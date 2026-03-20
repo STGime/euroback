@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -108,4 +109,32 @@ func (h *HankoMiddleware) Handler(next http.Handler) http.Handler {
 		slog.Debug("authenticated request", "sub", sub, "email", email, "path", r.URL.Path)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// ValidateToken parses and validates a raw JWT string (without the "Bearer "
+// prefix) and returns the subject claim. This is used by the WebSocket handler
+// where the token is passed as a query parameter rather than an HTTP header.
+func (h *HankoMiddleware) ValidateToken(tokenStr string) (string, error) {
+	if err := h.initJWKS(context.Background()); err != nil {
+		return "", err
+	}
+
+	token, err := jwt.Parse(tokenStr, h.jwks.Keyfunc,
+		jwt.WithValidMethods([]string{"RS256", "ES256"}),
+	)
+	if err != nil || !token.Valid {
+		return "", fmt.Errorf("invalid token: %w", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", fmt.Errorf("unexpected claims type")
+	}
+
+	sub, _ := claims.GetSubject()
+	if sub == "" {
+		return "", fmt.Errorf("token missing subject claim")
+	}
+
+	return sub, nil
 }

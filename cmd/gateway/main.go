@@ -14,6 +14,7 @@ import (
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/gateway"
 	"github.com/eurobase/euroback/internal/ratelimit"
+	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
 )
 
@@ -86,11 +87,34 @@ func main() {
 		slog.Warn("SCW_ACCESS_KEY / SCW_SECRET_KEY not set, storage routes disabled")
 	}
 
+	// ── Set up realtime WebSocket hub ──
+	hub := realtime.NewHub()
+	go hub.Run()
+	slog.Info("realtime hub started")
+
+	// Set up Redis bridge for cross-instance realtime fan-out (optional).
+	var rtBridge *realtime.RedisBridge
+	if redisURL != "" {
+		var bridgeErr error
+		rtBridge, bridgeErr = realtime.NewRedisBridge(redisURL, hub)
+		if bridgeErr != nil {
+			slog.Warn("failed to connect realtime redis bridge, cross-instance fan-out disabled",
+				"error", bridgeErr,
+			)
+		} else {
+			go rtBridge.Subscribe(ctx)
+			defer rtBridge.Close()
+		}
+	} else {
+		slog.Warn("REDIS_URL not set, realtime cross-instance fan-out disabled")
+	}
+	_ = rtBridge // EventPublisher will use this when integrated with the query engine.
+
 	// ── Dev mode: bypass Hanko auth for local testing ──
 	devMode := os.Getenv("DEV_MODE") == "true"
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, hankoAuth, hankoWebhookSecret, limiter, s3Client, devMode)
+	r := gateway.NewRouter(pool, hankoAuth, hankoWebhookSecret, limiter, s3Client, hub, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

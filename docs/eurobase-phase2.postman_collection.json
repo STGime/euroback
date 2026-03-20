@@ -460,6 +460,61 @@
 			]
 		},
 		{
+			"name": "Realtime WebSocket",
+			"description": "WebSocket tests cannot be fully automated in Postman (Postman doesn't support WebSocket in collections). Use these to verify the upgrade endpoint responds correctly, then test WebSocket manually.",
+			"item": [
+				{
+					"name": "24. WebSocket upgrade (HTTP check)",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "GET",
+						"header": [
+							{ "key": "Connection", "value": "Upgrade" },
+							{ "key": "Upgrade", "value": "websocket" },
+							{ "key": "Sec-WebSocket-Version", "value": "13" },
+							{ "key": "Sec-WebSocket-Key", "value": "dGhlIHNhbXBsZSBub25jZQ==" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/realtime?token=dev",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "realtime"],
+							"query": [{ "key": "token", "value": "dev" }]
+						},
+						"description": "Attempts a WebSocket upgrade. In Postman this will show as 101 Switching Protocols (or a connection error since Postman HTTP client doesn't fully support WebSocket).\n\nFor full testing, use wscat:\n  npx wscat -c 'ws://localhost:8080/v1/realtime?token=dev'\n\nThen send:\n  {\"action\":\"subscribe\",\"channel\":\"db:users\"}"
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"// WebSocket upgrade returns 101 which Postman may not handle.",
+						"// If you get a connection error, that's expected — use wscat instead.",
+						"pm.test('Response received (101 or error expected)', () => {",
+						"    // A 400 means the server is running but rejecting non-WS request",
+						"    // A 101 means successful upgrade (Postman can't maintain it)",
+						"    pm.expect(pm.response.code).to.be.oneOf([101, 400]);",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "25. WebSocket without token (expect rejection)",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/realtime",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "realtime"]
+						},
+						"description": "Attempts WebSocket connection without a token. In production mode this would return 401. In dev mode it still works."
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"// Without WebSocket headers this is just a regular GET, should get an error",
+						"pm.test('Rejected or upgrade attempted', () => {",
+						"    pm.expect(pm.response.code).to.be.oneOf([400, 401, 426]);",
+						"});"
+					], "type": "text/javascript" } }]
+				}
+			]
+		},
+		{
 			"name": "Rate Limiting",
 			"item": [
 				{

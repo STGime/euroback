@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
+	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
@@ -23,7 +26,7 @@ import (
 // Hanko JWT middleware is replaced with a pass-through that injects a fixed
 // test user, allowing local testing with curl/Postman without a running Hanko
 // instance. devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhookSecret string, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhookSecret string, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -56,6 +59,23 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
 		})
 	})
+
+	// WebSocket realtime route — auth is handled inside the handler via
+	// query parameter, so this is mounted outside the standard auth middleware.
+	if hub != nil {
+		isDev := len(devMode) > 0 && devMode[0]
+
+		// Build a token validator from the Hanko middleware.
+		var tokenValidator func(token string) (string, error)
+		if !isDev {
+			tokenValidator = hankoAuth.ValidateToken
+		}
+
+		wsHandler := realtime.HandleWebSocket(hub, tokenValidator, buildTenantResolver(pool), isDev)
+		r.Get("/v1/realtime", wsHandler)
+	} else {
+		slog.Warn("realtime hub not configured, websocket route disabled")
+	}
 
 	// V1 API routes (authenticated).
 	r.Route("/v1", func(r chi.Router) {
@@ -94,6 +114,27 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 	})
 
 	return r
+}
+
+// buildTenantResolver returns a realtime.TenantResolver that looks up the
+// user's default project and plan from the database.
+func buildTenantResolver(pool *pgxpool.Pool) realtime.TenantResolver {
+	return func(ctx context.Context, subject string) (string, string, error) {
+		var projectID, plan string
+		err := pool.QueryRow(ctx,
+			`SELECT p.id, COALESCE(p.plan, 'free')
+			 FROM projects p
+			 JOIN platform_users u ON p.owner_id = u.id
+			 WHERE u.hanko_user_id = $1 AND p.status = 'active'
+			 ORDER BY p.created_at ASC
+			 LIMIT 1`,
+			subject,
+		).Scan(&projectID, &plan)
+		if err != nil {
+			return "", "", fmt.Errorf("resolve tenant for subject %s: %w", subject, err)
+		}
+		return projectID, plan, nil
+	}
 }
 
 // devAuthMiddleware injects a hardcoded test user for local development.

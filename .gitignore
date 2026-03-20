@@ -31,6 +31,10 @@ console/node_modules/
 console/.svelte-kit/
 console/build/
 
+# SDK
+sdk/js/node_modules/
+sdk/js/dist/
+
 # Claude
 .claude/
 
