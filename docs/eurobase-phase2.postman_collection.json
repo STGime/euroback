@@ -1,0 +1,485 @@
+{
+	"info": {
+		"name": "Eurobase API — Phase 2 (Data Layer)",
+		"description": "Testing collection for the Eurobase query engine, storage proxy, and rate limiter.\n\nPrerequisites:\n1. Run Phase 1 collection first (create a tenant via Hanko webhook + POST /v1/tenants)\n2. The tenant must have status 'active' — manually update if needed:\n   docker exec euroback-postgres-1 psql -U eurobase_api -d eurobase -c \"UPDATE projects SET status='active' WHERE slug='my-first-project';\"\n3. Gateway running: source .env.local && go run ./cmd/gateway/\n4. MinIO running for storage tests (docker compose up -d)",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080"
+		},
+		{
+			"key": "project_id",
+			"value": "",
+			"description": "Set after creating a tenant in Phase 1"
+		},
+		{
+			"key": "project_slug",
+			"value": "my-first-project"
+		},
+		{
+			"key": "row_id",
+			"value": ""
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "dev",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Setup",
+			"item": [
+				{
+					"name": "0a. Health Check",
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": ["pm.test('200 OK', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+				},
+				{
+					"name": "0b. Get Project ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/tenants", "host": ["{{base_url}}"], "path": ["v1", "tenants"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"const body = pm.response.json();",
+						"if (body.length > 0) {",
+						"    pm.collectionVariables.set('project_id', body[0].id);",
+						"    pm.collectionVariables.set('project_slug', body[0].slug);",
+						"    console.log('Project ID:', body[0].id, 'Slug:', body[0].slug);",
+						"}"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "0c. Schema Introspection",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/schema", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "schema"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Has tables', () => {",
+						"    const body = pm.response.json();",
+						"    pm.expect(body).to.be.an('array');",
+						"    console.log('Tables:', body.map(t => t.name).join(', '));",
+						"});"
+					], "type": "text/javascript" } }]
+				}
+			]
+		},
+		{
+			"name": "Query Engine — CRUD",
+			"item": [
+				{
+					"name": "1. Insert Row into users",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"alice@example.com\",\n    \"display_name\": \"Alice\",\n    \"metadata\": {\"role\": \"admin\"}\n}"
+						},
+						"url": { "raw": "{{base_url}}/v1/db/users", "host": ["{{base_url}}"], "path": ["v1", "db", "users"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('201 Created', () => pm.response.to.have.status(201));",
+						"pm.test('Has id', () => {",
+						"    const body = pm.response.json();",
+						"    pm.expect(body.id).to.be.a('string');",
+						"    pm.collectionVariables.set('row_id', body.id);",
+						"    console.log('Created row ID:', body.id);",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "2. Insert Second Row",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"bob@example.com\",\n    \"display_name\": \"Bob\",\n    \"metadata\": {\"role\": \"user\"}\n}"
+						},
+						"url": { "raw": "{{base_url}}/v1/db/users", "host": ["{{base_url}}"], "path": ["v1", "db", "users"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('201 Created', () => pm.response.to.have.status(201));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "3. Select All Users",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/db/users", "host": ["{{base_url}}"], "path": ["v1", "db", "users"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Has data array', () => {",
+						"    const body = pm.response.json();",
+						"    pm.expect(body.data).to.be.an('array');",
+						"    pm.expect(body.data.length).to.be.greaterThan(0);",
+						"    console.log('Row count:', body.count);",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "4. Select with Column Filter",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/db/users?select=id,email,display_name",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "users"],
+							"query": [{ "key": "select", "value": "id,email,display_name" }]
+						}
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Only selected columns returned', () => {",
+						"    const row = pm.response.json().data[0];",
+						"    pm.expect(row).to.have.property('id');",
+						"    pm.expect(row).to.have.property('email');",
+						"    pm.expect(row).to.have.property('display_name');",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "5. Select with Filter (eq)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/db/users?email=eq.alice@example.com",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "users"],
+							"query": [{ "key": "email", "value": "eq.alice@example.com" }]
+						}
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Filtered to Alice only', () => {",
+						"    const body = pm.response.json();",
+						"    pm.expect(body.data.length).to.eql(1);",
+						"    pm.expect(body.data[0].email).to.eql('alice@example.com');",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "6. Select with Order + Limit",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/db/users?order=created_at.desc&limit=1",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "users"],
+							"query": [
+								{ "key": "order", "value": "created_at.desc" },
+								{ "key": "limit", "value": "1" }
+							]
+						}
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Only 1 row returned', () => {",
+						"    pm.expect(pm.response.json().data.length).to.eql(1);",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "7. Select Row by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/db/users/{{row_id}}", "host": ["{{base_url}}"], "path": ["v1", "db", "users", "{{row_id}}"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Correct row', () => {",
+						"    const body = pm.response.json();",
+						"    pm.expect(body.id).to.eql(pm.collectionVariables.get('row_id'));",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "8. Update Row",
+					"request": {
+						"method": "PATCH",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"display_name\": \"Alice Updated\",\n    \"metadata\": {\"role\": \"superadmin\"}\n}"
+						},
+						"url": { "raw": "{{base_url}}/v1/db/users/{{row_id}}", "host": ["{{base_url}}"], "path": ["v1", "db", "users", "{{row_id}}"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Name updated', () => {",
+						"    pm.expect(pm.response.json().display_name).to.eql('Alice Updated');",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "9. Delete Row",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/db/users/{{row_id}}", "host": ["{{base_url}}"], "path": ["v1", "db", "users", "{{row_id}}"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('204 No Content', () => pm.response.to.have.status(204));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "10. Verify Delete (expect 404)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/db/users/{{row_id}}", "host": ["{{base_url}}"], "path": ["v1", "db", "users", "{{row_id}}"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" } }]
+				}
+			]
+		},
+		{
+			"name": "Query Engine — Validation",
+			"item": [
+				{
+					"name": "11. Select from nonexistent table (404)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/db/nonexistent_table", "host": ["{{base_url}}"], "path": ["v1", "db", "nonexistent_table"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "12. Select invalid column (400)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/db/users?select=id,fake_column",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "users"],
+							"query": [{ "key": "select", "value": "id,fake_column" }]
+						}
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "13. Insert with empty body (400)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{}" },
+						"url": { "raw": "{{base_url}}/v1/db/users", "host": ["{{base_url}}"], "path": ["v1", "db", "users"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "14. Update nonexistent row (404)",
+					"request": {
+						"method": "PATCH",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\"display_name\": \"Ghost\"}" },
+						"url": { "raw": "{{base_url}}/v1/db/users/00000000-0000-0000-0000-000000000000", "host": ["{{base_url}}"], "path": ["v1", "db", "users", "00000000-0000-0000-0000-000000000000"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" } }]
+				}
+			]
+		},
+		{
+			"name": "Storage Proxy",
+			"item": [
+				{
+					"name": "15. Upload File",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "X-Project-Slug", "value": "{{project_slug}}" }
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{ "key": "file", "type": "file", "src": "", "description": "Select a file to upload" },
+								{ "key": "key", "value": "test/hello.txt", "type": "text" }
+							]
+						},
+						"url": { "raw": "{{base_url}}/v1/storage/upload", "host": ["{{base_url}}"], "path": ["v1", "storage", "upload"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('201 Created', () => pm.response.to.have.status(201));",
+						"pm.test('Has key', () => {",
+						"    pm.expect(pm.response.json().key).to.eql('test/hello.txt');",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "16. Download File",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "X-Project-Slug", "value": "{{project_slug}}" }
+						],
+						"url": { "raw": "{{base_url}}/v1/storage/test/hello.txt", "host": ["{{base_url}}"], "path": ["v1", "storage", "test", "hello.txt"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "17. List Files",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "X-Project-Slug", "value": "{{project_slug}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/storage?prefix=test/",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "storage"],
+							"query": [{ "key": "prefix", "value": "test/" }]
+						}
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Has objects', () => {",
+						"    pm.expect(pm.response.json().objects).to.be.an('array');",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "18. Generate Signed Download URL",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Slug", "value": "{{project_slug}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"key\": \"test/hello.txt\",\n    \"operation\": \"download\",\n    \"expires_in\": 3600\n}"
+						},
+						"url": { "raw": "{{base_url}}/v1/storage/signed-url", "host": ["{{base_url}}"], "path": ["v1", "storage", "signed-url"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Has URL', () => {",
+						"    pm.expect(pm.response.json().url).to.be.a('string');",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "19. Generate Signed Upload URL",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Slug", "value": "{{project_slug}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"key\": \"uploads/new-file.pdf\",\n    \"operation\": \"upload\",\n    \"content_type\": \"application/pdf\",\n    \"expires_in\": 900\n}"
+						},
+						"url": { "raw": "{{base_url}}/v1/storage/signed-url", "host": ["{{base_url}}"], "path": ["v1", "storage", "signed-url"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Has URL and expiry', () => {",
+						"    const body = pm.response.json();",
+						"    pm.expect(body.url).to.include('X-Amz-Signature');",
+						"    pm.expect(body.expires_at).to.be.a('string');",
+						"});"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "20. Delete File",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "X-Project-Slug", "value": "{{project_slug}}" }
+						],
+						"url": { "raw": "{{base_url}}/v1/storage/test/hello.txt", "host": ["{{base_url}}"], "path": ["v1", "storage", "test", "hello.txt"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('204 No Content', () => pm.response.to.have.status(204));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "21. Download deleted file (404)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "X-Project-Slug", "value": "{{project_slug}}" }
+						],
+						"url": { "raw": "{{base_url}}/v1/storage/test/hello.txt", "host": ["{{base_url}}"], "path": ["v1", "storage", "test", "hello.txt"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" } }]
+				},
+				{
+					"name": "22. Storage without slug header (400)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/storage", "host": ["{{base_url}}"], "path": ["v1", "storage"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
+					], "type": "text/javascript" } }]
+				}
+			]
+		},
+		{
+			"name": "Rate Limiting",
+			"item": [
+				{
+					"name": "23. Check rate limit headers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/v1/tenants", "host": ["{{base_url}}"], "path": ["v1", "tenants"] }
+					},
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('200 OK', () => pm.response.to.have.status(200));",
+						"pm.test('Has rate limit headers', () => {",
+						"    pm.expect(pm.response.headers.get('X-RateLimit-Limit')).to.not.be.undefined;",
+						"    pm.expect(pm.response.headers.get('X-RateLimit-Remaining')).to.not.be.undefined;",
+						"    console.log('Limit:', pm.response.headers.get('X-RateLimit-Limit'));",
+						"    console.log('Remaining:', pm.response.headers.get('X-RateLimit-Remaining'));",
+						"});"
+					], "type": "text/javascript" } }]
+				}
+			]
+		}
+	]
+}

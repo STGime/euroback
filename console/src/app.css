@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+	--color-eurobase-50: #eff6ff;
+	--color-eurobase-100: #dbeafe;
+	--color-eurobase-200: #bfdbfe;
+	--color-eurobase-300: #93c5fd;
+	--color-eurobase-400: #60a5fa;
+	--color-eurobase-500: #3b82f6;
+	--color-eurobase-600: #2563eb;
+	--color-eurobase-700: #1d4ed8;
+	--color-eurobase-800: #1e40af;
+	--color-eurobase-900: #1e3a8a;
+	--color-eurobase-950: #172554;
+	--font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}

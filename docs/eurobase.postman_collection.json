@@ -1,0 +1,441 @@
+{
+	"info": {
+		"name": "Eurobase API — Phase 1",
+		"description": "Local testing collection for the Eurobase gateway running on localhost:8080.\n\nSetup:\n1. source .env.local && go run ./cmd/gateway/\n2. Import this collection into Postman\n3. Start with Health Check, then Hanko Webhook (user.created), then Create/List Tenants",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080"
+		},
+		{
+			"key": "jwt_token",
+			"value": ""
+		},
+		{
+			"key": "webhook_secret",
+			"value": "test-webhook-secret-local"
+		},
+		{
+			"key": "hanko_user_id",
+			"value": "postman-test-user-001"
+		},
+		{
+			"key": "project_id",
+			"value": ""
+		}
+	],
+	"item": [
+		{
+			"name": "1. Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/health",
+					"host": ["{{base_url}}"],
+					"path": ["health"]
+				},
+				"description": "Unauthenticated health check. Should return 200 with {\"status\": \"ok\"}. Use this to verify the gateway is running."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+							"pm.test('Body has status ok', () => {",
+							"    const body = pm.response.json();",
+							"    pm.expect(body.status).to.eql('ok');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "2. Hanko Webhook — user.created",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Hanko-Signature",
+						"value": "{{hmac_signature}}",
+						"description": "HMAC-SHA256 of the body using the webhook secret. Auto-computed in pre-request script."
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"event\": \"user.created\",\n    \"data\": {\n        \"id\": \"postman-test-user-001\",\n        \"email\": \"dev@eurobase.app\",\n        \"display_name\": \"Postman Test User\"\n    }\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/webhooks/hanko",
+					"host": ["{{base_url}}"],
+					"path": ["platform", "webhooks", "hanko"]
+				},
+				"description": "Simulates a Hanko user.created webhook. This creates a platform_user in the database.\n\nRun this BEFORE creating tenants so the user exists.\n\nThe pre-request script auto-computes the HMAC-SHA256 signature using the webhook_secret variable."
+			},
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"const body = pm.request.body.raw;",
+							"const secret = pm.collectionVariables.get('webhook_secret');",
+							"const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+							"pm.collectionVariables.set('hmac_signature', hmac);"
+						],
+						"type": "text/javascript"
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+							"pm.test('Body has status ok', () => {",
+							"    const body = pm.response.json();",
+							"    pm.expect(body.status).to.eql('ok');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "2b. Hanko Webhook — user.updated",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Hanko-Signature",
+						"value": "{{hmac_signature}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"event\": \"user.updated\",\n    \"data\": {\n        \"id\": \"postman-test-user-001\",\n        \"email\": \"updated@eurobase.app\",\n        \"display_name\": \"Updated User\"\n    }\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/webhooks/hanko",
+					"host": ["{{base_url}}"],
+					"path": ["platform", "webhooks", "hanko"]
+				},
+				"description": "Simulates a Hanko user.updated webhook. Updates the platform_user's email and display_name."
+			},
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"const body = pm.request.body.raw;",
+							"const secret = pm.collectionVariables.get('webhook_secret');",
+							"const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+							"pm.collectionVariables.set('hmac_signature', hmac);"
+						],
+						"type": "text/javascript"
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 200', () => pm.response.to.have.status(200));"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "2c. Hanko Webhook — user.deleted",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Hanko-Signature",
+						"value": "{{hmac_signature}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"event\": \"user.deleted\",\n    \"data\": {\n        \"id\": \"some-user-to-delete\",\n        \"email\": \"\",\n        \"display_name\": \"\"\n    }\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/webhooks/hanko",
+					"host": ["{{base_url}}"],
+					"path": ["platform", "webhooks", "hanko"]
+				},
+				"description": "Simulates a Hanko user.deleted webhook. Soft-deletes the user (clears PII for GDPR)."
+			},
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"const body = pm.request.body.raw;",
+							"const secret = pm.collectionVariables.get('webhook_secret');",
+							"const hmac = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+							"pm.collectionVariables.set('hmac_signature', hmac);"
+						],
+						"type": "text/javascript"
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 200', () => pm.response.to.have.status(200));"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "2d. Hanko Webhook — invalid signature",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Hanko-Signature",
+						"value": "deadbeef1234567890abcdef"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"event\": \"user.created\",\n    \"data\": {\n        \"id\": \"attacker\",\n        \"email\": \"evil@hacker.com\"\n    }\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/webhooks/hanko",
+					"host": ["{{base_url}}"],
+					"path": ["platform", "webhooks", "hanko"]
+				},
+				"description": "Tests that an invalid HMAC signature is rejected with 401."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+							"pm.test('Error is invalid signature', () => {",
+							"    const body = pm.response.json();",
+							"    pm.expect(body.error).to.eql('invalid signature');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "3. Create Tenant — no auth (expect 401)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"name\": \"My App\",\n    \"slug\": \"my-app\",\n    \"region\": \"fr-par\",\n    \"plan\": \"free\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/v1/tenants",
+					"host": ["{{base_url}}"],
+					"path": ["v1", "tenants"]
+				},
+				"description": "Attempts to create a tenant without an Authorization header. Should return 401."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "4. Create Tenant",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer {{jwt_token}}",
+						"description": "Hanko JWT. For local testing, generate one with the test script or paste a real Hanko token."
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"name\": \"My First Project\",\n    \"slug\": \"my-first-project\",\n    \"region\": \"fr-par\",\n    \"plan\": \"free\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/v1/tenants",
+					"host": ["{{base_url}}"],
+					"path": ["v1", "tenants"]
+				},
+				"description": "Creates a new Eurobase project (tenant). Provisions a PostgreSQL schema and enqueues async S3 bucket + API key generation.\n\nRequires a valid JWT. For local testing, use the test JWT generator script (see docs).\n\nExpected response: 201 with project ID, slug, status, and api_url."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+							"pm.test('Response has project id', () => {",
+							"    const body = pm.response.json();",
+							"    pm.expect(body.id).to.be.a('string').and.not.empty;",
+							"    pm.expect(body.slug).to.eql('my-first-project');",
+							"    pm.expect(body.api_url).to.eql('https://my-first-project.eurobase.app');",
+							"    pm.collectionVariables.set('project_id', body.id);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "5. List Tenants",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{jwt_token}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/v1/tenants",
+					"host": ["{{base_url}}"],
+					"path": ["v1", "tenants"]
+				},
+				"description": "Lists all projects owned by the authenticated user.\n\nReturns an array of projects with id, name, slug, region, plan, status, api_url, and created_at."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+							"pm.test('Response is array', () => {",
+							"    const body = pm.response.json();",
+							"    pm.expect(body).to.be.an('array');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "6. Create Tenant — invalid region (expect 400)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer {{jwt_token}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"name\": \"US App\",\n    \"slug\": \"us-app\",\n    \"region\": \"us-east-1\",\n    \"plan\": \"free\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/v1/tenants",
+					"host": ["{{base_url}}"],
+					"path": ["v1", "tenants"]
+				},
+				"description": "Attempts to create a project in a non-EU region. Should return 400 — only fr-par is allowed."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+							"pm.test('Error mentions region', () => {",
+							"    const body = pm.response.json();",
+							"    pm.expect(body.error).to.include('fr-par');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "7. Create Tenant — missing name (expect 400)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer {{jwt_token}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"slug\": \"no-name-app\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/v1/tenants",
+					"host": ["{{base_url}}"],
+					"path": ["v1", "tenants"]
+				},
+				"description": "Attempts to create a project without a name. Should return 400."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		}
+	]
+}

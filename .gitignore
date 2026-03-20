@@ -1,0 +1,41 @@
+# Go
+bin/
+*.exe
+*.test
+*.out
+
+# Dependencies
+vendor/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+eurobase_pgdata/
+
+# Console
+console/node_modules/
+console/.svelte-kit/
+console/build/
+
+# Claude
+.claude/
+
+# Terraform
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate
+deploy/terraform/*.tfstate.backup
+deploy/terraform/*.tfvars

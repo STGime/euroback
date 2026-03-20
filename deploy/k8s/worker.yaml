@@ -1,0 +1,44 @@
+##############################################################################
+# Eurobase Worker — Kubernetes Deployment
+# River job queue worker. No HTTP service needed.
+##############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: eurobase
+  labels:
+    app: worker
+    component: jobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+        component: jobs
+    spec:
+      containers:
+        - name: worker
+          image: rg.fr-par.scw.cloud/eurobase/worker:latest
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "125m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          envFrom:
+            - secretRef:
+                name: eurobase-secrets
+          env:
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: eurobase-config
+                  key: environment
+      imagePullSecrets:
+        - name: scw-registry

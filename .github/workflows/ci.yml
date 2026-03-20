@@ -1,0 +1,137 @@
+##############################################################################
+# Eurobase CI/CD — GitHub Actions
+# Builds and deploys to Scaleway (FR jurisdiction only).
+# No US cloud runners for build artifacts — images go to Scaleway Registry.
+##############################################################################
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: rg.fr-par.scw.cloud
+  REGISTRY_NS: eurobase
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Go tests
+  # -------------------------------------------------------------------------
+  test-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run tests
+        run: go test ./... -v -race
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Static analysis
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+  # -------------------------------------------------------------------------
+  # Console (SvelteKit) build check
+  # -------------------------------------------------------------------------
+  test-console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install and build
+        run: |
+          cd console
+          npm ci
+          npm run build
+
+      - name: Lint
+        run: |
+          cd console
+          npm run check --if-present
+
+  # -------------------------------------------------------------------------
+  # Build & push images, then deploy to Kapsule
+  # Only on main branch after tests pass.
+  # -------------------------------------------------------------------------
+  deploy:
+    needs: [test-go, test-console]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Scaleway Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: nologin
+          password: ${{ secrets.SCW_SECRET_KEY }}
+
+      - name: Build and push gateway
+        run: |
+          docker build \
+            -f deploy/docker/Dockerfile.gateway \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:latest \
+            .
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:latest
+
+      - name: Build and push worker
+        run: |
+          docker build \
+            -f deploy/docker/Dockerfile.worker \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:latest \
+            .
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:latest
+
+      - name: Build and push console
+        run: |
+          docker build \
+            -f deploy/docker/Dockerfile.console \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:latest \
+            .
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:latest
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Deploy to Kapsule
+        run: |
+          kubectl set image deployment/gateway \
+            gateway=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:${{ github.sha }} \
+            -n eurobase
+          kubectl set image deployment/worker \
+            worker=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:${{ github.sha }} \
+            -n eurobase
+          kubectl set image deployment/console \
+            console=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:${{ github.sha }} \
+            -n eurobase
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/gateway -n eurobase --timeout=120s
+          kubectl rollout status deployment/worker -n eurobase --timeout=120s
+          kubectl rollout status deployment/console -n eurobase --timeout=120s

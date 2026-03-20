@@ -1,0 +1,124 @@
+##############################################################################
+# Eurobase Ingress — Nginx + cert-manager (Let's Encrypt TLS)
+##############################################################################
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: eurobase-ingress
+  namespace: eurobase
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  tls:
+    - hosts:
+        - api.eurobase.app
+        - console.eurobase.app
+      secretName: eurobase-tls
+  rules:
+    - host: api.eurobase.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8080
+    - host: console.eurobase.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: console
+                port:
+                  number: 3000
+---
+##############################################################################
+# Console Service (referenced by ingress)
+##############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console
+  namespace: eurobase
+  labels:
+    app: console
+    component: ui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: console
+  template:
+    metadata:
+      labels:
+        app: console
+        component: ui
+    spec:
+      containers:
+        - name: console
+          image: rg.fr-par.scw.cloud/eurobase/console:latest
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      imagePullSecrets:
+        - name: scw-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console
+  namespace: eurobase
+  labels:
+    app: console
+spec:
+  type: ClusterIP
+  selector:
+    app: console
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+---
+##############################################################################
+# cert-manager ClusterIssuer for Let's Encrypt
+##############################################################################
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: infra@eurobase.app
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

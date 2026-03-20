@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: eurobase
+      POSTGRES_USER: eurobase_api
+      POSTGRES_PASSWORD: localdev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eurobase_api -d eurobase"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - eurobase_pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  eurobase_pgdata:
