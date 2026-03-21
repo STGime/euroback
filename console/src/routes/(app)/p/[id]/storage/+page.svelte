@@ -2,7 +2,7 @@
 	import { onMount, getContext } from 'svelte';
 	import { page } from '$app/stores';
 	import { api, type FileInfo } from '$lib/api.js';
-	import { formatBytes, formatRelativeTime, getFileIcon } from '$lib/utils.js';
+	import { formatBytes, formatRelativeTime, getFileIcon, inferContentType } from '$lib/utils.js';
 	import FileUploader from '$lib/components/FileUploader.svelte';
 
 	// ---- State ----
@@ -22,6 +22,11 @@
 	let signedUrlExpiry = $state('');
 	let signedUrlLoading = $state(false);
 	let selectedExpiry = $state(3600);
+
+	// Preview state
+	let previewUrl = $state<string | null>(null);
+	let previewText = $state<string | null>(null);
+	let previewLoading = $state(false);
 
 	// Actions dropdown
 	let openDropdown = $state<string | null>(null);
@@ -107,6 +112,34 @@
 		selectedFile = file;
 		signedUrl = '';
 		signedUrlExpiry = '';
+		loadPreview(file);
+	}
+
+	async function loadPreview(file: FileInfo) {
+		// Clean up previous preview
+		if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+		previewText = null;
+		previewLoading = true;
+
+		try {
+			const ct = inferContentType(file.key, file.content_type);
+			const blob = await api.downloadFile(projectSlug, file.key);
+
+			if (ct.startsWith('image/')) {
+				previewUrl = URL.createObjectURL(blob);
+			} else if (ct === 'application/json' || ct.startsWith('text/') || ct === 'application/javascript' || ct === 'application/xml') {
+				const text = await blob.text();
+				if (ct === 'application/json') {
+					try { previewText = JSON.stringify(JSON.parse(text), null, 2); } catch { previewText = text; }
+				} else {
+					previewText = text.length > 5000 ? text.substring(0, 5000) + '\n... (truncated)' : text;
+				}
+			}
+		} catch (err) {
+			console.warn('Preview failed:', err);
+		} finally {
+			previewLoading = false;
+		}
 	}
 
 	async function handleDownload(file: FileInfo) {
@@ -358,7 +391,7 @@
 								</tr>
 							{/each}
 							{#each regularFiles as file}
-								{@const icon = getFileIcon(file.content_type)}
+								{@const icon = getFileIcon(inferContentType(file.key, file.content_type))}
 								<tr
 									class="hover:bg-gray-50 transition-colors {selectedFile?.key === file.key ? 'bg-eurobase-50' : ''}"
 									onclick={() => selectFile(file)}
@@ -386,7 +419,7 @@
 										</div>
 									</td>
 									<td class="px-4 py-3 text-gray-500 hidden sm:table-cell">{formatBytes(file.size)}</td>
-									<td class="px-4 py-3 text-gray-500 hidden md:table-cell font-mono text-xs">{file.content_type}</td>
+									<td class="px-4 py-3 text-gray-500 hidden md:table-cell font-mono text-xs">{inferContentType(file.key, file.content_type)}</td>
 									<td class="px-4 py-3 text-gray-500 hidden lg:table-cell">{formatRelativeTime(file.last_modified)}</td>
 									<td class="px-4 py-3 text-right">
 										<div class="relative inline-block">
@@ -462,7 +495,7 @@
 						</button>
 					{/each}
 					{#each regularFiles as file}
-						{@const icon = getFileIcon(file.content_type)}
+						{@const icon = getFileIcon(inferContentType(file.key, file.content_type))}
 						<div
 							role="button"
 							tabindex="0"
@@ -506,30 +539,31 @@
 				<div class="rounded-xl border border-gray-200 bg-white p-5 sticky top-6">
 					<!-- Preview area -->
 					<div class="flex justify-center mb-4">
-						{#if isImageType(selectedFile.content_type)}
-							<div class="flex h-40 w-full items-center justify-center rounded-lg bg-gray-50 overflow-hidden">
+						{#if previewLoading}
+							<div class="flex h-40 w-full items-center justify-center rounded-lg bg-gray-50">
+								<svg class="h-6 w-6 animate-spin text-gray-400" fill="none" viewBox="0 0 24 24">
+									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+								</svg>
+							</div>
+						{:else if previewUrl}
+							<div class="flex h-48 w-full items-center justify-center rounded-lg bg-gray-50 overflow-hidden">
 								<img
-									src="{api['baseURL']}/v1/storage/{encodeURIComponent(selectedFile.key)}"
+									src={previewUrl}
 									alt={selectedFile.key.split('/').pop()}
 									class="max-h-full max-w-full object-contain"
 								/>
 							</div>
+						{:else if previewText !== null}
+							<div class="w-full max-h-48 overflow-auto rounded-lg bg-gray-900 p-3">
+								<pre class="text-xs text-green-400 whitespace-pre-wrap break-all">{previewText}</pre>
+							</div>
 						{:else}
-							{@const icon = getFileIcon(selectedFile.content_type)}
+							{@const icon = getFileIcon(inferContentType(selectedFile.key, selectedFile.content_type))}
 							<div class="flex h-32 w-full items-center justify-center rounded-lg bg-gray-50">
-								{#if icon === 'pdf'}
-									<svg class="h-16 w-16 text-red-400" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-									</svg>
-								{:else if icon === 'text'}
-									<svg class="h-16 w-16 text-blue-400" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-									</svg>
-								{:else}
-									<svg class="h-16 w-16 text-gray-300" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-									</svg>
-								{/if}
+								<svg class="h-16 w-16 {icon === 'pdf' ? 'text-red-400' : icon === 'text' ? 'text-blue-400' : 'text-gray-300'}" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+								</svg>
 							</div>
 						{/if}
 					</div>
@@ -546,7 +580,7 @@
 							</div>
 							<div class="flex justify-between">
 								<dt class="text-gray-500">Type</dt>
-								<dd class="text-gray-900 font-mono text-xs">{selectedFile.content_type}</dd>
+								<dd class="text-gray-900 font-mono text-xs">{inferContentType(selectedFile.key, selectedFile.content_type)}</dd>
 							</div>
 							<div class="flex justify-between">
 								<dt class="text-gray-500">Modified</dt>
@@ -628,7 +662,7 @@
 
 					<!-- Close button -->
 					<button
-						onclick={() => { selectedFile = null; signedUrl = ''; }}
+						onclick={() => { selectedFile = null; signedUrl = ''; if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; } previewText = null; }}
 						class="mt-4 w-full text-center text-xs text-gray-400 hover:text-gray-600 cursor-pointer"
 					>
 						Close panel

@@ -267,7 +267,8 @@ export class EurobaseAPI {
 
 	/** Download a file from project storage. */
 	async downloadFile(slug: string, key: string): Promise<Blob> {
-		const encoded = encodeURIComponent(key);
+		// Encode each path segment individually to preserve slashes
+		const encoded = key.split('/').map(encodeURIComponent).join('/');
 		const res = await this.rawFetch(`/v1/storage/${encoded}`, {
 			headers: { 'X-Project-Slug': slug }
 		});
@@ -276,7 +277,7 @@ export class EurobaseAPI {
 
 	/** Delete a file from project storage. */
 	async deleteFile(slug: string, key: string): Promise<void> {
-		const encoded = encodeURIComponent(key);
+		const encoded = key.split('/').map(encodeURIComponent).join('/');
 		await this.fetch<void>(`/v1/storage/${encoded}`, {
 			method: 'DELETE',
 			headers: { 'X-Project-Slug': slug }

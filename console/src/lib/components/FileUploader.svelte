@@ -48,47 +48,45 @@
 		}
 	}
 
+	function updateUpload(file: File, patch: Partial<UploadItem>) {
+		uploads = uploads.map((u) => (u.file === file ? { ...u, ...patch } : u));
+	}
+
 	function addFiles(files: File[]) {
-		const newUploads: UploadItem[] = files.map((file) => ({
+		const newItems: UploadItem[] = files.map((file) => ({
 			file,
 			progress: 0,
 			status: 'pending'
 		}));
-		uploads = [...uploads, ...newUploads];
+		uploads = [...uploads, ...newItems];
 
-		for (const item of newUploads) {
-			uploadOne(item);
+		for (const item of newItems) {
+			uploadOne(item.file);
 		}
 	}
 
-	async function uploadOne(item: UploadItem) {
-		item.status = 'uploading';
-		item.progress = 10;
-		uploads = [...uploads]; // trigger reactivity
+	async function uploadOne(file: File) {
+		updateUpload(file, { status: 'uploading', progress: 10 });
 
-		const key = currentPrefix ? `${currentPrefix}${item.file.name}` : item.file.name;
+		const key = currentPrefix ? `${currentPrefix}${file.name}` : file.name;
 
 		try {
-			// Simulate incremental progress
-			item.progress = 30;
-			uploads = [...uploads];
+			updateUpload(file, { progress: 30 });
 
-			await api.uploadFile(slug, item.file, key);
+			await api.uploadFile(slug, file, key);
 
-			item.progress = 100;
-			item.status = 'done';
-			uploads = [...uploads];
+			updateUpload(file, { progress: 100, status: 'done' });
 		} catch (err) {
-			item.status = 'error';
-			item.error = err instanceof Error ? err.message : 'Upload failed';
-			uploads = [...uploads];
+			updateUpload(file, {
+				status: 'error',
+				error: err instanceof Error ? err.message : 'Upload failed'
+			});
 		}
 
 		// If all uploads are done, notify parent
 		if (uploads.every((u) => u.status === 'done' || u.status === 'error')) {
 			const hadSuccess = uploads.some((u) => u.status === 'done');
 			if (hadSuccess && onuploaded) {
-				// Small delay so the user sees 100%
 				setTimeout(() => {
 					onuploaded?.();
 				}, 500);

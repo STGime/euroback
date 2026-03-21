@@ -59,3 +59,30 @@ export function getFileExtension(key: string): string {
 	if (dot === -1) return '';
 	return key.slice(dot + 1).toLowerCase();
 }
+
+const mimeMap: Record<string, string> = {
+	jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+	webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon', bmp: 'image/bmp',
+	pdf: 'application/pdf',
+	json: 'application/json',
+	js: 'application/javascript', mjs: 'application/javascript',
+	xml: 'application/xml',
+	html: 'text/html', htm: 'text/html',
+	css: 'text/css',
+	txt: 'text/plain', md: 'text/plain', csv: 'text/csv',
+	ts: 'text/plain', tsx: 'text/plain', jsx: 'text/plain',
+	yaml: 'text/plain', yml: 'text/plain', toml: 'text/plain',
+	sh: 'text/plain', go: 'text/plain', py: 'text/plain', rs: 'text/plain',
+	mp4: 'video/mp4', webm: 'video/webm',
+	mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+	zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar',
+};
+
+/**
+ * Infer MIME type from file extension when the API doesn't provide one.
+ */
+export function inferContentType(key: string, apiContentType?: string): string {
+	if (apiContentType) return apiContentType;
+	const ext = getFileExtension(key);
+	return mimeMap[ext] || 'application/octet-stream';
+}

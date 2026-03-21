@@ -84,7 +84,7 @@
 	</aside>
 
 	<!-- Main content -->
-	<div class="flex flex-1 flex-col">
+	<div class="flex flex-1 flex-col min-w-0">
 		<!-- Top bar -->
 		<header class="flex h-16 items-center justify-between border-b border-gray-200 bg-white px-6">
 			<!-- Mobile menu button -->
@@ -116,7 +116,7 @@
 		</header>
 
 		<!-- Page content -->
-		<main class="flex-1 p-6 lg:p-8">
+		<main class="flex-1 p-6 lg:p-8 min-w-0 overflow-hidden">
 			{@render children()}
 		</main>
 	</div>

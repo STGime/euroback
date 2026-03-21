@@ -115,15 +115,9 @@ func handleSelectRows(engine *QueryEngine) http.HandlerFunc {
 		rows, totalCount, err := engine.SelectRows(r.Context(), schema, tableName, params)
 		if err != nil {
 			slog.Error("select query failed", "error", err, "schema", schema, "table", tableName)
-			if isNotFoundError(err) {
-				jsonError(w, err.Error(), http.StatusNotFound)
-				return
+			if !handleQueryError(w, err) {
+				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}
-			if isValidationError(err) {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
@@ -169,15 +163,9 @@ func handleSelectRowByID(engine *QueryEngine) http.HandlerFunc {
 		rows, _, err := engine.SelectRows(r.Context(), schema, tableName, params)
 		if err != nil {
 			slog.Error("select by id failed", "error", err, "schema", schema, "table", tableName, "id", rowID)
-			if isNotFoundError(err) {
-				jsonError(w, err.Error(), http.StatusNotFound)
-				return
+			if !handleQueryError(w, err) {
+				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}
-			if isValidationError(err) {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
@@ -214,24 +202,9 @@ func handleInsertRow(engine *QueryEngine) http.HandlerFunc {
 		row, err := engine.InsertRow(r.Context(), schema, tableName, data)
 		if err != nil {
 			slog.Error("insert failed", "error", err, "schema", schema, "table", tableName)
-			if isUniqueViolation(err) {
-				field := extractConflictField(err)
-				msg := "a record with this value already exists"
-				if field != "" {
-					msg = "a record with this " + field + " already exists"
-				}
-				jsonError(w, msg, http.StatusConflict)
-				return
+			if !handleQueryError(w, err) {
+				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}
-			if isNotFoundError(err) {
-				jsonError(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			if isValidationError(err) {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
@@ -265,24 +238,9 @@ func handleUpdateRow(engine *QueryEngine) http.HandlerFunc {
 		row, err := engine.UpdateRow(r.Context(), schema, tableName, rowID, data)
 		if err != nil {
 			slog.Error("update failed", "error", err, "schema", schema, "table", tableName, "id", rowID)
-			if isUniqueViolation(err) {
-				field := extractConflictField(err)
-				msg := "a record with this value already exists"
-				if field != "" {
-					msg = "a record with this " + field + " already exists"
-				}
-				jsonError(w, msg, http.StatusConflict)
-				return
+			if !handleQueryError(w, err) {
+				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}
-			if isNotFoundError(err) {
-				jsonError(w, "row not found", http.StatusNotFound)
-				return
-			}
-			if isValidationError(err) {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
@@ -364,6 +322,37 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 	}
 }
 
+// handleQueryError writes the appropriate HTTP error response for a query engine error.
+// Returns true if it handled the error, false if the caller should use a generic 500.
+func handleQueryError(w http.ResponseWriter, err error) bool {
+	if isUniqueViolation(err) {
+		field := extractConflictField(err)
+		msg := "a record with this value already exists"
+		if field != "" {
+			msg = "a record with this " + field + " already exists"
+		}
+		jsonError(w, msg, http.StatusConflict)
+		return true
+	}
+	if isTypeError(err) {
+		jsonError(w, extractTypeErrorMessage(err), http.StatusBadRequest)
+		return true
+	}
+	if isConstraintViolation(err) {
+		jsonError(w, extractConstraintMessage(err), http.StatusBadRequest)
+		return true
+	}
+	if isNotFoundError(err) {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return true
+	}
+	if isValidationError(err) {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return true
+	}
+	return false
+}
+
 // isNotFoundError checks if the error message indicates a not-found condition.
 func isNotFoundError(err error) bool {
 	msg := err.Error()
@@ -374,6 +363,53 @@ func isNotFoundError(err error) bool {
 func isValidationError(err error) bool {
 	msg := err.Error()
 	return contains(msg, "invalid column") || contains(msg, "no data provided")
+}
+
+// isTypeError checks if the error is a PostgreSQL data type or syntax error (22xxx).
+func isTypeError(err error) bool {
+	msg := err.Error()
+	return contains(msg, "SQLSTATE 22") || contains(msg, "invalid input syntax") || contains(msg, "invalid input value") || contains(msg, "out of range")
+}
+
+// extractTypeErrorMessage builds a user-friendly message from a PostgreSQL type error.
+func extractTypeErrorMessage(err error) string {
+	msg := err.Error()
+	// "invalid input syntax for type bigint" → "invalid value for type bigint"
+	if idx := strings.Index(msg, "invalid input syntax for type "); idx >= 0 {
+		rest := msg[idx+len("invalid input syntax for type "):]
+		if end := strings.IndexByte(rest, ' '); end >= 0 {
+			return "invalid value for type " + rest[:end]
+		}
+		// Trim trailing quote/paren
+		typeName := strings.TrimRight(rest, "\" ()")
+		return "invalid value for type " + typeName
+	}
+	if contains(msg, "out of range") {
+		return "value is out of range for this column type"
+	}
+	return "invalid value for this column type"
+}
+
+// isConstraintViolation checks for foreign key (23503) or not-null (23502) violations.
+func isConstraintViolation(err error) bool {
+	msg := err.Error()
+	return contains(msg, "SQLSTATE 23503") || contains(msg, "SQLSTATE 23502") || contains(msg, "violates not-null") || contains(msg, "violates foreign key")
+}
+
+// extractConstraintMessage builds a user-friendly message from a constraint error.
+func extractConstraintMessage(err error) string {
+	msg := err.Error()
+	if contains(msg, "violates not-null") || contains(msg, "SQLSTATE 23502") {
+		field := extractConflictField(err)
+		if field != "" {
+			return field + " cannot be null"
+		}
+		return "a required field is missing"
+	}
+	if contains(msg, "violates foreign key") || contains(msg, "SQLSTATE 23503") {
+		return "referenced record does not exist"
+	}
+	return "constraint violation"
 }
 
 // isUniqueViolation checks if the error is a PostgreSQL unique constraint violation (23505).
