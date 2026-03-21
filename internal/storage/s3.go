@@ -258,11 +258,12 @@ func (s *S3Client) ListObjects(ctx context.Context, bucketName, prefix string, l
 
 	objects := make([]ObjectInfo, 0, len(output.Contents))
 	for _, obj := range output.Contents {
-		info := ObjectInfo{
-			Size: *obj.Size,
-		}
+		var info ObjectInfo
 		if obj.Key != nil {
 			info.Key = *obj.Key
+		}
+		if obj.Size != nil {
+			info.Size = *obj.Size
 		}
 		if obj.LastModified != nil {
 			info.LastModified = *obj.LastModified
@@ -270,9 +271,14 @@ func (s *S3Client) ListObjects(ctx context.Context, bucketName, prefix string, l
 		objects = append(objects, info)
 	}
 
+	isTruncated := false
+	if output.IsTruncated != nil {
+		isTruncated = *output.IsTruncated
+	}
+
 	result := &ListResult{
 		Objects:     objects,
-		IsTruncated: *output.IsTruncated,
+		IsTruncated: isTruncated,
 	}
 	if output.NextContinuationToken != nil {
 		result.NextToken = *output.NextContinuationToken

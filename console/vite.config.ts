@@ -6,10 +6,12 @@ export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
 	server: {
 		proxy: {
-			// Proxy API calls to the Go gateway during local development
+			// Proxy API calls to the Go gateway during local development.
+			// Rewrites /api/v1/tenants → /v1/tenants on the gateway.
 			'/api': {
 				target: 'http://localhost:8080',
-				changeOrigin: true
+				changeOrigin: true,
+				rewrite: (path: string) => path.replace(/^\/api/, '')
 			}
 		}
 	}

@@ -21,6 +21,37 @@ export interface Project {
 	created_at: string;
 }
 
+export interface ColumnInfo {
+	name: string;
+	data_type: string;
+	is_nullable: boolean;
+	default_value?: string | null;
+}
+
+export interface TableSchema {
+	name: string;
+	columns: ColumnInfo[];
+	row_count: number;
+}
+
+export interface FileInfo {
+	key: string;
+	content_type: string;
+	size: number;
+	last_modified: string;
+}
+
+export interface FileListResponse {
+	objects: FileInfo[];
+	next_cursor?: string;
+	has_more: boolean;
+}
+
+export interface SignedUrlResponse {
+	url: string;
+	expires_at: string;
+}
+
 const TOKEN_KEY = 'eurobase_token';
 
 export class EurobaseAPI {
@@ -73,6 +104,32 @@ export class EurobaseAPI {
 		return res.json() as Promise<T>;
 	}
 
+	/**
+	 * Raw fetch that returns the Response object directly.
+	 * Used for non-JSON endpoints (file upload, download).
+	 */
+	private async rawFetch(path: string, options: RequestInit = {}): Promise<Response> {
+		const token = this.getToken();
+		const headers: Record<string, string> = {
+			...(options.headers as Record<string, string> | undefined)
+		};
+		if (token) {
+			headers['Authorization'] = `Bearer ${token}`;
+		}
+
+		const res = await fetch(`${this.baseURL}${path}`, {
+			...options,
+			headers
+		});
+
+		if (!res.ok) {
+			const body = await res.text().catch(() => '');
+			throw new Error(`API ${res.status}: ${body || res.statusText}`);
+		}
+
+		return res;
+	}
+
 	// ---- public methods ----
 
 	/**
@@ -92,6 +149,14 @@ export class EurobaseAPI {
 		return this.fetch<Project[]>('/v1/tenants');
 	}
 
+	/** Get a single project by ID. */
+	async getProject(projectId: string): Promise<Project> {
+		const projects = await this.fetch<Project[]>('/v1/tenants');
+		const project = projects.find((p) => p.id === projectId);
+		if (!project) throw new Error('Project not found');
+		return project;
+	}
+
 	/** Create a new project (tenant). */
 	async createProject(data: {
 		name: string;
@@ -102,6 +167,148 @@ export class EurobaseAPI {
 		return this.fetch<Project>('/v1/tenants', {
 			method: 'POST',
 			body: JSON.stringify(data)
+		});
+	}
+	// ---- Database methods ----
+
+	/** Get schema introspection for a project (all tables and columns). */
+	async getSchema(projectId: string): Promise<TableSchema[]> {
+		return this.fetch<TableSchema[]>(`/platform/projects/${projectId}/schema`);
+	}
+
+	/** Query rows from a table with optional filtering, sorting, and pagination. */
+	async queryTable(
+		projectId: string,
+		table: string,
+		params?: {
+			select?: string;
+			limit?: number;
+			offset?: number;
+			order?: string;
+			filters?: Record<string, string>;
+		}
+	): Promise<{ data: any[]; count: number }> {
+		const searchParams = new URLSearchParams();
+		if (params?.select) searchParams.set('select', params.select);
+		if (params?.limit != null) searchParams.set('limit', String(params.limit));
+		if (params?.offset != null) searchParams.set('offset', String(params.offset));
+		if (params?.order) searchParams.set('order', params.order);
+		if (params?.filters) {
+			for (const [key, value] of Object.entries(params.filters)) {
+				searchParams.set(key, value);
+			}
+		}
+		const qs = searchParams.toString();
+		const path = `/v1/db/${table}${qs ? `?${qs}` : ''}`;
+		return this.fetch<{ data: any[]; count: number }>(path, {
+			headers: { 'X-Project-Id': projectId }
+		});
+	}
+
+	/** Insert a new row into a table. */
+	async insertRow(
+		projectId: string,
+		table: string,
+		data: Record<string, any>
+	): Promise<any> {
+		return this.fetch(`/v1/db/${table}`, {
+			method: 'POST',
+			body: JSON.stringify(data),
+			headers: { 'X-Project-Id': projectId }
+		});
+	}
+
+	/** Update a row by ID. */
+	async updateRow(
+		projectId: string,
+		table: string,
+		id: string,
+		data: Record<string, any>
+	): Promise<any> {
+		return this.fetch(`/v1/db/${table}/${id}`, {
+			method: 'PATCH',
+			body: JSON.stringify(data),
+			headers: { 'X-Project-Id': projectId }
+		});
+	}
+
+	/** Delete a row by ID. */
+	async deleteRow(
+		projectId: string,
+		table: string,
+		id: string
+	): Promise<void> {
+		return this.fetch(`/v1/db/${table}/${id}`, {
+			method: 'DELETE',
+			headers: { 'X-Project-Id': projectId }
+		});
+	}
+
+	// ---- Storage methods ----
+
+	/** Upload a file to project storage. */
+	async uploadFile(
+		slug: string,
+		file: File,
+		key?: string
+	): Promise<{ key: string; content_type: string; size: number }> {
+		const formData = new FormData();
+		formData.append('file', file);
+		if (key) formData.append('key', key);
+
+		const res = await this.rawFetch('/v1/storage/upload', {
+			method: 'POST',
+			headers: { 'X-Project-Slug': slug },
+			body: formData
+		});
+
+		return res.json();
+	}
+
+	/** Download a file from project storage. */
+	async downloadFile(slug: string, key: string): Promise<Blob> {
+		const encoded = encodeURIComponent(key);
+		const res = await this.rawFetch(`/v1/storage/${encoded}`, {
+			headers: { 'X-Project-Slug': slug }
+		});
+		return res.blob();
+	}
+
+	/** Delete a file from project storage. */
+	async deleteFile(slug: string, key: string): Promise<void> {
+		const encoded = encodeURIComponent(key);
+		await this.fetch<void>(`/v1/storage/${encoded}`, {
+			method: 'DELETE',
+			headers: { 'X-Project-Slug': slug }
+		});
+	}
+
+	/** List files in project storage. */
+	async listFiles(
+		slug: string,
+		options?: { prefix?: string; limit?: number; cursor?: string }
+	): Promise<FileListResponse> {
+		const params = new URLSearchParams();
+		if (options?.prefix) params.set('prefix', options.prefix);
+		if (options?.limit) params.set('limit', String(options.limit));
+		if (options?.cursor) params.set('cursor', options.cursor);
+		const qs = params.toString();
+		return this.fetch<FileListResponse>(`/v1/storage${qs ? `?${qs}` : ''}`, {
+			headers: { 'X-Project-Slug': slug }
+		});
+	}
+
+	/** Generate a signed URL for a file. */
+	async generateSignedUrl(
+		slug: string,
+		key: string,
+		operation: 'upload' | 'download',
+		expiresIn?: number
+	): Promise<SignedUrlResponse> {
+		return this.fetch<SignedUrlResponse>('/v1/storage/signed-url', {
+			method: 'POST',
+			headers: { 'X-Project-Slug': slug },
+			body: JSON.stringify({ key, operation, expires_in: expiresIn })
 		});
 	}
 }

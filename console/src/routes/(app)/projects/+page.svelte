@@ -102,15 +102,15 @@
 			<h1 class="text-2xl font-bold text-gray-900">Your Projects</h1>
 			<p class="mt-1 text-sm text-gray-500">Manage your EU-sovereign backend projects</p>
 		</div>
-		<button
-			onclick={openModal}
+		<a
+			href="/onboarding"
 			class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer"
 		>
 			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
 				<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
 			</svg>
 			New Project
-		</button>
+		</a>
 	</div>
 
 	<!-- Loading state -->
@@ -152,15 +152,15 @@
 				Create your first EU-sovereign project. Each project gets its own PostgreSQL database,
 				object storage, and API endpoint — all hosted in EU datacenters.
 			</p>
-			<button
-				onclick={openModal}
+			<a
+				href="/onboarding"
 				class="mt-6 inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors cursor-pointer"
 			>
 				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
 				</svg>
 				Create your first project
-			</button>
+			</a>
 		</div>
 	{:else}
 		<!-- Project cards grid -->
