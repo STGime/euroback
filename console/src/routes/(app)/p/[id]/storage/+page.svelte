@@ -170,11 +170,12 @@
 	}
 
 	async function handleCopyUrl(file: FileInfo) {
-		const url = `${api['baseURL']}/v1/storage/${encodeURIComponent(file.key)}`;
+		const slug = projectCtx.project?.slug ?? projectSlug;
+		const encoded = file.key.split('/').map(encodeURIComponent).join('/');
+		const url = `https://${slug}.eurobase.app/v1/storage/${encoded}`;
 		try {
 			await navigator.clipboard.writeText(url);
 		} catch {
-			// Fallback: prompt
 			prompt('Copy this URL:', url);
 		}
 		openDropdown = null;
@@ -205,6 +206,70 @@
 			await loadFiles();
 		} catch (err_) {
 			alert(err_ instanceof Error ? err_.message : 'Failed to create folder');
+		}
+	}
+
+	// ---- Folder management ----
+	let showRenameFolderModal = $state(false);
+	let renameFolderKey = $state('');
+	let renameFolderNewName = $state('');
+	let showDeleteFolderConfirm = $state<{ key: string; name: string; fileCount: number } | null>(null);
+
+	function openRenameFolder(folderKey: string, displayName: string) {
+		renameFolderKey = folderKey;
+		renameFolderNewName = displayName;
+		showRenameFolderModal = true;
+	}
+
+	async function handleRenameFolder() {
+		if (!renameFolderNewName.trim()) return;
+		const oldPrefix = renameFolderKey;
+		const newPrefix = currentPrefix + renameFolderNewName.trim().replace(/\/$/, '') + '/';
+		if (oldPrefix === newPrefix) { showRenameFolderModal = false; return; }
+
+		try {
+			// List all objects under the old prefix
+			const res = await api.listFiles(projectSlug, { prefix: oldPrefix, limit: 1000 });
+			// Copy each object to new key, then delete old
+			for (const obj of res.objects) {
+				const newKey = obj.key.replace(oldPrefix, newPrefix);
+				// Download and re-upload (S3 doesn't have a rename)
+				const blob = await api.downloadFile(projectSlug, obj.key);
+				const file = new File([blob], newKey.split('/').pop() || 'file');
+				await api.uploadFile(projectSlug, file, newKey);
+				await api.deleteFile(projectSlug, obj.key);
+			}
+			showRenameFolderModal = false;
+			await loadFiles();
+		} catch (err_) {
+			alert(err_ instanceof Error ? err_.message : 'Failed to rename folder');
+		}
+	}
+
+	async function confirmDeleteFolder(folderKey: string, displayName: string) {
+		try {
+			const res = await api.listFiles(projectSlug, { prefix: folderKey, limit: 1000 });
+			// Count actual files (not the folder marker itself)
+			const fileCount = res.objects.filter(o => o.key !== folderKey).length;
+			showDeleteFolderConfirm = { key: folderKey, name: displayName, fileCount };
+		} catch {
+			showDeleteFolderConfirm = { key: folderKey, name: displayName, fileCount: 0 };
+		}
+	}
+
+	async function handleDeleteFolder() {
+		if (!showDeleteFolderConfirm) return;
+		const folderKey = showDeleteFolderConfirm.key;
+		try {
+			// Delete all objects under the folder prefix
+			const res = await api.listFiles(projectSlug, { prefix: folderKey, limit: 1000 });
+			for (const obj of res.objects) {
+				await api.deleteFile(projectSlug, obj.key);
+			}
+			showDeleteFolderConfirm = null;
+			await loadFiles();
+		} catch (err_) {
+			alert(err_ instanceof Error ? err_.message : 'Failed to delete folder');
 		}
 	}
 
@@ -387,7 +452,30 @@
 									<td class="px-4 py-3 text-gray-500 hidden sm:table-cell">--</td>
 									<td class="px-4 py-3 text-gray-500 hidden md:table-cell">Folder</td>
 									<td class="px-4 py-3 text-gray-500 hidden lg:table-cell">{formatRelativeTime(folder.last_modified)}</td>
-									<td class="px-4 py-3 text-right"></td>
+									<td class="px-4 py-3 text-right">
+										<div class="flex items-center justify-end gap-1">
+											<button
+												type="button"
+												class="cursor-pointer rounded p-1 text-gray-300 hover:bg-blue-50 hover:text-blue-500 transition-colors"
+												title="Rename folder"
+												onclick={(e) => { e.stopPropagation(); openRenameFolder(folder.key, folder.displayName); }}
+											>
+												<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+													<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+												</svg>
+											</button>
+											<button
+												type="button"
+												class="cursor-pointer rounded p-1 text-gray-300 hover:bg-red-50 hover:text-red-500 transition-colors"
+												title="Delete folder"
+												onclick={(e) => { e.stopPropagation(); confirmDeleteFolder(folder.key, folder.displayName); }}
+											>
+												<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+													<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+												</svg>
+											</button>
+										</div>
+									</td>
 								</tr>
 							{/each}
 							{#each regularFiles as file}
@@ -646,13 +734,31 @@
 						</div>
 						{#if signedUrl}
 							<div class="mt-2 rounded-lg bg-gray-50 border border-gray-200 p-2">
-								<input
-									type="text"
-									readonly
-									value={signedUrl}
-									class="w-full text-xs font-mono text-gray-700 bg-transparent border-none focus:outline-none"
-									onclick={(e) => { (e.target as HTMLInputElement).select(); }}
-								/>
+								<div class="flex items-center gap-1">
+									<input
+										type="text"
+										readonly
+										value={signedUrl}
+										class="flex-1 text-xs font-mono text-gray-700 bg-transparent border-none focus:outline-none min-w-0"
+										onclick={(e) => { (e.target as HTMLInputElement).select(); }}
+									/>
+									<button
+										type="button"
+										class="shrink-0 cursor-pointer rounded p-1 text-gray-400 hover:text-eurobase-600 hover:bg-eurobase-50 transition-colors"
+										title="Copy signed URL"
+										onclick={async () => {
+											try {
+												await navigator.clipboard.writeText(signedUrl);
+											} catch {
+												prompt('Copy this URL:', signedUrl);
+											}
+										}}
+									>
+										<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9.75a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184" />
+										</svg>
+									</button>
+								</div>
 								<p class="mt-1 text-xs text-gray-400">
 									Expires: {new Date(signedUrlExpiry).toLocaleString('en-GB')}
 								</p>
@@ -710,6 +816,82 @@
 					</button>
 				</div>
 			</form>
+		</div>
+	</div>
+{/if}
+
+<!-- Rename Folder Modal -->
+{#if showRenameFolderModal}
+	<div class="fixed inset-0 z-50 flex items-center justify-center">
+		<div class="absolute inset-0 bg-black/50" onclick={() => { showRenameFolderModal = false; }}></div>
+		<div class="relative z-10 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+			<h2 class="text-lg font-semibold text-gray-900">Rename Folder</h2>
+			<form onsubmit={(e) => { e.preventDefault(); handleRenameFolder(); }}>
+				<div class="mt-4">
+					<label for="rename-folder" class="block text-sm font-medium text-gray-700">New name</label>
+					<input
+						id="rename-folder"
+						type="text"
+						bind:value={renameFolderNewName}
+						class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						autofocus
+					/>
+				</div>
+				<div class="mt-5 flex justify-end gap-3">
+					<button
+						type="button"
+						onclick={() => { showRenameFolderModal = false; }}
+						class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer"
+					>Cancel</button>
+					<button
+						type="submit"
+						class="rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-semibold text-white hover:bg-eurobase-700 cursor-pointer"
+					>Rename</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+<!-- Delete Folder Confirmation -->
+{#if showDeleteFolderConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center">
+		<div class="absolute inset-0 bg-black/50" onclick={() => { showDeleteFolderConfirm = null; }}></div>
+		<div class="relative z-10 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+			<div class="flex items-start gap-3">
+				<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100">
+					<svg class="h-5 w-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+				</div>
+				<div>
+					<h2 class="text-lg font-semibold text-gray-900">Delete folder "{showDeleteFolderConfirm.name}"?</h2>
+					{#if showDeleteFolderConfirm.fileCount > 0}
+						<div class="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+							<p class="text-sm text-amber-800 font-medium">
+								This folder contains {showDeleteFolderConfirm.fileCount} file{showDeleteFolderConfirm.fileCount === 1 ? '' : 's'}.
+							</p>
+							<p class="text-xs text-amber-700 mt-0.5">
+								All files inside will be permanently deleted.
+							</p>
+						</div>
+					{:else}
+						<p class="mt-1 text-sm text-gray-500">This empty folder will be removed.</p>
+					{/if}
+				</div>
+			</div>
+			<div class="mt-5 flex justify-end gap-3">
+				<button
+					type="button"
+					onclick={() => { showDeleteFolderConfirm = null; }}
+					class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer"
+				>Cancel</button>
+				<button
+					type="button"
+					onclick={handleDeleteFolder}
+					class="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 cursor-pointer"
+				>Delete{showDeleteFolderConfirm.fileCount > 0 ? ` (${showDeleteFolderConfirm.fileCount} files)` : ''}</button>
+			</div>
 		</div>
 	</div>
 {/if}
