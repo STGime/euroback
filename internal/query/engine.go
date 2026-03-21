@@ -264,6 +264,64 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 	return result, nil
 }
 
+// ExecuteSQL runs a raw SQL query within the tenant's schema context.
+// It uses a read-only transaction with search_path and statement_timeout.
+func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string, maxRows int) ([]string, []map[string]interface{}, error) {
+	// Strip trailing semicolon so the query can be wrapped in a subquery.
+	rawSQL = strings.TrimSpace(rawSQL)
+	rawSQL = strings.TrimRight(rawSQL, ";")
+	rawSQL = strings.TrimSpace(rawSQL)
+
+	conn, err := e.pool.Acquire(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // read-only tx, rollback is fine
+
+	// Set transaction to read-only.
+	if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+		return nil, nil, fmt.Errorf("set read only: %w", err)
+	}
+
+	// Isolate to tenant schema.
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+		return nil, nil, fmt.Errorf("set search_path: %w", err)
+	}
+
+	// Prevent runaway queries.
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {
+		return nil, nil, fmt.Errorf("set statement_timeout: %w", err)
+	}
+
+	// Execute the user's query with a row limit wrapper.
+	wrappedSQL := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", rawSQL, maxRows)
+	rows, err := tx.Query(ctx, wrappedSQL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execute query: %w", err)
+	}
+	defer rows.Close()
+
+	// Extract column names.
+	fieldDescs := rows.FieldDescriptions()
+	columns := make([]string, len(fieldDescs))
+	for i, fd := range fieldDescs {
+		columns[i] = fd.Name
+	}
+
+	results, err := scanRows(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return columns, results, nil
+}
+
 // scanRows converts pgx rows into a slice of maps, normalizing types
 // (e.g., UUIDs from [16]byte to string) for clean JSON serialization.
 func scanRows(rows pgx.Rows) ([]map[string]interface{}, error) {

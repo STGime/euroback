@@ -100,8 +100,15 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 		queryEngine := query.NewQueryEngine(pool)
 		r.Route("/db", func(r chi.Router) {
 			r.Use(tenant.TenantContextMiddleware(pool))
+			r.Post("/sql", query.HandleSQL(queryEngine))
 			r.Mount("/rpc", query.HandleRPC(queryEngine))
-			r.Mount("/", query.HandleQuery(queryEngine))
+			// Catch-all table routes — must use explicit patterns so they
+			// don't shadow /sql and /rpc when mounted at "/".
+			r.Get("/{table}", query.HandleTableGet(queryEngine))
+			r.Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
+			r.Post("/{table}", query.HandleTableInsert(queryEngine))
+			r.Patch("/{table}/{id}", query.HandleTableUpdate(queryEngine))
+			r.Delete("/{table}/{id}", query.HandleTableDelete(queryEngine))
 		})
 
 		// Storage routes.

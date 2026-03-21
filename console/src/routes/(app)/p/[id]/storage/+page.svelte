@@ -73,12 +73,24 @@
 	// ---- Lifecycle ----
 
 	let lastSlug = '';
+	let initialLoadDone = false;
 	$effect(() => {
 		// Reload files when slug becomes available or changes
-		if (projectSlug && projectSlug !== $page.params.id && projectSlug !== lastSlug) {
+		if (projectSlug && projectSlug !== lastSlug) {
 			lastSlug = projectSlug;
+			initialLoadDone = true;
 			loadFiles();
 		}
+	});
+
+	// Fallback: if project context never loads (e.g. gateway down), stop the spinner
+	onMount(() => {
+		setTimeout(() => {
+			if (!initialLoadDone) {
+				loading = false;
+				error = 'Could not connect to the server. Please check that the gateway is running.';
+			}
+		}, 5000);
 	});
 
 	// ---- Actions ----
@@ -90,7 +102,13 @@
 			const res = await api.listFiles(projectSlug, { prefix: currentPrefix || undefined });
 			files = res.objects;
 		} catch (err_) {
-			error = err_ instanceof Error ? err_.message : 'Failed to load files';
+			let msg = err_ instanceof Error ? err_.message : 'Failed to load files';
+			if (msg.includes('500')) {
+				msg = 'Could not connect to the server. Please check that the gateway is running.';
+			} else if (msg.includes('fetch') || msg.includes('network') || msg.includes('Failed to fetch')) {
+				msg = 'Network error — the server may be offline.';
+			}
+			error = msg;
 			files = [];
 		} finally {
 			loading = false;

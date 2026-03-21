@@ -25,6 +25,8 @@ func jsonResponse(w http.ResponseWriter, data interface{}, status int) {
 }
 
 // HandleQuery returns a chi.Router that handles all /v1/db/ routes.
+// Deprecated: prefer using the individual Handle* functions directly on
+// the parent router so that explicit routes (like /sql) are not shadowed.
 func HandleQuery(engine *QueryEngine) chi.Router {
 	r := chi.NewRouter()
 
@@ -35,6 +37,31 @@ func HandleQuery(engine *QueryEngine) chi.Router {
 	r.Delete("/{table}/{id}", handleDeleteRow(engine))
 
 	return r
+}
+
+// HandleTableGet returns the handler for GET /v1/db/{table}.
+func HandleTableGet(engine *QueryEngine) http.HandlerFunc {
+	return handleSelectRows(engine)
+}
+
+// HandleTableGetByID returns the handler for GET /v1/db/{table}/{id}.
+func HandleTableGetByID(engine *QueryEngine) http.HandlerFunc {
+	return handleSelectRowByID(engine)
+}
+
+// HandleTableInsert returns the handler for POST /v1/db/{table}.
+func HandleTableInsert(engine *QueryEngine) http.HandlerFunc {
+	return handleInsertRow(engine)
+}
+
+// HandleTableUpdate returns the handler for PATCH /v1/db/{table}/{id}.
+func HandleTableUpdate(engine *QueryEngine) http.HandlerFunc {
+	return handleUpdateRow(engine)
+}
+
+// HandleTableDelete returns the handler for DELETE /v1/db/{table}/{id}.
+func HandleTableDelete(engine *QueryEngine) http.HandlerFunc {
+	return handleDeleteRow(engine)
 }
 
 // HandleRPC returns an http.HandlerFunc for POST /v1/db/rpc/{function}.

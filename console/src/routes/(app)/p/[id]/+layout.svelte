@@ -35,7 +35,11 @@
 		try {
 			project = await api.getProject(projectId);
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to load project';
+			let msg = err instanceof Error ? err.message : 'Failed to load project';
+			if (msg.includes('500') || msg.includes('fetch') || msg.includes('Failed to fetch')) {
+				msg = 'Could not connect to the server. Please check that the gateway is running.';
+			}
+			error = msg;
 		} finally {
 			loading = false;
 		}
@@ -52,8 +56,15 @@
 	{#if loading}
 		<div class="mb-4 h-7 w-48 animate-pulse rounded bg-gray-200"></div>
 	{:else if error}
-		<div class="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600">
-			{error}
+		<div class="mb-4 flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+			<svg class="h-5 w-5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+			</svg>
+			<span class="text-sm text-red-700">{error}</span>
+			<button
+				onclick={loadProject}
+				class="ml-auto shrink-0 rounded-md bg-red-100 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-200 transition-colors cursor-pointer"
+			>Retry</button>
 		</div>
 	{:else if project}
 		<div class="mb-4 flex items-center gap-3">

@@ -244,6 +244,26 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- SQL Editor methods ----
+
+	/** Execute a raw SQL SELECT query against the project database. */
+	async executeSQL(
+		projectId: string,
+		sql: string,
+		limit?: number
+	): Promise<{
+		columns: string[];
+		rows: Record<string, any>[];
+		row_count: number;
+		execution_time_ms: number;
+	}> {
+		return this.fetch(`/v1/db/sql`, {
+			method: 'POST',
+			body: JSON.stringify({ sql, limit: limit ?? 1000 }),
+			headers: { 'X-Project-Id': projectId }
+		});
+	}
+
 	// ---- Storage methods ----
 
 	/** Upload a file to project storage. */
