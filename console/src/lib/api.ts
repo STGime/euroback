@@ -169,11 +169,60 @@ export class EurobaseAPI {
 			body: JSON.stringify(data)
 		});
 	}
+	/** Delete a project (irreversible). */
+	async deleteProject(projectId: string): Promise<void> {
+		return this.fetch(`/v1/tenants/${projectId}`, { method: 'DELETE' });
+	}
+
 	// ---- Database methods ----
 
 	/** Get schema introspection for a project (all tables and columns). */
 	async getSchema(projectId: string): Promise<TableSchema[]> {
 		return this.fetch<TableSchema[]>(`/platform/projects/${projectId}/schema`);
+	}
+
+	/** Create a new table in the project schema. */
+	async createTable(
+		projectId: string,
+		name: string,
+		columns: {
+			name: string;
+			type: string;
+			nullable: boolean;
+			default_value?: string;
+			is_primary_key: boolean;
+		}[]
+	): Promise<{ status: string; table: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables`, {
+			method: 'POST',
+			body: JSON.stringify({ name, columns })
+		});
+	}
+
+	/** Drop a table from the project schema. */
+	async dropTable(projectId: string, tableName: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** Add a column to an existing table. */
+	async addColumn(
+		projectId: string,
+		tableName: string,
+		column: { name: string; type: string; nullable: boolean; default_value?: string }
+	): Promise<{ status: string; column: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}/columns`, {
+			method: 'POST',
+			body: JSON.stringify(column)
+		});
+	}
+
+	/** Drop a column from a table. */
+	async dropColumn(projectId: string, tableName: string, columnName: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}/columns/${columnName}`, {
+			method: 'DELETE'
+		});
 	}
 
 	/** Query rows from a table with optional filtering, sorting, and pagination. */
@@ -332,6 +381,75 @@ export class EurobaseAPI {
 			body: JSON.stringify({ key, operation, expires_in: expiresIn })
 		});
 	}
+
+	// ---- Webhook methods ----
+
+	async listWebhooks(projectId: string): Promise<Webhook[]> {
+		return this.fetch<Webhook[]>(`/platform/projects/${projectId}/webhooks`);
+	}
+
+	async createWebhook(projectId: string, data: { url: string; events: string[]; description?: string }): Promise<Webhook> {
+		return this.fetch<Webhook>(`/platform/projects/${projectId}/webhooks`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async updateWebhook(projectId: string, webhookId: string, data: { url?: string; events?: string[]; enabled?: boolean; description?: string }): Promise<Webhook> {
+		return this.fetch<Webhook>(`/platform/projects/${projectId}/webhooks/${webhookId}`, {
+			method: 'PATCH',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async deleteWebhook(projectId: string, webhookId: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/webhooks/${webhookId}`, { method: 'DELETE' });
+	}
+
+	async getWebhookDeliveries(projectId: string, webhookId: string): Promise<WebhookDelivery[]> {
+		return this.fetch<WebhookDelivery[]>(`/platform/projects/${projectId}/webhooks/${webhookId}/deliveries`);
+	}
+
+	// ---- API Key methods ----
+
+	async listAPIKeys(projectId: string): Promise<APIKey[]> {
+		return this.fetch<APIKey[]>(`/platform/projects/${projectId}/api-keys`);
+	}
+
+	async regenerateAPIKeys(projectId: string): Promise<{ public_key: string; secret_key: string }> {
+		return this.fetch(`/platform/projects/${projectId}/api-keys/regenerate`, { method: 'POST' });
+	}
+}
+
+export interface Webhook {
+	id: string;
+	project_id: string;
+	url: string;
+	events: string[];
+	secret?: string;
+	enabled: boolean;
+	description: string;
+	created_at: string;
+}
+
+export interface WebhookDelivery {
+	id: string;
+	webhook_id: string;
+	event: string;
+	payload: any;
+	status_code: number | null;
+	response: string | null;
+	attempts: number;
+	success: boolean;
+	created_at: string;
+}
+
+export interface APIKey {
+	id: string;
+	key_prefix: string;
+	type: string;
+	created_at: string;
+	last_used_at: string | null;
 }
 
 export const api = new EurobaseAPI();

@@ -27,7 +27,7 @@
 	}: {
 		open: boolean;
 		onClose: () => void;
-		onCreate?: (sql: string) => void;
+		onCreate?: (tableName: string, columns: ColumnDef[]) => Promise<void>;
 	} = $props();
 
 	let tableName = $state('');
@@ -36,7 +36,7 @@
 			name: 'id',
 			type: 'uuid',
 			nullable: false,
-			defaultValue: 'uuid_generate_v4()',
+			defaultValue: 'public.uuid_generate_v4()',
 			isPrimaryKey: true
 		},
 		{
@@ -50,6 +50,8 @@
 
 	let generatedSql = $derived(generateSql());
 	let showSql = $state(false);
+	let creating = $state(false);
+	let error: string | null = $state(null);
 
 	function addColumn() {
 		columns = [
@@ -96,21 +98,32 @@
 		return `CREATE TABLE "${safeName}" (\n${colDefs.join(',\n')}\n);`;
 	}
 
-	function handleCreate() {
-		if (onCreate) {
-			onCreate(generatedSql);
+	async function handleCreate() {
+		if (!onCreate || creating) return;
+		creating = true;
+		error = null;
+		try {
+			await onCreate(tableName.trim(), columns.filter((c) => c.name.trim()));
+			resetForm();
+			onClose();
+		} catch (err) {
+			let msg = err instanceof Error ? err.message : 'Failed to create table';
+			const jsonMatch = msg.match(/\{"error":"(.+?)"\}/);
+			if (jsonMatch) msg = jsonMatch[1];
+			error = msg;
+		} finally {
+			creating = false;
 		}
-		showSql = true;
 	}
 
-	function handleClose() {
+	function resetForm() {
 		tableName = '';
 		columns = [
 			{
 				name: 'id',
 				type: 'uuid',
 				nullable: false,
-				defaultValue: 'uuid_generate_v4()',
+				defaultValue: 'public.uuid_generate_v4()',
 				isPrimaryKey: true
 			},
 			{
@@ -122,6 +135,11 @@
 			}
 		];
 		showSql = false;
+		error = null;
+	}
+
+	function handleClose() {
+		resetForm();
 		onClose();
 	}
 
@@ -161,6 +179,16 @@
 
 			<!-- Body -->
 			<div class="px-6 py-5 space-y-5">
+				<!-- Error -->
+				{#if error}
+					<div class="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">
+						<svg class="h-5 w-5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+						</svg>
+						<span class="text-red-700">{error}</span>
+					</div>
+				{/if}
+
 				<!-- Table name -->
 				<div>
 					<label for="table-name" class="block text-sm font-medium text-gray-700 mb-1.5">
@@ -170,9 +198,10 @@
 						id="table-name"
 						type="text"
 						bind:value={tableName}
-						placeholder="e.g. users, orders, products"
+						placeholder="e.g. todos, orders, products"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
 					/>
+					<p class="mt-1 text-xs text-gray-400">Use lowercase letters, digits, and underscores only.</p>
 				</div>
 
 				<!-- Column definitions -->
@@ -282,10 +311,14 @@
 				<button
 					type="button"
 					class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					disabled={!isValid}
+					disabled={!isValid || creating}
 					onclick={handleCreate}
 				>
-					Create Table
+					{#if creating}
+						Creating...
+					{:else}
+						Create Table
+					{/if}
 				</button>
 			</div>
 		</div>

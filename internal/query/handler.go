@@ -295,11 +295,9 @@ func handleDeleteRow(engine *QueryEngine) http.HandlerFunc {
 		err := engine.DeleteRow(r.Context(), schema, tableName, rowID)
 		if err != nil {
 			slog.Error("delete failed", "error", err, "schema", schema, "table", tableName, "id", rowID)
-			if isNotFoundError(err) {
-				jsonError(w, "row not found", http.StatusNotFound)
-				return
+			if !handleQueryError(w, err) {
+				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}
-			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 

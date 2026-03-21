@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -182,5 +183,44 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(items)
+	}
+}
+
+// HandleDeleteProject deletes a project and its tenant schema.
+//
+// DELETE /v1/tenants/{id}
+func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		projectID := chi.URLParam(r, "id")
+
+		// Verify the user owns this project.
+		var ownerHankoID string
+		err := pool.QueryRow(r.Context(),
+			`SELECT u.hanko_user_id FROM projects p
+			 JOIN platform_users u ON p.owner_id = u.id
+			 WHERE p.id = $1`, projectID,
+		).Scan(&ownerHankoID)
+		if err != nil {
+			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+			return
+		}
+		if ownerHankoID != claims.Subject {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+
+		if err := svc.DeleteProject(r.Context(), projectID); err != nil {
+			slog.Error("delete project failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }

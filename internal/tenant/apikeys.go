@@ -41,7 +41,7 @@ func StoreAPIKeys(ctx context.Context, tx pgx.Tx, projectID string, publicKeyHas
 	slog.Info("storing api keys", "project_id", projectID)
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO api_keys (project_id, key_hash, key_prefix, key_type)
+		`INSERT INTO api_keys (project_id, key_hash, key_prefix, type)
 		 VALUES ($1, $2, $3, $4)`,
 		projectID, publicKeyHash, publicKeyPrefix, "public",
 	)
@@ -50,7 +50,7 @@ func StoreAPIKeys(ctx context.Context, tx pgx.Tx, projectID string, publicKeyHas
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO api_keys (project_id, key_hash, key_prefix, key_type)
+		`INSERT INTO api_keys (project_id, key_hash, key_prefix, type)
 		 VALUES ($1, $2, $3, $4)`,
 		projectID, secretKeyHash, secretKeyPrefix, "secret",
 	)

@@ -26,6 +26,9 @@
 	let currentOffset = $state(0);
 	const pageSize = 20;
 
+	// ---- Selection state ----
+	let selectedIds: Set<string> = $state(new Set());
+
 	// ---- Filter state ----
 	let showFilters = $state(false);
 	let filterColumn = $state('');
@@ -38,7 +41,10 @@
 	let showNewTableModal = $state(false);
 	let showInsertModal = $state(false);
 	let insertFormData: Record<string, string> = $state({});
+	let insertError: string | null = $state(null);
 	let showDeleteConfirm: any = $state(null);
+	let showDropTableConfirm: string | null = $state(null);
+	let dropTableError: string | null = $state(null);
 
 	// ---- Pagination ----
 	let pageStart = $derived(totalCount > 0 ? currentOffset + 1 : 0);
@@ -55,6 +61,7 @@
 	function selectTableAndLoad(name: string) {
 		selectedTable = name;
 		currentOffset = 0;
+		selectedIds = new Set();
 		showFilters = false;
 		filterColumn = '';
 		filterValue = '';
@@ -148,6 +155,12 @@
 		void loadTableData();
 	}
 
+	// ---- System tables ----
+	// Managed by the platform — rows should not be manually inserted/deleted
+	// as they are kept in sync with external services (e.g. S3).
+	const systemTables = new Set(['storage_objects']);
+	let isSystemTable = $derived(selectedTable ? systemTables.has(selectedTable) : false);
+
 	// ---- Insert row ----
 	// Context-aware button label based on table name.
 	let insertLabel = $derived(
@@ -166,6 +179,7 @@
 	function openInsertModal() {
 		if (!selectedSchema) return;
 		insertFormData = {};
+		insertError = null;
 		for (const col of selectedSchema.columns) {
 			if (!isEditableColumn(col)) continue;
 			insertFormData[col.name] = '';
@@ -173,8 +187,33 @@
 		showInsertModal = true;
 	}
 
+	function formatInsertError(err: unknown): string {
+		const raw = err instanceof Error ? err.message : String(err);
+		// Extract the inner error from API response like 'API 400: {"error":"..."}'
+		const jsonMatch = raw.match(/\{[^}]*"error"\s*:\s*"([^"]*)"/);
+		const detail = jsonMatch ? jsonMatch[1] : raw;
+		// Parse PostgreSQL type errors: 'invalid value for type bigint: "abc"'
+		const typeMatch = detail.match(/invalid (?:input syntax|value) for type (\w+):\s*"?([^"]*)"?/i);
+		if (typeMatch) {
+			const [, pgType, value] = typeMatch;
+			return `Invalid value${value ? ` "${value}"` : ''} — expected type ${pgType}`;
+		}
+		// Parse not-null violations
+		if (/null value.*violates not-null/i.test(detail)) {
+			const colMatch = detail.match(/column "(\w+)"/);
+			return colMatch ? `"${colMatch[1]}" is required and cannot be empty` : 'A required field is empty';
+		}
+		// Parse unique constraint violations
+		if (/duplicate key|unique constraint/i.test(detail)) {
+			const colMatch = detail.match(/Key \((\w+)\)/);
+			return colMatch ? `A row with this "${colMatch[1]}" already exists` : 'This row violates a unique constraint';
+		}
+		return detail || 'Failed to insert row';
+	}
+
 	async function handleInsertRow() {
 		if (!selectedTable) return;
+		insertError = null;
 		try {
 			const data: Record<string, any> = {};
 			for (const [key, value] of Object.entries(insertFormData)) {
@@ -186,7 +225,7 @@
 			showInsertModal = false;
 			void loadTableData();
 		} catch (err) {
-			dataError = err instanceof Error ? err.message : 'Failed to insert row';
+			insertError = formatInsertError(err);
 		}
 	}
 
@@ -203,9 +242,45 @@
 		}
 	}
 
-	function handleTableCreated(sql: string) {
-		// DDL endpoint not yet available — just log the SQL
-		console.log('Generated SQL:', sql);
+	async function handleTableCreated(tableName: string, columns: { name: string; type: string; nullable: boolean; defaultValue: string; isPrimaryKey: boolean }[]) {
+		await api.createTable(
+			projectId,
+			tableName,
+			columns.map((c) => ({
+				name: c.name,
+				type: c.type,
+				nullable: c.nullable,
+				default_value: c.defaultValue || undefined,
+				is_primary_key: c.isPrimaryKey
+			}))
+		);
+		showNewTableModal = false;
+		await loadSchema();
+		selectTableAndLoad(tableName);
+	}
+
+	async function handleDropTable() {
+		if (!showDropTableConfirm) return;
+		const tableName = showDropTableConfirm;
+		dropTableError = null;
+		try {
+			await api.dropTable(projectId, tableName);
+			showDropTableConfirm = null;
+			if (selectedTable === tableName) {
+				selectedTable = null;
+				rows = [];
+				totalCount = 0;
+			}
+			await loadSchema();
+			if (tables.length > 0 && !selectedTable) {
+				selectTableAndLoad(tables[0].name);
+			}
+		} catch (err) {
+			let msg = err instanceof Error ? err.message : 'Failed to drop table';
+			const jsonMatch = msg.match(/\{"error":"(.+?)"\}/);
+			if (jsonMatch) msg = jsonMatch[1];
+			dropTableError = msg;
+		}
 	}
 
 	const operators = [
@@ -251,20 +326,41 @@
 				</div>
 			{:else}
 				{#each tables as table}
-					<button
-						type="button"
-						class="cursor-pointer flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors
-							{selectedTable === table.name
-								? 'bg-eurobase-50 text-eurobase-700 font-medium'
-								: 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'}"
-						onclick={() => selectTable(table.name)}
-					>
-						<svg class="h-4 w-4 shrink-0 {selectedTable === table.name ? 'text-eurobase-500' : 'text-gray-400'}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25M3.375 8.25h7.5c.621 0 1.125.504 1.125 1.125" />
-						</svg>
-						<span class="truncate">{table.name}</span>
-						<span class="ml-auto text-[10px] text-gray-400">{table.row_count}</span>
-					</button>
+					<div class="group flex items-center rounded-lg transition-colors
+						{selectedTable === table.name
+							? 'bg-eurobase-50'
+							: 'hover:bg-gray-50'}">
+						<button
+							type="button"
+							class="cursor-pointer flex flex-1 items-center gap-2.5 min-w-0 px-3 py-2 text-sm transition-colors
+								{selectedTable === table.name
+									? 'text-eurobase-700 font-medium'
+									: 'text-gray-600 hover:text-gray-900'}"
+							onclick={() => selectTable(table.name)}
+						>
+							<svg class="h-4 w-4 shrink-0 {selectedTable === table.name ? 'text-eurobase-500' : 'text-gray-400'}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25M3.375 8.25h7.5c.621 0 1.125.504 1.125 1.125" />
+							</svg>
+							<span class="truncate">{table.name}</span>
+							{#if systemTables.has(table.name)}
+								<span class="shrink-0 rounded px-1 py-0.5 text-[9px] font-medium bg-eurobase-100 text-eurobase-600">system</span>
+							{/if}
+						</button>
+						{#if !systemTables.has(table.name)}
+							<button
+								type="button"
+								class="cursor-pointer shrink-0 mr-1.5 rounded p-1 text-gray-300 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-all"
+								onclick={(e) => { e.stopPropagation(); showDropTableConfirm = table.name; dropTableError = null; }}
+								title="Drop table"
+							>
+								<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+								</svg>
+							</button>
+						{:else}
+							<span class="shrink-0 mr-2 text-[10px] text-gray-400">{table.row_count}</span>
+						{/if}
+					</div>
 				{/each}
 			{/if}
 		</div>
@@ -277,6 +373,14 @@
 			<div class="flex items-center justify-between mb-4">
 				<div class="flex items-center gap-3">
 					<h2 class="text-lg font-semibold text-gray-900">{selectedTable}</h2>
+					{#if isSystemTable}
+						<span class="inline-flex items-center gap-1 rounded-full bg-eurobase-50 px-2 py-0.5 text-[10px] font-medium text-eurobase-600">
+							<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+							</svg>
+							System table
+						</span>
+					{/if}
 					<span class="text-xs text-gray-400">
 						{selectedSchema.columns.length} columns / {totalCount} rows
 					</span>
@@ -366,18 +470,35 @@
 				</div>
 			{/if}
 
+			<!-- Selection bar -->
+			{#if selectedIds.size > 0}
+				<div class="mb-3 flex items-center gap-3 rounded-lg border border-eurobase-200 bg-eurobase-50 px-4 py-2">
+					<span class="text-sm font-medium text-eurobase-700">
+						{selectedIds.size} {selectedIds.size === 1 ? 'row' : 'rows'} selected
+					</span>
+					<button
+						type="button"
+						class="cursor-pointer rounded-md border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+						onclick={() => { selectedIds = new Set(); }}
+					>
+						Clear
+					</button>
+				</div>
+			{/if}
+
 			<!-- Data grid -->
 			<div class="flex-1 overflow-auto">
 				<DataGrid
 					columns={selectedSchema.columns}
 					{rows}
 					loading={dataLoading}
+					bind:selectedIds
 					onUpdateCell={async (rowId, column, value) => {
 						if (!selectedTable) return;
 						await api.updateRow(projectId, selectedTable, rowId, { [column]: value });
 						loadTableData();
 					}}
-					onDeleteRow={(row) => {
+					onDeleteRow={isSystemTable ? undefined : (row) => {
 						showDeleteConfirm = row;
 					}}
 				/>
@@ -468,6 +589,14 @@
 				</button>
 			</div>
 			<div class="px-6 py-5 space-y-4">
+				{#if insertError}
+					<div class="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+						<svg class="h-4 w-4 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+						</svg>
+						<p class="text-sm text-red-700">{insertError}</p>
+					</div>
+				{/if}
 				{#each selectedSchema.columns.filter(isEditableColumn) as col}
 					<div>
 						<div class="block text-sm font-medium text-gray-700 mb-1">
@@ -563,6 +692,61 @@
 					onclick={handleDeleteRow}
 				>
 					Delete
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Drop Table Confirmation Dialog -->
+{#if showDropTableConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+		<button
+			type="button"
+			class="fixed inset-0 bg-black/50 cursor-default"
+			onclick={() => (showDropTableConfirm = null)}
+			tabindex="-1"
+			aria-label="Close dialog"
+		></button>
+		<div class="relative z-10 w-full max-w-sm rounded-xl bg-white shadow-2xl p-6">
+			<div class="flex items-center gap-3 mb-4">
+				<div class="flex h-10 w-10 items-center justify-center rounded-full bg-red-100">
+					<svg class="h-5 w-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+				</div>
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Drop Table</h3>
+					<p class="text-xs text-gray-500">This action cannot be undone.</p>
+				</div>
+			</div>
+			{#if dropTableError}
+				<div class="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+					<svg class="h-4 w-4 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+					</svg>
+					<p class="text-sm text-red-700">{dropTableError}</p>
+				</div>
+			{/if}
+			<p class="text-sm text-gray-600 mb-5">
+				Are you sure you want to drop
+				<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono font-semibold">{showDropTableConfirm}</code>?
+				All data in this table will be permanently deleted.
+			</p>
+			<div class="flex justify-end gap-3">
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+					onclick={() => (showDropTableConfirm = null)}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
+					onclick={handleDropTable}
+				>
+					Drop Table
 				</button>
 			</div>
 		</div>

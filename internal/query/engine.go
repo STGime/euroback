@@ -20,11 +20,6 @@ func NewQueryEngine(pool *pgxpool.Pool) *QueryEngine {
 	return &QueryEngine{pool: pool}
 }
 
-// setTenantID calls set_tenant_id() on the given connection to activate RLS.
-func (e *QueryEngine) setTenantID(ctx context.Context, conn *pgxpool.Conn, projectID string) error {
-	_, err := conn.Exec(ctx, "SELECT public.set_tenant_id($1::uuid)", projectID)
-	return err
-}
 
 // SelectRows builds and executes a parameterized SELECT query.
 // It validates the table and columns against pg_catalog before executing.
@@ -76,7 +71,6 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 	// Build the COUNT query.
 	countSQL, countArgs := buildCountQuery(schemaName, tableName, params)
 
-	// Execute both queries.
 	rows, err := e.pool.Query(ctx, selectSQL, selectArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("execute select: %w", err)

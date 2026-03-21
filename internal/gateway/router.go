@@ -14,6 +14,7 @@ import (
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/webhook"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,6 +58,10 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 				r.Use(hankoAuth.Handler)
 			}
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
+			r.Mount("/schema/tables", query.HandleDDL(pool))
+			r.Mount("/webhooks", webhook.Routes(pool))
+			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
+			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
 		})
 	})
 
@@ -95,6 +100,7 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 
 		r.Post("/tenants", tenant.HandleCreateProject(pool, tenantSvc))
 		r.Get("/tenants", tenant.HandleListProjects(pool, tenantSvc))
+		r.Delete("/tenants/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 
 		// Data API routes (tenant-scoped via middleware).
 		queryEngine := query.NewQueryEngine(pool)

@@ -224,3 +224,26 @@ func (s *TenantService) ListProjects(ctx context.Context, hankoUserID string) ([
 
 	return projects, nil
 }
+
+// DeleteProject drops the tenant schema and deletes the project row.
+// The caller must verify ownership before calling this.
+func (s *TenantService) DeleteProject(ctx context.Context, projectID string) error {
+	// Call deprovision_tenant to drop the schema.
+	_, err := s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID)
+	if err != nil {
+		slog.Error("deprovision_tenant failed", "error", err, "project_id", projectID)
+		return fmt.Errorf("deprovision tenant: %w", err)
+	}
+
+	// Delete the project row (cascades to api_keys, webhooks, etc.).
+	tag, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
+	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("project not found")
+	}
+
+	slog.Info("project deleted", "project_id", projectID)
+	return nil
+}

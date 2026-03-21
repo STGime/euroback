@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
 	import { api, type Project } from '$lib/api.js';
 	import { setContext } from 'svelte';
 
@@ -15,8 +16,16 @@
 		{ label: 'Database', href: '/database', icon: 'database' },
 		{ label: 'Storage', href: '/storage', icon: 'storage' },
 		{ label: 'API', href: '/api', icon: 'api' },
+		{ label: 'Webhooks', href: '/webhooks', icon: 'webhooks' },
 		{ label: 'Settings', href: '/settings', icon: 'settings' }
 	];
+
+	let copied = $state(false);
+	function copyProjectId() {
+		navigator.clipboard.writeText(projectId);
+		copied = true;
+		setTimeout(() => { copied = false; }, 1500);
+	}
 
 	let currentTab = $derived(() => {
 		const path = $page.url.pathname;
@@ -36,6 +45,10 @@
 			project = await api.getProject(projectId);
 		} catch (err) {
 			let msg = err instanceof Error ? err.message : 'Failed to load project';
+			if (msg.includes('Project not found')) {
+				goto('/projects');
+				return;
+			}
 			if (msg.includes('500') || msg.includes('fetch') || msg.includes('Failed to fetch')) {
 				msg = 'Could not connect to the server. Please check that the gateway is running.';
 			}
@@ -80,12 +93,31 @@
 				 'bg-gray-100 text-gray-600'}">
 				{project.status}
 			</span>
+			<button
+				type="button"
+				onclick={copyProjectId}
+				class="cursor-pointer inline-flex items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-colors"
+				title="Copy project ID"
+			>
+				<span class="font-medium text-gray-400">Project ID</span>
+				<span class="font-mono">{projectId}</span>
+				{#if copied}
+					<svg class="h-3.5 w-3.5 text-green-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+					</svg>
+				{:else}
+					<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9.75a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184" />
+					</svg>
+				{/if}
+			</button>
 		</div>
 	{/if}
 
 	<nav class="flex gap-1 border-b border-gray-200">
 		{#each tabs as tab}
-			{@const isActive = currentTab() === tab.href}
+			{@const sub = currentTab()}
+			{@const isActive = tab.href === '' ? sub === '' : sub.startsWith(tab.href)}
 			<a
 				href="/p/{projectId}{tab.href}"
 				class="relative px-4 py-2.5 text-sm font-medium transition-colors

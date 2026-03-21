@@ -1,0 +1,1200 @@
+{
+	"info": {
+		"name": "Eurobase API — Phase 3 (Console Features)",
+		"description": "Testing collection for Phase 3 console features: Schema DDL, SQL Editor, Data API, and Storage.\n\nPrerequisites:\n1. Run the Phase 1 collection first (Health Check → Hanko Webhook → Create Tenant)\n2. Copy the project_id from the Create Tenant response into the collection variable\n3. Gateway running in dev mode: DEV_MODE=true go run ./cmd/gateway/\n\nAll authenticated requests use Authorization: Bearer dev for dev mode.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080"
+		},
+		{
+			"key": "auth_token",
+			"value": "dev",
+			"description": "Any value works in dev mode"
+		},
+		{
+			"key": "project_id",
+			"value": "",
+			"description": "Set this after creating a tenant via Phase 1 collection"
+		},
+		{
+			"key": "project_slug",
+			"value": "",
+			"description": "Set this after creating a tenant via Phase 1 collection"
+		},
+		{
+			"key": "test_table",
+			"value": "todos",
+			"description": "Name of the test table created by DDL endpoints"
+		},
+		{
+			"key": "test_row_id",
+			"value": "",
+			"description": "Auto-set by Insert Row test script"
+		},
+		{
+			"key": "test_webhook_id",
+			"value": "",
+			"description": "Auto-set by Create Webhook test script"
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{auth_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Schema DDL",
+			"description": "Create/drop tables and columns via the platform schema API.",
+			"item": [
+				{
+					"name": "1. Get Schema (before)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema"]
+						},
+						"description": "List all tables in the project schema. Should show 'users' and 'storage_objects' from provisioning."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array of tables', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.be.an('array');",
+									"    pm.expect(body.length).to.be.at.least(2);",
+									"    const names = body.map(t => t.name);",
+									"    pm.expect(names).to.include('users');",
+									"    pm.expect(names).to.include('storage_objects');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create Table — todos",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"todos\",\n    \"columns\": [\n        {\n            \"name\": \"id\",\n            \"type\": \"uuid\",\n            \"nullable\": false,\n            \"default_value\": \"public.uuid_generate_v4()\",\n            \"is_primary_key\": true\n        },\n        {\n            \"name\": \"title\",\n            \"type\": \"text\",\n            \"nullable\": false\n        },\n        {\n            \"name\": \"done\",\n            \"type\": \"boolean\",\n            \"nullable\": false,\n            \"default_value\": \"false\"\n        },\n        {\n            \"name\": \"created_at\",\n            \"type\": \"timestamptz\",\n            \"nullable\": false,\n            \"default_value\": \"now()\"\n        }\n    ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						},
+						"description": "Create a 'todos' table with id (uuid PK), title (text), done (boolean), created_at (timestamptz). RLS is auto-enabled."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns created status', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.status).to.eql('created');",
+									"    pm.expect(body.table).to.eql('todos');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Create Table — duplicate (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"todos\",\n    \"columns\": [\n        { \"name\": \"id\", \"type\": \"integer\", \"is_primary_key\": true }\n    ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						},
+						"description": "Attempt to create a table that already exists. Should return 400."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions already exists', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('already exists');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Create Table — invalid name (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"my-bad-table!\",\n    \"columns\": [\n        { \"name\": \"id\", \"type\": \"integer\", \"is_primary_key\": true }\n    ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						},
+						"description": "Table name with invalid characters. Should return 400."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. Add Column — priority",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"priority\",\n    \"type\": \"integer\",\n    \"nullable\": true,\n    \"default_value\": \"0\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/{{test_table}}/columns",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "{{test_table}}", "columns"]
+						},
+						"description": "Add a 'priority' integer column with default 0 to the todos table."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns added status', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.status).to.eql('added');",
+									"    pm.expect(body.column).to.eql('priority');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "6. Drop Column — priority",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/{{test_table}}/columns/priority",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "{{test_table}}", "columns", "priority"]
+						},
+						"description": "Drop the 'priority' column from the todos table."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "7. Drop Table — system table (expect 400)",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/storage_objects",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "storage_objects"]
+						},
+						"description": "Attempt to drop the system 'storage_objects' table. Should be blocked."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions system table', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('system table');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "8. Get Schema (after)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema"]
+						},
+						"description": "Verify the 'todos' table now appears in the schema."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('todos table exists', () => {",
+									"    const body = pm.response.json();",
+									"    const names = body.map(t => t.name);",
+									"    pm.expect(names).to.include('todos');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Data API (CRUD)",
+			"description": "Insert, select, update, and delete rows via the REST data API.",
+			"item": [
+				{
+					"name": "1. Insert Row — todo",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Write documentation\",\n    \"done\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						},
+						"description": "Insert a todo row. The id and created_at are auto-generated."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Row has id and title', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.id).to.be.a('string');",
+									"    pm.expect(body.title).to.eql('Write documentation');",
+									"    pm.expect(body.done).to.eql(false);",
+									"    pm.collectionVariables.set('test_row_id', body.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Select Rows — todos",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos?limit=20",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"],
+							"query": [
+								{ "key": "limit", "value": "20" }
+							]
+						},
+						"description": "Select all todos with pagination."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns data array and count', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.data).to.be.an('array');",
+									"    pm.expect(body.count).to.be.at.least(1);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Select Row by ID",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos/{{test_row_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos", "{{test_row_id}}"]
+						},
+						"description": "Get a single todo by its ID."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns the correct row', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.title).to.eql('Write documentation');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Update Row — mark done",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"done\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos/{{test_row_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos", "{{test_row_id}}"]
+						},
+						"description": "Update the todo to mark it as done."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('done is true', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.done).to.eql(true);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. Delete Row",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos/{{test_row_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos", "{{test_row_id}}"]
+						},
+						"description": "Delete the todo row."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "6. Select after delete (expect empty)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos/{{test_row_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos", "{{test_row_id}}"]
+						},
+						"description": "Verify the deleted row returns 404."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "SQL Editor",
+			"description": "Raw SQL query execution via POST /v1/db/sql.",
+			"item": [
+				{
+					"name": "1. Simple SELECT",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"sql\": \"SELECT * FROM users;\",\n    \"limit\": 100\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						},
+						"description": "Execute a simple SELECT. Trailing semicolon should be accepted."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns columns and rows', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.columns).to.be.an('array');",
+									"    pm.expect(body.rows).to.be.an('array');",
+									"    pm.expect(body.row_count).to.be.a('number');",
+									"    pm.expect(body.execution_time_ms).to.be.a('number');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. SELECT with WHERE",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"sql\": \"SELECT id, email FROM users WHERE email IS NOT NULL ORDER BY created_at DESC\",\n    \"limit\": 50\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						},
+						"description": "SELECT with WHERE clause, column selection, and ordering."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. CTE query (WITH)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"sql\": \"WITH recent AS (SELECT * FROM users ORDER BY created_at DESC LIMIT 5) SELECT count(*) as cnt FROM recent\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						},
+						"description": "CTE (WITH) query should be accepted."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. INSERT blocked (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"sql\": \"INSERT INTO users (email) VALUES ('hack@evil.com')\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						},
+						"description": "INSERT should be blocked by ValidateSelectOnly."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error says SELECT only', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('SELECT');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. DROP TABLE blocked (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"sql\": \"DROP TABLE users\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						},
+						"description": "DROP TABLE should be blocked."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "6. Statement chaining blocked (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "X-Project-Id", "value": "{{project_id}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"sql\": \"SELECT 1; DROP TABLE users;\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						},
+						"description": "Multiple statements via semicolons should be blocked."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Webhooks",
+			"description": "CRUD operations for customer-configurable webhook endpoints.",
+			"item": [
+				{
+					"name": "1. List Webhooks (empty)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						},
+						"description": "List webhooks before any have been created."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns empty array', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.be.an('array');",
+									"    pm.expect(body).to.have.length(0);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create Webhook",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"url\": \"https://example.com/webhooks/eurobase\",\n    \"events\": [\"db.insert\", \"db.update\", \"db.delete\"],\n    \"description\": \"Test webhook for CI\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						},
+						"description": "Create a webhook with 3 events. Response includes the signing secret (shown once)."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns webhook with secret', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.id).to.be.a('string');",
+									"    pm.expect(body.url).to.eql('https://example.com/webhooks/eurobase');",
+									"    pm.expect(body.events).to.have.length(3);",
+									"    pm.expect(body.secret).to.match(/^whsec_/);",
+									"    pm.expect(body.enabled).to.eql(true);",
+									"    pm.collectionVariables.set('test_webhook_id', body.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Create Webhook — missing URL (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"url\": \"\",\n    \"events\": [\"db.insert\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						},
+						"description": "Empty URL should be rejected."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions url', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('url');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Create Webhook — no events (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"url\": \"https://example.com/hook\",\n    \"events\": []\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						},
+						"description": "Empty events array should be rejected."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions event', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('event');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. List Webhooks (1 result)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						},
+						"description": "Should now return the webhook we created."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns 1 webhook', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.have.length(1);",
+									"    pm.expect(body[0].url).to.eql('https://example.com/webhooks/eurobase');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "6. Update Webhook — disable",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"enabled\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks/{{test_webhook_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks", "{{test_webhook_id}}"]
+						},
+						"description": "Disable the webhook."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Webhook is disabled', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.enabled).to.eql(false);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "7. Update Webhook — change URL and events",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"url\": \"https://changed.com/hook\",\n    \"events\": [\"db.delete\", \"storage.upload\"],\n    \"enabled\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks/{{test_webhook_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks", "{{test_webhook_id}}"]
+						},
+						"description": "Update URL, events, and re-enable."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Fields updated', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.url).to.eql('https://changed.com/hook');",
+									"    pm.expect(body.events).to.include('storage.upload');",
+									"    pm.expect(body.enabled).to.eql(true);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "8. Get Deliveries (empty)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks/{{test_webhook_id}}/deliveries",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks", "{{test_webhook_id}}", "deliveries"]
+						},
+						"description": "No deliveries yet since no events have been dispatched."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns empty array', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.be.an('array');",
+									"    pm.expect(body).to.have.length(0);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "9. Delete Webhook",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks/{{test_webhook_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks", "{{test_webhook_id}}"]
+						},
+						"description": "Delete the test webhook."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "10. Delete Webhook — already deleted (expect 404)",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks/{{test_webhook_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks", "{{test_webhook_id}}"]
+						},
+						"description": "Deleting the same webhook again should return 404."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "API Keys",
+			"description": "List and regenerate project API keys.",
+			"item": [
+				{
+					"name": "1. List API Keys",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/api-keys",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "api-keys"]
+						},
+						"description": "List API keys for the project. Returns key prefixes only, never full keys."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Regenerate API Keys",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/api-keys/regenerate",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "api-keys", "regenerate"]
+						},
+						"description": "Generate a new API key pair. Returns the full plaintext keys once."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns public and secret keys', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.public_key).to.match(/^eb_pk_/);",
+									"    pm.expect(body.secret_key).to.match(/^eb_sk_/);",
+									"    pm.expect(body.public_key).to.have.length(38);",
+									"    pm.expect(body.secret_key).to.have.length(38);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. List API Keys (after regenerate)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/api-keys",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "api-keys"]
+						},
+						"description": "Verify the new keys appear with prefixes. Full keys are not returned."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns 2 keys (public + secret)', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.have.length(2);",
+									"    const types = body.map(k => k.type);",
+									"    pm.expect(types).to.include('public');",
+									"    pm.expect(types).to.include('secret');",
+									"});",
+									"pm.test('Keys have prefixes, not full keys', () => {",
+									"    const body = pm.response.json();",
+									"    body.forEach(k => {",
+									"        pm.expect(k.key_prefix).to.be.a('string');",
+									"        pm.expect(k.key_prefix.length).to.be.at.most(14);",
+									"        pm.expect(k).to.not.have.property('key_hash');",
+									"    });",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Regenerate Again (old keys replaced)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/api-keys/regenerate",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "api-keys", "regenerate"]
+						},
+						"description": "Regenerating again replaces the previous keys. Still returns 2 keys."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns new keys', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.public_key).to.match(/^eb_pk_/);",
+									"    pm.expect(body.secret_key).to.match(/^eb_sk_/);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. List API Keys (still 2)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/api-keys",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "api-keys"]
+						},
+						"description": "Verify still exactly 2 keys after second regeneration."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Still 2 keys', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.have.length(2);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Cleanup",
+			"description": "Drop the test table created during the DDL tests.",
+			"item": [
+				{
+					"name": "Drop Table — todos",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/{{test_table}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "{{test_table}}"]
+						},
+						"description": "Drop the test 'todos' table to clean up."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}
