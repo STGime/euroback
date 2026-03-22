@@ -1,11 +1,9 @@
 /**
  * Eurobase API client.
  *
- * Talks to the Go gateway. The token is stored in localStorage and attached
- * as a Bearer token on every request.
- *
- * The login() method is a placeholder — it will be replaced by Hanko
- * authentication once integrated.
+ * Talks to the Go gateway. The platform JWT is stored in localStorage
+ * and attached as a Bearer token on every request. Auth is handled by
+ * the built-in platform auth system (/platform/auth/*).
  */
 
 import { PUBLIC_API_URL } from '$env/static/public';
@@ -96,6 +94,15 @@ export class EurobaseAPI {
 		});
 
 		if (!res.ok) {
+			if (res.status === 401) {
+				this.clearToken();
+				if (typeof localStorage !== 'undefined') {
+					localStorage.removeItem('eurobase_email');
+				}
+				if (typeof window !== 'undefined') {
+					window.location.href = '/login';
+				}
+			}
 			const body = await res.text().catch(() => '');
 			throw new Error(`API ${res.status}: ${body || res.statusText}`);
 		}
@@ -125,6 +132,15 @@ export class EurobaseAPI {
 		});
 
 		if (!res.ok) {
+			if (res.status === 401) {
+				this.clearToken();
+				if (typeof localStorage !== 'undefined') {
+					localStorage.removeItem('eurobase_email');
+				}
+				if (typeof window !== 'undefined') {
+					window.location.href = '/login';
+				}
+			}
 			const body = await res.text().catch(() => '');
 			throw new Error(`API ${res.status}: ${body || res.statusText}`);
 		}
@@ -263,10 +279,8 @@ export class EurobaseAPI {
 			}
 		}
 		const qs = searchParams.toString();
-		const path = `/v1/db/${table}${qs ? `?${qs}` : ''}`;
-		return this.fetch<{ data: any[]; count: number }>(path, {
-			headers: { 'X-Project-Id': projectId }
-		});
+		const path = `/platform/projects/${projectId}/data/${table}${qs ? `?${qs}` : ''}`;
+		return this.fetch<{ data: any[]; count: number }>(path);
 	}
 
 	/** Insert a new row into a table. */
@@ -275,10 +289,9 @@ export class EurobaseAPI {
 		table: string,
 		data: Record<string, any>
 	): Promise<any> {
-		return this.fetch(`/v1/db/${table}`, {
+		return this.fetch(`/platform/projects/${projectId}/data/${table}`, {
 			method: 'POST',
-			body: JSON.stringify(data),
-			headers: { 'X-Project-Id': projectId }
+			body: JSON.stringify(data)
 		});
 	}
 
@@ -289,10 +302,9 @@ export class EurobaseAPI {
 		id: string,
 		data: Record<string, any>
 	): Promise<any> {
-		return this.fetch(`/v1/db/${table}/${id}`, {
+		return this.fetch(`/platform/projects/${projectId}/data/${table}/${id}`, {
 			method: 'PATCH',
-			body: JSON.stringify(data),
-			headers: { 'X-Project-Id': projectId }
+			body: JSON.stringify(data)
 		});
 	}
 
@@ -302,9 +314,8 @@ export class EurobaseAPI {
 		table: string,
 		id: string
 	): Promise<void> {
-		return this.fetch(`/v1/db/${table}/${id}`, {
-			method: 'DELETE',
-			headers: { 'X-Project-Id': projectId }
+		return this.fetch(`/platform/projects/${projectId}/data/${table}/${id}`, {
+			method: 'DELETE'
 		});
 	}
 
@@ -321,10 +332,9 @@ export class EurobaseAPI {
 		row_count: number;
 		execution_time_ms: number;
 	}> {
-		return this.fetch(`/v1/db/sql`, {
+		return this.fetch(`/platform/projects/${projectId}/data/sql`, {
 			method: 'POST',
-			body: JSON.stringify({ sql, limit: limit ?? 1000 }),
-			headers: { 'X-Project-Id': projectId }
+			body: JSON.stringify({ sql, limit: limit ?? 1000 })
 		});
 	}
 
@@ -332,7 +342,7 @@ export class EurobaseAPI {
 
 	/** Upload a file to project storage. */
 	async uploadFile(
-		slug: string,
+		projectId: string,
 		file: File,
 		key?: string
 	): Promise<{ key: string; content_type: string; size: number }> {
@@ -340,9 +350,8 @@ export class EurobaseAPI {
 		formData.append('file', file);
 		if (key) formData.append('key', key);
 
-		const res = await this.rawFetch('/v1/storage/upload', {
+		const res = await this.rawFetch(`/platform/projects/${projectId}/storage/upload`, {
 			method: 'POST',
-			headers: { 'X-Project-Slug': slug },
 			body: formData
 		});
 
@@ -350,27 +359,24 @@ export class EurobaseAPI {
 	}
 
 	/** Download a file from project storage. */
-	async downloadFile(slug: string, key: string): Promise<Blob> {
+	async downloadFile(projectId: string, key: string): Promise<Blob> {
 		// Encode each path segment individually to preserve slashes
 		const encoded = key.split('/').map(encodeURIComponent).join('/');
-		const res = await this.rawFetch(`/v1/storage/${encoded}`, {
-			headers: { 'X-Project-Slug': slug }
-		});
+		const res = await this.rawFetch(`/platform/projects/${projectId}/storage/${encoded}`);
 		return res.blob();
 	}
 
 	/** Delete a file from project storage. */
-	async deleteFile(slug: string, key: string): Promise<void> {
+	async deleteFile(projectId: string, key: string): Promise<void> {
 		const encoded = key.split('/').map(encodeURIComponent).join('/');
-		await this.fetch<void>(`/v1/storage/${encoded}`, {
-			method: 'DELETE',
-			headers: { 'X-Project-Slug': slug }
+		await this.fetch<void>(`/platform/projects/${projectId}/storage/${encoded}`, {
+			method: 'DELETE'
 		});
 	}
 
 	/** List files in project storage. */
 	async listFiles(
-		slug: string,
+		projectId: string,
 		options?: { prefix?: string; limit?: number; cursor?: string }
 	): Promise<FileListResponse> {
 		const params = new URLSearchParams();
@@ -378,21 +384,18 @@ export class EurobaseAPI {
 		if (options?.limit) params.set('limit', String(options.limit));
 		if (options?.cursor) params.set('cursor', options.cursor);
 		const qs = params.toString();
-		return this.fetch<FileListResponse>(`/v1/storage${qs ? `?${qs}` : ''}`, {
-			headers: { 'X-Project-Slug': slug }
-		});
+		return this.fetch<FileListResponse>(`/platform/projects/${projectId}/storage${qs ? `?${qs}` : ''}`);
 	}
 
 	/** Generate a signed URL for a file. */
 	async generateSignedUrl(
-		slug: string,
+		projectId: string,
 		key: string,
 		operation: 'upload' | 'download',
 		expiresIn?: number
 	): Promise<SignedUrlResponse> {
-		return this.fetch<SignedUrlResponse>('/v1/storage/signed-url', {
+		return this.fetch<SignedUrlResponse>(`/platform/projects/${projectId}/storage/signed-url`, {
 			method: 'POST',
-			headers: { 'X-Project-Slug': slug },
 			body: JSON.stringify({ key, operation, expires_in: expiresIn })
 		});
 	}

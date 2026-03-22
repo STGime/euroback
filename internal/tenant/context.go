@@ -6,6 +6,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/query"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -25,6 +26,88 @@ func TenantContextFromProject() func(http.Handler) http.Handler {
 			ctx := query.ContextWithSchema(r.Context(), pc.SchemaName)
 			ctx = query.ContextWithKeyType(ctx, pc.KeyType)
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// PlatformTenantContext resolves the tenant project from a chi URL param {id}
+// and the platform auth claims. Used by the console's platform-authenticated
+// data routes so the console never needs an API key.
+func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := auth.ClaimsFromContext(r.Context())
+			if !ok {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+
+			projectID := chi.URLParam(r, "id")
+			if projectID == "" {
+				http.Error(w, `{"error":"missing project id"}`, http.StatusBadRequest)
+				return
+			}
+
+			var schemaName string
+			err := pool.QueryRow(r.Context(),
+				`SELECT schema_name FROM projects
+				 WHERE id = $1 AND owner_id = $2::uuid AND status = 'active'`,
+				projectID, claims.Subject,
+			).Scan(&schemaName)
+			if err != nil {
+				slog.Error("platform tenant context: project not found",
+					"error", err,
+					"project_id", projectID,
+					"user_id", claims.Subject,
+				)
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
+			ctx := query.ContextWithSchema(r.Context(), schemaName)
+			// Console operates with "secret" level access.
+			ctx = query.ContextWithKeyType(ctx, "secret")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// PlatformStorageContext resolves the project slug from URL param {id} and
+// platform auth claims, then injects X-Project-Slug into the request header
+// so the existing storage handler can derive the bucket name.
+func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := auth.ClaimsFromContext(r.Context())
+			if !ok {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+
+			projectID := chi.URLParam(r, "id")
+			if projectID == "" {
+				http.Error(w, `{"error":"missing project id"}`, http.StatusBadRequest)
+				return
+			}
+
+			var slug string
+			err := pool.QueryRow(r.Context(),
+				`SELECT slug FROM projects
+				 WHERE id = $1 AND owner_id = $2::uuid AND status = 'active'`,
+				projectID, claims.Subject,
+			).Scan(&slug)
+			if err != nil {
+				slog.Error("platform storage context: project not found",
+					"error", err,
+					"project_id", projectID,
+					"user_id", claims.Subject,
+				)
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
+			r.Header.Set("X-Project-Slug", slug)
+			next.ServeHTTP(w, r)
 		})
 	}
 }

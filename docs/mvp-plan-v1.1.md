@@ -33,7 +33,7 @@ Eurobase is an EU-native Backend-as-a-Service (BaaS) platform. The MVP delivers 
 
 ### 1.1 MVP Scope
 
-The MVP enables a developer to: (a) create a Eurobase project via a guided onboarding flow, (b) get provisioned with a dedicated database schema and S3 bucket, (c) authenticate end-users via Hanko-powered auth, (d) read/write data through a REST API with automatic tenant isolation, (e) upload/download files to their isolated storage bucket, and (f) manage all of the above from a console dashboard.
+The MVP enables a developer to: (a) create a Eurobase project via a guided onboarding flow, (b) get provisioned with a dedicated database schema and S3 bucket, (c) authenticate end-users via Eurobase's built-in auth (email+password, with passkeys and OAuth planned), (d) read/write data through a REST API with automatic tenant isolation, (e) upload/download files to their isolated storage bucket, and (f) manage all of the above from a console dashboard.
 
 ### 1.2 Guiding Principles
 
@@ -63,7 +63,8 @@ The MVP enables a developer to: (a) create a Eurobase project via a guided onboa
 | **Provisioning** | Go (shared codebase) | Same language as gateway. Runs as background workers/jobs. Uses Scaleway SDK for Go. |
 | **Database** | Scaleway PostgreSQL 16 | Managed, HA, PITR. EU datacenters. pgvector for future AI features. |
 | **Object Storage** | Scaleway Object Storage | S3-compatible. No API fees. Same VPC as DB. |
-| **Auth Provider** | Hanko Cloud | German GmbH. Passkey-first. $0.01/MAU. Web components. |
+| **Console Auth** | Hanko Cloud | German GmbH. Passkey-first. Used for console/platform developer login only. |
+| **End-User Auth** | Built-in (Go) | Custom tenant-aware auth service. Email+password (MVP), passkeys and OAuth planned. Per-project user pools stored in tenant schemas. JWTs signed with per-project HS256 secrets. No external dependency. |
 | **Cache / Realtime** | Scaleway Redis 7 | Session cache, rate limiting, pub/sub for WebSocket fan-out. |
 | **Task Queue** | River (Go + PostgreSQL) | No extra infra needed. Job queue backed by PostgreSQL. Handles provisioning, webhooks, cleanup. |
 | **Container Orchestration** | Scaleway Kapsule (K8s) | Managed Kubernetes in Paris. Same VPC as all data services. |

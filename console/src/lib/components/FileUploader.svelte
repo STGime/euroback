@@ -3,12 +3,12 @@
 	import { formatBytes } from '$lib/utils.js';
 
 	interface Props {
-		slug: string;
+		projectId: string;
 		currentPrefix: string;
 		onuploaded?: () => void;
 	}
 
-	let { slug, currentPrefix, onuploaded }: Props = $props();
+	let { projectId, currentPrefix, onuploaded }: Props = $props();
 
 	interface UploadItem {
 		file: File;
@@ -73,7 +73,7 @@
 		try {
 			updateUpload(file, { progress: 30 });
 
-			await api.uploadFile(slug, file, key);
+			await api.uploadFile(projectId, file, key);
 
 			updateUpload(file, { progress: 100, status: 'done' });
 		} catch (err) {

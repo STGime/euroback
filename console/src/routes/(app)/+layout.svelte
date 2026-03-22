@@ -1,8 +1,15 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { logout } from '$lib/stores.js';
+	import { onMount } from 'svelte';
+	import { user, logout } from '$lib/stores.js';
 
 	let { children } = $props();
+
+	onMount(() => {
+		if (!$user) {
+			goto('/login');
+		}
+	});
 
 	const navItems = [
 		{
@@ -125,9 +132,9 @@
 
 			<!-- User menu -->
 			<div class="flex items-center gap-3">
-				<span class="text-sm text-gray-500 hidden sm:block">dev@eurobase.app</span>
+				<span class="text-sm text-gray-500 hidden sm:block">{$user?.email ?? ''}</span>
 				<div class="flex h-8 w-8 items-center justify-center rounded-full bg-eurobase-100 text-sm font-medium text-eurobase-700">
-					D
+					{($user?.email ?? '?')[0].toUpperCase()}
 				</div>
 			</div>
 		</header>

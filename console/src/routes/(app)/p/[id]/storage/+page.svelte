@@ -33,7 +33,8 @@
 
 	// Project slug from layout context
 	const projectCtx = getContext<{ id: string; project: import('$lib/api.js').Project | null }>('projectId');
-	let projectSlug = $derived(projectCtx.project?.slug ?? $page.params.id);
+	let projectId = $derived($page.params.id);
+	let projectSlug = $derived(projectCtx.project?.slug ?? projectId);
 
 	// Breadcrumb segments
 	let breadcrumbs = $derived.by(() => {
@@ -99,7 +100,7 @@
 		loading = true;
 		error = '';
 		try {
-			const res = await api.listFiles(projectSlug, { prefix: currentPrefix || undefined });
+			const res = await api.listFiles(projectId, { prefix: currentPrefix || undefined });
 			files = res.objects;
 		} catch (err_) {
 			let msg = err_ instanceof Error ? err_.message : 'Failed to load files';
@@ -141,7 +142,7 @@
 
 		try {
 			const ct = inferContentType(file.key, file.content_type);
-			const blob = await api.downloadFile(projectSlug, file.key);
+			const blob = await api.downloadFile(projectId, file.key);
 
 			if (ct.startsWith('image/')) {
 				previewUrl = URL.createObjectURL(blob);
@@ -162,7 +163,7 @@
 
 	async function handleDownload(file: FileInfo) {
 		try {
-			const blob = await api.downloadFile(projectSlug, file.key);
+			const blob = await api.downloadFile(projectId, file.key);
 			const url = URL.createObjectURL(blob);
 			const a = document.createElement('a');
 			a.href = url;
@@ -179,7 +180,7 @@
 	async function handleDelete(file: FileInfo) {
 		if (!confirm(`Delete "${file.key.split('/').pop()}"? This action cannot be undone.`)) return;
 		try {
-			await api.deleteFile(projectSlug, file.key);
+			await api.deleteFile(projectId, file.key);
 			if (selectedFile?.key === file.key) selectedFile = null;
 			await loadFiles();
 		} catch (err_) {
@@ -202,7 +203,7 @@
 	async function handleGenerateSignedUrl(file: FileInfo, expiresIn: number) {
 		signedUrlLoading = true;
 		try {
-			const res = await api.generateSignedUrl(projectSlug, file.key, 'download', expiresIn);
+			const res = await api.generateSignedUrl(projectId, file.key, 'download', expiresIn);
 			signedUrl = res.url;
 			signedUrlExpiry = res.expires_at;
 		} catch (err_) {
@@ -218,7 +219,7 @@
 		try {
 			// Create an empty "folder" by uploading an empty file with trailing slash key
 			const emptyFile = new File([], '.folder', { type: 'application/x-directory' });
-			await api.uploadFile(projectSlug, emptyFile, folderKey);
+			await api.uploadFile(projectId, emptyFile, folderKey);
 			showNewFolderModal = false;
 			newFolderName = '';
 			await loadFiles();
@@ -247,15 +248,15 @@
 
 		try {
 			// List all objects under the old prefix
-			const res = await api.listFiles(projectSlug, { prefix: oldPrefix, limit: 1000 });
+			const res = await api.listFiles(projectId, { prefix: oldPrefix, limit: 1000 });
 			// Copy each object to new key, then delete old
 			for (const obj of res.objects) {
 				const newKey = obj.key.replace(oldPrefix, newPrefix);
 				// Download and re-upload (S3 doesn't have a rename)
-				const blob = await api.downloadFile(projectSlug, obj.key);
+				const blob = await api.downloadFile(projectId, obj.key);
 				const file = new File([blob], newKey.split('/').pop() || 'file');
-				await api.uploadFile(projectSlug, file, newKey);
-				await api.deleteFile(projectSlug, obj.key);
+				await api.uploadFile(projectId, file, newKey);
+				await api.deleteFile(projectId, obj.key);
 			}
 			showRenameFolderModal = false;
 			await loadFiles();
@@ -266,7 +267,7 @@
 
 	async function confirmDeleteFolder(folderKey: string, displayName: string) {
 		try {
-			const res = await api.listFiles(projectSlug, { prefix: folderKey, limit: 1000 });
+			const res = await api.listFiles(projectId, { prefix: folderKey, limit: 1000 });
 			// Count actual files (not the folder marker itself)
 			const fileCount = res.objects.filter(o => o.key !== folderKey).length;
 			showDeleteFolderConfirm = { key: folderKey, name: displayName, fileCount };
@@ -280,9 +281,9 @@
 		const folderKey = showDeleteFolderConfirm.key;
 		try {
 			// Delete all objects under the folder prefix
-			const res = await api.listFiles(projectSlug, { prefix: folderKey, limit: 1000 });
+			const res = await api.listFiles(projectId, { prefix: folderKey, limit: 1000 });
 			for (const obj of res.objects) {
-				await api.deleteFile(projectSlug, obj.key);
+				await api.deleteFile(projectId, obj.key);
 			}
 			showDeleteFolderConfirm = null;
 			await loadFiles();
@@ -324,7 +325,7 @@
 
 	<!-- Upload area -->
 	<div class="mt-6">
-		<FileUploader slug={projectSlug} {currentPrefix} onuploaded={loadFiles} />
+		<FileUploader {projectId} {currentPrefix} onuploaded={loadFiles} />
 	</div>
 
 	<!-- Toolbar -->

@@ -77,6 +77,32 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
 			r.Get("/connect", tenant.HandleConnect(pool))
+
+			// Console storage proxy — platform-authenticated access to project storage.
+			if s3Client != nil {
+				r.Route("/storage", func(r chi.Router) {
+					r.Use(tenant.PlatformStorageContext(pool))
+					storageHandler := storage.NewStorageHandler(s3Client)
+					r.Mount("/", storageHandler.Routes())
+				})
+			}
+
+			// Console data proxy — platform-authenticated access to project data.
+			// Note: {id} here shadows the outer {id} (project ID) which is fine —
+			// PlatformTenantContext already resolved the project in middleware.
+			r.Route("/data", func(r chi.Router) {
+				r.Use(tenant.PlatformTenantContext(pool))
+
+				queryEngine := query.NewQueryEngine(pool)
+				publisher := realtime.NewEventPublisher(nil, hub)
+
+				r.Post("/sql", query.HandleSQL(queryEngine))
+				r.Get("/{table}", query.HandleTableGet(queryEngine))
+				r.Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
+				r.Post("/{table}", query.HandleTableInsert(queryEngine, publisher))
+				r.Patch("/{table}/{id}", query.HandleTableUpdate(queryEngine, publisher))
+				r.Delete("/{table}/{id}", query.HandleTableDelete(queryEngine, publisher))
+			})
 		})
 	})
 

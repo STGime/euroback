@@ -55,17 +55,34 @@ const filtered = await eb.db
 
 	function curlSnippet(table: string): string {
 		return `# List rows
-curl -H "Authorization: Bearer YOUR_TOKEN" \\
-     -H "X-Project-Id: ${projectId}" \\
+curl -H "apikey: YOUR_PUBLIC_KEY" \\
+     "${projectCtx.project?.api_url ?? 'http://localhost:8080'}/v1/db/${table}?limit=20"
+
+# List rows (as authenticated end-user)
+curl -H "apikey: YOUR_PUBLIC_KEY" \\
+     -H "Authorization: Bearer END_USER_JWT" \\
      "${projectCtx.project?.api_url ?? 'http://localhost:8080'}/v1/db/${table}?limit=20"
 
 # Insert a row
 curl -X POST \\
-     -H "Authorization: Bearer YOUR_TOKEN" \\
-     -H "X-Project-Id: ${projectId}" \\
+     -H "apikey: YOUR_PUBLIC_KEY" \\
      -H "Content-Type: application/json" \\
      -d '{"key": "value"}' \\
-     "${projectCtx.project?.api_url ?? 'http://localhost:8080'}/v1/db/${table}"`;
+     "${projectCtx.project?.api_url ?? 'http://localhost:8080'}/v1/db/${table}"
+
+# End-user auth — sign up
+curl -X POST \\
+     -H "apikey: YOUR_PUBLIC_KEY" \\
+     -H "Content-Type: application/json" \\
+     -d '{"email": "user@example.com", "password": "secret"}' \\
+     "${projectCtx.project?.api_url ?? 'http://localhost:8080'}/v1/auth/signup"
+
+# End-user auth — sign in
+curl -X POST \\
+     -H "apikey: YOUR_PUBLIC_KEY" \\
+     -H "Content-Type: application/json" \\
+     -d '{"email": "user@example.com", "password": "secret"}' \\
+     "${projectCtx.project?.api_url ?? 'http://localhost:8080'}/v1/auth/signin"`;
 	}
 
 	let activeTab: 'sdk' | 'curl' = $state('curl');
@@ -92,9 +109,10 @@ curl -X POST \\
 				<code class="mt-1 block text-sm font-mono text-gray-900">{projectCtx.project.api_url || `https://${projectCtx.project.slug}.eurobase.app`}</code>
 			</div>
 			<div>
-				<p class="text-xs font-medium uppercase tracking-wider text-gray-400">Required Headers</p>
-				<code class="mt-1 block text-xs font-mono text-gray-600">Authorization: Bearer &lt;token&gt;</code>
-				<code class="block text-xs font-mono text-gray-600">X-Project-Id: {projectId}</code>
+				<p class="text-xs font-medium uppercase tracking-wider text-gray-400">Required Header</p>
+				<code class="mt-1 block text-xs font-mono text-gray-600">apikey: &lt;your-public-key&gt;</code>
+				<p class="text-xs font-medium uppercase tracking-wider text-gray-400 mt-2">Optional Header</p>
+				<code class="mt-1 block text-xs font-mono text-gray-600">Authorization: Bearer &lt;end-user-jwt&gt;</code>
 			</div>
 		</div>
 	{/if}
@@ -135,6 +153,28 @@ curl -X POST \\
 					</div>
 					<div class="divide-y divide-gray-100">
 						{#each endpoints as ep}
+							<div class="flex items-center gap-3 px-5 py-3">
+								<span class="inline-flex rounded px-2 py-0.5 text-[10px] font-bold {ep.color}">{ep.method}</span>
+								<code class="text-sm font-mono text-gray-900">{ep.path}</code>
+								<span class="ml-auto text-xs text-gray-400">{ep.desc}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+
+				<!-- Auth Endpoints -->
+				<div class="rounded-xl border border-gray-200 bg-white overflow-hidden">
+					<div class="px-5 py-3 border-b border-gray-100">
+						<h3 class="text-sm font-semibold text-gray-900">End-User Auth Endpoints</h3>
+					</div>
+					<div class="divide-y divide-gray-100">
+						{#each [
+							{ method: 'POST', path: '/v1/auth/signup', desc: 'Register a new end-user', color: 'bg-blue-100 text-blue-700' },
+							{ method: 'POST', path: '/v1/auth/signin', desc: 'Sign in an end-user', color: 'bg-blue-100 text-blue-700' },
+							{ method: 'POST', path: '/v1/auth/refresh', desc: 'Refresh an end-user JWT', color: 'bg-blue-100 text-blue-700' },
+							{ method: 'POST', path: '/v1/auth/signout', desc: 'Sign out (invalidate refresh token)', color: 'bg-blue-100 text-blue-700' },
+							{ method: 'GET', path: '/v1/auth/user', desc: 'Get current end-user profile', color: 'bg-green-100 text-green-700' },
+						] as ep}
 							<div class="flex items-center gap-3 px-5 py-3">
 								<span class="inline-flex rounded px-2 py-0.5 text-[10px] font-bold {ep.color}">{ep.method}</span>
 								<code class="text-sm font-mono text-gray-900">{ep.path}</code>
