@@ -1,0 +1,1140 @@
+{
+	"info": {
+		"name": "Eurobase Auth Tests",
+		"description": "Manual testing collection for per-project end-user authentication.\n\nRun tests in order — later tests depend on variables set by earlier ones.\n\n## Setup\n\n1. `make setup` — start Postgres, Redis, MinIO\n2. Apply migrations: `source .env.local && migrate -path migrations -database \"$DATABASE_URL\" up`\n3. Start gateway with auth enforced: `export DEV_MODE=false && source .env.local && go run ./cmd/gateway/`\n4. Select the \"Eurobase Local\" environment in Postman",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 0 — Platform Auth",
+			"item": [
+				{
+					"name": "T0.1 Platform Sign Up",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const status = pm.response.code;",
+									"pm.test('Status is 201 or 400 (already exists)', () => {",
+									"    pm.expect(status).to.be.oneOf([201, 400]);",
+									"});",
+									"if (status === 201) {",
+									"    pm.test('Has access_token', () => {",
+									"        const json = pm.response.json();",
+									"        pm.expect(json.access_token).to.be.a('string');",
+									"        pm.expect(json.token_type).to.eql('bearer');",
+									"        pm.expect(json.expires_in).to.eql(86400);",
+									"        pm.expect(json.user.email).to.eql('dev@test.eu');",
+									"        pm.environment.set('platform_token', json.access_token);",
+									"        pm.environment.set('platform_user_id', json.user.id);",
+									"    });",
+									"} else {",
+									"    pm.test('Already registered — will sign in next', () => {",
+									"        pm.expect(pm.response.json().error).to.include('already');",
+									"    });",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T0.2 Platform Sign Up — Duplicate Email",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error is email already registered', () => {",
+									"    pm.expect(pm.response.json().error).to.eql('email already registered');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T0.3 Platform Sign Up — Weak Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions 8 characters', () => {",
+									"    pm.expect(pm.response.json().error).to.include('8 characters');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"weak@test.eu\",\n  \"password\": \"short\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T0.4 Platform Sign In — Valid",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has access_token', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.access_token).to.be.a('string');",
+									"    pm.expect(json.user.email).to.eql('dev@test.eu');",
+									"    pm.environment.set('platform_token', json.access_token);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signin"]
+						}
+					}
+				},
+				{
+					"name": "T0.5 Platform Sign In — Wrong Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Error is invalid credentials', () => {",
+									"    pm.expect(pm.response.json().error).to.eql('invalid email or password');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\",\n  \"password\": \"wrongpass\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signin"]
+						}
+					}
+				},
+				{
+					"name": "T0.6 Platform Sign In — Non-existent User",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Error is invalid credentials', () => {",
+									"    pm.expect(pm.response.json().error).to.eql('invalid email or password');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"nobody@test.eu\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signin"]
+						}
+					}
+				},
+				{
+					"name": "T0.7 List Tenants — Valid Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Response is array', () => {",
+									"    pm.expect(pm.response.json()).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", ""]
+						}
+					}
+				},
+				{
+					"name": "T0.8 List Tenants — No Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", ""]
+						}
+					}
+				},
+				{
+					"name": "T0.9 List Tenants — Invalid Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer invalid.garbage.token" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", ""]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 1 — API Key Validation",
+			"item": [
+				{
+					"name": "T1.1 Create Project",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Has API keys', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.public_key).to.match(/^eb_pk_/);",
+									"    pm.expect(json.secret_key).to.match(/^eb_sk_/);",
+									"    pm.expect(json.id).to.be.a('string');",
+									"    pm.expect(json.status).to.eql('active');",
+									"    pm.environment.set('project_id', json.id);",
+									"    pm.environment.set('public_key', json.public_key);",
+									"    pm.environment.set('secret_key', json.secret_key);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Sport Tracker\",\n  \"slug\": \"sportstracker\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", ""]
+						}
+					}
+				},
+				{
+					"name": "T1.2 Query with Public Key",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has sample todos', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.data).to.be.an('array');",
+									"    pm.expect(json.count).to.be.at.least(1);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				},
+				{
+					"name": "T1.3 Query — Missing API Key",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Error mentions apikey', () => {",
+									"    pm.expect(pm.response.text()).to.include('apikey');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				},
+				{
+					"name": "T1.4 Query — Invalid API Key",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "eb_pk_invalidkey1234567890" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				},
+				{
+					"name": "T1.5 Query with Secret Key",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has data', () => {",
+									"    pm.expect(pm.response.json().data).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — End-User Auth",
+			"item": [
+				{
+					"name": "T2.1 End-User Sign Up (Alice)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Has tokens and user', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.access_token).to.be.a('string');",
+									"    pm.expect(json.refresh_token).to.be.a('string');",
+									"    pm.expect(json.token_type).to.eql('bearer');",
+									"    pm.expect(json.expires_in).to.eql(3600);",
+									"    pm.expect(json.user.email).to.eql('alice@example.com');",
+									"    pm.environment.set('alice_token', json.access_token);",
+									"    pm.environment.set('alice_refresh', json.refresh_token);",
+									"    pm.environment.set('alice_id', json.user.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"alicepass1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T2.2 End-User Sign Up — Duplicate",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error is duplicate', () => {",
+									"    pm.expect(pm.response.json().error).to.eql('email already registered');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"alicepass1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T2.3 End-User Sign In",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has tokens', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.access_token).to.be.a('string');",
+									"    pm.expect(json.refresh_token).to.be.a('string');",
+									"    pm.environment.set('alice_token', json.access_token);",
+									"    pm.environment.set('alice_refresh', json.refresh_token);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"alicepass1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signin"]
+						}
+					}
+				},
+				{
+					"name": "T2.4 End-User Sign In — Wrong Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Error is invalid credentials', () => {",
+									"    pm.expect(pm.response.json().error).to.eql('invalid email or password');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"wrongpass\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signin"]
+						}
+					}
+				},
+				{
+					"name": "T2.5 Get Current User — With JWT",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('User email matches', () => {",
+									"    pm.expect(pm.response.json().email).to.eql('alice@example.com');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Authorization", "value": "Bearer {{alice_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/auth/user",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "user"]
+						}
+					}
+				},
+				{
+					"name": "T2.6 Get Current User — No JWT",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Error requires auth', () => {",
+									"    pm.expect(pm.response.json().error).to.eql('authentication required');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/auth/user",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "user"]
+						}
+					}
+				},
+				{
+					"name": "T2.7 Token Refresh",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('New tokens issued', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.access_token).to.be.a('string');",
+									"    pm.expect(json.refresh_token).to.be.a('string');",
+									"    // New refresh token should differ from old one",
+									"    pm.expect(json.refresh_token).to.not.eql(pm.environment.get('alice_refresh'));",
+									"    pm.environment.set('alice_token', json.access_token);",
+									"    pm.environment.set('alice_refresh_old', pm.environment.get('alice_refresh'));",
+									"    pm.environment.set('alice_refresh', json.refresh_token);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh_token\": \"{{alice_refresh}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/refresh",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "refresh"]
+						}
+					}
+				},
+				{
+					"name": "T2.8 Old Refresh Token Revoked",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Error is invalid refresh token', () => {",
+									"    pm.expect(pm.response.json().error).to.include('invalid');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh_token\": \"{{alice_refresh_old}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/refresh",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "refresh"]
+						}
+					}
+				},
+				{
+					"name": "T2.9 Sign Out",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Status ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh_token\": \"{{alice_refresh}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signout",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signout"]
+						}
+					}
+				},
+				{
+					"name": "T2.10 Sign Up Bob (for RLS tests)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Store Bob tokens', () => {",
+									"    const json = pm.response.json();",
+									"    pm.environment.set('bob_token', json.access_token);",
+									"    pm.environment.set('bob_refresh', json.refresh_token);",
+									"    pm.environment.set('bob_id', json.user.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"bob@example.com\",\n  \"password\": \"bobpass123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T2.11 Re-sign-in Alice (fresh token for later tests)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"const json = pm.response.json();",
+									"pm.environment.set('alice_token', json.access_token);",
+									"pm.environment.set('alice_refresh', json.refresh_token);"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"alicepass1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signin"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Data with Auth (RLS)",
+			"item": [
+				{
+					"name": "T3.1 Todos — Public table, anyone can read (public key)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has 3 sample todos', () => {",
+									"    pm.expect(pm.response.json().count).to.eql(3);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				},
+				{
+					"name": "T3.2 Todos — Authenticated user also sees public table",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has 3 sample todos', () => {",
+									"    pm.expect(pm.response.json().count).to.eql(3);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Authorization", "value": "Bearer {{alice_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				},
+				{
+					"name": "T3.3 Insert Todo as Alice",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Todo created', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.title).to.eql('Alice todo');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Authorization", "value": "Bearer {{alice_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"title\": \"Alice todo\",\n  \"completed\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				},
+				{
+					"name": "T3.4 Secret key sees all data",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Count >= 4 (3 seed + 1 inserted)', () => {",
+									"    pm.expect(pm.response.json().count).to.be.at.least(4);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 4 — Cross-Cutting",
+			"item": [
+				{
+					"name": "TC.1 Health Check",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Status ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": ["{{base_url}}"],
+							"path": ["health"]
+						}
+					}
+				},
+				{
+					"name": "TC.2 CORS Preflight — apikey header allowed",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));",
+									"pm.test('apikey in allowed headers', () => {",
+									"    const allowed = pm.response.headers.get('Access-Control-Allow-Headers');",
+									"    pm.expect(allowed).to.include('apikey');",
+									"});",
+									"pm.test('Origin echoed back', () => {",
+									"    const origin = pm.response.headers.get('Access-Control-Allow-Origin');",
+									"    pm.expect(origin).to.eql('http://localhost:5173');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "OPTIONS",
+						"header": [
+							{ "key": "Origin", "value": "http://localhost:5173" },
+							{ "key": "Access-Control-Request-Method", "value": "GET" },
+							{ "key": "Access-Control-Request-Headers", "value": "apikey, Authorization" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				},
+				{
+					"name": "TC.3 Platform JWT rejected on end-user route",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Platform token rejected as end-user', () => {",
+									"    const body = pm.response.text();",
+									"    const rejected = body.includes('invalid') || body.includes('not an end-user') || body.includes('authentication required');",
+									"    pm.expect(rejected).to.be.true;",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/auth/user",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "user"]
+						}
+					}
+				},
+				{
+					"name": "TC.4 End-User JWT rejected on platform route",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{alice_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", ""]
+						}
+					}
+				},
+				{
+					"name": "TC.5 End-User Sign Up — No API Key",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Error mentions apikey', () => {",
+									"    pm.expect(pm.response.text()).to.include('apikey');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"nokey@example.com\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "TC.6 Delete Project (cleanup)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				}
+			]
+		}
+	]
+}

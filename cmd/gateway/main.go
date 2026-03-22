@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,13 +17,19 @@ import (
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
+	// ── Check for --create-admin flag ──
+	if len(os.Args) >= 2 && os.Args[1] == "--create-admin" {
+		createAdmin()
+		return
+	}
+
 	// ── Load configuration from environment variables ──
 	databaseURL := requireEnv("DATABASE_URL")
-	hankoAPIURL := requireEnv("HANKO_API_URL")
-	hankoWebhookSecret := requireEnv("HANKO_WEBHOOK_SECRET")
+	platformJWTSecret := requireEnv("PLATFORM_JWT_SECRET")
 	redisURL := os.Getenv("REDIS_URL")
 
 	port := os.Getenv("GATEWAY_PORT")
@@ -51,8 +58,9 @@ func main() {
 	defer pool.Close()
 	slog.Info("database connection pool established")
 
-	// ── Set up auth middleware ──
-	hankoAuth := auth.NewHankoMiddleware(hankoAPIURL)
+	// ── Set up platform auth ──
+	platformAuthSvc := auth.NewPlatformAuthService(pool, platformJWTSecret)
+	platformAuth := auth.NewPlatformAuthMiddleware(platformAuthSvc)
 
 	// ── Set up rate limiter (optional — degrades gracefully) ──
 	var limiter *ratelimit.RateLimiter
@@ -110,11 +118,11 @@ func main() {
 	}
 	_ = rtBridge // Available for cross-instance fan-out via EventPublisher.
 
-	// ── Dev mode: bypass Hanko auth for local testing ──
+	// ── Dev mode: bypass platform auth for local testing ──
 	devMode := os.Getenv("DEV_MODE") == "true"
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, hankoAuth, hankoWebhookSecret, limiter, s3Client, hub, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
@@ -150,6 +158,50 @@ func main() {
 
 	pool.Close()
 	slog.Info("gateway shut down cleanly")
+}
+
+// createAdmin creates an initial admin platform user.
+// Usage: go run ./cmd/gateway --create-admin email password
+func createAdmin() {
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "Usage: %s --create-admin <email> <password>\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	email := os.Args[2]
+	password := os.Args[3]
+
+	databaseURL := requireEnv("DATABASE_URL")
+
+	ctx := context.Background()
+	pool, err := db.NewPool(ctx, databaseURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to connect to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to hash password: %v\n", err)
+		os.Exit(1)
+	}
+
+	var userID string
+	err = pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+		 VALUES ($1, $2, now())
+		 ON CONFLICT (email) WHERE email != ''
+		 DO UPDATE SET password_hash = EXCLUDED.password_hash
+		 RETURNING id`,
+		email, string(hash),
+	).Scan(&userID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create admin user: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Admin user created: %s (id: %s)\n", email, userID)
 }
 
 // requireEnv reads a required environment variable or exits with an error.

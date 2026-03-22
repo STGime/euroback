@@ -114,7 +114,7 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 
 		project, err := svc.CreateProject(r.Context(), claims.Subject, claims.Email, req)
 		if err != nil {
-			slog.Error("failed to create project", "error", err, "hanko_user_id", claims.Subject)
+			slog.Error("failed to create project", "error", err, "user_id", claims.Subject)
 			if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
 				http.Error(w, `{"error":"This project URL is already taken. Each project gets a unique subdomain (slug.eurobase.app), so please choose a different name or slug."}`, http.StatusConflict)
 				return
@@ -126,7 +126,7 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		slog.Info("tenant created",
 			"project_id", project.ID,
 			"slug", project.Slug,
-			"owner_hanko_id", claims.Subject,
+			"owner_id", claims.Subject,
 		)
 
 		resp := CreateProjectResponse{
@@ -162,7 +162,7 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 
 		projects, err := svc.ListProjects(r.Context(), claims.Subject)
 		if err != nil {
-			slog.Error("failed to list projects", "error", err, "hanko_user_id", claims.Subject)
+			slog.Error("failed to list projects", "error", err, "user_id", claims.Subject)
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 			return
 		}
@@ -182,7 +182,7 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 			}
 		}
 
-		slog.Debug("listed tenants", "count", len(items), "hanko_user_id", claims.Subject)
+		slog.Debug("listed tenants", "count", len(items), "user_id", claims.Subject)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -204,17 +204,15 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		projectID := chi.URLParam(r, "id")
 
 		// Verify the user owns this project.
-		var ownerHankoID string
+		var ownerID string
 		err := pool.QueryRow(r.Context(),
-			`SELECT u.hanko_user_id FROM projects p
-			 JOIN platform_users u ON p.owner_id = u.id
-			 WHERE p.id = $1`, projectID,
-		).Scan(&ownerHankoID)
+			`SELECT owner_id FROM projects WHERE id = $1`, projectID,
+		).Scan(&ownerID)
 		if err != nil {
 			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 			return
 		}
-		if ownerHankoID != claims.Subject {
+		if ownerID != claims.Subject {
 			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 			return
 		}

@@ -134,16 +134,24 @@ export class EurobaseAPI {
 
 	// ---- public methods ----
 
-	/**
-	 * Placeholder login — will be replaced by Hanko passkey / email OTP flow.
-	 * For now it just stores a fake token so the console can be navigated.
-	 */
-	async login(email: string, _password: string): Promise<{ token: string }> {
-		// TODO: Replace with real Hanko authentication.
-		// In the real flow Hanko issues a JWT that the Go gateway validates.
-		const fakeToken = `dev_${btoa(email)}_${Date.now()}`;
-		this.setToken(fakeToken);
-		return { token: fakeToken };
+	/** Sign up a new platform user. */
+	async signUp(email: string, password: string): Promise<{ access_token: string; user: { id: string; email: string } }> {
+		const resp = await this.fetch<{ access_token: string; user: { id: string; email: string } }>('/platform/auth/signup', {
+			method: 'POST',
+			body: JSON.stringify({ email, password })
+		});
+		this.setToken(resp.access_token);
+		return resp;
+	}
+
+	/** Sign in an existing platform user. */
+	async signIn(email: string, password: string): Promise<{ access_token: string; user: { id: string; email: string } }> {
+		const resp = await this.fetch<{ access_token: string; user: { id: string; email: string } }>('/platform/auth/signin', {
+			method: 'POST',
+			body: JSON.stringify({ email, password })
+		});
+		this.setToken(resp.access_token);
+		return resp;
 	}
 
 	/** List all projects (tenants) for the authenticated user. */

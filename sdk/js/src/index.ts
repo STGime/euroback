@@ -25,3 +25,12 @@ export type {
   Subscription,
   RealtimeEventType,
 } from './realtime'
+export { AuthClient } from './auth'
+export type {
+  AuthUser,
+  AuthSession,
+  SignUpCredentials,
+  SignInCredentials,
+  AuthEvent,
+  AuthStateChangeCallback,
+} from './auth'

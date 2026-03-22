@@ -29,6 +29,7 @@ func CORSMiddleware(next http.Handler) http.Handler {
 				"Content-Type",
 				"X-Project-Id",
 				"X-Project-Slug",
+				"apikey",
 			}, ", "))
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.WriteHeader(http.StatusNoContent)

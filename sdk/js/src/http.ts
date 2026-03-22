@@ -15,14 +15,17 @@ export interface HttpClient {
   del(path: string): Promise<any>
   postForm(path: string, formData: FormData): Promise<any>
   getBlob(path: string): Promise<Blob>
+  setAccessToken(token: string | null): void
+  getAccessToken(): string | null
 }
 
 /**
  * Creates an HTTP client that sends all requests to the Eurobase gateway
- * with the appropriate Authorization header.
+ * with the appropriate apikey header and optional Authorization Bearer token.
  */
 export function httpClient(config: EurobaseConfig): HttpClient {
   const baseUrl = config.url.replace(/\/+$/, '')
+  let accessToken: string | null = null
 
   function buildUrl(path: string, params?: Record<string, string>): string {
     let url = `${baseUrl}${path}`
@@ -35,7 +38,10 @@ export function httpClient(config: EurobaseConfig): HttpClient {
 
   function headers(contentType?: string): Record<string, string> {
     const h: Record<string, string> = {
-      'Authorization': `Bearer ${config.apiKey}`,
+      'apikey': config.apiKey,
+    }
+    if (accessToken) {
+      h['Authorization'] = `Bearer ${accessToken}`
     }
     if (contentType) {
       h['Content-Type'] = contentType
@@ -67,6 +73,14 @@ export function httpClient(config: EurobaseConfig): HttpClient {
   }
 
   return {
+    setAccessToken(token: string | null) {
+      accessToken = token
+    },
+
+    getAccessToken() {
+      return accessToken
+    },
+
     async get(path: string, params?: Record<string, string>): Promise<any> {
       try {
         const res = await fetch(buildUrl(path, params), {
@@ -121,11 +135,15 @@ export function httpClient(config: EurobaseConfig): HttpClient {
       try {
         // Do not set Content-Type — the browser/runtime sets it with
         // the correct multipart boundary automatically.
+        const h: Record<string, string> = {
+          'apikey': config.apiKey,
+        }
+        if (accessToken) {
+          h['Authorization'] = `Bearer ${accessToken}`
+        }
         const res = await fetch(buildUrl(path), {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${config.apiKey}`,
-          },
+          headers: h,
           body: formData,
         })
         return handleResponse(res)

@@ -2,15 +2,14 @@ package gateway
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
@@ -22,14 +21,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NewRouter creates and returns a fully configured chi router with all
-// platform and API routes. This is extracted from main.go to allow
-// integration testing with httptest.
-// NewRouter creates and configures the chi router. When devMode is true, the
-// Hanko JWT middleware is replaced with a pass-through that injects a fixed
-// test user, allowing local testing with curl/Postman without a running Hanko
-// instance. devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhookSecret string, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, devMode ...bool) chi.Router {
+// NewRouter creates and configures the chi router.
+//
+// When devMode is true, the platform auth middleware is replaced with a
+// pass-through that injects a fixed test user (for local curl/Postman testing).
+// devMode must NEVER be enabled in production.
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -38,6 +35,8 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 	r.Use(CORSMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+
+	isDev := len(devMode) > 0 && devMode[0]
 
 	// Health check (unauthenticated).
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -49,16 +48,27 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 	// Tenant service.
 	tenantSvc := tenant.NewTenantService(pool)
 
-	// Platform routes.
-	r.Route("/platform", func(r chi.Router) {
-		r.Post("/webhooks/hanko", HankoWebhookHandler(pool, hankoWebhookSecret))
+	// End-user auth service.
+	endUserAuthSvc := enduser.NewAuthService(pool)
 
-		// Schema introspection (authenticated).
+	// API key middleware (for SDK / end-user routes).
+	apiKeyMw := auth.NewAPIKeyMiddleware(pool)
+
+	// End-user JWT middleware (optional — anonymous if no token).
+	endUserMw := auth.NewEndUserMiddleware()
+
+	// ── Platform routes ──
+	r.Route("/platform", func(r chi.Router) {
+		// Unauthenticated: platform auth endpoints.
+		r.Post("/auth/signup", auth.HandlePlatformSignUp(platformAuthSvc))
+		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc))
+
+		// Authenticated: project management & schema introspection.
 		r.Route("/projects/{id}", func(r chi.Router) {
-			if len(devMode) > 0 && devMode[0] {
+			if isDev {
 				r.Use(devAuthMiddleware)
 			} else {
-				r.Use(hankoAuth.Handler)
+				r.Use(platformAuth.Handler)
 			}
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
 			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
@@ -70,52 +80,70 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 		})
 	})
 
-	// WebSocket realtime route — auth is handled inside the handler via
-	// query parameter, so this is mounted outside the standard auth middleware.
-	if hub != nil {
-		isDev := len(devMode) > 0 && devMode[0]
-
-		// Build a token validator from the Hanko middleware.
-		var tokenValidator func(token string) (string, error)
-		if !isDev {
-			tokenValidator = hankoAuth.ValidateToken
+	// ── Tenant management routes (platform-authenticated) ──
+	r.Route("/v1/tenants", func(r chi.Router) {
+		if isDev {
+			slog.Warn("DEV MODE ENABLED — auth middleware bypassed with test user")
+			r.Use(devAuthMiddleware)
+		} else {
+			r.Use(platformAuth.Handler)
 		}
 
+		r.Post("/", tenant.HandleCreateProject(pool, tenantSvc))
+		r.Get("/", tenant.HandleListProjects(pool, tenantSvc))
+		r.Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
+	})
+
+	// ── WebSocket realtime route ──
+	if hub != nil {
+		var tokenValidator func(token string) (string, error)
+		if !isDev {
+			tokenValidator = platformAuth.ValidateToken
+		}
 		wsHandler := realtime.HandleWebSocket(hub, tokenValidator, buildTenantResolver(pool), isDev)
 		r.Get("/v1/realtime", wsHandler)
 	} else {
 		slog.Warn("realtime hub not configured, websocket route disabled")
 	}
 
-	// V1 API routes (authenticated).
+	// ── SDK routes (API key authenticated) ──
 	r.Route("/v1", func(r chi.Router) {
-		if len(devMode) > 0 && devMode[0] {
-			slog.Warn("DEV MODE ENABLED — auth middleware bypassed with test user")
-			r.Use(devAuthMiddleware)
-		} else {
-			r.Use(hankoAuth.Handler)
-		}
+		// Auth endpoints (only need API key, no end-user JWT).
+		r.Route("/auth", func(r chi.Router) {
+			r.Use(apiKeyMw.Handler)
+			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc))
+			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc))
+			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc))
+			r.Post("/signout", enduser.HandleSignOut(endUserAuthSvc))
 
-		// Rate limiting (after auth so we have the tenant identity).
-		if limiter != nil {
-			r.Use(ratelimit.RateLimitMiddleware(limiter))
-		} else {
-			slog.Warn("rate limiter not configured, rate limiting disabled")
-		}
+			// GET /v1/auth/user requires end-user JWT.
+			r.Group(func(r chi.Router) {
+				r.Use(endUserMw.Handler)
+				r.Get("/user", enduser.HandleGetUser(endUserAuthSvc))
+			})
+		})
 
-		r.Post("/tenants", tenant.HandleCreateProject(pool, tenantSvc))
-		r.Get("/tenants", tenant.HandleListProjects(pool, tenantSvc))
-		r.Delete("/tenants/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
-
-		// Data API routes (tenant-scoped via middleware).
-		queryEngine := query.NewQueryEngine(pool)
-		publisher := realtime.NewEventPublisher(nil, hub)
+		// Data API routes (API key + optional end-user JWT).
 		r.Route("/db", func(r chi.Router) {
-			r.Use(tenant.TenantContextMiddleware(pool))
+			if isDev {
+				r.Use(devAuthMiddleware)
+				r.Use(tenant.TenantContextMiddleware(pool))
+			} else {
+				r.Use(apiKeyMw.Handler)
+				r.Use(endUserMw.Handler)
+				r.Use(tenant.TenantContextFromProject())
+			}
+
+			// Rate limiting.
+			if limiter != nil {
+				r.Use(ratelimit.RateLimitMiddleware(limiter))
+			}
+
+			queryEngine := query.NewQueryEngine(pool)
+			publisher := realtime.NewEventPublisher(nil, hub)
+
 			r.Post("/sql", query.HandleSQL(queryEngine))
 			r.Mount("/rpc", query.HandleRPC(queryEngine))
-			// Catch-all table routes — must use explicit patterns so they
-			// don't shadow /sql and /rpc when mounted at "/".
 			r.Get("/{table}", query.HandleTableGet(queryEngine))
 			r.Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
 			r.Post("/{table}", query.HandleTableInsert(queryEngine, publisher))
@@ -123,10 +151,19 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 			r.Delete("/{table}/{id}", query.HandleTableDelete(queryEngine, publisher))
 		})
 
-		// Storage routes.
+		// Storage routes (API key + optional end-user JWT).
 		if s3Client != nil {
-			storageHandler := storage.NewStorageHandler(s3Client)
-			r.Mount("/storage", storageHandler.Routes())
+			r.Route("/storage", func(r chi.Router) {
+				if isDev {
+					r.Use(devAuthMiddleware)
+				} else {
+					r.Use(apiKeyMw.Handler)
+					r.Use(endUserMw.Handler)
+				}
+
+				storageHandler := storage.NewStorageHandler(s3Client)
+				r.Mount("/", storageHandler.Routes())
+			})
 		} else {
 			slog.Warn("s3 client not configured, storage routes disabled")
 		}
@@ -144,7 +181,7 @@ func buildTenantResolver(pool *pgxpool.Pool) realtime.TenantResolver {
 			`SELECT p.id, COALESCE(p.plan, 'free')
 			 FROM projects p
 			 JOIN platform_users u ON p.owner_id = u.id
-			 WHERE u.hanko_user_id = $1 AND p.status = 'active'
+			 WHERE u.id = $1 AND p.status = 'active'
 			 ORDER BY p.created_at ASC
 			 LIMIT 1`,
 			subject,
@@ -168,23 +205,8 @@ func devAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// In dev mode, derive identity from the token value so different
-		// login emails produce different users. The console stores
-		// "dev_<base64(email)>_<timestamp>" as the token.
-		subject := "postman-test-user-001"
+		subject := "00000000-0000-0000-0000-000000000001"
 		email := "dev@eurobase.eu"
-
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if strings.HasPrefix(token, "dev_") {
-			parts := strings.SplitN(token, "_", 3) // ["dev", base64email, timestamp]
-			if len(parts) >= 2 {
-				if decoded, err := base64Decode(parts[1]); err == nil && decoded != "" {
-					email = decoded
-					// Use the email as subject so each email is a distinct user.
-					subject = "dev-" + decoded
-				}
-			}
-		}
 
 		ctx := auth.ContextWithClaims(r.Context(), &auth.Claims{
 			Subject: subject,
@@ -192,14 +214,4 @@ func devAuthMiddleware(next http.Handler) http.Handler {
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-// base64Decode is a helper for dev mode token parsing.
-func base64Decode(s string) (string, error) {
-	// The console uses btoa() which produces standard base64; try both padded and unpadded.
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		b, err = base64.RawStdEncoding.DecodeString(s)
-	}
-	return string(b), err
 }

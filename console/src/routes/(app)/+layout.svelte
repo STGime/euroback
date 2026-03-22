@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { PUBLIC_HANKO_API_URL } from '$env/static/public';
 	import { logout } from '$lib/stores.js';
 
 	let { children } = $props();
@@ -26,16 +25,6 @@
 	let currentPath = $state('/projects');
 
 	async function handleLogout() {
-		// If Hanko is configured, also log out from Hanko.
-		if (PUBLIC_HANKO_API_URL && PUBLIC_HANKO_API_URL !== 'DEV_MODE') {
-			try {
-				const { Hanko } = await import('@teamhanko/hanko-elements');
-				const hanko = new Hanko(PUBLIC_HANKO_API_URL);
-				await hanko.user.logout();
-			} catch {
-				// Continue with local logout even if Hanko fails.
-			}
-		}
 		logout();
 		goto('/login');
 	}

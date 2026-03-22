@@ -57,18 +57,17 @@ func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Verify ownership and get project info.
 		var name, slug, region, plan, schemaName string
-		var ownerHankoID string
+		var ownerID string
 		err := pool.QueryRow(r.Context(),
-			`SELECT p.name, p.slug, p.region, p.plan, p.schema_name, u.hanko_user_id
+			`SELECT p.name, p.slug, p.region, p.plan, p.schema_name, p.owner_id
 			 FROM projects p
-			 JOIN platform_users u ON p.owner_id = u.id
 			 WHERE p.id = $1`, projectID,
-		).Scan(&name, &slug, &region, &plan, &schemaName, &ownerHankoID)
+		).Scan(&name, &slug, &region, &plan, &schemaName, &ownerID)
 		if err != nil {
 			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 			return
 		}
-		if ownerHankoID != claims.Subject {
+		if ownerID != claims.Subject {
 			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 			return
 		}

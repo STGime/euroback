@@ -9,6 +9,26 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// TenantContextFromProject returns middleware that reads the ProjectContext
+// (set by APIKeyMiddleware) and stores the schema name in the request context.
+// This is used for SDK routes where the project is identified by API key.
+func TenantContextFromProject() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pc, ok := auth.ProjectFromContext(r.Context())
+			if !ok {
+				slog.Warn("tenant context from project: no project context")
+				http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+				return
+			}
+
+			ctx := query.ContextWithSchema(r.Context(), pc.SchemaName)
+			ctx = query.ContextWithKeyType(ctx, pc.KeyType)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 // TenantContextMiddleware resolves the tenant project and stores the schema
 // name and project ID in the request context for downstream handlers.
 //
@@ -34,15 +54,14 @@ func TenantContextMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler
 				err := pool.QueryRow(r.Context(),
 					`SELECT p.id, p.schema_name
 					 FROM projects p
-					 JOIN platform_users u ON p.owner_id = u.id
-					 WHERE p.id = $1 AND u.hanko_user_id = $2 AND p.status = 'active'`,
+					 WHERE p.id = $1 AND p.owner_id = $2::uuid AND p.status = 'active'`,
 					headerProjectID, claims.Subject,
 				).Scan(&projectID, &schemaName)
 				if err != nil {
 					slog.Error("tenant context: project not found or not owned by user",
 						"error", err,
 						"project_id", headerProjectID,
-						"hanko_user_id", claims.Subject,
+						"user_id", claims.Subject,
 					)
 					http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 					return
@@ -52,8 +71,7 @@ func TenantContextMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler
 				err := pool.QueryRow(r.Context(),
 					`SELECT p.id, p.schema_name
 					 FROM projects p
-					 JOIN platform_users u ON p.owner_id = u.id
-					 WHERE u.hanko_user_id = $1 AND p.status = 'active'
+					 WHERE p.owner_id = $1::uuid AND p.status = 'active'
 					 ORDER BY p.created_at ASC
 					 LIMIT 1`,
 					claims.Subject,
@@ -61,7 +79,7 @@ func TenantContextMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler
 				if err != nil {
 					slog.Error("tenant context: failed to resolve project",
 						"error", err,
-						"hanko_user_id", claims.Subject,
+						"user_id", claims.Subject,
 					)
 					http.Error(w, `{"error":"no active project found"}`, http.StatusNotFound)
 					return
@@ -69,7 +87,7 @@ func TenantContextMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler
 			}
 
 			slog.Debug("tenant context established",
-				"hanko_user_id", claims.Subject,
+				"user_id", claims.Subject,
 				"project_id", projectID,
 				"schema", schemaName,
 			)

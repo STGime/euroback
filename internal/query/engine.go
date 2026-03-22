@@ -21,6 +21,40 @@ func NewQueryEngine(pool *pgxpool.Pool) *QueryEngine {
 }
 
 
+// withEndUserRLS wraps a function in a transaction with SET LOCAL app.end_user_id
+// if an end-user ID is present in the context and the key type is not "secret".
+func (e *QueryEngine) withEndUserRLS(ctx context.Context, fn func(ctx context.Context) error) error {
+	endUserID := EndUserIDFromContext(ctx)
+	keyType := KeyTypeFromContext(ctx)
+
+	// Secret keys bypass RLS (service-level access).
+	if keyType == "secret" || endUserID == "" {
+		return fn(ctx)
+	}
+
+	conn, err := e.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.end_user_id = '%s'", endUserID)); err != nil {
+		return fmt.Errorf("set end_user_id: %w", err)
+	}
+
+	if err := fn(ctx); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 // SelectRows builds and executes a parameterized SELECT query.
 // It validates the table and columns against pg_catalog before executing.
 // Returns the result rows, total count, and any error.

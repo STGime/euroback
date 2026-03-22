@@ -58,7 +58,8 @@ func NewTenantService(pool *pgxpool.Pool) *TenantService {
 // CreateProject provisions a new project for the given owner within a transaction.
 // It upserts the platform_user, inserts the project, calls provision_tenant(),
 // and updates the status to 'active' or 'provisioning_failed'.
-func (s *TenantService) CreateProject(ctx context.Context, hankoUserID, email string, req CreateProjectRequest) (*Project, error) {
+// The platformUserID is the platform_users.id (UUID), and email is the user's email.
+func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email string, req CreateProjectRequest) (*Project, error) {
 	slug := req.Slug
 	if slug == "" {
 		slug = slugify(req.Name)
@@ -70,17 +71,14 @@ func (s *TenantService) CreateProject(ctx context.Context, hankoUserID, email st
 	}
 	defer tx.Rollback(ctx)
 
-	// Upsert platform user from Hanko claims.
+	// Resolve the owner — platformUserID is the platform_users.id (UUID).
 	var ownerID string
 	err = tx.QueryRow(ctx,
-		`INSERT INTO platform_users (hanko_user_id, email)
-		 VALUES ($1, $2)
-		 ON CONFLICT (hanko_user_id) DO UPDATE SET email = EXCLUDED.email
-		 RETURNING id`,
-		hankoUserID, email,
+		`SELECT id FROM platform_users WHERE id = $1::uuid`,
+		platformUserID,
 	).Scan(&ownerID)
 	if err != nil {
-		return nil, fmt.Errorf("upsert platform user: %w", err)
+		return nil, fmt.Errorf("resolve platform user: %w", err)
 	}
 
 	// Derive temporary schema_name and s3_bucket.
@@ -217,16 +215,15 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 	return &p, nil
 }
 
-// ListProjects returns all projects owned by the given Hanko user.
-func (s *TenantService) ListProjects(ctx context.Context, hankoUserID string) ([]Project, error) {
+// ListProjects returns all projects owned by the given platform user.
+func (s *TenantService) ListProjects(ctx context.Context, platformUserID string) ([]Project, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
 		        p.region, p.plan, p.status, p.created_at
 		 FROM projects p
-		 JOIN platform_users u ON p.owner_id = u.id
-		 WHERE u.hanko_user_id = $1
+		 WHERE p.owner_id = $1::uuid
 		 ORDER BY p.created_at DESC`,
-		hankoUserID,
+		platformUserID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)

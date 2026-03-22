@@ -2,9 +2,11 @@
  * Main client factory for the Eurobase SDK.
  */
 
+import { AuthClient } from './auth'
 import { DatabaseClient } from './database'
 import { StorageClient } from './storage'
 import { RealtimeClient } from './realtime'
+import { httpClient } from './http'
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -18,8 +20,10 @@ export interface EurobaseConfig {
   apiKey: string
 }
 
-/** The top-level Eurobase client with database, storage, and realtime access. */
+/** The top-level Eurobase client with database, storage, realtime, and auth access. */
 export interface EurobaseClient {
+  /** End-user authentication. */
+  auth: AuthClient
   /** Database query builder. */
   db: DatabaseClient
   /** Object storage operations. */
@@ -81,24 +85,22 @@ function parseConnectionString(connStr: string): EurobaseConfig {
  * // Connection string (single-string format)
  * const eurobase = createClient('eurobase://eb_pk_xxx@my-app.eurobase.app')
  *
- * // Query the database
+ * // Authenticate an end-user
+ * const { data, error } = await eurobase.auth.signIn({
+ *   email: 'user@example.com',
+ *   password: 'password123',
+ * })
+ *
+ * // Query the database (scoped to authenticated user via RLS)
  * const { data, error } = await eurobase.db
- *   .from('users')
- *   .select('id', 'name', 'email')
- *   .eq('status', 'active')
+ *   .from('todos')
+ *   .select('id', 'title', 'completed')
+ *   .eq('completed', 'false')
  *   .order('created_at', { ascending: false })
  *   .limit(20)
  *
  * // Check connectivity
  * const { ok, latency_ms } = await eurobase.status()
- *
- * // Upload a file
- * const result = await eurobase.storage.upload('avatar.png', file)
- *
- * // Listen for realtime changes
- * eurobase.realtime.on('messages', 'INSERT', (event) => {
- *   console.log('New message:', event.record)
- * })
  * ```
  */
 export function createClient(configOrConnectionString: EurobaseConfig | string): EurobaseClient {
@@ -117,7 +119,11 @@ export function createClient(configOrConnectionString: EurobaseConfig | string):
     throw new Error('Eurobase: apiKey is required')
   }
 
+  const http = httpClient(config)
+  const authClient = new AuthClient(config, http)
+
   return {
+    auth: authClient,
     db: new DatabaseClient(config),
     storage: new StorageClient(config),
     realtime: new RealtimeClient(config),

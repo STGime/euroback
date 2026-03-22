@@ -1,48 +1,14 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { PUBLIC_HANKO_API_URL } from '$env/static/public';
 	import { user } from '$lib/stores.js';
 	import { api } from '$lib/api.js';
 
-	let hankoContainerEl = $state<HTMLDivElement>();
-	let devMode = $state(false);
-	let devEmail = $state('');
-	let devSubmitting = $state(false);
+	let email = $state('');
+	let password = $state('');
+	let isSignUp = $state(false);
+	let submitting = $state(false);
 	let error = $state('');
 
-	onMount(async () => {
-		// Check if we're in dev mode (no Hanko URL configured).
-		if (!PUBLIC_HANKO_API_URL || PUBLIC_HANKO_API_URL === 'DEV_MODE') {
-			devMode = true;
-			return;
-		}
-
-		// Dynamically import and register Hanko Elements (client-side only).
-		const { register } = await import('@teamhanko/hanko-elements');
-		register(PUBLIC_HANKO_API_URL, { shadow: true });
-
-		// Listen for the auth flow completion event.
-		hankoContainerEl?.addEventListener('onAuthFlowCompleted', () => {
-			// Hanko sets a JWT cookie automatically.
-			// We store a marker in our user store to track login state.
-			const hanko = new (globalThis as any).Hanko(PUBLIC_HANKO_API_URL);
-			hanko.user.getCurrent().then((hankoUser: any) => {
-				// Store the session token from the cookie for Bearer auth.
-				const token = document.cookie
-					.split('; ')
-					.find((c: string) => c.startsWith('hanko='))
-					?.split('=')[1] ?? '';
-				api.setToken(token);
-				user.set({ token, email: hankoUser?.email ?? '' });
-				redirectAfterLogin();
-			}).catch(() => {
-				redirectAfterLogin();
-			});
-		});
-	});
-
-	// After login, go to /onboarding if no projects, otherwise /projects.
 	async function redirectAfterLogin() {
 		try {
 			const list = await api.listProjects();
@@ -52,25 +18,26 @@
 		}
 	}
 
-	// Dev mode login (same as before, for local development without Hanko).
-	async function handleDevLogin(e: Event) {
+	async function handleSubmit(e: Event) {
 		e.preventDefault();
 		error = '';
-		devSubmitting = true;
+		submitting = true;
 		try {
-			const result = await api.login(devEmail, 'dev');
-			user.set({ token: result.token, email: devEmail });
+			const result = isSignUp
+				? await api.signUp(email, password)
+				: await api.signIn(email, password);
+			user.set({ token: result.access_token, email });
 			await redirectAfterLogin();
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Login failed';
+			error = err instanceof Error ? err.message : 'Authentication failed';
 		} finally {
-			devSubmitting = false;
+			submitting = false;
 		}
 	}
 </script>
 
 <svelte:head>
-	<title>Sign In - Eurobase Console</title>
+	<title>{isSignUp ? 'Sign Up' : 'Sign In'} - Eurobase Console</title>
 </svelte:head>
 
 <div class="flex min-h-screen">
@@ -119,8 +86,8 @@
 						</svg>
 					</div>
 					<div>
-						<p class="font-medium">Passkey-first authentication</p>
-						<p class="text-sm text-eurobase-300">Powered by Hanko (DE) — passwordless, phishing-resistant</p>
+						<p class="font-medium">Built-in authentication</p>
+						<p class="text-sm text-eurobase-300">EU-sovereign auth for your apps — no external dependencies</p>
 					</div>
 				</div>
 			</div>
@@ -161,48 +128,63 @@
 			</div>
 
 			<div class="rounded-xl border border-gray-200 bg-white p-8 shadow-sm">
-				<h2 class="text-xl font-semibold text-gray-900">Sign in to your account</h2>
-				<p class="mt-1 text-sm text-gray-500">Access your Eurobase console</p>
+				<h2 class="text-xl font-semibold text-gray-900">
+					{isSignUp ? 'Create your account' : 'Sign in to your account'}
+				</h2>
+				<p class="mt-1 text-sm text-gray-500">
+					{isSignUp ? 'Get started with Eurobase' : 'Access your Eurobase console'}
+				</p>
 
-				{#if devMode}
-					<!-- Dev mode: simple email form for local development -->
-					<div class="mt-4 rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-700">
-						Dev mode — Hanko is not configured. Using placeholder auth.
-					</div>
-
-					{#if error}
-						<div class="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-							{error}
-						</div>
-					{/if}
-
-					<form onsubmit={handleDevLogin} class="mt-6 space-y-4">
-						<div>
-							<label for="email" class="block text-sm font-medium text-gray-700">Email address</label>
-							<input
-								id="email"
-								type="email"
-								bind:value={devEmail}
-								required
-								placeholder="you@company.eu"
-								class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
-							/>
-						</div>
-
-						<button
-							type="submit"
-							disabled={devSubmitting}
-							class="w-full rounded-lg bg-eurobase-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-						>
-							{devSubmitting ? 'Signing in...' : 'Sign In (Dev Mode)'}
-						</button>
-					</form>
-				{:else}
-					<!-- Production: Hanko Elements web component -->
-					<div class="mt-6" bind:this={hankoContainerEl}>
-						<hanko-auth></hanko-auth>
+				{#if error}
+					<div class="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+						{error}
 					</div>
 				{/if}
+
+				<form onsubmit={handleSubmit} class="mt-6 space-y-4">
+					<div>
+						<label for="email" class="block text-sm font-medium text-gray-700">Email address</label>
+						<input
+							id="email"
+							type="email"
+							bind:value={email}
+							required
+							placeholder="you@company.eu"
+							class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						/>
+					</div>
+
+					<div>
+						<label for="password" class="block text-sm font-medium text-gray-700">Password</label>
+						<input
+							id="password"
+							type="password"
+							bind:value={password}
+							required
+							minlength="8"
+							placeholder={isSignUp ? 'At least 8 characters' : ''}
+							class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						/>
+					</div>
+
+					<button
+						type="submit"
+						disabled={submitting}
+						class="w-full rounded-lg bg-eurobase-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						{submitting ? (isSignUp ? 'Creating account...' : 'Signing in...') : (isSignUp ? 'Create Account' : 'Sign In')}
+					</button>
+				</form>
+
+				<div class="mt-4 text-center text-sm text-gray-500">
+					{#if isSignUp}
+						Already have an account?
+						<button onclick={() => { isSignUp = false; error = ''; }} class="text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Sign in</button>
+					{:else}
+						Don't have an account?
+						<button onclick={() => { isSignUp = true; error = ''; }} class="text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Sign up</button>
+					{/if}
+				</div>
 			</div>
 
 			<p class="mt-6 text-center text-xs text-gray-400">

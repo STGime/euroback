@@ -1,4 +1,4 @@
-// Package auth provides Hanko JWT authentication middleware and helpers.
+// Package auth provides authentication middleware and helpers for the Eurobase platform.
 package auth
 
 import "context"
@@ -8,10 +8,10 @@ type contextKey int
 
 const claimsKey contextKey = iota
 
-// Claims holds the authenticated user's identity extracted from a Hanko JWT.
+// Claims holds the authenticated user's identity extracted from a JWT.
 type Claims struct {
-	Subject string // Hanko user ID (JWT "sub" claim)
-	Email   string // User email from JWT claims
+	Subject string // Platform user ID (UUID from platform_users.id)
+	Email   string // User email
 }
 
 // ClaimsFromContext extracts the authenticated claims from the request context.
