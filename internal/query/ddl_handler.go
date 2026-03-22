@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +24,18 @@ type AddColumnRequest struct {
 	DefaultValue string `json:"default_value,omitempty"`
 }
 
+// SchemaChange represents a logged DDL operation.
+type SchemaChange struct {
+	ID         string    `json:"id"`
+	ProjectID  string    `json:"project_id"`
+	Action     string    `json:"action"`
+	TableName  string    `json:"table_name"`
+	ColumnName *string   `json:"column_name"`
+	Detail     any       `json:"detail"`
+	SQLText    *string   `json:"sql_text"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // HandleDDL returns a chi.Router for schema DDL operations.
 // Mounted at /platform/projects/{id}/schema/tables
 func HandleDDL(pool *pgxpool.Pool) chi.Router {
@@ -34,6 +47,50 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r.Delete("/{table}/columns/{column}", handleDropColumn(pool))
 
 	return r
+}
+
+// HandleSchemaChanges returns a handler that lists schema change history.
+// GET /platform/projects/{id}/schema/changes
+func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+
+		rows, err := pool.Query(r.Context(),
+			`SELECT id, project_id, action, table_name, column_name, detail, sql_text, created_at
+			 FROM schema_changes WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100`, projectID)
+		if err != nil {
+			slog.Error("list schema changes failed", "error", err)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		changes := make([]SchemaChange, 0)
+		for rows.Next() {
+			var c SchemaChange
+			if err := rows.Scan(&c.ID, &c.ProjectID, &c.Action, &c.TableName, &c.ColumnName, &c.Detail, &c.SQLText, &c.CreatedAt); err != nil {
+				slog.Error("scan schema change failed", "error", err)
+				jsonError(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			changes = append(changes, c)
+		}
+
+		jsonResponse(w, changes, http.StatusOK)
+	}
+}
+
+// logSchemaChange records a DDL operation in the schema_changes table.
+func logSchemaChange(pool *pgxpool.Pool, r *http.Request, projectID, action, tableName string, columnName *string, detail any) {
+	detailJSON, _ := json.Marshal(detail)
+	_, err := pool.Exec(r.Context(),
+		`INSERT INTO schema_changes (project_id, action, table_name, column_name, detail)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		projectID, action, tableName, columnName, detailJSON,
+	)
+	if err != nil {
+		slog.Error("failed to log schema change", "error", err, "action", action, "table", tableName)
+	}
 }
 
 func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
@@ -76,6 +133,10 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		logSchemaChange(pool, r, projectID, "create_table", req.Name, nil, map[string]any{
+			"columns": req.Columns,
+		})
+
 		slog.Info("table created", "schema", schemaName, "table", req.Name, "columns", len(req.Columns))
 		jsonResponse(w, map[string]string{
 			"status": "created",
@@ -109,6 +170,8 @@ func handleDropTable(pool *pgxpool.Pool) http.HandlerFunc {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		logSchemaChange(pool, r, projectID, "drop_table", tableName, nil, nil)
 
 		slog.Info("table dropped", "schema", schemaName, "table", tableName)
 		w.WriteHeader(http.StatusNoContent)
@@ -154,6 +217,12 @@ func handleAddColumn(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		logSchemaChange(pool, r, projectID, "add_column", tableName, &req.Name, map[string]any{
+			"type":     req.Type,
+			"nullable": req.Nullable,
+			"default":  req.DefaultValue,
+		})
+
 		slog.Info("column added", "schema", schemaName, "table", tableName, "column", req.Name)
 		jsonResponse(w, map[string]string{
 			"status": "added",
@@ -188,6 +257,8 @@ func handleDropColumn(pool *pgxpool.Pool) http.HandlerFunc {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		logSchemaChange(pool, r, projectID, "drop_column", tableName, &columnName, nil)
 
 		slog.Info("column dropped", "schema", schemaName, "table", tableName, "column", columnName)
 		w.WriteHeader(http.StatusNoContent)

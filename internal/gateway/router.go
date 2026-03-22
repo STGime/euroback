@@ -33,6 +33,7 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 	// Global middleware.
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(CORSMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
@@ -58,6 +59,7 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 				r.Use(hankoAuth.Handler)
 			}
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
+			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
 			r.Mount("/schema/tables", query.HandleDDL(pool))
 			r.Mount("/webhooks", webhook.Routes(pool))
 			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
@@ -104,6 +106,7 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 
 		// Data API routes (tenant-scoped via middleware).
 		queryEngine := query.NewQueryEngine(pool)
+		publisher := realtime.NewEventPublisher(nil, hub)
 		r.Route("/db", func(r chi.Router) {
 			r.Use(tenant.TenantContextMiddleware(pool))
 			r.Post("/sql", query.HandleSQL(queryEngine))
@@ -112,9 +115,9 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 			// don't shadow /sql and /rpc when mounted at "/".
 			r.Get("/{table}", query.HandleTableGet(queryEngine))
 			r.Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
-			r.Post("/{table}", query.HandleTableInsert(queryEngine))
-			r.Patch("/{table}/{id}", query.HandleTableUpdate(queryEngine))
-			r.Delete("/{table}/{id}", query.HandleTableDelete(queryEngine))
+			r.Post("/{table}", query.HandleTableInsert(queryEngine, publisher))
+			r.Patch("/{table}/{id}", query.HandleTableUpdate(queryEngine, publisher))
+			r.Delete("/{table}/{id}", query.HandleTableDelete(queryEngine, publisher))
 		})
 
 		// Storage routes.

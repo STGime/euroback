@@ -108,7 +108,7 @@ func main() {
 	} else {
 		slog.Warn("REDIS_URL not set, realtime cross-instance fan-out disabled")
 	}
-	_ = rtBridge // EventPublisher will use this when integrated with the query engine.
+	_ = rtBridge // Available for cross-instance fan-out via EventPublisher.
 
 	// ── Dev mode: bypass Hanko auth for local testing ──
 	devMode := os.Getenv("DEV_MODE") == "true"

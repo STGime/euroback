@@ -174,6 +174,11 @@ export class EurobaseAPI {
 		return this.fetch(`/v1/tenants/${projectId}`, { method: 'DELETE' });
 	}
 
+	/** Get schema change history for a project. */
+	async getSchemaChanges(projectId: string): Promise<SchemaChange[]> {
+		return this.fetch<SchemaChange[]>(`/platform/projects/${projectId}/schema/changes`);
+	}
+
 	// ---- Database methods ----
 
 	/** Get schema introspection for a project (all tables and columns). */
@@ -450,6 +455,17 @@ export interface APIKey {
 	type: string;
 	created_at: string;
 	last_used_at: string | null;
+}
+
+export interface SchemaChange {
+	id: string;
+	project_id: string;
+	action: string;
+	table_name: string;
+	column_name: string | null;
+	detail: any;
+	sql_text: string | null;
+	created_at: string;
 }
 
 export const api = new EurobaseAPI();

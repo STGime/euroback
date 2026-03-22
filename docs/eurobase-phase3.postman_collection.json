@@ -301,6 +301,49 @@
 			]
 		},
 		{
+			"name": "Schema History",
+			"description": "Verify DDL operations are logged in schema_changes.",
+			"item": [
+				{
+					"name": "1. Get Schema Changes",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/changes",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "changes"]
+						},
+						"description": "List schema change history. Should contain entries from the DDL tests (create_table, add_column, drop_column)."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array of changes', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.be.an('array');",
+									"});",
+									"pm.test('Changes have correct structure', () => {",
+									"    const body = pm.response.json();",
+									"    if (body.length > 0) {",
+									"        const c = body[0];",
+									"        pm.expect(c).to.have.property('id');",
+									"        pm.expect(c).to.have.property('action');",
+									"        pm.expect(c).to.have.property('table_name');",
+									"        pm.expect(c).to.have.property('created_at');",
+									"    }",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
 			"name": "Data API (CRUD)",
 			"description": "Insert, select, update, and delete rows via the REST data API.",
 			"item": [

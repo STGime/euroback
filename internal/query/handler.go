@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -32,9 +33,9 @@ func HandleQuery(engine *QueryEngine) chi.Router {
 
 	r.Get("/{table}", handleSelectRows(engine))
 	r.Get("/{table}/{id}", handleSelectRowByID(engine))
-	r.Post("/{table}", handleInsertRow(engine))
-	r.Patch("/{table}/{id}", handleUpdateRow(engine))
-	r.Delete("/{table}/{id}", handleDeleteRow(engine))
+	r.Post("/{table}", handleInsertRow(engine, nil))
+	r.Patch("/{table}/{id}", handleUpdateRow(engine, nil))
+	r.Delete("/{table}/{id}", handleDeleteRow(engine, nil))
 
 	return r
 }
@@ -50,18 +51,18 @@ func HandleTableGetByID(engine *QueryEngine) http.HandlerFunc {
 }
 
 // HandleTableInsert returns the handler for POST /v1/db/{table}.
-func HandleTableInsert(engine *QueryEngine) http.HandlerFunc {
-	return handleInsertRow(engine)
+func HandleTableInsert(engine *QueryEngine, pub *realtime.EventPublisher) http.HandlerFunc {
+	return handleInsertRow(engine, pub)
 }
 
 // HandleTableUpdate returns the handler for PATCH /v1/db/{table}/{id}.
-func HandleTableUpdate(engine *QueryEngine) http.HandlerFunc {
-	return handleUpdateRow(engine)
+func HandleTableUpdate(engine *QueryEngine, pub *realtime.EventPublisher) http.HandlerFunc {
+	return handleUpdateRow(engine, pub)
 }
 
 // HandleTableDelete returns the handler for DELETE /v1/db/{table}/{id}.
-func HandleTableDelete(engine *QueryEngine) http.HandlerFunc {
-	return handleDeleteRow(engine)
+func HandleTableDelete(engine *QueryEngine, pub *realtime.EventPublisher) http.HandlerFunc {
+	return handleDeleteRow(engine, pub)
 }
 
 // HandleRPC returns an http.HandlerFunc for POST /v1/db/rpc/{function}.
@@ -206,7 +207,7 @@ func handleSelectRowByID(engine *QueryEngine) http.HandlerFunc {
 }
 
 // handleInsertRow handles POST /v1/db/{table}.
-func handleInsertRow(engine *QueryEngine) http.HandlerFunc {
+func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := SchemaFromContext(r.Context())
 		if schema == "" {
@@ -235,13 +236,17 @@ func handleInsertRow(engine *QueryEngine) http.HandlerFunc {
 			return
 		}
 
+		if pub != nil {
+			_ = pub.PublishInsert(r.Context(), schema, tableName, row)
+		}
+
 		slog.Debug("row inserted", "schema", schema, "table", tableName)
 		jsonResponse(w, row, http.StatusCreated)
 	}
 }
 
 // handleUpdateRow handles PATCH /v1/db/{table}/{id}.
-func handleUpdateRow(engine *QueryEngine) http.HandlerFunc {
+func handleUpdateRow(engine *QueryEngine, pub *realtime.EventPublisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := SchemaFromContext(r.Context())
 		if schema == "" {
@@ -271,13 +276,17 @@ func handleUpdateRow(engine *QueryEngine) http.HandlerFunc {
 			return
 		}
 
+		if pub != nil {
+			_ = pub.PublishUpdate(r.Context(), schema, tableName, row, nil)
+		}
+
 		slog.Debug("row updated", "schema", schema, "table", tableName, "id", rowID)
 		jsonResponse(w, row, http.StatusOK)
 	}
 }
 
 // handleDeleteRow handles DELETE /v1/db/{table}/{id}.
-func handleDeleteRow(engine *QueryEngine) http.HandlerFunc {
+func handleDeleteRow(engine *QueryEngine, pub *realtime.EventPublisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := SchemaFromContext(r.Context())
 		if schema == "" {
@@ -299,6 +308,10 @@ func handleDeleteRow(engine *QueryEngine) http.HandlerFunc {
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}
 			return
+		}
+
+		if pub != nil {
+			_ = pub.PublishDelete(r.Context(), schema, tableName, map[string]interface{}{"id": rowID})
 		}
 
 		slog.Debug("row deleted", "schema", schema, "table", tableName, "id", rowID)
