@@ -22,9 +22,22 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-echo "==> Running migrations..."
-docker compose exec -T postgres psql -U eurobase_api -d eurobase < migrations/000001_platform_schema.up.sql 2>/dev/null || true
-docker compose exec -T postgres psql -U eurobase_api -d eurobase < migrations/000002_tenant_functions.up.sql 2>/dev/null || true
+echo "==> Running database migrations..."
+for f in migrations/*.up.sql; do
+    echo "    Applying $f..."
+    docker compose exec -T postgres psql -U eurobase_api -d eurobase < "$f" 2>/dev/null || true
+done
+
+echo "==> Running River schema migrations..."
+DATABASE_URL="postgres://eurobase_api:localdev@localhost:5433/eurobase?sslmode=disable"
+"$(go env GOPATH)/bin/river" migrate-up --database-url "$DATABASE_URL" 2>/dev/null || {
+    echo "    River CLI not found. Installing..."
+    go install github.com/riverqueue/river/cmd/river@v0.31.0
+    "$(go env GOPATH)/bin/river" migrate-up --database-url "$DATABASE_URL"
+}
+
+echo "==> Configuring MinIO alias..."
+docker compose exec -T minio mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null || true
 
 echo ""
 echo "==> Local dev environment is ready!"
@@ -35,5 +48,8 @@ echo "  Redis:      redis://localhost:6380"
 echo "  MinIO S3:   http://localhost:9000  (user: minioadmin / pass: minioadmin)"
 echo "  MinIO UI:   http://localhost:9001"
 echo ""
-echo "Set environment variables:"
-echo "  source .env.local"
+echo "Start the services:"
+echo "  1. Gateway:  source .env.local && go run ./cmd/gateway"
+echo "  2. Worker:   source .env.local && go run ./cmd/worker"
+echo "  3. Console:  cd console && npm run dev"
+echo ""

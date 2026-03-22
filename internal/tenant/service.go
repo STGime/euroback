@@ -27,6 +27,9 @@ type Project struct {
 	Status     string    `json:"status"`
 	APIURL     string    `json:"api_url"`
 	CreatedAt  time.Time `json:"created_at"`
+	// PublicKey and SecretKey are only populated on creation (plaintext shown once).
+	PublicKey  string `json:"public_key,omitempty"`
+	SecretKey  string `json:"secret_key,omitempty"`
 }
 
 // TenantService encapsulates database operations for tenant/project management.
@@ -106,6 +109,7 @@ func (s *TenantService) CreateProject(ctx context.Context, hankoUserID, email st
 	)
 
 	var status string
+	var publicKey, secretKey string
 	if err != nil {
 		slog.Error("provision_tenant failed", "error", err, "project_id", projectID)
 		// Mark as failed.
@@ -118,9 +122,29 @@ func (s *TenantService) CreateProject(ctx context.Context, hankoUserID, email st
 		}
 		status = "provisioning_failed"
 	} else {
-		// Schema provisioning succeeded. Status stays 'provisioning' until the
-		// async worker completes S3 bucket creation and API key generation.
-		status = "provisioning"
+		// Generate API keys synchronously (pure crypto, microseconds).
+		var publicKeyHash, secretKeyHash string
+		publicKey, secretKey, publicKeyHash, secretKeyHash, err = GenerateAPIKeyPair()
+		if err != nil {
+			return nil, fmt.Errorf("generate api keys: %w", err)
+		}
+
+		publicKeyPrefix := publicKey[:14]
+		secretKeyPrefix := secretKey[:14]
+
+		if err := StoreAPIKeys(ctx, tx, projectID, publicKeyHash, publicKeyPrefix, secretKeyHash, secretKeyPrefix); err != nil {
+			return nil, fmt.Errorf("store api keys: %w", err)
+		}
+
+		// Mark as active immediately — only S3 bucket creation stays async.
+		_, err = tx.Exec(ctx,
+			`UPDATE projects SET status = 'active' WHERE id = $1`,
+			projectID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update project status: %w", err)
+		}
+		status = "active"
 	}
 
 	// Read back the final schema_name (provision_tenant may have updated it).
@@ -137,8 +161,8 @@ func (s *TenantService) CreateProject(ctx context.Context, hankoUserID, email st
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	// Enqueue async provisioning job (S3 bucket + API keys) if schema provisioning succeeded.
-	if status == "provisioning" && s.riverClient != nil {
+	// Enqueue async provisioning job (S3 bucket only) if schema provisioning succeeded.
+	if status == "active" && s.riverClient != nil {
 		_, err := s.riverClient.Insert(ctx, jobs.ProvisionProjectArgs{
 			ProjectID: projectID,
 			Slug:      slug,
@@ -146,9 +170,8 @@ func (s *TenantService) CreateProject(ctx context.Context, hankoUserID, email st
 		}, nil)
 		if err != nil {
 			slog.Error("failed to enqueue provision job", "error", err, "project_id", projectID)
-			// The project stays in 'provisioning' status; manual retry or a sweep job can pick it up.
 		} else {
-			slog.Info("async provision job enqueued", "project_id", projectID, "slug", slug)
+			slog.Info("async provision job enqueued (s3 bucket)", "project_id", projectID, "slug", slug)
 		}
 	}
 
@@ -171,6 +194,8 @@ func (s *TenantService) CreateProject(ctx context.Context, hankoUserID, email st
 		Status:     status,
 		APIURL:     fmt.Sprintf("https://%s.eurobase.app", slug),
 		CreatedAt:  createdAt,
+		PublicKey:  publicKey,
+		SecretKey:  secretKey,
 	}, nil
 }
 

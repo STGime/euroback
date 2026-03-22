@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { api, type Project } from '$lib/api.js';
 	import { projects, projectsLoading, projectsError, loadProjects } from '$lib/stores.js';
 
@@ -20,8 +21,15 @@
 			.replace(/^-|-$/g, '')
 	);
 
-	onMount(() => {
-		loadProjects();
+	let redirecting = $state(false);
+
+	onMount(async () => {
+		await loadProjects();
+		// Auto-redirect new users (0 projects) to onboarding.
+		if ($projects.length === 0 && !$projectsError) {
+			redirecting = true;
+			goto('/onboarding');
+		}
 	});
 
 	function openModal() {
@@ -95,6 +103,9 @@
 	<title>Projects - Eurobase Console</title>
 </svelte:head>
 
+{#if redirecting}
+	<!-- Redirecting to onboarding — show nothing -->
+{:else}
 <div class="mx-auto max-w-6xl">
 	<!-- Page header -->
 	<div class="flex items-center justify-between">
@@ -139,7 +150,7 @@
 				Retry
 			</button>
 		</div>
-	{:else if $projects.length === 0}
+	{:else if $projects.length === 0 && !redirecting}
 		<!-- Empty state -->
 		<div class="mt-16 flex flex-col items-center text-center">
 			<div class="flex h-20 w-20 items-center justify-center rounded-2xl bg-gray-100">
@@ -215,6 +226,7 @@
 		</div>
 	{/if}
 </div>
+{/if}
 
 <!-- New Project Modal -->
 {#if showNewModal}

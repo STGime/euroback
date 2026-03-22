@@ -1,4 +1,8 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { PUBLIC_HANKO_API_URL } from '$env/static/public';
+	import { logout } from '$lib/stores.js';
+
 	let { children } = $props();
 
 	const navItems = [
@@ -20,6 +24,21 @@
 	];
 
 	let currentPath = $state('/projects');
+
+	async function handleLogout() {
+		// If Hanko is configured, also log out from Hanko.
+		if (PUBLIC_HANKO_API_URL && PUBLIC_HANKO_API_URL !== 'DEV_MODE') {
+			try {
+				const { Hanko } = await import('@teamhanko/hanko-elements');
+				const hanko = new Hanko(PUBLIC_HANKO_API_URL);
+				await hanko.user.logout();
+			} catch {
+				// Continue with local logout even if Hanko fails.
+			}
+		}
+		logout();
+		goto('/login');
+	}
 </script>
 
 <div class="flex min-h-screen bg-gray-50">
@@ -62,7 +81,16 @@
 			</nav>
 
 			<!-- Sidebar footer -->
-			<div class="border-t border-gray-200 p-4">
+			<div class="border-t border-gray-200 p-4 space-y-3">
+				<button
+					onclick={handleLogout}
+					class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors cursor-pointer"
+				>
+					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9" />
+					</svg>
+					Sign Out
+				</button>
 				<div class="flex items-center gap-2 text-xs text-gray-400">
 					<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
 						<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"/>

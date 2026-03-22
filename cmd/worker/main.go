@@ -13,20 +13,15 @@ import (
 	"github.com/eurobase/euroback/internal/workers"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivermigrate"
 )
 
 func main() {
+	// ── Check for --migrate-only flag ──
+	migrateOnly := len(os.Args) > 1 && os.Args[1] == "--migrate-only"
+
 	// ── Load configuration from environment variables ──
 	databaseURL := requireEnv("DATABASE_URL")
-	s3Endpoint := requireEnv("S3_ENDPOINT")
-	s3AccessKey := requireEnv("S3_ACCESS_KEY")
-	s3SecretKey := requireEnv("S3_SECRET_KEY")
-	_ = os.Getenv("REDIS_URL") // reserved for cache layer
-
-	s3Region := os.Getenv("S3_REGION")
-	if s3Region == "" {
-		s3Region = "fr-par"
-	}
 
 	// ── Set up structured logging ──
 	logLevel := parseLogLevel(os.Getenv("LOG_LEVEL"))
@@ -34,8 +29,6 @@ func main() {
 		Level: logLevel,
 	}))
 	slog.SetDefault(logger)
-
-	slog.Info("starting eurobase worker")
 
 	// ── Initialize database connection pool ──
 	ctx, cancel := context.WithCancel(context.Background())
@@ -48,6 +41,38 @@ func main() {
 	}
 	defer pool.Close()
 	slog.Info("database connection pool established")
+
+	// ── Run River schema migrations ──
+	slog.Info("running river schema migrations")
+	migrator, err := rivermigrate.New(riverpgxv5.New(pool), nil)
+	if err != nil {
+		slog.Error("failed to create river migrator", "error", err)
+		os.Exit(1)
+	}
+	if _, err := migrator.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
+		slog.Error("failed to run river migrations", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("river schema migrations complete")
+
+	if migrateOnly {
+		slog.Info("migrate-only mode, exiting")
+		pool.Close()
+		return
+	}
+
+	// ── Load remaining config ──
+	s3Endpoint := requireEnv("S3_ENDPOINT")
+	s3AccessKey := requireEnv("S3_ACCESS_KEY")
+	s3SecretKey := requireEnv("S3_SECRET_KEY")
+	_ = os.Getenv("REDIS_URL") // reserved for cache layer
+
+	s3Region := os.Getenv("S3_REGION")
+	if s3Region == "" {
+		s3Region = "fr-par"
+	}
+
+	slog.Info("starting eurobase worker")
 
 	// ── Initialize Scaleway S3 client ──
 	s3Client, err := storage.NewS3Client(s3Endpoint, s3Region, s3AccessKey, s3SecretKey)

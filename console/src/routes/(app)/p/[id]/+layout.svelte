@@ -16,6 +16,7 @@
 		{ label: 'Database', href: '/database', icon: 'database' },
 		{ label: 'Storage', href: '/storage', icon: 'storage' },
 		{ label: 'API', href: '/api', icon: 'api' },
+		{ label: 'Connect', href: '/connect', icon: 'connect' },
 		{ label: 'Webhooks', href: '/webhooks', icon: 'webhooks' },
 		{ label: 'Settings', href: '/settings', icon: 'settings' }
 	];

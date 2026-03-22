@@ -19,6 +19,8 @@ export interface Project {
 	status: string;
 	api_url: string;
 	created_at: string;
+	public_key?: string;
+	secret_key?: string;
 }
 
 export interface ColumnInfo {
@@ -424,6 +426,11 @@ export class EurobaseAPI {
 	async regenerateAPIKeys(projectId: string): Promise<{ public_key: string; secret_key: string }> {
 		return this.fetch(`/platform/projects/${projectId}/api-keys/regenerate`, { method: 'POST' });
 	}
+
+	/** Get connection info for IDE integration (CLAUDE.md, .cursorrules, .env). */
+	async getConnectInfo(projectId: string): Promise<ConnectInfo> {
+		return this.fetch<ConnectInfo>(`/platform/projects/${projectId}/connect`);
+	}
 }
 
 export interface Webhook {
@@ -455,6 +462,20 @@ export interface APIKey {
 	type: string;
 	created_at: string;
 	last_used_at: string | null;
+}
+
+export interface ConnectInfo {
+	project_id: string;
+	project_name: string;
+	slug: string;
+	api_url: string;
+	region: string;
+	plan: string;
+	tables: { name: string; columns: { name: string; data_type: string; nullable: boolean }[] }[];
+	claude_md: string;
+	cursor_rules: string;
+	env_template: string;
+	sample_code: Record<string, string>;
 }
 
 export interface SchemaChange {

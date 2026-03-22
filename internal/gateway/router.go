@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
@@ -64,6 +66,7 @@ func NewRouter(pool *pgxpool.Pool, hankoAuth *auth.HankoMiddleware, hankoWebhook
 			r.Mount("/webhooks", webhook.Routes(pool))
 			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
+			r.Get("/connect", tenant.HandleConnect(pool))
 		})
 	})
 
@@ -159,14 +162,44 @@ func buildTenantResolver(pool *pgxpool.Pool) realtime.TenantResolver {
 // This must NEVER be used in production.
 func devAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") == "" {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
 			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
 			return
 		}
+
+		// In dev mode, derive identity from the token value so different
+		// login emails produce different users. The console stores
+		// "dev_<base64(email)>_<timestamp>" as the token.
+		subject := "postman-test-user-001"
+		email := "dev@eurobase.eu"
+
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if strings.HasPrefix(token, "dev_") {
+			parts := strings.SplitN(token, "_", 3) // ["dev", base64email, timestamp]
+			if len(parts) >= 2 {
+				if decoded, err := base64Decode(parts[1]); err == nil && decoded != "" {
+					email = decoded
+					// Use the email as subject so each email is a distinct user.
+					subject = "dev-" + decoded
+				}
+			}
+		}
+
 		ctx := auth.ContextWithClaims(r.Context(), &auth.Claims{
-			Subject: "postman-test-user-001",
-			Email:   "dev@eurobase.eu",
+			Subject: subject,
+			Email:   email,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// base64Decode is a helper for dev mode token parsing.
+func base64Decode(s string) (string, error) {
+	// The console uses btoa() which produces standard base64; try both padded and unpadded.
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		b, err = base64.RawStdEncoding.DecodeString(s)
+	}
+	return string(b), err
 }

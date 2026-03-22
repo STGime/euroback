@@ -26,6 +26,39 @@ export interface EurobaseClient {
   storage: StorageClient
   /** Realtime subscriptions via WebSocket. */
   realtime: RealtimeClient
+  /** Check connectivity to the Eurobase gateway. */
+  status(): Promise<{ ok: boolean; latency_ms: number }>
+}
+
+// ---------------------------------------------------------------------------
+// Connection string parser
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a connection string in the format:
+ *   eurobase://API_KEY@SLUG.eurobase.app
+ *
+ * Returns an EurobaseConfig object.
+ */
+function parseConnectionString(connStr: string): EurobaseConfig {
+  // Remove the eurobase:// prefix
+  const withoutScheme = connStr.replace(/^eurobase:\/\//, '')
+  const atIndex = withoutScheme.indexOf('@')
+  if (atIndex === -1) {
+    throw new Error('Eurobase: invalid connection string — expected eurobase://API_KEY@host')
+  }
+
+  const apiKey = withoutScheme.slice(0, atIndex)
+  const host = withoutScheme.slice(atIndex + 1)
+
+  if (!apiKey || !host) {
+    throw new Error('Eurobase: invalid connection string — API key and host are required')
+  }
+
+  return {
+    url: `https://${host}`,
+    apiKey,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -39,10 +72,14 @@ export interface EurobaseClient {
  * ```ts
  * import { createClient } from '@eurobase/sdk'
  *
+ * // Object config
  * const eurobase = createClient({
- *   url: 'https://api.eurobase.eu',
- *   apiKey: 'eb_live_...',
+ *   url: 'https://my-app.eurobase.app',
+ *   apiKey: 'eb_pk_...',
  * })
+ *
+ * // Connection string (single-string format)
+ * const eurobase = createClient('eurobase://eb_pk_xxx@my-app.eurobase.app')
  *
  * // Query the database
  * const { data, error } = await eurobase.db
@@ -51,6 +88,9 @@ export interface EurobaseClient {
  *   .eq('status', 'active')
  *   .order('created_at', { ascending: false })
  *   .limit(20)
+ *
+ * // Check connectivity
+ * const { ok, latency_ms } = await eurobase.status()
  *
  * // Upload a file
  * const result = await eurobase.storage.upload('avatar.png', file)
@@ -61,7 +101,15 @@ export interface EurobaseClient {
  * })
  * ```
  */
-export function createClient(config: EurobaseConfig): EurobaseClient {
+export function createClient(configOrConnectionString: EurobaseConfig | string): EurobaseClient {
+  let config: EurobaseConfig
+
+  if (typeof configOrConnectionString === 'string') {
+    config = parseConnectionString(configOrConnectionString)
+  } else {
+    config = configOrConnectionString
+  }
+
   if (!config.url) {
     throw new Error('Eurobase: url is required')
   }
@@ -73,5 +121,16 @@ export function createClient(config: EurobaseConfig): EurobaseClient {
     db: new DatabaseClient(config),
     storage: new StorageClient(config),
     realtime: new RealtimeClient(config),
+    async status() {
+      const start = Date.now()
+      try {
+        const res = await fetch(`${config.url}/health`)
+        const latency_ms = Date.now() - start
+        return { ok: res.ok, latency_ms }
+      } catch {
+        const latency_ms = Date.now() - start
+        return { ok: false, latency_ms }
+      }
+    },
   }
 }

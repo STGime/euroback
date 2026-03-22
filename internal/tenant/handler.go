@@ -24,11 +24,13 @@ type CreateProjectRequest struct {
 
 // CreateProjectResponse is the JSON response after project creation.
 type CreateProjectResponse struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Slug   string `json:"slug"`
-	Status string `json:"status"`
-	APIURL string `json:"api_url"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	Status    string `json:"status"`
+	APIURL    string `json:"api_url"`
+	PublicKey string `json:"public_key,omitempty"`
+	SecretKey string `json:"secret_key,omitempty"`
 }
 
 // ProjectListItem represents a project in the list response.
@@ -114,7 +116,7 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		if err != nil {
 			slog.Error("failed to create project", "error", err, "hanko_user_id", claims.Subject)
 			if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
-				http.Error(w, `{"error":"a project with this slug already exists"}`, http.StatusConflict)
+				http.Error(w, `{"error":"This project URL is already taken. Each project gets a unique subdomain (slug.eurobase.app), so please choose a different name or slug."}`, http.StatusConflict)
 				return
 			}
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
@@ -128,11 +130,13 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		)
 
 		resp := CreateProjectResponse{
-			ID:     project.ID,
-			Name:   project.Name,
-			Slug:   project.Slug,
-			Status: project.Status,
-			APIURL: project.APIURL,
+			ID:        project.ID,
+			Name:      project.Name,
+			Slug:      project.Slug,
+			Status:    project.Status,
+			APIURL:    project.APIURL,
+			PublicKey: project.PublicKey,
+			SecretKey: project.SecretKey,
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -21,6 +21,16 @@ spec:
         app: worker
         component: jobs
     spec:
+      initContainers:
+        # Run River schema migrations before the worker starts.
+        # Uses the same image — the river CLI is baked into the worker binary
+        # via a small migrate subcommand, or we run it via the Go migrate API.
+        - name: migrate
+          image: rg.fr-par.scw.cloud/eurobase/worker:latest
+          command: ["worker", "--migrate-only"]
+          envFrom:
+            - secretRef:
+                name: eurobase-secrets
       containers:
         - name: worker
           image: rg.fr-par.scw.cloud/eurobase/worker:latest
