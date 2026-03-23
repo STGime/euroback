@@ -33,6 +33,9 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 	if email == "" {
 		return nil, fmt.Errorf("email is required")
 	}
+	if parts := strings.SplitN(email, "@", 2); len(parts) != 2 || parts[0] == "" || parts[1] == "" || !strings.Contains(parts[1], ".") {
+		return nil, fmt.Errorf("invalid email address")
+	}
 	if len(req.Password) < 8 {
 		return nil, fmt.Errorf("password must be at least 8 characters")
 	}
@@ -93,14 +96,16 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 	var passwordHash string
 	var metadataJSON []byte
 
+	var bannedAt *time.Time
+
 	q := fmt.Sprintf(
-		`SELECT id, email, display_name, avatar_url, metadata, password_hash, created_at, updated_at
+		`SELECT id, email, display_name, avatar_url, metadata, password_hash, banned_at, created_at, updated_at
 		 FROM %s.users
 		 WHERE email = $1 AND password_hash IS NOT NULL`,
 		quoteIdent(schemaName),
 	)
 	err := s.pool.QueryRow(ctx, q, email).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &passwordHash, &user.CreatedAt, &user.UpdatedAt)
+		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &passwordHash, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("invalid email or password")
@@ -108,6 +113,10 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 		return nil, fmt.Errorf("query user: %w", err)
 	}
 	_ = json.Unmarshal(metadataJSON, &user.Metadata)
+
+	if bannedAt != nil {
+		return nil, fmt.Errorf("account suspended")
+	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
 		return nil, fmt.Errorf("invalid email or password")

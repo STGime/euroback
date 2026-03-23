@@ -78,6 +78,12 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
 			r.Get("/connect", tenant.HandleConnect(pool))
 
+			// Console end-user management — platform-authenticated.
+			r.Route("/users", func(r chi.Router) {
+				r.Use(tenant.PlatformTenantContext(pool))
+				r.Mount("/", enduser.PlatformRoutes(pool))
+			})
+
 			// Console storage proxy — platform-authenticated access to project storage.
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {

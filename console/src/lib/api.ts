@@ -400,6 +400,50 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- End-User management methods ----
+
+	async listEndUsers(projectId: string, params?: { search?: string; limit?: number; offset?: number }): Promise<EndUserList> {
+		const searchParams = new URLSearchParams();
+		if (params?.search) searchParams.set('search', params.search);
+		if (params?.limit != null) searchParams.set('limit', String(params.limit));
+		if (params?.offset != null) searchParams.set('offset', String(params.offset));
+		const qs = searchParams.toString();
+		return this.fetch<EndUserList>(`/platform/projects/${projectId}/users${qs ? `?${qs}` : ''}`);
+	}
+
+	async createEndUser(projectId: string, data: { email: string; password: string; metadata?: Record<string, any> }): Promise<EndUser> {
+		return this.fetch<EndUser>(`/platform/projects/${projectId}/users`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async updateEndUser(projectId: string, userId: string, data: { email?: string; display_name?: string; metadata?: Record<string, any> }): Promise<EndUser> {
+		return this.fetch<EndUser>(`/platform/projects/${projectId}/users/${userId}`, {
+			method: 'PATCH',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async deleteEndUser(projectId: string, userId: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/users/${userId}`, { method: 'DELETE' });
+	}
+
+	async suspendEndUser(projectId: string, userId: string): Promise<EndUser> {
+		return this.fetch<EndUser>(`/platform/projects/${projectId}/users/${userId}/suspend`, { method: 'POST' });
+	}
+
+	async unsuspendEndUser(projectId: string, userId: string): Promise<EndUser> {
+		return this.fetch<EndUser>(`/platform/projects/${projectId}/users/${userId}/suspend`, { method: 'DELETE' });
+	}
+
+	async resetEndUserPassword(projectId: string, userId: string, password: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/users/${userId}/reset-password`, {
+			method: 'POST',
+			body: JSON.stringify({ password })
+		});
+	}
+
 	// ---- Webhook methods ----
 
 	async listWebhooks(projectId: string): Promise<Webhook[]> {
@@ -442,6 +486,21 @@ export class EurobaseAPI {
 	async getConnectInfo(projectId: string): Promise<ConnectInfo> {
 		return this.fetch<ConnectInfo>(`/platform/projects/${projectId}/connect`);
 	}
+}
+
+export interface EndUser {
+	id: string;
+	email: string;
+	display_name: string | null;
+	metadata: Record<string, any>;
+	banned_at: string | null;
+	last_sign_in_at: string | null;
+	created_at: string;
+}
+
+export interface EndUserList {
+	users: EndUser[];
+	total: number;
 }
 
 export interface Webhook {

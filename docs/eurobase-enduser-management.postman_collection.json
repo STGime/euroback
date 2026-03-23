@@ -1,0 +1,864 @@
+{
+	"info": {
+		"name": "Eurobase API — End-User Management",
+		"description": "Testing collection for the platform end-user management endpoints.\n\nPrerequisites:\n1. Gateway running: go run ./cmd/gateway/\n2. Either set platform_token in your environment manually, or run request '0. Login' first.\n3. Set project_id in the environment or collection variables.\n4. Migration 000011 applied (banned_at column).\n\nAuth: Uses {{platform_token}} from the Eurobase Local environment.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080"
+		},
+		{
+			"key": "project_id",
+			"value": "",
+			"description": "Set this to your project ID"
+		},
+		{
+			"key": "user_id_alice",
+			"value": "",
+			"description": "Auto-set by Create User (Alice) test script"
+		},
+		{
+			"key": "user_id_bob",
+			"value": "",
+			"description": "Auto-set by Create User (Bob) test script"
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{platform_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "CRUD & Validation",
+			"description": "Basic create, read, list, delete operations and input validation.",
+			"item": [
+				{
+					"name": "1. List Users (empty)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						},
+						"description": "List all end-users in the project. Should be empty initially."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns paginated response with empty users', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.have.property('users');",
+									"    pm.expect(body).to.have.property('total');",
+									"    pm.expect(body.users).to.be.an('array');",
+									"    pm.expect(body.users).to.have.length(0);",
+									"    pm.expect(body.total).to.eql(0);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create User — Alice (with metadata)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						},
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"alice@example.com\",\n    \"password\": \"securepass123\",\n    \"metadata\": {\"role\": \"admin\", \"company\": \"Acme\"}\n}"
+						},
+						"description": "Create an end-user with email, password, and metadata. User is pre-confirmed (admin invite)."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns user with metadata', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.have.property('id');",
+									"    pm.expect(body.email).to.eql('alice@example.com');",
+									"    pm.expect(body).to.have.property('metadata');",
+									"    pm.expect(body.metadata.role).to.eql('admin');",
+									"    pm.expect(body.metadata.company).to.eql('Acme');",
+									"    pm.expect(body).to.have.property('banned_at');",
+									"    pm.expect(body.banned_at).to.be.null;",
+									"    pm.expect(body).to.not.have.property('password_hash');",
+									"    pm.collectionVariables.set('user_id_alice', body.id);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Create User — Bob",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						},
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"bob@example.com\",\n    \"password\": \"anothersecure1\"\n}"
+						},
+						"description": "Create a second user without metadata to verify defaults."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns bob with empty metadata', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.email).to.eql('bob@example.com');",
+									"    pm.expect(body.metadata).to.deep.eql({});",
+									"    pm.collectionVariables.set('user_id_bob', body.id);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "4. List Users (populated)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						},
+						"description": "List all end-users. Should return 2 users with total count."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns 2 users with total', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.total).to.eql(2);",
+									"    pm.expect(body.users).to.have.length(2);",
+									"});",
+									"pm.test('Users have all expected fields', () => {",
+									"    const user = pm.response.json().users[0];",
+									"    pm.expect(user).to.have.property('id');",
+									"    pm.expect(user).to.have.property('email');",
+									"    pm.expect(user).to.have.property('display_name');",
+									"    pm.expect(user).to.have.property('metadata');",
+									"    pm.expect(user).to.have.property('banned_at');",
+									"    pm.expect(user).to.have.property('last_sign_in_at');",
+									"    pm.expect(user).to.have.property('created_at');",
+									"    pm.expect(user).to.not.have.property('password_hash');",
+									"});",
+									"pm.test('Ordered by created_at DESC (bob first)', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.users[0].email).to.eql('bob@example.com');",
+									"    pm.expect(body.users[1].email).to.eql('alice@example.com');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "5. Get Single User",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}"]
+						},
+						"description": "Get Alice by ID."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns alice with metadata', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.email).to.eql('alice@example.com');",
+									"    pm.expect(body.metadata.role).to.eql('admin');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "6. Duplicate Email (400)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"alice@example.com\",\n    \"password\": \"doesntmatter1\"\n}"
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions duplicate', () => {",
+									"    pm.expect(pm.response.text()).to.include('email already exists');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "7. Short Password (400)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"short@example.com\",\n    \"password\": \"abc\"\n}"
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions password length', () => {",
+									"    pm.expect(pm.response.text()).to.include('at least 8 characters');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "8. Empty Email (400)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"\",\n    \"password\": \"securepass123\"\n}"
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions email required', () => {",
+									"    pm.expect(pm.response.text()).to.include('email is required');",
+									"});"
+								]
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Edit User",
+			"description": "Update user email, display name, and metadata.",
+			"item": [
+				{
+					"name": "9. Update Alice — display name + metadata",
+					"request": {
+						"method": "PATCH",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"display_name\": \"Alice Wonderland\",\n    \"metadata\": {\"role\": \"superadmin\", \"company\": \"Acme\", \"verified\": true}\n}"
+						},
+						"description": "Update Alice's display name and metadata."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Display name updated', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.display_name).to.eql('Alice Wonderland');",
+									"});",
+									"pm.test('Metadata updated', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.metadata.role).to.eql('superadmin');",
+									"    pm.expect(body.metadata.verified).to.be.true;",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "10. Update Alice — change email",
+					"request": {
+						"method": "PATCH",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"alice-new@example.com\"\n}"
+						},
+						"description": "Change Alice's email."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Email changed', () => {",
+									"    pm.expect(pm.response.json().email).to.eql('alice-new@example.com');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "11. Update — duplicate email (400)",
+					"request": {
+						"method": "PATCH",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"bob@example.com\"\n}"
+						},
+						"description": "Try to change Alice's email to Bob's — should fail."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions email taken', () => {",
+									"    pm.expect(pm.response.text()).to.include('email already taken');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "12. Restore Alice email",
+					"request": {
+						"method": "PATCH",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"alice@example.com\"\n}"
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Email restored', () => {",
+									"    pm.expect(pm.response.json().email).to.eql('alice@example.com');",
+									"});"
+								]
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Suspend / Unsuspend",
+			"description": "Suspend and unsuspend users. Suspended users cannot sign in.",
+			"item": [
+				{
+					"name": "13. Suspend Alice",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}/suspend",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}", "suspend"]
+						},
+						"description": "Suspend Alice. Sets banned_at and revokes refresh tokens."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('User is suspended', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.banned_at).to.not.be.null;",
+									"    pm.expect(body.email).to.eql('alice@example.com');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "14. Verify suspended in list",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('banned_at is set', () => {",
+									"    pm.expect(pm.response.json().banned_at).to.not.be.null;",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "15. Suspend already suspended (404)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}/suspend",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}", "suspend"]
+						},
+						"description": "Suspending an already-suspended user should fail."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 404', () => pm.response.to.have.status(404));",
+									"pm.test('Error mentions already suspended', () => {",
+									"    pm.expect(pm.response.text()).to.include('already suspended');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "16. Unsuspend Alice",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}/suspend",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}", "suspend"]
+						},
+						"description": "Unsuspend Alice. Clears banned_at."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('User is no longer suspended', () => {",
+									"    pm.expect(pm.response.json().banned_at).to.be.null;",
+									"});"
+								]
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Password Reset",
+			"description": "Reset an end-user's password from the platform console.",
+			"item": [
+				{
+					"name": "17. Reset Alice password",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}/reset-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}", "reset-password"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"password\": \"newsecurepass456\"\n}"
+						},
+						"description": "Reset Alice's password. All sessions are revoked."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns success status', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('password_reset');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "18. Reset password — too short (400)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}/reset-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}", "reset-password"]
+						},
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"password\": \"short\"\n}"
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions password length', () => {",
+									"    pm.expect(pm.response.text()).to.include('at least 8 characters');",
+									"});"
+								]
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Search & Pagination",
+			"description": "Search users by email/name and paginate results.",
+			"item": [
+				{
+					"name": "19. Search by email",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users?search=alice",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"],
+							"query": [{ "key": "search", "value": "alice" }]
+						},
+						"description": "Search for users matching 'alice'."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns only alice', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.total).to.eql(1);",
+									"    pm.expect(body.users).to.have.length(1);",
+									"    pm.expect(body.users[0].email).to.eql('alice@example.com');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "20. Search by display name",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users?search=Wonderland",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"],
+							"query": [{ "key": "search", "value": "Wonderland" }]
+						},
+						"description": "Search for users matching display name 'Wonderland'."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Finds alice by display name', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.total).to.eql(1);",
+									"    pm.expect(body.users[0].display_name).to.eql('Alice Wonderland');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "21. Search no results",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users?search=nonexistent",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"],
+							"query": [{ "key": "search", "value": "nonexistent" }]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns empty', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.total).to.eql(0);",
+									"    pm.expect(body.users).to.have.length(0);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "22. Pagination — limit 1",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users?limit=1",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"],
+							"query": [{ "key": "limit", "value": "1" }]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns 1 user but total is 2', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.users).to.have.length(1);",
+									"    pm.expect(body.total).to.eql(2);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "23. Pagination — offset 1",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users?limit=1&offset=1",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"],
+							"query": [
+								{ "key": "limit", "value": "1" },
+								{ "key": "offset", "value": "1" }
+							]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns second user (alice)', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.users).to.have.length(1);",
+									"    pm.expect(body.users[0].email).to.eql('alice@example.com');",
+									"    pm.expect(body.total).to.eql(2);",
+									"});"
+								]
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Delete & Not Found",
+			"description": "Delete users and handle not-found cases.",
+			"item": [
+				{
+					"name": "24. Delete Alice",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_alice}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_alice}}"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "25. Delete non-existent (404)",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/00000000-0000-0000-0000-000000000000",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "00000000-0000-0000-0000-000000000000"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 404', () => pm.response.to.have.status(404));",
+									"pm.test('Error says user not found', () => {",
+									"    pm.expect(pm.response.text()).to.include('user not found');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "26. Cleanup — Delete Bob",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id_bob}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id_bob}}"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "27. List Users (empty again)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns empty', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.total).to.eql(0);",
+									"    pm.expect(body.users).to.have.length(0);",
+									"});"
+								]
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}
