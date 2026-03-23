@@ -7,7 +7,8 @@
 		loading = false,
 		selectedIds = $bindable<Set<string>>(new Set()),
 		onUpdateCell,
-		onDeleteRow
+		onDeleteRow,
+		onEditColumn
 	}: {
 		columns: ColumnInfo[];
 		rows: any[];
@@ -15,6 +16,7 @@
 		selectedIds?: Set<string>;
 		onUpdateCell?: (rowId: string, column: string, value: any) => Promise<void>;
 		onDeleteRow?: (row: any) => void;
+		onEditColumn?: (col: ColumnInfo) => void;
 	} = $props();
 
 	let copiedId: string | null = $state(null);
@@ -212,13 +214,25 @@
 					<th
 						class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500"
 					>
-						<div class="flex items-center gap-2">
+						<div class="group/col flex items-center gap-2">
 							<span>{col.name}</span>
 							<span
 								class="inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap {typeBadgeColor(shortType(col.data_type))}"
 							>
 								{shortType(col.data_type)}
 							</span>
+							{#if onEditColumn}
+								<button
+									type="button"
+									class="cursor-pointer opacity-0 group-hover/col:opacity-100 rounded p-0.5 text-gray-400 hover:text-eurobase-600 hover:bg-eurobase-50 transition-all"
+									onclick={(e) => { e.stopPropagation(); onEditColumn(col); }}
+									title="Edit column"
+								>
+									<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+										<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125" />
+									</svg>
+								</button>
+							{/if}
 						</div>
 					</th>
 				{/each}

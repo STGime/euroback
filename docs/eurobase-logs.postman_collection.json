@@ -1,0 +1,104 @@
+{
+	"info": {
+		"name": "Eurobase - Logs",
+		"description": "Tests for the request logs endpoint: listing, filtering, pagination, and stats.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:8080" },
+		{ "key": "project_id", "value": "YOUR_PROJECT_ID" },
+		{ "key": "token", "value": "YOUR_JWT_TOKEN" }
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [{ "key": "token", "value": "{{token}}" }]
+	},
+	"item": [
+		{
+			"name": "List Logs - Empty",
+			"request": {
+				"method": "GET",
+				"url": "{{base_url}}/platform/projects/{{project_id}}/logs"
+			}
+		},
+		{
+			"name": "List Logs - With Data",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/logs?limit=10",
+					"query": [{ "key": "limit", "value": "10" }]
+				}
+			}
+		},
+		{
+			"name": "Filter by Method (GET)",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/logs?method=GET",
+					"query": [{ "key": "method", "value": "GET" }]
+				}
+			}
+		},
+		{
+			"name": "Filter by Status (4xx)",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/logs?status_min=400&status_max=499",
+					"query": [
+						{ "key": "status_min", "value": "400" },
+						{ "key": "status_max", "value": "499" }
+					]
+				}
+			}
+		},
+		{
+			"name": "Filter by Path",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/logs?path=/schema",
+					"query": [{ "key": "path", "value": "/schema" }]
+				}
+			}
+		},
+		{
+			"name": "Filter by Date Range",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/logs?from=2026-03-01T00:00:00Z&to=2026-03-31T23:59:59Z",
+					"query": [
+						{ "key": "from", "value": "2026-03-01T00:00:00Z" },
+						{ "key": "to", "value": "2026-03-31T23:59:59Z" }
+					]
+				}
+			}
+		},
+		{
+			"name": "Pagination - Page 2",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/logs?limit=10&offset=10",
+					"query": [
+						{ "key": "limit", "value": "10" },
+						{ "key": "offset", "value": "10" }
+					]
+				}
+			}
+		},
+		{
+			"name": "Stats Aggregation",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/logs?limit=1",
+					"query": [{ "key": "limit", "value": "1" }]
+				}
+			}
+		}
+	]
+}

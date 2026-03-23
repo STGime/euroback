@@ -1,16 +1,34 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getContext } from 'svelte';
+	import { api } from '$lib/api.js';
 
 	let projectId = $derived($page.params.id);
 	let ctx: { project: import('$lib/api.js').Project | null } = getContext('projectId');
 	let project = $derived(ctx.project);
 
-	const stats = [
-		{ label: 'Tables', value: '—', icon: 'table' },
+	let tableCount = $state('—');
+	let requestCount = $state('—');
+
+	onMount(async () => {
+		try {
+			const [schema, logs] = await Promise.all([
+				api.getSchema(projectId),
+				api.getLogs(projectId, { limit: 1 })
+			]);
+			tableCount = String(schema.length);
+			requestCount = logs.stats.total_requests.toLocaleString();
+		} catch {
+			// Keep placeholder values on error.
+		}
+	});
+
+	let stats = $derived([
+		{ label: 'Tables', value: tableCount, icon: 'table' },
 		{ label: 'Storage used', value: '—', icon: 'storage' },
-		{ label: 'API requests today', value: '—', icon: 'api' }
-	];
+		{ label: 'API requests', value: requestCount, icon: 'api' }
+	]);
 
 	let quickActions = $derived([
 		{ label: 'Open Database', href: `/p/${projectId}/database`, color: 'eurobase' },

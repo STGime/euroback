@@ -118,11 +118,17 @@ func main() {
 	}
 	_ = rtBridge // Available for cross-instance fan-out via EventPublisher.
 
+	// ── Set up request log pipeline ──
+	logCh := make(chan gateway.LogEntry, 10000)
+	gateway.StartLogWriter(ctx, pool, logCh)
+	gateway.StartLogCleanup(ctx, pool)
+	slog.Info("request logging pipeline started")
+
 	// ── Dev mode: bypass platform auth for local testing ──
 	devMode := os.Getenv("DEV_MODE") == "true"
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

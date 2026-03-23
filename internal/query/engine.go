@@ -127,25 +127,30 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 
 // InsertRow builds and executes a parameterized INSERT ... RETURNING * query.
 func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName string, data map[string]interface{}) (map[string]interface{}, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("no data provided for insert")
-	}
-
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
 		return nil, err
 	}
 
-	// Validate columns.
-	cols := make([]string, 0, len(data))
-	for k := range data {
-		cols = append(cols, k)
-	}
-	if err := ValidateColumns(ctx, e.pool, schemaName, tableName, cols); err != nil {
-		return nil, err
+	var sql string
+	var args []interface{}
+
+	if len(data) == 0 {
+		// All columns have defaults — use DEFAULT VALUES.
+		qt := qualifiedTable(schemaName, tableName)
+		sql = fmt.Sprintf("INSERT INTO %s DEFAULT VALUES RETURNING *", qt)
+	} else {
+		// Validate columns.
+		cols := make([]string, 0, len(data))
+		for k := range data {
+			cols = append(cols, k)
+		}
+		if err := ValidateColumns(ctx, e.pool, schemaName, tableName, cols); err != nil {
+			return nil, err
+		}
+		sql, args = buildInsertQuery(schemaName, tableName, data)
 	}
 
-	sql, args := buildInsertQuery(schemaName, tableName, data)
 	slog.Debug("executing insert query", "sql", sql, "args_count", len(args))
 
 	rows, err := e.pool.Query(ctx, sql, args...)

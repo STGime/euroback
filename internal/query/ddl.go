@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 
@@ -278,6 +279,195 @@ func DropColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, 
 	sql := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", qt, quoteIdent(columnName))
 	if _, err := pool.Exec(ctx, sql); err != nil {
 		return fmt.Errorf("drop column: %w", err)
+	}
+
+	return nil
+}
+
+// RenameTable renames a table and its RLS policy.
+func RenameTable(ctx context.Context, pool *pgxpool.Pool, schemaName, oldName, newName string) error {
+	if err := validateIdentifier(oldName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(newName, "table"); err != nil {
+		return err
+	}
+	if reservedTableNames[oldName] {
+		return fmt.Errorf("cannot rename system table %q", oldName)
+	}
+	if reservedTableNames[newName] {
+		return fmt.Errorf("cannot rename to reserved table name %q", newName)
+	}
+	if oldName == newName {
+		return fmt.Errorf("new name is the same as the current name")
+	}
+
+	if err := ValidateTable(ctx, pool, schemaName, oldName); err != nil {
+		return err
+	}
+
+	// Check new name doesn't already exist.
+	var exists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables WHERE schemaname = $1 AND tablename = $2)`,
+		schemaName, newName,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check table existence: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("table %s already exists", newName)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	qt := qualifiedTable(schemaName, oldName)
+	renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", qt, quoteIdent(newName))
+	if _, err := tx.Exec(ctx, renameSQL); err != nil {
+		return fmt.Errorf("rename table: %w", err)
+	}
+
+	// Rename the RLS policy (best-effort via savepoint so failure doesn't abort the tx).
+	oldPolicy := fmt.Sprintf("tenant_isolation_%s", oldName)
+	newPolicy := fmt.Sprintf("tenant_isolation_%s", newName)
+	newQt := qualifiedTable(schemaName, newName)
+	if _, err := tx.Exec(ctx, "SAVEPOINT rename_policy"); err == nil {
+		policySQL := fmt.Sprintf("ALTER POLICY %s ON %s RENAME TO %s", quoteIdent(oldPolicy), newQt, quoteIdent(newPolicy))
+		if _, err := tx.Exec(ctx, policySQL); err != nil {
+			slog.Warn("failed to rename RLS policy (non-fatal)", "error", err)
+			tx.Exec(ctx, "ROLLBACK TO SAVEPOINT rename_policy") //nolint:errcheck
+		} else {
+			tx.Exec(ctx, "RELEASE SAVEPOINT rename_policy") //nolint:errcheck
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	return nil
+}
+
+// RenameColumn renames a column in a table.
+func RenameColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, oldCol, newCol string) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(oldCol, "column"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(newCol, "column"); err != nil {
+		return err
+	}
+	if oldCol == newCol {
+		return fmt.Errorf("new column name is the same as the current name")
+	}
+
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, tableName, []string{oldCol}); err != nil {
+		return err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	sql := fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", qt, quoteIdent(oldCol), quoteIdent(newCol))
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("rename column: %w", err)
+	}
+
+	return nil
+}
+
+// AlterColumnType changes the data type of a column.
+func AlterColumnType(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, col, newType string) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(col, "column"); err != nil {
+		return err
+	}
+	if err := validateColumnType(newType); err != nil {
+		return err
+	}
+
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, tableName, []string{col}); err != nil {
+		return err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s",
+		qt, quoteIdent(col), strings.ToUpper(newType), quoteIdent(col), strings.ToUpper(newType))
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("alter column type: %w", err)
+	}
+
+	return nil
+}
+
+// AlterColumnNullable sets or drops the NOT NULL constraint on a column.
+func AlterColumnNullable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, col string, nullable bool) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(col, "column"); err != nil {
+		return err
+	}
+
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, tableName, []string{col}); err != nil {
+		return err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	action := "SET NOT NULL"
+	if nullable {
+		action = "DROP NOT NULL"
+	}
+	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s", qt, quoteIdent(col), action)
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("alter column nullable: %w", err)
+	}
+
+	return nil
+}
+
+// AlterColumnDefault sets or drops the default value of a column.
+func AlterColumnDefault(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, col string, defaultVal *string) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(col, "column"); err != nil {
+		return err
+	}
+
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, tableName, []string{col}); err != nil {
+		return err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	var sql string
+	if defaultVal == nil {
+		sql = fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT", qt, quoteIdent(col))
+	} else {
+		if err := validateDefault(*defaultVal); err != nil {
+			return err
+		}
+		sql = fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", qt, quoteIdent(col), *defaultVal)
+	}
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("alter column default: %w", err)
 	}
 
 	return nil

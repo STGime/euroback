@@ -256,6 +256,33 @@ export class EurobaseAPI {
 		});
 	}
 
+	/** Rename a table. */
+	async renameTable(projectId: string, tableName: string, newName: string): Promise<{ status: string; old_name: string; new_name: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}`, {
+			method: 'PATCH',
+			body: JSON.stringify({ new_name: newName })
+		});
+	}
+
+	/** Alter a column (rename, change type, toggle nullable, set/drop default). */
+	async alterColumn(
+		projectId: string,
+		tableName: string,
+		columnName: string,
+		changes: {
+			new_name?: string;
+			new_type?: string;
+			nullable?: boolean;
+			default_value?: string;
+			drop_default?: boolean;
+		}
+	): Promise<{ status: string; column: string; changes: Record<string, any> }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}/columns/${columnName}`, {
+			method: 'PATCH',
+			body: JSON.stringify(changes)
+		});
+	}
+
 	/** Query rows from a table with optional filtering, sorting, and pagination. */
 	async queryTable(
 		projectId: string,
@@ -486,6 +513,33 @@ export class EurobaseAPI {
 	async getConnectInfo(projectId: string): Promise<ConnectInfo> {
 		return this.fetch<ConnectInfo>(`/platform/projects/${projectId}/connect`);
 	}
+
+	/** Get request logs for a project. */
+	async getLogs(
+		projectId: string,
+		params?: {
+			limit?: number;
+			offset?: number;
+			method?: string;
+			status_min?: number;
+			status_max?: number;
+			path?: string;
+			from?: string;
+			to?: string;
+		}
+	): Promise<LogsResponse> {
+		const searchParams = new URLSearchParams();
+		if (params?.limit != null) searchParams.set('limit', String(params.limit));
+		if (params?.offset != null) searchParams.set('offset', String(params.offset));
+		if (params?.method) searchParams.set('method', params.method);
+		if (params?.status_min != null) searchParams.set('status_min', String(params.status_min));
+		if (params?.status_max != null) searchParams.set('status_max', String(params.status_max));
+		if (params?.path) searchParams.set('path', params.path);
+		if (params?.from) searchParams.set('from', params.from);
+		if (params?.to) searchParams.set('to', params.to);
+		const qs = searchParams.toString();
+		return this.fetch<LogsResponse>(`/platform/projects/${projectId}/logs${qs ? `?${qs}` : ''}`);
+	}
 }
 
 export interface EndUser {
@@ -557,6 +611,31 @@ export interface SchemaChange {
 	detail: any;
 	sql_text: string | null;
 	created_at: string;
+}
+
+export interface RequestLog {
+	id: string;
+	project_id: string;
+	method: string;
+	path: string;
+	status_code: number;
+	latency_ms: number;
+	ip_address: string;
+	user_agent: string;
+	created_at: string;
+}
+
+export interface LogStats {
+	total_requests: number;
+	error_count: number;
+	avg_latency_ms: number;
+	p95_latency_ms: number;
+}
+
+export interface LogsResponse {
+	logs: RequestLog[];
+	total: number;
+	stats: LogStats;
 }
 
 export const api = new EurobaseAPI();

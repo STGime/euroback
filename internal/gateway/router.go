@@ -26,7 +26,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -70,6 +70,10 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			} else {
 				r.Use(platformAuth.Handler)
 			}
+			if logCh != nil {
+				r.Use(RequestLoggingMiddleware(logCh))
+			}
+			r.Get("/logs", HandleLogs(pool))
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
 			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
 			r.Mount("/schema/tables", query.HandleDDL(pool))

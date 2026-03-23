@@ -1,0 +1,126 @@
+{
+	"info": {
+		"name": "Eurobase - Schema Editing",
+		"description": "Tests for schema editing operations: rename table, alter column (rename, type change, nullable, default).",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:8080" },
+		{ "key": "project_id", "value": "YOUR_PROJECT_ID" },
+		{ "key": "token", "value": "YOUR_JWT_TOKEN" }
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [{ "key": "token", "value": "{{token}}" }]
+	},
+	"item": [
+		{
+			"name": "Rename Table - Happy Path",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/old_table_name",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"new_name\": \"new_table_name\"}"
+				}
+			}
+		},
+		{
+			"name": "Rename Table - Reserved Table Error",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/storage_objects",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"new_name\": \"my_storage\"}"
+				}
+			}
+		},
+		{
+			"name": "Rename Table - Duplicate Name Error",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/table_a",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"new_name\": \"table_b\"}"
+				}
+			}
+		},
+		{
+			"name": "Alter Column - Rename",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/my_table/columns/old_col",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"new_name\": \"new_col\"}"
+				}
+			}
+		},
+		{
+			"name": "Alter Column - Change Type",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/my_table/columns/my_col",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"new_type\": \"bigint\"}"
+				}
+			}
+		},
+		{
+			"name": "Alter Column - Toggle Nullable",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/my_table/columns/my_col",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"nullable\": true}"
+				}
+			}
+		},
+		{
+			"name": "Alter Column - Set Default",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/my_table/columns/my_col",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"default_value\": \"0\"}"
+				}
+			}
+		},
+		{
+			"name": "Alter Column - Drop Default",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/my_table/columns/my_col",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"drop_default\": true}"
+				}
+			}
+		},
+		{
+			"name": "Alter Column - Invalid Type Error",
+			"request": {
+				"method": "PATCH",
+				"header": [{ "key": "Content-Type", "value": "application/json" }],
+				"url": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/my_table/columns/my_col",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"new_type\": \"money\"}"
+				}
+			}
+		}
+	]
+}

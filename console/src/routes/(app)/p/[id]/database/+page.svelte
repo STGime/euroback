@@ -4,6 +4,8 @@
 	import { api, type TableSchema, type ColumnInfo } from '$lib/api.js';
 	import DataGrid from '$lib/components/DataGrid.svelte';
 	import NewTableModal from './NewTableModal.svelte';
+	import RenameTableModal from './RenameTableModal.svelte';
+	import ColumnEditModal from './ColumnEditModal.svelte';
 
 	let projectId = $derived($page.params.id);
 
@@ -45,6 +47,14 @@
 	let showDeleteConfirm: any = $state(null);
 	let showDropTableConfirm: string | null = $state(null);
 	let dropTableError: string | null = $state(null);
+
+	// ---- Rename table modal ----
+	let showRenameTableModal = $state(false);
+	let renameTableTarget: string | null = $state(null);
+
+	// ---- Column edit modal ----
+	let showColumnEditModal = $state(false);
+	let editColumnTarget: ColumnInfo | null = $state(null);
 
 	// ---- Pagination ----
 	let pageStart = $derived(totalCount > 0 ? currentOffset + 1 : 0);
@@ -380,6 +390,18 @@
 							</svg>
 							System table
 						</span>
+					{:else}
+						<button
+							type="button"
+							class="cursor-pointer inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors"
+							onclick={() => { renameTableTarget = selectedTable; showRenameTableModal = true; }}
+							title="Rename table"
+						>
+							<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125" />
+							</svg>
+							Rename
+						</button>
 					{/if}
 					<span class="text-xs text-gray-400">
 						{selectedSchema.columns.length} columns / {totalCount} rows
@@ -501,6 +523,10 @@
 					onDeleteRow={isSystemTable ? undefined : (row) => {
 						showDeleteConfirm = row;
 					}}
+					onEditColumn={isSystemTable ? undefined : (col) => {
+						editColumnTarget = col;
+						showColumnEditModal = true;
+					}}
 				/>
 			</div>
 
@@ -563,6 +589,35 @@
 	onClose={() => (showNewTableModal = false)}
 	onCreate={handleTableCreated}
 />
+
+<!-- Rename Table Modal -->
+{#if renameTableTarget}
+	<RenameTableModal
+		open={showRenameTableModal}
+		tableName={renameTableTarget}
+		{projectId}
+		onClose={() => { showRenameTableModal = false; renameTableTarget = null; }}
+		onRenamed={async (newName) => {
+			await loadSchema();
+			selectTableAndLoad(newName);
+		}}
+	/>
+{/if}
+
+<!-- Column Edit Modal -->
+{#if editColumnTarget && selectedTable}
+	<ColumnEditModal
+		open={showColumnEditModal}
+		column={editColumnTarget}
+		tableName={selectedTable}
+		{projectId}
+		onClose={() => { showColumnEditModal = false; editColumnTarget = null; }}
+		onSaved={async () => {
+			await loadSchema();
+			if (selectedTable) loadTableData();
+		}}
+	/>
+{/if}
 
 <!-- Insert Row Modal -->
 {#if showInsertModal && selectedSchema}
