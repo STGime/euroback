@@ -65,6 +65,58 @@ func HandleTableDelete(engine *QueryEngine, pub *realtime.EventPublisher) http.H
 	return handleDeleteRow(engine, pub)
 }
 
+// HandleTableBulkDelete returns the handler for POST /v1/db/{table}/bulk-delete.
+func HandleTableBulkDelete(engine *QueryEngine, pub *realtime.EventPublisher) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		schema := SchemaFromContext(r.Context())
+		if schema == "" {
+			jsonError(w, "tenant context not available", http.StatusBadRequest)
+			return
+		}
+
+		tableName := chi.URLParam(r, "table")
+		if tableName == "" {
+			jsonError(w, "table name is required", http.StatusBadRequest)
+			return
+		}
+
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(body.IDs) == 0 {
+			jsonError(w, "ids array is required", http.StatusBadRequest)
+			return
+		}
+		if len(body.IDs) > 1000 {
+			jsonError(w, "maximum 1000 IDs per request", http.StatusBadRequest)
+			return
+		}
+
+		deleted, err := engine.DeleteRows(r.Context(), schema, tableName, body.IDs)
+		if err != nil {
+			slog.Error("bulk delete failed", "error", err, "schema", schema, "table", tableName)
+			if !handleQueryError(w, err) {
+				jsonError(w, "internal server error", http.StatusInternalServerError)
+			}
+			return
+		}
+
+		if pub != nil {
+			for _, id := range body.IDs {
+				_ = pub.PublishDelete(r.Context(), schema, tableName, map[string]interface{}{"id": id})
+			}
+		}
+
+		slog.Debug("bulk delete complete", "schema", schema, "table", tableName, "deleted", deleted)
+		jsonResponse(w, map[string]interface{}{"deleted": deleted}, http.StatusOK)
+	}
+}
+
 // HandleRPC returns an http.HandlerFunc for POST /v1/db/rpc/{function}.
 func HandleRPC(engine *QueryEngine) chi.Router {
 	r := chi.NewRouter()
@@ -101,10 +153,11 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// For each table, get column info.
+		// For each table, get column info enriched with constraints and indexes.
 		type TableSchema struct {
 			Name    string       `json:"name"`
 			Columns []ColumnInfo `json:"columns"`
+			Indexes []IndexInfo  `json:"indexes,omitempty"`
 		}
 
 		result := make([]TableSchema, 0, len(tables))
@@ -115,7 +168,19 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			result = append(result, TableSchema{Name: t, Columns: cols})
+			cols, err = GetTableConstraints(r.Context(), pool, schemaName, t, cols)
+			if err != nil {
+				slog.Error("failed to get table constraints", "error", err, "schema", schemaName, "table", t)
+				jsonError(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			indexes, err := GetTableIndexes(r.Context(), pool, schemaName, t)
+			if err != nil {
+				slog.Error("failed to get table indexes", "error", err, "schema", schemaName, "table", t)
+				jsonError(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			result = append(result, TableSchema{Name: t, Columns: cols, Indexes: indexes})
 		}
 
 		slog.Debug("schema introspection complete", "project_id", projectID, "schema", schemaName, "table_count", len(result))

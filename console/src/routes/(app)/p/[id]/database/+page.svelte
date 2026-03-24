@@ -3,6 +3,7 @@
 	import { page } from '$app/stores';
 	import { api, type TableSchema, type ColumnInfo } from '$lib/api.js';
 	import DataGrid from '$lib/components/DataGrid.svelte';
+	import IndexPanel from './IndexPanel.svelte';
 	import NewTableModal from './NewTableModal.svelte';
 	import RenameTableModal from './RenameTableModal.svelte';
 	import ColumnEditModal from './ColumnEditModal.svelte';
@@ -55,6 +56,24 @@
 	// ---- Column edit modal ----
 	let showColumnEditModal = $state(false);
 	let editColumnTarget: ColumnInfo | null = $state(null);
+
+	// ---- Add column modal ----
+	let showAddColumnModal = $state(false);
+	let addColName = $state('');
+	let addColType = $state('text');
+	let addColNullable = $state(true);
+	let addColUnique = $state(false);
+	let addColDefault = $state('');
+	let addColError: string | null = $state(null);
+	let addColSaving = $state(false);
+
+	// ---- Bulk delete ----
+	let showBulkDeleteConfirm = $state(false);
+	let bulkDeleteError: string | null = $state(null);
+
+	// ---- Drop column confirm ----
+	let showDropColumnConfirm: ColumnInfo | null = $state(null);
+	let dropColumnError: string | null = $state(null);
 
 	// ---- Pagination ----
 	let pageStart = $derived(totalCount > 0 ? currentOffset + 1 : 0);
@@ -252,7 +271,7 @@
 		}
 	}
 
-	async function handleTableCreated(tableName: string, columns: { name: string; type: string; nullable: boolean; defaultValue: string; isPrimaryKey: boolean }[]) {
+	async function handleTableCreated(tableName: string, columns: { name: string; type: string; nullable: boolean; defaultValue: string; isPrimaryKey: boolean; isUnique?: boolean; fkTable?: string; fkColumn?: string; fkOnDelete?: string }[]) {
 		await api.createTable(
 			projectId,
 			tableName,
@@ -261,7 +280,14 @@
 				type: c.type,
 				nullable: c.nullable,
 				default_value: c.defaultValue || undefined,
-				is_primary_key: c.isPrimaryKey
+				is_primary_key: c.isPrimaryKey,
+				is_unique: c.isUnique || false,
+				foreign_key: c.fkTable && c.fkColumn ? {
+					column: c.name,
+					referenced_table: c.fkTable,
+					referenced_column: c.fkColumn,
+					on_delete: c.fkOnDelete || 'NO ACTION'
+				} : undefined
 			}))
 		);
 		showNewTableModal = false;
@@ -290,6 +316,79 @@
 			const jsonMatch = msg.match(/\{"error":"(.+?)"\}/);
 			if (jsonMatch) msg = jsonMatch[1];
 			dropTableError = msg;
+		}
+	}
+
+	const pgTypes = [
+		'text', 'integer', 'bigint', 'smallint', 'boolean', 'uuid',
+		'timestamp', 'timestamptz', 'jsonb', 'json', 'real', 'numeric',
+		'date', 'time', 'bytea', 'serial', 'bigserial',
+		'double precision', 'character varying', 'varchar'
+	];
+
+	function openAddColumnModal() {
+		addColName = '';
+		addColType = 'text';
+		addColNullable = true;
+		addColUnique = false;
+		addColDefault = '';
+		addColError = null;
+		showAddColumnModal = true;
+	}
+
+	async function handleAddColumn() {
+		if (!selectedTable || !addColName.trim()) return;
+		addColSaving = true;
+		addColError = null;
+		try {
+			await api.addColumn(projectId, selectedTable, {
+				name: addColName.trim(),
+				type: addColType,
+				nullable: addColNullable,
+				default_value: addColDefault || undefined
+			});
+			if (addColUnique) {
+				await api.addUniqueConstraint(projectId, selectedTable, addColName.trim());
+			}
+			showAddColumnModal = false;
+			await loadSchema();
+			if (selectedTable) loadTableData();
+		} catch (err) {
+			const raw = err instanceof Error ? err.message : String(err);
+			const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
+			addColError = jsonMatch ? jsonMatch[1] : raw;
+		} finally {
+			addColSaving = false;
+		}
+	}
+
+	async function handleDropColumn() {
+		if (!selectedTable || !showDropColumnConfirm) return;
+		dropColumnError = null;
+		try {
+			await api.dropColumn(projectId, selectedTable, showDropColumnConfirm.name);
+			showDropColumnConfirm = null;
+			await loadSchema();
+			if (selectedTable) loadTableData();
+		} catch (err) {
+			const raw = err instanceof Error ? err.message : String(err);
+			const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
+			dropColumnError = jsonMatch ? jsonMatch[1] : raw;
+		}
+	}
+
+	async function handleBulkDelete() {
+		if (!selectedTable || selectedIds.size === 0) return;
+		bulkDeleteError = null;
+		try {
+			await api.bulkDeleteRows(projectId, selectedTable, Array.from(selectedIds));
+			showBulkDeleteConfirm = false;
+			selectedIds = new Set();
+			void loadTableData();
+		} catch (err) {
+			const raw = err instanceof Error ? err.message : String(err);
+			const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
+			bulkDeleteError = jsonMatch ? jsonMatch[1] : raw;
 		}
 	}
 
@@ -429,6 +528,18 @@
 						</svg>
 						Refresh
 					</button>
+					{#if !isSystemTable}
+						<button
+							type="button"
+							class="cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+							onclick={openAddColumnModal}
+						>
+							<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+							</svg>
+							Add Column
+						</button>
+					{/if}
 					<button
 						type="button"
 						class="cursor-pointer inline-flex items-center gap-1.5 rounded-lg bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors"
@@ -498,6 +609,15 @@
 					<span class="text-sm font-medium text-eurobase-700">
 						{selectedIds.size} {selectedIds.size === 1 ? 'row' : 'rows'} selected
 					</span>
+					{#if !isSystemTable}
+						<button
+							type="button"
+							class="cursor-pointer rounded-md border border-red-300 bg-white px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
+							onclick={() => { showBulkDeleteConfirm = true; bulkDeleteError = null; }}
+						>
+							Delete Selected
+						</button>
+					{/if}
 					<button
 						type="button"
 						class="cursor-pointer rounded-md border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
@@ -527,8 +647,23 @@
 						editColumnTarget = col;
 						showColumnEditModal = true;
 					}}
+					onDropColumn={isSystemTable ? undefined : (col) => {
+						showDropColumnConfirm = col;
+						dropColumnError = null;
+					}}
 				/>
 			</div>
+
+			<!-- Index Panel -->
+			{#if !isSystemTable && selectedTable && selectedSchema}
+				<IndexPanel
+					{projectId}
+					tableName={selectedTable}
+					columns={selectedSchema.columns}
+					indexes={selectedSchema.indexes ?? []}
+					onChanged={() => loadSchema()}
+				/>
+			{/if}
 
 			<!-- Pagination -->
 			<div class="flex items-center justify-between mt-4 pt-3 border-t border-gray-200">
@@ -588,6 +723,7 @@
 	open={showNewTableModal}
 	onClose={() => (showNewTableModal = false)}
 	onCreate={handleTableCreated}
+	{tables}
 />
 
 <!-- Rename Table Modal -->
@@ -611,12 +747,230 @@
 		column={editColumnTarget}
 		tableName={selectedTable}
 		{projectId}
+		{tables}
 		onClose={() => { showColumnEditModal = false; editColumnTarget = null; }}
 		onSaved={async () => {
 			await loadSchema();
 			if (selectedTable) loadTableData();
 		}}
 	/>
+{/if}
+
+<!-- Add Column Modal -->
+{#if showAddColumnModal && selectedTable}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+		<button
+			type="button"
+			class="fixed inset-0 bg-black/50 cursor-default"
+			onclick={() => (showAddColumnModal = false)}
+			tabindex="-1"
+			aria-label="Close modal"
+		></button>
+		<div class="relative z-10 w-full max-w-md rounded-xl bg-white shadow-2xl">
+			<div class="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+				<h2 class="text-lg font-semibold text-gray-900">Add Column — <span class="font-mono text-eurobase-600">{selectedTable}</span></h2>
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+					onclick={() => (showAddColumnModal = false)}
+					aria-label="Close"
+				>
+					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+			<div class="px-6 py-5 space-y-4">
+				{#if addColError}
+					<div class="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+						<svg class="h-4 w-4 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+						</svg>
+						<p class="text-sm text-red-700">{addColError}</p>
+					</div>
+				{/if}
+				<div>
+					<label class="block text-sm font-medium text-gray-700 mb-1" for="addcol-name">Name</label>
+					<input
+						id="addcol-name"
+						type="text"
+						bind:value={addColName}
+						placeholder="column_name"
+						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none"
+					/>
+				</div>
+				<div>
+					<label class="block text-sm font-medium text-gray-700 mb-1" for="addcol-type">Type</label>
+					<select
+						id="addcol-type"
+						bind:value={addColType}
+						class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+					>
+						{#each pgTypes as t}
+							<option value={t}>{t}</option>
+						{/each}
+					</select>
+				</div>
+				<div class="flex items-center gap-6">
+					<div class="flex items-center gap-3">
+						<input
+							id="addcol-nullable"
+							type="checkbox"
+							bind:checked={addColNullable}
+							class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500 cursor-pointer"
+						/>
+						<label for="addcol-nullable" class="text-sm text-gray-700 cursor-pointer">Nullable</label>
+					</div>
+					<div class="flex items-center gap-3">
+						<input
+							id="addcol-unique"
+							type="checkbox"
+							bind:checked={addColUnique}
+							class="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+						/>
+						<label for="addcol-unique" class="text-sm text-gray-700 cursor-pointer">Unique</label>
+					</div>
+				</div>
+				<div>
+					<label class="block text-sm font-medium text-gray-700 mb-1" for="addcol-default">Default value</label>
+					<input
+						id="addcol-default"
+						type="text"
+						bind:value={addColDefault}
+						placeholder="e.g. now(), 0, 'hello'"
+						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none"
+					/>
+				</div>
+			</div>
+			<div class="flex items-center justify-end gap-3 border-t border-gray-200 px-6 py-4">
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+					onclick={() => (showAddColumnModal = false)}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+					disabled={!addColName.trim() || addColSaving}
+					onclick={handleAddColumn}
+				>
+					{addColSaving ? 'Adding...' : 'Add Column'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Drop Column Confirmation -->
+{#if showDropColumnConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+		<button
+			type="button"
+			class="fixed inset-0 bg-black/50 cursor-default"
+			onclick={() => (showDropColumnConfirm = null)}
+			tabindex="-1"
+			aria-label="Close dialog"
+		></button>
+		<div class="relative z-10 w-full max-w-sm rounded-xl bg-white shadow-2xl p-6">
+			<div class="flex items-center gap-3 mb-4">
+				<div class="flex h-10 w-10 items-center justify-center rounded-full bg-red-100">
+					<svg class="h-5 w-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+				</div>
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Drop Column</h3>
+					<p class="text-xs text-gray-500">This action cannot be undone.</p>
+				</div>
+			</div>
+			{#if dropColumnError}
+				<div class="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+					<svg class="h-4 w-4 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+					</svg>
+					<p class="text-sm text-red-700">{dropColumnError}</p>
+				</div>
+			{/if}
+			<p class="text-sm text-gray-600 mb-5">
+				Are you sure you want to drop column
+				<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono font-semibold">{showDropColumnConfirm.name}</code>
+				from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono font-semibold">{selectedTable}</code>?
+				All data in this column will be permanently deleted.
+			</p>
+			<div class="flex justify-end gap-3">
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+					onclick={() => (showDropColumnConfirm = null)}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
+					onclick={handleDropColumn}
+				>
+					Drop Column
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Bulk Delete Confirmation Dialog -->
+{#if showBulkDeleteConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+		<button
+			type="button"
+			class="fixed inset-0 bg-black/50 cursor-default"
+			onclick={() => (showBulkDeleteConfirm = false)}
+			tabindex="-1"
+			aria-label="Close dialog"
+		></button>
+		<div class="relative z-10 w-full max-w-sm rounded-xl bg-white shadow-2xl p-6">
+			<div class="flex items-center gap-3 mb-4">
+				<div class="flex h-10 w-10 items-center justify-center rounded-full bg-red-100">
+					<svg class="h-5 w-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+				</div>
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Delete {selectedIds.size} {selectedIds.size === 1 ? 'Row' : 'Rows'}</h3>
+					<p class="text-xs text-gray-500">This action cannot be undone.</p>
+				</div>
+			</div>
+			{#if bulkDeleteError}
+				<div class="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+					<svg class="h-4 w-4 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+					</svg>
+					<p class="text-sm text-red-700">{bulkDeleteError}</p>
+				</div>
+			{/if}
+			<p class="text-sm text-gray-600 mb-5">
+				Are you sure you want to delete <strong>{selectedIds.size}</strong> selected {selectedIds.size === 1 ? 'row' : 'rows'}
+				from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono font-semibold">{selectedTable}</code>?
+			</p>
+			<div class="flex justify-end gap-3">
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+					onclick={() => (showBulkDeleteConfirm = false)}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
+					onclick={handleBulkDelete}
+				>
+					Delete {selectedIds.size} {selectedIds.size === 1 ? 'Row' : 'Rows'}
+				</button>
+			</div>
+		</div>
+	</div>
 {/if}
 
 <!-- Insert Row Modal -->

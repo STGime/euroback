@@ -231,6 +231,25 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 	return nil
 }
 
+// DeleteRows deletes multiple rows by ID using ANY($1).
+// Returns the number of rows affected.
+func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) (int64, error) {
+	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
+		return 0, err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1)", qt, quoteIdent("id"))
+	slog.Debug("executing bulk delete", "sql", sql, "id_count", len(ids))
+
+	tag, err := e.pool.Exec(ctx, sql, ids)
+	if err != nil {
+		return 0, fmt.Errorf("execute bulk delete: %w", err)
+	}
+
+	return tag.RowsAffected(), nil
+}
+
 // CallFunction calls a PostgreSQL function via SELECT schema.func(args).
 func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName string, args map[string]interface{}) (interface{}, error) {
 	// Validate function name characters (alphanumeric + underscore only).

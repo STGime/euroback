@@ -1,0 +1,1051 @@
+{
+	"info": {
+		"name": "Eurobase API — Phase 4 (Advanced Schema Management)",
+		"description": "Testing collection for Phase 4: Bulk Delete, Enriched Introspection, Foreign Keys, Unique Constraints, Indexes.\n\nPrerequisites:\n1. Run the Phase 1 collection first (Create Tenant)\n2. Set project_id collection variable\n3. Gateway running in dev mode: DEV_MODE=true go run ./cmd/gateway/\n4. Migration 000014 applied\n\nAll requests use Authorization: Bearer dev for dev mode.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080"
+		},
+		{
+			"key": "auth_token",
+			"value": "dev",
+			"description": "Any value works in dev mode"
+		},
+		{
+			"key": "project_id",
+			"value": "",
+			"description": "Set after creating a tenant via Phase 1"
+		},
+		{
+			"key": "test_row_id_1",
+			"value": "",
+			"description": "Auto-set by insert test"
+		},
+		{
+			"key": "test_row_id_2",
+			"value": "",
+			"description": "Auto-set by insert test"
+		},
+		{
+			"key": "test_row_id_3",
+			"value": "",
+			"description": "Auto-set by insert test"
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{auth_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Setup — Create Test Tables",
+			"description": "Create tables needed for FK, unique, and index tests.",
+			"item": [
+				{
+					"name": "1. Create Table — categories",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"categories\",\n    \"columns\": [\n        {\n            \"name\": \"id\",\n            \"type\": \"uuid\",\n            \"nullable\": false,\n            \"default_value\": \"public.uuid_generate_v4()\",\n            \"is_primary_key\": true\n        },\n        {\n            \"name\": \"name\",\n            \"type\": \"text\",\n            \"nullable\": false,\n            \"is_unique\": true\n        },\n        {\n            \"name\": \"created_at\",\n            \"type\": \"timestamptz\",\n            \"nullable\": false,\n            \"default_value\": \"now()\"\n        }\n    ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						},
+						"description": "Create 'categories' table with a UNIQUE constraint on 'name'."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Table created', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.status).to.eql('created');",
+									"    pm.expect(body.table).to.eql('categories');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create Table — products (with FK)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"products\",\n    \"columns\": [\n        {\n            \"name\": \"id\",\n            \"type\": \"uuid\",\n            \"nullable\": false,\n            \"default_value\": \"public.uuid_generate_v4()\",\n            \"is_primary_key\": true\n        },\n        {\n            \"name\": \"name\",\n            \"type\": \"text\",\n            \"nullable\": false\n        },\n        {\n            \"name\": \"category_id\",\n            \"type\": \"uuid\",\n            \"nullable\": true,\n            \"foreign_key\": {\n                \"column\": \"category_id\",\n                \"referenced_table\": \"categories\",\n                \"referenced_column\": \"id\",\n                \"on_delete\": \"SET NULL\"\n            }\n        },\n        {\n            \"name\": \"sku\",\n            \"type\": \"text\",\n            \"nullable\": false,\n            \"is_unique\": true\n        },\n        {\n            \"name\": \"price\",\n            \"type\": \"numeric\",\n            \"nullable\": false,\n            \"default_value\": \"0\"\n        },\n        {\n            \"name\": \"created_at\",\n            \"type\": \"timestamptz\",\n            \"nullable\": false,\n            \"default_value\": \"now()\"\n        }\n    ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						},
+						"description": "Create 'products' table with FK to categories, UNIQUE on sku."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Table created', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.status).to.eql('created');",
+									"    pm.expect(body.table).to.eql('products');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Insert 3 product rows",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Widget A\",\n    \"sku\": \"WID-001\",\n    \"price\": 9.99\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/products",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "products"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Row created', () => {",
+									"    const body = pm.response.json();",
+									"    pm.collectionVariables.set('test_row_id_1', body.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Insert row 2",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Widget B\",\n    \"sku\": \"WID-002\",\n    \"price\": 14.50\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/products",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "products"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Row created', () => {",
+									"    const body = pm.response.json();",
+									"    pm.collectionVariables.set('test_row_id_2', body.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. Insert row 3",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Widget C\",\n    \"sku\": \"WID-003\",\n    \"price\": 22.00\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/products",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "products"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Row created', () => {",
+									"    const body = pm.response.json();",
+									"    pm.collectionVariables.set('test_row_id_3', body.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "A — Bulk Delete",
+			"description": "Bulk delete rows via POST /{table}/bulk-delete.",
+			"item": [
+				{
+					"name": "1. Bulk Delete — 2 rows",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"ids\": [\"{{test_row_id_1}}\", \"{{test_row_id_2}}\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/products/bulk-delete",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "products", "bulk-delete"]
+						},
+						"description": "Delete 2 product rows by ID."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns deleted count', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.deleted).to.eql(2);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Verify remaining rows",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/products?limit=100",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "products"],
+							"query": [{ "key": "limit", "value": "100" }]
+						},
+						"description": "Should have 1 remaining row."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('1 row remaining', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.count).to.eql(1);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Bulk Delete — empty IDs (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"ids\": []\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/products/bulk-delete",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "products", "bulk-delete"]
+						},
+						"description": "Empty IDs array should be rejected."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions ids', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('ids');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Bulk Delete — nonexistent IDs (returns 0)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"ids\": [\"00000000-0000-0000-0000-000000000099\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/products/bulk-delete",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "products", "bulk-delete"]
+						},
+						"description": "Deleting nonexistent IDs returns deleted=0 (not an error)."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Deleted 0', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.deleted).to.eql(0);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "B — Enriched Introspection",
+			"description": "Verify GET /schema returns PK, FK, unique, and index metadata.",
+			"item": [
+				{
+					"name": "1. Get Schema — enriched",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema"]
+						},
+						"description": "Schema introspection should now include PK, FK, unique, and index data."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('products table has enriched column info', () => {",
+									"    const body = pm.response.json();",
+									"    const products = body.find(t => t.name === 'products');",
+									"    pm.expect(products).to.not.be.undefined;",
+									"",
+									"    // id column should be PK",
+									"    const idCol = products.columns.find(c => c.name === 'id');",
+									"    pm.expect(idCol.is_primary_key).to.eql(true);",
+									"",
+									"    // category_id should have FK",
+									"    const catCol = products.columns.find(c => c.name === 'category_id');",
+									"    pm.expect(catCol.foreign_key).to.not.be.null;",
+									"    pm.expect(catCol.foreign_key.referenced_table).to.eql('categories');",
+									"    pm.expect(catCol.foreign_key.referenced_column).to.eql('id');",
+									"",
+									"    // sku should be unique",
+									"    const skuCol = products.columns.find(c => c.name === 'sku');",
+									"    pm.expect(skuCol.is_unique).to.eql(true);",
+									"});",
+									"pm.test('categories table — name column is unique', () => {",
+									"    const body = pm.response.json();",
+									"    const cat = body.find(t => t.name === 'categories');",
+									"    const nameCol = cat.columns.find(c => c.name === 'name');",
+									"    pm.expect(nameCol.is_unique).to.eql(true);",
+									"});",
+									"pm.test('Tables have indexes array', () => {",
+									"    const body = pm.response.json();",
+									"    const products = body.find(t => t.name === 'products');",
+									"    pm.expect(products.indexes).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "C — Foreign Keys",
+			"description": "Add and drop foreign key constraints. Uses a fresh empty 'orders' table to avoid FK violations from existing data.",
+			"item": [
+				{
+					"name": "0. Create empty orders table for FK tests",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"orders\",\n    \"columns\": [\n        {\n            \"name\": \"id\",\n            \"type\": \"uuid\",\n            \"nullable\": false,\n            \"default_value\": \"public.uuid_generate_v4()\",\n            \"is_primary_key\": true\n        },\n        {\n            \"name\": \"category_id\",\n            \"type\": \"uuid\",\n            \"nullable\": true\n        },\n        {\n            \"name\": \"created_at\",\n            \"type\": \"timestamptz\",\n            \"nullable\": false,\n            \"default_value\": \"now()\"\n        }\n    ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						},
+						"description": "Create an empty 'orders' table so FK add succeeds (no existing rows to violate the constraint)."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "1. Add FK — orders.category_id → categories.id",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"category_id\",\n    \"referenced_table\": \"categories\",\n    \"referenced_column\": \"id\",\n    \"on_delete\": \"CASCADE\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/orders/foreign-keys",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "orders", "foreign-keys"]
+						},
+						"description": "Add a FK from orders.category_id to categories.id with CASCADE. Table is empty so no violation."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns constraint name', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.status).to.eql('created');",
+									"    pm.expect(body.constraint).to.eql('fk_orders_category_id');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Drop FK — fk_orders_category_id",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/orders/constraints/fk_orders_category_id",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "orders", "constraints", "fk_orders_category_id"]
+						},
+						"description": "Drop the FK we just added."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Add FK — invalid referenced table (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"category_id\",\n    \"referenced_table\": \"nonexistent\",\n    \"referenced_column\": \"id\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/orders/foreign-keys",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "orders", "foreign-keys"]
+						},
+						"description": "FK referencing a nonexistent table should fail."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions table', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('does not exist');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Add FK — invalid ON DELETE (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"category_id\",\n    \"referenced_table\": \"categories\",\n    \"referenced_column\": \"id\",\n    \"on_delete\": \"DESTROY\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/orders/foreign-keys",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "orders", "foreign-keys"]
+						},
+						"description": "Invalid ON DELETE action should be rejected."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions ON DELETE', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('ON DELETE');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. Drop constraint — nonexistent (expect 400)",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/orders/constraints/fk_does_not_exist",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "orders", "constraints", "fk_does_not_exist"]
+						},
+						"description": "Dropping a nonexistent constraint should fail."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "D — Unique Constraints",
+			"description": "Add and drop unique constraints.",
+			"item": [
+				{
+					"name": "1. Add Unique — products.price",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"price\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/constraints/unique",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "constraints", "unique"]
+						},
+						"description": "Add a UNIQUE constraint on products.price."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns constraint name', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.status).to.eql('created');",
+									"    pm.expect(body.constraint).to.eql('uq_products_price');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Verify unique in schema",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema"]
+						},
+						"description": "Verify price column now shows is_unique=true."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('price is unique', () => {",
+									"    const body = pm.response.json();",
+									"    const products = body.find(t => t.name === 'products');",
+									"    const priceCol = products.columns.find(c => c.name === 'price');",
+									"    pm.expect(priceCol.is_unique).to.eql(true);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Drop Unique — uq_products_price",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/constraints/uq_products_price",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "constraints", "uq_products_price"]
+						},
+						"description": "Drop the unique constraint on price."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Add Unique — nonexistent column (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"no_such_column\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/constraints/unique",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "constraints", "unique"]
+						},
+						"description": "Unique on nonexistent column should fail."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "E — Indexes",
+			"description": "Create, list, and drop indexes.",
+			"item": [
+				{
+					"name": "1. Create Index — products.price",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"price\",\n    \"unique\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/indexes",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "indexes"]
+						},
+						"description": "Create a non-unique index on products.price."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns index name', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.status).to.eql('created');",
+									"    pm.expect(body.index).to.eql('idx_products_price');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create Unique Index — products.name",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"name\",\n    \"unique\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/indexes",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "indexes"]
+						},
+						"description": "Create a UNIQUE index on products.name."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns index name', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.index).to.eql('idx_products_name');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. List Indexes — products",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/indexes",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "indexes"]
+						},
+						"description": "List all indexes on products table."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array of indexes', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body).to.be.an('array');",
+									"    pm.expect(body.length).to.be.at.least(2);",
+									"});",
+									"pm.test('Indexes have correct structure', () => {",
+									"    const body = pm.response.json();",
+									"    const priceIdx = body.find(i => i.name === 'idx_products_price');",
+									"    pm.expect(priceIdx).to.not.be.undefined;",
+									"    pm.expect(priceIdx.column).to.eql('price');",
+									"    pm.expect(priceIdx.is_unique).to.eql(false);",
+									"",
+									"    const nameIdx = body.find(i => i.name === 'idx_products_name');",
+									"    pm.expect(nameIdx).to.not.be.undefined;",
+									"    pm.expect(nameIdx.is_unique).to.eql(true);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Drop Index — idx_products_price",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/indexes/idx_products_price",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "indexes", "idx_products_price"]
+						},
+						"description": "Drop the price index."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "5. Drop Index — idx_products_name",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/indexes/idx_products_name",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "indexes", "idx_products_name"]
+						},
+						"description": "Drop the name index."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "6. Drop Index — nonexistent (expect 400)",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/indexes/idx_not_real",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "indexes", "idx_not_real"]
+						},
+						"description": "Dropping a nonexistent index should fail."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "7. Create Index — nonexistent column (expect 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"column\": \"no_such_column\",\n    \"unique\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products/indexes",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products", "indexes"]
+						},
+						"description": "Index on nonexistent column should fail."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Schema Change History",
+			"description": "Verify all Phase 4 DDL operations are logged.",
+			"item": [
+				{
+					"name": "1. Get Schema Changes",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/changes",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "changes"]
+						},
+						"description": "Verify new action types appear in schema change history."
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Contains Phase 4 action types', () => {",
+									"    const body = pm.response.json();",
+									"    const actions = body.map(c => c.action);",
+									"    pm.expect(actions).to.include('create_table');",
+									"    // These may appear depending on test order",
+									"    const phase4Actions = ['add_foreign_key', 'drop_foreign_key', 'add_unique_constraint', 'drop_unique_constraint', 'create_index', 'drop_index'];",
+									"    const found = phase4Actions.filter(a => actions.includes(a));",
+									"    pm.expect(found.length).to.be.at.least(1, 'Should have at least one Phase 4 action');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Cleanup",
+			"description": "Drop test tables.",
+			"item": [
+				{
+					"name": "1. Drop Table — orders",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/orders",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "orders"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Drop Table — products",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/products",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "products"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Drop Table — categories",
+					"request": {
+						"method": "DELETE",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables/categories",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables", "categories"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204', () => pm.response.to.have.status(204));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

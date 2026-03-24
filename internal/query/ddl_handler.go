@@ -62,6 +62,18 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r.Delete("/{table}/columns/{column}", handleDropColumn(pool))
 	r.Patch("/{table}/columns/{column}", handleAlterColumn(pool))
 
+	// Foreign keys
+	r.Post("/{table}/foreign-keys", handleAddForeignKey(pool))
+	r.Delete("/{table}/constraints/{constraint}", handleDropConstraint(pool))
+
+	// Unique constraints
+	r.Post("/{table}/constraints/unique", handleAddUniqueConstraint(pool))
+
+	// Indexes
+	r.Get("/{table}/indexes", handleListIndexes(pool))
+	r.Post("/{table}/indexes", handleCreateIndex(pool))
+	r.Delete("/{table}/indexes/{index}", handleDropIndex(pool))
+
 	return r
 }
 
@@ -328,6 +340,235 @@ func handleRenameTable(pool *pgxpool.Pool) http.HandlerFunc {
 			"old_name": tableName,
 			"new_name": req.NewName,
 		}, http.StatusOK)
+	}
+}
+
+func handleAddForeignKey(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		if projectID == "" || tableName == "" {
+			jsonError(w, "project ID and table name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var req ForeignKeyDefinition
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := AddForeignKey(r.Context(), pool, schemaName, tableName, req); err != nil {
+			slog.Error("add foreign key failed", "error", err, "schema", schemaName, "table", tableName)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		colName := req.Column
+		logSchemaChange(pool, r, projectID, "add_foreign_key", tableName, &colName, map[string]any{
+			"referenced_table":  req.ReferencedTable,
+			"referenced_column": req.ReferencedColumn,
+			"on_delete":         req.OnDelete,
+		})
+
+		slog.Info("foreign key added", "schema", schemaName, "table", tableName, "column", req.Column)
+		jsonResponse(w, map[string]string{"status": "created", "constraint": "fk_" + tableName + "_" + req.Column}, http.StatusCreated)
+	}
+}
+
+func handleDropConstraint(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+		constraintName := chi.URLParam(r, "constraint")
+
+		if projectID == "" || tableName == "" || constraintName == "" {
+			jsonError(w, "project ID, table name, and constraint name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		if err := DropConstraint(r.Context(), pool, schemaName, tableName, constraintName); err != nil {
+			slog.Error("drop constraint failed", "error", err, "schema", schemaName, "table", tableName, "constraint", constraintName)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		action := "drop_foreign_key"
+		if len(constraintName) > 3 && constraintName[:3] == "uq_" {
+			action = "drop_unique_constraint"
+		}
+		logSchemaChange(pool, r, projectID, action, tableName, nil, map[string]any{
+			"constraint": constraintName,
+		})
+
+		slog.Info("constraint dropped", "schema", schemaName, "table", tableName, "constraint", constraintName)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleAddUniqueConstraint(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		if projectID == "" || tableName == "" {
+			jsonError(w, "project ID and table name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var req struct {
+			Column string `json:"column"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := AddUniqueConstraint(r.Context(), pool, schemaName, tableName, req.Column); err != nil {
+			slog.Error("add unique constraint failed", "error", err, "schema", schemaName, "table", tableName)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "add_unique_constraint", tableName, &req.Column, nil)
+
+		slog.Info("unique constraint added", "schema", schemaName, "table", tableName, "column", req.Column)
+		jsonResponse(w, map[string]string{"status": "created", "constraint": "uq_" + tableName + "_" + req.Column}, http.StatusCreated)
+	}
+}
+
+func handleListIndexes(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		if projectID == "" || tableName == "" {
+			jsonError(w, "project ID and table name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		indexes, err := GetTableIndexes(r.Context(), pool, schemaName, tableName)
+		if err != nil {
+			slog.Error("list indexes failed", "error", err)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if indexes == nil {
+			indexes = []IndexInfo{}
+		}
+
+		jsonResponse(w, indexes, http.StatusOK)
+	}
+}
+
+func handleCreateIndex(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		if projectID == "" || tableName == "" {
+			jsonError(w, "project ID and table name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var req struct {
+			Column string `json:"column"`
+			Unique bool   `json:"unique"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := CreateIndex(r.Context(), pool, schemaName, tableName, req.Column, req.Unique); err != nil {
+			slog.Error("create index failed", "error", err, "schema", schemaName, "table", tableName)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		colName := req.Column
+		logSchemaChange(pool, r, projectID, "create_index", tableName, &colName, map[string]any{
+			"unique": req.Unique,
+		})
+
+		indexName := "idx_" + tableName + "_" + req.Column
+		slog.Info("index created", "schema", schemaName, "table", tableName, "index", indexName)
+		jsonResponse(w, map[string]string{"status": "created", "index": indexName}, http.StatusCreated)
+	}
+}
+
+func handleDropIndex(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+		indexName := chi.URLParam(r, "index")
+
+		if projectID == "" || tableName == "" || indexName == "" {
+			jsonError(w, "project ID, table name, and index name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		if err := DropIndex(r.Context(), pool, schemaName, indexName); err != nil {
+			slog.Error("drop index failed", "error", err, "schema", schemaName, "index", indexName)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "drop_index", tableName, nil, map[string]any{
+			"index": indexName,
+		})
+
+		slog.Info("index dropped", "schema", schemaName, "index", indexName)
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

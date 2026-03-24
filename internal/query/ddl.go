@@ -18,13 +18,23 @@ var reservedTableNames = map[string]bool{
 	"storage_objects": true,
 }
 
+// ForeignKeyDefinition describes a foreign key to add.
+type ForeignKeyDefinition struct {
+	Column           string `json:"column"`
+	ReferencedTable  string `json:"referenced_table"`
+	ReferencedColumn string `json:"referenced_column"`
+	OnDelete         string `json:"on_delete,omitempty"` // CASCADE, SET NULL, RESTRICT, NO ACTION (default)
+}
+
 // ColumnDefinition describes a column to create.
 type ColumnDefinition struct {
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	Nullable     bool   `json:"nullable"`
-	DefaultValue string `json:"default_value,omitempty"`
-	IsPrimaryKey bool   `json:"is_primary_key"`
+	Name         string                `json:"name"`
+	Type         string                `json:"type"`
+	Nullable     bool                  `json:"nullable"`
+	DefaultValue string                `json:"default_value,omitempty"`
+	IsPrimaryKey bool                  `json:"is_primary_key"`
+	IsUnique     bool                  `json:"is_unique,omitempty"`
+	ForeignKey   *ForeignKeyDefinition `json:"foreign_key,omitempty"`
 }
 
 // allowedTypes are PostgreSQL types that can be used in table creation.
@@ -161,6 +171,15 @@ func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName 
 		colDefs = append(colDefs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pks, ", ")))
 	}
 
+	// Add UNIQUE constraints inline.
+	for _, col := range columns {
+		if col.IsUnique {
+			colDefs = append(colDefs, fmt.Sprintf("CONSTRAINT %s UNIQUE (%s)",
+				quoteIdent(fmt.Sprintf("uq_%s_%s", tableName, col.Name)),
+				quoteIdent(col.Name)))
+		}
+	}
+
 	createSQL := fmt.Sprintf("CREATE TABLE %s (\n  %s\n)", qt, strings.Join(colDefs, ",\n  "))
 
 	// Execute in a transaction: CREATE TABLE + enable RLS + create policy.
@@ -188,6 +207,29 @@ func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName 
 	)
 	if _, err := tx.Exec(ctx, policySQL); err != nil {
 		return fmt.Errorf("create RLS policy: %w", err)
+	}
+
+	// Add foreign key constraints.
+	for _, col := range columns {
+		if col.ForeignKey != nil {
+			fk := col.ForeignKey
+			onDelete := "NO ACTION"
+			if fk.OnDelete != "" {
+				onDelete = strings.ToUpper(fk.OnDelete)
+			}
+			fkSQL := fmt.Sprintf(
+				"ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s.%s(%s) ON DELETE %s",
+				qt,
+				quoteIdent(fmt.Sprintf("fk_%s_%s", tableName, col.Name)),
+				quoteIdent(col.Name),
+				quoteIdent(schemaName), quoteIdent(fk.ReferencedTable),
+				quoteIdent(fk.ReferencedColumn),
+				onDelete,
+			)
+			if _, err := tx.Exec(ctx, fkSQL); err != nil {
+				return fmt.Errorf("add foreign key on %s: %w", col.Name, err)
+			}
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -435,6 +477,147 @@ func AlterColumnNullable(ctx context.Context, pool *pgxpool.Pool, schemaName, ta
 	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s", qt, quoteIdent(col), action)
 	if _, err := pool.Exec(ctx, sql); err != nil {
 		return fmt.Errorf("alter column nullable: %w", err)
+	}
+
+	return nil
+}
+
+// validOnDelete lists the allowed ON DELETE actions for FK constraints.
+var validOnDelete = map[string]bool{
+	"CASCADE": true, "SET NULL": true, "RESTRICT": true, "NO ACTION": true,
+}
+
+// AddForeignKey adds a foreign key constraint to a column.
+func AddForeignKey(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string, fk ForeignKeyDefinition) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(fk.Column, "column"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(fk.ReferencedTable, "referenced table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(fk.ReferencedColumn, "referenced column"); err != nil {
+		return err
+	}
+
+	onDelete := "NO ACTION"
+	if fk.OnDelete != "" {
+		onDelete = strings.ToUpper(fk.OnDelete)
+		if !validOnDelete[onDelete] {
+			return fmt.Errorf("invalid ON DELETE action %q", fk.OnDelete)
+		}
+	}
+
+	// Verify source table/column exist.
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, tableName, []string{fk.Column}); err != nil {
+		return err
+	}
+	// Verify referenced table/column exist.
+	if err := ValidateTable(ctx, pool, schemaName, fk.ReferencedTable); err != nil {
+		return fmt.Errorf("referenced table: %w", err)
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, fk.ReferencedTable, []string{fk.ReferencedColumn}); err != nil {
+		return fmt.Errorf("referenced column: %w", err)
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	constraintName := fmt.Sprintf("fk_%s_%s", tableName, fk.Column)
+
+	sql := fmt.Sprintf(
+		"ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s.%s(%s) ON DELETE %s",
+		qt, quoteIdent(constraintName), quoteIdent(fk.Column),
+		quoteIdent(schemaName), quoteIdent(fk.ReferencedTable), quoteIdent(fk.ReferencedColumn),
+		onDelete,
+	)
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("add foreign key: %w", err)
+	}
+
+	return nil
+}
+
+// DropConstraint drops a named constraint from a table (works for FK and UNIQUE).
+func DropConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, constraintName string) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	sql := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", qt, quoteIdent(constraintName))
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("drop constraint: %w", err)
+	}
+
+	return nil
+}
+
+// AddUniqueConstraint adds a UNIQUE constraint to a column.
+func AddUniqueConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, column string) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(column, "column"); err != nil {
+		return err
+	}
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, tableName, []string{column}); err != nil {
+		return err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	constraintName := fmt.Sprintf("uq_%s_%s", tableName, column)
+	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s)", qt, quoteIdent(constraintName), quoteIdent(column))
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("add unique constraint: %w", err)
+	}
+
+	return nil
+}
+
+// CreateIndex creates an index on a column. If unique is true, creates a UNIQUE index.
+func CreateIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, column string, unique bool) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(column, "column"); err != nil {
+		return err
+	}
+	if err := ValidateTable(ctx, pool, schemaName, tableName); err != nil {
+		return err
+	}
+	if err := ValidateColumns(ctx, pool, schemaName, tableName, []string{column}); err != nil {
+		return err
+	}
+
+	qt := qualifiedTable(schemaName, tableName)
+	indexName := fmt.Sprintf("idx_%s_%s", tableName, column)
+	uniqueKw := ""
+	if unique {
+		uniqueKw = "UNIQUE "
+	}
+	sql := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)", uniqueKw, quoteIdent(indexName), qt, quoteIdent(column))
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("create index: %w", err)
+	}
+
+	return nil
+}
+
+// DropIndex drops an index from the schema.
+func DropIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, indexName string) error {
+	sql := fmt.Sprintf("DROP INDEX %s.%s", quoteIdent(schemaName), quoteIdent(indexName))
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("drop index: %w", err)
 	}
 
 	return nil

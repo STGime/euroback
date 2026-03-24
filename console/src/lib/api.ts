@@ -21,17 +21,33 @@ export interface Project {
 	secret_key?: string;
 }
 
+export interface ForeignKeyInfo {
+	constraint_name: string;
+	referenced_table: string;
+	referenced_column: string;
+}
+
+export interface IndexInfo {
+	name: string;
+	column: string;
+	is_unique: boolean;
+}
+
 export interface ColumnInfo {
 	name: string;
 	data_type: string;
 	is_nullable: boolean;
 	default_value?: string | null;
+	is_primary_key?: boolean;
+	is_unique?: boolean;
+	foreign_key?: ForeignKeyInfo | null;
 }
 
 export interface TableSchema {
 	name: string;
 	columns: ColumnInfo[];
 	row_count: number;
+	indexes?: IndexInfo[];
 }
 
 export interface FileInfo {
@@ -222,6 +238,13 @@ export class EurobaseAPI {
 			nullable: boolean;
 			default_value?: string;
 			is_primary_key: boolean;
+			is_unique?: boolean;
+			foreign_key?: {
+				column: string;
+				referenced_table: string;
+				referenced_column: string;
+				on_delete?: string;
+			};
 		}[]
 	): Promise<{ status: string; table: string }> {
 		return this.fetch(`/platform/projects/${projectId}/schema/tables`, {
@@ -342,6 +365,89 @@ export class EurobaseAPI {
 		id: string
 	): Promise<void> {
 		return this.fetch(`/platform/projects/${projectId}/data/${table}/${id}`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** Bulk delete rows by IDs (max 1000). */
+	async bulkDeleteRows(
+		projectId: string,
+		table: string,
+		ids: string[]
+	): Promise<{ deleted: number }> {
+		return this.fetch(`/platform/projects/${projectId}/data/${table}/bulk-delete`, {
+			method: 'POST',
+			body: JSON.stringify({ ids })
+		});
+	}
+
+	// ---- Foreign Key methods ----
+
+	/** Add a foreign key constraint to a column. */
+	async addForeignKey(
+		projectId: string,
+		table: string,
+		fk: { column: string; referenced_table: string; referenced_column: string; on_delete?: string }
+	): Promise<{ status: string; constraint: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/foreign-keys`, {
+			method: 'POST',
+			body: JSON.stringify(fk)
+		});
+	}
+
+	/** Drop a constraint (FK or UNIQUE) from a table. */
+	async dropConstraint(
+		projectId: string,
+		table: string,
+		constraintName: string
+	): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/constraints/${constraintName}`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** Add a unique constraint to a column. */
+	async addUniqueConstraint(
+		projectId: string,
+		table: string,
+		column: string
+	): Promise<{ status: string; constraint: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/constraints/unique`, {
+			method: 'POST',
+			body: JSON.stringify({ column })
+		});
+	}
+
+	// ---- Index methods ----
+
+	/** Get indexes for a table. */
+	async getIndexes(
+		projectId: string,
+		table: string
+	): Promise<IndexInfo[]> {
+		return this.fetch<IndexInfo[]>(`/platform/projects/${projectId}/schema/tables/${table}/indexes`);
+	}
+
+	/** Create an index on a column. */
+	async createIndex(
+		projectId: string,
+		table: string,
+		column: string,
+		unique: boolean = false
+	): Promise<{ status: string; index: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/indexes`, {
+			method: 'POST',
+			body: JSON.stringify({ column, unique })
+		});
+	}
+
+	/** Drop an index. */
+	async dropIndex(
+		projectId: string,
+		table: string,
+		indexName: string
+	): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/indexes/${indexName}`, {
 			method: 'DELETE'
 		});
 	}

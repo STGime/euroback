@@ -1,24 +1,31 @@
 <script lang="ts">
-	import { api, type ColumnInfo } from '$lib/api.js';
+	import { api, type ColumnInfo, type TableSchema } from '$lib/api.js';
 
 	interface Props {
 		open: boolean;
 		column: ColumnInfo;
 		tableName: string;
 		projectId: string;
+		tables?: TableSchema[];
 		onClose: () => void;
 		onSaved: () => void;
 	}
 
-	let { open, column, tableName, projectId, onClose, onSaved }: Props = $props();
+	let { open, column, tableName, projectId, tables = [], onClose, onSaved }: Props = $props();
 
 	let name = $state('');
 	let type_ = $state('');
 	let nullable = $state(false);
 	let defaultValue = $state('');
 	let dropDefault = $state(false);
+	let isUnique = $state(false);
 	let saving = $state(false);
 	let error: string | null = $state(null);
+
+	// FK state
+	let fkTable = $state('');
+	let fkColumn = $state('');
+	let fkOnDelete = $state('NO ACTION');
 
 	const pgTypes = [
 		'text', 'integer', 'bigint', 'smallint', 'boolean', 'uuid',
@@ -26,6 +33,8 @@
 		'date', 'time', 'bytea', 'serial', 'bigserial',
 		'double precision', 'character varying', 'varchar'
 	];
+
+	const onDeleteOptions = ['NO ACTION', 'CASCADE', 'SET NULL', 'RESTRICT'];
 
 	// Reset form when modal opens.
 	$effect(() => {
@@ -35,9 +44,24 @@
 			nullable = column.is_nullable;
 			defaultValue = column.default_value ?? '';
 			dropDefault = false;
+			isUnique = column.is_unique ?? false;
 			error = null;
+
+			if (column.foreign_key) {
+				fkTable = column.foreign_key.referenced_table;
+				fkColumn = column.foreign_key.referenced_column;
+			} else {
+				fkTable = '';
+				fkColumn = '';
+			}
+			fkOnDelete = 'NO ACTION';
 		}
 	});
+
+	function getTargetColumns(targetTable: string): string[] {
+		const t = tables.find(t => t.name === targetTable);
+		return t ? t.columns.map(c => c.name) : [];
+	}
 
 	let hasChanges = $derived(
 		name !== column?.name ||
@@ -69,21 +93,69 @@
 	});
 
 	async function handleSave() {
-		if (!hasChanges || !column) return;
+		if (!column) return;
 		saving = true;
 		error = null;
 		try {
-			const changes: Record<string, any> = {};
-			if (type_ !== column.data_type) changes.new_type = type_;
-			if (nullable !== column.is_nullable) changes.nullable = nullable;
-			if (dropDefault) {
-				changes.drop_default = true;
-			} else if (defaultValue !== (column.default_value ?? '')) {
-				changes.default_value = defaultValue;
+			// Handle column alter changes
+			if (hasChanges) {
+				const changes: Record<string, any> = {};
+				if (type_ !== column.data_type) changes.new_type = type_;
+				if (nullable !== column.is_nullable) changes.nullable = nullable;
+				if (dropDefault) {
+					changes.drop_default = true;
+				} else if (defaultValue !== (column.default_value ?? '')) {
+					changes.default_value = defaultValue;
+				}
+				if (name !== column.name) changes.new_name = name;
+				await api.alterColumn(projectId, tableName, column.name, changes);
 			}
-			if (name !== column.name) changes.new_name = name;
 
-			await api.alterColumn(projectId, tableName, column.name, changes);
+			// Handle unique constraint changes
+			const wasUnique = column.is_unique ?? false;
+			if (isUnique && !wasUnique) {
+				await api.addUniqueConstraint(projectId, tableName, column.name);
+			} else if (!isUnique && wasUnique) {
+				const constraintName = `uq_${tableName}_${column.name}`;
+				await api.dropConstraint(projectId, tableName, constraintName);
+			}
+
+			// Handle FK changes
+			const hadFK = !!column.foreign_key;
+			const wantFK = !!(fkTable && fkColumn);
+			if (hadFK && !wantFK) {
+				// Drop existing FK
+				await api.dropConstraint(projectId, tableName, column.foreign_key!.constraint_name);
+			} else if (wantFK && (!hadFK || fkTable !== column.foreign_key?.referenced_table || fkColumn !== column.foreign_key?.referenced_column)) {
+				// Drop old FK if exists, then add new
+				if (hadFK) {
+					await api.dropConstraint(projectId, tableName, column.foreign_key!.constraint_name);
+				}
+				await api.addForeignKey(projectId, tableName, {
+					column: column.name,
+					referenced_table: fkTable,
+					referenced_column: fkColumn,
+					on_delete: fkOnDelete
+				});
+			}
+
+			onSaved();
+			onClose();
+		} catch (err) {
+			const raw = err instanceof Error ? err.message : String(err);
+			const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
+			error = jsonMatch ? jsonMatch[1] : raw;
+		} finally {
+			saving = false;
+		}
+	}
+
+	async function handleDropFK() {
+		if (!column?.foreign_key) return;
+		saving = true;
+		error = null;
+		try {
+			await api.dropConstraint(projectId, tableName, column.foreign_key.constraint_name);
 			onSaved();
 			onClose();
 		} catch (err) {
@@ -157,15 +229,26 @@
 					</select>
 				</div>
 
-				<!-- Nullable -->
-				<div class="flex items-center gap-3">
-					<input
-						id="col-nullable"
-						type="checkbox"
-						bind:checked={nullable}
-						class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500 cursor-pointer"
-					/>
-					<label for="col-nullable" class="text-sm text-gray-700 cursor-pointer">Nullable</label>
+				<!-- Nullable + Unique -->
+				<div class="flex items-center gap-6">
+					<div class="flex items-center gap-3">
+						<input
+							id="col-nullable"
+							type="checkbox"
+							bind:checked={nullable}
+							class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500 cursor-pointer"
+						/>
+						<label for="col-nullable" class="text-sm text-gray-700 cursor-pointer">Nullable</label>
+					</div>
+					<div class="flex items-center gap-3">
+						<input
+							id="col-unique"
+							type="checkbox"
+							bind:checked={isUnique}
+							class="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+						/>
+						<label for="col-unique" class="text-sm text-gray-700 cursor-pointer">Unique</label>
+					</div>
 				</div>
 
 				<!-- Default value -->
@@ -189,6 +272,60 @@
 					/>
 				</div>
 
+				<!-- Foreign Key -->
+				<div class="border-t border-gray-200 pt-4">
+					<div class="flex items-center justify-between mb-2">
+						<span class="text-sm font-medium text-gray-700">Foreign Key</span>
+						{#if column.foreign_key}
+							<button
+								type="button"
+								class="cursor-pointer text-xs text-red-500 hover:text-red-700"
+								onclick={handleDropFK}
+							>
+								Drop FK
+							</button>
+						{/if}
+					</div>
+					{#if column.foreign_key}
+						<div class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-700">
+							References <code class="font-mono font-semibold">{column.foreign_key.referenced_table}.{column.foreign_key.referenced_column}</code>
+							<span class="text-xs text-indigo-500 ml-1">({column.foreign_key.constraint_name})</span>
+						</div>
+					{:else}
+						<div class="flex items-center gap-2">
+							<select
+								bind:value={fkTable}
+								class="flex-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+								onchange={() => { fkColumn = ''; }}
+							>
+								<option value="">No FK</option>
+								{#each tables as t}
+									<option value={t.name}>{t.name}</option>
+								{/each}
+							</select>
+							{#if fkTable}
+								<select
+									bind:value={fkColumn}
+									class="flex-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+								>
+									<option value="">Column...</option>
+									{#each getTargetColumns(fkTable) as c}
+										<option value={c}>{c}</option>
+									{/each}
+								</select>
+								<select
+									bind:value={fkOnDelete}
+									class="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+								>
+									{#each onDeleteOptions as opt}
+										<option value={opt}>{opt}</option>
+									{/each}
+								</select>
+							{/if}
+						</div>
+					{/if}
+				</div>
+
 				<!-- SQL Preview -->
 				{#if sqlPreview()}
 					<div>
@@ -209,7 +346,7 @@
 				<button
 					type="button"
 					class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					disabled={!hasChanges || saving}
+					disabled={saving}
 					onclick={handleSave}
 				>
 					{saving ? 'Saving...' : 'Save Changes'}

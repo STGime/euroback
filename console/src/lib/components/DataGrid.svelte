@@ -8,7 +8,8 @@
 		selectedIds = $bindable<Set<string>>(new Set()),
 		onUpdateCell,
 		onDeleteRow,
-		onEditColumn
+		onEditColumn,
+		onDropColumn
 	}: {
 		columns: ColumnInfo[];
 		rows: any[];
@@ -17,6 +18,7 @@
 		onUpdateCell?: (rowId: string, column: string, value: any) => Promise<void>;
 		onDeleteRow?: (row: any) => void;
 		onEditColumn?: (col: ColumnInfo) => void;
+		onDropColumn?: (col: ColumnInfo) => void;
 	} = $props();
 
 	let copiedId: string | null = $state(null);
@@ -221,6 +223,15 @@
 							>
 								{shortType(col.data_type)}
 							</span>
+							{#if col.is_primary_key}
+								<span class="inline-flex rounded px-1 py-0.5 text-[9px] font-semibold bg-amber-100 text-amber-700" title="Primary Key">PK</span>
+							{/if}
+							{#if col.foreign_key}
+								<span class="inline-flex rounded px-1 py-0.5 text-[9px] font-semibold bg-indigo-100 text-indigo-700" title="Foreign Key: {col.foreign_key.referenced_table}.{col.foreign_key.referenced_column}">FK</span>
+							{/if}
+							{#if col.is_unique}
+								<span class="inline-flex rounded px-1 py-0.5 text-[9px] font-semibold bg-teal-100 text-teal-700" title="Unique">UQ</span>
+							{/if}
 							{#if onEditColumn}
 								<button
 									type="button"
@@ -230,6 +241,18 @@
 								>
 									<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
 										<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125" />
+									</svg>
+								</button>
+							{/if}
+							{#if onDropColumn}
+								<button
+									type="button"
+									class="cursor-pointer opacity-0 group-hover/col:opacity-100 rounded p-0.5 text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all"
+									onclick={(e) => { e.stopPropagation(); onDropColumn(col); }}
+									title="Drop column"
+								>
+									<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+										<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
 									</svg>
 								</button>
 							{/if}

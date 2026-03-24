@@ -1,4 +1,6 @@
 <script lang="ts">
+	import type { TableSchema } from '$lib/api.js';
+
 	const PG_TYPES = [
 		'text',
 		'integer',
@@ -12,22 +14,30 @@
 		'numeric'
 	];
 
+	const ON_DELETE_OPTIONS = ['NO ACTION', 'CASCADE', 'SET NULL', 'RESTRICT'];
+
 	interface ColumnDef {
 		name: string;
 		type: string;
 		nullable: boolean;
 		defaultValue: string;
 		isPrimaryKey: boolean;
+		isUnique: boolean;
+		fkTable: string;
+		fkColumn: string;
+		fkOnDelete: string;
 	}
 
 	let {
 		open = false,
 		onClose,
-		onCreate
+		onCreate,
+		tables = []
 	}: {
 		open: boolean;
 		onClose: () => void;
 		onCreate?: (tableName: string, columns: ColumnDef[]) => Promise<void>;
+		tables?: TableSchema[];
 	} = $props();
 
 	let tableName = $state('');
@@ -37,14 +47,22 @@
 			type: 'uuid',
 			nullable: false,
 			defaultValue: 'public.uuid_generate_v4()',
-			isPrimaryKey: true
+			isPrimaryKey: true,
+			isUnique: false,
+			fkTable: '',
+			fkColumn: '',
+			fkOnDelete: 'NO ACTION'
 		},
 		{
 			name: 'created_at',
 			type: 'timestamptz',
 			nullable: false,
 			defaultValue: 'now()',
-			isPrimaryKey: false
+			isPrimaryKey: false,
+			isUnique: false,
+			fkTable: '',
+			fkColumn: '',
+			fkOnDelete: 'NO ACTION'
 		}
 	]);
 
@@ -61,7 +79,11 @@
 				type: 'text',
 				nullable: true,
 				defaultValue: '',
-				isPrimaryKey: false
+				isPrimaryKey: false,
+				isUnique: false,
+				fkTable: '',
+				fkColumn: '',
+				fkOnDelete: 'NO ACTION'
 			}
 		];
 	}
@@ -77,6 +99,11 @@
 		}));
 	}
 
+	function getTargetColumns(targetTable: string): string[] {
+		const t = tables.find(t => t.name === targetTable);
+		return t ? t.columns.map(c => c.name) : [];
+	}
+
 	function generateSql(): string {
 		if (!tableName.trim()) return '-- Enter a table name to generate SQL';
 
@@ -87,12 +114,20 @@
 				const parts = [`  "${col.name.trim()}"`, col.type];
 				if (!col.nullable) parts.push('NOT NULL');
 				if (col.defaultValue.trim()) parts.push(`DEFAULT ${col.defaultValue.trim()}`);
+				if (col.isUnique) parts.push('UNIQUE');
 				return parts.join(' ');
 			});
 
 		const pks = columns.filter((c) => c.isPrimaryKey && c.name.trim()).map((c) => `"${c.name.trim()}"`);
 		if (pks.length > 0) {
 			colDefs.push(`  PRIMARY KEY (${pks.join(', ')})`);
+		}
+
+		// FK constraints
+		for (const col of columns) {
+			if (col.fkTable && col.fkColumn && col.name.trim()) {
+				colDefs.push(`  FOREIGN KEY ("${col.name.trim()}") REFERENCES "${col.fkTable}"("${col.fkColumn}") ON DELETE ${col.fkOnDelete}`);
+			}
 		}
 
 		return `CREATE TABLE "${safeName}" (\n${colDefs.join(',\n')}\n);`;
@@ -124,14 +159,22 @@
 				type: 'uuid',
 				nullable: false,
 				defaultValue: 'public.uuid_generate_v4()',
-				isPrimaryKey: true
+				isPrimaryKey: true,
+				isUnique: false,
+				fkTable: '',
+				fkColumn: '',
+				fkOnDelete: 'NO ACTION'
 			},
 			{
 				name: 'created_at',
 				type: 'timestamptz',
 				nullable: false,
 				defaultValue: 'now()',
-				isPrimaryKey: false
+				isPrimaryKey: false,
+				isUnique: false,
+				fkTable: '',
+				fkColumn: '',
+				fkOnDelete: 'NO ACTION'
 			}
 		];
 		showSql = false;
@@ -161,7 +204,7 @@
 		></button>
 
 		<!-- Modal -->
-		<div class="relative z-10 w-full max-w-3xl max-h-[85vh] overflow-y-auto rounded-xl bg-white shadow-2xl">
+		<div class="relative z-10 w-full max-w-4xl max-h-[85vh] overflow-y-auto rounded-xl bg-white shadow-2xl">
 			<!-- Header -->
 			<div class="flex items-center justify-between border-b border-gray-200 px-6 py-4">
 				<h2 class="text-lg font-semibold text-gray-900">Create New Table</h2>
@@ -221,10 +264,11 @@
 					</div>
 
 					<!-- Column header labels -->
-					<div class="grid grid-cols-[1fr_120px_60px_1fr_60px_32px] gap-2 mb-2 px-1">
+					<div class="grid grid-cols-[1fr_110px_50px_50px_1fr_50px_32px] gap-2 mb-2 px-1">
 						<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Name</span>
 						<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Type</span>
 						<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 text-center">Null</span>
+						<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 text-center">UQ</span>
 						<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Default</span>
 						<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 text-center">PK</span>
 						<span></span>
@@ -232,59 +276,104 @@
 
 					<div class="space-y-2">
 						{#each columns as col, i}
-							<div class="grid grid-cols-[1fr_120px_60px_1fr_60px_32px] gap-2 items-center">
-								<input
-									type="text"
-									bind:value={col.name}
-									placeholder="column_name"
-									class="rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none"
-								/>
-								<select
-									bind:value={col.type}
-									class="rounded-lg border border-gray-300 px-2 py-1.5 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none cursor-pointer"
-								>
-									{#each PG_TYPES as t}
-										<option value={t}>{t}</option>
-									{/each}
-								</select>
-								<div class="flex justify-center">
+							<div class="space-y-1">
+								<div class="grid grid-cols-[1fr_110px_50px_50px_1fr_50px_32px] gap-2 items-center">
 									<input
-										type="checkbox"
-										bind:checked={col.nullable}
-										class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500 cursor-pointer"
+										type="text"
+										bind:value={col.name}
+										placeholder="column_name"
+										class="rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none"
 									/>
-								</div>
-								<input
-									type="text"
-									bind:value={col.defaultValue}
-									placeholder="optional"
-									class="rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm font-mono text-gray-600 placeholder-gray-300 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none"
-								/>
-								<div class="flex justify-center">
+									<select
+										bind:value={col.type}
+										class="rounded-lg border border-gray-300 px-2 py-1.5 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none cursor-pointer"
+									>
+										{#each PG_TYPES as t}
+											<option value={t}>{t}</option>
+										{/each}
+									</select>
+									<div class="flex justify-center">
+										<input
+											type="checkbox"
+											bind:checked={col.nullable}
+											class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500 cursor-pointer"
+										/>
+									</div>
+									<div class="flex justify-center">
+										<input
+											type="checkbox"
+											bind:checked={col.isUnique}
+											class="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+											title="Unique constraint"
+										/>
+									</div>
+									<input
+										type="text"
+										bind:value={col.defaultValue}
+										placeholder="optional"
+										class="rounded-lg border border-gray-300 px-2.5 py-1.5 text-sm font-mono text-gray-600 placeholder-gray-300 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500/20 focus:outline-none"
+									/>
+									<div class="flex justify-center">
+										<button
+											type="button"
+											class="cursor-pointer h-6 w-6 flex items-center justify-center rounded transition-colors
+												{col.isPrimaryKey
+													? 'bg-eurobase-100 text-eurobase-700'
+													: 'bg-gray-100 text-gray-400 hover:bg-gray-200'}"
+											onclick={() => togglePrimaryKey(i)}
+											title="Toggle primary key"
+										>
+											<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+												<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
+											</svg>
+										</button>
+									</div>
 									<button
 										type="button"
-										class="cursor-pointer h-6 w-6 flex items-center justify-center rounded transition-colors
-											{col.isPrimaryKey
-												? 'bg-eurobase-100 text-eurobase-700'
-												: 'bg-gray-100 text-gray-400 hover:bg-gray-200'}"
-										onclick={() => togglePrimaryKey(i)}
-										title="Toggle primary key"
+										class="cursor-pointer flex h-7 w-7 items-center justify-center rounded-lg text-gray-300 hover:bg-red-50 hover:text-red-500 transition-colors"
+										onclick={() => removeColumn(i)}
+										title="Remove column"
 									>
-										<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-											<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
+										<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
 										</svg>
 									</button>
 								</div>
-								<button
-									type="button"
-									class="cursor-pointer flex h-7 w-7 items-center justify-center rounded-lg text-gray-300 hover:bg-red-50 hover:text-red-500 transition-colors"
-									onclick={() => removeColumn(i)}
-									title="Remove column"
-								>
-									<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
-									</svg>
-								</button>
+								<!-- FK config (optional) -->
+								{#if tables.length > 0}
+									<div class="ml-4 flex items-center gap-2">
+										<span class="text-[10px] text-gray-400 shrink-0">FK:</span>
+										<select
+											bind:value={col.fkTable}
+											class="rounded border border-gray-200 px-1.5 py-1 text-xs text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+											onchange={() => { col.fkColumn = ''; }}
+										>
+											<option value="">None</option>
+											{#each tables as t}
+												<option value={t.name}>{t.name}</option>
+											{/each}
+										</select>
+										{#if col.fkTable}
+											<select
+												bind:value={col.fkColumn}
+												class="rounded border border-gray-200 px-1.5 py-1 text-xs text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+											>
+												<option value="">Column...</option>
+												{#each getTargetColumns(col.fkTable) as c}
+													<option value={c}>{c}</option>
+												{/each}
+											</select>
+											<select
+												bind:value={col.fkOnDelete}
+												class="rounded border border-gray-200 px-1.5 py-1 text-xs text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+											>
+												{#each ON_DELETE_OPTIONS as opt}
+													<option value={opt}>{opt}</option>
+												{/each}
+											</select>
+										{/if}
+									</div>
+								{/if}
 							</div>
 						{/each}
 					</div>
