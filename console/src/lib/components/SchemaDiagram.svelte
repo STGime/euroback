@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import ELK from 'elkjs/lib/elk.bundled.js';
 	import type { TableSchema } from '$lib/api.js';
 
 	let { tables = [] }: { tables: TableSchema[] } = $props();
@@ -22,14 +23,21 @@
 	const ROW_HEIGHT = 24;
 	const HEADER_HEIGHT = 32;
 	const TABLE_PADDING = 8;
-	const COL_WIDTH = 220;
+	const COL_WIDTH = 280;
+
+	function shortType(type: string): string {
+		if (type === 'timestamp with time zone') return 'timestamptz';
+		if (type === 'timestamp without time zone') return 'timestamp';
+		if (type === 'character varying') return 'varchar';
+		if (type === 'double precision') return 'float8';
+		return type;
+	}
 
 	function tableHeight(cols: number): number {
 		return HEADER_HEIGHT + cols * ROW_HEIGHT + TABLE_PADDING;
 	}
 
 	onMount(async () => {
-		const ELK = (await import('elkjs')).default;
 		const elk = new ELK();
 
 		// Build edges from FK relationships
@@ -158,6 +166,45 @@
 		};
 	}
 
+	function fitToView() {
+		if (layoutNodes.size === 0 || !svgEl) return;
+		let minX = Infinity, minY = Infinity, maxX = 0, maxY = 0;
+		for (const n of layoutNodes.values()) {
+			minX = Math.min(minX, n.x);
+			minY = Math.min(minY, n.y);
+			maxX = Math.max(maxX, n.x + n.width);
+			maxY = Math.max(maxY, n.y + n.height);
+		}
+		const padding = 60;
+		viewBox = {
+			x: minX - padding,
+			y: minY - padding,
+			width: maxX - minX + padding * 2,
+			height: maxY - minY + padding * 2
+		};
+		scale = 1;
+	}
+
+	function zoomIn() {
+		const factor = 1.3;
+		const cx = viewBox.x + viewBox.width / 2;
+		const cy = viewBox.y + viewBox.height / 2;
+		const newW = viewBox.width / factor;
+		const newH = viewBox.height / factor;
+		viewBox = { x: cx - newW / 2, y: cy - newH / 2, width: newW, height: newH };
+		scale = Math.min(3.0, scale * factor);
+	}
+
+	function zoomOut() {
+		const factor = 1.3;
+		const cx = viewBox.x + viewBox.width / 2;
+		const cy = viewBox.y + viewBox.height / 2;
+		const newW = viewBox.width * factor;
+		const newH = viewBox.height * factor;
+		viewBox = { x: cx - newW / 2, y: cy - newH / 2, width: newW, height: newH };
+		scale = Math.max(0.25, scale / factor);
+	}
+
 	function isConnected(tableName: string): boolean {
 		if (!selectedTable) return true;
 		if (tableName === selectedTable) return true;
@@ -186,6 +233,41 @@
 		No tables to display
 	</div>
 {:else}
+	<div class="relative w-full h-full">
+	<!-- Zoom controls -->
+	<div class="absolute top-3 right-3 z-10 flex flex-col gap-1.5">
+		<button
+			type="button"
+			class="cursor-pointer flex items-center justify-center h-8 w-8 rounded-lg border border-gray-300 bg-white text-gray-600 shadow-sm hover:bg-gray-50 transition-colors"
+			onclick={zoomIn}
+			title="Zoom in"
+		>
+			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+			</svg>
+		</button>
+		<button
+			type="button"
+			class="cursor-pointer flex items-center justify-center h-8 w-8 rounded-lg border border-gray-300 bg-white text-gray-600 shadow-sm hover:bg-gray-50 transition-colors"
+			onclick={zoomOut}
+			title="Zoom out"
+		>
+			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12h-15" />
+			</svg>
+		</button>
+		<button
+			type="button"
+			class="cursor-pointer flex items-center justify-center h-8 w-8 rounded-lg border border-gray-300 bg-white text-gray-600 shadow-sm hover:bg-gray-50 transition-colors"
+			onclick={fitToView}
+			title="Fit to view"
+		>
+			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+			</svg>
+		</button>
+	</div>
+
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<svg
 		bind:this={svgEl}
@@ -274,22 +356,26 @@
 							x2={node.width} y2={cy}
 							stroke="#f3f4f6"
 						/>
-						<text x="12" y={cy + ROW_HEIGHT / 2 + 4} font-size="11" fill="#374151" font-family="monospace">
+						<clipPath id="clip-{table.name}-{col.name}">
+							<rect x="10" y={cy} width={node.width / 2 - 12} height={ROW_HEIGHT} />
+						</clipPath>
+						<text x="12" y={cy + ROW_HEIGHT / 2 + 4} font-size="11" fill="#374151" font-family="monospace" clip-path="url(#clip-{table.name}-{col.name})">
 							{col.name}
 						</text>
 						<text x={node.width - 8} y={cy + ROW_HEIGHT / 2 + 4} font-size="10" fill="#9ca3af" text-anchor="end" font-family="monospace">
-							{col.data_type}
+							{shortType(col.data_type)}
 						</text>
 						<!-- Badges -->
 						{#if col.is_primary_key}
-							<circle cx={node.width - 60} cy={cy + ROW_HEIGHT / 2} r="3" fill="#f59e0b" />
+							<circle cx={node.width / 2 + 4} cy={cy + ROW_HEIGHT / 2} r="3" fill="#f59e0b" />
 						{/if}
 						{#if col.foreign_key}
-							<circle cx={node.width - 70} cy={cy + ROW_HEIGHT / 2} r="3" fill="#6366f1" />
+							<circle cx={node.width / 2 + 14} cy={cy + ROW_HEIGHT / 2} r="3" fill="#6366f1" />
 						{/if}
 					{/each}
 				</g>
 			{/if}
 		{/each}
 	</svg>
+	</div>
 {/if}
