@@ -11,7 +11,8 @@
 
 	onMount(async () => {
 		try {
-			tables = await api.getSchema(projectId);
+			const hiddenTables = new Set(['users', 'refresh_tokens']);
+			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load schema';
 		} finally {

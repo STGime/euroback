@@ -3,7 +3,10 @@
 	import ELK from 'elkjs/lib/elk.bundled.js';
 	import type { TableSchema } from '$lib/api.js';
 
-	let { tables = [] }: { tables: TableSchema[] } = $props();
+	let { tables: rawTables = [] }: { tables: TableSchema[] } = $props();
+
+	const HIDDEN_TABLES = new Set(['users', 'refresh_tokens']);
+	let tables = $derived(rawTables.filter(t => !HIDDEN_TABLES.has(t.name)));
 
 	// Layout state
 	let layoutNodes: Map<string, { x: number; y: number; width: number; height: number }> = $state(new Map());
@@ -40,11 +43,12 @@
 	onMount(async () => {
 		const elk = new ELK();
 
-		// Build edges from FK relationships
+		// Build edges from FK relationships (exclude edges to/from hidden tables)
+		const visibleNames = new Set(tables.map(t => t.name));
 		const edgeList: typeof edges = [];
 		for (const table of tables) {
 			for (const col of table.columns) {
-				if (col.foreign_key) {
+				if (col.foreign_key && visibleNames.has(col.foreign_key.referenced_table)) {
 					edgeList.push({
 						id: `${table.name}.${col.name}->${col.foreign_key.referenced_table}.${col.foreign_key.referenced_column}`,
 						sourceTable: table.name,

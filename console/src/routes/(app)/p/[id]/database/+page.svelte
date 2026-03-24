@@ -102,7 +102,8 @@
 		schemaLoading = true;
 		schemaError = null;
 		try {
-			tables = await api.getSchema(projectId);
+			const hiddenTables = new Set(['users', 'refresh_tokens']);
+			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 			if (tables.length > 0 && !selectedTable) {
 				selectTableAndLoad(tables[0].name);
 			}
@@ -193,7 +194,6 @@
 	// ---- Insert row ----
 	// Context-aware button label based on table name.
 	let insertLabel = $derived(
-		selectedTable === 'users' ? 'Add User' :
 		selectedTable === 'storage_objects' ? 'Add Object' :
 		`Insert Row`
 	);

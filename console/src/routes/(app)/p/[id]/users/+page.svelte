@@ -225,8 +225,8 @@
 	<div class="flex items-center justify-between">
 		<div class="flex items-center gap-3">
 			<div>
-				<h2 class="text-lg font-semibold text-gray-900">Users</h2>
-				<p class="text-sm text-gray-500">Manage your project's end-users.</p>
+				<h2 class="text-lg font-semibold text-gray-900">Authentication</h2>
+				<p class="text-sm text-gray-500">Manage users who sign in to your application via the Eurobase Auth SDK. These users are stored in your project's <code class="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">users</code> table and authenticated via <code class="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">/v1/auth</code>.</p>
 			</div>
 			{#if !loading && total > 0}
 				<span class="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">{total}</span>
