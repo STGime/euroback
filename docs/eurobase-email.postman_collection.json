@@ -1,0 +1,826 @@
+{
+	"info": {
+		"name": "Eurobase Email & Password Reset",
+		"description": "Tests for transactional email endpoints: platform forgot/reset password, end-user forgot/reset password, email verification, resend verification, email templates, and email status.\n\nRun tests in order — later tests depend on variables set by earlier ones.\n\n## Setup\n\n1. `make setup` — start Postgres, Redis, MinIO\n2. Apply migrations including 000015: `source .env.local && migrate -path migrations -database \"$DATABASE_URL\" up`\n3. Start gateway: `source .env.local && go run ./cmd/gateway/`\n4. Select the \"Eurobase Local\" environment in Postman\n5. Run \"Phase 0 — Platform Auth\" from the auth-tests collection first to set `platform_token` and `project_id`\n\n## Note on email delivery\n\nWithout `SCW_TEM_SECRET_KEY` set, the gateway logs email content instead of sending. Check gateway stdout for logged emails including tokens. You can extract tokens from logs to test reset/verify flows end-to-end.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 1 — Email Status",
+			"item": [
+				{
+					"name": "E1.1 Get Email Status",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has configured field', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('configured');",
+									"    pm.expect(typeof json.configured).to.eql('boolean');",
+									"    pm.environment.set('email_configured', json.configured);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/config/email-status",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "config", "email-status"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — Platform Forgot/Reset Password",
+			"item": [
+				{
+					"name": "E2.1 Platform Forgot Password — Valid Email",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns ok status (no email enumeration)', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/forgot-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "forgot-password"]
+						}
+					}
+				},
+				{
+					"name": "E2.2 Platform Forgot Password — Non-existent Email",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200 (no enumeration)', () => pm.response.to.have.status(200));",
+									"pm.test('Returns ok status', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"nonexistent@test.eu\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/forgot-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "forgot-password"]
+						}
+					}
+				},
+				{
+					"name": "E2.3 Platform Reset Password — Invalid Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions invalid or expired', () => {",
+									"    pm.expect(pm.response.json().error).to.include('invalid');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n  \"password\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/reset-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "reset-password"]
+						}
+					}
+				},
+				{
+					"name": "E2.4 Platform Reset Password — Weak Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions 8 characters', () => {",
+									"    pm.expect(pm.response.json().error).to.include('8 characters');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n  \"password\": \"short\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/reset-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "reset-password"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — End-User Forgot/Reset Password",
+			"item": [
+				{
+					"name": "E3.0 Sign Up End-User for Tests",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const status = pm.response.code;",
+									"pm.test('Status is 201 or 400', () => {",
+									"    pm.expect(status).to.be.oneOf([201, 400]);",
+									"});",
+									"if (status === 201) {",
+									"    const json = pm.response.json();",
+									"    pm.environment.set('email_test_user_id', json.user.id);",
+									"    pm.environment.set('email_test_user_token', json.access_token);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"emailtest@example.com\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "E3.1 End-User Forgot Password — Valid Email",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns ok (no enumeration)', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"emailtest@example.com\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/forgot-password",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "forgot-password"]
+						}
+					}
+				},
+				{
+					"name": "E3.2 End-User Forgot Password — Non-existent Email",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200 (no enumeration)', () => pm.response.to.have.status(200));",
+									"pm.test('Returns ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"noone@nowhere.com\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/forgot-password",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "forgot-password"]
+						}
+					}
+				},
+				{
+					"name": "E3.3 End-User Reset Password — Invalid Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions invalid or expired', () => {",
+									"    pm.expect(pm.response.json().error).to.include('invalid');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n  \"password\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/reset-password",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "reset-password"]
+						}
+					}
+				},
+				{
+					"name": "E3.4 End-User Reset Password — No API Key",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"sometoken\",\n  \"password\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/reset-password",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "reset-password"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 4 — Email Verification",
+			"item": [
+				{
+					"name": "E4.1 Verify Email — Invalid Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions invalid or expired', () => {",
+									"    pm.expect(pm.response.json().error).to.include('invalid');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"0000000000000000000000000000000000000000000000000000000000000000\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/verify-email",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "verify-email"]
+						}
+					}
+				},
+				{
+					"name": "E4.2 Resend Verification — Valid Email",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"emailtest@example.com\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/resend-verification",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "resend-verification"]
+						}
+					}
+				},
+				{
+					"name": "E4.3 Resend Verification — Non-existent Email",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200 (no enumeration)', () => pm.response.to.have.status(200));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"nobody@nowhere.com\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/resend-verification",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "resend-verification"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 5 — Email Templates (Platform)",
+			"item": [
+				{
+					"name": "E5.1 List Email Templates",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array of 4 templates', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.be.an('array');",
+									"    pm.expect(json.length).to.eql(4);",
+									"    const types = json.map(t => t.template_type).sort();",
+									"    pm.expect(types).to.deep.eql(['password_changed', 'password_reset', 'verification', 'welcome']);",
+									"});",
+									"pm.test('All defaults are not custom', () => {",
+									"    const json = pm.response.json();",
+									"    json.forEach(t => {",
+									"        pm.expect(t.is_custom).to.eql(false);",
+									"        pm.expect(t.subject).to.be.a('string').and.not.empty;",
+									"        pm.expect(t.body_html).to.be.a('string').and.not.empty;",
+									"    });",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates"]
+						}
+					}
+				},
+				{
+					"name": "E5.2 Update Email Template (Verification)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"subject\": \"Custom: Please verify your email\",\n  \"body_html\": \"<html><body><h1>Verify for {{.ProjectName}}</h1><p>Click <a href='{{.ActionURL}}'>here</a> to verify {{.UserEmail}}.</p><p>Expires in {{.ExpiresIn}}.</p></body></html>\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates/verification",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates", "verification"]
+						}
+					}
+				},
+				{
+					"name": "E5.3 List Templates — Verify Custom",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Verification template is now custom', () => {",
+									"    const json = pm.response.json();",
+									"    const verif = json.find(t => t.template_type === 'verification');",
+									"    pm.expect(verif.is_custom).to.eql(true);",
+									"    pm.expect(verif.subject).to.include('Custom');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates"]
+						}
+					}
+				},
+				{
+					"name": "E5.4 Preview Email Template",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns rendered subject and body', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.subject).to.be.a('string').and.not.empty;",
+									"    pm.expect(json.body).to.be.a('string').and.not.empty;",
+									"    pm.expect(json.body).to.include('user@example.com');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"subject\": \"Test subject for {{.ProjectName}}\",\n  \"body_html\": \"<p>Hello {{.UserEmail}}, click {{.ActionURL}}</p>\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates/verification/preview",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates", "verification", "preview"]
+						}
+					}
+				},
+				{
+					"name": "E5.5 Update Template — Invalid Type",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions invalid template type', () => {",
+									"    pm.expect(pm.response.json().error).to.include('invalid template type');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"subject\": \"test\",\n  \"body_html\": \"<p>test</p>\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates/nonexistent_type",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates", "nonexistent_type"]
+						}
+					}
+				},
+				{
+					"name": "E5.6 Update Template — Missing Fields",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions required fields', () => {",
+									"    pm.expect(pm.response.json().error).to.include('required');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"subject\": \"\",\n  \"body_html\": \"\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates/verification",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates", "verification"]
+						}
+					}
+				},
+				{
+					"name": "E5.7 Delete Template (Reset to Default)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates/verification",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates", "verification"]
+						}
+					}
+				},
+				{
+					"name": "E5.8 List Templates — Verify Reset to Default",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Verification template is back to default', () => {",
+									"    const json = pm.response.json();",
+									"    const verif = json.find(t => t.template_type === 'verification');",
+									"    pm.expect(verif.is_custom).to.eql(false);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates"]
+						}
+					}
+				},
+				{
+					"name": "E5.9 Templates — No Auth",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 6 — End-to-End Token Flow (Manual)",
+			"description": "These tests require extracting tokens from gateway logs. Run forgot-password, then find the raw token in the log output (\"email not configured, logging instead\" message) and paste it into E6.1.\n\nAlternatively, query the DB: SELECT encode(decode(token_hash, 'hex'), 'hex') ... — but the raw token is only in the log.",
+			"item": [
+				{
+					"name": "E6.1 Platform Reset Password — With Real Token (manual)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"// This test requires a real token extracted from gateway logs.",
+									"// If using a dummy token, expect 400.",
+									"const status = pm.response.code;",
+									"pm.test('Status is 200 (real token) or 400 (dummy)', () => {",
+									"    pm.expect(status).to.be.oneOf([200, 400]);",
+									"});",
+									"if (status === 200) {",
+									"    pm.test('Password reset succeeded', () => {",
+									"        pm.expect(pm.response.json().status).to.eql('ok');",
+									"    });",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"PASTE_TOKEN_FROM_GATEWAY_LOGS_HERE\",\n  \"password\": \"mynewpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/reset-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "reset-password"]
+						}
+					}
+				},
+				{
+					"name": "E6.2 Sign In With New Password (manual)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"// Only works after E6.1 succeeds with a real token.",
+									"const status = pm.response.code;",
+									"pm.test('Status is 200 or 401', () => {",
+									"    pm.expect(status).to.be.oneOf([200, 401]);",
+									"});",
+									"if (status === 200) {",
+									"    pm.test('Signed in with new password', () => {",
+									"        pm.expect(pm.response.json().access_token).to.be.a('string');",
+									"    });",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\",\n  \"password\": \"mynewpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signin"]
+						}
+					}
+				}
+			]
+		}
+	]
+}

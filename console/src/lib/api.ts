@@ -186,6 +186,29 @@ export class EurobaseAPI {
 		return res;
 	}
 
+	/**
+	 * Unauthenticated fetch — no Authorization header, no 401 redirect.
+	 */
+	private async fetchUnauthed<T>(path: string, options: RequestInit = {}): Promise<T> {
+		const headers: Record<string, string> = {
+			'Content-Type': 'application/json',
+			...(options.headers as Record<string, string> | undefined)
+		};
+
+		const res = await fetch(`${this.baseURL}${path}`, {
+			...options,
+			headers
+		});
+
+		if (!res.ok) {
+			const body = await res.text().catch(() => '');
+			throw new Error(`API ${res.status}: ${body || res.statusText}`);
+		}
+
+		if (res.status === 204) return undefined as unknown as T;
+		return res.json() as Promise<T>;
+	}
+
 	// ---- public methods ----
 
 	/** Sign up a new platform user. */
@@ -681,6 +704,68 @@ export class EurobaseAPI {
 		return this.fetch<ConnectInfo>(`/platform/projects/${projectId}/connect`);
 	}
 
+	// ---- Platform password reset (unauthenticated) ----
+
+	/** Request a platform password reset email. */
+	async platformForgotPassword(email: string): Promise<{ status: string }> {
+		return this.fetchUnauthed('/platform/auth/forgot-password', {
+			method: 'POST',
+			body: JSON.stringify({ email })
+		});
+	}
+
+	/** Reset platform password with token. */
+	async platformResetPassword(token: string, password: string): Promise<{ status: string }> {
+		return this.fetchUnauthed('/platform/auth/reset-password', {
+			method: 'POST',
+			body: JSON.stringify({ token, password })
+		});
+	}
+
+	// ---- Email configuration ----
+
+	/** Check if email sending is configured. */
+	async getEmailStatus(): Promise<{ configured: boolean }> {
+		return this.fetch('/platform/config/email-status');
+	}
+
+	// ---- Email template management ----
+
+	/** List all email templates for a project. */
+	async listEmailTemplates(projectId: string): Promise<EmailTemplate[]> {
+		return this.fetch<EmailTemplate[]>(`/platform/projects/${projectId}/email-templates`);
+	}
+
+	/** Update (upsert) a custom email template. */
+	async updateEmailTemplate(projectId: string, type: string, data: { subject: string; body_html: string }): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/email-templates/${type}`, {
+			method: 'PUT',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Delete a custom email template (reset to default). */
+	async deleteEmailTemplate(projectId: string, type: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/email-templates/${type}`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** Preview a rendered email template. */
+	async previewEmailTemplate(projectId: string, type: string, data: { subject: string; body_html: string }): Promise<{ subject: string; body: string }> {
+		return this.fetch(`/platform/projects/${projectId}/email-templates/${type}/preview`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Send a test email using the current template. */
+	async testEmailTemplate(projectId: string, type: string): Promise<{ status: string; sent_to: string }> {
+		return this.fetch(`/platform/projects/${projectId}/email-templates/${type}/test`, {
+			method: 'POST'
+		});
+	}
+
 	/** Get request logs for a project. */
 	async getLogs(
 		projectId: string,
@@ -707,6 +792,13 @@ export class EurobaseAPI {
 		const qs = searchParams.toString();
 		return this.fetch<LogsResponse>(`/platform/projects/${projectId}/logs${qs ? `?${qs}` : ''}`);
 	}
+}
+
+export interface EmailTemplate {
+	template_type: string;
+	subject: string;
+	body_html: string;
+	is_custom: boolean;
 }
 
 export interface EndUser {

@@ -1,10 +1,26 @@
 <script lang="ts">
-	import { getContext } from 'svelte';
-	import { api, type AuthConfig } from '$lib/api.js';
+	import { getContext, onMount } from 'svelte';
+	import { api, type AuthConfig, type EmailTemplate } from '$lib/api.js';
 
 	const projectCtx: { id: string; project: import('$lib/api.js').Project | null } = getContext('projectId');
 
-	// Defaults
+	// Tab state
+	let activeTab = $state<'settings' | 'templates'>('settings');
+
+	// Email status
+	let emailConfigured = $state<boolean | null>(null);
+
+	onMount(async () => {
+		try {
+			const status = await api.getEmailStatus();
+			emailConfigured = status.configured;
+		} catch {
+			emailConfigured = false;
+		}
+	});
+
+	// ---- Settings tab state ----
+
 	const defaults: AuthConfig = {
 		providers: { email_password: { enabled: true } },
 		password_min_length: 8,
@@ -13,7 +29,6 @@
 		redirect_urls: ['http://localhost:3000']
 	};
 
-	// Load from project or defaults
 	function loadConfig(): AuthConfig {
 		const cfg = projectCtx.project?.auth_config;
 		if (!cfg || !cfg.providers) return { ...defaults };
@@ -74,141 +89,411 @@
 			saving = false;
 		}
 	}
+
+	// ---- Templates tab state ----
+
+	const templateTypes = [
+		{ type: 'verification', label: 'Email Verification' },
+		{ type: 'password_reset', label: 'Password Reset' },
+		{ type: 'welcome', label: 'Welcome' },
+		{ type: 'password_changed', label: 'Password Changed' }
+	];
+
+	const templateVars = ['{{.UserEmail}}', '{{.ProjectName}}', '{{.ActionURL}}', '{{.ExpiresIn}}'];
+
+	let templates = $state<EmailTemplate[]>([]);
+	let templatesLoading = $state(false);
+	let editingType = $state<string | null>(null);
+	let editSubject = $state('');
+	let editBodyHtml = $state('');
+	let templateSaving = $state(false);
+	let templateMessage = $state('');
+	let templateError = $state('');
+	let previewHtml = $state('');
+	let previewSubject = $state('');
+	let testSending = $state(false);
+
+	async function loadTemplates() {
+		templatesLoading = true;
+		try {
+			templates = await api.listEmailTemplates(projectCtx.id);
+		} catch (err) {
+			templateError = err instanceof Error ? err.message : 'Failed to load templates';
+		} finally {
+			templatesLoading = false;
+		}
+	}
+
+	function startEditing(tmpl: EmailTemplate) {
+		editingType = tmpl.template_type;
+		editSubject = tmpl.subject;
+		editBodyHtml = tmpl.body_html;
+		previewHtml = '';
+		previewSubject = '';
+		templateMessage = '';
+		templateError = '';
+	}
+
+	function cancelEditing() {
+		editingType = null;
+		previewHtml = '';
+		previewSubject = '';
+	}
+
+	async function saveTemplate() {
+		if (!editingType) return;
+		templateSaving = true;
+		templateMessage = '';
+		templateError = '';
+		try {
+			await api.updateEmailTemplate(projectCtx.id, editingType, {
+				subject: editSubject,
+				body_html: editBodyHtml
+			});
+			templateMessage = 'Template saved.';
+			setTimeout(() => { templateMessage = ''; }, 3000);
+			await loadTemplates();
+			editingType = null;
+		} catch (err) {
+			templateError = err instanceof Error ? err.message : 'Failed to save template';
+		} finally {
+			templateSaving = false;
+		}
+	}
+
+	async function resetTemplate(type: string) {
+		templateMessage = '';
+		templateError = '';
+		try {
+			await api.deleteEmailTemplate(projectCtx.id, type);
+			templateMessage = 'Template reset to default.';
+			setTimeout(() => { templateMessage = ''; }, 3000);
+			await loadTemplates();
+			if (editingType === type) editingType = null;
+		} catch (err) {
+			templateError = err instanceof Error ? err.message : 'Failed to reset template';
+		}
+	}
+
+	async function previewTemplate() {
+		if (!editingType) return;
+		try {
+			const result = await api.previewEmailTemplate(projectCtx.id, editingType, {
+				subject: editSubject,
+				body_html: editBodyHtml
+			});
+			previewSubject = result.subject;
+			previewHtml = result.body;
+		} catch (err) {
+			templateError = err instanceof Error ? err.message : 'Preview failed';
+		}
+	}
+
+	async function sendTestEmail(type: string) {
+		testSending = true;
+		templateMessage = '';
+		templateError = '';
+		try {
+			const result = await api.testEmailTemplate(projectCtx.id, type);
+			templateMessage = `Test email sent to ${result.sent_to}`;
+			setTimeout(() => { templateMessage = ''; }, 5000);
+		} catch (err) {
+			templateError = err instanceof Error ? err.message : 'Failed to send test email';
+		} finally {
+			testSending = false;
+		}
+	}
+
+	// Load templates when switching to templates tab
+	$effect(() => {
+		if (activeTab === 'templates' && templates.length === 0) {
+			loadTemplates();
+		}
+	});
 </script>
 
 <svelte:head>
 	<title>Auth - {projectCtx.project?.name ?? 'Project'} - Eurobase Console</title>
 </svelte:head>
 
-<div class="max-w-2xl">
+<div class="max-w-3xl">
 	<h2 class="text-xl font-bold text-gray-900">Authentication</h2>
 	<p class="mt-1 text-sm text-gray-500">Configure how your end-users authenticate.</p>
 
-	{#if saveMessage}
+	<!-- Email status banner -->
+	{#if emailConfigured === false}
+		<div class="mt-4 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-700">
+			Configure Scaleway TEM environment variables to enable email features (verification, password reset).
+		</div>
+	{/if}
+
+	<!-- Tab navigation -->
+	<div class="mt-6 border-b border-gray-200">
+		<nav class="-mb-px flex gap-6">
+			<button
+				onclick={() => activeTab = 'settings'}
+				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeTab === 'settings' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
+			>
+				Settings
+			</button>
+			<button
+				onclick={() => activeTab = 'templates'}
+				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeTab === 'templates' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
+			>
+				Email Templates
+			</button>
+		</nav>
+	</div>
+
+	{#if saveMessage || templateMessage}
 		<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-700">
-			{saveMessage}
+			{saveMessage || templateMessage}
 		</div>
 	{/if}
 
-	{#if saveError}
+	{#if saveError || templateError}
 		<div class="mt-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
-			{saveError}
+			{saveError || templateError}
 		</div>
 	{/if}
 
-	<div class="mt-6 space-y-6">
-		<!-- Auth Methods -->
-		<div>
-			<h3 class="text-sm font-semibold text-gray-900">Auth Methods</h3>
-			<div class="mt-3 space-y-3">
-				<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3">
-					<div>
-						<p class="text-sm font-medium text-gray-900">Email + Password</p>
-						<p class="text-xs text-gray-500">Users sign in with email and password</p>
+	<!-- Settings Tab -->
+	{#if activeTab === 'settings'}
+		<div class="mt-6 space-y-6">
+			<!-- Auth Methods -->
+			<div>
+				<h3 class="text-sm font-semibold text-gray-900">Auth Methods</h3>
+				<div class="mt-3 space-y-3">
+					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3">
+						<div>
+							<p class="text-sm font-medium text-gray-900">Email + Password</p>
+							<p class="text-xs text-gray-500">Users sign in with email and password</p>
+						</div>
+						<button
+							type="button"
+							role="switch"
+							aria-checked={emailPasswordEnabled}
+							onclick={() => emailPasswordEnabled = !emailPasswordEnabled}
+							class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {emailPasswordEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+						>
+							<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {emailPasswordEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+						</button>
 					</div>
-					<button
-						type="button"
-						role="switch"
-						aria-checked={emailPasswordEnabled}
-						onclick={() => emailPasswordEnabled = !emailPasswordEnabled}
-						class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {emailPasswordEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
-					>
-						<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {emailPasswordEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
-					</button>
-				</div>
 
-				<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
-					<div>
-						<p class="text-sm font-medium text-gray-900">Passkeys</p>
-						<p class="text-xs text-gray-500">Passwordless auth with WebAuthn</p>
+					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
+						<div>
+							<p class="text-sm font-medium text-gray-900">Passkeys</p>
+							<p class="text-xs text-gray-500">Passwordless auth with WebAuthn</p>
+						</div>
+						<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
 					</div>
-					<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
-				</div>
 
-				<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
-					<div>
-						<p class="text-sm font-medium text-gray-900">Social Login (Google, GitHub)</p>
-						<p class="text-xs text-gray-500">Let users sign in with existing accounts</p>
+					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
+						<div>
+							<p class="text-sm font-medium text-gray-900">Social Login (Google, GitHub)</p>
+							<p class="text-xs text-gray-500">Let users sign in with existing accounts</p>
+						</div>
+						<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
 					</div>
-					<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
+				</div>
+			</div>
+
+			<!-- Settings -->
+			<div>
+				<h3 class="text-sm font-semibold text-gray-900">Settings</h3>
+				<div class="mt-3 space-y-4">
+					<div class="flex items-start justify-between">
+						<div>
+							<p class="text-sm font-medium text-gray-700">Require email confirmation</p>
+							{#if emailConfigured === false}
+								<p class="text-xs text-amber-500 mt-0.5">Requires Scaleway TEM configuration</p>
+							{:else}
+								<p class="text-xs text-gray-400 mt-0.5">Users must verify their email before signing in</p>
+							{/if}
+						</div>
+						<button
+							type="button"
+							role="switch"
+							aria-checked={requireEmailConfirmation}
+							onclick={() => requireEmailConfirmation = !requireEmailConfirmation}
+							class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {requireEmailConfirmation ? 'bg-eurobase-600' : 'bg-gray-200'}"
+						>
+							<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {requireEmailConfirmation ? 'translate-x-5' : 'translate-x-0'}"></span>
+						</button>
+					</div>
+
+					<div>
+						<label for="pwd-min" class="block text-sm font-medium text-gray-700">Minimum password length</label>
+						<input
+							id="pwd-min"
+							type="number"
+							min="8"
+							max="128"
+							bind:value={passwordMinLength}
+							class="mt-1.5 block w-24 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						/>
+					</div>
+
+					<div>
+						<label for="session-dur" class="block text-sm font-medium text-gray-700">Session duration</label>
+						<select
+							id="session-dur"
+							bind:value={sessionDuration}
+							class="mt-1.5 block w-48 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						>
+							{#each sessionOptions as opt}
+								<option value={opt.value}>{opt.label}</option>
+							{/each}
+						</select>
+					</div>
+
+					<div>
+						<label for="redirect-urls" class="block text-sm font-medium text-gray-700">Allowed redirect URLs</label>
+						<p class="text-xs text-gray-400 mt-0.5">One URL per line</p>
+						<textarea
+							id="redirect-urls"
+							bind:value={redirectUrls}
+							rows="3"
+							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						></textarea>
+					</div>
 				</div>
 			</div>
 		</div>
 
-		<!-- Settings -->
-		<div>
-			<h3 class="text-sm font-semibold text-gray-900">Settings</h3>
-			<div class="mt-3 space-y-4">
-				<div class="flex items-start justify-between">
-					<div>
-						<p class="text-sm font-medium text-gray-700">Require email confirmation</p>
-						<p class="text-xs text-gray-400 mt-0.5">Email sending not yet configured</p>
-					</div>
-					<button
-						type="button"
-						role="switch"
-						aria-checked={requireEmailConfirmation}
-						onclick={() => requireEmailConfirmation = !requireEmailConfirmation}
-						class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {requireEmailConfirmation ? 'bg-eurobase-600' : 'bg-gray-200'}"
-					>
-						<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {requireEmailConfirmation ? 'translate-x-5' : 'translate-x-0'}"></span>
-					</button>
-				</div>
-
-				<div>
-					<label for="pwd-min" class="block text-sm font-medium text-gray-700">Minimum password length</label>
-					<input
-						id="pwd-min"
-						type="number"
-						min="8"
-						max="128"
-						bind:value={passwordMinLength}
-						class="mt-1.5 block w-24 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
-					/>
-				</div>
-
-				<div>
-					<label for="session-dur" class="block text-sm font-medium text-gray-700">Session duration</label>
-					<select
-						id="session-dur"
-						bind:value={sessionDuration}
-						class="mt-1.5 block w-48 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
-					>
-						{#each sessionOptions as opt}
-							<option value={opt.value}>{opt.label}</option>
-						{/each}
-					</select>
-				</div>
-
-				<div>
-					<label for="redirect-urls" class="block text-sm font-medium text-gray-700">Allowed redirect URLs</label>
-					<p class="text-xs text-gray-400 mt-0.5">One URL per line</p>
-					<textarea
-						id="redirect-urls"
-						bind:value={redirectUrls}
-						rows="3"
-						class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
-					></textarea>
-				</div>
-			</div>
+		<div class="mt-8">
+			<button
+				onclick={handleSave}
+				disabled={saving}
+				class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+			>
+				{#if saving}
+					<svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+					</svg>
+					Saving...
+				{:else}
+					Save Changes
+				{/if}
+			</button>
 		</div>
-	</div>
+	{/if}
 
-	<div class="mt-8">
-		<button
-			onclick={handleSave}
-			disabled={saving}
-			class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-		>
-			{#if saving}
-				<svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
-					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-				</svg>
-				Saving...
+	<!-- Email Templates Tab -->
+	{#if activeTab === 'templates'}
+		<div class="mt-6 space-y-4">
+			{#if templatesLoading}
+				<p class="text-sm text-gray-500">Loading templates...</p>
+			{:else if editingType}
+				<!-- Template editor -->
+				{@const typeLabel = templateTypes.find(t => t.type === editingType)?.label ?? editingType}
+				<div class="space-y-4">
+					<div class="flex items-center justify-between">
+						<h3 class="text-sm font-semibold text-gray-900">Editing: {typeLabel}</h3>
+						<button onclick={cancelEditing} class="text-sm text-gray-500 hover:text-gray-700 cursor-pointer">Cancel</button>
+					</div>
+
+					<!-- Variable reference -->
+					<div class="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3">
+						<p class="text-xs font-medium text-gray-600 mb-1.5">Available variables:</p>
+						<div class="flex flex-wrap gap-2">
+							{#each templateVars as v}
+								<code class="text-xs bg-white border border-gray-200 rounded px-2 py-0.5 text-gray-700">{v}</code>
+							{/each}
+						</div>
+					</div>
+
+					<div>
+						<label for="tpl-subject" class="block text-sm font-medium text-gray-700">Subject</label>
+						<input
+							id="tpl-subject"
+							type="text"
+							bind:value={editSubject}
+							class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						/>
+					</div>
+
+					<div>
+						<label for="tpl-body" class="block text-sm font-medium text-gray-700">HTML Body</label>
+						<textarea
+							id="tpl-body"
+							bind:value={editBodyHtml}
+							rows="16"
+							class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono bg-gray-900 text-green-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						></textarea>
+					</div>
+
+					<div class="flex items-center gap-3">
+						<button
+							onclick={saveTemplate}
+							disabled={templateSaving}
+							class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+						>
+							{templateSaving ? 'Saving...' : 'Save Template'}
+						</button>
+						<button
+							onclick={previewTemplate}
+							class="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors cursor-pointer"
+						>
+							Preview
+						</button>
+					</div>
+
+					{#if previewHtml}
+						<div class="space-y-2">
+							<h4 class="text-sm font-medium text-gray-700">Preview</h4>
+							<p class="text-xs text-gray-500">Subject: {previewSubject}</p>
+							<div class="rounded-lg border border-gray-200 overflow-hidden">
+								{@html previewHtml}
+							</div>
+						</div>
+					{/if}
+				</div>
 			{:else}
-				Save Changes
+				<!-- Template list -->
+				{#each templateTypes as tt}
+					{@const tmpl = templates.find(t => t.template_type === tt.type)}
+					<div class="rounded-lg border border-gray-200 px-4 py-4">
+						<div class="flex items-start justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">{tt.label}</p>
+								<p class="text-xs text-gray-500 mt-0.5">
+									{tmpl?.is_custom ? 'Custom template' : 'Default template'}
+								</p>
+								{#if tmpl}
+									<p class="text-xs text-gray-400 mt-1">Subject: {tmpl.subject}</p>
+								{/if}
+							</div>
+							<div class="flex items-center gap-2">
+								{#if emailConfigured}
+									<button
+										onclick={() => sendTestEmail(tt.type)}
+										disabled={testSending}
+										class="text-xs text-gray-500 hover:text-gray-700 cursor-pointer disabled:opacity-50"
+									>
+										{testSending ? 'Sending...' : 'Send Test'}
+									</button>
+								{/if}
+								{#if tmpl?.is_custom}
+									<button
+										onclick={() => resetTemplate(tt.type)}
+										class="text-xs text-red-500 hover:text-red-700 cursor-pointer"
+									>
+										Reset
+									</button>
+								{/if}
+								<button
+									onclick={() => tmpl && startEditing(tmpl)}
+									class="text-xs text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer"
+								>
+									Edit
+								</button>
+							</div>
+						</div>
+					</div>
+				{/each}
 			{/if}
-		</button>
-	</div>
+		</div>
+	{/if}
 </div>

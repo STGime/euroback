@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
@@ -26,7 +27,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -55,6 +56,9 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 
 	// End-user auth service.
 	endUserAuthSvc := enduser.NewAuthService(pool)
+	if emailService != nil {
+		endUserAuthSvc.SetEmailService(emailService)
+	}
 
 	// API key middleware (for SDK / end-user routes).
 	apiKeyMw := auth.NewAPIKeyMiddleware(pool)
@@ -67,6 +71,8 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 		// Unauthenticated: platform auth endpoints.
 		r.Post("/auth/signup", auth.HandlePlatformSignUp(platformAuthSvc))
 		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc))
+		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc))
+		r.Post("/auth/reset-password", auth.HandlePlatformResetPassword(platformAuthSvc))
 
 		// Authenticated: account management.
 		r.Route("/auth/account", func(r chi.Router) {
@@ -79,6 +85,23 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Patch("/profile", auth.HandleUpdateProfile(platformAuthSvc))
 			r.Post("/change-password", auth.HandleChangePassword(platformAuthSvc))
 			r.Post("/delete", auth.HandleDeleteAccount(platformAuthSvc))
+		})
+
+		// Authenticated: platform config endpoints.
+		r.Route("/config", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			if emailService != nil {
+				r.Get("/email-status", email.HandleEmailStatus(emailService))
+			} else {
+				r.Get("/email-status", func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]bool{"configured": false})
+				})
+			}
 		})
 
 		// Authenticated: project management & schema introspection.
@@ -99,6 +122,16 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
 			r.Get("/connect", tenant.HandleConnect(pool))
+
+			// Email template management.
+			if emailService != nil {
+				tmplHandler := email.NewTemplateHandler(pool, emailService)
+				r.Get("/email-templates", tmplHandler.HandleList())
+				r.Put("/email-templates/{type}", tmplHandler.HandleUpdate())
+				r.Delete("/email-templates/{type}", tmplHandler.HandleDelete())
+				r.Post("/email-templates/{type}/preview", tmplHandler.HandlePreview())
+				r.Post("/email-templates/{type}/test", tmplHandler.HandleTest())
+			}
 
 			// Console end-user management — platform-authenticated.
 			r.Route("/users", func(r chi.Router) {
@@ -171,6 +204,10 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc))
 			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc))
 			r.Post("/signout", enduser.HandleSignOut(endUserAuthSvc))
+			r.Post("/forgot-password", enduser.HandleForgotPassword(endUserAuthSvc))
+			r.Post("/reset-password", enduser.HandleResetPassword(endUserAuthSvc))
+			r.Post("/verify-email", enduser.HandleVerifyEmail(endUserAuthSvc))
+			r.Post("/resend-verification", enduser.HandleResendVerification(endUserAuthSvc))
 
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {

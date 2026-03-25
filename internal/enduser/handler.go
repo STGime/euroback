@@ -63,6 +63,10 @@ func HandleSignIn(svc *AuthService) http.HandlerFunc {
 		resp, err := svc.SignIn(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req)
 		if err != nil {
 			slog.Warn("end-user signin failed", "error", err, "project_id", pc.ProjectID)
+			if err.Error() == "email_not_confirmed" {
+				writeJSON(w, map[string]string{"error": "email_not_confirmed", "message": "Please verify your email address before signing in. Check your inbox."}, http.StatusForbidden)
+				return
+			}
 			writeJSON(w, map[string]string{"error": "invalid email or password"}, http.StatusUnauthorized)
 			return
 		}
@@ -149,6 +153,117 @@ func HandleGetUser(svc *AuthService) http.HandlerFunc {
 		}
 
 		writeJSON(w, user, http.StatusOK)
+	}
+}
+
+// HandleForgotPassword returns an HTTP handler for POST /v1/auth/forgot-password.
+func HandleForgotPassword(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		// Load project name for email template.
+		var projectName string
+		_ = svc.pool.QueryRow(r.Context(), `SELECT name FROM projects WHERE id = $1`, pc.ProjectID).Scan(&projectName)
+
+		_ = svc.ForgotPassword(r.Context(), pc.SchemaName, pc.ProjectID, projectName, req.Email)
+
+		// Always return 200 to prevent email enumeration.
+		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
+	}
+}
+
+// HandleResetPassword returns an HTTP handler for POST /v1/auth/reset-password.
+func HandleResetPassword(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		var req struct {
+			Token    string `json:"token"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		if err := svc.ResetPassword(r.Context(), pc.SchemaName, req.Token, req.Password, config.PasswordMinLength); err != nil {
+			slog.Warn("password reset failed", "error", err, "project_id", pc.ProjectID)
+			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
+	}
+}
+
+// HandleVerifyEmail returns an HTTP handler for POST /v1/auth/verify-email.
+func HandleVerifyEmail(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		if err := svc.VerifyEmail(r.Context(), pc.SchemaName, req.Token); err != nil {
+			slog.Warn("email verification failed", "error", err, "project_id", pc.ProjectID)
+			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
+	}
+}
+
+// HandleResendVerification returns an HTTP handler for POST /v1/auth/resend-verification.
+func HandleResendVerification(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		var projectName string
+		_ = svc.pool.QueryRow(r.Context(), `SELECT name FROM projects WHERE id = $1`, pc.ProjectID).Scan(&projectName)
+
+		_ = svc.ResendVerification(r.Context(), pc.SchemaName, pc.ProjectID, projectName, req.Email)
+
+		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
 	}
 }
 

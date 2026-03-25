@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
@@ -20,12 +21,18 @@ import (
 
 // AuthService handles end-user auth operations scoped to a tenant schema.
 type AuthService struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	emailService *email.EmailService
 }
 
 // NewAuthService creates a new end-user auth service.
 func NewAuthService(pool *pgxpool.Pool) *AuthService {
 	return &AuthService{pool: pool}
+}
+
+// SetEmailService sets the email service for sending verification/reset emails.
+func (s *AuthService) SetEmailService(svc *email.EmailService) {
+	s.emailService = svc
 }
 
 // SignUp creates a new end-user in the given tenant schema.
@@ -79,6 +86,13 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 	_ = json.Unmarshal(metadataJSON, &user.Metadata)
 
 	slog.Info("end-user signed up", "schema", schemaName, "user_id", user.ID, "email", user.Email)
+
+	// If email confirmation is required and an email service is available, send verification email.
+	if config.RequireEmailConfirmation && s.emailService != nil {
+		if err := s.emailService.SendVerificationEmail(ctx, projectID, "", schemaName, user.ID, user.Email); err != nil {
+			slog.Error("failed to send verification email", "error", err, "user_id", user.ID)
+		}
+	}
 
 	sessionDurationSecs := config.SessionDurationSeconds()
 	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
@@ -136,6 +150,16 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
 		return nil, fmt.Errorf("invalid email or password")
+	}
+
+	// Sign-in guard: block unverified users when email confirmation is required.
+	if config.RequireEmailConfirmation {
+		var emailConfirmedAt *time.Time
+		confirmQ := fmt.Sprintf(`SELECT email_confirmed_at FROM %s.users WHERE id = $1`, quoteIdent(schemaName))
+		_ = s.pool.QueryRow(ctx, confirmQ, user.ID).Scan(&emailConfirmedAt)
+		if emailConfirmedAt == nil {
+			return nil, fmt.Errorf("email_not_confirmed")
+		}
 	}
 
 	// Update last_sign_in_at.
@@ -337,4 +361,110 @@ func hashSHA256(input string) string {
 // quoteIdent quotes a SQL identifier to prevent injection.
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// ForgotPassword initiates a password reset for an end-user.
+// Always returns nil to prevent email enumeration.
+func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID, projectName, emailAddr string) error {
+	if s.emailService == nil {
+		slog.Warn("forgot-password: email service not configured")
+		return nil
+	}
+
+	emailAddr = strings.ToLower(strings.TrimSpace(emailAddr))
+
+	var userID string
+	q := fmt.Sprintf(`SELECT id FROM %s.users WHERE email = $1`, quoteIdent(schemaName))
+	err := s.pool.QueryRow(ctx, q, emailAddr).Scan(&userID)
+	if err != nil {
+		// User not found — return nil to prevent enumeration.
+		return nil
+	}
+
+	if err := s.emailService.SendPasswordResetEmail(ctx, projectID, projectName, schemaName, userID, emailAddr); err != nil {
+		slog.Error("failed to send password reset email", "error", err, "user_id", userID)
+	}
+	return nil
+}
+
+// ResetPassword completes a password reset using a token.
+func (s *AuthService) ResetPassword(ctx context.Context, schemaName, rawToken, newPassword string, minPasswordLen int) error {
+	if len(newPassword) < minPasswordLen {
+		return fmt.Errorf("password must be at least %d characters", minPasswordLen)
+	}
+	if s.emailService == nil {
+		return fmt.Errorf("email service not configured")
+	}
+
+	userID, err := s.emailService.VerifyToken(ctx, schemaName, rawToken, "password_reset")
+	if err != nil {
+		return err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+
+	// Update password.
+	updateQ := fmt.Sprintf(`UPDATE %s.users SET password_hash = $1, updated_at = now() WHERE id = $2`, quoteIdent(schemaName))
+	if _, err := s.pool.Exec(ctx, updateQ, string(hash), userID); err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+
+	// Revoke all refresh tokens for security.
+	revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schemaName))
+	if _, err := s.pool.Exec(ctx, revokeQ, userID); err != nil {
+		slog.Error("failed to revoke refresh tokens after password reset", "error", err, "user_id", userID)
+	}
+
+	slog.Info("end-user password reset", "schema", schemaName, "user_id", userID)
+	return nil
+}
+
+// VerifyEmail confirms an end-user's email address.
+func (s *AuthService) VerifyEmail(ctx context.Context, schemaName, rawToken string) error {
+	if s.emailService == nil {
+		return fmt.Errorf("email service not configured")
+	}
+
+	userID, err := s.emailService.VerifyToken(ctx, schemaName, rawToken, "verification")
+	if err != nil {
+		return err
+	}
+
+	q := fmt.Sprintf(`UPDATE %s.users SET email_confirmed_at = now(), updated_at = now() WHERE id = $1`, quoteIdent(schemaName))
+	if _, err := s.pool.Exec(ctx, q, userID); err != nil {
+		return fmt.Errorf("confirm email: %w", err)
+	}
+
+	slog.Info("end-user email verified", "schema", schemaName, "user_id", userID)
+	return nil
+}
+
+// ResendVerification resends the verification email to an end-user.
+func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projectID, projectName, emailAddr string) error {
+	if s.emailService == nil {
+		slog.Warn("resend-verification: email service not configured")
+		return nil
+	}
+
+	emailAddr = strings.ToLower(strings.TrimSpace(emailAddr))
+
+	var userID string
+	var emailConfirmedAt *time.Time
+	q := fmt.Sprintf(`SELECT id, email_confirmed_at FROM %s.users WHERE email = $1`, quoteIdent(schemaName))
+	err := s.pool.QueryRow(ctx, q, emailAddr).Scan(&userID, &emailConfirmedAt)
+	if err != nil {
+		return nil // prevent enumeration
+	}
+
+	if emailConfirmedAt != nil {
+		return nil // already confirmed
+	}
+
+	if err := s.emailService.SendVerificationEmail(ctx, projectID, projectName, schemaName, userID, emailAddr); err != nil {
+		slog.Error("failed to resend verification email", "error", err, "user_id", userID)
+	}
+	return nil
 }

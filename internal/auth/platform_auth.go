@@ -15,9 +15,21 @@ import (
 
 // PlatformAuthService handles sign-up, sign-in, and JWT generation
 // for platform (console) users stored in public.platform_users.
+// PlatformEmailer is the interface for sending platform email tokens.
+type PlatformEmailer interface {
+	SendPlatformPasswordResetEmail(ctx context.Context, userID, userEmail string) error
+	VerifyPlatformToken(ctx context.Context, rawToken, tokenType string) (string, error)
+}
+
 type PlatformAuthService struct {
-	pool      *pgxpool.Pool
-	jwtSecret []byte
+	pool         *pgxpool.Pool
+	jwtSecret    []byte
+	emailService PlatformEmailer
+}
+
+// SetEmailService sets the email service for password reset emails.
+func (s *PlatformAuthService) SetEmailService(svc PlatformEmailer) {
+	s.emailService = svc
 }
 
 // PlatformUser represents a row from public.platform_users.
@@ -293,4 +305,60 @@ func (s *PlatformAuthService) ValidatePlatformJWT(tokenStr string) (*Claims, err
 		Subject: sub,
 		Email:   email,
 	}, nil
+}
+
+// ForgotPassword initiates a platform password reset.
+// Always returns nil to prevent email enumeration.
+func (s *PlatformAuthService) ForgotPassword(ctx context.Context, emailAddr string) error {
+	if s.emailService == nil {
+		slog.Warn("platform forgot-password: email service not configured")
+		return nil
+	}
+
+	emailAddr = strings.ToLower(strings.TrimSpace(emailAddr))
+
+	var userID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id FROM platform_users WHERE email = $1`,
+		emailAddr,
+	).Scan(&userID)
+	if err != nil {
+		return nil // prevent enumeration
+	}
+
+	if err := s.emailService.SendPlatformPasswordResetEmail(ctx, userID, emailAddr); err != nil {
+		slog.Error("failed to send platform password reset email", "error", err, "user_id", userID)
+	}
+	return nil
+}
+
+// ResetPasswordWithToken resets a platform user's password using a token.
+func (s *PlatformAuthService) ResetPasswordWithToken(ctx context.Context, rawToken, newPassword string) error {
+	if len(newPassword) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
+	if s.emailService == nil {
+		return fmt.Errorf("email service not configured")
+	}
+
+	userID, err := s.emailService.VerifyPlatformToken(ctx, rawToken, "password_reset")
+	if err != nil {
+		return err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx,
+		`UPDATE platform_users SET password_hash = $1 WHERE id = $2`,
+		string(hash), userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+
+	slog.Info("platform user reset password via token", "user_id", userID)
+	return nil
 }

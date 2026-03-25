@@ -13,6 +13,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/gateway"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
@@ -95,6 +96,29 @@ func main() {
 		slog.Warn("SCW_ACCESS_KEY / SCW_SECRET_KEY not set, storage routes disabled")
 	}
 
+	// ── Set up Scaleway TEM email client (optional — degrades gracefully) ──
+	scwTEMKey := os.Getenv("SCW_TEM_SECRET_KEY")
+	scwTEMRegion := os.Getenv("SCW_TEM_REGION")
+	emailFromAddr := os.Getenv("EMAIL_FROM_ADDRESS")
+	emailFromName := os.Getenv("EMAIL_FROM_NAME")
+	consoleURL := os.Getenv("CONSOLE_URL")
+	if consoleURL == "" {
+		consoleURL = "http://localhost:5173"
+	}
+
+	emailClient := email.NewEmailClient(scwTEMKey, scwTEMRegion, emailFromAddr, emailFromName)
+	var emailService *email.EmailService
+	if emailClient.Configured() {
+		emailService = email.NewEmailService(emailClient, pool, consoleURL)
+		slog.Info("email service configured (Scaleway TEM)")
+	} else {
+		emailService = email.NewEmailService(emailClient, pool, consoleURL)
+		slog.Warn("SCW_TEM_SECRET_KEY or EMAIL_FROM_ADDRESS not set, emails will be logged instead of sent")
+	}
+
+	// Wire email into platform auth.
+	platformAuthSvc.SetEmailService(emailService)
+
 	// ── Set up realtime WebSocket hub ──
 	hub := realtime.NewHub()
 	go hub.Run()
@@ -135,7 +159,7 @@ func main() {
 	subdomainMw := auth.NewSubdomainMiddleware(pool, domainSuffix)
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

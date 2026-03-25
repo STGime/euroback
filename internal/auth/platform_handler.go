@@ -189,6 +189,52 @@ func HandleDeleteAccount(svc *PlatformAuthService) http.HandlerFunc {
 	}
 }
 
+// HandlePlatformForgotPassword returns an HTTP handler for POST /platform/auth/forgot-password.
+func HandlePlatformForgotPassword(svc *PlatformAuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		_ = svc.ForgotPassword(r.Context(), req.Email)
+
+		// Always return 200 to prevent email enumeration.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
+// HandlePlatformResetPassword returns an HTTP handler for POST /platform/auth/reset-password.
+func HandlePlatformResetPassword(svc *PlatformAuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Token    string `json:"token"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := svc.ResetPasswordWithToken(r.Context(), req.Token, req.Password); err != nil {
+			slog.Warn("platform password reset failed", "error", err)
+			status := http.StatusBadRequest
+			if isUserError(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, err.Error(), status)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
 func isUserError(err error) bool {
 	msg := err.Error()
 	return msg == "email is required" ||
@@ -198,7 +244,9 @@ func isUserError(err error) bool {
 		msg == "display name must be at most 100 characters" ||
 		msg == "new password must be at least 8 characters" ||
 		msg == "current password is incorrect" ||
-		msg == "delete all projects before deleting your account"
+		msg == "delete all projects before deleting your account" ||
+		msg == "invalid or expired token" ||
+		msg == "email service not configured"
 }
 
 func writeJSONError(w http.ResponseWriter, msg string, status int) {
