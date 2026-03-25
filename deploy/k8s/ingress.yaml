@@ -17,6 +17,9 @@ spec:
         - api.eurobase.app
         - console.eurobase.app
       secretName: eurobase-tls
+    - hosts:
+        - "*.eurobase.app"
+      secretName: eurobase-wildcard-tls
   rules:
     - host: api.eurobase.app
       http:
@@ -38,6 +41,16 @@ spec:
                 name: console
                 port:
                   number: 3000
+    - host: "*.eurobase.app"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8080
 ---
 ##############################################################################
 # Console Service (referenced by ingress)
@@ -106,7 +119,7 @@ spec:
       protocol: TCP
 ---
 ##############################################################################
-# cert-manager ClusterIssuer for Let's Encrypt
+# cert-manager ClusterIssuer for Let's Encrypt (HTTP-01 — explicit hosts)
 ##############################################################################
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -122,3 +135,51 @@ spec:
       - http01:
           ingress:
             class: nginx
+---
+##############################################################################
+# cert-manager ClusterIssuer for Let's Encrypt (DNS-01 — wildcards)
+#
+# Requires the Scaleway DNS cert-manager webhook to be installed:
+#   https://github.com/scaleway/cert-manager-webhook-scaleway
+#
+# And a secret named "scaleway-credentials" in the cert-manager namespace
+# with SCW_ACCESS_KEY and SCW_SECRET_KEY.
+##############################################################################
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod-dns
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: infra@eurobase.app
+    privateKeySecretRef:
+      name: letsencrypt-prod-dns-key
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.scaleway.com
+            solverName: scaleway
+            config:
+              accessKeySecretRef:
+                name: scaleway-credentials
+                key: SCW_ACCESS_KEY
+              secretKeySecretRef:
+                name: scaleway-credentials
+                key: SCW_SECRET_KEY
+---
+##############################################################################
+# Wildcard certificate for *.eurobase.app (DNS-01 validated)
+##############################################################################
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: eurobase-wildcard
+  namespace: eurobase
+spec:
+  secretName: eurobase-wildcard-tls
+  issuerRef:
+    name: letsencrypt-prod-dns
+    kind: ClusterIssuer
+  dnsNames:
+    - "*.eurobase.app"

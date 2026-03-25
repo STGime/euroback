@@ -46,6 +46,19 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
+		// If a subdomain already resolved a project, verify the API key
+		// belongs to the same project.
+		if existing, ok := ProjectFromContext(r.Context()); ok {
+			if existing.ProjectID != pc.ProjectID {
+				slog.Warn("API key does not match subdomain project",
+					"subdomain_project", existing.ProjectID,
+					"apikey_project", pc.ProjectID,
+				)
+				http.Error(w, `{"error":"API key does not belong to this project"}`, http.StatusUnauthorized)
+				return
+			}
+		}
+
 		// Update last_used_at (fire and forget).
 		go func() {
 			_, _ = m.pool.Exec(r.Context(),

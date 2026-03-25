@@ -27,6 +27,16 @@ type PlatformUser struct {
 	DisplayName *string `json:"display_name,omitempty"`
 }
 
+// PlatformProfile is the full profile returned by the account endpoint.
+type PlatformProfile struct {
+	ID           string     `json:"id"`
+	Email        string     `json:"email"`
+	DisplayName  *string    `json:"display_name"`
+	Plan         string     `json:"plan"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastSignInAt *time.Time `json:"last_sign_in_at"`
+}
+
 // PlatformAuthResponse is returned after successful sign-up or sign-in.
 type PlatformAuthResponse struct {
 	AccessToken string       `json:"access_token"`
@@ -152,6 +162,101 @@ func (s *PlatformAuthService) generatePlatformJWT(userID, email string) (string,
 	}
 
 	return signed, expiresIn, nil
+}
+
+// GetProfile returns the full profile for a platform user.
+func (s *PlatformAuthService) GetProfile(ctx context.Context, userID string) (*PlatformProfile, error) {
+	var p PlatformProfile
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, email, display_name, COALESCE(plan, 'free'), created_at, last_sign_in_at
+		 FROM platform_users WHERE id = $1`,
+		userID,
+	).Scan(&p.ID, &p.Email, &p.DisplayName, &p.Plan, &p.CreatedAt, &p.LastSignInAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, fmt.Errorf("query profile: %w", err)
+	}
+	return &p, nil
+}
+
+// UpdateDisplayName sets the display name for a platform user.
+func (s *PlatformAuthService) UpdateDisplayName(ctx context.Context, userID, displayName string) error {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return fmt.Errorf("display name is required")
+	}
+	if len(displayName) > 100 {
+		return fmt.Errorf("display name must be at most 100 characters")
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE platform_users SET display_name = $1 WHERE id = $2`,
+		displayName, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update display name: %w", err)
+	}
+	return nil
+}
+
+// ChangePassword verifies the current password and updates to a new one.
+func (s *PlatformAuthService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	if len(newPassword) < 8 {
+		return fmt.Errorf("new password must be at least 8 characters")
+	}
+
+	var passwordHash string
+	err := s.pool.QueryRow(ctx,
+		`SELECT password_hash FROM platform_users WHERE id = $1`,
+		userID,
+	).Scan(&passwordHash)
+	if err != nil {
+		return fmt.Errorf("query user: %w", err)
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(currentPassword)); err != nil {
+		return fmt.Errorf("current password is incorrect")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx,
+		`UPDATE platform_users SET password_hash = $1 WHERE id = $2`,
+		string(hash), userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+
+	slog.Info("platform user changed password", "user_id", userID)
+	return nil
+}
+
+// DeleteAccount removes a platform user after verifying all projects are deleted.
+func (s *PlatformAuthService) DeleteAccount(ctx context.Context, userID string) error {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM projects WHERE owner_id = $1::uuid AND status != 'deleting'`,
+		userID,
+	).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check projects: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("delete all projects before deleting your account")
+	}
+
+	_, err = s.pool.Exec(ctx, `DELETE FROM platform_users WHERE id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("delete account: %w", err)
+	}
+
+	slog.Info("platform user deleted account", "user_id", userID)
+	return nil
 }
 
 // ValidatePlatformJWT parses and validates a platform JWT, returning the claims.

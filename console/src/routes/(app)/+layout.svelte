@@ -1,13 +1,23 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { user, logout } from '$lib/stores.js';
+	import { api } from '$lib/api.js';
 
 	let { children } = $props();
+	let displayName = $state<string | null>(null);
 
-	onMount(() => {
+	onMount(async () => {
 		if (!$user) {
 			goto('/login');
+			return;
+		}
+		try {
+			const profile = await api.getProfile();
+			displayName = profile.display_name;
+		} catch {
+			// Silently ignore — falls back to email display.
 		}
 	});
 
@@ -29,7 +39,7 @@
 		}
 	];
 
-	let currentPath = $state('/projects');
+	let currentPath = $derived(page.url.pathname);
 
 	async function handleLogout() {
 		logout();
@@ -132,9 +142,9 @@
 
 			<!-- User menu -->
 			<div class="flex items-center gap-3">
-				<span class="text-sm text-gray-500 hidden sm:block">{$user?.email ?? ''}</span>
+				<span class="text-sm text-gray-500 hidden sm:block">{displayName ?? $user?.email ?? ''}</span>
 				<div class="flex h-8 w-8 items-center justify-center rounded-full bg-eurobase-100 text-sm font-medium text-eurobase-700">
-					{($user?.email ?? '?')[0].toUpperCase()}
+					{(displayName ?? $user?.email ?? '?')[0].toUpperCase()}
 				</div>
 			</div>
 		</header>

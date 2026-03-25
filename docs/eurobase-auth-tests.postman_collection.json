@@ -298,6 +298,462 @@
 			]
 		},
 		{
+			"name": "Phase 0.5 — Platform Account Management",
+			"item": [
+				{
+					"name": "T0A.1 Get Profile",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Profile has expected fields', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.id).to.be.a('string');",
+									"    pm.expect(json.email).to.eql('dev@test.eu');",
+									"    pm.expect(json.plan).to.eql('free');",
+									"    pm.expect(json.created_at).to.be.a('string');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/profile",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "profile"]
+						}
+					}
+				},
+				{
+					"name": "T0A.2 Get Profile — No Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/profile",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "profile"]
+						}
+					}
+				},
+				{
+					"name": "T0A.3 Update Display Name",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Status ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"display_name\": \"Test User\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/profile",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "profile"]
+						}
+					}
+				},
+				{
+					"name": "T0A.4 Verify Display Name Persisted",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Display name updated', () => {",
+									"    pm.expect(pm.response.json().display_name).to.eql('Test User');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/profile",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "profile"]
+						}
+					}
+				},
+				{
+					"name": "T0A.5 Update Display Name — Empty (rejected)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions required', () => {",
+									"    pm.expect(pm.response.json().error).to.include('required');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"display_name\": \"   \"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/profile",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "profile"]
+						}
+					}
+				},
+				{
+					"name": "T0A.6 Change Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Status ok', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"current_password\": \"password123\",\n  \"new_password\": \"newpass456!\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/change-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "change-password"]
+						}
+					}
+				},
+				{
+					"name": "T0A.7 Sign In with New Password",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Token returned', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.access_token).to.be.a('string');",
+									"    pm.environment.set('platform_token', json.access_token);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\",\n  \"password\": \"newpass456!\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signin"]
+						}
+					}
+				},
+				{
+					"name": "T0A.8 Sign In with Old Password (rejected)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+									"pm.test('Old password no longer works', () => {",
+									"    pm.expect(pm.response.json().error).to.eql('invalid email or password');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"dev@test.eu\",\n  \"password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/signin",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "signin"]
+						}
+					}
+				},
+				{
+					"name": "T0A.9 Change Password — Wrong Current (rejected)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions incorrect', () => {",
+									"    pm.expect(pm.response.json().error).to.include('incorrect');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"current_password\": \"totallyWrong\",\n  \"new_password\": \"doesntmatter1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/change-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "change-password"]
+						}
+					}
+				},
+				{
+					"name": "T0A.10 Change Password — Too Short (rejected)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions 8 characters', () => {",
+									"    pm.expect(pm.response.json().error).to.include('8 characters');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"current_password\": \"newpass456!\",\n  \"new_password\": \"short\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/change-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "change-password"]
+						}
+					}
+				},
+				{
+					"name": "T0A.11 Delete Account — Wrong Email (rejected)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions confirmation', () => {",
+									"    pm.expect(pm.response.json().error).to.include('confirmation');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"confirmation_email\": \"wrong@test.eu\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/delete",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "delete"]
+						}
+					}
+				},
+				{
+					"name": "T0A.12 Delete Account — Has Projects (rejected)",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"// This test expects the user to have at least one project.",
+									"// Phase 1 creates one, but we're before Phase 1.",
+									"// We create a temporary project here.",
+									"const baseUrl = pm.environment.get('base_url');",
+									"const token = pm.environment.get('platform_token');",
+									"pm.sendRequest({",
+									"    url: baseUrl + '/v1/tenants/',",
+									"    method: 'POST',",
+									"    header: {",
+									"        'Authorization': 'Bearer ' + token,",
+									"        'Content-Type': 'application/json'",
+									"    },",
+									"    body: { mode: 'raw', raw: JSON.stringify({ name: 'temp-delete-test', slug: 'temp-del-test' }) }",
+									"}, (err, res) => {",
+									"    if (res.code === 201) {",
+									"        pm.environment.set('temp_project_id', res.json().id);",
+									"    }",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						},
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions projects', () => {",
+									"    pm.expect(pm.response.json().error).to.include('projects');",
+									"});",
+									"",
+									"// Cleanup: delete the temp project.",
+									"const baseUrl = pm.environment.get('base_url');",
+									"const token = pm.environment.get('platform_token');",
+									"const tempId = pm.environment.get('temp_project_id');",
+									"if (tempId) {",
+									"    pm.sendRequest({",
+									"        url: baseUrl + '/v1/tenants/' + tempId,",
+									"        method: 'DELETE',",
+									"        header: { 'Authorization': 'Bearer ' + token }",
+									"    }, () => {});",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"confirmation_email\": \"dev@test.eu\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/delete",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "delete"]
+						}
+					}
+				},
+				{
+					"name": "T0A.13 Restore Password for Later Phases",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Password restored', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('ok');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"current_password\": \"newpass456!\",\n  \"new_password\": \"password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/auth/account/change-password",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "auth", "account", "change-password"]
+						}
+					}
+				}
+			]
+		},
+		{
 			"name": "Phase 1 — API Key Validation",
 			"item": [
 				{

@@ -67,11 +67,138 @@ func HandlePlatformSignIn(svc *PlatformAuthService) http.HandlerFunc {
 	}
 }
 
+// HandleGetProfile returns an HTTP handler for GET /platform/auth/account/profile.
+func HandleGetProfile(svc *PlatformAuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := ClaimsFromContext(r.Context())
+		if !ok {
+			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		profile, err := svc.GetProfile(r.Context(), claims.Subject)
+		if err != nil {
+			slog.Warn("get profile failed", "error", err)
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(profile)
+	}
+}
+
+// HandleUpdateProfile returns an HTTP handler for PATCH /platform/auth/account/profile.
+func HandleUpdateProfile(svc *PlatformAuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := ClaimsFromContext(r.Context())
+		if !ok {
+			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			DisplayName string `json:"display_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := svc.UpdateDisplayName(r.Context(), claims.Subject, req.DisplayName); err != nil {
+			slog.Warn("update profile failed", "error", err)
+			status := http.StatusInternalServerError
+			if isUserError(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, err.Error(), status)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
+// HandleChangePassword returns an HTTP handler for POST /platform/auth/account/change-password.
+func HandleChangePassword(svc *PlatformAuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := ClaimsFromContext(r.Context())
+		if !ok {
+			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			CurrentPassword string `json:"current_password"`
+			NewPassword     string `json:"new_password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := svc.ChangePassword(r.Context(), claims.Subject, req.CurrentPassword, req.NewPassword); err != nil {
+			slog.Warn("change password failed", "error", err)
+			status := http.StatusInternalServerError
+			if isUserError(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, err.Error(), status)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
+// HandleDeleteAccount returns an HTTP handler for POST /platform/auth/account/delete.
+func HandleDeleteAccount(svc *PlatformAuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := ClaimsFromContext(r.Context())
+		if !ok {
+			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			ConfirmationEmail string `json:"confirmation_email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.ConfirmationEmail != claims.Email {
+			writeJSONError(w, "confirmation email does not match", http.StatusBadRequest)
+			return
+		}
+
+		if err := svc.DeleteAccount(r.Context(), claims.Subject); err != nil {
+			slog.Warn("delete account failed", "error", err)
+			status := http.StatusInternalServerError
+			if isUserError(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, err.Error(), status)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func isUserError(err error) bool {
 	msg := err.Error()
 	return msg == "email is required" ||
 		msg == "password must be at least 8 characters" ||
-		msg == "email already registered"
+		msg == "email already registered" ||
+		msg == "display name is required" ||
+		msg == "display name must be at most 100 characters" ||
+		msg == "new password must be at least 8 characters" ||
+		msg == "current password is incorrect" ||
+		msg == "delete all projects before deleting your account"
 }
 
 func writeJSONError(w http.ResponseWriter, msg string, status int) {

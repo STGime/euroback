@@ -20,6 +20,15 @@ export interface AuthConfig {
 	redirect_urls: string[];
 }
 
+export interface PlatformProfile {
+	id: string;
+	email: string;
+	display_name: string | null;
+	plan: string;
+	created_at: string;
+	last_sign_in_at: string | null;
+}
+
 export interface Project {
 	id: string;
 	name: string;
@@ -197,6 +206,37 @@ export class EurobaseAPI {
 		});
 		this.setToken(resp.access_token);
 		return resp;
+	}
+
+	// ---- Account methods ----
+
+	/** Get the current user's profile. */
+	async getProfile(): Promise<PlatformProfile> {
+		return this.fetch<PlatformProfile>('/platform/auth/account/profile');
+	}
+
+	/** Update the current user's display name. */
+	async updateDisplayName(displayName: string): Promise<{ status: string }> {
+		return this.fetch('/platform/auth/account/profile', {
+			method: 'PATCH',
+			body: JSON.stringify({ display_name: displayName })
+		});
+	}
+
+	/** Change the current user's password. */
+	async changePassword(currentPassword: string, newPassword: string): Promise<{ status: string }> {
+		return this.fetch('/platform/auth/account/change-password', {
+			method: 'POST',
+			body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+		});
+	}
+
+	/** Delete the current user's account. */
+	async deleteAccount(confirmationEmail: string): Promise<void> {
+		return this.fetch('/platform/auth/account/delete', {
+			method: 'POST',
+			body: JSON.stringify({ confirmation_email: confirmationEmail })
+		});
 	}
 
 	/** List all projects (tenants) for the authenticated user. */

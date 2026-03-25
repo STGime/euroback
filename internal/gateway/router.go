@@ -26,7 +26,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -35,6 +35,11 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 	r.Use(CORSMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+
+	// Subdomain resolution — resolves {slug}.eurobase.app to a project context.
+	if subdomainMw != nil {
+		r.Use(subdomainMw.Handler)
+	}
 
 	isDev := len(devMode) > 0 && devMode[0]
 
@@ -62,6 +67,19 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 		// Unauthenticated: platform auth endpoints.
 		r.Post("/auth/signup", auth.HandlePlatformSignUp(platformAuthSvc))
 		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc))
+
+		// Authenticated: account management.
+		r.Route("/auth/account", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			r.Get("/profile", auth.HandleGetProfile(platformAuthSvc))
+			r.Patch("/profile", auth.HandleUpdateProfile(platformAuthSvc))
+			r.Post("/change-password", auth.HandleChangePassword(platformAuthSvc))
+			r.Post("/delete", auth.HandleDeleteAccount(platformAuthSvc))
+		})
 
 		// Authenticated: project management & schema introspection.
 		r.Route("/projects/{id}", func(r chi.Router) {

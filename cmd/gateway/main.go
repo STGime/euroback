@@ -127,8 +127,15 @@ func main() {
 	// ── Dev mode: bypass platform auth for local testing ──
 	devMode := os.Getenv("DEV_MODE") == "true"
 
+	// ── Set up subdomain middleware for SDK URLs ({slug}.eurobase.app) ──
+	domainSuffix := os.Getenv("DOMAIN_SUFFIX")
+	if domainSuffix == "" {
+		domainSuffix = "eurobase.app"
+	}
+	subdomainMw := auth.NewSubdomainMiddleware(pool, domainSuffix)
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
