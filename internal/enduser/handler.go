@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/tenant"
 )
 
 // HandleSignUp returns an HTTP handler for POST /v1/auth/signup.
@@ -18,18 +19,20 @@ func HandleSignUp(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
 		var req SignUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
 
-		resp, err := svc.SignUp(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, req)
+		resp, err := svc.SignUp(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req)
 		if err != nil {
 			slog.Warn("end-user signup failed", "error", err, "project_id", pc.ProjectID)
 			status := http.StatusInternalServerError
 			msg := err.Error()
-			if msg == "email is required" || msg == "password must be at least 8 characters" || msg == "email already registered" {
+			if msg == "email is required" || strings.HasPrefix(msg, "password must be at least") || msg == "email already registered" || msg == "email/password authentication is disabled" {
 				status = http.StatusBadRequest
 			}
 			writeJSON(w, map[string]string{"error": msg}, status)
@@ -49,13 +52,15 @@ func HandleSignIn(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
 		var req SignInRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
 
-		resp, err := svc.SignIn(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, req)
+		resp, err := svc.SignIn(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req)
 		if err != nil {
 			slog.Warn("end-user signin failed", "error", err, "project_id", pc.ProjectID)
 			writeJSON(w, map[string]string{"error": "invalid email or password"}, http.StatusUnauthorized)
@@ -75,13 +80,15 @@ func HandleRefresh(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
 		var req RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
 
-		resp, err := svc.RefreshToken(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, req.RefreshToken)
+		resp, err := svc.RefreshToken(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req.RefreshToken)
 		if err != nil {
 			slog.Warn("token refresh failed", "error", err, "project_id", pc.ProjectID)
 			writeJSON(w, map[string]string{"error": "invalid or expired refresh token"}, http.StatusUnauthorized)

@@ -1,6 +1,9 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 type projectContextKey struct{}
 
@@ -10,6 +13,7 @@ type ProjectContext struct {
 	SchemaName string
 	JWTSecret  string
 	KeyType    string // "public" or "secret"
+	AuthConfig json.RawMessage
 }
 
 // ContextWithProject stores a ProjectContext in the given context.

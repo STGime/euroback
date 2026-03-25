@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { api, type Project } from '$lib/api.js';
+	import { api, type Project, type AuthConfig } from '$lib/api.js';
 	import { loadProjects } from '$lib/stores.js';
 
 	// State
@@ -9,6 +9,16 @@
 	let creating = $state(false);
 	let createError = $state('');
 	let createdProject = $state<Project | null>(null);
+	let step = $state<'create' | 'auth' | 'success'>('create');
+
+	// Auth config state (Step 2)
+	let emailPasswordEnabled = $state(true);
+	let requireEmailConfirmation = $state(false);
+	let passwordMinLength = $state(8);
+	let sessionDuration = $state('168h');
+	let redirectUrls = $state('http://localhost:3000');
+	let savingAuth = $state(false);
+	let authError = $state('');
 
 	// Post-creation UI
 	let activeTab = $state<'quickstart' | 'curl' | 'ide'>('quickstart');
@@ -31,6 +41,13 @@
 	let projectId = $derived(createdProject?.id ?? '');
 	let apiUrl = $derived(createdProject?.api_url ?? `https://${slug}.eurobase.app`);
 
+	const sessionOptions = [
+		{ value: '1h', label: '1 hour' },
+		{ value: '24h', label: '24 hours' },
+		{ value: '168h', label: '7 days' },
+		{ value: '720h', label: '30 days' }
+	];
+
 	async function handleCreate() {
 		if (!projectName.trim()) return;
 		creating = true;
@@ -44,10 +61,10 @@
 			});
 			createdProject = project;
 			await loadProjects();
+			step = 'auth';
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : 'Failed to create project';
 			if (msg.includes('409') || msg.includes('already taken')) {
-				// Auto-suggest a unique name by appending a random suffix.
 				const suffix = Math.random().toString(36).slice(2, 6);
 				projectName = projectName.trim() + '-' + suffix;
 				createError = `That project URL was taken. We've updated the name — click Create Project to try again, or edit it.`;
@@ -57,6 +74,31 @@
 		} finally {
 			creating = false;
 		}
+	}
+
+	async function handleSaveAuthConfig() {
+		if (!createdProject) return;
+		savingAuth = true;
+		authError = '';
+		try {
+			const config: AuthConfig = {
+				providers: { email_password: { enabled: emailPasswordEnabled } },
+				password_min_length: passwordMinLength,
+				require_email_confirmation: requireEmailConfirmation,
+				session_duration: sessionDuration,
+				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean)
+			};
+			await api.updateProject(createdProject.id, { auth_config: config });
+			step = 'success';
+		} catch (err) {
+			authError = err instanceof Error ? err.message : 'Failed to save auth config';
+		} finally {
+			savingAuth = false;
+		}
+	}
+
+	function handleSkipAuth() {
+		step = 'success';
 	}
 
 	function goToDashboard() {
@@ -99,6 +141,9 @@ console.log(data)
 	let envTemplate = $derived(`EUROBASE_URL=${apiUrl}
 EUROBASE_PUBLIC_KEY=${publicKey}
 EUROBASE_SECRET_KEY=${secretKey}`);
+
+	let stepNumber = $derived(step === 'create' ? 1 : step === 'auth' ? 2 : 3);
+	let stepLabel = $derived(step === 'create' ? 'Create' : step === 'auth' ? 'Authentication' : 'Get Started');
 </script>
 
 <svelte:head>
@@ -106,8 +151,18 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 </svelte:head>
 
 <div class="mx-auto max-w-3xl">
-	{#if !createdProject}
-		<!-- CREATE PHASE -->
+	<!-- Step indicator -->
+	<div class="mb-6 text-center">
+		<p class="text-xs font-medium text-gray-400 uppercase tracking-wider">Step {stepNumber} of 3 &middot; {stepLabel}</p>
+		<div class="mt-2 flex justify-center gap-2">
+			{#each [1, 2, 3] as s}
+				<div class="h-1 w-16 rounded-full transition-colors {s <= stepNumber ? 'bg-eurobase-600' : 'bg-gray-200'}"></div>
+			{/each}
+		</div>
+	</div>
+
+	{#if step === 'create'}
+		<!-- STEP 1: CREATE PROJECT -->
 		<div>
 			<h1 class="text-2xl font-bold text-gray-900">Create your project</h1>
 			<p class="mt-2 text-sm text-gray-500 leading-relaxed">
@@ -230,8 +285,157 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				</button>
 			</div>
 		</div>
+
+	{:else if step === 'auth'}
+		<!-- STEP 2: AUTH CONFIGURATION -->
+		<div>
+			<h1 class="text-2xl font-bold text-gray-900">Configure Authentication</h1>
+			<p class="mt-2 text-sm text-gray-500 leading-relaxed">
+				Choose how your users will sign in. You can change this later in Settings.
+			</p>
+
+			{#if authError}
+				<div class="mt-5 rounded-lg bg-red-50 border border-red-200 p-3.5 text-sm text-red-700 flex items-start gap-2">
+					<svg class="h-4 w-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+					</svg>
+					{authError}
+				</div>
+			{/if}
+
+			<div class="mt-6 space-y-6">
+				<!-- Auth Methods -->
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Auth Methods</h3>
+					<div class="mt-3 space-y-3">
+						<!-- Email + Password -->
+						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Email + Password</p>
+								<p class="text-xs text-gray-500">Users sign in with email and password</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={emailPasswordEnabled}
+								onclick={() => emailPasswordEnabled = !emailPasswordEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {emailPasswordEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {emailPasswordEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+
+						<!-- Passkeys (coming soon) -->
+						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Passkeys</p>
+								<p class="text-xs text-gray-500">Passwordless auth with WebAuthn</p>
+							</div>
+							<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
+						</div>
+
+						<!-- Social Login (coming soon) -->
+						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Social Login (Google, GitHub)</p>
+								<p class="text-xs text-gray-500">Let users sign in with existing accounts</p>
+							</div>
+							<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
+						</div>
+					</div>
+				</div>
+
+				<!-- Settings -->
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Settings</h3>
+					<div class="mt-3 space-y-4">
+						<!-- Require email confirmation -->
+						<div class="flex items-start justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-700">Require email confirmation</p>
+								<p class="text-xs text-gray-400 mt-0.5">Email sending not yet configured</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={requireEmailConfirmation}
+								onclick={() => requireEmailConfirmation = !requireEmailConfirmation}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {requireEmailConfirmation ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {requireEmailConfirmation ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+
+						<!-- Minimum password length -->
+						<div>
+							<label for="pwd-min" class="block text-sm font-medium text-gray-700">Minimum password length</label>
+							<input
+								id="pwd-min"
+								type="number"
+								min="8"
+								max="128"
+								bind:value={passwordMinLength}
+								class="mt-1.5 block w-24 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+							/>
+						</div>
+
+						<!-- Session duration -->
+						<div>
+							<label for="session-dur" class="block text-sm font-medium text-gray-700">Session duration</label>
+							<select
+								id="session-dur"
+								bind:value={sessionDuration}
+								class="mt-1.5 block w-48 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+							>
+								{#each sessionOptions as opt}
+									<option value={opt.value}>{opt.label}</option>
+								{/each}
+							</select>
+						</div>
+
+						<!-- Allowed redirect URLs -->
+						<div>
+							<label for="redirect-urls" class="block text-sm font-medium text-gray-700">Allowed redirect URLs</label>
+							<p class="text-xs text-gray-400 mt-0.5">One URL per line</p>
+							<textarea
+								id="redirect-urls"
+								bind:value={redirectUrls}
+								rows="2"
+								class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+							></textarea>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- Actions -->
+			<div class="mt-8 space-y-3">
+				<button
+					onclick={handleSaveAuthConfig}
+					disabled={savingAuth}
+					class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-eurobase-600 px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+				>
+					{#if savingAuth}
+						<svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+						</svg>
+						Saving...
+					{:else}
+						Continue
+					{/if}
+				</button>
+				<button
+					onclick={handleSkipAuth}
+					class="w-full text-center text-sm text-gray-500 hover:text-gray-700 transition-colors cursor-pointer py-1"
+				>
+					Use defaults and continue &rarr;
+				</button>
+			</div>
+		</div>
+
 	{:else}
-		<!-- POST-CREATION PHASE (same page, transitions in-place) -->
+		<!-- STEP 3: SUCCESS / GET STARTED -->
 		<div>
 			<div class="text-center">
 				<div class="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50">
@@ -239,7 +443,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 						<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.745 3.745 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />
 					</svg>
 				</div>
-				<h1 class="mt-4 text-2xl font-bold text-gray-900">{createdProject.name} is ready!</h1>
+				<h1 class="mt-4 text-2xl font-bold text-gray-900">{createdProject?.name} is ready!</h1>
 				<p class="mt-2 text-sm text-gray-500 leading-relaxed">
 					Your database has a sample <code class="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">todos</code> table with 3 rows. Try the quickstart below.
 				</p>
@@ -407,8 +611,8 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 			</div>
 
 			<p class="mt-4 text-center text-xs text-gray-400">
-				Need to configure authentication?
-				<a href="/p/{projectId}/settings" class="text-eurobase-600 hover:text-eurobase-500">Set it up in Settings</a>
+				Need to change auth settings?
+				<a href="/p/{projectId}/auth" class="text-eurobase-600 hover:text-eurobase-500">Configure in Auth settings</a>
 			</p>
 		</div>
 	{/if}

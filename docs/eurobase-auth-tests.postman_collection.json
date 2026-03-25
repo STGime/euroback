@@ -467,7 +467,7 @@
 									"    pm.expect(json.access_token).to.be.a('string');",
 									"    pm.expect(json.refresh_token).to.be.a('string');",
 									"    pm.expect(json.token_type).to.eql('bearer');",
-									"    pm.expect(json.expires_in).to.eql(3600);",
+									"    pm.expect(json.expires_in).to.be.a('number');",
 									"    pm.expect(json.user.email).to.eql('alice@example.com');",
 									"    pm.environment.set('alice_token', json.access_token);",
 									"    pm.environment.set('alice_refresh', json.refresh_token);",

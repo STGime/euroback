@@ -1,0 +1,673 @@
+{
+	"info": {
+		"name": "Eurobase Auth Config (PATCH /v1/tenants/{id})",
+		"description": "Tests for the auth_config PATCH endpoint and its enforcement on end-user auth.\n\nPrerequisites:\n1. Gateway running: `DEV_MODE=true source .env.local && go run ./cmd/gateway/`\n2. A project already created (set `project_id` and `public_key` variables from Phase 1 collection)\n3. Select the \"Eurobase Local\" environment\n\nRun tests in order — later tests depend on variables set by earlier ones.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080"
+		},
+		{
+			"key": "auth_token",
+			"value": "dev",
+			"description": "Any value works in dev mode"
+		},
+		{
+			"key": "project_id",
+			"value": "",
+			"description": "Set to an existing project ID"
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{auth_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Phase 1 — PATCH /v1/tenants/{id} (auth_config)",
+			"item": [
+				{
+					"name": "T1.1 Update auth_config — valid defaults",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Response contains auth_config', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.auth_config).to.be.an('object');",
+									"    pm.expect(json.auth_config.providers.email_password.enabled).to.eql(true);",
+									"    pm.expect(json.auth_config.password_min_length).to.eql(8);",
+									"    pm.expect(json.auth_config.session_duration).to.eql('168h');",
+									"    pm.expect(json.auth_config.require_email_confirmation).to.eql(false);",
+									"    pm.expect(json.auth_config.redirect_urls).to.include('http://localhost:3000');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.2 Update auth_config — custom settings",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Custom values persisted', () => {",
+									"    const cfg = pm.response.json().auth_config;",
+									"    pm.expect(cfg.password_min_length).to.eql(12);",
+									"    pm.expect(cfg.session_duration).to.eql('24h');",
+									"    pm.expect(cfg.require_email_confirmation).to.eql(true);",
+									"    pm.expect(cfg.redirect_urls).to.have.lengthOf(2);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 12,\n    \"require_email_confirmation\": true,\n    \"session_duration\": \"24h\",\n    \"redirect_urls\": [\"http://localhost:3000\", \"https://myapp.eu/callback\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.3 Reject — password_min_length too low (5)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions password_min_length', () => {",
+									"    pm.expect(pm.response.json().error).to.include('password_min_length');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 5,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.4 Reject — password_min_length too high (200)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions password_min_length', () => {",
+									"    pm.expect(pm.response.json().error).to.include('password_min_length');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 200,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.5 Reject — invalid session_duration",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions session_duration', () => {",
+									"    pm.expect(pm.response.json().error).to.include('session_duration');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"999h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.6 Reject — no providers enabled",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions provider', () => {",
+									"    pm.expect(pm.response.json().error).to.include('provider');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": false } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.7 Reject — invalid redirect URL",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions redirect URL', () => {",
+									"    pm.expect(pm.response.json().error).to.include('redirect URL');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"not-a-url\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.8 Reject — missing auth_config body",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions auth_config required', () => {",
+									"    pm.expect(pm.response.json().error).to.include('auth_config');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T1.9 Reject — nonexistent project",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/00000000-0000-0000-0000-000000000000",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "00000000-0000-0000-0000-000000000000"]
+						}
+					}
+				},
+				{
+					"name": "T1.10 Reject — no Authorization header",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — auth_config enforcement on end-user auth",
+			"description": "These tests verify that the auth_config set via PATCH is enforced on end-user sign-up and sign-in via the SDK routes.\n\nPrerequisite: Run the Eurobase Auth Tests collection first to set `public_key` in the Eurobase Local environment.",
+			"item": [
+				{
+					"name": "T2.0 Setup — Set password_min_length=12, session=1h",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('password_min_length is 12', () => {",
+									"    pm.expect(pm.response.json().auth_config.password_min_length).to.eql(12);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 12,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"1h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T2.1 End-user sign-up — rejected (password too short for config)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions 12 characters', () => {",
+									"    pm.expect(pm.response.json().error).to.include('12');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"shortpwd@test.eu\",\n  \"password\": \"only8chr\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T2.2 End-user sign-up — success (password meets 12-char minimum)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Token expires_in is 3600 (1h session)', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.expires_in).to.eql(3600);",
+									"    pm.expect(json.access_token).to.be.a('string');",
+									"    pm.expect(json.user.email).to.eql('configtest@test.eu');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"auth": { "type": "noauth" },
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"configtest@test.eu\",\n  \"password\": \"longpassword12\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "auth", "signup"]
+						}
+					}
+				},
+				{
+					"name": "T2.3 Setup — Disable email_password provider",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400 — no providers enabled', () => {",
+									"    pm.response.to.have.status(400);",
+									"    pm.expect(pm.response.json().error).to.include('provider');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": false } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T2.4 Verify auth_config in GET projects list",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Project list items have auth_config', () => {",
+									"    const projects = pm.response.json();",
+									"    pm.expect(projects).to.be.an('array');",
+									"    // Find our project",
+									"    const p = projects.find(x => x.id === pm.collectionVariables.get('project_id'));",
+									"    if (p && p.auth_config) {",
+									"        pm.expect(p.auth_config.password_min_length).to.be.a('number');",
+									"    }",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/tenants",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants"]
+						}
+					}
+				},
+				{
+					"name": "T2.5 Cleanup — Reset to defaults",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Reset to defaults', () => {",
+									"    const cfg = pm.response.json().auth_config;",
+									"    pm.expect(cfg.password_min_length).to.eql(8);",
+									"    pm.expect(cfg.session_duration).to.eql('168h');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"168h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Session duration validation",
+			"item": [
+				{
+					"name": "T3.1 Accept — 1h session duration",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('session_duration is 1h', () => {",
+									"    pm.expect(pm.response.json().auth_config.session_duration).to.eql('1h');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"1h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T3.2 Accept — 720h (30d) session duration",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('session_duration is 720h', () => {",
+									"    pm.expect(pm.response.json().auth_config.session_duration).to.eql('720h');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"720h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				},
+				{
+					"name": "T3.3 Reject — 48h (not allowed)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions session_duration', () => {",
+									"    pm.expect(pm.response.json().error).to.include('session_duration');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"auth_config\": {\n    \"providers\": { \"email_password\": { \"enabled\": true } },\n    \"password_min_length\": 8,\n    \"require_email_confirmation\": false,\n    \"session_duration\": \"48h\",\n    \"redirect_urls\": [\"http://localhost:3000\"]\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{project_id}}"]
+						}
+					}
+				}
+			]
+		}
+	]
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,7 +29,11 @@ func NewAuthService(pool *pgxpool.Pool) *AuthService {
 }
 
 // SignUp creates a new end-user in the given tenant schema.
-func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, projectID string, req SignUpRequest) (*AuthResponse, error) {
+func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, projectID string, config tenant.AuthConfig, req SignUpRequest) (*AuthResponse, error) {
+	if !config.IsEmailPasswordEnabled() {
+		return nil, fmt.Errorf("email/password authentication is disabled")
+	}
+
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 	if email == "" {
 		return nil, fmt.Errorf("email is required")
@@ -36,8 +41,8 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 	if parts := strings.SplitN(email, "@", 2); len(parts) != 2 || parts[0] == "" || parts[1] == "" || !strings.Contains(parts[1], ".") {
 		return nil, fmt.Errorf("invalid email address")
 	}
-	if len(req.Password) < 8 {
-		return nil, fmt.Errorf("password must be at least 8 characters")
+	if len(req.Password) < config.PasswordMinLength {
+		return nil, fmt.Errorf("password must be at least %d characters", config.PasswordMinLength)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
@@ -50,12 +55,18 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 		metadataJSON = []byte("{}")
 	}
 
+	// If email confirmation is required, leave email_confirmed_at as NULL.
+	emailConfirmedExpr := "now()"
+	if config.RequireEmailConfirmation {
+		emailConfirmedExpr = "NULL"
+	}
+
 	var user User
 	q := fmt.Sprintf(
 		`INSERT INTO %s.users (email, password_hash, metadata, email_confirmed_at)
-		 VALUES ($1, $2, $3, now())
+		 VALUES ($1, $2, $3, %s)
 		 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
-		quoteIdent(schemaName),
+		quoteIdent(schemaName), emailConfirmedExpr,
 	)
 	err = s.pool.QueryRow(ctx, q, email, string(hash), string(metadataJSON)).
 		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
@@ -69,7 +80,8 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 
 	slog.Info("end-user signed up", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret)
+	sessionDurationSecs := config.SessionDurationSeconds()
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +101,11 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 }
 
 // SignIn authenticates an end-user by email + password.
-func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, projectID string, req SignInRequest) (*AuthResponse, error) {
+func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, projectID string, config tenant.AuthConfig, req SignInRequest) (*AuthResponse, error) {
+	if !config.IsEmailPasswordEnabled() {
+		return nil, fmt.Errorf("email/password authentication is disabled")
+	}
+
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 
 	var user User
@@ -128,7 +144,8 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 
 	slog.Info("end-user signed in", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret)
+	sessionDurationSecs := config.SessionDurationSeconds()
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +165,7 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 }
 
 // RefreshToken rotates a refresh token and issues a new access + refresh token pair.
-func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, projectID, rawRefreshToken string) (*AuthResponse, error) {
+func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, projectID string, config tenant.AuthConfig, rawRefreshToken string) (*AuthResponse, error) {
 	tokenHash := hashSHA256(rawRefreshToken)
 
 	tx, err := s.pool.Begin(ctx)
@@ -209,7 +226,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret)
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, config.SessionDurationSeconds())
 	if err != nil {
 		return nil, err
 	}
@@ -278,8 +295,11 @@ func (s *AuthService) createRefreshToken(ctx context.Context, schemaName, userID
 }
 
 // generateAccessToken creates an HS256 JWT for an end-user.
-func generateAccessToken(userID, email, projectID, secret string) (string, int, error) {
-	expiresIn := 3600 // 1 hour
+func generateAccessToken(userID, email, projectID, secret string, sessionDurationSecs int) (string, int, error) {
+	expiresIn := sessionDurationSecs
+	if expiresIn <= 0 {
+		expiresIn = 3600 // fallback to 1 hour
+	}
 	now := time.Now()
 
 	claims := jwt.MapClaims{

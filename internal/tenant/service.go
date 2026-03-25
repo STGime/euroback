@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -25,8 +26,9 @@ type Project struct {
 	Region     string    `json:"region"`
 	Plan       string    `json:"plan"`
 	Status     string    `json:"status"`
-	APIURL     string    `json:"api_url"`
-	CreatedAt  time.Time `json:"created_at"`
+	APIURL     string          `json:"api_url"`
+	AuthConfig json.RawMessage `json:"auth_config,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
 	// PublicKey and SecretKey are only populated on creation (plaintext shown once).
 	PublicKey  string `json:"public_key,omitempty"`
 	SecretKey  string `json:"secret_key,omitempty"`
@@ -201,10 +203,10 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Project, error) {
 	var p Project
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status, created_at
+		`SELECT id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status, auth_config, created_at
 		 FROM projects WHERE id = $1`,
 		projectID,
-	).Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status, &p.CreatedAt)
+	).Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status, &p.AuthConfig, &p.CreatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("project not found: %s", projectID)
@@ -219,7 +221,7 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 func (s *TenantService) ListProjects(ctx context.Context, platformUserID string) ([]Project, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
-		        p.region, p.plan, p.status, p.created_at
+		        p.region, p.plan, p.status, p.auth_config, p.created_at
 		 FROM projects p
 		 WHERE p.owner_id = $1::uuid
 		 ORDER BY p.created_at DESC`,
@@ -233,7 +235,7 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 	projects := make([]Project, 0)
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status, &p.AuthConfig, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
@@ -267,5 +269,27 @@ func (s *TenantService) DeleteProject(ctx context.Context, projectID string) err
 	}
 
 	slog.Info("project deleted", "project_id", projectID)
+	return nil
+}
+
+// UpdateAuthConfig updates the auth_config for a project, verifying ownership.
+func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID string, config AuthConfig) error {
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal auth config: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE projects SET auth_config = $1 WHERE id = $2 AND owner_id = $3::uuid`,
+		configJSON, projectID, ownerID,
+	)
+	if err != nil {
+		return fmt.Errorf("update auth config: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("project not found or not owned by user")
+	}
+
+	slog.Info("auth config updated", "project_id", projectID)
 	return nil
 }

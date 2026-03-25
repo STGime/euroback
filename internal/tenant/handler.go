@@ -190,6 +190,58 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 	}
 }
 
+// HandleUpdateProject handles PATCH /v1/tenants/{id} to update project settings (e.g. auth_config).
+func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		projectID := chi.URLParam(r, "id")
+
+		var body struct {
+			AuthConfig *AuthConfig `json:"auth_config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+
+		if body.AuthConfig == nil {
+			http.Error(w, `{"error":"auth_config is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		if err := body.AuthConfig.Validate(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		if err := svc.UpdateAuthConfig(r.Context(), projectID, claims.Subject, *body.AuthConfig); err != nil {
+			slog.Error("update auth config failed", "error", err, "project_id", projectID)
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "not owned") {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		project, err := svc.GetProject(r.Context(), projectID)
+		if err != nil {
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(project)
+	}
+}
+
 // HandleDeleteProject deletes a project and its tenant schema.
 //
 // DELETE /v1/tenants/{id}

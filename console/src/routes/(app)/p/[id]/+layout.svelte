@@ -15,7 +15,8 @@
 		{ label: 'Overview', href: '', icon: 'overview' },
 		{ label: 'Database', href: '/database', icon: 'database' },
 		{ label: 'Storage', href: '/storage', icon: 'storage' },
-		{ label: 'Authentication', href: '/users', icon: 'users' },
+		{ label: 'Auth', href: '/auth', icon: 'auth' },
+		{ label: 'Users', href: '/users', icon: 'users' },
 		{ label: 'Logs', href: '/logs', icon: 'logs' },
 		{ label: 'API', href: '/api', icon: 'api' },
 		{ label: 'Connect', href: '/connect', icon: 'connect' },
@@ -137,6 +138,8 @@
 	</nav>
 </div>
 
+{#key $page.url.pathname}
 <div>
 	{@render children()}
 </div>
+{/key}

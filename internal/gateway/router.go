@@ -128,6 +128,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 
 		r.Post("/", tenant.HandleCreateProject(pool, tenantSvc))
 		r.Get("/", tenant.HandleListProjects(pool, tenantSvc))
+		r.Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
 		r.Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 

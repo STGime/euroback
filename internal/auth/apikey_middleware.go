@@ -34,12 +34,12 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 
 		var pc ProjectContext
 		err := m.pool.QueryRow(r.Context(),
-			`SELECT p.id, p.schema_name, p.jwt_secret, ak.type
+			`SELECT p.id, p.schema_name, p.jwt_secret, ak.type, p.auth_config
 			 FROM api_keys ak
 			 JOIN projects p ON ak.project_id = p.id
 			 WHERE ak.key_hash = $1 AND p.status = 'active'`,
 			keyHash,
-		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.JWTSecret, &pc.KeyType)
+		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.JWTSecret, &pc.KeyType, &pc.AuthConfig)
 		if err != nil {
 			slog.Warn("invalid API key", "error", err, "prefix", safePrefix(apiKey))
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)

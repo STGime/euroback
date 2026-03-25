@@ -8,6 +8,18 @@
 
 import { PUBLIC_API_URL } from '$env/static/public';
 
+export interface ProviderConfig {
+	enabled: boolean;
+}
+
+export interface AuthConfig {
+	providers: Record<string, ProviderConfig>;
+	password_min_length: number;
+	require_email_confirmation: boolean;
+	session_duration: string;
+	redirect_urls: string[];
+}
+
 export interface Project {
 	id: string;
 	name: string;
@@ -16,6 +28,7 @@ export interface Project {
 	plan: string;
 	status: string;
 	api_url: string;
+	auth_config?: AuthConfig;
 	created_at: string;
 	public_key?: string;
 	secret_key?: string;
@@ -214,6 +227,14 @@ export class EurobaseAPI {
 	/** Delete a project (irreversible). */
 	async deleteProject(projectId: string): Promise<void> {
 		return this.fetch(`/v1/tenants/${projectId}`, { method: 'DELETE' });
+	}
+
+	/** Update a project (e.g. auth_config). */
+	async updateProject(projectId: string, data: { auth_config?: AuthConfig }): Promise<Project> {
+		return this.fetch<Project>(`/v1/tenants/${projectId}`, {
+			method: 'PATCH',
+			body: JSON.stringify(data)
+		});
 	}
 
 	/** Get schema change history for a project. */
