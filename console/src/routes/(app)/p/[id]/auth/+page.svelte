@@ -397,8 +397,8 @@
 
 					<!-- Variable reference -->
 					<div class="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3">
-						<p class="text-xs font-medium text-gray-600 mb-1.5">Available variables (click to copy):</p>
-						<div class="flex flex-wrap gap-2">
+						<p class="text-xs font-medium text-gray-600 mb-2">Template variables — automatically replaced when the email is sent (click to copy):</p>
+						<div class="flex flex-wrap gap-2 mb-2">
 							{#each templateVars as v}
 								<button
 									type="button"
@@ -407,6 +407,12 @@
 									class="text-xs bg-white border border-gray-200 rounded px-2 py-0.5 text-gray-700 font-mono cursor-pointer hover:bg-eurobase-50 hover:border-eurobase-300 transition-colors"
 								>{v}</button>
 							{/each}
+						</div>
+						<div class="text-[11px] text-gray-400 space-y-0.5">
+							<p><strong class="text-gray-500">UserEmail</strong> — the end-user's email address</p>
+							<p><strong class="text-gray-500">ProjectName</strong> — your project name</p>
+							<p><strong class="text-gray-500">ActionURL</strong> — the verification or reset link (auto-generated with token)</p>
+							<p><strong class="text-gray-500">ExpiresIn</strong> — how long the link is valid (e.g. "24 hours")</p>
 						</div>
 					</div>
 
