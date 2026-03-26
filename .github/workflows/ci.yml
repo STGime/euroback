@@ -114,8 +114,9 @@ jobs:
 
       - name: Install Scaleway CLI and get kubeconfig
         run: |
-          curl -sL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          curl -sL -o /usr/local/bin/scw https://github.com/scaleway/scaleway-cli/releases/download/v2.53.0/scaleway-cli_2.53.0_linux_amd64
           chmod +x /usr/local/bin/scw
+          scw version
           mkdir -p ~/.kube
           scw k8s kubeconfig install ${{ secrets.SCW_CLUSTER_ID }}
         env:
