@@ -1,13 +1,30 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { browser } from '$app/environment';
 	import { api, type ConnectInfo } from '$lib/api.js';
+
+	type IdeTab = 'claude' | 'cursor' | 'windsurf' | 'generic';
+	const STORAGE_KEY = 'eurobase:connect-tab';
+
+	function loadSavedTab(): IdeTab {
+		if (browser) {
+			const saved = localStorage.getItem(STORAGE_KEY);
+			if (saved === 'claude' || saved === 'cursor' || saved === 'windsurf' || saved === 'generic') return saved;
+		}
+		return 'claude';
+	}
 
 	let projectId = $derived($page.params.id);
 	let info = $state<ConnectInfo | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let activeTab = $state<'claude' | 'cursor' | 'windsurf' | 'generic'>('claude');
+	let activeTab = $state<IdeTab>(loadSavedTab());
 	let copiedField = $state('');
+
+	function setTab(tab: IdeTab) {
+		activeTab = tab;
+		if (browser) localStorage.setItem(STORAGE_KEY, tab);
+	}
 
 	$effect(() => {
 		loadConnect();
@@ -17,7 +34,9 @@
 		loading = true;
 		error = null;
 		try {
+			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
 			info = await api.getConnectInfo(projectId);
+			info.tables = info.tables.filter(t => !hiddenTables.has(t.name));
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load connect info';
 		} finally {
@@ -77,7 +96,7 @@
 					{ id: 'generic', label: 'Generic' }
 				] as tab}
 					<button
-						onclick={() => activeTab = tab.id as typeof activeTab}
+						onclick={() => setTab(tab.id as IdeTab)}
 						class="border-b-2 pb-3 text-sm font-medium transition-colors cursor-pointer {activeTab === tab.id ? 'border-eurobase-600 text-eurobase-700' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
 					>
 						{tab.label}
@@ -202,21 +221,55 @@
 
 			{:else if activeTab === 'generic'}
 				<div class="space-y-4">
+					<!-- Install SDK -->
+					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">1. Install the SDK</p>
+								<p class="text-xs text-gray-500">Add the Eurobase JavaScript SDK to your project</p>
+							</div>
+							<button
+								onclick={() => copyToClipboard('npm install @eurobase/sdk', 'install')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>
+								{copiedField === 'install' ? 'Copied!' : 'Copy'}
+							</button>
+						</div>
+						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm font-mono text-gray-100 overflow-x-auto">npm install @eurobase/sdk</pre>
+					</div>
+
+					<!-- .env setup -->
+					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">2. Set up environment variables</p>
+								<p class="text-xs text-gray-500">Create a <code class="text-xs bg-gray-100 rounded px-1">.env</code> file in your project root. Get your API keys from <a href="/p/{info.project_id}/settings" class="text-eurobase-600 hover:underline">Settings</a>.</p>
+							</div>
+							<button
+								onclick={() => downloadFile('.env', info.env_template)}
+								class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
+							>
+								Download .env
+							</button>
+						</div>
+						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.env_template}</pre>
+					</div>
+
+					<!-- Connection string -->
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">Connection String</p>
-								<p class="text-xs text-gray-500">Replace <code class="text-xs bg-gray-100 rounded px-1">YOUR_PUBLIC_KEY</code> with your API key from project Settings</p>
+								<p class="text-xs text-gray-500">Alternative: pass a single URL instead of separate url + apiKey</p>
 							</div>
 						</div>
 						<code class="block rounded-lg bg-gray-900 px-4 py-3 text-sm font-mono text-gray-100 overflow-x-auto">eurobase://<span class="text-amber-400">YOUR_PUBLIC_KEY</span>@{info.slug}.eurobase.app</code>
-						<p class="mt-2 text-xs text-gray-500">Usage: <code class="bg-gray-100 rounded px-1 text-gray-700">const eb = createClient('eurobase://eb_pk_...@{info.slug}.eurobase.app')</code></p>
 					</div>
 
 					{#if info.sample_code.javascript}
 						<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
 							<div class="flex items-center justify-between mb-3">
-								<p class="text-sm font-semibold text-gray-900">JavaScript / TypeScript</p>
+								<p class="text-sm font-semibold text-gray-900">3. Use the SDK</p>
 								<button
 									onclick={() => copyToClipboard(info.sample_code.javascript, 'js')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
@@ -231,7 +284,7 @@
 					{#if info.sample_code.curl}
 						<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
 							<div class="flex items-center justify-between mb-3">
-								<p class="text-sm font-semibold text-gray-900">cURL</p>
+								<p class="text-sm font-semibold text-gray-900">Or use cURL directly</p>
 								<button
 									onclick={() => copyToClipboard(info.sample_code.curl, 'curl')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
