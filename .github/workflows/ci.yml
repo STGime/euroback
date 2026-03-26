@@ -49,7 +49,7 @@ jobs:
       - name: Install and build
         run: |
           cd console
-          npm ci
+          npm ci --include=optional
           npm run build
         env:
           PUBLIC_API_URL: https://api.eurobase.app
