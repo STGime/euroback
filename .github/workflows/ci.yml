@@ -53,6 +53,7 @@ jobs:
           npm run build
         env:
           PUBLIC_API_URL: https://api.eurobase.app
+          PUBLIC_BUILD_SHA: ${{ github.sha }}
 
       # svelte-check disabled — too many strict TS warnings from route params.
       # TODO: fix string|undefined params across console pages, then re-enable.
