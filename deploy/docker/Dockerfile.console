@@ -7,6 +7,8 @@ COPY console/package*.json ./
 RUN npm ci
 COPY console/ .
 ENV PUBLIC_API_URL=https://api.eurobase.app
+ARG BUILD_SHA=unknown
+ENV PUBLIC_BUILD_SHA=$BUILD_SHA
 RUN npm run build
 
 FROM node:22-alpine

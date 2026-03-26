@@ -103,6 +103,7 @@ jobs:
         run: |
           docker build \
             -f deploy/docker/Dockerfile.console \
+            --build-arg BUILD_SHA=${{ github.sha }} \
             -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:${{ github.sha }} \
             -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:latest \
             .

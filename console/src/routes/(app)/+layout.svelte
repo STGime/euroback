@@ -4,6 +4,7 @@
 	import { onMount } from 'svelte';
 	import { user, logout } from '$lib/stores.js';
 	import { api } from '$lib/api.js';
+	import { PUBLIC_BUILD_SHA } from '$env/static/public';
 
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
@@ -113,6 +114,9 @@
 					</svg>
 					<span>EU-Sovereign Infrastructure</span>
 				</div>
+				{#if PUBLIC_BUILD_SHA}
+					<div class="text-[10px] text-gray-300 font-mono">{PUBLIC_BUILD_SHA.slice(0, 7)}</div>
+				{/if}
 			</div>
 		</div>
 	</aside>

@@ -37,7 +37,7 @@ output "object_storage_endpoint" {
   value       = "https://${scaleway_object_bucket.platform_assets.name}.s3.fr-par.scw.cloud"
 }
 
-# output "tem_domain_status" {
-#   description = "TEM domain verification status"
-#   value       = scaleway_tem_domain.eurobase.status
-# }
+output "tem_domain_status" {
+  description = "TEM domain verification status"
+  value       = scaleway_tem_domain.eurobase.status
+}

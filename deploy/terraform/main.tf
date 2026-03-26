@@ -170,13 +170,12 @@ resource "scaleway_object_bucket" "platform_assets" {
 
 # ---------------------------------------------------------------------------
 # Transactional Email (TEM)
-# Activate TEM in the Scaleway console first, then uncomment.
 # ---------------------------------------------------------------------------
 
-# resource "scaleway_tem_domain" "eurobase" {
-#   name       = "eurobase.app"
-#   accept_tos = true
-# }
+resource "scaleway_tem_domain" "eurobase" {
+  name       = "eurobase.app"
+  accept_tos = true
+}
 
 # ---------------------------------------------------------------------------
 # Container Registry
