@@ -1,0 +1,2 @@
+-- 000016_fix_provision_tenant_banned_at.down.sql
+-- No-op: banned_at column should not be removed (it's been there since migration 011).
