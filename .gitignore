@@ -47,6 +47,6 @@ deploy/terraform/*.tfvars
 # Deploy secrets
 deploy/create-secrets.sh
 
-# Build artifacts
-gateway
-worker
+# Build artifacts (binaries in repo root)
+/gateway
+/worker

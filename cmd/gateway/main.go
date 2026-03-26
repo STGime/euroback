@@ -99,6 +99,10 @@ func main() {
 	// ── Set up Scaleway TEM email client (optional — degrades gracefully) ──
 	scwTEMKey := os.Getenv("SCW_TEM_SECRET_KEY")
 	scwTEMRegion := os.Getenv("SCW_TEM_REGION")
+	scwTEMProjectID := os.Getenv("SCW_TEM_PROJECT_ID")
+	if scwTEMProjectID == "" {
+		scwTEMProjectID = os.Getenv("SCW_PROJECT_ID") // fallback to main project ID
+	}
 	emailFromAddr := os.Getenv("EMAIL_FROM_ADDRESS")
 	emailFromName := os.Getenv("EMAIL_FROM_NAME")
 	consoleURL := os.Getenv("CONSOLE_URL")
@@ -106,7 +110,7 @@ func main() {
 		consoleURL = "http://localhost:5173"
 	}
 
-	emailClient := email.NewEmailClient(scwTEMKey, scwTEMRegion, emailFromAddr, emailFromName)
+	emailClient := email.NewEmailClient(scwTEMKey, scwTEMRegion, scwTEMProjectID, emailFromAddr, emailFromName)
 	var emailService *email.EmailService
 	if emailClient.Configured() {
 		emailService = email.NewEmailService(emailClient, pool, consoleURL)

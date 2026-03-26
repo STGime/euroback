@@ -111,7 +111,7 @@
 	let templateError = $state('');
 	let previewHtml = $state('');
 	let previewSubject = $state('');
-	let testSending = $state(false);
+	let testSendingType = $state<string | null>(null);
 
 	async function loadTemplates() {
 		templatesLoading = true;
@@ -190,7 +190,7 @@
 	}
 
 	async function sendTestEmail(type: string) {
-		testSending = true;
+		testSendingType = type;
 		templateMessage = '';
 		templateError = '';
 		try {
@@ -200,7 +200,7 @@
 		} catch (err) {
 			templateError = err instanceof Error ? err.message : 'Failed to send test email';
 		} finally {
-			testSending = false;
+			testSendingType = null;
 		}
 	}
 
@@ -469,10 +469,11 @@
 								{#if emailConfigured}
 									<button
 										onclick={() => sendTestEmail(tt.type)}
-										disabled={testSending}
+										disabled={testSendingType !== null}
+										title="Sends test email to your account email"
 										class="text-xs text-gray-500 hover:text-gray-700 cursor-pointer disabled:opacity-50"
 									>
-										{testSending ? 'Sending...' : 'Send Test'}
+										{testSendingType === tt.type ? 'Sending...' : 'Send Test'}
 									</button>
 								{/if}
 								{#if tmpl?.is_custom}

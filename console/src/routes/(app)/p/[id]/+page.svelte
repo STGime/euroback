@@ -17,7 +17,8 @@
 				api.getSchema(projectId),
 				api.getLogs(projectId, { limit: 1 })
 			]);
-			tableCount = String(schema.length);
+			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
+			tableCount = String(schema.filter(t => !hiddenTables.has(t.name)).length);
 			requestCount = logs.stats.total_requests.toLocaleString();
 		} catch {
 			// Keep placeholder values on error.
@@ -34,6 +35,57 @@
 		{ label: 'Open Database', href: `/p/${projectId}/database`, color: 'eurobase' },
 		{ label: 'Open Storage', href: `/p/${projectId}/storage`, color: 'emerald' },
 		{ label: 'View API Keys', href: `/p/${projectId}/settings`, color: 'violet' }
+	]);
+
+	let copiedStep: string | null = $state(null);
+	let guideDismissed = $state(false);
+
+	function copyCode(code: string, id: string) {
+		navigator.clipboard.writeText(code);
+		copiedStep = id;
+		setTimeout(() => { if (copiedStep === id) copiedStep = null; }, 1500);
+	}
+
+	let apiUrl = $derived(project?.api_url || `https://${project?.slug}.eurobase.app`);
+
+	let getStartedSteps = $derived([
+		{
+			id: 'install',
+			title: 'Install the SDK',
+			desc: 'Add the Eurobase JavaScript SDK to your project.',
+			code: 'npm install @eurobase/sdk',
+		},
+		{
+			id: 'init',
+			title: 'Initialize the client',
+			desc: 'Create a client with your project URL and public API key.',
+			code: `import { createClient } from '@eurobase/sdk'
+
+const eb = createClient({
+  url: '${apiUrl}',
+  apiKey: process.env.EUROBASE_PUBLIC_KEY
+})`,
+		},
+		{
+			id: 'query',
+			title: 'Make your first query',
+			desc: 'Read data from any table. The SDK handles auth headers automatically.',
+			code: `const { data, error } = await eb.db.from('todos').select('*')
+console.log(data)`,
+		},
+		{
+			id: 'auth',
+			title: 'Add authentication',
+			desc: 'Sign up and sign in end-users. After sign-in, the JWT is sent with every query and RLS policies are enforced.',
+			code: `// Sign up a new user
+await eb.auth.signUp({ email: 'user@example.com', password: 'securepassword' })
+
+// Sign in
+await eb.auth.signIn({ email: 'user@example.com', password: 'securepassword' })
+
+// All subsequent queries are now authenticated
+const { data } = await eb.db.from('todos').select('*')`,
+		},
 	]);
 </script>
 
@@ -96,6 +148,82 @@
 			</div>
 		{/each}
 	</div>
+
+	<!-- Get Started guide -->
+	{#if !guideDismissed}
+		<div class="rounded-xl border border-eurobase-200 bg-white mb-6 overflow-hidden">
+			<div class="flex items-center justify-between border-b border-eurobase-100 bg-eurobase-50/50 px-5 py-3.5">
+				<div class="flex items-center gap-2.5">
+					<div class="flex h-7 w-7 items-center justify-center rounded-lg bg-eurobase-600 text-white">
+						<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M15.59 14.37a6 6 0 0 1-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 0 0 6.16-12.12A14.98 14.98 0 0 0 9.631 8.41m5.96 5.96a14.926 14.926 0 0 1-5.841 2.58m-.119-8.54a6 6 0 0 0-7.381 5.84h4.8m2.581-5.84a14.927 14.927 0 0 0-2.58 5.84m2.699 2.7c-.103.021-.207.041-.311.06a15.09 15.09 0 0 1-2.448-2.448 14.9 14.9 0 0 1 .06-.312m-2.24 2.39a4.493 4.493 0 0 0-1.757 4.306 4.493 4.493 0 0 0 4.306-1.758M16.5 9a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z" />
+						</svg>
+					</div>
+					<h2 class="text-sm font-semibold text-gray-900">Get Started</h2>
+				</div>
+				<button
+					type="button"
+					class="cursor-pointer rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+					onclick={() => (guideDismissed = true)}
+					title="Dismiss"
+				>
+					<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+				</button>
+			</div>
+			<div class="px-5 py-5 space-y-5">
+				{#each getStartedSteps as step, i}
+					<div class="flex gap-4">
+						<div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700">{i + 1}</div>
+						<div class="flex-1 min-w-0">
+							<h3 class="text-sm font-semibold text-gray-900">{step.title}</h3>
+							<p class="mt-0.5 text-xs text-gray-500">{step.desc}</p>
+							<div class="relative mt-2">
+								<pre class="rounded-lg bg-gray-900 p-3 text-xs font-mono text-green-400 overflow-x-auto">{step.code}</pre>
+								<button
+									type="button"
+									class="cursor-pointer absolute top-2 right-2 rounded-md bg-gray-800 px-2 py-0.5 text-[10px] font-medium text-gray-400 hover:text-white transition-colors"
+									onclick={() => copyCode(step.code, step.id)}
+								>
+									{copiedStep === step.id ? 'Copied!' : 'Copy'}
+								</button>
+							</div>
+						</div>
+					</div>
+				{/each}
+				<div class="flex items-center gap-3 pt-2 border-t border-gray-100">
+					<a
+						href="/p/{projectId}/connect"
+						class="inline-flex items-center gap-1.5 text-xs font-medium text-eurobase-600 hover:text-eurobase-700 transition-colors"
+					>
+						<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
+						</svg>
+						IDE setup &amp; config files
+					</a>
+					<span class="text-gray-300">|</span>
+					<a
+						href="/p/{projectId}/api"
+						class="inline-flex items-center gap-1.5 text-xs font-medium text-eurobase-600 hover:text-eurobase-700 transition-colors"
+					>
+						<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+						</svg>
+						Full API reference
+					</a>
+					<span class="text-gray-300">|</span>
+					<a
+						href="/p/{projectId}/users"
+						class="inline-flex items-center gap-1.5 text-xs font-medium text-eurobase-600 hover:text-eurobase-700 transition-colors"
+					>
+						<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+						</svg>
+						Auth guide
+					</a>
+				</div>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Quick actions -->
 	<div>

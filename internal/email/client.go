@@ -17,13 +17,14 @@ type EmailClient struct {
 	httpClient *http.Client
 	authToken  string
 	region     string
+	projectID  string
 	fromEmail  string
 	fromName   string
 }
 
 // NewEmailClient creates a new TEM email client.
 // If authToken is empty, emails will be logged instead of sent.
-func NewEmailClient(authToken, region, fromEmail, fromName string) *EmailClient {
+func NewEmailClient(authToken, region, projectID, fromEmail, fromName string) *EmailClient {
 	if region == "" {
 		region = "fr-par"
 	}
@@ -34,6 +35,7 @@ func NewEmailClient(authToken, region, fromEmail, fromName string) *EmailClient 
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		authToken:  authToken,
 		region:     region,
+		projectID:  projectID,
 		fromEmail:  fromEmail,
 		fromName:   fromName,
 	}
@@ -46,10 +48,11 @@ func (c *EmailClient) Configured() bool {
 
 // temRequest is the JSON body for the Scaleway TEM send API.
 type temRequest struct {
-	From    temAddress   `json:"from"`
-	To      []temAddress `json:"to"`
-	Subject string       `json:"subject"`
-	HTML    string       `json:"html"`
+	From      temAddress   `json:"from"`
+	To        []temAddress `json:"to"`
+	Subject   string       `json:"subject"`
+	HTML      string       `json:"html"`
+	ProjectID string       `json:"project_id"`
 }
 
 type temAddress struct {
@@ -69,10 +72,11 @@ func (c *EmailClient) Send(ctx context.Context, to, subject, htmlBody string) er
 	}
 
 	payload := temRequest{
-		From:    temAddress{Email: c.fromEmail, Name: c.fromName},
-		To:      []temAddress{{Email: to}},
-		Subject: subject,
-		HTML:    htmlBody,
+		From:      temAddress{Email: c.fromEmail, Name: c.fromName},
+		To:        []temAddress{{Email: to}},
+		Subject:   subject,
+		HTML:      htmlBody,
+		ProjectID: c.projectID,
 	}
 
 	body, err := json.Marshal(payload)
