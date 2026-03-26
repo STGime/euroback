@@ -349,11 +349,12 @@
 
 					<div>
 						<label for="redirect-urls" class="block text-sm font-medium text-gray-700">Allowed redirect URLs</label>
-						<p class="text-xs text-gray-400 mt-0.5">One URL per line</p>
+						<p class="text-xs text-gray-400 mt-0.5">URLs where users can be redirected after authentication (e.g. email verification, password reset, OAuth callbacks). Add one URL per line. Include both your development and production URLs. Must include scheme and host (e.g. https://myapp.com/callback).</p>
 						<textarea
 							id="redirect-urls"
 							bind:value={redirectUrls}
 							rows="3"
+							placeholder="http://localhost:3000&#10;https://myapp.com"
 							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 						></textarea>
 					</div>
