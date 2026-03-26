@@ -7,11 +7,10 @@ metadata:
   name: eurobase-ingress
   namespace: eurobase
   annotations:
-    kubernetes.io/ingress.class: nginx
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
+  ingressClassName: nginx
   tls:
     - hosts:
         - api.eurobase.app
@@ -76,7 +75,7 @@ spec:
     spec:
       containers:
         - name: console
-          image: rg.fr-par.scw.cloud/eurobase/console:latest
+          image: rg.fr-par.scw.cloud/eurobase-app/console:latest
           ports:
             - containerPort: 3000
               protocol: TCP

@@ -4,7 +4,7 @@
 ##############################################################################
 
 terraform {
-  required_version = ">= 1.7.0"
+  required_version = ">= 1.5.0"
 
   required_providers {
     scaleway = {
@@ -72,13 +72,24 @@ provider "scaleway" {
 }
 
 # ---------------------------------------------------------------------------
+# Private Network (required by Kapsule)
+# ---------------------------------------------------------------------------
+
+resource "scaleway_vpc_private_network" "eurobase" {
+  name = "eurobase-pn"
+  tags = ["eurobase", var.environment]
+}
+
+# ---------------------------------------------------------------------------
 # Kubernetes — Kapsule
 # ---------------------------------------------------------------------------
 
 resource "scaleway_k8s_cluster" "eurobase" {
-  name    = "eurobase-cluster"
-  version = "1.29"
-  cni     = "cilium"
+  name                        = "eurobase-cluster"
+  version                     = "1.32"
+  cni                         = "cilium"
+  delete_additional_resources = true
+  private_network_id          = scaleway_vpc_private_network.eurobase.id
 
   auto_upgrade {
     enable                        = true
@@ -112,7 +123,6 @@ resource "scaleway_rdb_instance" "eurobase" {
   engine         = "PostgreSQL-16"
   is_ha_cluster  = false # MVP — upgrade for production HA later
   volume_type    = "lssd"
-  volume_size_in_gb = 10
 
   tags = ["eurobase", var.environment]
 }
@@ -126,7 +136,7 @@ resource "scaleway_rdb_user" "eurobase_api" {
   instance_id = scaleway_rdb_instance.eurobase.id
   name        = "eurobase_api"
   password    = var.database_password
-  is_admin    = false
+  is_admin    = true
 }
 
 # ---------------------------------------------------------------------------
@@ -136,8 +146,10 @@ resource "scaleway_rdb_user" "eurobase_api" {
 resource "scaleway_redis_cluster" "eurobase" {
   name         = "eurobase-redis"
   node_type    = "RED1-MICRO"
-  version      = "7.2.4"
+  version      = "8.4.0"
   cluster_size = 1
+  user_name    = "eurobase"
+  password     = var.database_password
 
   tags = ["eurobase", var.environment]
 }
@@ -149,7 +161,6 @@ resource "scaleway_redis_cluster" "eurobase" {
 
 resource "scaleway_object_bucket" "platform_assets" {
   name = "eurobase-platform-assets"
-  acl  = "private"
 
   tags = {
     environment = var.environment
@@ -159,18 +170,19 @@ resource "scaleway_object_bucket" "platform_assets" {
 
 # ---------------------------------------------------------------------------
 # Transactional Email (TEM)
+# Activate TEM in the Scaleway console first, then uncomment.
 # ---------------------------------------------------------------------------
 
-resource "scaleway_tem_domain" "eurobase" {
-  name       = "eurobase.app"
-  accept_tos = true
-}
+# resource "scaleway_tem_domain" "eurobase" {
+#   name       = "eurobase.app"
+#   accept_tos = true
+# }
 
 # ---------------------------------------------------------------------------
 # Container Registry
 # ---------------------------------------------------------------------------
 
 resource "scaleway_registry_namespace" "eurobase" {
-  name      = "eurobase"
+  name      = "eurobase-app"
   is_public = false
 }

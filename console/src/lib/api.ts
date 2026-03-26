@@ -137,7 +137,7 @@ export class EurobaseAPI {
 				if (typeof localStorage !== 'undefined') {
 					localStorage.removeItem('eurobase_email');
 				}
-				if (typeof window !== 'undefined') {
+				if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login') && !window.location.pathname.startsWith('/reset-password')) {
 					window.location.href = '/login';
 				}
 			}
@@ -175,7 +175,7 @@ export class EurobaseAPI {
 				if (typeof localStorage !== 'undefined') {
 					localStorage.removeItem('eurobase_email');
 				}
-				if (typeof window !== 'undefined') {
+				if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login') && !window.location.pathname.startsWith('/reset-password')) {
 					window.location.href = '/login';
 				}
 			}

@@ -10,12 +10,12 @@ output "cluster_kubeconfig" {
 
 output "database_endpoint" {
   description = "PostgreSQL connection endpoint"
-  value       = scaleway_rdb_instance.eurobase.endpoint_ip
+  value       = try(scaleway_rdb_instance.eurobase.load_balancer[0].ip, scaleway_rdb_instance.eurobase.endpoint_ip, "")
 }
 
 output "database_port" {
   description = "PostgreSQL connection port"
-  value       = scaleway_rdb_instance.eurobase.endpoint_port
+  value       = try(scaleway_rdb_instance.eurobase.load_balancer[0].port, scaleway_rdb_instance.eurobase.endpoint_port, 0)
 }
 
 output "redis_endpoint" {
@@ -37,7 +37,7 @@ output "object_storage_endpoint" {
   value       = "https://${scaleway_object_bucket.platform_assets.name}.s3.fr-par.scw.cloud"
 }
 
-output "tem_domain_status" {
-  description = "TEM domain verification status"
-  value       = scaleway_tem_domain.eurobase.status
-}
+# output "tem_domain_status" {
+#   description = "TEM domain verification status"
+#   value       = scaleway_tem_domain.eurobase.status
+# }

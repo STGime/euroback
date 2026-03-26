@@ -43,3 +43,10 @@ deploy/terraform/.terraform/
 deploy/terraform/*.tfstate
 deploy/terraform/*.tfstate.backup
 deploy/terraform/*.tfvars
+
+# Deploy secrets
+deploy/create-secrets.sh
+
+# Build artifacts
+gateway
+worker
