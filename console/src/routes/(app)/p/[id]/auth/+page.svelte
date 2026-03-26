@@ -396,10 +396,15 @@
 
 					<!-- Variable reference -->
 					<div class="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3">
-						<p class="text-xs font-medium text-gray-600 mb-1.5">Available variables:</p>
+						<p class="text-xs font-medium text-gray-600 mb-1.5">Available variables (click to copy):</p>
 						<div class="flex flex-wrap gap-2">
 							{#each templateVars as v}
-								<code class="text-xs bg-white border border-gray-200 rounded px-2 py-0.5 text-gray-700">{v}</code>
+								<button
+									type="button"
+									onclick={() => { navigator.clipboard.writeText(v); }}
+									title="Click to copy"
+									class="text-xs bg-white border border-gray-200 rounded px-2 py-0.5 text-gray-700 font-mono cursor-pointer hover:bg-eurobase-50 hover:border-eurobase-300 transition-colors"
+								>{v}</button>
 							{/each}
 						</div>
 					</div>

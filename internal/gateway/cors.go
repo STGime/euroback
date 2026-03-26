@@ -23,7 +23,7 @@ func CORSMiddleware(next http.Handler) http.Handler {
 
 		// Preflight request.
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", strings.Join([]string{
 				"Authorization",
 				"Content-Type",
