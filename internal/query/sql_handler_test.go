@@ -113,9 +113,8 @@ func TestExecuteSQLRowLimit(t *testing.T) {
 }
 
 func TestExecuteSQLReadOnly(t *testing.T) {
-	pool, schema, _ := setupTestDB(t)
-	ctx := context.Background()
-	engine := NewQueryEngine(pool)
+	pool, _, _ := setupTestDB(t)
+	_ = pool
 
 	// Attempting to execute a write via the SQL endpoint should fail
 	// because ValidateSelectOnly would catch it before ExecuteSQL.

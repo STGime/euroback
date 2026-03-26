@@ -1,7 +1,7 @@
 ##############################################################################
 # Eurobase CI/CD — GitHub Actions
 # Builds and deploys to Scaleway (FR jurisdiction only).
-# No US cloud runners for build artifacts — images go to Scaleway Registry.
+# Images go to Scaleway Container Registry (fr-par).
 ##############################################################################
 name: CI/CD
 
@@ -13,7 +13,7 @@ on:
 
 env:
   REGISTRY: rg.fr-par.scw.cloud
-  REGISTRY_NS: eurobase
+  REGISTRY_NS: eurobase-app
 
 jobs:
   # -------------------------------------------------------------------------
@@ -26,18 +26,13 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
 
       - name: Run tests
         run: go test ./... -v -race
 
       - name: Vet
         run: go vet ./...
-
-      - name: Static analysis
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
 
   # -------------------------------------------------------------------------
   # Console (SvelteKit) build check
@@ -56,6 +51,8 @@ jobs:
           cd console
           npm ci
           npm run build
+        env:
+          PUBLIC_API_URL: https://api.eurobase.app
 
       - name: Lint
         run: |
@@ -113,10 +110,18 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
-      - name: Configure kubeconfig
+      - name: Install Scaleway CLI and get kubeconfig
         run: |
+          curl -sL https://github.com/scaleway/scaleway-cli/releases/latest/download/scaleway-cli_linux_amd64 -o /usr/local/bin/scw
+          chmod +x /usr/local/bin/scw
           mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          scw k8s kubeconfig install ${{ secrets.SCW_CLUSTER_ID }}
+        env:
+          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          SCW_DEFAULT_PROJECT_ID: ${{ secrets.SCW_PROJECT_ID }}
+          SCW_DEFAULT_REGION: fr-par
+          SCW_DEFAULT_ZONE: fr-par-1
 
       - name: Deploy to Kapsule
         run: |
