@@ -417,6 +417,24 @@ export class EurobaseAPI {
 		return this.fetch<{ data: any[]; count: number }>(path);
 	}
 
+	/** Run an aggregate query on a table. */
+	async aggregateTable(
+		projectId: string,
+		table: string,
+		aggregate: string,
+		filters?: Record<string, string>
+	): Promise<{ result: any }> {
+		const searchParams = new URLSearchParams();
+		searchParams.set('aggregate', aggregate);
+		if (filters) {
+			for (const [key, value] of Object.entries(filters)) {
+				searchParams.set(key, value);
+			}
+		}
+		const qs = searchParams.toString();
+		return this.fetch<{ result: any }>(`/platform/projects/${projectId}/data/${table}?${qs}`);
+	}
+
 	/** Insert a new row into a table. */
 	async insertRow(
 		projectId: string,

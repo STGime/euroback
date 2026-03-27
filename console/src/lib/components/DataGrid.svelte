@@ -350,6 +350,9 @@
 									{/if}
 								{:else if isUuid(col.data_type)}
 									<div class="flex items-center gap-1.5">
+										{#if col.foreign_key}
+											<span class="text-[9px] text-indigo-500 font-medium" title="References {col.foreign_key.referenced_table}.{col.foreign_key.referenced_column}">{col.foreign_key.referenced_table}</span>
+										{/if}
 										<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-600">
 											{String(row[col.name]).substring(0, 8)}...
 										</code>

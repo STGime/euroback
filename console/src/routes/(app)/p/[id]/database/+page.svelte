@@ -95,7 +95,11 @@
 		filterColumn = '';
 		filterValue = '';
 		sortColumn = '';
+		searchQuery = '';
+		searchColumn = '';
+		aggregateResults = {};
 		loadTableData();
+		loadAggregates();
 	}
 
 	async function loadSchema() {
@@ -391,8 +395,70 @@
 		{ value: 'lte', label: '<=' },
 		{ value: 'like', label: 'LIKE' },
 		{ value: 'ilike', label: 'ILIKE' },
-		{ value: 'is', label: 'IS' }
+		{ value: 'is', label: 'IS' },
+		{ value: 'fts', label: 'Search' }
 	];
+
+	// ---- Search state ----
+	let searchQuery = $state('');
+	let searchColumn = $state('');
+
+	function applySearch() {
+		if (!searchQuery.trim() || !searchColumn) return;
+		filterColumn = searchColumn;
+		filterOperator = 'fts';
+		filterValue = searchQuery.trim();
+		currentOffset = 0;
+		loadTableData();
+	}
+
+	function clearSearch() {
+		searchQuery = '';
+		searchColumn = '';
+		if (filterOperator === 'fts') {
+			filterColumn = '';
+			filterOperator = 'eq';
+			filterValue = '';
+			currentOffset = 0;
+			loadTableData();
+		}
+	}
+
+	// ---- Aggregation state ----
+	let aggregateResults: Record<string, number | null> = $state({});
+	let aggregateLoading = $state(false);
+
+	async function loadAggregates() {
+		if (!selectedTable || !selectedSchema) return;
+		aggregateLoading = true;
+		aggregateResults = {};
+		try {
+			const countResp = await api.aggregateTable(projectId, selectedTable, 'count');
+			aggregateResults['_count'] = countResp.result;
+
+			const numericTypes = ['integer', 'bigint', 'smallint', 'numeric', 'real', 'double precision', 'int4', 'int8', 'float4', 'float8'];
+			for (const col of selectedSchema.columns) {
+				const baseType = col.data_type.toLowerCase().replace(/\s+/g, ' ');
+				if (numericTypes.some(t => baseType.includes(t))) {
+					try {
+						const sumResp = await api.aggregateTable(projectId, selectedTable, `sum:${col.name}`);
+						aggregateResults[`sum:${col.name}`] = sumResp.result;
+						const avgResp = await api.aggregateTable(projectId, selectedTable, `avg:${col.name}`);
+						aggregateResults[`avg:${col.name}`] = avgResp.result;
+					} catch { /* skip */ }
+				}
+			}
+		} catch { /* skip */ }
+		aggregateLoading = false;
+	}
+
+	// Text columns for search
+	let textColumns = $derived(
+		selectedSchema?.columns.filter(c => {
+			const t = c.data_type.toLowerCase();
+			return t.includes('text') || t.includes('varchar') || t.includes('char');
+		}) ?? []
+	);
 </script>
 
 <div class="flex gap-6 h-[calc(100vh-13rem)] overflow-hidden">
@@ -525,6 +591,48 @@
 				</div>
 			</div>
 
+			<!-- Search bar -->
+			{#if textColumns.length > 0}
+				<div class="flex items-center gap-2 mb-3">
+					<svg class="h-4 w-4 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+					</svg>
+					<select
+						bind:value={searchColumn}
+						class="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+					>
+						<option value="">Search column...</option>
+						{#each textColumns as col}
+							<option value={col.name}>{col.name}</option>
+						{/each}
+					</select>
+					<input
+						type="text"
+						bind:value={searchQuery}
+						placeholder="Full-text search..."
+						onkeydown={(e) => { if (e.key === 'Enter') applySearch(); }}
+						class="flex-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 focus:border-eurobase-500 focus:outline-none"
+					/>
+					<button
+						type="button"
+						disabled={!searchQuery.trim() || !searchColumn}
+						class="cursor-pointer rounded-lg bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						onclick={applySearch}
+					>
+						Search
+					</button>
+					{#if searchQuery}
+						<button
+							type="button"
+							class="cursor-pointer rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+							onclick={clearSearch}
+						>
+							Clear
+						</button>
+					{/if}
+				</div>
+			{/if}
+
 			<!-- Filter bar -->
 			{#if showFilters}
 				<div class="flex items-center gap-2 mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
@@ -633,6 +741,26 @@
 					indexes={selectedSchema.indexes ?? []}
 					onChanged={() => loadSchema()}
 				/>
+			{/if}
+
+			<!-- Aggregate footer -->
+			{#if Object.keys(aggregateResults).length > 0}
+				<div class="flex items-center gap-4 mt-2 px-3 py-2 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600">
+					{#if aggregateResults['_count'] != null}
+						<span class="font-medium">Total rows: <span class="text-gray-900">{aggregateResults['_count'].toLocaleString()}</span></span>
+					{/if}
+					{#each Object.entries(aggregateResults) as [key, val]}
+						{#if key.startsWith('sum:') && val != null}
+							<span>SUM({key.slice(4)}): <span class="font-medium text-gray-900">{Number(val).toLocaleString()}</span></span>
+						{/if}
+						{#if key.startsWith('avg:') && val != null}
+							<span>AVG({key.slice(4)}): <span class="font-medium text-gray-900">{Number(val).toFixed(2)}</span></span>
+						{/if}
+					{/each}
+					{#if aggregateLoading}
+						<span class="text-gray-400">loading...</span>
+					{/if}
+				</div>
 			{/if}
 
 			<!-- Pagination -->
