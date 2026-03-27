@@ -15,6 +15,7 @@ import (
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/gateway"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
@@ -58,6 +59,10 @@ func main() {
 	}
 	defer pool.Close()
 	slog.Info("database connection pool established")
+
+	// ── Set up plan limits ──
+	limitsSvc := plans.NewLimitsService(pool)
+	slog.Info("plan limits service initialized")
 
 	// ── Set up platform auth ──
 	platformAuthSvc := auth.NewPlatformAuthService(pool, platformJWTSecret)
@@ -163,7 +168,7 @@ func main() {
 	subdomainMw := auth.NewSubdomainMiddleware(pool, domainSuffix)
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

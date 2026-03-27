@@ -766,6 +766,18 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Plan & Usage ----
+
+	/** Get usage stats and limits for a project. */
+	async getUsage(projectId: string): Promise<ProjectUsage> {
+		return this.fetch<ProjectUsage>(`/platform/projects/${projectId}/usage`);
+	}
+
+	/** Get all available plans and their limits. */
+	async getPlans(): Promise<PlanLimits[]> {
+		return this.fetch<PlanLimits[]>('/platform/config/plans');
+	}
+
 	/** Get request logs for a project. */
 	async getLogs(
 		projectId: string,
@@ -792,6 +804,32 @@ export class EurobaseAPI {
 		const qs = searchParams.toString();
 		return this.fetch<LogsResponse>(`/platform/projects/${projectId}/logs${qs ? `?${qs}` : ''}`);
 	}
+}
+
+export interface PlanLimits {
+	plan: string;
+	db_size_mb: number;
+	storage_mb: number;
+	bandwidth_mb: number;
+	mau_limit: number;
+	rate_limit_rps: number;
+	ws_connections: number;
+	upload_size_mb: number;
+	webhook_limit: number;
+	project_limit: number;
+	log_retention_days: number;
+	custom_templates: boolean;
+}
+
+export interface ProjectUsage {
+	usage: {
+		database_size_mb: number;
+		storage_size_mb: number;
+		mau_count: number;
+		webhook_count: number;
+		project_count: number;
+	};
+	limits: PlanLimits;
 }
 
 export interface EmailTemplate {

@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getContext } from 'svelte';
-	import { api } from '$lib/api.js';
+	import { api, type ProjectUsage } from '$lib/api.js';
 
 	let projectId = $derived($page.params.id);
 	let ctx: { project: import('$lib/api.js').Project | null } = getContext('projectId');
@@ -10,20 +10,39 @@
 
 	let tableCount = $state('—');
 	let requestCount = $state('—');
+	let usage = $state<ProjectUsage | null>(null);
 
 	onMount(async () => {
 		try {
-			const [schema, logs] = await Promise.all([
+			const [schema, logs, usageData] = await Promise.all([
 				api.getSchema(projectId),
-				api.getLogs(projectId, { limit: 1 })
+				api.getLogs(projectId, { limit: 1 }),
+				api.getUsage(projectId).catch(() => null)
 			]);
 			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
 			tableCount = String(schema.filter(t => !hiddenTables.has(t.name)).length);
 			requestCount = logs.stats.total_requests.toLocaleString();
+			usage = usageData;
 		} catch {
 			// Keep placeholder values on error.
 		}
 	});
+
+	function formatMB(mb: number): string {
+		if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+		return mb.toFixed(1) + ' MB';
+	}
+
+	function pct(used: number, limit: number): number {
+		if (limit <= 0) return 0;
+		return Math.min(100, Math.round((used / limit) * 100));
+	}
+
+	function barColor(percent: number): string {
+		if (percent >= 90) return 'bg-red-500';
+		if (percent >= 75) return 'bg-amber-500';
+		return 'bg-eurobase-500';
+	}
 
 	let stats = $derived([
 		{ label: 'Tables', value: tableCount, icon: 'table' },
@@ -220,6 +239,44 @@ const { data } = await eb.db.from('todos').select('*')`,
 						</svg>
 						Auth guide
 					</a>
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	<!-- Usage -->
+	{#if usage}
+		<div>
+			<h2 class="text-sm font-semibold text-gray-900 mb-3">Usage</h2>
+			<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+				<div class="rounded-lg border border-gray-200 bg-white p-4">
+					<p class="text-xs font-medium text-gray-500">Database</p>
+					<p class="mt-1 text-sm font-semibold text-gray-900">{formatMB(usage.usage.database_size_mb)} / {formatMB(usage.limits.db_size_mb)}</p>
+					<div class="mt-2 h-1.5 rounded-full bg-gray-100">
+						<div class="h-1.5 rounded-full {barColor(pct(usage.usage.database_size_mb, usage.limits.db_size_mb))}" style="width:{pct(usage.usage.database_size_mb, usage.limits.db_size_mb)}%"></div>
+					</div>
+				</div>
+
+				<div class="rounded-lg border border-gray-200 bg-white p-4">
+					<p class="text-xs font-medium text-gray-500">Storage</p>
+					<p class="mt-1 text-sm font-semibold text-gray-900">{formatMB(usage.usage.storage_size_mb)} / {formatMB(usage.limits.storage_mb)}</p>
+					<div class="mt-2 h-1.5 rounded-full bg-gray-100">
+						<div class="h-1.5 rounded-full {barColor(pct(usage.usage.storage_size_mb, usage.limits.storage_mb))}" style="width:{pct(usage.usage.storage_size_mb, usage.limits.storage_mb)}%"></div>
+					</div>
+				</div>
+
+				<div class="rounded-lg border border-gray-200 bg-white p-4">
+					<p class="text-xs font-medium text-gray-500">Auth Users</p>
+					<p class="mt-1 text-sm font-semibold text-gray-900">{usage.usage.mau_count.toLocaleString()} / {usage.limits.mau_limit.toLocaleString()}</p>
+					<div class="mt-2 h-1.5 rounded-full bg-gray-100">
+						<div class="h-1.5 rounded-full {barColor(pct(usage.usage.mau_count, usage.limits.mau_limit))}" style="width:{pct(usage.usage.mau_count, usage.limits.mau_limit)}%"></div>
+					</div>
+				</div>
+
+				<div class="rounded-lg border border-gray-200 bg-white p-4">
+					<p class="text-xs font-medium text-gray-500">Plan</p>
+					<p class="mt-1 text-sm font-semibold text-gray-900 capitalize">{usage.limits.plan}</p>
+					<p class="mt-1 text-xs text-gray-400">{usage.limits.rate_limit_rps} req/s &middot; {usage.limits.ws_connections} WS</p>
 				</div>
 			</div>
 		</div>

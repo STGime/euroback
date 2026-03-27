@@ -13,6 +13,7 @@ type ProjectContext struct {
 	SchemaName string
 	JWTSecret  string
 	KeyType    string // "public" or "secret"
+	Plan       string // billing plan: "free", "pro"
 	AuthConfig json.RawMessage
 }
 

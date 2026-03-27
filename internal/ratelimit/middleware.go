@@ -29,8 +29,13 @@ func RateLimitMiddleware(limiter *RateLimiter) func(http.Handler) http.Handler {
 				key = claims.Subject
 			}
 
-			// Default to free-tier limits.
+			// Determine rate limit from project plan.
 			limit := PlanLimits["free"]
+			if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc.Plan != "" {
+				if planLimit, exists := PlanLimits[pc.Plan]; exists {
+					limit = planLimit
+				}
+			}
 			window := time.Second
 
 			allowed, info, err := limiter.Allow(r.Context(), key, limit, window)

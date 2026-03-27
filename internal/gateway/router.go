@@ -11,6 +11,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
@@ -27,7 +28,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -102,6 +103,9 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 					json.NewEncoder(w).Encode(map[string]bool{"configured": false})
 				})
 			}
+			if limitsSvc != nil {
+				r.Get("/plans", plans.HandleGetPlans(limitsSvc))
+			}
 		})
 
 		// Authenticated: project management & schema introspection.
@@ -118,14 +122,19 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
 			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
 			r.Mount("/schema/tables", query.HandleDDL(pool))
-			r.Mount("/webhooks", webhook.Routes(pool))
+			r.Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
 			r.Get("/connect", tenant.HandleConnect(pool))
 
+			// Plan usage.
+			if limitsSvc != nil {
+				r.Get("/usage", plans.HandleGetUsage(limitsSvc, pool))
+			}
+
 			// Email template management.
 			if emailService != nil {
-				tmplHandler := email.NewTemplateHandler(pool, emailService)
+				tmplHandler := email.NewTemplateHandler(pool, emailService, limitsSvc)
 				r.Get("/email-templates", tmplHandler.HandleList())
 				r.Put("/email-templates/{type}", tmplHandler.HandleUpdate())
 				r.Delete("/email-templates/{type}", tmplHandler.HandleDelete())

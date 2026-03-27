@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,13 +14,14 @@ import (
 
 // TemplateHandler handles email template CRUD operations.
 type TemplateHandler struct {
-	pool    *pgxpool.Pool
-	service *EmailService
+	pool      *pgxpool.Pool
+	service   *EmailService
+	limitsSvc *plans.LimitsService
 }
 
 // NewTemplateHandler creates a new template handler.
-func NewTemplateHandler(pool *pgxpool.Pool, service *EmailService) *TemplateHandler {
-	return &TemplateHandler{pool: pool, service: service}
+func NewTemplateHandler(pool *pgxpool.Pool, service *EmailService, limitsSvc *plans.LimitsService) *TemplateHandler {
+	return &TemplateHandler{pool: pool, service: service, limitsSvc: limitsSvc}
 }
 
 type templateResponse struct {
@@ -93,6 +95,14 @@ func (h *TemplateHandler) HandleUpdate() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		templateType := chi.URLParam(r, "type")
+
+		// Check if plan allows custom templates.
+		if h.limitsSvc != nil {
+			if err := h.limitsSvc.CheckCustomTemplates(r.Context(), projectID); err != nil {
+				writeJSONError(w, err.Error(), http.StatusForbidden)
+				return
+			}
+		}
 
 		if !validTypes[templateType] {
 			writeJSONError(w, "invalid template type", http.StatusBadRequest)

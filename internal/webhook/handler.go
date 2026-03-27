@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -46,10 +47,14 @@ type createWebhookRequest struct {
 
 // Routes returns a chi.Router for webhook CRUD operations.
 // Mounted at /platform/projects/{id}/webhooks
-func Routes(pool *pgxpool.Pool) chi.Router {
+func Routes(pool *pgxpool.Pool, limitsSvc ...*plans.LimitsService) chi.Router {
+	var svc *plans.LimitsService
+	if len(limitsSvc) > 0 {
+		svc = limitsSvc[0]
+	}
 	r := chi.NewRouter()
 	r.Get("/", handleList(pool))
-	r.Post("/", handleCreate(pool))
+	r.Post("/", handleCreate(pool, svc))
 	r.Delete("/{webhookId}", handleDelete(pool))
 	r.Patch("/{webhookId}", handleUpdate(pool))
 	r.Get("/{webhookId}/deliveries", handleDeliveries(pool))
@@ -84,9 +89,17 @@ func handleList(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleCreate(pool *pgxpool.Pool) http.HandlerFunc {
+func handleCreate(pool *pgxpool.Pool, limitsSvc *plans.LimitsService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
+
+		// Check webhook limit for the project's plan.
+		if limitsSvc != nil {
+			if err := limitsSvc.CheckWebhookLimit(r.Context(), projectID); err != nil {
+				jsonError(w, err.Error(), http.StatusForbidden)
+				return
+			}
+		}
 
 		var req createWebhookRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
