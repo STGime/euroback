@@ -40,6 +40,22 @@ Not included in Free:
 - Team members (future)
 - Point-in-time recovery (future)
 
+## Billing Model
+
+Per-project pricing (like Supabase). Each project has its own plan and is billed independently.
+Users can mix Free and Pro projects. Example scenarios:
+
+| Scenario | Monthly cost |
+|----------|-------------|
+| 1 free project | $0 |
+| 2 free projects | $0 |
+| 1 free + 1 pro | $19 |
+| 2 pro projects | $38 |
+| 3 pro + 2 free | $57 |
+
+Project limits: Free users can have up to 2 projects. Users with any Pro project
+can have up to 10 projects total (mix of free and pro).
+
 ## Pro Tier ($19/month per project)
 
 Goal: Production-ready for B2B SaaS. Everything a growing startup needs.

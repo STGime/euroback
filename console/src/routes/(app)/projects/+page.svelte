@@ -284,20 +284,21 @@
 
 				<!-- Plan -->
 				<fieldset>
-					<legend class="block text-sm font-medium text-gray-700">Plan</legend>
+					<legend class="block text-sm font-medium text-gray-700">Plan for this project</legend>
+					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently</p>
 					<div class="mt-2 flex gap-3">
 						<label class="flex-1 cursor-pointer">
 							<input type="radio" name="plan" value="free" bind:group={newPlan} class="peer sr-only" />
 							<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50 border-gray-200 hover:border-gray-300">
 								<p class="text-sm font-semibold text-gray-900">Free</p>
-								<p class="text-xs text-gray-500">For prototyping</p>
+								<p class="text-xs text-gray-500">$0/mo</p>
 							</div>
 						</label>
 						<label class="flex-1 cursor-pointer">
 							<input type="radio" name="plan" value="pro" bind:group={newPlan} class="peer sr-only" />
 							<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50 border-gray-200 hover:border-gray-300">
 								<p class="text-sm font-semibold text-gray-900">Pro</p>
-								<p class="text-xs text-gray-500">For production</p>
+								<p class="text-xs text-eurobase-600 font-medium">&euro;19/mo</p>
 							</div>
 						</label>
 					</div>

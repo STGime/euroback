@@ -6,39 +6,42 @@ import (
 	"log/slog"
 )
 
-// CheckProjectLimit verifies the owner has not exceeded their plan's project limit.
-// Returns nil if allowed, an error if the limit would be exceeded.
+// CheckProjectLimit verifies the owner has not exceeded their project limit.
+// Logic: if the owner has any pro project, they get the pro project limit (10).
+// Otherwise they get the free limit (2).
 func (s *LimitsService) CheckProjectLimit(ctx context.Context, ownerID string) error {
-	// Get the owner's current plan from their most recent project (default to "free").
-	var plan string
+	var totalCount, proCount int
 	err := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(
-			(SELECT plan FROM projects WHERE owner_id = $1::uuid AND status = 'active' ORDER BY created_at DESC LIMIT 1),
-			'free'
-		)`, ownerID,
-	).Scan(&plan)
-	if err != nil {
-		slog.Error("check project limit: failed to resolve plan", "owner_id", ownerID, "error", err)
-		return fmt.Errorf("failed to check project limit: %w", err)
-	}
-
-	limits, err := s.GetLimits(ctx, plan)
-	if err != nil {
-		return err
-	}
-
-	var count int
-	err = s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM projects WHERE owner_id = $1::uuid AND status = 'active'`, ownerID,
-	).Scan(&count)
+		`SELECT
+			count(*),
+			count(*) FILTER (WHERE plan = 'pro')
+		 FROM projects
+		 WHERE owner_id = $1::uuid AND status = 'active'`,
+		ownerID,
+	).Scan(&totalCount, &proCount)
 	if err != nil {
 		slog.Error("check project limit: count failed", "owner_id", ownerID, "error", err)
 		return fmt.Errorf("failed to count projects: %w", err)
 	}
 
-	if count >= limits.ProjectLimit {
-		slog.Warn("project limit reached", "owner_id", ownerID, "plan", plan, "current", count, "limit", limits.ProjectLimit)
-		return fmt.Errorf("%s plan limited to %d projects, upgrade to pro", plan, limits.ProjectLimit)
+	// Determine effective plan based on whether user has any pro projects.
+	effectivePlan := "free"
+	if proCount > 0 {
+		effectivePlan = "pro"
+	}
+
+	limits, err := s.GetLimits(ctx, effectivePlan)
+	if err != nil {
+		return err
+	}
+
+	if totalCount >= limits.ProjectLimit {
+		if effectivePlan == "free" {
+			slog.Warn("project limit reached", "owner_id", ownerID, "plan", effectivePlan, "current", totalCount, "limit", limits.ProjectLimit)
+			return fmt.Errorf("free plan limited to %d projects — upgrade a project to Pro to create up to %d", limits.ProjectLimit, 10)
+		}
+		slog.Warn("project limit reached", "owner_id", ownerID, "plan", effectivePlan, "current", totalCount, "limit", limits.ProjectLimit)
+		return fmt.Errorf("pro plan limited to %d projects", limits.ProjectLimit)
 	}
 
 	return nil

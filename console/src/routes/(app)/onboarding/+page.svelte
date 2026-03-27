@@ -236,7 +236,8 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 
 				<!-- Plan selector -->
 				<fieldset>
-					<legend class="block text-sm font-medium text-gray-700">Plan</legend>
+					<legend class="block text-sm font-medium text-gray-700">Plan for this project</legend>
+					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently. You can mix Free and Pro projects.</p>
 					<div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
 						<label class="cursor-pointer">
 							<input type="radio" name="onb-plan" value="free" bind:group={plan} class="peer sr-only" />
@@ -266,7 +267,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 							<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50/50 peer-checked:shadow-sm border-gray-200 hover:border-gray-300">
 								<div class="flex items-center justify-between">
 									<p class="text-sm font-semibold text-gray-900">Pro</p>
-									<span class="text-sm font-semibold text-eurobase-700">&euro;19/mo</span>
+									<span class="text-sm font-semibold text-eurobase-700">&euro;19/mo per project</span>
 								</div>
 								<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 									<li class="flex items-center gap-1.5">
