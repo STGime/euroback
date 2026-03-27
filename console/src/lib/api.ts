@@ -679,6 +679,30 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Cron Job methods ----
+
+	async listCronJobs(projectId: string): Promise<CronJob[]> {
+		return this.fetch<CronJob[]>(`/platform/projects/${projectId}/cron`);
+	}
+
+	async createCronJob(projectId: string, data: { name: string; schedule: string; action_type: string; action: string }): Promise<CronJob> {
+		return this.fetch<CronJob>(`/platform/projects/${projectId}/cron`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async updateCronJob(projectId: string, jobId: string, data: Partial<CronJob>): Promise<CronJob> {
+		return this.fetch<CronJob>(`/platform/projects/${projectId}/cron/${jobId}`, {
+			method: 'PATCH',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async deleteCronJob(projectId: string, jobId: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/cron/${jobId}`, { method: 'DELETE' });
+	}
+
 	// ---- Webhook methods ----
 
 	async listWebhooks(projectId: string): Promise<Webhook[]> {
@@ -870,6 +894,21 @@ export interface EndUser {
 export interface EndUserList {
 	users: EndUser[];
 	total: number;
+}
+
+export interface CronJob {
+	id: string;
+	project_id: string;
+	name: string;
+	schedule: string;
+	action_type: string;
+	action: string;
+	enabled: boolean;
+	last_run_at: string | null;
+	last_error: string | null;
+	run_count: number;
+	created_at: string;
+	updated_at: string;
 }
 
 export interface Webhook {

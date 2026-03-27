@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/plans"
@@ -123,6 +124,8 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
 			r.Mount("/schema/tables", query.HandleDDL(pool))
 			r.Mount("/webhooks", webhook.Routes(pool, limitsSvc))
+			cronSvc := cron.NewCronService(pool)
+			r.Mount("/cron", cron.Routes(cronSvc))
 			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
 			r.Get("/connect", tenant.HandleConnect(pool))

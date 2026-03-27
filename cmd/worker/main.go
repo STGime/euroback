@@ -8,6 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"time"
+
+	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/workers"
@@ -107,6 +110,25 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("river worker started")
+
+	// ── Start cron executor ──
+	cronSvc := cron.NewCronService(pool)
+	cronExec := cron.NewExecutor(cronSvc, pool)
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := cronExec.RunDueJobs(ctx); err != nil {
+					slog.Error("cron executor error", "error", err)
+				}
+			}
+		}
+	}()
+	slog.Info("cron executor started (60s interval)")
 
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)
