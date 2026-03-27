@@ -77,6 +77,17 @@ var defaultTemplates = map[string]DefaultTemplate{
 			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
 <p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Your password for <strong>{{.ProjectName}}</strong> was successfully changed. If you didn't make this change, please contact support immediately.</p>`),
 	},
+	"magic_link": {
+		Subject: "Sign in to {{.ProjectName}}",
+		BodyHTML: fmt.Sprintf(baseLayout,
+			"{{.ProjectName}}",
+			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
+<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Click the button below to sign in to <strong>{{.ProjectName}}</strong>. No password needed.</p>
+<p style="margin:0 0 24px;text-align:center">
+<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Sign In</a>
+</p>
+<p style="margin:0;color:#71717a;font-size:12px">This link expires in {{.ExpiresIn}}. If you didn't request this, you can safely ignore this email.</p>`),
+	},
 }
 
 // DefaultTemplates returns the built-in default templates.

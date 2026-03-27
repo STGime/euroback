@@ -104,6 +104,41 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 	return s.client.Send(ctx, userEmail, subject, body)
 }
 
+// SendMagicLinkEmail sends a magic link sign-in email to the end-user.
+func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+	rawToken, tokenHash, err := generateToken()
+	if err != nil {
+		return err
+	}
+
+	q := fmt.Sprintf(
+		`INSERT INTO %s.email_tokens (user_id, token_hash, token_type, expires_at)
+		 VALUES ($1, $2, 'magic_link', now() + interval '15 minutes')`,
+		quoteIdent(schemaName),
+	)
+	if _, err := s.pool.Exec(ctx, q, userID, tokenHash); err != nil {
+		return fmt.Errorf("store magic link token: %w", err)
+	}
+
+	customSubject, customHTML, err := s.loadCustomTemplate(ctx, projectID, "magic_link")
+	if err != nil {
+		slog.Warn("failed to load custom template, using default", "error", err)
+	}
+
+	actionURL := fmt.Sprintf("%s/magic-link?token=%s&project_id=%s", s.consoleURL, rawToken, projectID)
+	subject, body, err := RenderTemplate("magic_link", customSubject, customHTML, TemplateData{
+		UserEmail:   userEmail,
+		ProjectName: projectName,
+		ActionURL:   actionURL,
+		ExpiresIn:   "15 minutes",
+	})
+	if err != nil {
+		return fmt.Errorf("render magic link email: %w", err)
+	}
+
+	return s.client.Send(ctx, userEmail, subject, body)
+}
+
 // SendPlatformPasswordResetEmail sends a password reset email for console users.
 func (s *EmailService) SendPlatformPasswordResetEmail(ctx context.Context, userID, userEmail string) error {
 	rawToken, tokenHash, err := generateToken()

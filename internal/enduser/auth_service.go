@@ -442,6 +442,103 @@ func (s *AuthService) VerifyEmail(ctx context.Context, schemaName, rawToken stri
 	return nil
 }
 
+// RequestMagicLink sends a magic link email for passwordless sign-in.
+// Always returns nil to prevent email enumeration.
+func (s *AuthService) RequestMagicLink(ctx context.Context, schemaName, projectID, projectName string, config tenant.AuthConfig, emailAddr string) error {
+	if !config.IsMagicLinkEnabled() {
+		return fmt.Errorf("magic link authentication is disabled")
+	}
+
+	if s.emailService == nil {
+		slog.Warn("request-magic-link: email service not configured")
+		return nil
+	}
+
+	emailAddr = strings.ToLower(strings.TrimSpace(emailAddr))
+
+	var userID string
+	q := fmt.Sprintf(`SELECT id FROM %s.users WHERE email = $1`, quoteIdent(schemaName))
+	err := s.pool.QueryRow(ctx, q, emailAddr).Scan(&userID)
+	if err != nil {
+		// User not found — return nil to prevent enumeration.
+		return nil
+	}
+
+	if err := s.emailService.SendMagicLinkEmail(ctx, projectID, projectName, schemaName, userID, emailAddr); err != nil {
+		slog.Error("failed to send magic link email", "error", err, "user_id", userID)
+	}
+	return nil
+}
+
+// SignInWithMagicLink completes a magic link sign-in using a token.
+func (s *AuthService) SignInWithMagicLink(ctx context.Context, schemaName, jwtSecret, projectID string, config tenant.AuthConfig, rawToken string) (*AuthResponse, error) {
+	if !config.IsMagicLinkEnabled() {
+		return nil, fmt.Errorf("magic link authentication is disabled")
+	}
+
+	if s.emailService == nil {
+		return nil, fmt.Errorf("email service not configured")
+	}
+
+	userID, err := s.emailService.VerifyToken(ctx, schemaName, rawToken, "magic_link")
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch the user.
+	var user User
+	var metadataJSON []byte
+	var bannedAt *time.Time
+	var emailConfirmedAt *time.Time
+
+	userQ := fmt.Sprintf(
+		`SELECT id, email, display_name, avatar_url, metadata, banned_at, email_confirmed_at, created_at, updated_at
+		 FROM %s.users WHERE id = $1`,
+		quoteIdent(schemaName),
+	)
+	err = s.pool.QueryRow(ctx, userQ, userID).
+		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &emailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("query user: %w", err)
+	}
+	_ = json.Unmarshal(metadataJSON, &user.Metadata)
+
+	if bannedAt != nil {
+		return nil, fmt.Errorf("account suspended")
+	}
+
+	// Magic link confirms email implicitly.
+	if emailConfirmedAt == nil {
+		confirmQ := fmt.Sprintf(`UPDATE %s.users SET email_confirmed_at = now(), updated_at = now() WHERE id = $1`, quoteIdent(schemaName))
+		_, _ = s.pool.Exec(ctx, confirmQ, userID)
+	}
+
+	// Update last_sign_in_at.
+	updateQ := fmt.Sprintf(`UPDATE %s.users SET last_sign_in_at = now() WHERE id = $1`, quoteIdent(schemaName))
+	_, _ = s.pool.Exec(ctx, updateQ, userID)
+
+	slog.Info("end-user signed in via magic link", "schema", schemaName, "user_id", user.ID, "email", user.Email)
+
+	sessionDurationSecs := config.SessionDurationSeconds()
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err := s.createRefreshToken(ctx, schemaName, user.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuthResponse{
+		AccessToken:  accessToken,
+		TokenType:    "bearer",
+		ExpiresIn:    expiresIn,
+		RefreshToken: refreshToken,
+		User:         user,
+	}, nil
+}
+
 // ResendVerification resends the verification email to an end-user.
 func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projectID, projectName, emailAddr string) error {
 	if s.emailService == nil {

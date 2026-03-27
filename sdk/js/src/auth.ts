@@ -109,6 +109,26 @@ export class AuthClient {
     return { data: result, error: null }
   }
 
+  /** Request a magic link email for passwordless sign-in. */
+  async requestMagicLink(email: string): Promise<{ error: string | null }> {
+    const result = await this.http.post('/v1/auth/request-magic-link', { email })
+    if (result.error) {
+      return { error: result.error }
+    }
+    return { error: null }
+  }
+
+  /** Sign in with a magic link token. */
+  async signInWithMagicLink(token: string): Promise<{ data: AuthSession | null; error: string | null }> {
+    const result = await this.http.post('/v1/auth/signin-magic-link', { token })
+    if (result.error) {
+      return { data: null, error: result.error }
+    }
+    this.setSession(result)
+    this.emit('SIGNED_IN', result)
+    return { data: result, error: null }
+  }
+
   /** Get the current user from the server. */
   async getUser(): Promise<{ data: AuthUser | null; error: string | null }> {
     const result = await this.http.get('/v1/auth/user')

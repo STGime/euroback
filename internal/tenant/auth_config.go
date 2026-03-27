@@ -89,6 +89,12 @@ func (c *AuthConfig) IsEmailPasswordEnabled() bool {
 	return ok && p.Enabled
 }
 
+// IsMagicLinkEnabled returns whether the magic_link provider is enabled.
+func (c *AuthConfig) IsMagicLinkEnabled() bool {
+	p, ok := c.Providers["magic_link"]
+	return ok && p.Enabled
+}
+
 // ParseAuthConfig parses a JSON string into an AuthConfig, returning defaults if empty.
 func ParseAuthConfig(raw []byte) AuthConfig {
 	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "" || strings.TrimSpace(string(raw)) == "{}" || strings.TrimSpace(string(raw)) == "null" {

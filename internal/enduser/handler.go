@@ -241,6 +241,69 @@ func HandleVerifyEmail(svc *AuthService) http.HandlerFunc {
 	}
 }
 
+// HandleRequestMagicLink returns an HTTP handler for POST /v1/auth/request-magic-link.
+func HandleRequestMagicLink(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		// Load project name for email template.
+		var projectName string
+		_ = svc.pool.QueryRow(r.Context(), `SELECT name FROM projects WHERE id = $1`, pc.ProjectID).Scan(&projectName)
+
+		err := svc.RequestMagicLink(r.Context(), pc.SchemaName, pc.ProjectID, projectName, config, req.Email)
+		if err != nil {
+			slog.Warn("request-magic-link failed", "error", err, "project_id", pc.ProjectID)
+		}
+
+		// Always return 200 to prevent email enumeration.
+		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
+	}
+}
+
+// HandleSignInWithMagicLink returns an HTTP handler for POST /v1/auth/signin-magic-link.
+func HandleSignInWithMagicLink(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		resp, err := svc.SignInWithMagicLink(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req.Token)
+		if err != nil {
+			slog.Warn("magic-link signin failed", "error", err, "project_id", pc.ProjectID)
+			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, resp, http.StatusOK)
+	}
+}
+
 // HandleResendVerification returns an HTTP handler for POST /v1/auth/resend-verification.
 func HandleResendVerification(svc *AuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
