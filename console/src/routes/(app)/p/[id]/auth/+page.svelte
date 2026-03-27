@@ -320,7 +320,7 @@
 									<div class="mt-1.5"><span class="text-amber-400">POST</span> /v1/auth/signin-magic-link</div>
 									<div class="text-gray-400">Body: {"{"}"token": "abc123..."{"}"}</div>
 								</div>
-								<p class="text-[11px] text-eurobase-600 mt-1">Requires Scaleway TEM email to be configured. Customize the email template in the Email Templates tab.</p>
+								<p class="text-[11px] text-eurobase-600 mt-1">Customize the email template in the Email Templates tab.</p>
 							</div>
 						{/if}
 					</div>
