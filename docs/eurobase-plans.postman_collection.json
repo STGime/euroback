@@ -1,0 +1,535 @@
+{
+	"info": {
+		"name": "Eurobase Plan Limits & Usage",
+		"description": "Tests for plan limits enforcement, usage tracking, and plan-gated features.\n\n## Setup\n\n1. `make setup` — start Postgres, Redis, MinIO\n2. Apply migrations including 000017: `source .env.local && migrate -path migrations -database \"$DATABASE_URL\" up`\n3. Start gateway: `source .env.local && go run ./cmd/gateway/`\n4. Select the \"Eurobase Local\" environment in Postman\n5. Run Phase 0 from the auth-tests collection first to set `platform_token` and `project_id`\n\n## Test order\n\nRun phases in order. Phase 3 (webhook limit) requires a clean project with <3 webhooks.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 1 — Plans & Usage Endpoints",
+			"item": [
+				{
+					"name": "P1.1 Get All Plans",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array with free and pro plans', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.be.an('array');",
+									"    pm.expect(json.length).to.be.at.least(2);",
+									"    const names = json.map(p => p.plan).sort();",
+									"    pm.expect(names).to.include('free');",
+									"    pm.expect(names).to.include('pro');",
+									"});",
+									"pm.test('Free plan has correct limits', () => {",
+									"    const free = pm.response.json().find(p => p.plan === 'free');",
+									"    pm.expect(free.db_size_mb).to.eql(500);",
+									"    pm.expect(free.storage_mb).to.eql(1024);",
+									"    pm.expect(free.mau_limit).to.eql(10000);",
+									"    pm.expect(free.rate_limit_rps).to.eql(100);",
+									"    pm.expect(free.project_limit).to.eql(2);",
+									"    pm.expect(free.webhook_limit).to.eql(3);",
+									"    pm.expect(free.custom_templates).to.eql(false);",
+									"});",
+									"pm.test('Pro plan has correct limits', () => {",
+									"    const pro = pm.response.json().find(p => p.plan === 'pro');",
+									"    pm.expect(pro.db_size_mb).to.eql(5120);",
+									"    pm.expect(pro.storage_mb).to.eql(51200);",
+									"    pm.expect(pro.mau_limit).to.eql(100000);",
+									"    pm.expect(pro.rate_limit_rps).to.eql(1000);",
+									"    pm.expect(pro.project_limit).to.eql(10);",
+									"    pm.expect(pro.webhook_limit).to.eql(0);",
+									"    pm.expect(pro.custom_templates).to.eql(true);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/config/plans",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "config", "plans"]
+						}
+					}
+				},
+				{
+					"name": "P1.2 Get Project Usage",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has usage and limits objects', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('usage');",
+									"    pm.expect(json).to.have.property('limits');",
+									"});",
+									"pm.test('Usage has expected fields', () => {",
+									"    const u = pm.response.json().usage;",
+									"    pm.expect(u).to.have.property('database_size_mb');",
+									"    pm.expect(u).to.have.property('storage_size_mb');",
+									"    pm.expect(u).to.have.property('mau_count');",
+									"    pm.expect(u).to.have.property('webhook_count');",
+									"    pm.expect(u).to.have.property('project_count');",
+									"});",
+									"pm.test('Limits match free plan', () => {",
+									"    const l = pm.response.json().limits;",
+									"    pm.expect(l.plan).to.eql('free');",
+									"    pm.expect(l.db_size_mb).to.eql(500);",
+									"    pm.expect(l.project_limit).to.eql(2);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/usage",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "usage"]
+						}
+					}
+				},
+				{
+					"name": "P1.3 Plans — No Auth",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/platform/config/plans",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "config", "plans"]
+						}
+					}
+				},
+				{
+					"name": "P1.4 Usage — No Auth",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/usage",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "usage"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — Custom Templates Gate (Free Plan)",
+			"item": [
+				{
+					"name": "P2.1 Update Email Template — Free Plan (should fail)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 403', () => pm.response.to.have.status(403));",
+									"pm.test('Error mentions upgrade to pro', () => {",
+									"    pm.expect(pm.response.json().error).to.include('pro');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"subject\": \"Custom subject\",\n  \"body_html\": \"<p>Custom body</p>\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates/verification",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates", "verification"]
+						}
+					}
+				},
+				{
+					"name": "P2.2 List Templates — Still Works (read is not gated)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns 4 default templates', () => {",
+									"    pm.expect(pm.response.json().length).to.eql(4);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/email-templates",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "email-templates"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Webhook Limit (Free Plan = 3)",
+			"item": [
+				{
+					"name": "P3.1 Create Webhook 1",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Webhook created', () => {",
+									"    pm.expect(pm.response.json().url).to.eql('https://example.com/hook1');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"url\": \"https://example.com/hook1\",\n  \"events\": [\"insert\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						}
+					}
+				},
+				{
+					"name": "P3.2 Create Webhook 2",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"url\": \"https://example.com/hook2\",\n  \"events\": [\"insert\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						}
+					}
+				},
+				{
+					"name": "P3.3 Create Webhook 3",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"url\": \"https://example.com/hook3\",\n  \"events\": [\"insert\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						}
+					}
+				},
+				{
+					"name": "P3.4 Create Webhook 4 — Should Fail (limit = 3)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 403', () => pm.response.to.have.status(403));",
+									"pm.test('Error mentions upgrade', () => {",
+									"    pm.expect(pm.response.json().error).to.include('upgrade');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"url\": \"https://example.com/hook4\",\n  \"events\": [\"insert\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 4 — Project Limit (Free Plan = 2)",
+			"description": "The free plan allows max 2 projects. If you already have 2 projects, creating a 3rd should fail.\n\nNote: This test depends on how many projects you already have. If you only have 1 project, P4.1 will succeed (creating the 2nd). P4.2 tests the 3rd which should fail.",
+			"item": [
+				{
+					"name": "P4.1 Create 2nd Project (should succeed if only 1 exists)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const status = pm.response.code;",
+									"pm.test('Status is 201 or 403', () => {",
+									"    pm.expect(status).to.be.oneOf([201, 403]);",
+									"});",
+									"if (status === 201) {",
+									"    pm.test('Project created', () => {",
+									"        pm.environment.set('second_project_id', pm.response.json().id);",
+									"    });",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"plan-limit-test\",\n  \"slug\": \"plan-limit-test\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants"]
+						}
+					}
+				},
+				{
+					"name": "P4.2 Create 3rd Project — Should Fail (limit = 2)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 403', () => pm.response.to.have.status(403));",
+									"pm.test('Error mentions project limit', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.error).to.include('project');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"should-fail\",\n  \"slug\": \"should-fail\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/tenants",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 5 — Rate Limiting with Plan",
+			"description": "The free plan allows 100 req/s. This is hard to trigger in Postman manually but verifies the headers are returned correctly.",
+			"item": [
+				{
+					"name": "P5.1 API Request Returns Rate Limit Headers",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Rate limit headers present', () => {",
+									"    pm.expect(pm.response.headers.get('X-RateLimit-Limit')).to.exist;",
+									"    pm.expect(pm.response.headers.get('X-RateLimit-Remaining')).to.exist;",
+									"    pm.expect(pm.response.headers.get('X-RateLimit-Reset')).to.exist;",
+									"});",
+									"pm.test('Rate limit matches free plan (100)', () => {",
+									"    pm.expect(pm.response.headers.get('X-RateLimit-Limit')).to.eql('100');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 6 — Cleanup",
+			"description": "Delete test webhooks and the second project created during testing.",
+			"item": [
+				{
+					"name": "P6.1 List Webhooks (get IDs for cleanup)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"const webhooks = pm.response.json();",
+									"if (webhooks.length > 0) {",
+									"    pm.environment.set('cleanup_webhook_ids', JSON.stringify(webhooks.map(w => w.id)));",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/webhooks",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "webhooks"]
+						}
+					}
+				},
+				{
+					"name": "P6.2 Delete 2nd Project (if created)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"// OK if 200/204 or 404 (wasn't created)",
+									"pm.test('Cleanup OK', () => {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 204, 404]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/tenants/{{second_project_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "tenants", "{{second_project_id}}"]
+						}
+					}
+				}
+			]
+		}
+	]
+}

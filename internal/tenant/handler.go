@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -66,7 +67,7 @@ func slugify(name string) string {
 // (tenant) for the authenticated platform user.
 //
 // POST /v1/tenants
-func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
+func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*plans.LimitsService) http.HandlerFunc {
 	_ = pool // pool is held by svc; kept in signature for consistency
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +76,16 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			slog.Warn("create tenant called without auth claims")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
+		}
+
+		// Check project limit for the user's plan.
+		if len(limitsSvc) > 0 && limitsSvc[0] != nil {
+			if err := limitsSvc[0].CheckProjectLimit(r.Context(), claims.Subject); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
 		}
 
 		var req CreateProjectRequest
