@@ -1,0 +1,783 @@
+{
+	"info": {
+		"name": "Eurobase Sprint 1 — Data API Features",
+		"description": "Tests for aggregations, full-text search, nested relation selects, and usage dashboard.\n\n## Setup\n\n1. Gateway running: `source .env.local && go run ./cmd/gateway/`\n2. Migrations applied (through 017)\n3. Select \"Eurobase Local\" environment\n4. Run Phase 0 from auth-tests collection to set `platform_token`, `project_id`, `public_key`\n5. The project needs a `todos` table with data (created by default on project provisioning)\n\n## Test data setup\n\nSome tests require a second table with a foreign key. Run the \"Setup\" phase first to create test data.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 0 — Setup Test Data",
+			"item": [
+				{
+					"name": "S0.1 Create 'categories' table",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const status = pm.response.code;",
+									"pm.test('Status is 201 or 400 (already exists)', () => {",
+									"    pm.expect(status).to.be.oneOf([201, 400]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"categories\",\n  \"columns\": [\n    { \"name\": \"id\", \"type\": \"uuid\", \"nullable\": false, \"is_primary_key\": true },\n    { \"name\": \"name\", \"type\": \"text\", \"nullable\": false, \"is_primary_key\": false },\n    { \"name\": \"created_at\", \"type\": \"timestamptz\", \"nullable\": false, \"is_primary_key\": false, \"default_value\": \"now()\" }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						}
+					}
+				},
+				{
+					"name": "S0.2 Create 'posts' table with FK to categories",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const status = pm.response.code;",
+									"pm.test('Status is 201 or 400 (already exists)', () => {",
+									"    pm.expect(status).to.be.oneOf([201, 400]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"posts\",\n  \"columns\": [\n    { \"name\": \"id\", \"type\": \"uuid\", \"nullable\": false, \"is_primary_key\": true },\n    { \"name\": \"title\", \"type\": \"text\", \"nullable\": false, \"is_primary_key\": false },\n    { \"name\": \"body\", \"type\": \"text\", \"nullable\": true, \"is_primary_key\": false },\n    { \"name\": \"category_id\", \"type\": \"uuid\", \"nullable\": true, \"is_primary_key\": false, \"foreign_key\": { \"column\": \"category_id\", \"referenced_table\": \"categories\", \"referenced_column\": \"id\", \"on_delete\": \"SET NULL\" } },\n    { \"name\": \"created_at\", \"type\": \"timestamptz\", \"nullable\": false, \"is_primary_key\": false, \"default_value\": \"now()\" }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "schema", "tables"]
+						}
+					}
+				},
+				{
+					"name": "S0.3 Insert categories",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.environment.set('category_id', pm.response.json().id);"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{ \"name\": \"Technology\" }"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/categories",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "categories"]
+						}
+					}
+				},
+				{
+					"name": "S0.4 Insert post with category FK",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.environment.set('post_id', pm.response.json().id);"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{ \"title\": \"EU Data Sovereignty Guide\", \"body\": \"European data sovereignty means keeping all citizen data within EU jurisdiction under GDPR.\", \"category_id\": \"{{category_id}}\" }"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"]
+						}
+					}
+				},
+				{
+					"name": "S0.5 Insert 2nd post",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{ \"title\": \"Building with Eurobase\", \"body\": \"Eurobase is an EU-sovereign backend-as-a-service platform for developers building compliant applications.\", \"category_id\": \"{{category_id}}\" }"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 1 — Aggregations",
+			"item": [
+				{
+					"name": "A1.1 COUNT all rows",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns result with count', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('result');",
+									"    pm.expect(json.result).to.be.a('number');",
+									"    pm.expect(json.result).to.be.at.least(2);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?aggregate=count",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "aggregate", "value": "count" }]
+						}
+					}
+				},
+				{
+					"name": "A1.2 COUNT with filter",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns filtered count', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.result).to.be.a('number');",
+									"    pm.expect(json.result).to.eql(1);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?aggregate=count&title=eq.Building with Eurobase",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [
+								{ "key": "aggregate", "value": "count" },
+								{ "key": "title", "value": "eq.Building with Eurobase" }
+							]
+						}
+					}
+				},
+				{
+					"name": "A1.3 COUNT on todos (has 3 rows)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Count is at least 3', () => {",
+									"    pm.expect(pm.response.json().result).to.be.at.least(3);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/todos?aggregate=count",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "todos"],
+							"query": [{ "key": "aggregate", "value": "count" }]
+						}
+					}
+				},
+				{
+					"name": "A1.4 MIN on created_at",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns a result', () => {",
+									"    pm.expect(pm.response.json()).to.have.property('result');",
+									"    pm.expect(pm.response.json().result).to.not.be.null;",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?aggregate=min:created_at",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "aggregate", "value": "min:created_at" }]
+						}
+					}
+				},
+				{
+					"name": "A1.5 Invalid aggregate function",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions unsupported', () => {",
+									"    pm.expect(pm.response.json().error).to.include('unsupported');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?aggregate=median:title",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "aggregate", "value": "median:title" }]
+						}
+					}
+				},
+				{
+					"name": "A1.6 Aggregate on invalid column",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?aggregate=sum:nonexistent",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "aggregate", "value": "sum:nonexistent" }]
+						}
+					}
+				},
+				{
+					"name": "A1.7 No API key",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?aggregate=count",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "aggregate", "value": "count" }]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — Full-Text Search",
+			"item": [
+				{
+					"name": "FTS2.1 Search posts by body",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns matching posts', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.data).to.be.an('array');",
+									"    pm.expect(json.data.length).to.be.at.least(1);",
+									"    pm.expect(json.data[0].body).to.include('sovereignty');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?body=fts.sovereignty",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "body", "value": "fts.sovereignty" }]
+						}
+					}
+				},
+				{
+					"name": "FTS2.2 Search with multiple terms",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns results', () => {",
+									"    pm.expect(pm.response.json().data).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?body=fts.european data",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "body", "value": "fts.european data" }]
+						}
+					}
+				},
+				{
+					"name": "FTS2.3 Search with no matches",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns empty array', () => {",
+									"    pm.expect(pm.response.json().data).to.be.an('array');",
+									"    pm.expect(pm.response.json().data.length).to.eql(0);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?body=fts.xyznonexistent",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "body", "value": "fts.xyznonexistent" }]
+						}
+					}
+				},
+				{
+					"name": "FTS2.4 Search on title",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns Eurobase post', () => {",
+									"    const data = pm.response.json().data;",
+									"    pm.expect(data.length).to.be.at.least(1);",
+									"    pm.expect(data[0].title).to.include('Eurobase');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?title=fts.Eurobase",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "title", "value": "fts.Eurobase" }]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Nested Relations",
+			"item": [
+				{
+					"name": "R3.1 Select posts with category(*)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Posts have nested categories object', () => {",
+									"    const data = pm.response.json().data;",
+									"    pm.expect(data).to.be.an('array');",
+									"    pm.expect(data.length).to.be.at.least(1);",
+									"    const post = data[0];",
+									"    pm.expect(post).to.have.property('categories');",
+									"    pm.expect(post.categories).to.be.an('object');",
+									"    pm.expect(post.categories).to.have.property('name');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?select=*,categories(*)",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "select", "value": "*,categories(*)" }]
+						}
+					}
+				},
+				{
+					"name": "R3.2 Select posts with specific category columns",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Category has only name field', () => {",
+									"    const data = pm.response.json().data;",
+									"    pm.expect(data.length).to.be.at.least(1);",
+									"    const cat = data[0].categories;",
+									"    pm.expect(cat).to.have.property('name');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?select=title,categories(name)",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "select", "value": "title,categories(name)" }]
+						}
+					}
+				},
+				{
+					"name": "R3.3 Select without relations (unchanged behavior)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('No nested objects — just flat data', () => {",
+									"    const data = pm.response.json().data;",
+									"    pm.expect(data.length).to.be.at.least(1);",
+									"    pm.expect(data[0]).to.not.have.property('categories');",
+									"    pm.expect(data[0]).to.have.property('title');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?select=title,body",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "select", "value": "title,body" }]
+						}
+					}
+				},
+				{
+					"name": "R3.4 Relation with non-existent FK",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions foreign key', () => {",
+									"    const err = pm.response.json().error;",
+									"    pm.expect(err.toLowerCase()).to.include('foreign key');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?select=*,nonexistent(name)",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [{ "key": "select", "value": "*,nonexistent(name)" }]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 4 — Usage Dashboard",
+			"item": [
+				{
+					"name": "U4.1 Get project usage",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has usage object', () => {",
+									"    const u = pm.response.json().usage;",
+									"    pm.expect(u).to.have.property('database_size_mb');",
+									"    pm.expect(u).to.have.property('mau_count');",
+									"    pm.expect(u).to.have.property('webhook_count');",
+									"    pm.expect(u).to.have.property('project_count');",
+									"    pm.expect(u.database_size_mb).to.be.a('number');",
+									"    pm.expect(u.database_size_mb).to.be.at.least(0);",
+									"});",
+									"pm.test('Has limits object with plan', () => {",
+									"    const l = pm.response.json().limits;",
+									"    pm.expect(l).to.have.property('plan');",
+									"    pm.expect(l).to.have.property('db_size_mb');",
+									"    pm.expect(l).to.have.property('mau_limit');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/usage",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "usage"]
+						}
+					}
+				},
+				{
+					"name": "U4.2 Usage — invalid project",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/00000000-0000-0000-0000-000000000000/usage",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "00000000-0000-0000-0000-000000000000", "usage"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 5 — Combined Features",
+			"item": [
+				{
+					"name": "C5.1 Count + Filter + FTS combined",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns a count result', () => {",
+									"    pm.expect(pm.response.json().result).to.be.a('number');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?aggregate=count&body=fts.sovereignty",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [
+								{ "key": "aggregate", "value": "count" },
+								{ "key": "body", "value": "fts.sovereignty" }
+							]
+						}
+					}
+				},
+				{
+					"name": "C5.2 Relation + filter",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns filtered posts with category', () => {",
+									"    const data = pm.response.json().data;",
+									"    pm.expect(data).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "apikey", "value": "{{secret_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/db/posts?select=title,categories(name)&title=like.*Eurobase*",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "posts"],
+							"query": [
+								{ "key": "select", "value": "title,categories(name)" },
+								{ "key": "title", "value": "like.*Eurobase*" }
+							]
+						}
+					}
+				}
+			]
+		}
+	]
+}
