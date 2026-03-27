@@ -43,6 +43,19 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
+		// Parse and validate request body first.
+		var req CreateCronJobRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Validate fields before checking plan limits.
+		if err := req.Validate(); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		// Enforce plan limit: free plan gets 2 cron jobs.
 		count, err := svc.Count(r.Context(), projectID)
 		if err != nil {
@@ -51,7 +64,6 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 			return
 		}
 
-		// Check project plan.
 		var plan string
 		err = svc.pool.QueryRow(r.Context(),
 			`SELECT COALESCE(plan, 'free') FROM projects WHERE id = $1`, projectID).Scan(&plan)
@@ -63,12 +75,6 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 
 		if plan == "free" && count >= freePlanCronLimit {
 			jsonError(w, "free plan is limited to 2 scheduled jobs — upgrade to pro for unlimited", http.StatusForbidden)
-			return
-		}
-
-		var req CreateCronJobRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
 

@@ -42,6 +42,20 @@ type CreateCronJobRequest struct {
 	Action     string `json:"action"`
 }
 
+// Validate checks that all required fields are present and valid.
+func (r *CreateCronJobRequest) Validate() error {
+	if strings.TrimSpace(r.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if strings.TrimSpace(r.Action) == "" {
+		return fmt.Errorf("action is required")
+	}
+	if r.ActionType != "sql" && r.ActionType != "rpc" {
+		return fmt.Errorf("action_type must be 'sql' or 'rpc'")
+	}
+	return validateCronSchedule(r.Schedule)
+}
+
 // UpdateCronJobRequest is the payload for updating a cron job.
 type UpdateCronJobRequest struct {
 	Name       *string `json:"name,omitempty"`
