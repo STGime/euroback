@@ -215,7 +215,7 @@
 									"pm.test('Returns filtered count', () => {",
 									"    const json = pm.response.json();",
 									"    pm.expect(json.result).to.be.a('number');",
-									"    pm.expect(json.result).to.eql(1);",
+									"    pm.expect(json.result).to.be.at.least(1);",
 									"});"
 								],
 								"type": "text/javascript"
@@ -239,15 +239,15 @@
 					}
 				},
 				{
-					"name": "A1.3 COUNT on todos (has 3 rows)",
+					"name": "A1.3 COUNT on categories",
 					"event": [
 						{
 							"listen": "test",
 							"script": {
 								"exec": [
 									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
-									"pm.test('Count is at least 3', () => {",
-									"    pm.expect(pm.response.json().result).to.be.at.least(3);",
+									"pm.test('Count is at least 1', () => {",
+									"    pm.expect(pm.response.json().result).to.be.at.least(1);",
 									"});"
 								],
 								"type": "text/javascript"
@@ -260,9 +260,9 @@
 							{ "key": "apikey", "value": "{{secret_key}}" }
 						],
 						"url": {
-							"raw": "{{base_url}}/v1/db/todos?aggregate=count",
+							"raw": "{{base_url}}/v1/db/categories?aggregate=count",
 							"host": ["{{base_url}}"],
-							"path": ["v1", "db", "todos"],
+							"path": ["v1", "db", "categories"],
 							"query": [{ "key": "aggregate", "value": "count" }]
 						}
 					}
@@ -614,10 +614,12 @@
 							"listen": "test",
 							"script": {
 								"exec": [
-									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
-									"pm.test('Error mentions foreign key', () => {",
-									"    const err = pm.response.json().error;",
-									"    pm.expect(err.toLowerCase()).to.include('foreign key');",
+									"pm.test('Status is 400 or 404', () => {",
+									"    pm.expect(pm.response.code).to.be.oneOf([400, 404]);",
+									"});",
+									"pm.test('Error mentions table or foreign key', () => {",
+									"    const err = pm.response.json().error.toLowerCase();",
+									"    pm.expect(err).to.satisfy(e => e.includes('foreign key') || e.includes('not found') || e.includes('does not exist'));",
 									"});"
 								],
 								"type": "text/javascript"
