@@ -90,6 +90,7 @@ func (h *TemplateHandler) HandleUpdate() http.HandlerFunc {
 	validTypes := map[string]bool{
 		"verification": true, "password_reset": true,
 		"welcome": true, "password_changed": true,
+		"magic_link": true,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
