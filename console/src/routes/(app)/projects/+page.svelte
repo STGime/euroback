@@ -58,7 +58,12 @@
 			showNewModal = false;
 			await loadProjects();
 		} catch (err) {
-			createError = err instanceof Error ? err.message : 'Failed to create project';
+			const msg = err instanceof Error ? err.message : 'Failed to create project';
+			if (msg.includes('limited to') && msg.includes('project')) {
+				createError = "You've reached the project limit on your current plan. Upgrade to Pro for more projects.";
+			} else {
+				createError = msg.replace(/^API \d+:\s*/, '').replace(/^\{.*"error"\s*:\s*"/, '').replace(/"\s*\}$/, '');
+			}
 		} finally {
 			creating = false;
 		}

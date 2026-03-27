@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { api, type Project, type AuthConfig } from '$lib/api.js';
+	import { onMount } from 'svelte';
+	import { api, type Project, type AuthConfig, type PlanLimits } from '$lib/api.js';
 	import { loadProjects } from '$lib/stores.js';
 
 	// State
@@ -8,6 +9,23 @@
 	let plan = $state('free');
 	let creating = $state(false);
 	let createError = $state('');
+	let planData = $state<PlanLimits[]>([]);
+
+	onMount(async () => {
+		try {
+			planData = await api.getPlans();
+		} catch {
+			// Use empty — cards will show hardcoded fallback
+		}
+	});
+
+	let freePlan = $derived(planData.find(p => p.plan === 'free'));
+	let proPlan = $derived(planData.find(p => p.plan === 'pro'));
+
+	function formatLimit(mb: number): string {
+		if (mb >= 1024) return (mb / 1024).toFixed(0) + ' GB';
+		return mb + ' MB';
+	}
 	let createdProject = $state<Project | null>(null);
 	let step = $state<'create' | 'auth' | 'success'>('create');
 
@@ -68,8 +86,12 @@
 				const suffix = Math.random().toString(36).slice(2, 6);
 				projectName = projectName.trim() + '-' + suffix;
 				createError = `That project URL was taken. We've updated the name — click Create Project to try again, or edit it.`;
+			} else if (msg.includes('limited to') && msg.includes('project')) {
+				const limit = freePlan?.project_limit ?? 2;
+				createError = `You've reached the maximum of ${limit} projects on the Free plan. Upgrade to Pro to create up to ${proPlan?.project_limit ?? 10} projects.`;
 			} else {
-				createError = msg;
+				// Strip raw API prefix for cleaner display
+				createError = msg.replace(/^API \d+:\s*/, '').replace(/^\{.*"error"\s*:\s*"/, '').replace(/"\s*\}$/, '');
 			}
 		} finally {
 			creating = false;
@@ -226,15 +248,15 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 								<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										500 MB database
+										{freePlan ? formatLimit(freePlan.db_size_mb) : '500 MB'} database
 									</li>
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										1 GB file storage
+										{freePlan ? formatLimit(freePlan.storage_mb) : '1 GB'} file storage
 									</li>
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										50k API requests/mo
+										{freePlan ? (freePlan.mau_limit / 1000).toFixed(0) + 'k' : '10k'} auth users
 									</li>
 								</ul>
 							</div>
@@ -244,20 +266,20 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 							<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50/50 peer-checked:shadow-sm border-gray-200 hover:border-gray-300">
 								<div class="flex items-center justify-between">
 									<p class="text-sm font-semibold text-gray-900">Pro</p>
-									<span class="text-sm font-semibold text-eurobase-700">&euro;29/mo</span>
+									<span class="text-sm font-semibold text-eurobase-700">&euro;19/mo</span>
 								</div>
 								<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-eurobase-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										8 GB database
+										{proPlan ? formatLimit(proPlan.db_size_mb) : '5 GB'} database
 									</li>
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-eurobase-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										100 GB file storage
+										{proPlan ? formatLimit(proPlan.storage_mb) : '50 GB'} file storage
 									</li>
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-eurobase-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										Unlimited API requests
+										{proPlan ? (proPlan.mau_limit / 1000).toFixed(0) + 'k' : '100k'} auth users
 									</li>
 								</ul>
 							</div>
