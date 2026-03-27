@@ -517,12 +517,20 @@ const {'{'} data: files {'}'} = await eb.storage
 					The Auth settings page lets you configure how end-users authenticate in your application. Eurobase provides a built-in email/password auth system &mdash; no external providers required.
 				</p>
 
-				<h3 class="text-lg font-semibold text-gray-900">Configuration options</h3>
+				<h3 class="text-lg font-semibold text-gray-900">Auth methods</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>Email/password toggle</strong> &mdash; enable or disable email/password authentication</li>
-					<li><strong>Password rules</strong> &mdash; set minimum length and require uppercase, numbers, or special characters</li>
-					<li><strong>Session duration</strong> &mdash; configure how long access tokens remain valid</li>
-					<li><strong>Redirect URLs</strong> &mdash; whitelist URLs your app can redirect to after sign-in</li>
+					<li><strong>Email + Password</strong> &mdash; traditional sign-up and sign-in with email and password</li>
+					<li><strong>Magic Links</strong> &mdash; passwordless sign-in via a one-time email link (no password needed)</li>
+					<li><strong>Passkeys</strong> &mdash; coming soon (WebAuthn / FaceID / fingerprint)</li>
+					<li><strong>Social Login</strong> &mdash; coming soon (Google, GitHub)</li>
+				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Configuration options</h3>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Password rules</strong> &mdash; set minimum length (8&ndash;128 characters)</li>
+					<li><strong>Email confirmation</strong> &mdash; require users to verify their email before signing in</li>
+					<li><strong>Session duration</strong> &mdash; how long access tokens remain valid (1h to 30 days)</li>
+					<li><strong>Redirect URLs</strong> &mdash; whitelist URLs your app can redirect to after auth callbacks</li>
 				</ul>
 
 				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">
@@ -565,7 +573,45 @@ eb.auth.onAuthStateChange((event, session) => {'{'}\
 await eb.auth.signOut()</pre>
 				</div>
 
-				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3">
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Magic Links (passwordless)</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Magic links let users sign in without a password. They enter their email, receive a link, and click it to sign in. The link expires after 15 minutes and can only be used once. Email is automatically verified on first magic link sign-in.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Enable magic links in <strong>Auth &rarr; Settings &rarr; Magic Links</strong> toggle. Both email/password and magic links can be active at the same time.
+				</p>
+
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-3">
+					<button
+						onclick={() => copyCode("// 1. Send magic link to user's email\nawait eb.auth.requestMagicLink('user@example.com')\n\n// 2. User clicks the link in their inbox\n// Your app receives the token via URL: /auth/callback?token=abc123\nconst token = new URL(location.href).searchParams.get('token')\n\n// 3. Exchange the token for a session\nconst { data, error } = await eb.auth.signInWithMagicLink(token)\n// data.access_token, data.user.email — user is now signed in", 'sdk-magic')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'sdk-magic' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>// 1. Send magic link to user's email
+await eb.auth.requestMagicLink('user@example.com')
+
+// 2. User clicks the link in their inbox
+// Your app receives the token via URL: /auth/callback?token=abc123
+const token = new URL(location.href).searchParams.get('token')
+
+// 3. Exchange the token for a session
+const {'{'} data, error {'}'} = await eb.auth.signInWithMagicLink(token)
+// data.access_token, data.user.email — user is now signed in</pre>
+				</div>
+
+				<div class="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+					<p class="text-xs font-semibold text-gray-700 mb-1.5">How it works under the hood</p>
+					<ol class="text-xs text-gray-600 space-y-1 ml-4 list-decimal">
+						<li><code class="bg-white border border-gray-200 rounded px-1">requestMagicLink</code> sends a POST to <code class="bg-white border border-gray-200 rounded px-1">/v1/auth/request-magic-link</code> with the email</li>
+						<li>The server generates a one-time token (32 random bytes), stores a SHA-256 hash in the database, and emails the raw token in a link</li>
+						<li>The user clicks the link, your app extracts the <code class="bg-white border border-gray-200 rounded px-1">token</code> query parameter</li>
+						<li><code class="bg-white border border-gray-200 rounded px-1">signInWithMagicLink</code> sends the token to <code class="bg-white border border-gray-200 rounded px-1">/v1/auth/signin-magic-link</code></li>
+						<li>The server verifies the token (not expired, not used), marks it as consumed, and returns a JWT + refresh token</li>
+					</ol>
+				</div>
+
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">
 					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
 					</svg>

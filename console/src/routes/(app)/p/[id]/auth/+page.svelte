@@ -283,20 +283,46 @@
 						</button>
 					</div>
 
-					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3">
-						<div>
-							<p class="text-sm font-medium text-gray-900">Magic Links</p>
-							<p class="text-xs text-gray-500">Passwordless sign-in via email link</p>
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Magic Links</p>
+								<p class="text-xs text-gray-500">Passwordless sign-in via email link</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={magicLinkEnabled}
+								onclick={() => magicLinkEnabled = !magicLinkEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {magicLinkEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {magicLinkEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
 						</div>
-						<button
-							type="button"
-							role="switch"
-							aria-checked={magicLinkEnabled}
-							onclick={() => magicLinkEnabled = !magicLinkEnabled}
-							class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {magicLinkEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
-						>
-							<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {magicLinkEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
-						</button>
+						{#if magicLinkEnabled}
+							<div class="mt-3 rounded-lg bg-eurobase-50 border border-eurobase-100 p-3 space-y-2">
+								<p class="text-xs font-medium text-eurobase-800">How Magic Links work</p>
+								<p class="text-xs text-eurobase-700 leading-relaxed">Users enter their email and receive a sign-in link. Clicking the link signs them in instantly — no password needed. Links expire after 15 minutes and can only be used once. Email is automatically verified on first use.</p>
+								<p class="text-xs font-medium text-eurobase-800 mt-2">SDK usage</p>
+								<div class="rounded-md bg-gray-900 p-2.5 font-mono text-[11px] text-green-400 leading-relaxed overflow-x-auto">
+									<div class="text-gray-500">// 1. Request a magic link email</div>
+									<div>await eb.auth.requestMagicLink('user@example.com')</div>
+									<div class="mt-2 text-gray-500">// 2. User clicks email link → your app receives the token</div>
+									<div class="text-gray-500">// Extract from URL: /auth/callback?token=abc123</div>
+									<div>const token = new URL(location.href).searchParams.get('token')</div>
+									<div class="mt-2 text-gray-500">// 3. Exchange token for session</div>
+									<div>const {"{"} data, error {"}"} = await eb.auth.signInWithMagicLink(token)</div>
+								</div>
+								<p class="text-xs font-medium text-eurobase-800 mt-2">REST API</p>
+								<div class="rounded-md bg-gray-900 p-2.5 font-mono text-[11px] text-green-400 leading-relaxed overflow-x-auto">
+									<div><span class="text-amber-400">POST</span> /v1/auth/request-magic-link</div>
+									<div class="text-gray-400">Body: {"{"}"email": "user@example.com"{"}"}</div>
+									<div class="mt-1.5"><span class="text-amber-400">POST</span> /v1/auth/signin-magic-link</div>
+									<div class="text-gray-400">Body: {"{"}"token": "abc123..."{"}"}</div>
+								</div>
+								<p class="text-[11px] text-eurobase-600 mt-1">Requires Scaleway TEM email to be configured. Customize the email template in the Email Templates tab.</p>
+							</div>
+						{/if}
 					</div>
 
 					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
