@@ -834,14 +834,15 @@ on push to main:
 - [x] Scaleway Kapsule deployment (Terraform + K8s + CI/CD)
 - [x] Wildcard TLS for SDK subdomains
 
-### Sprint 1: Data API Parity (Easy Wins)
+### Sprint 1: Data API Parity (Easy Wins) -- COMPLETE
 
 | Feature | Effort | Status |
 |---------|--------|--------|
-| Aggregations (COUNT, SUM, AVG, MIN, MAX) | 1 day | Planned |
-| Nested relation selects (auto-JOIN via FK) | 2 days | Planned |
-| Full-text search (PostgreSQL tsvector) | 1 day | Planned |
-| Fix usage dashboard on project overview | 1 day | Planned |
+| Aggregations (COUNT, SUM, AVG, MIN, MAX) | 1 day | Done |
+| Nested relation selects (auto-JOIN via FK) | 2 days | Done |
+| Full-text search (PostgreSQL tsvector) | 1 day | Done |
+| Fix usage dashboard on project overview | 1 day | Done |
+| Console: FTS search bar, aggregate footer, FK labels | 1 day | Done |
 
 ### Sprint 2: Monetization
 
