@@ -481,7 +481,9 @@ func isNotFoundError(err error) bool {
 // isValidationError checks if the error message indicates a validation failure.
 func isValidationError(err error) bool {
 	msg := err.Error()
-	return contains(msg, "invalid column") || contains(msg, "no data provided")
+	return contains(msg, "invalid column") || contains(msg, "no data provided") ||
+		contains(msg, "unsupported aggregate") || contains(msg, "foreign key") ||
+		contains(msg, "a required field")
 }
 
 // isTypeError checks if the error is a PostgreSQL data type or syntax error (22xxx).

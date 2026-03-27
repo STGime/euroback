@@ -183,10 +183,18 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		return nil, 0, err
 	}
 
-	// Validate selected columns.
+	// Validate selected columns (skip "*" which means all columns).
 	if len(params.Select) > 0 {
-		if err := ValidateColumns(ctx, e.pool, schemaName, tableName, params.Select); err != nil {
-			return nil, 0, err
+		colsToValidate := make([]string, 0, len(params.Select))
+		for _, c := range params.Select {
+			if c != "*" {
+				colsToValidate = append(colsToValidate, c)
+			}
+		}
+		if len(colsToValidate) > 0 {
+			if err := ValidateColumns(ctx, e.pool, schemaName, tableName, colsToValidate); err != nil {
+				return nil, 0, err
+			}
 		}
 	}
 
