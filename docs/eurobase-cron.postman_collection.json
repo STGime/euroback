@@ -1,0 +1,480 @@
+{
+	"info": {
+		"name": "Eurobase Cron Jobs",
+		"description": "Tests for scheduled job CRUD and plan limit enforcement.\n\n## Setup\n\n1. Gateway running: `source .env.local && go run ./cmd/gateway/`\n2. Migration 019 applied\n3. Select \"Eurobase Local\" environment\n4. `platform_token` and `project_id` set (run Phase 0 from auth-tests first)",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 1 — CRUD",
+			"item": [
+				{
+					"name": "C1.1 List cron jobs (empty)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns empty array', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				},
+				{
+					"name": "C1.2 Create cron job (SQL)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns created job', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.name).to.eql('Clean expired tokens');",
+									"    pm.expect(json.schedule).to.eql('0 * * * *');",
+									"    pm.expect(json.action_type).to.eql('sql');",
+									"    pm.expect(json.enabled).to.eql(true);",
+									"    pm.expect(json.run_count).to.eql(0);",
+									"    pm.expect(json.id).to.be.a('string');",
+									"    pm.environment.set('cron_job_1_id', json.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Clean expired tokens\",\n  \"schedule\": \"0 * * * *\",\n  \"action_type\": \"sql\",\n  \"action\": \"DELETE FROM refresh_tokens WHERE expires_at < now()\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				},
+				{
+					"name": "C1.3 Create cron job (RPC)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns RPC job', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.name).to.eql('Weekly digest');",
+									"    pm.expect(json.action_type).to.eql('rpc');",
+									"    pm.expect(json.schedule).to.eql('0 9 * * 1');",
+									"    pm.environment.set('cron_job_2_id', json.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Weekly digest\",\n  \"schedule\": \"0 9 * * 1\",\n  \"action_type\": \"rpc\",\n  \"action\": \"send_weekly_digest\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				},
+				{
+					"name": "C1.4 List cron jobs (has 2)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns 2 jobs', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.be.an('array');",
+									"    pm.expect(json.length).to.eql(2);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				},
+				{
+					"name": "C1.5 Update cron job (disable)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Job is disabled', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.enabled).to.eql(false);",
+									"    pm.expect(json.name).to.eql('Clean expired tokens');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"enabled\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_1_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_1_id}}"]
+						}
+					}
+				},
+				{
+					"name": "C1.6 Update cron job (change schedule + rename)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('Schedule and name updated', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.schedule).to.eql('*/5 * * * *');",
+									"    pm.expect(json.name).to.eql('Clean tokens (every 5min)');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Clean tokens (every 5min)\",\n  \"schedule\": \"*/5 * * * *\",\n  \"enabled\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_1_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_1_id}}"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — Validation",
+			"item": [
+				{
+					"name": "C2.1 Create — missing name",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions name', () => {",
+									"    pm.expect(pm.response.json().error).to.include('name');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"\",\n  \"schedule\": \"* * * * *\",\n  \"action_type\": \"sql\",\n  \"action\": \"SELECT 1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				},
+				{
+					"name": "C2.2 Create — invalid schedule",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions schedule', () => {",
+									"    pm.expect(pm.response.json().error.toLowerCase()).to.include('schedule');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Bad schedule\",\n  \"schedule\": \"not a cron\",\n  \"action_type\": \"sql\",\n  \"action\": \"SELECT 1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				},
+				{
+					"name": "C2.3 Create — invalid action_type",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions action_type', () => {",
+									"    pm.expect(pm.response.json().error.toLowerCase()).to.include('action_type');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Bad type\",\n  \"schedule\": \"* * * * *\",\n  \"action_type\": \"graphql\",\n  \"action\": \"query { users { id } }\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				},
+				{
+					"name": "C2.4 Create — no auth",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"No auth\",\n  \"schedule\": \"* * * * *\",\n  \"action_type\": \"sql\",\n  \"action\": \"SELECT 1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Plan Limits (Free = 2)",
+			"item": [
+				{
+					"name": "C3.1 Create 3rd job — should fail on free plan",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 403', () => pm.response.to.have.status(403));",
+									"pm.test('Error mentions plan limit', () => {",
+									"    const err = pm.response.json().error.toLowerCase();",
+									"    pm.expect(err).to.satisfy(e => e.includes('limit') || e.includes('upgrade') || e.includes('plan'));",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Should fail\",\n  \"schedule\": \"* * * * *\",\n  \"action_type\": \"sql\",\n  \"action\": \"SELECT 1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 4 — Cleanup",
+			"item": [
+				{
+					"name": "C4.1 Delete job 1",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204 or 200', () => {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_1_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_1_id}}"]
+						}
+					}
+				},
+				{
+					"name": "C4.2 Delete job 2",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 204 or 200', () => {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_2_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_2_id}}"]
+						}
+					}
+				},
+				{
+					"name": "C4.3 List — empty after cleanup",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('No jobs remain', () => {",
+									"    pm.expect(pm.response.json().length).to.eql(0);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					}
+				}
+			]
+		}
+	]
+}
