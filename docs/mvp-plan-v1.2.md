@@ -844,12 +844,12 @@ on push to main:
 | Fix usage dashboard on project overview | 1 day | Done |
 | Console: FTS search bar, aggregate footer, FK labels | 1 day | Done |
 
-### Sprint 2: Monetization
+### Sprint 2: Monetization (In Progress)
 
 | Feature | Effort | Status |
 |---------|--------|--------|
-| Magic Links (passwordless email auth) | 3 days | Planned |
-| Mollie billing integration | 1 week | Planned |
+| Magic Links (passwordless email auth) | 3 days | Done |
+| Mollie billing integration | 1 week | Next |
 
 ### Sprint 3: Auth & Automation
 
