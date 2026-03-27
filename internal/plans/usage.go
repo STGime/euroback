@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 // ProjectUsage holds the current resource usage for a project.
@@ -22,21 +23,22 @@ func (s *LimitsService) GetUsage(ctx context.Context, projectID, schemaName stri
 	// Database size: sum of all table sizes in the tenant schema.
 	var dbSizeBytes int64
 	err := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(pg_total_relation_size(schemaname || '.' || tablename)), 0)
+		`SELECT COALESCE(SUM(pg_total_relation_size(quote_ident(schemaname) || '.' || quote_ident(tablename))), 0)
 		 FROM pg_tables WHERE schemaname = $1`, schemaName,
 	).Scan(&dbSizeBytes)
 	if err != nil {
 		slog.Error("get usage: db size query failed", "project_id", projectID, "schema", schemaName, "error", err)
-		return nil, fmt.Errorf("failed to query database size: %w", err)
+		// Non-fatal: return 0 if the query fails (e.g. permission issue)
+		dbSizeBytes = 0
 	}
 	usage.DatabaseSizeMB = float64(dbSizeBytes) / (1024 * 1024)
 
 	// MAU count: number of users in the tenant schema.
-	query := fmt.Sprintf(`SELECT count(*) FROM %q.users`, schemaName)
-	err = s.pool.QueryRow(ctx, query).Scan(&usage.MAUCount)
+	mauQuery := fmt.Sprintf(`SELECT count(*) FROM "%s".users`, strings.ReplaceAll(schemaName, `"`, `""`))
+	err = s.pool.QueryRow(ctx, mauQuery).Scan(&usage.MAUCount)
 	if err != nil {
 		slog.Error("get usage: MAU count failed", "project_id", projectID, "schema", schemaName, "error", err)
-		return nil, fmt.Errorf("failed to count users: %w", err)
+		usage.MAUCount = 0
 	}
 
 	// Webhook count.

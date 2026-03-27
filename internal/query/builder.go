@@ -133,10 +133,176 @@ func buildFilterClause(f Filter, argIdx int) (string, []interface{}, int) {
 		clause := fmt.Sprintf("%s IN (%s)", col, strings.Join(placeholders, ", "))
 		return clause, args, argIdx
 
+	case "fts":
+		// Full-text search: to_tsvector('english', col) @@ to_tsquery('english', $N).
+		// Split search terms by spaces and join with " & " for tsquery.
+		terms := strings.Fields(f.Value)
+		tsquery := strings.Join(terms, " & ")
+		clause := fmt.Sprintf("to_tsvector('english', %s) @@ to_tsquery('english', $%d)", col, argIdx)
+		return clause, []interface{}{tsquery}, argIdx + 1
+
 	default:
 		clause := fmt.Sprintf("%s %s $%d", col, sqlOp, argIdx)
 		return clause, []interface{}{f.Value}, argIdx + 1
 	}
+}
+
+// buildAggregateQuery builds a parameterized aggregate query.
+// The aggregate string can be "count", "sum:column", "avg:column", "min:column", "max:column".
+// Returns the SQL string, parameter values, and the aggregate column (empty for count).
+func buildAggregateQuery(schemaName, tableName, aggregate string, params QueryParams) (string, []interface{}, string) {
+	var args []interface{}
+	argIdx := 1
+
+	qt := qualifiedTable(schemaName, tableName)
+
+	// Parse the aggregate function and optional column.
+	var aggFunc, aggCol string
+	if idx := strings.Index(aggregate, ":"); idx >= 0 {
+		aggFunc = strings.ToLower(aggregate[:idx])
+		aggCol = aggregate[idx+1:]
+	} else {
+		aggFunc = strings.ToLower(aggregate)
+	}
+
+	// Build the aggregate expression.
+	var aggExpr string
+	switch aggFunc {
+	case "count":
+		aggExpr = "count(*)"
+	case "sum":
+		aggExpr = fmt.Sprintf("sum(%s)", quoteIdent(aggCol))
+	case "avg":
+		aggExpr = fmt.Sprintf("avg(%s)", quoteIdent(aggCol))
+	case "min":
+		aggExpr = fmt.Sprintf("min(%s)", quoteIdent(aggCol))
+	case "max":
+		aggExpr = fmt.Sprintf("max(%s)", quoteIdent(aggCol))
+	default:
+		// Fallback to count for unknown aggregates.
+		aggExpr = "count(*)"
+	}
+
+	// WHERE clause.
+	var whereClauses []string
+	for _, f := range params.Filters {
+		clause, newArgs, newIdx := buildFilterClause(f, argIdx)
+		if clause != "" {
+			whereClauses = append(whereClauses, clause)
+			args = append(args, newArgs...)
+			argIdx = newIdx
+		}
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	sql := fmt.Sprintf("SELECT %s FROM %s%s", aggExpr, qt, whereSQL)
+	return sql, args, aggCol
+}
+
+// buildRelationQuery builds a SELECT query with LEFT JOINs for related tables.
+func buildRelationQuery(schemaName, tableName string, params QueryParams, resolvedRelations []ResolvedRelation) (string, []interface{}) {
+	var args []interface{}
+	argIdx := 1
+
+	mainAlias := "t0"
+	qt := qualifiedTable(schemaName, tableName)
+
+	// Build the column expression for the main table.
+	var colExprs []string
+	if len(params.Select) > 0 {
+		for _, c := range params.Select {
+			if c == "*" {
+				colExprs = append(colExprs, fmt.Sprintf("%s.*", mainAlias))
+			} else {
+				colExprs = append(colExprs, fmt.Sprintf("%s.%s", mainAlias, quoteIdent(c)))
+			}
+		}
+	} else {
+		colExprs = append(colExprs, fmt.Sprintf("%s.*", mainAlias))
+	}
+
+	// Build column expressions for each relation.
+	for i, rel := range resolvedRelations {
+		alias := fmt.Sprintf("t%d", i+1)
+		for _, c := range rel.Columns {
+			if c == "*" {
+				// We select all columns but alias them to avoid collisions.
+				colExprs = append(colExprs, fmt.Sprintf(
+					"row_to_json(%s) AS %s",
+					alias,
+					quoteIdent("_rel_"+rel.Table),
+				))
+				break
+			}
+			colExprs = append(colExprs, fmt.Sprintf(
+				"%s.%s AS %s",
+				alias,
+				quoteIdent(c),
+				quoteIdent("_rel_"+rel.Table+"_"+c),
+			))
+		}
+	}
+
+	colExpr := strings.Join(colExprs, ", ")
+
+	// Build JOINs.
+	var joins []string
+	for i, rel := range resolvedRelations {
+		alias := fmt.Sprintf("t%d", i+1)
+		relQT := qualifiedTable(schemaName, rel.Table)
+		joins = append(joins, fmt.Sprintf(
+			"LEFT JOIN %s AS %s ON %s.%s = %s.%s",
+			relQT, alias,
+			mainAlias, quoteIdent(rel.ForeignKey),
+			alias, quoteIdent(rel.ReferencedColumn),
+		))
+	}
+	joinSQL := ""
+	if len(joins) > 0 {
+		joinSQL = " " + strings.Join(joins, " ")
+	}
+
+	// WHERE clause.
+	var whereClauses []string
+	for _, f := range params.Filters {
+		clause, newArgs, newIdx := buildFilterClause(f, argIdx)
+		if clause != "" {
+			// Qualify filter columns with main table alias.
+			clause = strings.Replace(clause, quoteIdent(f.Column), mainAlias+"."+quoteIdent(f.Column), 1)
+			whereClauses = append(whereClauses, clause)
+			args = append(args, newArgs...)
+			argIdx = newIdx
+		}
+	}
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	// ORDER BY clause.
+	orderSQL := ""
+	if len(params.OrderBy) > 0 {
+		parts := make([]string, len(params.OrderBy))
+		for i, o := range params.OrderBy {
+			dir := "ASC"
+			if o.Descending {
+				dir = "DESC"
+			}
+			parts[i] = mainAlias + "." + quoteIdent(o.Column) + " " + dir
+		}
+		orderSQL = " ORDER BY " + strings.Join(parts, ", ")
+	}
+
+	// LIMIT and OFFSET.
+	limitSQL := fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+	args = append(args, params.Limit, params.Offset)
+
+	sql := fmt.Sprintf("SELECT %s FROM %s AS %s%s%s%s%s", colExpr, qt, mainAlias, joinSQL, whereSQL, orderSQL, limitSQL)
+	return sql, args
 }
 
 // buildInsertQuery builds a parameterized INSERT ... RETURNING * query.

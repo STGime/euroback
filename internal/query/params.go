@@ -8,19 +8,27 @@ import (
 	"strings"
 )
 
+// Relation represents a related table to embed via LEFT JOIN.
+type Relation struct {
+	Table   string   // related table name, e.g. "customer"
+	Columns []string // columns to select from the related table ("*" for all)
+}
+
 // QueryParams holds parsed query parameters from the HTTP request.
 type QueryParams struct {
-	Select  []string      // columns to return
-	Filters []Filter      // WHERE clauses
-	OrderBy []OrderClause // ORDER BY clauses
-	Limit   int           // default 20, max 1000
-	Offset  int           // pagination offset
+	Select    []string      // columns to return
+	Filters   []Filter      // WHERE clauses
+	OrderBy   []OrderClause // ORDER BY clauses
+	Limit     int           // default 20, max 1000
+	Offset    int           // pagination offset
+	Aggregate string        // aggregate function, e.g. "count", "sum:price"
+	Relations []Relation    // related tables to embed via LEFT JOIN
 }
 
 // Filter represents a single WHERE clause condition.
 type Filter struct {
 	Column   string
-	Operator string // eq, neq, gt, gte, lt, lte, like, ilike, is, in
+	Operator string // eq, neq, gt, gte, lt, lte, like, ilike, is, in, fts
 	Value    string
 }
 
@@ -42,6 +50,7 @@ var supportedOperators = map[string]string{
 	"ilike": "ILIKE",
 	"is":    "IS",
 	"in":    "IN",
+	"fts":   "@@",
 }
 
 // IsValidOperator checks if the given operator name is supported.
@@ -57,10 +66,11 @@ func SQLOperator(op string) string {
 
 // reservedParams are query parameter keys that are not treated as filters.
 var reservedParams = map[string]bool{
-	"select": true,
-	"order":  true,
-	"limit":  true,
-	"offset": true,
+	"select":    true,
+	"order":     true,
+	"limit":     true,
+	"offset":    true,
+	"aggregate": true,
 }
 
 // ParseQueryParams parses URL query parameters in PostgREST/Supabase style.
@@ -81,12 +91,23 @@ func ParseQueryParams(r *http.Request) QueryParams {
 		Offset: 0,
 	}
 
-	// Parse select columns.
+	// Parse aggregate.
+	if agg := q.Get("aggregate"); agg != "" {
+		params.Aggregate = agg
+	}
+
+	// Parse select columns and relations.
 	if sel := q.Get("select"); sel != "" {
-		cols := strings.Split(sel, ",")
+		cols := splitSelectParam(sel)
 		for _, c := range cols {
 			c = strings.TrimSpace(c)
-			if c != "" {
+			if c == "" {
+				continue
+			}
+			// Check for relation syntax: "table(col1,col2)" or "table(*)".
+			if rel := parseRelation(c); rel != nil {
+				params.Relations = append(params.Relations, *rel)
+			} else {
 				params.Select = append(params.Select, c)
 			}
 		}
@@ -183,5 +204,64 @@ func parseFilter(column, value string) *Filter {
 		Column:   column,
 		Operator: op,
 		Value:    val,
+	}
+}
+
+// splitSelectParam splits a select parameter string by commas, but respects
+// parentheses so that "id,total,customer(name,email)" splits correctly into
+// ["id", "total", "customer(name,email)"].
+func splitSelectParam(sel string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i, ch := range sel {
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, sel[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, sel[start:])
+	return parts
+}
+
+// parseRelation checks if a select entry has relation syntax like "customer(name,email)"
+// and returns a Relation if so, or nil otherwise.
+func parseRelation(entry string) *Relation {
+	lparen := strings.Index(entry, "(")
+	if lparen < 0 {
+		return nil
+	}
+	rparen := strings.LastIndex(entry, ")")
+	if rparen < lparen {
+		return nil
+	}
+
+	table := strings.TrimSpace(entry[:lparen])
+	if table == "" {
+		return nil
+	}
+
+	colStr := entry[lparen+1 : rparen]
+	var cols []string
+	for _, c := range strings.Split(colStr, ",") {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			cols = append(cols, c)
+		}
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+
+	return &Relation{
+		Table:   table,
+		Columns: cols,
 	}
 }

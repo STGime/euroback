@@ -205,6 +205,22 @@ func handleSelectRows(engine *QueryEngine) http.HandlerFunc {
 
 		params := ParseQueryParams(r)
 
+		// If an aggregate is requested, use AggregateQuery instead.
+		if params.Aggregate != "" {
+			result, err := engine.AggregateQuery(r.Context(), schema, tableName, params)
+			if err != nil {
+				slog.Error("aggregate query failed", "error", err, "schema", schema, "table", tableName, "aggregate", params.Aggregate)
+				if !handleQueryError(w, err) {
+					jsonError(w, "internal server error", http.StatusInternalServerError)
+				}
+				return
+			}
+
+			slog.Debug("aggregate query complete", "schema", schema, "table", tableName, "aggregate", params.Aggregate)
+			jsonResponse(w, map[string]interface{}{"result": result}, http.StatusOK)
+			return
+		}
+
 		rows, totalCount, err := engine.SelectRows(r.Context(), schema, tableName, params)
 		if err != nil {
 			slog.Error("select query failed", "error", err, "schema", schema, "table", tableName)
