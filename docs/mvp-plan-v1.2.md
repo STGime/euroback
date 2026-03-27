@@ -4,7 +4,7 @@
 
 Technical Specification for Development Team
 
-Version 1.1 — March 2026 — Confidential
+Version 1.2 — March 2026 — Confidential
 
 ---
 
@@ -807,4 +807,95 @@ on push to main:
 
 ---
 
-*End of Document — Eurobase MVP Implementation Plan v1.1 — March 2026 — Updated: Mollie billing integration*
+---
+
+## 15. Post-MVP Feature Roadmap (v1.2+)
+
+### Completed (MVP)
+
+- [x] Custom auth system (email+password, no Hanko dependency)
+- [x] End-user signup/signin with JWT + refresh tokens
+- [x] Email verification and password reset (Scaleway TEM)
+- [x] Customizable email templates per project
+- [x] Database CRUD with filtering, ordering, pagination
+- [x] Schema management (create/alter/drop tables, columns, indexes)
+- [x] SQL Editor (SELECT-only)
+- [x] RPC / stored function calls
+- [x] File storage (upload, download, list, delete, signed URLs)
+- [x] Realtime WebSocket subscriptions (INSERT/UPDATE/DELETE events)
+- [x] Webhooks with retry logic and delivery logs
+- [x] Request logging and log viewer
+- [x] Rate limiting (Redis-backed, per-plan)
+- [x] Plan limits (free/pro) with enforcement
+- [x] Usage tracking and dashboard
+- [x] JavaScript/TypeScript SDK (@eurobase/sdk)
+- [x] Console dashboard with full project management
+- [x] API Explorer (auto-generated from schema)
+- [x] Scaleway Kapsule deployment (Terraform + K8s + CI/CD)
+- [x] Wildcard TLS for SDK subdomains
+
+### Sprint 1: Data API Parity (Easy Wins)
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| Aggregations (COUNT, SUM, AVG, MIN, MAX) | 1 day | Planned |
+| Nested relation selects (auto-JOIN via FK) | 2 days | Planned |
+| Full-text search (PostgreSQL tsvector) | 1 day | Planned |
+| Fix usage dashboard on project overview | 1 day | Planned |
+
+### Sprint 2: Monetization
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| Magic Links (passwordless email auth) | 3 days | Planned |
+| Mollie billing integration | 1 week | Planned |
+
+### Sprint 3: Auth & Automation
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| OAuth / Social Login (Google, GitHub) | 1 week | Planned |
+| Cron jobs / scheduled tasks (River) | 2 days | Planned |
+
+### Sprint 4: Developer Workflow
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| Team collaboration / RBAC | 1 week | Planned |
+| CLI tool (Go binary, Homebrew) | 1 week | Planned |
+
+### Future (v1.3+)
+
+| Feature | Effort | Priority |
+|---------|--------|----------|
+| Edge Functions (Scaleway Serverless) | 2 weeks | High |
+| Python SDK | 1 week | High |
+| Image transformations (resize/crop) | 1 week | Medium |
+| MFA / TOTP | 1 week | Medium |
+| Custom domains per project | 1 week | Medium |
+| GraphQL API | 2 weeks | Medium |
+| Vector search (pgvector) | 1 week | Medium |
+| GDPR data export (one-click) | 2 days | High |
+| Audit log | 3 days | High |
+| Data residency certificate API | 1 day | Medium |
+| Realtime Presence | 1 week | Low |
+| Realtime Broadcast | 1 week | Low |
+| SSE (Server-Sent Events) | 3 days | Low |
+| Branching / preview environments | 2 weeks | Low |
+| Self-hosting documentation | 3 days | Low |
+| Swift SDK (iOS) | 1 week | Low |
+| Kotlin SDK (Android) | 1 week | Low |
+
+### Pricing Model (Per-Project)
+
+| Plan | Price | DB | Storage | MAU | Rate Limit | Projects |
+|------|-------|-----|---------|-----|-----------|----------|
+| Free | $0/mo | 500 MB | 1 GB | 10K | 100 req/s | 2 |
+| Pro | $19/mo per project | 5 GB | 50 GB | 100K | 1K req/s | 10 |
+
+Each project is billed independently. Users can mix free and pro projects.
+See docs/plan-pricing-tiers.md for full details.
+
+---
+
+*End of Document — Eurobase MVP Implementation Plan v1.2 — March 2026*

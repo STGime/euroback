@@ -36,7 +36,7 @@ Current MVP phase
 Phase 1 — Core Infrastructure (Weeks 1–3)
 Goals: tenant provisioning, Hanko auth webhook, Scaleway bucket init per project,
 basic project CRUD, console auth flow and dashboard skeleton.
-See /docs/mvp-plan-v1.1.md for full phase breakdown.
+See /docs/mvp-plan-v1.2.md for full phase breakdown.
 Non-negotiables
 
 RLS + set_tenant_id() on every tenant-scoped DB operation — no exceptions
