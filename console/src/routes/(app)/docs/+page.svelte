@@ -15,10 +15,11 @@
 		{ id: 'users', label: '7. Managing End Users' },
 		{ id: 'api', label: '8. Exploring the API' },
 		{ id: 'webhooks', label: '9. Webhooks' },
-		{ id: 'logs', label: '10. Monitoring with Logs' },
-		{ id: 'settings', label: '11. Project Settings' },
-		{ id: 'connect', label: '12. Connecting Your IDE' },
-		{ id: 'account', label: '13. Your Account' },
+		{ id: 'cron', label: '10. Scheduled Jobs' },
+		{ id: 'logs', label: '11. Monitoring with Logs' },
+		{ id: 'settings', label: '12. Project Settings' },
+		{ id: 'connect', label: '13. Connecting Your IDE' },
+		{ id: 'account', label: '14. Your Account' },
 		{ id: 'next', label: "What's Next" }
 	];
 
@@ -802,15 +803,114 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 			</div>
 
 			<div class="mt-6 text-right">
+				<button onclick={() => scrollTo('cron')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Scheduled Jobs &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 10. SCHEDULED JOBS ======================= -->
+		<section id="cron" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">10. Scheduled Jobs</h2>
+			<p class="text-sm italic text-gray-500 mb-4">Alex needs to clean up expired sessions and send weekly reports automatically.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Scheduled jobs let you run SQL statements or database functions on a recurring schedule. No server needed &mdash; Eurobase executes them automatically in your project's database.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900">Creating a scheduled job</h3>
+				<ol class="text-sm text-gray-700 space-y-1.5 ml-4 list-decimal">
+					<li>Go to the <strong>Cron</strong> tab in your project</li>
+					<li>Click <strong>New Job</strong></li>
+					<li>Give it a name (e.g. "Clean expired sessions")</li>
+					<li>Choose a schedule preset or write a custom cron expression</li>
+					<li>Select the action type: <strong>SQL</strong> (run a query) or <strong>RPC</strong> (call a function)</li>
+					<li>Write the SQL or function name</li>
+					<li>Click <strong>Create</strong></li>
+				</ol>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Common examples</h3>
+
+				<div class="space-y-3">
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Clean up expired sessions (every hour)</p>
+						<p class="text-xs text-gray-500 mt-0.5">Schedule: <code class="bg-white border border-gray-200 rounded px-1">0 * * * *</code></p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">DELETE FROM sessions WHERE expires_at &lt; now()</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Send weekly digest (every Monday at 9am)</p>
+						<p class="text-xs text-gray-500 mt-0.5">Schedule: <code class="bg-white border border-gray-200 rounded px-1">0 9 * * 1</code></p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">SELECT send_weekly_digest()</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Archive old records (daily at midnight)</p>
+						<p class="text-xs text-gray-500 mt-0.5">Schedule: <code class="bg-white border border-gray-200 rounded px-1">0 0 * * *</code></p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">INSERT INTO archive SELECT * FROM logs WHERE created_at &lt; now() - interval '30 days'; DELETE FROM logs WHERE created_at &lt; now() - interval '30 days';</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Check pending orders (every 5 minutes)</p>
+						<p class="text-xs text-gray-500 mt-0.5">Schedule: <code class="bg-white border border-gray-200 rounded px-1">*/5 * * * *</code></p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">SELECT process_pending_orders()</div>
+					</div>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Cron schedule reference</h3>
+				<div class="rounded-lg border border-gray-200 overflow-hidden">
+					<table class="w-full text-xs">
+						<thead class="bg-gray-50">
+							<tr>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Field</th>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Values</th>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Special</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-gray-100">
+							<tr><td class="px-3 py-1.5 text-gray-700">Minute</td><td class="px-3 py-1.5 text-gray-500">0-59</td><td class="px-3 py-1.5 text-gray-500">* , */N</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700">Hour</td><td class="px-3 py-1.5 text-gray-500">0-23</td><td class="px-3 py-1.5 text-gray-500">* , */N</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700">Day of month</td><td class="px-3 py-1.5 text-gray-500">1-31</td><td class="px-3 py-1.5 text-gray-500">* , */N</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700">Month</td><td class="px-3 py-1.5 text-gray-500">1-12</td><td class="px-3 py-1.5 text-gray-500">* , */N</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700">Day of week</td><td class="px-3 py-1.5 text-gray-500">0-6 (Sun=0)</td><td class="px-3 py-1.5 text-gray-500">* , */N</td></tr>
+						</tbody>
+					</table>
+				</div>
+
+				<div class="rounded-lg border border-gray-200 bg-gray-50 p-3 mt-3">
+					<p class="text-xs font-semibold text-gray-700 mb-1">Quick reference</p>
+					<div class="grid grid-cols-2 gap-x-6 gap-y-0.5 text-xs text-gray-600">
+						<span><code class="bg-white border border-gray-200 rounded px-1">* * * * *</code> &mdash; every minute</span>
+						<span><code class="bg-white border border-gray-200 rounded px-1">*/5 * * * *</code> &mdash; every 5 minutes</span>
+						<span><code class="bg-white border border-gray-200 rounded px-1">0 * * * *</code> &mdash; every hour</span>
+						<span><code class="bg-white border border-gray-200 rounded px-1">0 0 * * *</code> &mdash; daily at midnight</span>
+						<span><code class="bg-white border border-gray-200 rounded px-1">0 9 * * 1</code> &mdash; Monday 9am</span>
+						<span><code class="bg-white border border-gray-200 rounded px-1">0 0 1 * *</code> &mdash; 1st of month</span>
+					</div>
+				</div>
+
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">
+					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
+					</svg>
+					<div class="text-sm text-eurobase-800">
+						<p><strong>Plan limits:</strong> Free plan includes 2 scheduled jobs. Pro plan has unlimited jobs.</p>
+						<p class="mt-1">Jobs run SQL in your project's database schema with full access. They execute as the system user, not as an end-user &mdash; RLS policies are bypassed.</p>
+					</div>
+				</div>
+			</div>
+
+			<div class="mt-6 text-right">
 				<button onclick={() => scrollTo('logs')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Monitoring with Logs &rarr;
 				</button>
 			</div>
 		</section>
 
-		<!-- ======================= 10. MONITORING WITH LOGS ======================= -->
+		<!-- ======================= 11. MONITORING WITH LOGS ======================= -->
 		<section id="logs" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">10. Monitoring with Logs</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">11. Monitoring with Logs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex notices slow responses and wants to investigate API traffic.</p>
 
 			<div class="space-y-4">
@@ -850,7 +950,7 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 
 		<!-- ======================= 11. PROJECT SETTINGS ======================= -->
 		<section id="settings" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">11. Project Settings</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Project Settings</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to rotate an API key after an intern accidentally committed it.</p>
 
 			<div class="space-y-4">
@@ -888,7 +988,7 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 
 		<!-- ======================= 12. CONNECTING YOUR IDE ======================= -->
 		<section id="connect" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Connecting Your IDE</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Connecting Your IDE</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI coding assistant to understand the LexVault schema.</p>
 
 			<div class="space-y-4">
@@ -945,7 +1045,7 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 
 		<!-- ======================= 13. YOUR ACCOUNT ======================= -->
 		<section id="account" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Your Account</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Your Account</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
 
 			<div class="space-y-4">
