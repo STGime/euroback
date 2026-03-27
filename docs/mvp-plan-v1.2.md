@@ -851,12 +851,12 @@ on push to main:
 | Magic Links (passwordless email auth) | 3 days | Done |
 | Mollie billing integration | 1 week | Next |
 
-### Sprint 3: Auth & Automation
+### Sprint 3: Auth & Automation (In Progress)
 
 | Feature | Effort | Status |
 |---------|--------|--------|
-| Custom cron jobs (Layer 2 — developer SQL/RPC on schedule) | 3 days | Planned |
-| OAuth / Social Login (Google, GitHub) | 1 week | Planned |
+| Custom cron jobs (Layer 2 — developer SQL/RPC on schedule) | 3 days | Done |
+| OAuth / Social Login (Google, GitHub) | 1 week | Next |
 
 ### Sprint 4: Developer Workflow
 
