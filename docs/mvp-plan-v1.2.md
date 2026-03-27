@@ -855,8 +855,8 @@ on push to main:
 
 | Feature | Effort | Status |
 |---------|--------|--------|
+| Custom cron jobs (Layer 2 — developer SQL/RPC on schedule) | 3 days | Planned |
 | OAuth / Social Login (Google, GitHub) | 1 week | Planned |
-| Cron jobs / scheduled tasks (River) | 2 days | Planned |
 
 ### Sprint 4: Developer Workflow
 
@@ -864,12 +864,53 @@ on push to main:
 |---------|--------|--------|
 | Team collaboration / RBAC | 1 week | Planned |
 | CLI tool (Go binary, Homebrew) | 1 week | Planned |
+| Built-in automations (Layer 1 — token cleanup, log retention, usage alerts) | 2 days | Planned |
+
+### Automation Strategy (3 Layers)
+
+**Layer 1: Built-in automations** (Eurobase provides, zero-code)
+Pre-built automations that developers toggle on in project settings:
+- Clean up expired tokens (refresh tokens, email tokens)
+- Usage alerts (email at 80%, 90%, 100% of plan limits)
+- Log retention (auto-purge logs older than plan limit)
+- Inactive user flagging (mark users with no sign-in for X days)
+- Scheduled database export to S3 (pro feature)
+
+**Layer 2: Custom cron jobs** (developer writes SQL/RPC)
+Developers configure a schedule + SQL statement or RPC function:
+```
+Schedule: every 6 hours
+Action:   DELETE FROM sessions WHERE expires_at < now()
+
+Schedule: 0 9 * * MON  (every Monday 9am)
+Action:   SELECT send_weekly_digest()
+
+Schedule: */5 * * * *  (every 5 minutes)
+Action:   SELECT check_pending_orders()
+```
+Uses River (PostgreSQL-backed job queue, already in worker).
+Console UI: table of jobs with name, schedule, SQL, last/next run, status.
+API: CRUD via /platform/projects/{id}/cron
+
+**Layer 3: Edge Functions** (developer writes full JS/TS, v1.3+)
+Custom HTTP endpoints with full code execution:
+```typescript
+// functions/process-order.ts
+export default async function(req, ctx) {
+  const order = await req.json()
+  const payment = await fetch('https://api.mollie.com/v2/payments', {...})
+  await ctx.db.from('orders').insert({ ...order, payment_id: payment.id })
+  return new Response(JSON.stringify({ status: 'ok' }))
+}
+```
+Runs on Scaleway Serverless Containers or self-hosted Deno isolates.
+Triggered by HTTP request, webhook, or schedule.
 
 ### Future (v1.3+)
 
 | Feature | Effort | Priority |
 |---------|--------|----------|
-| Edge Functions (Scaleway Serverless) | 2 weeks | High |
+| Edge Functions (Layer 3 — Scaleway Serverless) | 2 weeks | High |
 | Python SDK | 1 week | High |
 | Image transformations (resize/crop) | 1 week | Medium |
 | MFA / TOTP | 1 week | Medium |
