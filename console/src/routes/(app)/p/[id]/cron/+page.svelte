@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { api, type CronJob } from '$lib/api.js';
+	import { api, type CronJob, type TableSchema } from '$lib/api.js';
 	import { onMount } from 'svelte';
 
 	let projectId = $derived($page.params.id);
@@ -31,6 +31,26 @@
 	let testRunning = $state(false);
 	let testResult: string | null = $state(null);
 	let testError: string | null = $state(null);
+
+	// Schema browser
+	let schemaTables: TableSchema[] = $state([]);
+	let schemaLoading = $state(false);
+	let expandedTable: string | null = $state(null);
+	const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
+
+	async function loadSchema() {
+		if (schemaTables.length > 0) return;
+		schemaLoading = true;
+		try {
+			const all = await api.getSchema(projectId);
+			schemaTables = all.filter(t => !hiddenTables.has(t.name));
+		} catch { /* ignore */ }
+		schemaLoading = false;
+	}
+
+	function insertIntoEditor(text: string) {
+		formAction = formAction + text;
+	}
 
 	// Delete confirm
 	let deleteConfirmId: string | null = $state(null);
@@ -67,8 +87,10 @@
 		testResult = null;
 		testError = null;
 		useCustomSchedule = false;
+		expandedTable = null;
 		cronMinute = '*'; cronHour = '*'; cronDay = '*'; cronMonth = '*'; cronWeekday = '*';
 		showForm = true;
+		loadSchema();
 	}
 
 	function openEdit(job: CronJob) {
@@ -91,6 +113,7 @@
 			}
 		}
 		showForm = true;
+		loadSchema();
 	}
 
 	function handlePresetChange(value: string) {
@@ -293,14 +316,77 @@
 {#if showForm}
 	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
 		<button type="button" class="fixed inset-0 bg-black/50 cursor-default" onclick={() => (showForm = false)} tabindex="-1" aria-label="Close"></button>
-		<div class="relative z-10 w-full max-w-lg rounded-xl bg-white shadow-2xl max-h-[90vh] overflow-y-auto">
-			<div class="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+		<div class="relative z-10 w-full max-w-4xl rounded-xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
+			<div class="flex items-center justify-between border-b border-gray-200 px-6 py-4 shrink-0">
 				<h2 class="text-lg font-semibold text-gray-900">{editingJob ? 'Edit Job' : 'New Scheduled Job'}</h2>
 				<button type="button" class="cursor-pointer rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600" onclick={() => (showForm = false)} aria-label="Close">
 					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
 				</button>
 			</div>
-			<div class="px-6 py-5 space-y-5">
+			<div class="flex flex-1 min-h-0">
+				<!-- Schema browser (left side) -->
+				{#if formActionType === 'sql'}
+					<div class="w-56 shrink-0 border-r border-gray-200 overflow-y-auto bg-gray-50">
+						<div class="px-3 py-2 border-b border-gray-200">
+							<p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Tables</p>
+							<p class="text-[10px] text-gray-400">Click to insert into SQL</p>
+						</div>
+						{#if schemaLoading}
+							<div class="p-3 space-y-2">
+								{#each Array(4) as _}
+									<div class="h-6 animate-pulse rounded bg-gray-200"></div>
+								{/each}
+							</div>
+						{:else if schemaTables.length === 0}
+							<p class="p-3 text-xs text-gray-400">No tables found</p>
+						{:else}
+							<div class="p-1.5">
+								{#each schemaTables as table}
+									<div class="mb-0.5">
+										<button
+											type="button"
+											class="cursor-pointer w-full flex items-center gap-1.5 rounded px-2 py-1.5 text-xs text-left transition-colors hover:bg-gray-200
+												{expandedTable === table.name ? 'bg-gray-200 font-medium text-gray-900' : 'text-gray-700'}"
+											onclick={() => {
+												if (expandedTable === table.name) {
+													expandedTable = null;
+												} else {
+													expandedTable = table.name;
+												}
+											}}
+											ondblclick={() => insertIntoEditor(table.name)}
+											title="Double-click to insert table name"
+										>
+											<svg class="h-3 w-3 shrink-0 text-gray-400 transition-transform {expandedTable === table.name ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+												<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+											</svg>
+											{table.name}
+											<span class="ml-auto text-[10px] text-gray-400">{table.columns.length}</span>
+										</button>
+										{#if expandedTable === table.name}
+											<div class="ml-4 pl-2 border-l border-gray-200 space-y-0.5 py-1">
+												{#each table.columns as col}
+													<button
+														type="button"
+														class="cursor-pointer w-full flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-left text-gray-600 hover:bg-eurobase-50 hover:text-eurobase-700 transition-colors"
+														onclick={() => insertIntoEditor(col.name)}
+														title="Click to insert column name"
+													>
+														<span class="truncate">{col.name}</span>
+														<span class="ml-auto text-[9px] text-gray-400 uppercase shrink-0">{col.data_type.split(' ')[0]}</span>
+													</button>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				{/if}
+
+				<!-- Form (right side) -->
+				<div class="flex-1 overflow-y-auto px-6 py-5 space-y-5">
 				{#if formError}
 					<div class="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
 						<svg class="h-4 w-4 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
@@ -451,7 +537,8 @@
 					</div>
 				{/if}
 			</div>
-			<div class="flex items-center justify-end gap-3 border-t border-gray-200 px-6 py-4">
+			</div> <!-- close flex row -->
+			<div class="flex items-center justify-end gap-3 border-t border-gray-200 px-6 py-4 shrink-0">
 				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showForm = false)}>Cancel</button>
 				<button
 					type="button"
