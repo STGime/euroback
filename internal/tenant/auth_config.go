@@ -142,6 +142,38 @@ func (c *AuthConfig) IsRedirectURLAllowed(rawURL string) bool {
 	return false
 }
 
+// MaskSecretsJSON takes raw auth_config JSON and masks OAuth client_secret values.
+// Returns the masked JSON. Used before returning project data in API responses.
+func MaskSecretsJSON(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return raw
+	}
+	if oauthRaw, ok := cfg["oauth_providers"]; ok {
+		if oauth, ok := oauthRaw.(map[string]interface{}); ok {
+			for providerName, providerRaw := range oauth {
+				if provider, ok := providerRaw.(map[string]interface{}); ok {
+					if secret, ok := provider["client_secret"].(string); ok && len(secret) > 8 {
+						provider["client_secret"] = secret[:4] + strings.Repeat("*", len(secret)-8) + secret[len(secret)-4:]
+					} else if ok && len(secret) > 0 {
+						provider["client_secret"] = strings.Repeat("*", len(secret))
+					}
+					oauth[providerName] = provider
+				}
+			}
+			cfg["oauth_providers"] = oauth
+		}
+	}
+	masked, err := json.Marshal(cfg)
+	if err != nil {
+		return raw
+	}
+	return masked
+}
+
 // ParseAuthConfig parses a JSON string into an AuthConfig, returning defaults if empty.
 func ParseAuthConfig(raw []byte) AuthConfig {
 	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "" || strings.TrimSpace(string(raw)) == "{}" || strings.TrimSpace(string(raw)) == "null" {

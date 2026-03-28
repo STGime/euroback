@@ -214,6 +214,7 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 		return nil, fmt.Errorf("query project: %w", err)
 	}
 	p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
+	p.AuthConfig = MaskSecretsJSON(p.AuthConfig)
 	return &p, nil
 }
 
@@ -239,6 +240,7 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
+		p.AuthConfig = MaskSecretsJSON(p.AuthConfig)
 		projects = append(projects, p)
 	}
 
