@@ -851,11 +851,16 @@ on push to main:
 | Magic Links (passwordless email auth) | 3 days | Done |
 | Mollie billing integration | 1 week | Next |
 
-### Sprint 3: Auth & Automation (In Progress)
+### Sprint 3: Auth & Automation -- COMPLETE
 
 | Feature | Effort | Status |
 |---------|--------|--------|
-| Custom cron jobs (Layer 2 — developer SQL/RPC on schedule) | 3 days | Done |
+| Custom cron jobs (SQL/RPC on schedule) | 3 days | Done |
+| Cron execution logs (run history per job) | 1 day | Done |
+| RPC function management (create/list/delete via API) | 1 day | Done |
+| Cron & RPC console page with sub-tabs | 1 day | Done |
+| Function builder with schema browser, validation, test | 1 day | Done |
+| Cron/RPC documentation with examples | 0.5 day | Done |
 | OAuth / Social Login (Google, GitHub) | 1 week | Next |
 
 ### Sprint 4: Developer Workflow
