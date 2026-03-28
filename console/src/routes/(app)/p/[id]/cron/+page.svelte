@@ -49,7 +49,8 @@
 	}
 
 	function insertIntoEditor(text: string) {
-		formAction = formAction + text;
+		const needsSpace = formAction.length > 0 && !formAction.endsWith(' ') && !formAction.endsWith('\n') && !formAction.endsWith('\t') && !formAction.endsWith('(') && !formAction.endsWith('.');
+		formAction = formAction + (needsSpace ? ' ' : '') + text;
 	}
 
 	// Delete confirm
@@ -354,14 +355,21 @@
 													expandedTable = table.name;
 												}
 											}}
-											ondblclick={() => insertIntoEditor(table.name)}
-											title="Double-click to insert table name"
+											title="Click to expand columns"
 										>
 											<svg class="h-3 w-3 shrink-0 text-gray-400 transition-transform {expandedTable === table.name ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
 												<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
 											</svg>
-											{table.name}
-											<span class="ml-auto text-[10px] text-gray-400">{table.columns.length}</span>
+											<span class="flex-1 truncate">{table.name}</span>
+											<span
+												role="button"
+												tabindex="-1"
+												class="cursor-pointer shrink-0 rounded p-0.5 text-gray-300 hover:text-eurobase-600 hover:bg-eurobase-50 transition-colors"
+												onclick={(e) => { e.stopPropagation(); insertIntoEditor(table.name); }}
+												title="Insert table name into SQL"
+											>
+												<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+											</span>
 										</button>
 										{#if expandedTable === table.name}
 											<div class="ml-4 pl-2 border-l border-gray-200 space-y-0.5 py-1">
@@ -369,7 +377,7 @@
 													<button
 														type="button"
 														class="cursor-pointer w-full flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-left text-gray-600 hover:bg-eurobase-50 hover:text-eurobase-700 transition-colors"
-														onclick={() => insertIntoEditor(table.name + '.' + col.name)}
+														onclick={() => insertIntoEditor(col.name)}
 														title="Click to insert column name"
 													>
 														<span class="truncate">{col.name}</span>
