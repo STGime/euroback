@@ -369,7 +369,7 @@
 													<button
 														type="button"
 														class="cursor-pointer w-full flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-left text-gray-600 hover:bg-eurobase-50 hover:text-eurobase-700 transition-colors"
-														onclick={() => insertIntoEditor(col.name)}
+														onclick={() => insertIntoEditor(table.name + '.' + col.name)}
 														title="Click to insert column name"
 													>
 														<span class="truncate">{col.name}</span>
