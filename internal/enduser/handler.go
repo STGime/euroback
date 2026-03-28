@@ -346,23 +346,23 @@ func HandleOAuthRedirect(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
-		config := tenant.ParseAuthConfig(pc.AuthConfig)
-
-		providerConfig, ok := config.GetOAuthProvider(providerName)
-		if !ok {
-			writeJSON(w, map[string]string{"error": fmt.Sprintf("oauth provider %q is not enabled", providerName)}, http.StatusBadRequest)
-			return
-		}
-
 		clientRedirectURL := r.URL.Query().Get("redirect_url")
 		if clientRedirectURL == "" {
 			writeJSON(w, map[string]string{"error": "redirect_url query parameter is required"}, http.StatusBadRequest)
 			return
 		}
 
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
 		// Validate redirect_url against allowed list.
 		if !config.IsRedirectURLAllowed(clientRedirectURL) {
 			writeJSON(w, map[string]string{"error": "redirect_url is not in the allowed redirect URLs"}, http.StatusBadRequest)
+			return
+		}
+
+		providerConfig, ok := config.GetOAuthProvider(providerName)
+		if !ok {
+			writeJSON(w, map[string]string{"error": fmt.Sprintf("oauth provider %q is not enabled", providerName)}, http.StatusBadRequest)
 			return
 		}
 
