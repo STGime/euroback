@@ -48,6 +48,20 @@
 	let newFuncError: string | null = $state(null);
 	let newFuncSaving = $state(false);
 	let selectedFunctionPreview: DBFunction | null = $state(null);
+	let funcNameError: string | null = $derived(
+		newFuncName.length === 0 ? null :
+		/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(newFuncName) ? null :
+		'Use only letters, digits, and underscores. Must start with a letter or underscore.'
+	);
+	let funcBodyError: string | null = $derived(
+		newFuncBody.length === 0 ? null :
+		newFuncLanguage === 'plpgsql' && !newFuncBody.trim().toUpperCase().startsWith('BEGIN') ? 'PL/pgSQL functions must start with BEGIN' :
+		newFuncLanguage === 'plpgsql' && !newFuncBody.trim().toUpperCase().replace(/;$/, '').endsWith('END') ? 'PL/pgSQL functions must end with END;' :
+		null
+	);
+	let funcTestRunning = $state(false);
+	let funcTestResult: string | null = $state(null);
+	let funcTestError: string | null = $state(null);
 
 	// Schema browser
 	let schemaTables: TableSchema[] = $state([]);
@@ -112,6 +126,31 @@
 				runsMap[jobId] = await api.listCronJobRuns(projectId, jobId);
 			} catch { runsMap[jobId] = []; }
 			runsLoading = false;
+		}
+	}
+
+	async function handleTestFunction() {
+		if (!newFuncName.trim() || !newFuncBody.trim() || funcNameError || funcBodyError) return;
+		funcTestRunning = true;
+		funcTestResult = null;
+		funcTestError = null;
+		try {
+			// Create (or replace) the function — this validates the SQL syntax
+			await api.createFunction(projectId, {
+				name: newFuncName.trim(),
+				body: newFuncBody.trim(),
+				returns: newFuncReturns,
+				language: newFuncLanguage
+			});
+			funcTestResult = `Function "${newFuncName.trim()}" created successfully. PostgreSQL validated the syntax. You can now select it from the dropdown and use it in a cron job or call it from the SDK via eb.db.rpc('${newFuncName.trim()}').`;
+			// Refresh function list
+			availableFunctions = await api.listFunctions(projectId);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Failed to create function';
+			const m = msg.match(/\{"error":"(.+?)"\}/);
+			funcTestError = m ? m[1] : msg;
+		} finally {
+			funcTestRunning = false;
 		}
 	}
 
@@ -689,7 +728,10 @@
 									<div>
 										<label for="func-name" class="block text-xs font-medium text-gray-700 mb-1">Function Name</label>
 										<input id="func-name" type="text" bind:value={newFuncName} placeholder="e.g. cleanup_expired_sessions"
-											class="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
+											class="w-full rounded-lg border px-3 py-1.5 text-xs font-mono text-gray-900 placeholder-gray-300 focus:outline-none {funcNameError ? 'border-red-300 focus:border-red-500' : 'border-gray-300 focus:border-eurobase-500'}" />
+										{#if funcNameError}
+											<p class="mt-0.5 text-[10px] text-red-500">{funcNameError}</p>
+										{/if}
 									</div>
 									<div class="grid grid-cols-2 gap-3">
 										<div>
@@ -724,17 +766,49 @@
 											rows="5"
 											class="w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-mono placeholder-gray-600 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
 										></textarea>
+									{#if funcBodyError}
+											<p class="mt-0.5 text-[10px] text-amber-600">{funcBodyError}</p>
+										{/if}
+										{#if newFuncLanguage === 'plpgsql'}
+											<div class="mt-1.5 rounded bg-gray-50 border border-gray-200 px-2.5 py-2 text-[10px] text-gray-500 space-y-0.5">
+												<p class="font-semibold text-gray-600">PL/pgSQL syntax tips:</p>
+												<p>- Must start with <code class="bg-white rounded px-0.5">BEGIN</code> and end with <code class="bg-white rounded px-0.5">END;</code> (semicolon required)</p>
+												<p>- Each statement must end with <code class="bg-white rounded px-0.5">;</code></p>
+												<p>- Use <code class="bg-white rounded px-0.5">PERFORM</code> instead of <code class="bg-white rounded px-0.5">SELECT</code> when discarding results</p>
+												<p>- Use <code class="bg-white rounded px-0.5">RETURN value;</code> if the function returns a value</p>
+											</div>
+										{/if}
 									</div>
-									<div class="flex justify-end">
+									<div class="flex items-center justify-between">
+										<button
+											type="button"
+											disabled={!newFuncName.trim() || !newFuncBody.trim() || !!funcNameError || !!funcBodyError || funcTestRunning}
+											class="cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
+											onclick={handleTestFunction}
+										>
+											{#if funcTestRunning}
+												<svg class="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+												Testing...
+											{:else}
+												<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z" /></svg>
+												Test Function
+											{/if}
+										</button>
 										<button
 											type="button"
 											class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50"
-											disabled={!newFuncName.trim() || !newFuncBody.trim() || newFuncSaving}
+											disabled={!newFuncName.trim() || !newFuncBody.trim() || !!funcNameError || !!funcBodyError || newFuncSaving}
 											onclick={handleCreateNewFunction}
 										>
 											{newFuncSaving ? 'Creating...' : 'Create Function'}
 										</button>
 									</div>
+									{#if funcTestResult}
+										<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">{funcTestResult}</div>
+									{/if}
+									{#if funcTestError}
+										<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{funcTestError}</div>
+									{/if}
 								</div>
 							{/if}
 
