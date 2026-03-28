@@ -21,6 +21,7 @@ func Routes(svc *CronService) chi.Router {
 	r.Post("/", handleCreate(svc))
 	r.Patch("/{jobId}", handleUpdate(svc))
 	r.Delete("/{jobId}", handleDelete(svc))
+	r.Get("/{jobId}/runs", handleListRuns(svc))
 	return r
 }
 
@@ -132,6 +133,25 @@ func handleDelete(svc *CronService) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleListRuns(svc *CronService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobID := chi.URLParam(r, "jobId")
+		if jobID == "" {
+			jsonError(w, "job ID is required", http.StatusBadRequest)
+			return
+		}
+
+		runs, err := svc.ListRuns(r.Context(), jobID, 20)
+		if err != nil {
+			slog.Error("list cron job runs failed", "error", err, "job_id", jobID)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		jsonResponse(w, runs, http.StatusOK)
 	}
 }
 

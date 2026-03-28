@@ -123,6 +123,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
 			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
 			r.Mount("/schema/tables", query.HandleDDL(pool))
+			r.Mount("/schema/functions", query.HandleFunctions(pool))
 			r.Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
 			r.Mount("/cron", cron.Routes(cronSvc))

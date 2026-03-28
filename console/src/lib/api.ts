@@ -703,6 +703,27 @@ export class EurobaseAPI {
 		return this.fetch(`/platform/projects/${projectId}/cron/${jobId}`, { method: 'DELETE' });
 	}
 
+	async listCronJobRuns(projectId: string, jobId: string): Promise<CronJobRun[]> {
+		return this.fetch<CronJobRun[]>(`/platform/projects/${projectId}/cron/${jobId}/runs`);
+	}
+
+	// ---- Function methods ----
+
+	async listFunctions(projectId: string): Promise<DBFunction[]> {
+		return this.fetch<DBFunction[]>(`/platform/projects/${projectId}/schema/functions`);
+	}
+
+	async createFunction(projectId: string, data: { name: string; body: string; returns?: string; language?: string }): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/functions`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async dropFunction(projectId: string, name: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/schema/functions/${name}`, { method: 'DELETE' });
+	}
+
 	// ---- Webhook methods ----
 
 	async listWebhooks(projectId: string): Promise<Webhook[]> {
@@ -894,6 +915,24 @@ export interface EndUser {
 export interface EndUserList {
 	users: EndUser[];
 	total: number;
+}
+
+export interface DBFunction {
+	name: string;
+	language: string;
+	return_type: string;
+}
+
+export interface CronJobRun {
+	id: string;
+	job_id: string;
+	project_id: string;
+	started_at: string;
+	finished_at: string | null;
+	duration_ms: number | null;
+	status: string;
+	result: string | null;
+	error: string | null;
 }
 
 export interface CronJob {

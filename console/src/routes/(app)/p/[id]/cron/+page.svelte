@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { api, type CronJob, type TableSchema } from '$lib/api.js';
+	import { api, type CronJob, type CronJobRun, type DBFunction, type TableSchema } from '$lib/api.js';
 	import { onMount } from 'svelte';
 
 	let projectId = $derived($page.params.id);
@@ -31,6 +31,23 @@
 	let testRunning = $state(false);
 	let testResult: string | null = $state(null);
 	let testError: string | null = $state(null);
+
+	// Run history
+	let expandedRunsJobId: string | null = $state(null);
+	let runsLoading = $state(false);
+	let runsMap: Record<string, CronJobRun[]> = $state({});
+
+	// RPC function picker
+	let availableFunctions: DBFunction[] = $state([]);
+	let functionsLoading = $state(false);
+	let showCreateFunction = $state(false);
+	let newFuncName = $state('');
+	let newFuncLanguage: 'plpgsql' | 'sql' = $state('plpgsql');
+	let newFuncReturns = $state('void');
+	let newFuncBody = $state('');
+	let newFuncError: string | null = $state(null);
+	let newFuncSaving = $state(false);
+	let selectedFunctionPreview: DBFunction | null = $state(null);
 
 	// Schema browser
 	let schemaTables: TableSchema[] = $state([]);
@@ -78,6 +95,62 @@
 		}
 	}
 
+	async function toggleRuns(jobId: string) {
+		if (expandedRunsJobId === jobId) {
+			expandedRunsJobId = null;
+			return;
+		}
+		expandedRunsJobId = jobId;
+		if (!runsMap[jobId]) {
+			runsLoading = true;
+			try {
+				runsMap[jobId] = await api.listCronJobRuns(projectId, jobId);
+			} catch { runsMap[jobId] = []; }
+			runsLoading = false;
+		}
+	}
+
+	async function loadFunctions() {
+		if (availableFunctions.length > 0) return;
+		functionsLoading = true;
+		try {
+			availableFunctions = await api.listFunctions(projectId);
+		} catch { /* ignore */ }
+		functionsLoading = false;
+	}
+
+	async function handleCreateNewFunction() {
+		if (!newFuncName.trim() || !newFuncBody.trim()) return;
+		newFuncSaving = true;
+		newFuncError = null;
+		try {
+			await api.createFunction(projectId, {
+				name: newFuncName.trim(),
+				body: newFuncBody.trim(),
+				returns: newFuncReturns,
+				language: newFuncLanguage
+			});
+			showCreateFunction = false;
+			formAction = newFuncName.trim();
+			// Reload functions list.
+			availableFunctions = await api.listFunctions(projectId);
+			newFuncName = ''; newFuncBody = ''; newFuncReturns = 'void'; newFuncLanguage = 'plpgsql';
+		} catch (err) {
+			let msg = err instanceof Error ? err.message : 'Failed to create function';
+			const m = msg.match(/\{"error":"(.+?)"\}/);
+			if (m) msg = m[1];
+			newFuncError = msg;
+		} finally {
+			newFuncSaving = false;
+		}
+	}
+
+	function formatRunTime(dateStr: string): string {
+		return new Date(dateStr).toLocaleString('en-GB', {
+			month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+		});
+	}
+
 	function openCreate() {
 		editingJob = null;
 		formName = '';
@@ -89,9 +162,12 @@
 		testError = null;
 		useCustomSchedule = false;
 		expandedTable = null;
+		showCreateFunction = false;
+		selectedFunctionPreview = null;
 		cronMinute = '*'; cronHour = '*'; cronDay = '*'; cronMonth = '*'; cronWeekday = '*';
 		showForm = true;
 		loadSchema();
+		loadFunctions();
 	}
 
 	function openEdit(job: CronJob) {
@@ -115,6 +191,7 @@
 		}
 		showForm = true;
 		loadSchema();
+		loadFunctions();
 	}
 
 	function handlePresetChange(value: string) {
@@ -297,6 +374,10 @@
 							</div>
 						</div>
 						<div class="flex items-center gap-2 shrink-0">
+							<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors" onclick={() => toggleRuns(job.id)} title="View run history">
+								<svg class="h-3.5 w-3.5 inline-block mr-1" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+								History
+							</button>
 							<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors" onclick={() => openEdit(job)}>Edit</button>
 							<button type="button" class="cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors {job.enabled ? 'border-gray-300 text-gray-600 hover:bg-gray-50' : 'border-green-300 text-green-700 hover:bg-green-50'}" onclick={() => toggleEnabled(job)}>{job.enabled ? 'Disable' : 'Enable'}</button>
 							<button type="button" class="cursor-pointer rounded p-1.5 text-gray-300 hover:bg-red-50 hover:text-red-500 transition-colors" onclick={() => (deleteConfirmId = job.id)} title="Delete job">
@@ -307,6 +388,52 @@
 					<div class="border-t border-gray-100 bg-gray-50 px-5 py-3">
 						<code class="text-xs font-mono text-gray-500 break-all">{job.action}</code>
 					</div>
+					<!-- Run History -->
+					{#if expandedRunsJobId === job.id}
+						<div class="border-t border-gray-200 bg-white px-5 py-3">
+							<h4 class="text-xs font-semibold text-gray-700 mb-2">Run History</h4>
+							{#if runsLoading}
+								<div class="space-y-1.5">
+									{#each Array(3) as _}
+										<div class="h-6 animate-pulse rounded bg-gray-100"></div>
+									{/each}
+								</div>
+							{:else if !runsMap[job.id] || runsMap[job.id].length === 0}
+								<p class="text-xs text-gray-400">No runs recorded yet.</p>
+							{:else}
+								<div class="overflow-x-auto">
+									<table class="w-full text-xs">
+										<thead>
+											<tr class="text-left text-gray-500">
+												<th class="pb-1.5 pr-4 font-medium">Timestamp</th>
+												<th class="pb-1.5 pr-4 font-medium">Duration</th>
+												<th class="pb-1.5 pr-4 font-medium">Status</th>
+												<th class="pb-1.5 font-medium">Result / Error</th>
+											</tr>
+										</thead>
+										<tbody>
+											{#each runsMap[job.id] as run}
+												<tr class="border-t border-gray-100">
+													<td class="py-1.5 pr-4 text-gray-600 whitespace-nowrap">{formatRunTime(run.started_at)}</td>
+													<td class="py-1.5 pr-4 text-gray-500 whitespace-nowrap">{run.duration_ms != null ? run.duration_ms + 'ms' : '-'}</td>
+													<td class="py-1.5 pr-4">
+														{#if run.status === 'success'}
+															<span class="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">Success</span>
+														{:else if run.status === 'error'}
+															<span class="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-700">Error</span>
+														{:else}
+															<span class="inline-flex items-center rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-700">Running</span>
+														{/if}
+													</td>
+													<td class="py-1.5 text-gray-500 max-w-xs truncate" title={run.error || run.result || ''}>{run.error || run.result || '-'}</td>
+												</tr>
+											{/each}
+										</tbody>
+									</table>
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{/each}
 		</div>
@@ -505,17 +632,117 @@
 					<label for="cron-action" class="block text-sm font-medium text-gray-700 mb-1">
 						{formActionType === 'sql' ? 'SQL Statement' : 'Function Name'}
 					</label>
-					<textarea
-						id="cron-action"
-						bind:value={formAction}
-						placeholder={formActionType === 'sql' ? "UPDATE users SET status = 'inactive' WHERE last_sign_in_at < now() - interval '90 days'" : "cleanup_expired_sessions"}
-						rows="3"
-						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
-					></textarea>
-					{#if formActionType === 'sql'}
-						<p class="mt-1 text-xs text-gray-400">Runs in your project's database. Use UPDATE, INSERT, or any statement that modifies data. The number of affected rows is recorded. Use the Test Run button below to verify your SQL before scheduling.</p>
+					{#if formActionType === 'rpc'}
+						<!-- RPC function picker -->
+						<div class="space-y-3">
+							{#if functionsLoading}
+								<div class="h-10 animate-pulse rounded-lg bg-gray-100"></div>
+							{:else}
+								<div class="flex items-center gap-2">
+									<select
+										class="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:outline-none bg-white"
+										bind:value={formAction}
+										onchange={(e) => {
+											const f = availableFunctions.find(fn => fn.name === (e.target as HTMLSelectElement).value);
+											selectedFunctionPreview = f || null;
+										}}
+									>
+										<option value="">Select a function...</option>
+										{#each availableFunctions as fn}
+											<option value={fn.name}>{fn.name} ({fn.language}, returns {fn.return_type})</option>
+										{/each}
+									</select>
+									<button
+										type="button"
+										class="cursor-pointer shrink-0 rounded-lg border border-eurobase-300 bg-eurobase-50 px-3 py-2 text-xs font-medium text-eurobase-700 hover:bg-eurobase-100 transition-colors"
+										onclick={() => { showCreateFunction = true; newFuncError = null; }}
+									>
+										Create New Function
+									</button>
+								</div>
+							{/if}
+
+							{#if selectedFunctionPreview}
+								<div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+									<p class="text-[10px] font-medium text-gray-500 uppercase mb-1">Selected function</p>
+									<p class="text-xs text-gray-700 font-mono">{selectedFunctionPreview.name}() -> {selectedFunctionPreview.return_type}</p>
+									<p class="text-[10px] text-gray-400 mt-0.5">Language: {selectedFunctionPreview.language}</p>
+								</div>
+							{/if}
+
+							{#if showCreateFunction}
+								<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/30 p-4 space-y-3">
+									<div class="flex items-center justify-between">
+										<h4 class="text-sm font-semibold text-gray-900">Create New Function</h4>
+										<button type="button" class="cursor-pointer text-gray-400 hover:text-gray-600" onclick={() => (showCreateFunction = false)}>
+											<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+										</button>
+									</div>
+									{#if newFuncError}
+										<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{newFuncError}</div>
+									{/if}
+									<div>
+										<label for="func-name" class="block text-xs font-medium text-gray-700 mb-1">Function Name</label>
+										<input id="func-name" type="text" bind:value={newFuncName} placeholder="e.g. cleanup_expired_sessions"
+											class="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
+									</div>
+									<div class="grid grid-cols-2 gap-3">
+										<div>
+											<label for="func-lang" class="block text-xs font-medium text-gray-700 mb-1">Language</label>
+											<select id="func-lang" bind:value={newFuncLanguage}
+												class="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-eurobase-500 focus:outline-none bg-white">
+												<option value="plpgsql">PL/pgSQL</option>
+												<option value="sql">SQL</option>
+											</select>
+										</div>
+										<div>
+											<label for="func-returns" class="block text-xs font-medium text-gray-700 mb-1">Returns</label>
+											<select id="func-returns" bind:value={newFuncReturns}
+												class="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-eurobase-500 focus:outline-none bg-white">
+												<option value="void">void</option>
+												<option value="text">text</option>
+												<option value="integer">integer</option>
+												<option value="bigint">bigint</option>
+												<option value="boolean">boolean</option>
+												<option value="jsonb">jsonb</option>
+												<option value="trigger">trigger</option>
+											</select>
+										</div>
+									</div>
+									<div>
+										<label for="func-body" class="block text-xs font-medium text-gray-700 mb-1">Function Body</label>
+										<textarea
+											id="func-body"
+											bind:value={newFuncBody}
+											placeholder={newFuncLanguage === 'plpgsql' ? "BEGIN\n  DELETE FROM sessions WHERE expires_at < now();\nEND;" : "DELETE FROM sessions WHERE expires_at < now();"}
+											rows="5"
+											class="w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
+										></textarea>
+									</div>
+									<div class="flex justify-end">
+										<button
+											type="button"
+											class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50"
+											disabled={!newFuncName.trim() || !newFuncBody.trim() || newFuncSaving}
+											onclick={handleCreateNewFunction}
+										>
+											{newFuncSaving ? 'Creating...' : 'Create Function'}
+										</button>
+									</div>
+								</div>
+							{/if}
+
+							<p class="text-xs text-gray-400">Called as <code class="bg-gray-100 rounded px-1">SELECT function_name()</code> in your project schema. Zero-argument functions only.</p>
+						</div>
 					{:else}
-						<p class="mt-1 text-xs text-gray-400">Called as <code class="bg-gray-100 rounded px-1">SELECT function_name()</code> in your project schema.</p>
+						<textarea
+							id="cron-action"
+							bind:value={formAction}
+							placeholder="UPDATE users SET status = 'inactive' WHERE last_sign_in_at < now() - interval '90 days'"
+							rows="3"
+							class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
+						></textarea>
+						<p class="mt-1 text-xs text-gray-400">Runs in your project's database. Use UPDATE, INSERT, or any statement that modifies data. The number of affected rows is recorded. Use the Test Run button below to verify your SQL before scheduling.</p>
 					{/if}
 				</div>
 

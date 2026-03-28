@@ -43,7 +43,25 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 			"action_type", job.ActionType,
 		)
 
+		// Insert a running record into cron_job_runs.
+		var runID string
+		insertErr := e.pool.QueryRow(ctx,
+			`INSERT INTO cron_job_runs (job_id, project_id, status)
+			 VALUES ($1, $2, 'running')
+			 RETURNING id`,
+			job.ID, job.ProjectID,
+		).Scan(&runID)
+		if insertErr != nil {
+			slog.Error("failed to insert cron run record",
+				"job_id", job.ID,
+				"error", insertErr,
+			)
+		}
+
+		startTime := time.Now()
 		execErr := e.executeJob(ctx, job)
+		durationMs := int(time.Since(startTime).Milliseconds())
+
 		if execErr != nil {
 			slog.Error("cron job execution failed",
 				"job_id", job.ID,
@@ -55,6 +73,37 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 				"job_id", job.ID,
 				"name", job.Name,
 			)
+		}
+
+		// Update the cron_job_runs record with results.
+		if runID != "" {
+			status := "success"
+			var resultText *string
+			var errorText *string
+			if execErr != nil {
+				status = "error"
+				errStr := execErr.Error()
+				errorText = &errStr
+			} else {
+				r := fmt.Sprintf("completed in %dms", durationMs)
+				resultText = &r
+			}
+			_, updateErr := e.pool.Exec(ctx,
+				`UPDATE cron_job_runs SET
+					finished_at = now(),
+					duration_ms = $2,
+					status      = $3,
+					result      = $4,
+					error       = $5
+				 WHERE id = $1`,
+				runID, durationMs, status, resultText, errorText,
+			)
+			if updateErr != nil {
+				slog.Error("failed to update cron run record",
+					"run_id", runID,
+					"error", updateErr,
+				)
+			}
 		}
 
 		if recordErr := e.svc.RecordRun(ctx, job.ID, execErr); recordErr != nil {

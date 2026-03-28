@@ -623,6 +623,121 @@ func DropIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, indexName st
 	return nil
 }
 
+// DBFunction represents a PostgreSQL function in a schema.
+type DBFunction struct {
+	Name       string `json:"name"`
+	Language   string `json:"language"`
+	ReturnType string `json:"return_type"`
+}
+
+// ListFunctions returns all user-defined functions in the given schema.
+func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]DBFunction, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT routine_name, COALESCE(external_language, 'sql'), data_type
+		 FROM information_schema.routines
+		 WHERE specific_schema = $1 AND routine_type = 'FUNCTION'
+		 ORDER BY routine_name`, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("list functions: %w", err)
+	}
+	defer rows.Close()
+
+	funcs := make([]DBFunction, 0)
+	for rows.Next() {
+		var f DBFunction
+		if err := rows.Scan(&f.Name, &f.Language, &f.ReturnType); err != nil {
+			return nil, fmt.Errorf("scan function: %w", err)
+		}
+		funcs = append(funcs, f)
+	}
+	return funcs, nil
+}
+
+// CreateFunctionRequest describes a zero-arg function to create.
+type CreateFunctionRequest struct {
+	Name     string `json:"name"`
+	Body     string `json:"body"`
+	Returns  string `json:"returns"`
+	Language string `json:"language"`
+}
+
+// allowedFunctionLanguages are the languages permitted for user functions.
+var allowedFunctionLanguages = map[string]bool{
+	"sql":     true,
+	"plpgsql": true,
+}
+
+// allowedReturnTypes are the return types permitted for user functions.
+var allowedReturnTypes = map[string]bool{
+	"void":    true,
+	"text":    true,
+	"integer": true,
+	"bigint":  true,
+	"boolean": true,
+	"jsonb":   true,
+	"json":    true,
+	"numeric": true,
+	"trigger": true,
+}
+
+// CreateFunction creates or replaces a zero-argument function in the schema.
+func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, req CreateFunctionRequest) error {
+	if err := validateIdentifier(req.Name, "function"); err != nil {
+		return err
+	}
+
+	lang := strings.ToLower(strings.TrimSpace(req.Language))
+	if lang == "" {
+		lang = "plpgsql"
+	}
+	if !allowedFunctionLanguages[lang] {
+		return fmt.Errorf("unsupported language %q; use 'sql' or 'plpgsql'", req.Language)
+	}
+
+	returns := strings.ToLower(strings.TrimSpace(req.Returns))
+	if returns == "" {
+		returns = "void"
+	}
+	if !allowedReturnTypes[returns] {
+		return fmt.Errorf("unsupported return type %q", req.Returns)
+	}
+
+	if strings.TrimSpace(req.Body) == "" {
+		return fmt.Errorf("function body cannot be empty")
+	}
+
+	// Reject dollar-quoting in body to prevent escaping out of the $$ block.
+	if strings.Contains(req.Body, "$$") {
+		return fmt.Errorf("function body cannot contain '$$'")
+	}
+
+	sql := fmt.Sprintf(
+		"CREATE OR REPLACE FUNCTION %s.%s() RETURNS %s LANGUAGE %s AS $$ %s $$",
+		quoteIdent(schemaName), quoteIdent(req.Name),
+		returns, lang, req.Body,
+	)
+
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("create function: %w", err)
+	}
+
+	return nil
+}
+
+// DropFunction drops a zero-argument function from the schema.
+func DropFunction(ctx context.Context, pool *pgxpool.Pool, schemaName, funcName string) error {
+	if err := validateIdentifier(funcName, "function"); err != nil {
+		return err
+	}
+
+	sql := fmt.Sprintf("DROP FUNCTION IF EXISTS %s.%s()", quoteIdent(schemaName), quoteIdent(funcName))
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("drop function: %w", err)
+	}
+
+	return nil
+}
+
 // AlterColumnDefault sets or drops the default value of a column.
 func AlterColumnDefault(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, col string, defaultVal *string) error {
 	if err := validateIdentifier(tableName, "table"); err != nil {

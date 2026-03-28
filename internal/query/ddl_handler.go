@@ -572,6 +572,118 @@ func handleDropIndex(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// HandleFunctions returns a chi.Router for schema function operations.
+// Mounted at /platform/projects/{id}/schema/functions
+func HandleFunctions(pool *pgxpool.Pool) chi.Router {
+	r := chi.NewRouter()
+	r.Get("/", handleListFunctions(pool))
+	r.Post("/", handleCreateFunction(pool))
+	r.Delete("/{funcName}", handleDropFunction(pool))
+	return r
+}
+
+func handleListFunctions(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			jsonError(w, "project ID is required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName)
+		if err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		funcs, err := ListFunctions(r.Context(), pool, schemaName)
+		if err != nil {
+			slog.Error("list functions failed", "error", err, "schema", schemaName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		jsonResponse(w, funcs, http.StatusOK)
+	}
+}
+
+func handleCreateFunction(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			jsonError(w, "project ID is required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName)
+		if err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var req CreateFunctionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := CreateFunction(r.Context(), pool, schemaName, req); err != nil {
+			slog.Error("create function failed", "error", err, "schema", schemaName, "function", req.Name)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "create_function", req.Name, nil, map[string]any{
+			"language": req.Language,
+			"returns":  req.Returns,
+		})
+
+		slog.Info("function created", "schema", schemaName, "function", req.Name)
+		jsonResponse(w, map[string]string{
+			"status":   "created",
+			"function": req.Name,
+		}, http.StatusCreated)
+	}
+}
+
+func handleDropFunction(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		funcName := chi.URLParam(r, "funcName")
+
+		if projectID == "" || funcName == "" {
+			jsonError(w, "project ID and function name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName)
+		if err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		if err := DropFunction(r.Context(), pool, schemaName, funcName); err != nil {
+			slog.Error("drop function failed", "error", err, "schema", schemaName, "function", funcName)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "drop_function", funcName, nil, nil)
+
+		slog.Info("function dropped", "schema", schemaName, "function", funcName)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func handleAlterColumn(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")

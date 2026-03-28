@@ -233,6 +233,45 @@ func (s *CronService) RecordRun(ctx context.Context, jobID string, runErr error)
 	return nil
 }
 
+// CronJobRun represents a single execution record for a cron job.
+type CronJobRun struct {
+	ID         string     `json:"id"`
+	JobID      string     `json:"job_id"`
+	ProjectID  string     `json:"project_id"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	DurationMs *int       `json:"duration_ms"`
+	Status     string     `json:"status"`
+	Result     *string    `json:"result"`
+	Error      *string    `json:"error"`
+}
+
+// ListRuns returns the most recent execution records for a cron job.
+func (s *CronService) ListRuns(ctx context.Context, jobID string, limit int) ([]CronJobRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, job_id, project_id, started_at, finished_at, duration_ms, status, result, error
+		 FROM cron_job_runs WHERE job_id = $1 ORDER BY started_at DESC LIMIT $2`, jobID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query cron job runs: %w", err)
+	}
+	defer rows.Close()
+
+	runs := make([]CronJobRun, 0)
+	for rows.Next() {
+		var r CronJobRun
+		if err := rows.Scan(&r.ID, &r.JobID, &r.ProjectID, &r.StartedAt, &r.FinishedAt,
+			&r.DurationMs, &r.Status, &r.Result, &r.Error); err != nil {
+			return nil, fmt.Errorf("scan cron job run: %w", err)
+		}
+		runs = append(runs, r)
+	}
+	return runs, nil
+}
+
 // Count returns the number of cron jobs for a project (for plan limit enforcement).
 func (s *CronService) Count(ctx context.Context, projectID string) (int, error) {
 	var count int
