@@ -868,8 +868,29 @@ on push to main:
 | Feature | Effort | Status |
 |---------|--------|--------|
 | Team collaboration / RBAC | 1 week | Planned |
-| CLI tool (Go binary, Homebrew) | 1 week | Planned |
+| CLI tool v1 (Go binary, Homebrew) | 1 week | Planned |
 | Built-in automations (Layer 1 — token cleanup, log retention, usage alerts) | 2 days | Planned |
+
+### CLI Tool — Scope (v1 vs v2)
+
+**v1 (1 week):** Daily developer workflow
+- login, projects list/create, init, status
+- db tables, db query, db dump
+- migrations up/down/status
+- logs --tail (streaming)
+- keys show/regenerate
+- functions list/create, cron list/logs
+
+**v2 (2 weeks, later):** Advanced features
+- `eurobase start` — local dev stack via Docker (Postgres, gateway, Redis, MinIO)
+- `eurobase gen types` — TypeScript type generation from schema
+- DB inspection (bloat, locks, slow queries)
+- Seeding (seed.sql)
+- Shell completion
+
+Supabase CLI comparison: v1 covers the essential daily workflow. Main gaps vs
+Supabase: no local dev stack, no type generation, no preview branches. These
+are planned for v2.
 
 ### Automation Strategy (3 Layers)
 
