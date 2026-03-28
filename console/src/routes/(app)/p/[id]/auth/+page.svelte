@@ -289,20 +289,56 @@
 			<div>
 				<h3 class="text-sm font-semibold text-gray-900">Auth Methods</h3>
 				<div class="mt-3 space-y-3">
-					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3">
-						<div>
-							<p class="text-sm font-medium text-gray-900">Email + Password</p>
-							<p class="text-xs text-gray-500">Users sign in with email and password</p>
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Email + Password</p>
+								<p class="text-xs text-gray-500">Users sign in with email and password</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={emailPasswordEnabled}
+								onclick={() => emailPasswordEnabled = !emailPasswordEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {emailPasswordEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {emailPasswordEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
 						</div>
-						<button
-							type="button"
-							role="switch"
-							aria-checked={emailPasswordEnabled}
-							onclick={() => emailPasswordEnabled = !emailPasswordEnabled}
-							class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {emailPasswordEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
-						>
-							<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {emailPasswordEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
-						</button>
+						{#if emailPasswordEnabled}
+							<div class="mt-3 space-y-3 border-t border-gray-100 pt-3">
+								<div class="flex items-start justify-between">
+									<div>
+										<p class="text-xs font-medium text-gray-700">Require email confirmation</p>
+										{#if emailConfigured === false}
+											<p class="text-[10px] text-amber-500 mt-0.5">Requires email sending to be configured</p>
+										{:else}
+											<p class="text-[10px] text-gray-400 mt-0.5">Users must verify their email before signing in</p>
+										{/if}
+									</div>
+									<button
+										type="button"
+										role="switch"
+										aria-checked={requireEmailConfirmation}
+										onclick={() => requireEmailConfirmation = !requireEmailConfirmation}
+										class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {requireEmailConfirmation ? 'bg-eurobase-600' : 'bg-gray-200'}"
+									>
+										<span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {requireEmailConfirmation ? 'translate-x-4' : 'translate-x-0'}"></span>
+									</button>
+								</div>
+								<div>
+									<label for="pwd-min" class="block text-xs font-medium text-gray-700">Minimum password length</label>
+									<input
+										id="pwd-min"
+										type="number"
+										min="8"
+										max="128"
+										bind:value={passwordMinLength}
+										class="mt-1 block w-20 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+									/>
+								</div>
+							</div>
+						{/if}
 					</div>
 
 					<div class="rounded-lg border border-gray-200 px-4 py-3">
@@ -445,40 +481,8 @@
 
 			<!-- Settings -->
 			<div>
-				<h3 class="text-sm font-semibold text-gray-900">Settings</h3>
+				<h3 class="text-sm font-semibold text-gray-900">Session Settings</h3>
 				<div class="mt-3 space-y-4">
-					<div class="flex items-start justify-between">
-						<div>
-							<p class="text-sm font-medium text-gray-700">Require email confirmation</p>
-							{#if emailConfigured === false}
-								<p class="text-xs text-amber-500 mt-0.5">Requires Scaleway TEM configuration</p>
-							{:else}
-								<p class="text-xs text-gray-400 mt-0.5">Users must verify their email before signing in</p>
-							{/if}
-						</div>
-						<button
-							type="button"
-							role="switch"
-							aria-checked={requireEmailConfirmation}
-							onclick={() => requireEmailConfirmation = !requireEmailConfirmation}
-							class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {requireEmailConfirmation ? 'bg-eurobase-600' : 'bg-gray-200'}"
-						>
-							<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {requireEmailConfirmation ? 'translate-x-5' : 'translate-x-0'}"></span>
-						</button>
-					</div>
-
-					<div>
-						<label for="pwd-min" class="block text-sm font-medium text-gray-700">Minimum password length</label>
-						<input
-							id="pwd-min"
-							type="number"
-							min="8"
-							max="128"
-							bind:value={passwordMinLength}
-							class="mt-1.5 block w-24 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
-						/>
-					</div>
-
 					<div>
 						<label for="session-dur" class="block text-sm font-medium text-gray-700">Session duration</label>
 						<select
