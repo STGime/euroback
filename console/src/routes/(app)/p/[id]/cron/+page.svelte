@@ -66,8 +66,13 @@
 	}
 
 	function insertIntoEditor(text: string) {
-		const needsSpace = formAction.length > 0 && !formAction.endsWith(' ') && !formAction.endsWith('\n') && !formAction.endsWith('\t') && !formAction.endsWith('(') && !formAction.endsWith('.');
-		formAction = formAction + (needsSpace ? ' ' : '') + text;
+		if (showCreateFunction) {
+			const needsSpace = newFuncBody.length > 0 && !newFuncBody.endsWith(' ') && !newFuncBody.endsWith('\n') && !newFuncBody.endsWith('\t') && !newFuncBody.endsWith('(') && !newFuncBody.endsWith('.');
+			newFuncBody = newFuncBody + (needsSpace ? ' ' : '') + text;
+		} else {
+			const needsSpace = formAction.length > 0 && !formAction.endsWith(' ') && !formAction.endsWith('\n') && !formAction.endsWith('\t') && !formAction.endsWith('(') && !formAction.endsWith('.');
+			formAction = formAction + (needsSpace ? ' ' : '') + text;
+		}
 	}
 
 	// Delete confirm
@@ -453,7 +458,7 @@
 			</div>
 			<div class="flex flex-1 min-h-0">
 				<!-- Schema browser (left side) -->
-				{#if formActionType === 'sql'}
+				{#if formActionType === 'sql' || showCreateFunction}
 					<div class="w-56 shrink-0 border-r border-gray-200 overflow-y-auto bg-gray-50">
 						<div class="px-3 py-2 border-b border-gray-200">
 							<p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Tables</p>
@@ -715,9 +720,9 @@
 										<textarea
 											id="func-body"
 											bind:value={newFuncBody}
-											placeholder={newFuncLanguage === 'plpgsql' ? "BEGIN\n  DELETE FROM sessions WHERE expires_at < now();\nEND;" : "DELETE FROM sessions WHERE expires_at < now();"}
+											placeholder={newFuncLanguage === 'plpgsql' ? "BEGIN\n  -- your logic here\nEND;" : "-- your SQL here"}
 											rows="5"
-											class="w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
+											class="w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-mono placeholder-gray-600 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
 										></textarea>
 									</div>
 									<div class="flex justify-end">
