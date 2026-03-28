@@ -937,6 +937,7 @@ Triggered by HTTP request, webhook, or schedule.
 | Feature | Effort | Priority |
 |---------|--------|----------|
 | Edge Functions (Layer 3 — Scaleway Serverless) | 2 weeks | High |
+| Encrypt OAuth secrets at application layer (AES-256, server key from env) | 2 days | High |
 | Python SDK | 1 week | High |
 | Image transformations (resize/crop) | 1 week | Medium |
 | MFA / TOTP | 1 week | Medium |
