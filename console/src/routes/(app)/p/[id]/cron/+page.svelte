@@ -699,7 +699,7 @@
 											<label for="func-returns" class="block text-xs font-medium text-gray-700 mb-1">Returns</label>
 											<select id="func-returns" bind:value={newFuncReturns}
 												class="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-900 focus:border-eurobase-500 focus:outline-none bg-white">
-												<option value="void">void</option>
+												<option value="void">void (no return value)</option>
 												<option value="text">text</option>
 												<option value="integer">integer</option>
 												<option value="bigint">bigint</option>
@@ -707,6 +707,7 @@
 												<option value="jsonb">jsonb</option>
 												<option value="trigger">trigger</option>
 											</select>
+											<p class="text-[10px] text-gray-400 mt-0.5">Use <strong>void</strong> for cron jobs. Other types are for functions called from the SDK via <code class="bg-gray-100 rounded px-0.5">eb.db.rpc('name')</code> where the return value is sent to the caller.</p>
 										</div>
 									</div>
 									<div>
