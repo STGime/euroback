@@ -21,7 +21,7 @@
 		{ label: 'API', href: '/api', icon: 'api' },
 		{ label: 'Connect', href: '/connect', icon: 'connect' },
 		{ label: 'Webhooks', href: '/webhooks', icon: 'webhooks' },
-		{ label: 'Cron', href: '/cron', icon: 'cron' },
+		{ label: 'Cron & RPC', href: '/cron', icon: 'cron' },
 		{ label: 'Settings', href: '/settings', icon: 'settings' }
 	];
 
