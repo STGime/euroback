@@ -938,6 +938,7 @@ Triggered by HTTP request, webhook, or schedule.
 |---------|--------|----------|
 | Edge Functions (Layer 3 — Scaleway Serverless) | 2 weeks | High |
 | Encrypt OAuth secrets at application layer (AES-256, server key from env) | 2 days | High |
+| Console: skip sending masked OAuth secrets on save (only send if changed) | 0.5 day | Medium |
 | Python SDK | 1 week | High |
 | Image transformations (resize/crop) | 1 week | Medium |
 | MFA / TOTP | 1 week | Medium |
