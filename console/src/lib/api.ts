@@ -12,8 +12,15 @@ export interface ProviderConfig {
 	enabled: boolean;
 }
 
+export interface OAuthProviderConfig {
+	enabled: boolean;
+	client_id: string;
+	client_secret: string;
+}
+
 export interface AuthConfig {
 	providers: Record<string, ProviderConfig>;
+	oauth_providers?: Record<string, OAuthProviderConfig>;
 	password_min_length: number;
 	require_email_confirmation: boolean;
 	session_duration: string;

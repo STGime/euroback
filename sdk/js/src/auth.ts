@@ -47,6 +47,7 @@ export type AuthStateChangeCallback = (event: AuthEvent, session: AuthSession | 
 
 export class AuthClient {
   private http: HttpClient
+  private config: EurobaseConfig
   private session: AuthSession | null = null
   private listeners: AuthStateChangeCallback[] = []
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -54,6 +55,7 @@ export class AuthClient {
 
   constructor(config: EurobaseConfig, http: HttpClient) {
     this.http = http
+    this.config = config
     this.restoreSession()
   }
 
@@ -127,6 +129,73 @@ export class AuthClient {
     this.setSession(result)
     this.emit('SIGNED_IN', result)
     return { data: result, error: null }
+  }
+
+  /**
+   * Initiate OAuth sign-in by redirecting the browser to the provider's consent screen.
+   * After the user authorizes, they will be redirected back to `redirectTo` with tokens
+   * in the URL hash fragment.
+   */
+  signInWithOAuth(provider: string, options?: { redirectTo?: string }): void {
+    const baseUrl = this.config.url.replace(/\/+$/, '')
+    const redirectTo = options?.redirectTo ?? (typeof window !== 'undefined' ? window.location.origin : '')
+    const url = `${baseUrl}/v1/auth/oauth/${encodeURIComponent(provider)}?redirect_url=${encodeURIComponent(redirectTo)}`
+    if (typeof window !== 'undefined') {
+      window.location.href = url
+    }
+  }
+
+  /**
+   * Handle the OAuth callback by reading tokens from the URL hash fragment.
+   * Call this on your callback page after the OAuth redirect.
+   * Returns the session if tokens are found, or null.
+   */
+  handleOAuthCallback(): { data: AuthSession | null; error: string | null } {
+    if (typeof window === 'undefined') {
+      return { data: null, error: 'not in browser environment' }
+    }
+
+    // Check for error in query params.
+    const searchParams = new URLSearchParams(window.location.search)
+    const errorParam = searchParams.get('error')
+    if (errorParam) {
+      const errorDesc = searchParams.get('error_description') || errorParam
+      return { data: null, error: errorDesc }
+    }
+
+    // Read tokens from URL hash fragment.
+    const hash = window.location.hash.substring(1)
+    if (!hash) {
+      return { data: null, error: null }
+    }
+
+    const params = new URLSearchParams(hash)
+    const accessToken = params.get('access_token')
+    const refreshToken = params.get('refresh_token')
+    const tokenType = params.get('token_type') || 'bearer'
+    const expiresIn = parseInt(params.get('expires_in') || '3600', 10)
+
+    if (!accessToken || !refreshToken) {
+      return { data: null, error: null }
+    }
+
+    const session: AuthSession = {
+      access_token: accessToken,
+      token_type: tokenType,
+      expires_in: expiresIn,
+      refresh_token: refreshToken,
+      user: { id: '', email: '', created_at: '', updated_at: '' },
+    }
+
+    this.setSession(session)
+    this.emit('SIGNED_IN', session)
+
+    // Clean the URL hash.
+    if (typeof window.history !== 'undefined') {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    }
+
+    return { data: session, error: null }
   }
 
   /** Get the current user from the server. */

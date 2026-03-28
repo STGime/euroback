@@ -47,6 +47,12 @@
 	let passwordMinLength = $state(8);
 	let sessionDuration = $state('168h');
 	let redirectUrls = $state('http://localhost:3000');
+	let googleEnabled = $state(false);
+	let googleClientId = $state('');
+	let googleClientSecret = $state('');
+	let githubEnabled = $state(false);
+	let githubClientId = $state('');
+	let githubClientSecret = $state('');
 	let saving = $state(false);
 	let saveMessage = $state('');
 	let saveError = $state('');
@@ -67,6 +73,18 @@
 			passwordMinLength = cfg.password_min_length;
 			sessionDuration = cfg.session_duration;
 			redirectUrls = cfg.redirect_urls.join('\n');
+
+			const oauthCfg = projectCtx.project?.auth_config?.oauth_providers;
+			if (oauthCfg?.google) {
+				googleEnabled = oauthCfg.google.enabled ?? false;
+				googleClientId = oauthCfg.google.client_id ?? '';
+				googleClientSecret = oauthCfg.google.client_secret ?? '';
+			}
+			if (oauthCfg?.github) {
+				githubEnabled = oauthCfg.github.enabled ?? false;
+				githubClientId = oauthCfg.github.client_id ?? '';
+				githubClientSecret = oauthCfg.github.client_secret ?? '';
+			}
 		}
 	});
 
@@ -77,6 +95,10 @@
 		try {
 			const config: AuthConfig = {
 				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled } },
+				oauth_providers: {
+					google: { enabled: googleEnabled, client_id: googleClientId, client_secret: googleClientSecret },
+					github: { enabled: githubEnabled, client_id: githubClientId, client_secret: githubClientSecret }
+				},
 				password_min_length: passwordMinLength,
 				require_email_confirmation: requireEmailConfirmation,
 				session_duration: sessionDuration,
@@ -333,13 +355,91 @@
 						<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
 					</div>
 
-					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
-						<div>
-							<p class="text-sm font-medium text-gray-900">Social Login (Google, GitHub)</p>
-							<p class="text-xs text-gray-500">Let users sign in with existing accounts</p>
+					<!-- Google OAuth -->
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Google</p>
+								<p class="text-xs text-gray-500">Sign in with Google account</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={googleEnabled}
+								onclick={() => googleEnabled = !googleEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {googleEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {googleEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
 						</div>
-						<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
+						{#if googleEnabled}
+							<div class="mt-3 space-y-3">
+								<div>
+									<label for="google-client-id" class="block text-xs font-medium text-gray-700">Client ID</label>
+									<input id="google-client-id" type="text" bind:value={googleClientId} placeholder="123456789.apps.googleusercontent.com" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div>
+									<label for="google-client-secret" class="block text-xs font-medium text-gray-700">Client Secret</label>
+									<input id="google-client-secret" type="password" bind:value={googleClientSecret} placeholder="GOCSPX-..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div class="rounded-lg bg-eurobase-50 border border-eurobase-100 p-3">
+									<p class="text-xs font-medium text-eurobase-800">Setup instructions</p>
+									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
+										<li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" class="underline">Google Cloud Console</a></li>
+										<li>Create OAuth 2.0 credentials (Web application)</li>
+										<li>Add your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/google/callback</code> as an authorized redirect URI</li>
+										<li>Copy the Client ID and Client Secret here</li>
+									</ol>
+								</div>
+							</div>
+						{/if}
 					</div>
+
+					<!-- GitHub OAuth -->
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">GitHub</p>
+								<p class="text-xs text-gray-500">Sign in with GitHub account</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={githubEnabled}
+								onclick={() => githubEnabled = !githubEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {githubEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {githubEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+						{#if githubEnabled}
+							<div class="mt-3 space-y-3">
+								<div>
+									<label for="github-client-id" class="block text-xs font-medium text-gray-700">Client ID</label>
+									<input id="github-client-id" type="text" bind:value={githubClientId} placeholder="Iv1.abc123..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div>
+									<label for="github-client-secret" class="block text-xs font-medium text-gray-700">Client Secret</label>
+									<input id="github-client-secret" type="password" bind:value={githubClientSecret} placeholder="secret_..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div class="rounded-lg bg-eurobase-50 border border-eurobase-100 p-3">
+									<p class="text-xs font-medium text-eurobase-800">Setup instructions</p>
+									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
+										<li>Go to <a href="https://github.com/settings/developers" target="_blank" rel="noopener" class="underline">GitHub Developer Settings</a></li>
+										<li>Create a new OAuth App</li>
+										<li>Set Authorization callback URL to your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/github/callback</code></li>
+										<li>Copy the Client ID and Client Secret here</li>
+									</ol>
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					{#if googleEnabled || githubEnabled}
+						<div class="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
+							<p class="text-xs text-blue-700">Social login uses third-party providers only to verify user identity. No application data is shared. All user records remain in EU infrastructure.</p>
+						</div>
+					{/if}
 				</div>
 			</div>
 

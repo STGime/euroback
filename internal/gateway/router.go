@@ -223,6 +223,8 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Post("/resend-verification", enduser.HandleResendVerification(endUserAuthSvc))
 			r.Post("/request-magic-link", enduser.HandleRequestMagicLink(endUserAuthSvc))
 			r.Post("/signin-magic-link", enduser.HandleSignInWithMagicLink(endUserAuthSvc))
+			r.Get("/oauth/{provider}", enduser.HandleOAuthRedirect(endUserAuthSvc))
+			r.Get("/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
 
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {

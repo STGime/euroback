@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/email"
+	"github.com/eurobase/euroback/internal/oauth"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
@@ -518,6 +519,126 @@ func (s *AuthService) SignInWithMagicLink(ctx context.Context, schemaName, jwtSe
 	_, _ = s.pool.Exec(ctx, updateQ, userID)
 
 	slog.Info("end-user signed in via magic link", "schema", schemaName, "user_id", user.ID, "email", user.Email)
+
+	sessionDurationSecs := config.SessionDurationSeconds()
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err := s.createRefreshToken(ctx, schemaName, user.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuthResponse{
+		AccessToken:  accessToken,
+		TokenType:    "bearer",
+		ExpiresIn:    expiresIn,
+		RefreshToken: refreshToken,
+		User:         user,
+	}, nil
+}
+
+// SignInWithOAuth exchanges an OAuth authorization code for user info,
+// finds or creates the user, and returns an auth session.
+func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret, projectID string, config tenant.AuthConfig, providerName, code, redirectURL string) (*AuthResponse, error) {
+	// Get OAuth provider config from auth_config.
+	providerConfig, ok := config.GetOAuthProvider(providerName)
+	if !ok {
+		return nil, fmt.Errorf("oauth provider %q is not enabled", providerName)
+	}
+
+	// Get the provider implementation.
+	provider, err := oauth.Get(providerName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Exchange code for user info.
+	userInfo, err := provider.ExchangeCode(ctx, providerConfig.ClientID, providerConfig.ClientSecret, code, redirectURL)
+	if err != nil {
+		return nil, fmt.Errorf("oauth exchange failed: %w", err)
+	}
+
+	var user User
+	var metadataJSON []byte
+	var bannedAt *time.Time
+
+	// Try to find user by provider + provider_user_id.
+	findQ := fmt.Sprintf(
+		`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
+		 FROM %s.users
+		 WHERE provider = $1 AND provider_user_id = $2`,
+		quoteIdent(schemaName),
+	)
+	err = s.pool.QueryRow(ctx, findQ, providerName, userInfo.ProviderID).
+		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+
+	if err == pgx.ErrNoRows {
+		// Try to find existing user by email (link accounts).
+		emailLower := strings.ToLower(strings.TrimSpace(userInfo.Email))
+		findByEmailQ := fmt.Sprintf(
+			`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
+			 FROM %s.users
+			 WHERE email = $1`,
+			quoteIdent(schemaName),
+		)
+		err = s.pool.QueryRow(ctx, findByEmailQ, emailLower).
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+
+		if err == pgx.ErrNoRows {
+			// Create new user.
+			var displayName *string
+			if userInfo.Name != "" {
+				displayName = &userInfo.Name
+			}
+			var avatarURL *string
+			if userInfo.AvatarURL != "" {
+				avatarURL = &userInfo.AvatarURL
+			}
+
+			insertQ := fmt.Sprintf(
+				`INSERT INTO %s.users (email, display_name, avatar_url, provider, provider_user_id, email_confirmed_at, metadata)
+				 VALUES ($1, $2, $3, $4, $5, now(), '{}'::jsonb)
+				 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
+				quoteIdent(schemaName),
+			)
+			err = s.pool.QueryRow(ctx, insertQ, emailLower, displayName, avatarURL, providerName, userInfo.ProviderID).
+				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+			if err != nil {
+				return nil, fmt.Errorf("create oauth user: %w", err)
+			}
+			_ = json.Unmarshal(metadataJSON, &user.Metadata)
+
+			slog.Info("end-user signed up via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
+		} else if err != nil {
+			return nil, fmt.Errorf("query user by email: %w", err)
+		} else {
+			// Link existing account: set provider + provider_user_id.
+			_ = json.Unmarshal(metadataJSON, &user.Metadata)
+			linkQ := fmt.Sprintf(
+				`UPDATE %s.users SET provider = $1, provider_user_id = $2, email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $3`,
+				quoteIdent(schemaName),
+			)
+			_, _ = s.pool.Exec(ctx, linkQ, providerName, userInfo.ProviderID, user.ID)
+			slog.Info("end-user linked oauth account", "schema", schemaName, "user_id", user.ID, "provider", providerName)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("query user by provider: %w", err)
+	} else {
+		_ = json.Unmarshal(metadataJSON, &user.Metadata)
+	}
+
+	if bannedAt != nil {
+		return nil, fmt.Errorf("account suspended")
+	}
+
+	// Update last_sign_in_at.
+	updateQ := fmt.Sprintf(`UPDATE %s.users SET last_sign_in_at = now() WHERE id = $1`, quoteIdent(schemaName))
+	_, _ = s.pool.Exec(ctx, updateQ, user.ID)
+
+	slog.Info("end-user signed in via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
 
 	sessionDurationSecs := config.SessionDurationSeconds()
 	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)

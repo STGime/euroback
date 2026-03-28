@@ -2,12 +2,16 @@ package enduser
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/oauth"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/go-chi/chi/v5"
 )
 
 // HandleSignUp returns an HTTP handler for POST /v1/auth/signup.
@@ -328,6 +332,161 @@ func HandleResendVerification(svc *AuthService) http.HandlerFunc {
 
 		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
 	}
+}
+
+// HandleOAuthRedirect returns an HTTP handler for GET /v1/auth/oauth/{provider}.
+// Generates a state token, builds the auth URL, and redirects the browser to the provider.
+func HandleOAuthRedirect(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		providerName := chi.URLParam(r, "provider")
+
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		providerConfig, ok := config.GetOAuthProvider(providerName)
+		if !ok {
+			writeJSON(w, map[string]string{"error": fmt.Sprintf("oauth provider %q is not enabled", providerName)}, http.StatusBadRequest)
+			return
+		}
+
+		clientRedirectURL := r.URL.Query().Get("redirect_url")
+		if clientRedirectURL == "" {
+			writeJSON(w, map[string]string{"error": "redirect_url query parameter is required"}, http.StatusBadRequest)
+			return
+		}
+
+		// Validate redirect_url against allowed list.
+		if !config.IsRedirectURLAllowed(clientRedirectURL) {
+			writeJSON(w, map[string]string{"error": "redirect_url is not in the allowed redirect URLs"}, http.StatusBadRequest)
+			return
+		}
+
+		// Generate state token for CSRF protection.
+		state, err := generateRandomHex(16)
+		if err != nil {
+			slog.Error("oauth: failed to generate state", "error", err)
+			writeJSON(w, map[string]string{"error": "internal server error"}, http.StatusInternalServerError)
+			return
+		}
+
+		// Encode the client redirect URL and state into the OAuth callback redirect_uri.
+		// The callback URL is on the Eurobase gateway itself.
+		callbackURL := fmt.Sprintf("%s://%s/v1/auth/oauth/%s/callback", schemeFromRequest(r), r.Host, providerName)
+
+		// Store client redirect and state in the callback URL as query params.
+		// We encode the client redirect in the state to avoid server-side session storage.
+		encodedState := state + ":" + clientRedirectURL
+
+		provider, err := oauth.Get(providerName)
+		if err != nil {
+			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+
+		authURL := provider.AuthURL(providerConfig.ClientID, callbackURL, encodedState)
+		http.Redirect(w, r, authURL, http.StatusFound)
+	}
+}
+
+// HandleOAuthCallback returns an HTTP handler for GET /v1/auth/oauth/{provider}/callback.
+// Exchanges the authorization code for user info, creates/finds the user, and redirects
+// back to the client app with tokens in the URL fragment.
+func HandleOAuthCallback(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		providerName := chi.URLParam(r, "provider")
+
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		code := r.URL.Query().Get("code")
+		encodedState := r.URL.Query().Get("state")
+
+		if code == "" {
+			// Provider returned an error.
+			errMsg := r.URL.Query().Get("error_description")
+			if errMsg == "" {
+				errMsg = r.URL.Query().Get("error")
+			}
+			if errMsg == "" {
+				errMsg = "missing authorization code"
+			}
+			slog.Warn("oauth callback: no code", "provider", providerName, "error", errMsg)
+			writeJSON(w, map[string]string{"error": errMsg}, http.StatusBadRequest)
+			return
+		}
+
+		// Extract the client redirect URL from the state.
+		var clientRedirectURL string
+		if idx := strings.Index(encodedState, ":"); idx > 0 {
+			clientRedirectURL = encodedState[idx+1:]
+		}
+		if clientRedirectURL == "" {
+			writeJSON(w, map[string]string{"error": "invalid state parameter"}, http.StatusBadRequest)
+			return
+		}
+
+		// Validate redirect_url against allowed list.
+		if !config.IsRedirectURLAllowed(clientRedirectURL) {
+			writeJSON(w, map[string]string{"error": "redirect_url is not in the allowed redirect URLs"}, http.StatusBadRequest)
+			return
+		}
+
+		// Build the callback URL that was used for the token exchange.
+		callbackURL := fmt.Sprintf("%s://%s/v1/auth/oauth/%s/callback", schemeFromRequest(r), r.Host, providerName)
+
+		resp, err := svc.SignInWithOAuth(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, providerName, code, callbackURL)
+		if err != nil {
+			slog.Warn("oauth signin failed", "error", err, "provider", providerName, "project_id", pc.ProjectID)
+			// Redirect to client with error.
+			redirectWithError(w, r, clientRedirectURL, "oauth_error", err.Error())
+			return
+		}
+
+		// Redirect to client app with tokens in URL fragment.
+		fragment := url.Values{
+			"access_token":  {resp.AccessToken},
+			"refresh_token": {resp.RefreshToken},
+			"token_type":    {resp.TokenType},
+			"expires_in":    {fmt.Sprintf("%d", resp.ExpiresIn)},
+		}
+		redirectURL := clientRedirectURL + "#" + fragment.Encode()
+		http.Redirect(w, r, redirectURL, http.StatusFound)
+	}
+}
+
+// schemeFromRequest determines the scheme (http or https) from the request.
+func schemeFromRequest(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+	return "http"
+}
+
+// redirectWithError redirects to the client redirect URL with error query params.
+func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURL, errCode, errDesc string) {
+	u, err := url.Parse(redirectURL)
+	if err != nil {
+		http.Error(w, `{"error":"invalid redirect URL"}`, http.StatusBadRequest)
+		return
+	}
+	q := u.Query()
+	q.Set("error", errCode)
+	q.Set("error_description", errDesc)
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}, status int) {

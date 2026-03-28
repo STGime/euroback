@@ -13,13 +13,21 @@ type ProviderConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+// OAuthProviderConfig holds the settings for a social login provider.
+type OAuthProviderConfig struct {
+	Enabled      bool   `json:"enabled"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
 // AuthConfig holds the per-project authentication configuration.
 type AuthConfig struct {
-	Providers                map[string]ProviderConfig `json:"providers"`
-	PasswordMinLength        int                       `json:"password_min_length"`
-	RequireEmailConfirmation bool                      `json:"require_email_confirmation"`
-	SessionDuration          string                    `json:"session_duration"`
-	RedirectURLs             []string                  `json:"redirect_urls"`
+	Providers                map[string]ProviderConfig        `json:"providers"`
+	OAuthProviders           map[string]OAuthProviderConfig   `json:"oauth_providers,omitempty"`
+	PasswordMinLength        int                              `json:"password_min_length"`
+	RequireEmailConfirmation bool                             `json:"require_email_confirmation"`
+	SessionDuration          string                           `json:"session_duration"`
+	RedirectURLs             []string                         `json:"redirect_urls"`
 }
 
 // allowedSessionDurations is the set of valid session duration values.
@@ -68,6 +76,14 @@ func (c *AuthConfig) Validate() error {
 		}
 	}
 	if !hasEnabled {
+		for _, p := range c.OAuthProviders {
+			if p.Enabled && p.ClientID != "" && p.ClientSecret != "" {
+				hasEnabled = true
+				break
+			}
+		}
+	}
+	if !hasEnabled {
 		return fmt.Errorf("at least one auth provider must be enabled")
 	}
 
@@ -93,6 +109,37 @@ func (c *AuthConfig) IsEmailPasswordEnabled() bool {
 func (c *AuthConfig) IsMagicLinkEnabled() bool {
 	p, ok := c.Providers["magic_link"]
 	return ok && p.Enabled
+}
+
+// GetOAuthProvider returns the OAuth provider config if it exists, is enabled, and has credentials.
+func (c *AuthConfig) GetOAuthProvider(name string) (OAuthProviderConfig, bool) {
+	if c.OAuthProviders == nil {
+		return OAuthProviderConfig{}, false
+	}
+	p, ok := c.OAuthProviders[name]
+	return p, ok && p.Enabled && p.ClientID != "" && p.ClientSecret != ""
+}
+
+// IsRedirectURLAllowed checks whether the given URL is in the allowed redirect list.
+func (c *AuthConfig) IsRedirectURLAllowed(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	candidate := u.Scheme + "://" + u.Host + u.Path
+	for _, allowed := range c.RedirectURLs {
+		a, err := url.Parse(allowed)
+		if err != nil {
+			continue
+		}
+		// Match scheme + host. If allowed URL has a path, the candidate must start with it.
+		if a.Scheme == u.Scheme && a.Host == u.Host {
+			if a.Path == "" || a.Path == "/" || strings.HasPrefix(candidate, a.Scheme+"://"+a.Host+a.Path) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ParseAuthConfig parses a JSON string into an AuthConfig, returning defaults if empty.
