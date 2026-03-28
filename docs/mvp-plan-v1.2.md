@@ -851,7 +851,7 @@ on push to main:
 | Magic Links (passwordless email auth) | 3 days | Done |
 | Mollie billing integration | 1 week | Next |
 
-### Sprint 3: Auth & Automation -- COMPLETE
+### Sprint 3: Auth & Automation -- COMPLETE (all items)
 
 | Feature | Effort | Status |
 |---------|--------|--------|
@@ -861,7 +861,7 @@ on push to main:
 | Cron & RPC console page with sub-tabs | 1 day | Done |
 | Function builder with schema browser, validation, test | 1 day | Done |
 | Cron/RPC documentation with examples | 0.5 day | Done |
-| OAuth / Social Login (Google, GitHub) | 1 week | Next |
+| OAuth / Social Login (Google, GitHub) | 1 week | Done |
 
 ### Sprint 4: Developer Workflow
 
