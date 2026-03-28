@@ -373,7 +373,7 @@
 								<label for="cron-wd" class="block text-[10px] font-medium text-gray-500 mb-0.5">Weekday</label>
 								<input id="cron-wd" type="text" bind:value={cronWeekday} oninput={syncCustomToSchedule}
 									class="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-mono text-center text-gray-900 focus:border-eurobase-500 focus:outline-none" />
-								<p class="text-[9px] text-gray-400 text-center mt-0.5">{weekdays.join(' ')}</p>
+								<p class="text-[9px] text-gray-400 text-center mt-0.5">0=Sun 1=Mon ... 6=Sat</p>
 							</div>
 						</div>
 					{/if}
@@ -393,7 +393,7 @@
 							onclick={() => formActionType = 'sql'}
 						>
 							<p class="text-sm font-medium text-gray-900">SQL Statement</p>
-							<p class="text-[11px] text-gray-500 mt-0.5">DELETE, UPDATE, INSERT, or call functions</p>
+							<p class="text-[11px] text-gray-500 mt-0.5">UPDATE, INSERT, or any SQL that modifies data</p>
 						</button>
 						<button
 							type="button"
@@ -414,19 +414,19 @@
 					<textarea
 						id="cron-action"
 						bind:value={formAction}
-						placeholder={formActionType === 'sql' ? "DELETE FROM refresh_tokens WHERE expires_at < now()" : "cleanup_expired_sessions"}
+						placeholder={formActionType === 'sql' ? "UPDATE users SET status = 'inactive' WHERE last_sign_in_at < now() - interval '90 days'" : "cleanup_expired_sessions"}
 						rows="3"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
 					></textarea>
 					{#if formActionType === 'sql'}
-						<p class="mt-1 text-xs text-gray-400">Runs in your project's database. Use DELETE, UPDATE, or INSERT to modify data. The number of affected rows is recorded.</p>
+						<p class="mt-1 text-xs text-gray-400">Runs in your project's database. Use UPDATE, INSERT, or any statement that modifies data. The number of affected rows is recorded. Use the Test Run button below to verify your SQL before scheduling.</p>
 					{:else}
 						<p class="mt-1 text-xs text-gray-400">Called as <code class="bg-gray-100 rounded px-1">SELECT function_name()</code> in your project schema.</p>
 					{/if}
 				</div>
 
 				<!-- Test Run -->
-				{#if formAction.trim() && formActionType === 'sql'}
+				{#if formActionType === 'sql'}
 					<div>
 						<button
 							type="button"
