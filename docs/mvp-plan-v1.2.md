@@ -863,10 +863,22 @@ on push to main:
 | Cron/RPC documentation with examples | 0.5 day | Done |
 | OAuth / Social Login (Google, GitHub) | 1 week | Done |
 
-### Sprint 4: Developer Workflow
+### Sprint 4: Security & Developer Experience -- COMPLETE
 
 | Feature | Effort | Status |
 |---------|--------|--------|
+| Auth helpers (auth_uid(), auth_role(), auth_email()) | 1 day | Done |
+| Vault (encrypted secrets — AES-256-GCM, API, SDK, Console) | 2 days | Done |
+| RLS policy presets (owner, public read, auth read, full, read-only) | 1 day | Done |
+| Full SQL editor (all SQL allowed, destructive op warning) | 1 day | Done |
+| RLS toggle + policy management in database UI | 1 day | Done |
+| Documentation (RLS guide, Vault guide, auth helpers) | 0.5 day | Done |
+
+### Sprint 5: Developer Workflow
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| Mollie billing integration | 1 week | Next |
 | Team collaboration / RBAC | 1 week | Planned |
 | CLI tool v1 (Go binary, Homebrew) | 1 week | Planned |
 | Built-in automations (Layer 1 — token cleanup, log retention, usage alerts) | 2 days | Planned |
@@ -937,8 +949,6 @@ Triggered by HTTP request, webhook, or schedule.
 | Feature | Effort | Priority |
 |---------|--------|----------|
 | Edge Functions (Layer 3 — Scaleway Serverless) | 2 weeks | High |
-| Auth helpers (auth_uid(), auth_jwt() for GoTrue-compatible RLS) | 1 day | High |
-| Vault (encrypted secrets storage — API, SDK, SQL, Console) | 2 days | High |
 | Encrypt OAuth secrets at application layer (AES-256, server key from env) | 2 days | High |
 | Console: skip sending masked OAuth secrets on save (only send if changed) | 0.5 day | Medium |
 | Python SDK | 1 week | High |
