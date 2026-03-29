@@ -836,6 +836,39 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Vault methods ----
+
+	/** List all vault secrets for a project (names + descriptions, no values). */
+	async listVaultSecrets(projectId: string): Promise<VaultSecret[]> {
+		return this.fetch<VaultSecret[]>(`/platform/projects/${projectId}/vault`);
+	}
+
+	/** Get a single decrypted vault secret by name. */
+	async getVaultSecret(projectId: string, name: string): Promise<VaultSecret> {
+		return this.fetch<VaultSecret>(`/platform/projects/${projectId}/vault/${encodeURIComponent(name)}`);
+	}
+
+	/** Create or update a vault secret. */
+	async setVaultSecret(projectId: string, data: { name: string; value: string; description?: string }): Promise<VaultSecret> {
+		return this.fetch<VaultSecret>(`/platform/projects/${projectId}/vault`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Update a vault secret's value and/or description. */
+	async updateVaultSecret(projectId: string, name: string, data: { value?: string; description?: string }): Promise<VaultSecret> {
+		return this.fetch<VaultSecret>(`/platform/projects/${projectId}/vault/${encodeURIComponent(name)}`, {
+			method: 'PATCH',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Delete a vault secret. */
+	async deleteVaultSecret(projectId: string, name: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/vault/${encodeURIComponent(name)}`, { method: 'DELETE' });
+	}
+
 	// ---- Plan & Usage ----
 
 	/** Get usage stats and limits for a project. */
@@ -874,6 +907,15 @@ export class EurobaseAPI {
 		const qs = searchParams.toString();
 		return this.fetch<LogsResponse>(`/platform/projects/${projectId}/logs${qs ? `?${qs}` : ''}`);
 	}
+}
+
+export interface VaultSecret {
+	id: string;
+	name: string;
+	value?: string;
+	description: string;
+	created_at: string;
+	updated_at: string;
 }
 
 export interface PlanLimits {

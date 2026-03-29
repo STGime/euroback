@@ -30,6 +30,19 @@ func EndUserIDFromContext(ctx context.Context) string {
 	return s
 }
 
+type endUserEmailKey struct{}
+
+// ContextWithEndUserEmail stores the end-user email in the context.
+func ContextWithEndUserEmail(ctx context.Context, email string) context.Context {
+	return context.WithValue(ctx, endUserEmailKey{}, email)
+}
+
+// EndUserEmailFromContext extracts the end-user email from the context.
+func EndUserEmailFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(endUserEmailKey{}).(string)
+	return s
+}
+
 type apiKeyTypeKey struct{}
 
 // ContextWithKeyType stores the API key type ("public" or "secret") in context.

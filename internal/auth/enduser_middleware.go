@@ -74,6 +74,7 @@ func (m *EndUserMiddleware) Handler(next http.Handler) http.Handler {
 		ctx := ContextWithEndUserClaims(r.Context(), claims)
 		// Also store in query context for RLS.
 		ctx = query.ContextWithEndUserID(ctx, claims.UserID)
+		ctx = query.ContextWithEndUserEmail(ctx, claims.Email)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

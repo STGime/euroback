@@ -6,6 +6,7 @@ import { AuthClient } from './auth'
 import { DatabaseClient } from './database'
 import { StorageClient } from './storage'
 import { RealtimeClient } from './realtime'
+import { VaultClient } from './vault'
 import { httpClient } from './http'
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,8 @@ export interface EurobaseClient {
   storage: StorageClient
   /** Realtime subscriptions via WebSocket. */
   realtime: RealtimeClient
+  /** Encrypted secrets vault (requires secret API key). */
+  vault: VaultClient
   /** Check connectivity to the Eurobase gateway. */
   status(): Promise<{ ok: boolean; latency_ms: number }>
 }
@@ -127,6 +130,7 @@ export function createClient(configOrConnectionString: EurobaseConfig | string):
     db: new DatabaseClient(config),
     storage: new StorageClient(config),
     realtime: new RealtimeClient(config),
+    vault: new VaultClient(config),
     async status() {
       const start = Date.now()
       try {

@@ -48,11 +48,29 @@ func (e *QueryEngine) withEndUserRLS(ctx context.Context, fn func(ctx context.Co
 		return fmt.Errorf("set end_user_id: %w", err)
 	}
 
+	// Set authenticated role for GoTrue-compatible auth helpers.
+	if _, err := tx.Exec(ctx, "SET LOCAL app.end_user_role = 'authenticated'"); err != nil {
+		return fmt.Errorf("set end_user_role: %w", err)
+	}
+
+	// Set email if available from context.
+	if email := EndUserEmailFromContext(ctx); email != "" {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.end_user_email = '%s'", sanitizeSessionValue(email))); err != nil {
+			return fmt.Errorf("set end_user_email: %w", err)
+		}
+	}
+
 	if err := fn(ctx); err != nil {
 		return err
 	}
 
 	return tx.Commit(ctx)
+}
+
+// sanitizeSessionValue escapes single quotes in a value used in SET LOCAL statements
+// to prevent SQL injection via session variables.
+func sanitizeSessionValue(v string) string {
+	return strings.ReplaceAll(v, "'", "''")
 }
 
 // ResolvedRelation holds the resolved foreign key information for a relation.

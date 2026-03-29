@@ -19,6 +19,7 @@ import (
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
+	"github.com/eurobase/euroback/internal/vault"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -157,6 +158,20 @@ func main() {
 	gateway.StartLogCleanup(ctx, pool)
 	slog.Info("request logging pipeline started")
 
+	// ── Set up vault (encrypted secrets storage, optional) ──
+	var vaultSvc *vault.VaultService
+	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
+		var vaultErr error
+		vaultSvc, vaultErr = vault.NewVaultService(pool, vaultKey)
+		if vaultErr != nil {
+			slog.Error("failed to initialize vault", "error", vaultErr)
+		} else {
+			slog.Info("vault service initialized")
+		}
+	} else {
+		slog.Warn("VAULT_ENCRYPTION_KEY not set, vault disabled")
+	}
+
 	// ── Dev mode: bypass platform auth for local testing ──
 	devMode := os.Getenv("DEV_MODE") == "true"
 
@@ -168,7 +183,7 @@ func main() {
 	subdomainMw := auth.NewSubdomainMiddleware(pool, domainSuffix)
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, vaultSvc, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

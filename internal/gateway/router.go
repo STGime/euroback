@@ -18,6 +18,7 @@ import (
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/webhook"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -29,7 +30,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -144,6 +145,11 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 				r.Delete("/email-templates/{type}", tmplHandler.HandleDelete())
 				r.Post("/email-templates/{type}/preview", tmplHandler.HandlePreview())
 				r.Post("/email-templates/{type}/test", tmplHandler.HandleTest())
+			}
+
+			// Vault (encrypted secrets storage) — platform-authenticated.
+			if vaultSvc != nil && vaultSvc.Configured() {
+				r.Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
 
 			// Console end-user management — platform-authenticated.
@@ -277,6 +283,17 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			})
 		} else {
 			slog.Warn("s3 client not configured, storage routes disabled")
+		}
+
+		// Vault routes (API key authenticated, secret key only).
+		if vaultSvc != nil && vaultSvc.Configured() {
+			r.Route("/vault", func(r chi.Router) {
+				r.Use(apiKeyMw.Handler)
+				r.Get("/", vault.HandleSDKList(vaultSvc))
+				r.Get("/{name}", vault.HandleSDKGet(vaultSvc))
+				r.Post("/", vault.HandleSDKSet(vaultSvc, pool))
+				r.Delete("/{name}", vault.HandleSDKDelete(vaultSvc))
+			})
 		}
 	})
 

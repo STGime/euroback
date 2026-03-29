@@ -1,0 +1,202 @@
+{
+	"info": {
+		"name": "Eurobase Vault & Auth Helpers",
+		"description": "Tests for Vault (encrypted secrets) and GoTrue-compatible auth helpers.\n\n## Setup\n\n1. Gateway running with VAULT_ENCRYPTION_KEY set\n2. Migrations 022-023 applied\n3. `platform_token`, `project_id`, `secret_key` set\n\n## Note\n\nVault requires VAULT_ENCRYPTION_KEY env var. Generate one:\n`openssl rand -base64 32`\nAdd to .env.local: `export VAULT_ENCRYPTION_KEY=<key>`",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 1 — Vault CRUD (Platform API)",
+			"item": [
+				{
+					"name": "V1.1 List secrets (empty)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns empty array', () => { pm.expect(pm.response.json()).to.be.an('array'); });"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault"] }
+					}
+				},
+				{
+					"name": "V1.2 Create secret",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+						"pm.test('Returns secret metadata', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.name).to.eql('test_api_key');",
+						"    pm.expect(json.description).to.eql('Test key for Postman');",
+						"    pm.expect(json).to.not.have.property('value');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"body": { "mode": "raw", "raw": "{\n  \"name\": \"test_api_key\",\n  \"value\": \"sk_live_super_secret_value_12345\",\n  \"description\": \"Test key for Postman\"\n}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault"] }
+					}
+				},
+				{
+					"name": "V1.3 Get secret (decrypted)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns decrypted value', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.name).to.eql('test_api_key');",
+						"    pm.expect(json.value).to.eql('sk_live_super_secret_value_12345');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault/test_api_key", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault", "test_api_key"] }
+					}
+				},
+				{
+					"name": "V1.4 List secrets (has 1)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns 1 secret without value', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.length).to.eql(1);",
+						"    pm.expect(json[0].name).to.eql('test_api_key');",
+						"    pm.expect(json[0]).to.not.have.property('value');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault"] }
+					}
+				},
+				{
+					"name": "V1.5 Update secret",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Description updated', () => {",
+						"    pm.expect(pm.response.json().description).to.eql('Updated description');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "PATCH",
+						"header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"body": { "mode": "raw", "raw": "{\n  \"value\": \"sk_live_new_value_67890\",\n  \"description\": \"Updated description\"\n}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault/test_api_key", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault", "test_api_key"] }
+					}
+				},
+				{
+					"name": "V1.6 Verify updated value",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Value was updated', () => {",
+						"    pm.expect(pm.response.json().value).to.eql('sk_live_new_value_67890');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault/test_api_key", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault", "test_api_key"] }
+					}
+				},
+				{
+					"name": "V1.7 Get non-existent secret",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault/nonexistent", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault", "nonexistent"] }
+					}
+				},
+				{
+					"name": "V1.8 No auth",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — Vault SDK API (Secret Key Only)",
+			"item": [
+				{
+					"name": "V2.1 SDK list — with secret key",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns array', () => { pm.expect(pm.response.json()).to.be.an('array'); });"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "apikey", "value": "{{secret_key}}" }],
+						"url": { "raw": "{{base_url}}/v1/vault", "host": ["{{base_url}}"], "path": ["v1", "vault"] }
+					}
+				},
+				{
+					"name": "V2.2 SDK list — with public key (should fail)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 403', () => pm.response.to.have.status(403));",
+						"pm.test('Error mentions secret key', () => {",
+						"    pm.expect(pm.response.json().error.toLowerCase()).to.include('secret');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "apikey", "value": "{{public_key}}" }],
+						"url": { "raw": "{{base_url}}/v1/vault", "host": ["{{base_url}}"], "path": ["v1", "vault"] }
+					}
+				},
+				{
+					"name": "V2.3 SDK get — with secret key",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns decrypted value', () => {",
+						"    pm.expect(pm.response.json().value).to.be.a('string');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "apikey", "value": "{{secret_key}}" }],
+						"url": { "raw": "{{base_url}}/v1/vault/test_api_key", "host": ["{{base_url}}"], "path": ["v1", "vault", "test_api_key"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Cleanup",
+			"item": [
+				{
+					"name": "V3.1 Delete secret",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200 or 204', () => { pm.expect(pm.response.code).to.be.oneOf([200, 204]); });"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault/test_api_key", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault", "test_api_key"] }
+					}
+				},
+				{
+					"name": "V3.2 List — empty after cleanup",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Empty', () => { pm.expect(pm.response.json().length).to.eql(0); });"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/vault", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "vault"] }
+					}
+				}
+			]
+		}
+	]
+}

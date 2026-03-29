@@ -26,6 +26,8 @@ export type {
   RealtimeEventType,
 } from './realtime'
 export { AuthClient } from './auth'
+export { VaultClient } from './vault'
+export type { VaultSecret, VaultSecretMeta } from './vault'
 export type {
   AuthUser,
   AuthSession,
