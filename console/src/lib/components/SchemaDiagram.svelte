@@ -5,7 +5,7 @@
 
 	let { tables: rawTables = [] }: { tables: TableSchema[] } = $props();
 
-	const HIDDEN_TABLES = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
+	const HIDDEN_TABLES = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets']);
 	let tables = $derived(rawTables.filter(t => !HIDDEN_TABLES.has(t.name)));
 
 	// Layout state

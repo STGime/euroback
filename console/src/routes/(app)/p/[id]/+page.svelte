@@ -19,7 +19,7 @@
 				api.getLogs(projectId, { limit: 1 }),
 				api.getUsage(projectId).catch(() => null)
 			]);
-			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
+			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets']);
 			tableCount = String(schema.filter(t => !hiddenTables.has(t.name)).length);
 			requestCount = logs.stats.total_requests.toLocaleString();
 			usage = usageData;

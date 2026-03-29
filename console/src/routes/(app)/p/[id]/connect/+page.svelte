@@ -34,7 +34,7 @@
 		loading = true;
 		error = null;
 		try {
-			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
+			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets']);
 			info = await api.getConnectInfo(projectId);
 			info.tables = info.tables.filter(t => !hiddenTables.has(t.name));
 		} catch (err) {

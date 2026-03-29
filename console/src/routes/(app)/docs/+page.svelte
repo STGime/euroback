@@ -15,11 +15,13 @@
 		{ id: 'users', label: '7. Managing End Users' },
 		{ id: 'api', label: '8. Exploring the API' },
 		{ id: 'webhooks', label: '9. Webhooks' },
-		{ id: 'cron', label: '10. Scheduled Jobs' },
-		{ id: 'logs', label: '11. Monitoring with Logs' },
-		{ id: 'settings', label: '12. Project Settings' },
-		{ id: 'connect', label: '13. Connecting Your IDE' },
-		{ id: 'account', label: '14. Your Account' },
+		{ id: 'rls', label: '10. Row-Level Security' },
+		{ id: 'vault', label: '11. Vault (Secrets)' },
+		{ id: 'cron', label: '12. Scheduled Jobs' },
+		{ id: 'logs', label: '13. Monitoring with Logs' },
+		{ id: 'settings', label: '14. Project Settings' },
+		{ id: 'connect', label: '15. Connecting Your IDE' },
+		{ id: 'account', label: '16. Your Account' },
 		{ id: 'next', label: "What's Next" }
 	];
 
@@ -803,15 +805,194 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 			</div>
 
 			<div class="mt-6 text-right">
+				<button onclick={() => scrollTo('rls')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Row-Level Security &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 10. ROW-LEVEL SECURITY ======================= -->
+		<section id="rls" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">10. Row-Level Security (RLS)</h2>
+			<p class="text-sm italic text-gray-500 mb-4">Alex needs each law firm employee to only see their own cases.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Row-Level Security lets you control which rows each user can read, insert, update, or delete. Policies are written in SQL and enforced by PostgreSQL itself &mdash; no application code needed.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900">Auth helper functions</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Eurobase provides built-in functions you can use in RLS policies to access the current user's identity:
+				</p>
+
+				<div class="rounded-lg border border-gray-200 overflow-hidden">
+					<table class="w-full text-xs">
+						<thead class="bg-gray-50">
+							<tr>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Function</th>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Returns</th>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Description</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-gray-100">
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_uid()</td><td class="px-3 py-1.5 text-gray-500">uuid</td><td class="px-3 py-1.5 text-gray-500">Current user's ID</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_email()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">Current user's email</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_role()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">'authenticated' or 'anon'</td></tr>
+						</tbody>
+					</table>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Common RLS patterns</h3>
+
+				<div class="space-y-3">
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Users can only read their own rows</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">CREATE POLICY "read own" ON todos FOR SELECT USING (user_id = auth_uid());</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Users can insert with their own ID</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">CREATE POLICY "insert own" ON todos FOR INSERT WITH CHECK (user_id = auth_uid());</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Users can update only their own rows</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">CREATE POLICY "update own" ON todos FOR UPDATE USING (user_id = auth_uid());</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Public read, authenticated write</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-0.5">
+							<div>CREATE POLICY "public read" ON posts FOR SELECT USING (true);</div>
+							<div>CREATE POLICY "auth insert" ON posts FOR INSERT WITH CHECK (auth_role() = 'authenticated');</div>
+						</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Admin access by email</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">CREATE POLICY "admin all" ON users FOR ALL USING (auth_email() = 'admin@company.eu');</div>
+					</div>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">How to enable RLS on a custom table</h3>
+				<ol class="text-sm text-gray-700 space-y-1.5 ml-4 list-decimal">
+					<li>Create the table with a <code class="bg-gray-100 rounded px-1">user_id</code> UUID column (FK to users.id)</li>
+					<li>Enable RLS: <code class="bg-gray-100 rounded px-1">ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;</code></li>
+					<li>Add policies using the auth helper functions</li>
+					<li>Test: sign in as a user, query the table &mdash; only matching rows are returned</li>
+				</ol>
+
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">
+					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
+					</svg>
+					<div class="text-sm text-eurobase-800">
+						<p><strong>Supabase compatibility:</strong> Eurobase's <code class="bg-white/50 rounded px-1">auth_uid()</code>, <code class="bg-white/50 rounded px-1">auth_role()</code>, and <code class="bg-white/50 rounded px-1">auth_email()</code> follow the same pattern as Supabase's GoTrue. RLS policies written for Supabase work in Eurobase with minimal changes.</p>
+					</div>
+				</div>
+			</div>
+
+			<div class="mt-6 text-right">
+				<button onclick={() => scrollTo('vault')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Vault &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 11. VAULT ======================= -->
+		<section id="vault" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">11. Vault (Encrypted Secrets)</h2>
+			<p class="text-sm italic text-gray-500 mb-4">Alex needs to store API keys for Mollie payments and Twilio SMS securely.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Vault is Eurobase's built-in encrypted secrets storage. Store API keys, credentials, and sensitive configuration securely &mdash; encrypted with AES-256-GCM, accessible via the console, API, and SDK. All secrets stay in EU infrastructure.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900">Storing secrets</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Go to the <strong>Vault</strong> tab in your project. Click "New Secret", enter a name (e.g. <code class="bg-gray-100 rounded px-1">stripe_api_key</code>), the secret value, and an optional description. The value is encrypted before storage.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Accessing secrets from the SDK</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Secrets are only accessible with the <strong>secret API key</strong> (<code class="bg-gray-100 rounded px-1">eb_sk_</code>). The public key cannot read secrets &mdash; this prevents client-side exposure.
+				</p>
+
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>// Server-side only (Node.js, backend)
+const eb = createClient({'{'} url: '...', apiKey: 'eb_sk_...' {'}'})
+
+// Read a secret
+const {'{'} data: apiKey {'}'} = await eb.vault.get('stripe_api_key')
+console.log(apiKey) // 'sk_live_...'
+
+// Store a secret
+await eb.vault.set('twilio_token', 'ACxxxxxxx', 'Twilio auth token')
+
+// List all secret names (values not included)
+const {'{'} data: secrets {'}'} = await eb.vault.list()
+// [{'{'}name: 'stripe_api_key', description: '...'{'}'}]
+
+// Delete a secret
+await eb.vault.delete('old_key')</pre>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Common use cases</h3>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Payment provider keys</strong> &mdash; Mollie, Stripe API keys for processing payments</li>
+					<li><strong>Email/SMS credentials</strong> &mdash; SendGrid, Twilio tokens for notifications</li>
+					<li><strong>External API keys</strong> &mdash; OpenAI, Google Maps, any third-party service</li>
+					<li><strong>Database connection strings</strong> &mdash; credentials for external databases</li>
+					<li><strong>Webhook signing secrets</strong> &mdash; verify incoming webhooks from external services</li>
+				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">REST API</h3>
+				<div class="rounded-lg border border-gray-200 overflow-hidden">
+					<table class="w-full text-xs">
+						<thead class="bg-gray-50">
+							<tr>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Method</th>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Endpoint</th>
+								<th class="px-3 py-2 text-left text-gray-600 font-semibold">Description</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-gray-100">
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">GET</td><td class="px-3 py-1.5 font-mono text-gray-600">/v1/vault</td><td class="px-3 py-1.5 text-gray-500">List secret names (no values)</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">GET</td><td class="px-3 py-1.5 font-mono text-gray-600">/v1/vault/:name</td><td class="px-3 py-1.5 text-gray-500">Get decrypted value</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">POST</td><td class="px-3 py-1.5 font-mono text-gray-600">/v1/vault</td><td class="px-3 py-1.5 text-gray-500">Create secret</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">DELETE</td><td class="px-3 py-1.5 font-mono text-gray-600">/v1/vault/:name</td><td class="px-3 py-1.5 text-gray-500">Delete secret</td></tr>
+						</tbody>
+					</table>
+				</div>
+				<p class="text-xs text-gray-400 mt-1">All vault endpoints require the secret API key (<code class="bg-gray-100 rounded px-1">eb_sk_</code>). Public key access returns 403.</p>
+
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">
+					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
+					</svg>
+					<div class="text-sm text-eurobase-800">
+						<p><strong>EU sovereignty:</strong> Secrets are encrypted with AES-256-GCM and stored in Scaleway PostgreSQL (France). The encryption key lives in your server environment &mdash; not in a US-based secrets manager. No Google Secret Manager, no AWS KMS, no HashiCorp Vault (US). Your credentials never leave the EU.</p>
+					</div>
+				</div>
+
+				<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 mt-3">
+					<p class="text-xs font-semibold text-gray-700 mb-1">Plan limits</p>
+					<p class="text-xs text-gray-600">Free: 5 secrets &middot; Pro: 100 secrets</p>
+				</div>
+			</div>
+
+			<div class="mt-6 text-right">
 				<button onclick={() => scrollTo('cron')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Scheduled Jobs &rarr;
 				</button>
 			</div>
 		</section>
 
-		<!-- ======================= 10. SCHEDULED JOBS ======================= -->
+		<!-- ======================= 12. SCHEDULED JOBS ======================= -->
 		<section id="cron" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">10. Scheduled Jobs</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Scheduled Jobs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to clean up expired sessions and send weekly reports automatically.</p>
 
 			<div class="space-y-4">
@@ -982,7 +1163,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 		<!-- ======================= 11. MONITORING WITH LOGS ======================= -->
 		<section id="logs" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">11. Monitoring with Logs</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Monitoring with Logs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex notices slow responses and wants to investigate API traffic.</p>
 
 			<div class="space-y-4">
@@ -1022,7 +1203,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 		<!-- ======================= 11. PROJECT SETTINGS ======================= -->
 		<section id="settings" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Project Settings</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Project Settings</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to rotate an API key after an intern accidentally committed it.</p>
 
 			<div class="space-y-4">
@@ -1060,7 +1241,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 		<!-- ======================= 12. CONNECTING YOUR IDE ======================= -->
 		<section id="connect" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Connecting Your IDE</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">15. Connecting Your IDE</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI coding assistant to understand the LexVault schema.</p>
 
 			<div class="space-y-4">
@@ -1117,7 +1298,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 		<!-- ======================= 13. YOUR ACCOUNT ======================= -->
 		<section id="account" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Your Account</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">16. Your Account</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
 
 			<div class="space-y-4">

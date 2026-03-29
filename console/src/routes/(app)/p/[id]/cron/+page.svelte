@@ -96,7 +96,7 @@
 	let schemaTables: TableSchema[] = $state([]);
 	let schemaLoading = $state(false);
 	let expandedTable: string | null = $state(null);
-	const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens']);
+	const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets']);
 
 	async function loadSchema() {
 		if (schemaTables.length > 0) return;
