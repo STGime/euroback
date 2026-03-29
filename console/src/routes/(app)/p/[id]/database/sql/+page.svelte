@@ -51,8 +51,9 @@
 
 	async function loadSchema() {
 		schemaLoading = true;
+		const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets']);
 		try {
-			tables = await api.getSchema(projectId);
+			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 		} catch {
 			// Schema load failure is non-critical for the SQL editor
 		} finally {
@@ -145,11 +146,32 @@
 		}
 	}
 
+	function isDestructiveSQL(sql: string): boolean {
+		const upper = sql.toUpperCase().trim();
+		return /^(DROP|DELETE|TRUNCATE|ALTER\s+TABLE\s+\S+\s+DROP)/.test(upper);
+	}
+
+	let showDestructiveConfirm = $state(false);
+
 	async function executeQuery() {
 		if (!activeTab || !activeTab.sql.trim() || executing) return;
 		const idx = tabs.findIndex((t) => t.id === activeTabId);
 		if (idx < 0) return;
 
+		if (isDestructiveSQL(activeTab.sql.trim())) {
+			showDestructiveConfirm = true;
+			return;
+		}
+
+		await runQuery();
+	}
+
+	async function runQuery() {
+		if (!activeTab || !activeTab.sql.trim() || executing) return;
+		const idx = tabs.findIndex((t) => t.id === activeTabId);
+		if (idx < 0) return;
+
+		showDestructiveConfirm = false;
 		executing = true;
 		tabs[idx].error = null;
 
@@ -166,10 +188,39 @@
 				...history.filter((h) => h.sql !== activeTab!.sql.trim())
 			].slice(0, 50);
 			saveHistory();
+
+			// Refresh schema sidebar after DDL operations.
+			const upper = activeTab.sql.trim().toUpperCase();
+			if (/^(CREATE|DROP|ALTER|RENAME)/.test(upper)) {
+				loadSchema();
+			}
 		} catch (err) {
 			let msg = err instanceof Error ? err.message : 'Query failed';
 			const jsonMatch = msg.match(/\{"error":"(.+?)"\}/);
 			if (jsonMatch) msg = jsonMatch[1];
+
+			// Enhance dependency errors with helpful context.
+			if (msg.includes('other objects depend on it') || msg.includes('2BP01')) {
+				const tableMatch = msg.match(/drop table (\w+)/i);
+				const tableName = tableMatch ? tableMatch[1] : null;
+				if (tableName) {
+					// Look up which tables have FKs pointing to this table.
+					const dependents = tables
+						.filter(t => t.columns.some(c => c.foreign_key?.referenced_table === tableName))
+						.map(t => {
+							const fkCol = t.columns.find(c => c.foreign_key?.referenced_table === tableName);
+							return `${t.name}.${fkCol?.name} → ${tableName}.${fkCol?.foreign_key?.referenced_column}`;
+						});
+					if (dependents.length > 0) {
+						msg = `Cannot drop "${tableName}" because these tables reference it:\n\n` +
+							dependents.map(d => `  • ${d}`).join('\n') +
+							`\n\nDrop the dependent tables first, remove the foreign keys, or use DROP TABLE ${tableName} CASCADE to force.`;
+					} else {
+						msg = `Cannot drop "${tableName}" — other objects depend on it. Use DROP TABLE ${tableName} CASCADE to force (this will also drop dependent objects).`;
+					}
+				}
+			}
+
 			tabs[idx].error = msg;
 			tabs[idx].columns = [];
 			tabs[idx].rows = [];
@@ -429,3 +480,29 @@
 		{/if}
 	</div>
 </div>
+
+{#if showDestructiveConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+		<button type="button" class="fixed inset-0 bg-black/50 cursor-default" onclick={() => showDestructiveConfirm = false} tabindex="-1" aria-label="Close"></button>
+		<div class="relative z-10 w-full max-w-sm rounded-xl bg-white shadow-2xl p-6">
+			<div class="flex items-center gap-3 mb-3">
+				<div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-100">
+					<svg class="h-5 w-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+				</div>
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Destructive Operation</h3>
+					<p class="text-xs text-gray-500">This query will modify or delete data permanently.</p>
+				</div>
+			</div>
+			<div class="rounded-lg bg-gray-900 px-3 py-2 mb-4">
+				<code class="text-xs font-mono text-amber-400 break-all">{activeTab?.sql.trim().substring(0, 120)}{(activeTab?.sql.trim().length ?? 0) > 120 ? '...' : ''}</code>
+			</div>
+			<div class="flex justify-end gap-3">
+				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => showDestructiveConfirm = false}>Cancel</button>
+				<button type="button" class="cursor-pointer rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 transition-colors" onclick={runQuery}>Execute</button>
+			</div>
+		</div>
+	</div>
+{/if}

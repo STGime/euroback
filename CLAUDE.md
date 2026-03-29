@@ -44,3 +44,4 @@ Mollie only for billing — Stripe is explicitly excluded
 Structured logging (slog) throughout Go code — no fmt.Println
 All credentials from env vars — nothing hardcoded
 EU member states only for all infrastructure — UK and Switzerland excluded
+System tables (users, refresh_tokens, storage_objects, email_tokens, vault_secrets) must be hidden from all user-facing UI (Table Editor, SQL Editor, API Explorer, Schema Diagram, Connect page, Cron schema browser, overview table count)

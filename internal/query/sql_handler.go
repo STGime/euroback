@@ -21,8 +21,17 @@ type SQLResponse struct {
 	ExecutionTimeMs float64                  `json:"execution_time_ms"`
 }
 
-// HandleSQL returns an http.HandlerFunc for POST /v1/db/sql.
+// HandleSQL returns an http.HandlerFunc for POST /v1/db/sql (SDK — read-only).
 func HandleSQL(engine *QueryEngine) http.HandlerFunc {
+	return handleSQLInternal(engine, true)
+}
+
+// HandlePlatformSQL returns an http.HandlerFunc for POST /platform/.../data/sql (console — full access).
+func HandlePlatformSQL(engine *QueryEngine) http.HandlerFunc {
+	return handleSQLInternal(engine, false)
+}
+
+func handleSQLInternal(engine *QueryEngine, readOnly bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := SchemaFromContext(r.Context())
 		if schema == "" {
@@ -36,10 +45,12 @@ func HandleSQL(engine *QueryEngine) http.HandlerFunc {
 			return
 		}
 
-		// Validate the query is SELECT-only.
-		if err := ValidateSelectOnly(req.SQL); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
-			return
+		if readOnly {
+			// SDK: validate SELECT-only.
+			if err := ValidateSelectOnly(req.SQL); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		// Cap limit.
@@ -49,7 +60,7 @@ func HandleSQL(engine *QueryEngine) http.HandlerFunc {
 		}
 
 		start := time.Now()
-		columns, rows, err := engine.ExecuteSQL(r.Context(), schema, req.SQL, maxRows)
+		columns, rows, err := engine.ExecuteSQL(r.Context(), schema, req.SQL, maxRows, readOnly)
 		elapsed := time.Since(start)
 
 		if err != nil {

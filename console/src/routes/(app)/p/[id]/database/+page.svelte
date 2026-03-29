@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { api, type TableSchema, type ColumnInfo } from '$lib/api.js';
+	import { api, type TableSchema, type ColumnInfo, type RLSPolicy } from '$lib/api.js';
 	import DataGrid from '$lib/components/DataGrid.svelte';
 	import IndexPanel from './IndexPanel.svelte';
 	import NewTableModal from './NewTableModal.svelte';
@@ -164,6 +164,64 @@
 	function refresh() {
 		void loadTableData();
 	}
+
+	// ---- RLS Policy state ----
+	let showPolicies = $state(false);
+	let policies: RLSPolicy[] = $state([]);
+	let policiesLoading = $state(false);
+	let policyError: string | null = $state(null);
+	let policyUserIdColumn = $state('user_id');
+
+	async function loadPolicies() {
+		if (!selectedTable) return;
+		policiesLoading = true;
+		policyError = null;
+		try {
+			policies = await api.listPolicies(projectId, selectedTable);
+		} catch (err) {
+			policyError = err instanceof Error ? err.message : 'Failed to load policies';
+		} finally {
+			policiesLoading = false;
+		}
+	}
+
+	async function applyPreset(preset: string) {
+		if (!selectedTable) return;
+		policyError = null;
+		try {
+			await api.applyPolicyPreset(projectId, selectedTable, preset, policyUserIdColumn);
+			await loadPolicies();
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Failed to apply preset';
+			const m = msg.match(/\{"error":"(.+?)"\}/);
+			policyError = m ? m[1] : msg;
+		}
+	}
+
+	async function deletePolicy(name: string) {
+		if (!selectedTable) return;
+		try {
+			await api.dropPolicy(projectId, selectedTable, name);
+			await loadPolicies();
+		} catch { /* ignore */ }
+	}
+
+	const policyPresets = [
+		{ id: 'owner_access', label: 'Owner access', desc: 'Users can CRUD only their own rows', policyNames: ['owner_select', 'owner_insert', 'owner_update', 'owner_delete'] },
+		{ id: 'public_read_owner_write', label: 'Public read, owner write', desc: 'Anyone can read, only owner can modify', policyNames: ['public_select', 'owner_insert', 'owner_update', 'owner_delete'] },
+		{ id: 'authenticated_read_owner_write', label: 'Auth read, owner write', desc: 'Signed-in users read all, owner modifies', policyNames: ['auth_select', 'owner_insert', 'owner_update', 'owner_delete'] },
+		{ id: 'full_access', label: 'Full access', desc: 'No restrictions (USING true)', policyNames: ['allow_all'] },
+		{ id: 'read_only', label: 'Read only', desc: 'Anyone can read, nobody can write', policyNames: ['read_only'] }
+	];
+
+	let activePreset = $derived(() => {
+		if (policies.length === 0) return null;
+		const names = new Set(policies.map(p => p.name));
+		for (const preset of policyPresets) {
+			if (preset.policyNames.length === names.size && preset.policyNames.every(n => names.has(n))) return preset.id;
+		}
+		return null;
+	});
 
 	async function toggleRLS() {
 		if (!selectedTable) return;
@@ -562,13 +620,13 @@
 							{selectedSchema.rls_enabled
 								? 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100'
 								: 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'}"
-						onclick={toggleRLS}
-						title={selectedSchema.rls_enabled ? 'RLS is enabled — click to disable' : 'RLS is disabled — click to enable'}
+						onclick={() => { showPolicies = !showPolicies; if (showPolicies) loadPolicies(); }}
+						title="Manage RLS policies"
 					>
 						<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
 						</svg>
-						RLS {selectedSchema.rls_enabled ? 'ON' : 'OFF'}
+						RLS & Policies
 					</button>
 					<span class="text-xs text-gray-400">
 						{selectedSchema.columns.length} columns / {totalCount} rows
@@ -618,6 +676,115 @@
 					</button>
 				</div>
 			</div>
+
+			<!-- RLS Policies panel -->
+			{#if showPolicies}
+				<div class="mb-4 rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+					<div class="flex items-center justify-between">
+						<h3 class="text-sm font-semibold text-gray-900">Row-Level Security</h3>
+						<div class="flex items-center gap-2">
+							<button
+								type="button"
+								class="cursor-pointer text-xs rounded-md border px-2 py-1 transition-colors {selectedSchema?.rls_enabled ? 'border-green-300 text-green-700 bg-green-50' : 'border-amber-300 text-amber-700 bg-amber-50'}"
+								onclick={toggleRLS}
+							>
+								{selectedSchema?.rls_enabled ? 'Enabled' : 'Disabled'} — click to {selectedSchema?.rls_enabled ? 'disable' : 'enable'}
+							</button>
+							<button type="button" class="cursor-pointer text-gray-400 hover:text-gray-600" onclick={() => showPolicies = false}>
+								<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+							</button>
+						</div>
+					</div>
+
+					{#if selectedSchema?.rls_enabled}
+						{@const uuidColumns = selectedSchema.columns.filter(c => c.data_type.toLowerCase().includes('uuid') && c.name !== 'id')}
+						{@const hasUserCol = uuidColumns.length > 0}
+
+						<!-- Preset buttons -->
+						<div>
+							<p class="text-xs font-medium text-gray-600 mb-2">Apply a preset (replaces existing policies):</p>
+
+							{#if hasUserCol}
+								<div class="flex items-center gap-2 mb-2">
+									<label class="text-xs text-gray-500">User column:</label>
+									<select bind:value={policyUserIdColumn} class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 focus:border-eurobase-500 focus:outline-none bg-white">
+										{#each uuidColumns as col}
+											<option value={col.name}>{col.name}</option>
+										{/each}
+									</select>
+								</div>
+							{/if}
+
+							<div class="flex flex-wrap gap-2">
+								{#each policyPresets as preset}
+									{@const needsUserCol = ['owner_access', 'public_read_owner_write', 'authenticated_read_owner_write'].includes(preset.id)}
+									{@const isActive = activePreset() === preset.id}
+									<button
+										type="button"
+										disabled={needsUserCol && !hasUserCol}
+										class="cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed
+											{isActive
+												? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700'
+												: 'border-gray-200 text-gray-700 hover:bg-eurobase-50 hover:border-eurobase-300 hover:text-eurobase-700'}"
+										onclick={() => applyPreset(preset.id)}
+										title={needsUserCol && !hasUserCol ? 'This table has no UUID column to match users against' : preset.desc}
+									>
+										{#if isActive}
+											<svg class="inline h-3 w-3 mr-1 -ml-0.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										{/if}
+										{preset.label}
+									</button>
+								{/each}
+							</div>
+
+							{#if !hasUserCol}
+								<p class="mt-1.5 text-[10px] text-amber-600">Owner-based presets require a UUID column (e.g. user_id) that references the user. Add one to this table first, or use "Full access" / "Read only".</p>
+							{/if}
+						</div>
+
+						{#if policyError}
+							<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{policyError}</div>
+						{/if}
+
+						<!-- Current policies -->
+						<div>
+							<p class="text-xs font-medium text-gray-600 mb-1.5">Current policies:</p>
+							{#if policiesLoading}
+								<div class="h-8 animate-pulse rounded bg-gray-100"></div>
+							{:else if policies.length === 0}
+								<div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+									<p class="text-xs font-medium text-amber-700">No policies configured</p>
+									<p class="text-[10px] text-amber-600 mt-0.5">This table has RLS enabled but no access policies. The API and SDK will return no rows until you select a policy above. Choose a preset to get started.</p>
+								</div>
+							{:else}
+								<div class="space-y-1">
+									{#each policies as policy}
+										<div class="flex items-center justify-between rounded bg-gray-50 px-3 py-1.5">
+											<div class="flex items-center gap-2">
+												<span class="text-xs font-mono font-medium text-gray-700">{policy.name}</span>
+												<span class="rounded bg-eurobase-100 px-1.5 py-0.5 text-[9px] font-medium text-eurobase-700">{policy.command}</span>
+												{#if policy.qual}
+													<span class="text-[10px] text-gray-400 font-mono truncate max-w-xs" title={policy.qual}>USING ({policy.qual})</span>
+												{/if}
+											</div>
+											<button
+												type="button"
+												class="cursor-pointer rounded p-1 text-gray-300 hover:bg-red-50 hover:text-red-500 transition-colors"
+												onclick={() => deletePolicy(policy.name)}
+												title="Drop policy"
+											>
+												<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
+											</button>
+										</div>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					{:else}
+						<p class="text-xs text-gray-500">Enable RLS to add access policies.</p>
+					{/if}
+				</div>
+			{/if}
 
 			<!-- Search bar -->
 			{#if textColumns.length > 0}

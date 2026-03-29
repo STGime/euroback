@@ -360,6 +360,34 @@ export class EurobaseAPI {
 		});
 	}
 
+	/** List RLS policies for a table. */
+	async listPolicies(projectId: string, tableName: string): Promise<RLSPolicy[]> {
+		return this.fetch<RLSPolicy[]>(`/platform/projects/${projectId}/schema/tables/${tableName}/policies`);
+	}
+
+	/** Apply a preset RLS policy to a table (drops existing policies). */
+	async applyPolicyPreset(projectId: string, tableName: string, preset: string, userIdColumn?: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}/policies/preset`, {
+			method: 'POST',
+			body: JSON.stringify({ preset, user_id_column: userIdColumn || 'user_id' })
+		});
+	}
+
+	/** Create a custom RLS policy. */
+	async createPolicy(projectId: string, tableName: string, data: { name: string; command: string; using?: string; with_check?: string }): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}/policies`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Drop an RLS policy. */
+	async dropPolicy(projectId: string, tableName: string, policyName: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}/policies/${policyName}`, {
+			method: 'DELETE'
+		});
+	}
+
 	/** Add a column to an existing table. */
 	async addColumn(
 		projectId: string,
@@ -951,6 +979,14 @@ export interface ProjectUsage {
 		project_count: number;
 	};
 	limits: PlanLimits;
+}
+
+export interface RLSPolicy {
+	name: string;
+	command: string;
+	permissive: boolean;
+	qual: string;
+	with_check: string;
 }
 
 export interface EmailTemplate {

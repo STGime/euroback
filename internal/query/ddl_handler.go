@@ -75,8 +75,12 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r.Post("/{table}/indexes", handleCreateIndex(pool))
 	r.Delete("/{table}/indexes/{index}", handleDropIndex(pool))
 
-	// RLS toggle
+	// RLS
 	r.Post("/{table}/rls", handleToggleRLS(pool))
+	r.Get("/{table}/policies", handleListPolicies(pool))
+	r.Post("/{table}/policies", handleCreatePolicy(pool))
+	r.Post("/{table}/policies/preset", handleApplyPreset(pool))
+	r.Delete("/{table}/policies/{policy}", handleDropPolicy(pool))
 
 	return r
 }
@@ -824,5 +828,117 @@ func handleToggleRLS(pool *pgxpool.Pool) http.HandlerFunc {
 		slog.Info("RLS toggled", "schema", schemaName, "table", tableName, "enabled", body.Enabled)
 
 		jsonResponse(w, map[string]any{"status": "ok", "rls_enabled": body.Enabled}, http.StatusOK)
+	}
+}
+
+func handleListPolicies(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		policies, err := ListPolicies(r.Context(), pool, schemaName, tableName)
+		if err != nil {
+			slog.Error("list policies failed", "error", err)
+			jsonError(w, "failed to list policies", http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, policies, http.StatusOK)
+	}
+}
+
+func handleApplyPreset(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var body struct {
+			Preset       string `json:"preset"`
+			UserIDColumn string `json:"user_id_column"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if err := ApplyPolicyPreset(r.Context(), pool, schemaName, tableName, body.Preset, body.UserIDColumn); err != nil {
+			slog.Error("apply preset failed", "error", err)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "apply_rls_preset", tableName, nil, map[string]any{"preset": body.Preset})
+		jsonResponse(w, map[string]any{"status": "ok", "preset": body.Preset}, http.StatusOK)
+	}
+}
+
+func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var body struct {
+			Name      string `json:"name"`
+			Command   string `json:"command"`
+			Using     string `json:"using"`
+			WithCheck string `json:"with_check"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if body.Name == "" || body.Command == "" {
+			jsonError(w, "name and command are required", http.StatusBadRequest)
+			return
+		}
+
+		if err := CreateCustomPolicy(r.Context(), pool, schemaName, tableName, body.Name, body.Command, body.Using, body.WithCheck); err != nil {
+			slog.Error("create policy failed", "error", err)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "create_policy", tableName, nil, map[string]any{"policy": body.Name, "command": body.Command})
+		jsonResponse(w, map[string]any{"status": "ok", "policy": body.Name}, http.StatusCreated)
+	}
+}
+
+func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+		policyName := chi.URLParam(r, "policy")
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		if err := DropPolicy(r.Context(), pool, schemaName, tableName, policyName); err != nil {
+			slog.Error("drop policy failed", "error", err)
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "drop_policy", tableName, nil, map[string]any{"policy": policyName})
+		w.WriteHeader(http.StatusNoContent)
 	}
 }

@@ -193,20 +193,10 @@ func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName 
 		return fmt.Errorf("create table: %w", err)
 	}
 
-	// Enable RLS.
+	// Enable RLS (no default policy — table is locked down until policies are added).
 	rlsSQL := fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", qt)
 	if _, err := tx.Exec(ctx, rlsSQL); err != nil {
 		return fmt.Errorf("enable RLS: %w", err)
-	}
-
-	// Create a permissive policy (allows all operations within the tenant schema).
-	// Tenant isolation is enforced by schema separation.
-	policySQL := fmt.Sprintf(
-		"CREATE POLICY tenant_isolation_%s ON %s FOR ALL USING (true)",
-		tableName, qt,
-	)
-	if _, err := tx.Exec(ctx, policySQL); err != nil {
-		return fmt.Errorf("create RLS policy: %w", err)
 	}
 
 	// Add foreign key constraints.
@@ -768,5 +758,164 @@ func AlterColumnDefault(ctx context.Context, pool *pgxpool.Pool, schemaName, tab
 		return fmt.Errorf("alter column default: %w", err)
 	}
 
+	return nil
+}
+
+// RLSPolicy represents a PostgreSQL RLS policy.
+type RLSPolicy struct {
+	Name       string `json:"name"`
+	Command    string `json:"command"`    // SELECT, INSERT, UPDATE, DELETE, ALL
+	Permissive bool   `json:"permissive"` // true=PERMISSIVE, false=RESTRICTIVE
+	Qual       string `json:"qual"`       // USING clause
+	WithCheck  string `json:"with_check"` // WITH CHECK clause
+}
+
+// ListPolicies returns all RLS policies for a table.
+func ListPolicies(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]RLSPolicy, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT polname, polcmd, polpermissive,
+		        pg_get_expr(polqual, polrelid) AS qual,
+		        pg_get_expr(polwithcheck, polrelid) AS with_check
+		 FROM pg_policy
+		 WHERE polrelid = (
+		     SELECT oid FROM pg_class
+		     WHERE relname = $1
+		       AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)
+		 )
+		 ORDER BY polname`,
+		tableName, schemaName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query policies: %w", err)
+	}
+	defer rows.Close()
+
+	cmdMap := map[byte]string{'r': "SELECT", 'a': "INSERT", 'w': "UPDATE", 'd': "DELETE", '*': "ALL"}
+
+	policies := make([]RLSPolicy, 0)
+	for rows.Next() {
+		var p RLSPolicy
+		var cmd byte
+		var qual, withCheck *string
+		if err := rows.Scan(&p.Name, &cmd, &p.Permissive, &qual, &withCheck); err != nil {
+			return nil, fmt.Errorf("scan policy: %w", err)
+		}
+		p.Command = cmdMap[cmd]
+		if p.Command == "" {
+			p.Command = "ALL"
+		}
+		if qual != nil {
+			p.Qual = *qual
+		}
+		if withCheck != nil {
+			p.WithCheck = *withCheck
+		}
+		policies = append(policies, p)
+	}
+	return policies, nil
+}
+
+// ApplyPolicyPreset drops all existing policies and applies a preset.
+func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, preset, userIDColumn string) error {
+	qt := qualifiedTable(schemaName, tableName)
+
+	// Drop all existing policies first.
+	existing, err := ListPolicies(ctx, pool, schemaName, tableName)
+	if err != nil {
+		return err
+	}
+	for _, p := range existing {
+		dropSQL := fmt.Sprintf("DROP POLICY %s ON %s", quoteIdent(p.Name), qt)
+		if _, err := pool.Exec(ctx, dropSQL); err != nil {
+			slog.Warn("failed to drop policy", "policy", p.Name, "error", err)
+		}
+	}
+
+	if userIDColumn == "" {
+		userIDColumn = "user_id"
+	}
+	col := quoteIdent(userIDColumn)
+
+	var sqls []string
+	switch preset {
+	case "owner_access":
+		sqls = []string{
+			fmt.Sprintf("CREATE POLICY owner_select ON %s FOR SELECT USING (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s = auth_uid())", qt, col),
+		}
+	case "public_read_owner_write":
+		sqls = []string{
+			fmt.Sprintf("CREATE POLICY public_select ON %s FOR SELECT USING (true)", qt),
+			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s = auth_uid())", qt, col),
+		}
+	case "authenticated_read_owner_write":
+		sqls = []string{
+			fmt.Sprintf("CREATE POLICY auth_select ON %s FOR SELECT USING (auth_role() = 'authenticated')", qt),
+			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s = auth_uid())", qt, col),
+		}
+	case "full_access":
+		sqls = []string{
+			fmt.Sprintf("CREATE POLICY allow_all ON %s FOR ALL USING (true)", qt),
+		}
+	case "read_only":
+		sqls = []string{
+			fmt.Sprintf("CREATE POLICY read_only ON %s FOR SELECT USING (true)", qt),
+		}
+	default:
+		return fmt.Errorf("unknown policy preset: %s", preset)
+	}
+
+	for _, sql := range sqls {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("apply policy: %w", err)
+		}
+	}
+
+	slog.Info("RLS policy preset applied", "schema", schemaName, "table", tableName, "preset", preset)
+	return nil
+}
+
+// CreateCustomPolicy creates a single custom RLS policy.
+func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, policyName, command, usingExpr, withCheckExpr string) error {
+	qt := qualifiedTable(schemaName, tableName)
+
+	if !validIdentRe.MatchString(policyName) {
+		return fmt.Errorf("invalid policy name (use letters, digits, underscores)")
+	}
+
+	validCmds := map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true, "ALL": true}
+	command = strings.ToUpper(command)
+	if !validCmds[command] {
+		return fmt.Errorf("command must be SELECT, INSERT, UPDATE, DELETE, or ALL")
+	}
+
+	sql := fmt.Sprintf("CREATE POLICY %s ON %s FOR %s", quoteIdent(policyName), qt, command)
+	if usingExpr != "" {
+		sql += fmt.Sprintf(" USING (%s)", usingExpr)
+	}
+	if withCheckExpr != "" {
+		sql += fmt.Sprintf(" WITH CHECK (%s)", withCheckExpr)
+	}
+
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("create policy: %w", err)
+	}
+	slog.Info("custom RLS policy created", "schema", schemaName, "table", tableName, "policy", policyName)
+	return nil
+}
+
+// DropPolicy drops an RLS policy by name.
+func DropPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, policyName string) error {
+	qt := qualifiedTable(schemaName, tableName)
+	sql := fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", quoteIdent(policyName), qt)
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("drop policy: %w", err)
+	}
 	return nil
 }

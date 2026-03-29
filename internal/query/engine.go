@@ -549,7 +549,8 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 
 // ExecuteSQL runs a raw SQL query within the tenant's schema context.
 // It uses a read-only transaction with search_path and statement_timeout.
-func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string, maxRows int) ([]string, []map[string]interface{}, error) {
+func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string, maxRows int, readOnly ...bool) ([]string, []map[string]interface{}, error) {
+	isReadOnly := len(readOnly) > 0 && readOnly[0]
 	// Strip trailing semicolon so the query can be wrapped in a subquery.
 	rawSQL = strings.TrimSpace(rawSQL)
 	rawSQL = strings.TrimRight(rawSQL, ";")
@@ -567,9 +568,11 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // read-only tx, rollback is fine
 
-	// Set transaction to read-only.
-	if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
-		return nil, nil, fmt.Errorf("set read only: %w", err)
+	// Set transaction to read-only for SDK queries.
+	if isReadOnly {
+		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+			return nil, nil, fmt.Errorf("set read only: %w", err)
+		}
 	}
 
 	// Isolate to tenant schema.
@@ -582,27 +585,46 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 		return nil, nil, fmt.Errorf("set statement_timeout: %w", err)
 	}
 
-	// Execute the user's query with a row limit wrapper.
-	wrappedSQL := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", rawSQL, maxRows)
-	rows, err := tx.Query(ctx, wrappedSQL)
+	// Detect if this is a SELECT-like query that returns rows.
+	upperSQL := strings.ToUpper(strings.TrimSpace(rawSQL))
+	isSelect := strings.HasPrefix(upperSQL, "SELECT") || strings.HasPrefix(upperSQL, "WITH") || strings.HasPrefix(upperSQL, "TABLE")
+
+	if isSelect {
+		// SELECT: wrap with LIMIT and return rows.
+		wrappedSQL := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", rawSQL, maxRows)
+		rows, err := tx.Query(ctx, wrappedSQL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("execute query: %w", err)
+		}
+		defer rows.Close()
+
+		fieldDescs := rows.FieldDescriptions()
+		columns := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			columns[i] = fd.Name
+		}
+
+		results, err := scanRows(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return columns, results, nil
+	}
+
+	// DML/DDL: execute and return affected rows.
+	tag, err := tx.Exec(ctx, rawSQL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("execute query: %w", err)
 	}
-	defer rows.Close()
 
-	// Extract column names.
-	fieldDescs := rows.FieldDescriptions()
-	columns := make([]string, len(fieldDescs))
-	for i, fd := range fieldDescs {
-		columns[i] = fd.Name
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, fmt.Errorf("commit: %w", err)
 	}
 
-	results, err := scanRows(rows)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return columns, results, nil
+	return []string{"result"}, []map[string]interface{}{
+		{"result": fmt.Sprintf("%s (%d rows affected)", tag.String(), tag.RowsAffected())},
+	}, nil
 }
 
 // scanRows converts pgx rows into a slice of maps, normalizing types
