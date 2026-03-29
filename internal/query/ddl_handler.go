@@ -2,6 +2,7 @@ package query
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -73,6 +74,9 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r.Get("/{table}/indexes", handleListIndexes(pool))
 	r.Post("/{table}/indexes", handleCreateIndex(pool))
 	r.Delete("/{table}/indexes/{index}", handleDropIndex(pool))
+
+	// RLS toggle
+	r.Post("/{table}/rls", handleToggleRLS(pool))
 
 	return r
 }
@@ -777,5 +781,48 @@ func handleAlterColumn(pool *pgxpool.Pool) http.HandlerFunc {
 			"column":  currentCol,
 			"changes": changes,
 		}, http.StatusOK)
+	}
+}
+
+// handleToggleRLS enables or disables RLS on a table.
+func handleToggleRLS(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		var schemaName string
+		err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName)
+		if err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		qt := qualifiedTable(schemaName, tableName)
+		action := "ENABLE"
+		if !body.Enabled {
+			action = "DISABLE"
+		}
+
+		sql := fmt.Sprintf("ALTER TABLE %s %s ROW LEVEL SECURITY", qt, action)
+		if _, err := pool.Exec(r.Context(), sql); err != nil {
+			slog.Error("toggle RLS failed", "error", err, "table", tableName, "action", action)
+			jsonError(w, "failed to toggle RLS: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "toggle_rls", tableName, nil, map[string]any{"enabled": body.Enabled})
+		slog.Info("RLS toggled", "schema", schemaName, "table", tableName, "enabled", body.Enabled)
+
+		jsonResponse(w, map[string]any{"status": "ok", "rls_enabled": body.Enabled}, http.StatusOK)
 	}
 }

@@ -165,6 +165,17 @@
 		void loadTableData();
 	}
 
+	async function toggleRLS() {
+		if (!selectedTable) return;
+		const isEnabled = selectedSchema?.rls_enabled ?? false;
+		try {
+			await api.toggleRLS(projectId, selectedTable, !isEnabled);
+			await loadSchema();
+		} catch (err) {
+			dataError = err instanceof Error ? err.message : 'Failed to toggle RLS';
+		}
+	}
+
 	function applyFilter() {
 		currentOffset = 0;
 		void loadTableData();
@@ -507,6 +518,9 @@
 								<path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25M3.375 8.25h7.5c.621 0 1.125.504 1.125 1.125" />
 							</svg>
 							<span class="truncate">{table.name}</span>
+							{#if table.rls_enabled === false}
+								<span class="shrink-0 rounded bg-amber-100 px-1 py-0.5 text-[8px] font-bold text-amber-700" title="Row-Level Security is disabled — all users can access all rows">RLS OFF</span>
+							{/if}
 						</button>
 						<button
 							type="button"
@@ -541,6 +555,20 @@
 							<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125" />
 						</svg>
 						Rename
+					</button>
+					<button
+						type="button"
+						class="cursor-pointer inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors
+							{selectedSchema.rls_enabled
+								? 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100'
+								: 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'}"
+						onclick={toggleRLS}
+						title={selectedSchema.rls_enabled ? 'RLS is enabled — click to disable' : 'RLS is disabled — click to enable'}
+					>
+						<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
+						</svg>
+						RLS {selectedSchema.rls_enabled ? 'ON' : 'OFF'}
 					</button>
 					<span class="text-xs text-gray-400">
 						{selectedSchema.columns.length} columns / {totalCount} rows

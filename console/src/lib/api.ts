@@ -77,6 +77,7 @@ export interface TableSchema {
 	columns: ColumnInfo[];
 	row_count: number;
 	indexes?: IndexInfo[];
+	rls_enabled?: boolean;
 }
 
 export interface FileInfo {
@@ -348,6 +349,14 @@ export class EurobaseAPI {
 	async dropTable(projectId: string, tableName: string): Promise<void> {
 		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}`, {
 			method: 'DELETE'
+		});
+	}
+
+	/** Toggle Row-Level Security on a table. */
+	async toggleRLS(projectId: string, tableName: string, enabled: boolean): Promise<{ status: string; rls_enabled: boolean }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${tableName}/rls`, {
+			method: 'POST',
+			body: JSON.stringify({ enabled })
 		});
 	}
 

@@ -875,13 +875,73 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 					</div>
 				</div>
 
-				<h3 class="text-lg font-semibold text-gray-900 mt-6">How to enable RLS on a custom table</h3>
-				<ol class="text-sm text-gray-700 space-y-1.5 ml-4 list-decimal">
-					<li>Create the table with a <code class="bg-gray-100 rounded px-1">user_id</code> UUID column (FK to users.id)</li>
-					<li>Enable RLS: <code class="bg-gray-100 rounded px-1">ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;</code></li>
-					<li>Add policies using the auth helper functions</li>
-					<li>Test: sign in as a user, query the table &mdash; only matching rows are returned</li>
-				</ol>
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Full example: secure a tasks table</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Follow these steps to create a table where each user can only see and manage their own rows.
+				</p>
+
+				<div class="mt-3 space-y-3">
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Step 1: Create the table with a user_id column</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-0.5">
+							<div>CREATE TABLE tasks (</div>
+							<div>&nbsp;&nbsp;id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),</div>
+							<div>&nbsp;&nbsp;user_id UUID NOT NULL REFERENCES users(id),</div>
+							<div>&nbsp;&nbsp;title TEXT NOT NULL,</div>
+							<div>&nbsp;&nbsp;completed BOOLEAN DEFAULT false,</div>
+							<div>&nbsp;&nbsp;created_at TIMESTAMPTZ DEFAULT now()</div>
+							<div>);</div>
+						</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Step 2: RLS is enabled automatically</p>
+						<p class="mt-1 text-[10px] text-gray-500">Tables created via the Eurobase console or API have RLS enabled by default. You'll see a green RLS badge on protected tables. If a table shows "RLS OFF" in the sidebar, enable it with:</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Step 3: Add policies for each operation</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-1">
+							<div class="text-gray-500">-- Users can read only their own tasks</div>
+							<div>CREATE POLICY "select own" ON tasks FOR SELECT</div>
+							<div>&nbsp;&nbsp;USING (user_id = auth_uid());</div>
+							<div class="mt-1.5 text-gray-500">-- Users can insert tasks with their own user_id</div>
+							<div>CREATE POLICY "insert own" ON tasks FOR INSERT</div>
+							<div>&nbsp;&nbsp;WITH CHECK (user_id = auth_uid());</div>
+							<div class="mt-1.5 text-gray-500">-- Users can update only their own tasks</div>
+							<div>CREATE POLICY "update own" ON tasks FOR UPDATE</div>
+							<div>&nbsp;&nbsp;USING (user_id = auth_uid());</div>
+							<div class="mt-1.5 text-gray-500">-- Users can delete only their own tasks</div>
+							<div>CREATE POLICY "delete own" ON tasks FOR DELETE</div>
+							<div>&nbsp;&nbsp;USING (user_id = auth_uid());</div>
+						</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">Step 4: Test it from the SDK</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-0.5">
+							<div class="text-gray-500">// Sign in as a user</div>
+							<div>await eb.auth.signIn({'{'} email: 'alice@example.com', password: '...' {'}'})</div>
+							<div></div>
+							<div class="text-gray-500">// Insert a task — user_id is automatically checked by RLS</div>
+							<div>await eb.db.from('tasks').insert({'{'} user_id: session.user.id, title: 'Buy milk' {'}'})</div>
+							<div></div>
+							<div class="text-gray-500">// Query — only Alice's tasks are returned</div>
+							<div>const {'{'} data {'}'} = await eb.db.from('tasks').select('*')</div>
+							<div class="text-gray-500">// data = [{'{'} title: "Buy milk", ... {'}'}] — Bob's tasks are invisible</div>
+						</div>
+					</div>
+				</div>
+
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3 mt-4">
+					<svg class="h-5 w-5 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+					<div class="text-sm text-amber-800">
+						<p><strong>RLS is on by default</strong> for tables created via the console. But without policies, no rows are visible. Add at least a SELECT policy so users can read data. Tables showing "RLS OFF" in the sidebar need to be secured with <code class="bg-amber-100 rounded px-1">ALTER TABLE ... ENABLE ROW LEVEL SECURITY;</code></p>
+					</div>
+				</div>
 
 				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">
 					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -889,6 +949,7 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 					</svg>
 					<div class="text-sm text-eurobase-800">
 						<p><strong>Supabase compatibility:</strong> Eurobase's <code class="bg-white/50 rounded px-1">auth_uid()</code>, <code class="bg-white/50 rounded px-1">auth_role()</code>, and <code class="bg-white/50 rounded px-1">auth_email()</code> follow the same pattern as Supabase's GoTrue. RLS policies written for Supabase work in Eurobase with minimal changes.</p>
+						<p class="mt-1"><strong>Secret API key</strong> (<code class="bg-white/50 rounded px-1">eb_sk_</code>) bypasses RLS entirely &mdash; use it for server-side admin access, never in client code.</p>
 					</div>
 				</div>
 			</div>

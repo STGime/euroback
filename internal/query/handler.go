@@ -155,9 +155,10 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// For each table, get column info enriched with constraints and indexes.
 		type TableSchema struct {
-			Name    string       `json:"name"`
-			Columns []ColumnInfo `json:"columns"`
-			Indexes []IndexInfo  `json:"indexes,omitempty"`
+			Name       string       `json:"name"`
+			Columns    []ColumnInfo `json:"columns"`
+			Indexes    []IndexInfo  `json:"indexes,omitempty"`
+			RLSEnabled bool         `json:"rls_enabled"`
 		}
 
 		result := make([]TableSchema, 0, len(tables))
@@ -180,7 +181,15 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			result = append(result, TableSchema{Name: t, Columns: cols, Indexes: indexes})
+			// Check RLS status.
+			var rlsEnabled bool
+			_ = pool.QueryRow(r.Context(),
+				`SELECT relrowsecurity FROM pg_class
+				 WHERE relname = $1 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)`,
+				t, schemaName,
+			).Scan(&rlsEnabled)
+
+			result = append(result, TableSchema{Name: t, Columns: cols, Indexes: indexes, RLSEnabled: rlsEnabled})
 		}
 
 		slog.Debug("schema introspection complete", "project_id", projectID, "schema", schemaName, "table_count", len(result))
