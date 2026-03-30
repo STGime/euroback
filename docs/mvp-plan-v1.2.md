@@ -885,24 +885,46 @@ on push to main:
 
 ### CLI Tool — Scope (v1 vs v2)
 
-**v1 (1 week):** Daily developer workflow
-- login, projects list/create, init, status
-- db tables, db query, db dump
-- migrations up/down/status
-- logs --tail (streaming)
-- keys show/regenerate
-- functions list/create, cron list/logs
+**v1 (1 week):** Daily developer workflow — 30 commands
+
+Auth & Projects:
+- login, logout, projects list/create/delete, switch, status
+
+Database:
+- db tables, db schema [table], db query "SQL", db dump
+
+Migrations:
+- migrations create, up, down, status
+
+Keys & Config:
+- keys show, keys regenerate, init (.env, CLAUDE.md, .cursorrules)
+
+Logs:
+- logs (list), logs --tail (streaming), logs --method/--status (filters)
+
+Vault:
+- vault list, vault get, vault set, vault delete
+
+Cron & Functions:
+- cron list, cron logs, functions list, functions create, functions delete
+
+Storage:
+- storage ls, storage upload, storage download, storage delete, storage url
+
+Architecture: Go binary using cobra, calls platform API over HTTPS.
+Config stored in ~/.eurobase/config.json. Distributed via Homebrew.
 
 **v2 (2 weeks, later):** Advanced features
 - `eurobase start` — local dev stack via Docker (Postgres, gateway, Redis, MinIO)
 - `eurobase gen types` — TypeScript type generation from schema
+- `eurobase db diff/pull/reset` — schema diff and sync
 - DB inspection (bloat, locks, slow queries)
 - Seeding (seed.sql)
 - Shell completion
 
-Supabase CLI comparison: v1 covers the essential daily workflow. Main gaps vs
-Supabase: no local dev stack, no type generation, no preview branches. These
-are planned for v2.
+Supabase delta: v1 achieves parity on 15 commands, has 4 advantages
+(db query, db tables, log streaming, cron/function management).
+Main gaps deferred to v2: local dev stack, type generation, preview branches.
 
 ### Automation Strategy (3 Layers)
 
