@@ -34,6 +34,7 @@ func main() {
 	root.AddCommand(cli.FunctionsCmd())
 	root.AddCommand(cli.StorageCmd())
 	root.AddCommand(cli.InitCmd())
+	root.AddCommand(cli.TestCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

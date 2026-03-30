@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.postgres
     ports:
       - "5433:5432"
     environment:

@@ -974,6 +974,7 @@ Triggered by HTTP request, webhook, or schedule.
 | Built-in automations: inactive user flagging, session revocation | 1 day | Medium |
 | Built-in automations: error spike alerts | 1 day | Medium |
 | Built-in automations: scheduled DB export to S3 (pro) | 2 days | Medium |
+| Console RLS test templates ("Test policy as user X") | 2 days | High |
 | Edge Functions (Layer 3 — Scaleway Serverless) | 2 weeks | High |
 | Encrypt OAuth secrets at application layer (AES-256, server key from env) | 2 days | High |
 | Console: skip sending masked OAuth secrets on save (only send if changed) | 0.5 day | Medium |
