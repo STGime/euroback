@@ -836,6 +836,12 @@ func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tabl
 	}
 	col := quoteIdent(userIDColumn)
 
+	// Set search_path so auth_uid() / auth_role() are found in the tenant schema.
+	if _, err := pool.Exec(ctx, fmt.Sprintf("SET search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+		return fmt.Errorf("set search_path: %w", err)
+	}
+	defer pool.Exec(ctx, "SET search_path TO public") //nolint:errcheck
+
 	var sqls []string
 	switch preset {
 	case "owner_access":
@@ -894,6 +900,12 @@ func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tab
 	if !validCmds[command] {
 		return fmt.Errorf("command must be SELECT, INSERT, UPDATE, DELETE, or ALL")
 	}
+
+	// Set search_path so auth_uid() / auth_role() are found in the tenant schema.
+	if _, err := pool.Exec(ctx, fmt.Sprintf("SET search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+		return fmt.Errorf("set search_path: %w", err)
+	}
+	defer pool.Exec(ctx, "SET search_path TO public") //nolint:errcheck
 
 	sql := fmt.Sprintf("CREATE POLICY %s ON %s FOR %s", quoteIdent(policyName), qt, command)
 	if usingExpr != "" {
