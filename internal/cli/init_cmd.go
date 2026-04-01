@@ -76,7 +76,7 @@ DATABASE_URL=%s
 - System tables (users, refresh_tokens, storage_objects, email_tokens, vault_secrets) are managed by the platform
 
 ## Auth
-- Custom auth built in Go (not Hanko)
+- Custom auth built in Go (email/password, magic links, OAuth)
 - Anon key for public client access
 - Service key for server-side access only — never expose in client code
 

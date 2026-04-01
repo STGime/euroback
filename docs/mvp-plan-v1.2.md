@@ -813,7 +813,7 @@ on push to main:
 
 ### Completed (MVP)
 
-- [x] Custom auth system (email+password, no Hanko dependency)
+- [x] Custom auth system (email/password, magic links, OAuth — no external auth dependency)
 - [x] End-user signup/signin with JWT + refresh tokens
 - [x] Email verification and password reset (Scaleway TEM)
 - [x] Customizable email templates per project
