@@ -67,20 +67,24 @@ func LoginCmd() *cobra.Command {
 			}
 
 			var result struct {
-				Token string `json:"token"`
+				AccessToken string `json:"access_token"`
+				User        struct {
+					ID    string `json:"id"`
+					Email string `json:"email"`
+				} `json:"user"`
 			}
 			if err := json.Unmarshal(respData, &result); err != nil {
 				return fmt.Errorf("parsing login response: %w", err)
 			}
-			if result.Token == "" {
+			if result.AccessToken == "" {
 				return fmt.Errorf("no token in login response")
 			}
 
-			cfg.Token = result.Token
+			cfg.Token = result.AccessToken
 			cfg.Email = email
 
 			// Try to fetch projects and auto-select if only one
-			client.Token = result.Token
+			client.Token = result.AccessToken
 			projectsData, err := client.Get("/v1/tenants")
 			if err == nil {
 				var projects []struct {
