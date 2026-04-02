@@ -60,14 +60,14 @@ func LogsCmd() *cobra.Command {
 					continue
 				}
 
-				var entries []logEntry
-				if err := json.Unmarshal(data, &entries); err != nil {
+				var resp logsResponse
+				if err := json.Unmarshal(data, &resp); err != nil {
 					PrintError("Error parsing logs: " + err.Error())
 					time.Sleep(2 * time.Second)
 					continue
 				}
 
-				for _, e := range entries {
+				for _, e := range resp.Logs {
 					printLogEntry(e)
 					lastSeen = e.Timestamp
 				}
@@ -84,11 +84,16 @@ func LogsCmd() *cobra.Command {
 }
 
 type logEntry struct {
-	Timestamp string `json:"timestamp"`
-	Method    string `json:"method"`
-	Path      string `json:"path"`
-	Status    int    `json:"status"`
-	Latency   string `json:"latency"`
+	Timestamp string  `json:"created_at"`
+	Method    string  `json:"method"`
+	Path      string  `json:"path"`
+	Status    int     `json:"status_code"`
+	LatencyMs float64 `json:"latency_ms"`
+}
+
+type logsResponse struct {
+	Logs  []logEntry `json:"logs"`
+	Total int        `json:"total"`
 }
 
 func fetchAndPrintLogs(client *APIClient, path string, cmd *cobra.Command) error {
@@ -97,38 +102,41 @@ func fetchAndPrintLogs(client *APIClient, path string, cmd *cobra.Command) error
 		return err
 	}
 
-	var entries []logEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	var resp logsResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
 		return fmt.Errorf("parsing response: %w", err)
 	}
 
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	if jsonOut {
-		PrintJSON(entries)
+		PrintJSON(resp.Logs)
 		return nil
 	}
 
 	headers := []string{"Time", "Method", "Path", "Status", "Latency"}
 	var rows [][]string
-	for _, e := range entries {
+	for _, e := range resp.Logs {
 		statusStr := fmt.Sprintf("%d", e.Status)
 		if e.Status >= 500 {
 			statusStr = colorRed + statusStr + colorReset
 		} else if e.Status >= 400 {
 			statusStr = colorYellow + statusStr + colorReset
 		}
-		rows = append(rows, []string{e.Timestamp, e.Method, e.Path, statusStr, e.Latency})
+		latency := fmt.Sprintf("%.1fms", e.LatencyMs)
+		rows = append(rows, []string{e.Timestamp, e.Method, e.Path, statusStr, latency})
 	}
 	PrintTable(headers, rows)
+	fmt.Printf("\n%d total log entries\n", resp.Total)
 	return nil
 }
 
 func printLogEntry(e logEntry) {
+	latency := fmt.Sprintf("%.1fms", e.LatencyMs)
 	statusStr := fmt.Sprintf("%d", e.Status)
 	if e.Status >= 500 {
 		statusStr = colorRed + statusStr + colorReset
 	} else if e.Status >= 400 {
 		statusStr = colorYellow + statusStr + colorReset
 	}
-	fmt.Printf("%s  %-6s %-40s %s  %s\n", e.Timestamp, e.Method, e.Path, statusStr, e.Latency)
+	fmt.Printf("%s  %-6s %-40s %s  %s\n", e.Timestamp, e.Method, e.Path, statusStr, latency)
 }

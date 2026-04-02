@@ -118,21 +118,41 @@ func dbSchemaCmd() *cobra.Command {
 			}
 
 			if len(args) == 1 {
-				// Show columns for a specific table
-				data, err := client.Get("/platform/projects/" + cfg.ActiveProject + "/schema/" + args[0])
+				// Show columns for a specific table — filter from full schema
+				data, err := client.Get("/platform/projects/" + cfg.ActiveProject + "/schema")
 				if err != nil {
 					return err
 				}
 
+				var allTables []struct {
+					Name    string `json:"name"`
+					Columns []struct {
+						Name     string `json:"name"`
+						Type     string `json:"data_type"`
+						Nullable bool   `json:"is_nullable"`
+						Default  string `json:"default_value"`
+						PK       bool   `json:"is_primary_key"`
+					} `json:"columns"`
+				}
+				if err := json.Unmarshal(data, &allTables); err != nil {
+					return fmt.Errorf("parsing response: %w", err)
+				}
+
 				var columns []struct {
 					Name     string `json:"name"`
-					Type     string `json:"type"`
-					Nullable bool   `json:"nullable"`
+					Type     string `json:"data_type"`
+					Nullable bool   `json:"is_nullable"`
 					Default  string `json:"default_value"`
 					PK       bool   `json:"is_primary_key"`
 				}
-				if err := json.Unmarshal(data, &columns); err != nil {
-					return fmt.Errorf("parsing response: %w", err)
+				for _, t := range allTables {
+					if t.Name == args[0] {
+						columns = t.Columns
+						break
+					}
+				}
+				if columns == nil {
+					return fmt.Errorf("table %q not found", args[0])
 				}
 
 				jsonOut, _ := cmd.Flags().GetBool("json")
@@ -223,8 +243,10 @@ func dbQueryCmd() *cobra.Command {
 			}
 
 			var result struct {
-				Columns []string        `json:"columns"`
-				Rows    [][]interface{} `json:"rows"`
+				Columns     []string                   `json:"columns"`
+				Rows        []map[string]interface{}    `json:"rows"`
+				RowCount    int                         `json:"row_count"`
+				ExecTimeMs  float64                     `json:"execution_time_ms"`
 			}
 			if err := json.Unmarshal(data, &result); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
@@ -236,6 +258,8 @@ func dbQueryCmd() *cobra.Command {
 				return nil
 			}
 
+			fmt.Printf("%d row(s) · %.1fms\n\n", result.RowCount, result.ExecTimeMs)
+
 			if len(result.Columns) == 0 {
 				PrintSuccess("Query executed successfully (no results)")
 				return nil
@@ -244,13 +268,17 @@ func dbQueryCmd() *cobra.Command {
 			var rows [][]string
 			for _, row := range result.Rows {
 				var cols []string
-				for _, v := range row {
-					cols = append(cols, fmt.Sprintf("%v", v))
+				for _, c := range result.Columns {
+					v := row[c]
+					if v == nil {
+						cols = append(cols, "NULL")
+					} else {
+						cols = append(cols, fmt.Sprintf("%v", v))
+					}
 				}
 				rows = append(rows, cols)
 			}
 			PrintTable(result.Columns, rows)
-			fmt.Printf("\n%d row(s)\n", len(result.Rows))
 			return nil
 		},
 	}

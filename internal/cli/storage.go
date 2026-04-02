@@ -56,15 +56,18 @@ func storageLsCmd() *cobra.Command {
 				return err
 			}
 
-			var files []struct {
-				Key      string `json:"key"`
-				Size     int64  `json:"size"`
-				Type     string `json:"content_type"`
-				Modified string `json:"last_modified"`
+			var resp struct {
+				Objects []struct {
+					Key      string `json:"key"`
+					Size     int64  `json:"size"`
+					Type     string `json:"content_type"`
+					Modified string `json:"last_modified"`
+				} `json:"objects"`
 			}
-			if err := json.Unmarshal(data, &files); err != nil {
+			if err := json.Unmarshal(data, &resp); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
 			}
+			files := resp.Objects
 
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			if jsonOut {
