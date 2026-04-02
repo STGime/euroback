@@ -109,6 +109,18 @@ func HandleLogs(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		// Enforce plan-based log retention.
+		var retentionDays int
+		err := pool.QueryRow(r.Context(),
+			`SELECT COALESCE(pl.log_retention_days, 1)
+			 FROM projects p
+			 LEFT JOIN plan_limits pl ON pl.plan = COALESCE(p.plan, 'free')
+			 WHERE p.id = $1`, projectID,
+		).Scan(&retentionDays)
+		if err == nil && retentionDays > 0 {
+			conditions = append(conditions, fmt.Sprintf("created_at >= now() - interval '%d days'", retentionDays))
+		}
+
 		where := strings.Join(conditions, " AND ")
 
 		// Get total count.

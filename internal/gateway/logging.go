@@ -126,10 +126,10 @@ func batchInsertLogs(ctx context.Context, pool *pgxpool.Pool, entries []LogEntry
 	return tx.Commit(ctx)
 }
 
-// StartLogCleanup starts a background goroutine that deletes logs older than 7 days.
+// StartLogCleanup starts a background goroutine that deletes logs based on each project's plan retention.
 func StartLogCleanup(ctx context.Context, pool *pgxpool.Pool) {
 	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
+		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 
 		// Run once on startup.
@@ -147,7 +147,14 @@ func StartLogCleanup(ctx context.Context, pool *pgxpool.Pool) {
 }
 
 func cleanupOldLogs(ctx context.Context, pool *pgxpool.Pool) {
-	result, err := pool.Exec(ctx, `DELETE FROM request_logs WHERE created_at < now() - interval '7 days'`)
+	// Delete logs per project based on plan retention.
+	// Join projects → plan_limits to get log_retention_days per project.
+	result, err := pool.Exec(ctx,
+		`DELETE FROM request_logs rl
+		 USING projects p
+		 LEFT JOIN plan_limits pl ON pl.plan = COALESCE(p.plan, 'free')
+		 WHERE rl.project_id = p.id
+		   AND rl.created_at < now() - (COALESCE(pl.log_retention_days, 1) || ' days')::interval`)
 	if err != nil {
 		slog.Error("failed to clean up old request logs", "error", err)
 		return
