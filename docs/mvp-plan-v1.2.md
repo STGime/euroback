@@ -874,13 +874,14 @@ on push to main:
 | RLS toggle + policy management in database UI | 1 day | Done |
 | Documentation (RLS guide, Vault guide, auth helpers) | 0.5 day | Done |
 
-### Sprint 5: Developer Workflow
+### Sprint 5: Developer Workflow (In Progress)
 
 | Feature | Effort | Status |
 |---------|--------|--------|
+| CLI tool v1 (30+ commands, cobra, Go binary) | 1 week | Done |
+| pgTAP database testing (eurobase test) | 1 day | Done |
 | Mollie billing integration | 1 week | Next |
 | Team collaboration / RBAC | 1 week | Planned |
-| CLI tool v1 (Go binary, Homebrew) | 1 week | Planned |
 | Built-in automations (Layer 1 — token cleanup, log retention, usage alerts) | 2 days | Planned |
 
 ### CLI Tool — Scope (v1 vs v2)
