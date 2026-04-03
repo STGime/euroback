@@ -35,6 +35,7 @@ func main() {
 	root.AddCommand(cli.StorageCmd())
 	root.AddCommand(cli.InitCmd())
 	root.AddCommand(cli.TestCmd())
+	root.AddCommand(cli.ComplianceCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -1,0 +1,144 @@
+{
+	"info": {
+		"name": "Eurobase Compliance (DPA Report)",
+		"description": "Tests for GDPR compliance report and sub-processor registry.\n\n## Setup\n\n1. Gateway running\n2. Migration 025 applied\n3. `platform_token` and `project_id` set",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 1 — Sub-Processors",
+			"item": [
+				{
+					"name": "D1.1 Get active sub-processors",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns array of sub-processors', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"    pm.expect(json.length).to.be.at.least(3);",
+						"});",
+						"pm.test('All have required fields', () => {",
+						"    const json = pm.response.json();",
+						"    json.forEach(sp => {",
+						"        pm.expect(sp).to.have.property('name');",
+						"        pm.expect(sp).to.have.property('country');",
+						"        pm.expect(sp).to.have.property('purpose');",
+						"        pm.expect(sp).to.have.property('cloud_act_risk');",
+						"        pm.expect(sp).to.have.property('data_categories');",
+						"    });",
+						"});",
+						"pm.test('Scaleway is present', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.some(sp => sp.name.includes('Scaleway'))).to.be.true;",
+						"});",
+						"pm.test('Core services are EU-only', () => {",
+						"    const json = pm.response.json();",
+						"    const core = json.filter(sp => ['database','compute','cache'].includes(sp.service));",
+						"    core.forEach(sp => {",
+						"        pm.expect(sp.cloud_act_risk).to.be.false;",
+						"        pm.expect(sp.jurisdiction).to.eql('EU');",
+						"    });",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/compliance/sub-processors", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "compliance", "sub-processors"] }
+					}
+				},
+				{
+					"name": "D1.2 No auth",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/compliance/sub-processors", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "compliance", "sub-processors"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — DPA Report",
+			"item": [
+				{
+					"name": "D2.1 Get full DPA report",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Has all report sections', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('generated_at');",
+						"    pm.expect(json).to.have.property('version');",
+						"    pm.expect(json).to.have.property('eurobase_entity');",
+						"    pm.expect(json).to.have.property('customer');",
+						"    pm.expect(json).to.have.property('sub_processors');",
+						"    pm.expect(json).to.have.property('data_flow');",
+						"    pm.expect(json).to.have.property('processing_activities');",
+						"    pm.expect(json).to.have.property('summary');",
+						"});",
+						"pm.test('Eurobase entity is correct', () => {",
+						"    const e = pm.response.json().eurobase_entity;",
+						"    pm.expect(e.name).to.eql('Eurobase');",
+						"    pm.expect(e.dpo_email).to.eql('dpo@eurobase.app');",
+						"});",
+						"pm.test('Customer info is populated', () => {",
+						"    const c = pm.response.json().customer;",
+						"    pm.expect(c.project_name).to.be.a('string').and.not.empty;",
+						"    pm.expect(c.plan).to.be.a('string');",
+						"});",
+						"pm.test('Data flow shows EU storage', () => {",
+						"    const df = pm.response.json().data_flow;",
+						"    pm.expect(df.storage_location).to.include('France');",
+						"    pm.expect(df.encryption_at_rest).to.be.true;",
+						"    pm.expect(df.encryption_in_transit).to.be.true;",
+						"});",
+						"pm.test('Processing activities exist', () => {",
+						"    const pa = pm.response.json().processing_activities;",
+						"    pm.expect(pa).to.be.an('array');",
+						"    pm.expect(pa.length).to.be.at.least(2);",
+						"    pa.forEach(a => {",
+						"        pm.expect(a).to.have.property('activity');",
+						"        pm.expect(a).to.have.property('legal_basis');",
+						"    });",
+						"});",
+						"pm.test('Summary has totals', () => {",
+						"    const s = pm.response.json().summary;",
+						"    pm.expect(s.total_sub_processors).to.be.at.least(3);",
+						"    pm.expect(s).to.have.property('eu_only');",
+						"    pm.expect(s).to.have.property('cloud_act_exposure');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/compliance/dpa-report", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "compliance", "dpa-report"] }
+					}
+				},
+				{
+					"name": "D2.2 Report — no auth",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/compliance/dpa-report", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "compliance", "dpa-report"] }
+					}
+				},
+				{
+					"name": "D2.3 Report — invalid project",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/00000000-0000-0000-0000-000000000000/compliance/dpa-report", "host": ["{{base_url}}"], "path": ["platform", "projects", "00000000-0000-0000-0000-000000000000", "compliance", "dpa-report"] }
+					}
+				}
+			]
+		}
+	]
+}

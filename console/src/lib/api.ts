@@ -829,6 +829,18 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Compliance methods ----
+
+	/** Get the full DPA compliance report for a project. */
+	async getDPAReport(projectId: string): Promise<DPAReport> {
+		return this.fetch<DPAReport>(`/platform/projects/${projectId}/compliance/dpa-report`);
+	}
+
+	/** Get active sub-processors for a project. */
+	async getSubProcessors(projectId: string): Promise<SubProcessorInfo[]> {
+		return this.fetch<SubProcessorInfo[]>(`/platform/projects/${projectId}/compliance/sub-processors`);
+	}
+
 	// ---- Email configuration ----
 
 	/** Check if email sending is configured. */
@@ -1123,6 +1135,62 @@ export interface LogsResponse {
 	logs: RequestLog[];
 	total: number;
 	stats: LogStats;
+}
+
+export interface SubProcessorInfo {
+	id: string;
+	name: string;
+	legal_entity: string;
+	country: string;
+	country_code: string;
+	jurisdiction: string;
+	service: string;
+	purpose: string;
+	data_categories: string[];
+	data_subjects: string;
+	transfer_mechanism: string;
+	security_certs: string[];
+	dpa_url?: string;
+	privacy_url?: string;
+	cloud_act_risk: boolean;
+	added_at: string;
+}
+
+export interface ProcessingActivity {
+	activity: string;
+	legal_basis: string;
+	data_categories: string[];
+	retention: string;
+}
+
+export interface DPAReport {
+	generated_at: string;
+	version: string;
+	eurobase_entity: {
+		name: string;
+		country: string;
+		dpo_email: string;
+	};
+	customer: {
+		project_name: string;
+		project_slug: string;
+		plan: string;
+	};
+	sub_processors: SubProcessorInfo[];
+	data_flow: {
+		storage_location: string;
+		encryption_at_rest: boolean;
+		encryption_in_transit: boolean;
+		cross_border_transfers: boolean;
+		cross_border_details?: string;
+	};
+	processing_activities: ProcessingActivity[];
+	summary: {
+		total_sub_processors: number;
+		eu_only: boolean;
+		cloud_act_exposure: boolean;
+		cloud_act_details?: string;
+	};
 }
 
 export const api = new EurobaseAPI();

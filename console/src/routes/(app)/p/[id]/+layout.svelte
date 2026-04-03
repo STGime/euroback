@@ -23,6 +23,7 @@
 		{ label: 'Webhooks', href: '/webhooks', icon: 'webhooks' },
 		{ label: 'Vault', href: '/vault', icon: 'vault' },
 		{ label: 'Cron & RPC', href: '/cron', icon: 'cron' },
+		{ label: 'Compliance', href: '/compliance', icon: 'compliance' },
 		{ label: 'Settings', href: '/settings', icon: 'settings' }
 	];
 

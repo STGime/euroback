@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
@@ -151,6 +152,11 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			if vaultSvc != nil && vaultSvc.Configured() {
 				r.Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
+
+			// Compliance (DPA report, sub-processor registry).
+			complianceSvc := compliance.NewComplianceService(pool)
+			r.Get("/compliance/dpa-report", compliance.HandleDPAReport(complianceSvc))
+			r.Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
 
 			// Console end-user management — platform-authenticated.
 			r.Route("/users", func(r chi.Router) {
