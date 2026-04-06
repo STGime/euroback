@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { api, type EdgeFunction, type EdgeFunctionLog, type TableSchema } from '$lib/api.js';
+	import CodeEditor from '$lib/components/CodeEditor.svelte';
 
 	let projectId = $derived($page.params.id);
 
@@ -21,6 +22,9 @@
 	let saving = $state(false);
 	let logs: EdgeFunctionLog[] = $state([]);
 	let showLogs = $state(false);
+
+	// Code editor ref
+	let codeEditor: CodeEditor | undefined = $state(undefined);
 
 	// Create state
 	let showCreate = $state(false);
@@ -48,11 +52,13 @@
 	}
 
 	function insertText(text: string) {
-		const needsSpace = editorCode.length > 0
-			&& !editorCode.endsWith(' ') && !editorCode.endsWith('\n')
-			&& !editorCode.endsWith('\t') && !editorCode.endsWith('(')
-			&& !editorCode.endsWith('.');
-		editorCode = editorCode + (needsSpace ? ' ' : '') + text;
+		if (codeEditor) {
+			const pos = codeEditor.getCursorPosition();
+			codeEditor.insertAt(pos, text);
+			codeEditor.focus();
+		} else {
+			editorCode = editorCode + ' ' + text;
+		}
 	}
 
 	function shortType(type: string): string {
@@ -347,13 +353,13 @@
 						</div>
 
 						<!-- Code editor -->
-						<div class="relative overflow-hidden">
-							<textarea
-								bind:value={editorCode}
-								class="block h-[400px] w-full resize-none border-0 bg-gray-900 px-4 py-3 font-mono text-sm text-green-400 focus:ring-0 overflow-auto"
-								spellcheck="false"
+						<div class="h-[400px]">
+							<CodeEditor
+								bind:this={codeEditor}
+								value={editorCode}
+								onchange={(v) => { editorCode = v; }}
 								placeholder="// Write your function code here..."
-							></textarea>
+							/>
 						</div>
 
 						<!-- Context reference -->
