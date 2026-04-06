@@ -149,6 +149,11 @@ func (c *APIClient) Patch(path string, body interface{}) ([]byte, error) {
 	return c.do(http.MethodPatch, path, body)
 }
 
+// Put performs an authenticated PUT request with a JSON body.
+func (c *APIClient) Put(path string, body interface{}) ([]byte, error) {
+	return c.do(http.MethodPut, path, body)
+}
+
 // Delete performs an authenticated DELETE request.
 func (c *APIClient) Delete(path string) ([]byte, error) {
 	return c.do(http.MethodDelete, path, nil)

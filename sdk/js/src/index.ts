@@ -26,6 +26,8 @@ export type {
   RealtimeEventType,
 } from './realtime'
 export { AuthClient } from './auth'
+export { FunctionsClient } from './functions'
+export type { FunctionInvokeOptions, FunctionError } from './functions'
 export { VaultClient } from './vault'
 export type { VaultSecret, VaultSecretMeta } from './vault'
 export type {

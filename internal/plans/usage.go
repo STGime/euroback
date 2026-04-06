@@ -9,11 +9,12 @@ import (
 
 // ProjectUsage holds the current resource usage for a project.
 type ProjectUsage struct {
-	DatabaseSizeMB float64 `json:"database_size_mb"`
-	StorageSizeMB  float64 `json:"storage_size_mb"`
-	MAUCount       int     `json:"mau_count"`
-	WebhookCount   int     `json:"webhook_count"`
-	ProjectCount   int     `json:"project_count"`
+	DatabaseSizeMB    float64 `json:"database_size_mb"`
+	StorageSizeMB     float64 `json:"storage_size_mb"`
+	MAUCount          int     `json:"mau_count"`
+	WebhookCount      int     `json:"webhook_count"`
+	ProjectCount      int     `json:"project_count"`
+	EdgeFunctionCount int     `json:"edge_function_count"`
 }
 
 // GetUsage queries the current resource usage for a project.
@@ -58,6 +59,15 @@ func (s *LimitsService) GetUsage(ctx context.Context, projectID, schemaName stri
 	if err != nil {
 		slog.Error("get usage: project count failed", "project_id", projectID, "error", err)
 		return nil, fmt.Errorf("failed to count projects: %w", err)
+	}
+
+	// Edge function count.
+	err = s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM edge_functions WHERE project_id = $1`, projectID,
+	).Scan(&usage.EdgeFunctionCount)
+	if err != nil {
+		slog.Error("get usage: edge function count failed", "project_id", projectID, "error", err)
+		usage.EdgeFunctionCount = 0
 	}
 
 	return usage, nil

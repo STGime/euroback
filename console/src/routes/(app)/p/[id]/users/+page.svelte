@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { api, type EndUser } from '$lib/api.js';
-	import { onMount } from 'svelte';
+	import { api, type EndUser, type Project } from '$lib/api.js';
+	import { getContext, onMount } from 'svelte';
+
+	const projectCtx = getContext<{ id: string; project: Project | null }>('projectId');
 
 	let projectId = $derived($page.params.id);
 
@@ -35,6 +37,7 @@
 	// Password reset
 	let resetUser: EndUser | null = $state(null);
 	let resetPassword = $state('');
+	let resetConfirmPassword = $state('');
 	let resetError: string | null = $state(null);
 	let resetting = $state(false);
 
@@ -174,14 +177,21 @@
 		} catch { /* ignore */ }
 	}
 
+	let resetPasswordsMismatch = $derived(resetConfirmPassword.length > 0 && resetPassword !== resetConfirmPassword);
+
 	async function handleResetPassword() {
 		if (!resetUser || !resetPassword) return;
+		if (resetPassword !== resetConfirmPassword) {
+			resetError = 'Passwords do not match';
+			return;
+		}
 		resetting = true;
 		resetError = null;
 		try {
 			await api.resetEndUserPassword(projectId, resetUser.id, resetPassword);
 			resetUser = null;
 			resetPassword = '';
+			resetConfirmPassword = '';
 		} catch (err) {
 			let msg = err instanceof Error ? err.message : 'Failed to reset password';
 			const m = msg.match(/\{"error":"(.+?)"\}/);
@@ -218,6 +228,26 @@
 			hour: '2-digit', minute: '2-digit'
 		});
 	}
+
+	let copiedStep: number | null = $state(null);
+
+	function copySnippet(code: string, step: number) {
+		navigator.clipboard.writeText(code);
+		copiedStep = step;
+		setTimeout(() => { if (copiedStep === step) copiedStep = null; }, 1500);
+	}
+
+	let slug = $derived(projectCtx.project?.slug ?? 'my-project');
+
+	let quickstartSteps = $derived([
+		{ title: 'Install the SDK', desc: 'Add the Eurobase SDK to your project.', code: 'npm install @eurobase/sdk' },
+		{ title: 'Initialize the client', desc: 'Create a client with your project URL and API key.', code: `import { createClient } from '@eurobase/sdk'\n\nconst eb = createClient({\n  url: 'https://${slug}.eurobase.app',\n  apiKey: process.env.EUROBASE_PUBLIC_KEY\n})` },
+		{ title: 'Sign up a user', desc: 'Register a new user with email and password.', code: `const { data, error } = await eb.auth.signUp({\n  email: 'user@example.com',\n  password: 'securepassword'\n})` },
+		{ title: 'Sign in', desc: 'Authenticate an existing user.', code: `const { data, error } = await eb.auth.signIn({\n  email: 'user@example.com',\n  password: 'securepassword'\n})` },
+		{ title: 'Listen for auth changes', desc: 'React to sign-in, sign-out, and token refresh events.', code: `eb.auth.onAuthStateChange((event, session) => {\n  console.log(event) // SIGNED_IN | SIGNED_OUT | TOKEN_REFRESHED\n})\n\n// Get the current user at any time\nconst { data: user } = await eb.auth.getUser()` },
+		{ title: 'Sign out', desc: 'End the user session and clear tokens.', code: 'await eb.auth.signOut()' },
+		{ title: 'Authenticated queries', desc: 'After sign-in, the JWT is sent automatically with every query. RLS policies are enforced server-side.', code: `// No extra headers needed — the SDK handles auth automatically\nconst { data } = await eb.db.from('todos').select('*')\n// Only rows allowed by your RLS policies are returned` },
+	]);
 </script>
 
 <div class="mx-auto max-w-5xl space-y-6">
@@ -243,6 +273,34 @@
 			Add User
 		</button>
 	</div>
+
+	<!-- Quick Start Guide -->
+	<details class="rounded-xl border border-gray-200 bg-white">
+		<summary class="cursor-pointer select-none px-5 py-4 text-sm font-semibold text-gray-900 hover:bg-gray-50 transition-colors">
+			Quick Start — Add Auth to Your App
+		</summary>
+		<div class="border-t border-gray-200 px-5 py-5 space-y-5">
+			{#each quickstartSteps as step, i}
+				<div class="flex gap-4">
+					<div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700">{i + 1}</div>
+					<div class="flex-1 min-w-0">
+						<h4 class="text-sm font-semibold text-gray-900">{step.title}</h4>
+						<p class="mt-0.5 text-xs text-gray-500">{step.desc}</p>
+						<div class="relative mt-2">
+							<pre class="rounded-lg bg-gray-900 p-3 text-xs font-mono text-green-400 overflow-x-auto">{step.code}</pre>
+							<button
+								type="button"
+								class="cursor-pointer absolute top-2 right-2 rounded-md bg-gray-800 px-2 py-0.5 text-[10px] font-medium text-gray-400 hover:text-white transition-colors"
+								onclick={() => copySnippet(step.code, i)}
+							>
+								{copiedStep === i ? 'Copied!' : 'Copy'}
+							</button>
+						</div>
+					</div>
+				</div>
+			{/each}
+		</div>
+	</details>
 
 	<!-- Search -->
 	{#if !loading || users.length > 0 || search}
@@ -355,7 +413,7 @@
 									<button
 										type="button"
 										class="cursor-pointer rounded p-1.5 text-gray-300 hover:bg-gray-100 hover:text-gray-600 transition-colors"
-										onclick={() => { resetUser = user; resetPassword = ''; resetError = null; }}
+										onclick={() => { resetUser = user; resetPassword = ''; resetConfirmPassword = ''; resetError = null; }}
 										title="Reset password"
 									>
 										<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -589,10 +647,18 @@
 					<input id="reset-password" type="password" bind:value={resetPassword} placeholder="Minimum 8 characters"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
 				</div>
+				<div>
+					<label for="reset-password-confirm" class="block text-sm font-medium text-gray-700 mb-1">Confirm Password</label>
+					<input id="reset-password-confirm" type="password" bind:value={resetConfirmPassword} placeholder="Re-enter password"
+						class="w-full rounded-lg border {resetPasswordsMismatch ? 'border-red-300' : 'border-gray-300'} px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
+					{#if resetPasswordsMismatch}
+						<p class="mt-1 text-xs text-red-500">Passwords do not match</p>
+					{/if}
+				</div>
 			</div>
 			<div class="flex items-center justify-end gap-3 border-t border-gray-200 px-6 py-4">
 				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (resetUser = null)}>Cancel</button>
-				<button type="button" class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50" disabled={resetPassword.length < 8 || resetting} onclick={handleResetPassword}>
+				<button type="button" class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50" disabled={resetPassword.length < 8 || resetPassword !== resetConfirmPassword || resetting} onclick={handleResetPassword}>
 					{resetting ? 'Resetting...' : 'Reset Password'}
 				</button>
 			</div>

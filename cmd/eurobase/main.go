@@ -32,6 +32,7 @@ func main() {
 	root.AddCommand(cli.VaultCmd())
 	root.AddCommand(cli.CronCmd())
 	root.AddCommand(cli.FunctionsCmd())
+	root.AddCommand(cli.EdgeFunctionsCmd())
 	root.AddCommand(cli.StorageCmd())
 	root.AddCommand(cli.InitCmd())
 	root.AddCommand(cli.TestCmd())

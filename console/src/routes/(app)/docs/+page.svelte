@@ -18,11 +18,12 @@
 		{ id: 'rls', label: '10. Row-Level Security' },
 		{ id: 'vault', label: '11. Vault (Secrets)' },
 		{ id: 'cron', label: '12. Scheduled Jobs' },
-		{ id: 'logs', label: '13. Monitoring with Logs' },
-		{ id: 'settings', label: '14. Project Settings' },
-		{ id: 'cli', label: '15. CLI Tool' },
-		{ id: 'connect', label: '16. Connecting Your IDE' },
-		{ id: 'account', label: '17. Your Account' },
+		{ id: 'edge-functions', label: '13. Edge Functions' },
+		{ id: 'logs', label: '14. Monitoring with Logs' },
+		{ id: 'settings', label: '15. Project Settings' },
+		{ id: 'cli', label: '16. CLI Tool' },
+		{ id: 'connect', label: '17. Connecting Your IDE' },
+		{ id: 'account', label: '18. Your Account' },
 		{ id: 'next', label: "What's Next" }
 	];
 
@@ -1217,15 +1218,102 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 
 			<div class="mt-6 text-right">
+				<button onclick={() => scrollTo('edge-functions')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Edge Functions &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 13. EDGE FUNCTIONS ======================= -->
+		<section id="edge-functions" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Edge Functions</h2>
+			<p class="text-sm italic text-gray-500 mb-4">Alex needs to process a payment webhook and update an order — this requires custom server-side logic beyond SQL.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Edge Functions are serverless TypeScript/JavaScript functions that run on Eurobase's EU-sovereign infrastructure. They let you write custom server-side logic — payment processing, external API integrations, data transformations — without managing any servers.
+				</p>
+
+				<div class="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
+					<p class="text-sm text-blue-800"><span class="font-semibold">EU Sovereign:</span> Edge Functions run on Scaleway infrastructure in France. Unlike other platforms that route through US-hosted runtimes, your code and secrets never leave the EU.</p>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Creating a Function</h3>
+				<p class="text-sm text-gray-700">From the console, navigate to <span class="font-mono text-sm bg-gray-100 px-1 rounded">Functions</span> tab and click <span class="font-mono text-sm bg-gray-100 px-1 rounded">+ New Function</span>. Give it a lowercase name with hyphens (e.g., <code>process-order</code>).</p>
+				<p class="text-sm text-gray-700 mt-2">Or via CLI:</p>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto">eurobase edge-functions deploy process-order --file functions/process-order.ts</pre>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Function Structure</h3>
+				<p class="text-sm text-gray-700">Every function receives a <code>Request</code> and a <code>ctx</code> (context) object:</p>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto whitespace-pre">async function handler(req: Request, ctx: Eurobase.FunctionContext) {"{"}{"\n"}  // Parse the incoming request{"\n"}  const {"{"} orderId {"}"} = await req.json();{"\n"}{"\n"}  // Query the database (scoped to your project){"\n"}  const [order] = await ctx.db.sql({"\n"}    "SELECT * FROM orders WHERE id = $1",{"\n"}    [orderId]{"\n"}  );{"\n"}{"\n"}  // Read a secret from Vault{"\n"}  const apiKey = await ctx.vault.get("PAYMENT_API_KEY");{"\n"}{"\n"}  // Call an external API{"\n"}  const payment = await fetch("https://api.mollie.com/v2/payments", {"{"}{"\n"}    method: "POST",{"\n"}    headers: {"{"} Authorization: `Bearer ${"{"} apiKey {"}"}` {"}"},{"}"}{"\n"}    body: JSON.stringify({"{"} amount: order.total {"}"}){"}"}{"\n"}  );{"\n"}{"\n"}  // Return a response{"\n"}  return new Response(JSON.stringify({"{"} status: "ok" {"}"}), {"{"}{"\n"}    status: 200,{"\n"}    headers: {"{"} "Content-Type": "application/json" {"}"},{"\n"}  {"}"});{"\n"}{"}"}</pre>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Context API</h3>
+				<div class="overflow-x-auto">
+					<table class="w-full text-sm border border-gray-200 rounded-lg">
+						<thead class="bg-gray-50">
+							<tr>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">Property</th>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">Description</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-gray-100">
+							<tr><td class="px-4 py-2 font-mono text-xs">ctx.db.sql(query, params)</td><td class="px-4 py-2 text-gray-600">Execute SQL scoped to your project schema</td></tr>
+							<tr><td class="px-4 py-2 font-mono text-xs">ctx.vault.get(name)</td><td class="px-4 py-2 text-gray-600">Read an encrypted secret from Vault</td></tr>
+							<tr><td class="px-4 py-2 font-mono text-xs">ctx.env</td><td class="px-4 py-2 text-gray-600">Per-function environment variables</td></tr>
+							<tr><td class="px-4 py-2 font-mono text-xs">ctx.user.id / ctx.user.email</td><td class="px-4 py-2 text-gray-600">Authenticated user (if JWT required)</td></tr>
+							<tr><td class="px-4 py-2 font-mono text-xs">ctx.log.info(msg) / .warn / .error</td><td class="px-4 py-2 text-gray-600">Structured logging (visible in Logs)</td></tr>
+						</tbody>
+					</table>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Invoking Functions</h3>
+				<p class="text-sm text-gray-700">Functions are invoked via HTTP using your API key:</p>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto">POST https://your-project.eurobase.app/v1/functions/process-order{"\n"}Authorization: Bearer &lt;user-jwt&gt;{"\n"}apikey: eb_pk_...{"\n"}{"\n"}{"{"}"orderId": "abc-123"{"}"}</pre>
+
+				<p class="text-sm text-gray-700 mt-2">Or via the SDK:</p>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto">const {"{"} data, error {"}"} = await eurobase.functions.invoke('process-order', {"{"}{"\n"}  body: {"{"} orderId: 'abc-123' {"}"},{"\n"}{"}"});</pre>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">CLI Commands</h3>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto"># List edge functions{"\n"}eurobase edge-functions list{"\n"}{"\n"}# Deploy from local file{"\n"}eurobase edge-functions deploy process-order -f functions/process-order.ts{"\n"}{"\n"}# View execution logs{"\n"}eurobase edge-functions logs process-order{"\n"}{"\n"}# Delete a function{"\n"}eurobase edge-functions delete process-order</pre>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Plan Limits</h3>
+				<div class="overflow-x-auto">
+					<table class="w-full text-sm border border-gray-200 rounded-lg">
+						<thead class="bg-gray-50">
+							<tr>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">Limit</th>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">Free</th>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">Pro</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-gray-100">
+							<tr><td class="px-4 py-2 text-gray-700">Functions per project</td><td class="px-4 py-2">3</td><td class="px-4 py-2">25</td></tr>
+							<tr><td class="px-4 py-2 text-gray-700">Execution timeout</td><td class="px-4 py-2">10 seconds</td><td class="px-4 py-2">60 seconds</td></tr>
+							<tr><td class="px-4 py-2 text-gray-700">Memory per execution</td><td class="px-4 py-2">64 MB</td><td class="px-4 py-2">256 MB</td></tr>
+						</tbody>
+					</table>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Use Cases</h3>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
+					<li><strong>Payment webhooks</strong> — Process Mollie callbacks, update order status</li>
+					<li><strong>External integrations</strong> — Sync data to/from other EU SaaS</li>
+					<li><strong>Custom auth logic</strong> — Post-signup hooks, role assignment</li>
+					<li><strong>Data transformation</strong> — Parse CSVs, enrich records, generate reports</li>
+					<li><strong>Notifications</strong> — Send emails, push notifications on events</li>
+				</ul>
+			</div>
+
+			<div class="mt-6 text-right">
 				<button onclick={() => scrollTo('logs')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Monitoring with Logs &rarr;
 				</button>
 			</div>
 		</section>
 
-		<!-- ======================= 11. MONITORING WITH LOGS ======================= -->
+		<!-- ======================= 14. MONITORING WITH LOGS ======================= -->
 		<section id="logs" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Monitoring with Logs</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Monitoring with Logs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex notices slow responses and wants to investigate API traffic.</p>
 
 			<div class="space-y-4">

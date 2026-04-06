@@ -4,6 +4,7 @@
 
 import { AuthClient } from './auth'
 import { DatabaseClient } from './database'
+import { FunctionsClient } from './functions'
 import { StorageClient } from './storage'
 import { RealtimeClient } from './realtime'
 import { VaultClient } from './vault'
@@ -27,6 +28,8 @@ export interface EurobaseClient {
   auth: AuthClient
   /** Database query builder. */
   db: DatabaseClient
+  /** Edge Functions invocation. */
+  functions: FunctionsClient
   /** Object storage operations. */
   storage: StorageClient
   /** Realtime subscriptions via WebSocket. */
@@ -128,6 +131,7 @@ export function createClient(configOrConnectionString: EurobaseConfig | string):
   return {
     auth: authClient,
     db: new DatabaseClient(config),
+    functions: new FunctionsClient(config),
     storage: new StorageClient(config),
     realtime: new RealtimeClient(config),
     vault: new VaultClient(config),

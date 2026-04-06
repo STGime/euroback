@@ -1,0 +1,20 @@
+##############################################################################
+# Eurobase Edge Functions Runner — Deno runtime
+##############################################################################
+FROM denoland/deno:2.1.0
+
+WORKDIR /app
+
+# Copy the runner server
+COPY functions-runner/ /app/
+
+# Pre-cache dependencies
+RUN deno cache /app/server.ts
+
+EXPOSE 8000
+
+# Restricted permissions:
+# --allow-net: connect to Postgres, S3, and external HTTPS APIs
+# --allow-env: read configuration from environment variables
+# --allow-read=/app: read cached function code
+CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read=/app", "/app/server.ts"]

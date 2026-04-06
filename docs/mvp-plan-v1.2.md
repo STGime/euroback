@@ -24,6 +24,8 @@ Version 1.2 — March 2026 — Confidential
 12. [Testing Strategy](#12-testing-strategy)
 13. [Deployment and CI/CD](#13-deployment-and-cicd)
 14. [Open Questions and Decisions](#14-open-questions-and-decisions)
+15. [Post-MVP Feature Roadmap](#15-post-mvp-feature-roadmap-v12)
+16. [Feature Delta: Eurobase vs Supabase](#feature-delta-eurobase-vs-supabase)
 
 ---
 
@@ -880,7 +882,10 @@ on push to main:
 |---------|--------|--------|
 | CLI tool v1 (30+ commands, cobra, Go binary) | 1 week | Done |
 | pgTAP database testing (eurobase test) | 1 day | Done |
+| DPA compliance report | 2 days | Done |
+| Edge Functions — Phase 1 (CRUD, console, CLI, SDK, docs) | 3 days | Done |
 | Mollie billing integration | 1 week | Next |
+| Edge Functions — Phase 2 (Deno runner deployment) | 3 days | Planned |
 | Team collaboration / RBAC | 1 week | Planned |
 | Built-in automations (Layer 1 — token cleanup, log retention, usage alerts) | 2 days | Planned |
 
@@ -966,6 +971,84 @@ export default async function(req, ctx) {
 ```
 Runs on Scaleway Serverless Containers or self-hosted Deno isolates.
 Triggered by HTTP request, webhook, or schedule.
+
+### Feature Delta: Eurobase vs Supabase
+
+Comprehensive comparison as of April 2026. This tracks where Eurobase has parity, advantages, gaps, and big gaps relative to Supabase.
+
+#### Parity (16 features — shipped)
+
+| Feature | Eurobase | Supabase | Notes |
+|---------|----------|----------|-------|
+| Database CRUD (REST) | `/v1/db/{table}` | PostgREST | Filter, order, paginate, nested relations |
+| Auth (email/password) | Built-in Go | GoTrue | Signup, signin, refresh, signout |
+| Auth (magic links) | Built-in Go | GoTrue | Passwordless email flow |
+| Auth (OAuth) | Google, GitHub | 20+ providers | 2 providers vs many — adequate for MVP |
+| Email verification | Scaleway TEM | Built-in | Token-based, customizable templates |
+| Password reset | Scaleway TEM | Built-in | Token-based flow |
+| File storage | Scaleway S3 | S3-compatible | Upload, download, list, delete, signed URLs |
+| Realtime | WebSocket | WebSocket | INSERT/UPDATE/DELETE events |
+| Row-Level Security | Per-table + presets | Per-table | 5 policy presets + custom SQL |
+| Rate limiting | Redis-backed | Built-in | Per-plan (100/1000 req/s) |
+| Webhooks | Retry + logs | Retry + logs | Event-driven HTTP callbacks |
+| JavaScript SDK | @eurobase/sdk | @supabase/js | Auth, DB, storage, realtime, vault |
+| SQL editor | Full SQL | Full SQL | Destructive op warnings, DDL support |
+| Schema management | DDL API + console | Dashboard | Create/alter/drop tables, columns, indexes |
+| CLI tool | 30+ commands | 30+ commands | Auth, DB, migrations, storage, vault, cron |
+| Plan/usage limits | Free + Pro | Free + Pro | Per-project billing model |
+
+#### Eurobase Advantages (5 features)
+
+| Feature | Detail | Supabase Equivalent |
+|---------|--------|---------------------|
+| EU sovereignty (zero CLOUD Act) | All infra EU-incorporated (Scaleway FR, Mollie NL) | AWS us-east-1 default, EU regions available but US parent company |
+| DPA compliance report | Auto-generated GDPR report with sub-processor registry | Manual, no built-in tooling |
+| Encrypted vault (AES-256-GCM) | Server-side encrypted secrets, API + SDK + console | Vault exists but different approach |
+| Auth helpers in RLS | `auth_uid()`, `auth_role()`, `auth_email()` per-schema | `auth.uid()` via GoTrue schema |
+| pgTAP testing via CLI | `eurobase test` runs RLS policy tests | No built-in test runner |
+
+#### Gaps (17 features — planned)
+
+| Feature | Priority | Effort | Target |
+|---------|----------|--------|--------|
+| Python SDK | High | 1 week | v1.3 |
+| MFA / TOTP | Medium | 1 week | v1.3 |
+| Custom domains per project | Medium | 1 week | v1.3 |
+| Image transformations | Medium | 1 week | v1.3 |
+| GraphQL API | Medium | 2 weeks | v1.3 |
+| Vector search (pgvector) | Medium | 1 week | v1.3 |
+| Realtime Presence | Low | 1 week | v1.4 |
+| Realtime Broadcast | Low | 1 week | v1.4 |
+| Storage policies (RLS for buckets) | Medium | 3 days | v1.3 |
+| Database backups (PITR) | High | 3 days | v1.3 |
+| Log drains | Low | 2 days | v1.4 |
+| Audit log | High | 3 days | v1.3 |
+| SSO (SAML) | Low | 2 weeks | v1.4 |
+| Phone auth (SMS OTP) | Low | 1 week | v1.4 |
+| Anonymous auth | Low | 2 days | v1.4 |
+| Swift SDK (iOS) | Low | 1 week | v1.4 |
+| Kotlin SDK (Android) | Low | 1 week | v1.4 |
+
+#### Big Gaps (5 features — significant effort)
+
+| Feature | Why It Matters | Effort | Target |
+|---------|---------------|--------|--------|
+| Edge Functions | Custom server-side logic, webhooks, integrations | 2-3 weeks | v1.3 |
+| Local dev (`eurobase start`) | Docker-based local stack, essential for DX | 1 week | v1.3 |
+| Type generation (`eurobase gen types`) | Auto TypeScript types from schema | 3 days | v1.3 |
+| Branching / preview environments | DB branches for staging/preview | 2 weeks | v1.4 |
+| Self-hosting | Docker Compose one-liner for on-prem | 1 week | v1.4 |
+
+#### Summary
+
+- **Parity:** 16 features — Eurobase covers the core BaaS workflow
+- **Advantages:** 5 features — EU sovereignty, DPA reports, vault, auth helpers, pgTAP testing
+- **Gaps:** 17 features — mostly medium/low priority, planned for v1.3-v1.4
+- **Big Gaps:** 5 features — Edge Functions and local dev are the highest priority
+
+**Revenue blocker:** Mollie billing integration (Sprint 2, next up).
+**DX blocker:** Local dev stack + type generation (Sprint 6).
+**Feature blocker:** Edge Functions for advanced use cases (Sprint 7).
 
 ### Future (v1.3+)
 

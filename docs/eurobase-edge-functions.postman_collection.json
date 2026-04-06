@@ -1,0 +1,262 @@
+{
+	"info": {
+		"name": "Eurobase Edge Functions",
+		"description": "Tests for Edge Functions CRUD, invocation, and logs.\n\n## Setup\n\n1. Gateway running\n2. Migration 026 applied\n3. `platform_token` and `project_id` set",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [],
+	"item": [
+		{
+			"name": "Phase 1 — CRUD",
+			"item": [
+				{
+					"name": "F1.1 List functions (empty)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns empty array', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				},
+				{
+					"name": "F1.2 Create function",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+						"pm.test('Has required fields', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('id');",
+						"    pm.expect(json).to.have.property('name', 'test-function');",
+						"    pm.expect(json).to.have.property('code');",
+						"    pm.expect(json).to.have.property('verify_jwt', true);",
+						"    pm.expect(json).to.have.property('status', 'active');",
+						"    pm.expect(json).to.have.property('version', 1);",
+						"    pm.collectionVariables.set('fn_name', json.name);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"name\": \"test-function\", \"code\": \"async function handler(req, ctx) { return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }); }\"}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				},
+				{
+					"name": "F1.3 Create duplicate (should fail)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 400', () => pm.response.to.have.status(400));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"name\": \"test-function\", \"code\": \"// duplicate\"}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				},
+				{
+					"name": "F1.4 Create with invalid name",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+						"pm.test('Error mentions name', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.error).to.include('invalid function name');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"name\": \"Invalid Name!\", \"code\": \"// bad\"}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				},
+				{
+					"name": "F1.5 Get function with code",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Has code', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.name).to.eql('test-function');",
+						"    pm.expect(json.code).to.include('handler');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F1.6 Update function code",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Version bumped', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.version).to.eql(2);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"code\": \"async function handler(req, ctx) { return new Response(JSON.stringify({ ok: true, v: 2 }), { status: 200, headers: { 'Content-Type': 'application/json' } }); }\"}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F1.7 Disable function",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Status changed', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.status).to.eql('disabled');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"status\": \"active\"}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F1.8 List functions (non-empty)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Has one function', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"    pm.expect(json.length).to.be.at.least(1);",
+						"    pm.expect(json[0].name).to.eql('test-function');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				},
+				{
+					"name": "F1.9 Get function logs (empty)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns array', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/logs", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "logs"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — Auth",
+			"item": [
+				{
+					"name": "F2.1 List functions — no auth",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				},
+				{
+					"name": "F2.2 Create function — no auth",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\"name\": \"unauth-fn\", \"code\": \"// test\"}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				},
+				{
+					"name": "F2.3 Get nonexistent function",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/nonexistent", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "nonexistent"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Cleanup",
+			"item": [
+				{
+					"name": "F3.1 Delete function",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Status is deleted', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.status).to.eql('deleted');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F3.2 Delete nonexistent (should fail)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/nonexistent", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "nonexistent"] }
+					}
+				},
+				{
+					"name": "F3.3 List functions (empty again)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Empty after delete', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"    const remaining = json.filter(f => f.name === 'test-function');",
+						"    pm.expect(remaining.length).to.eql(0);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
+					}
+				}
+			]
+		}
+	]
+}

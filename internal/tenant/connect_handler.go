@@ -108,7 +108,28 @@ await eb.db.from('todos').update({ completed: true }).eq('id', rowId)
 await eb.db.from('todos').delete().eq('id', rowId)
 
 // Upload file
-await eb.storage.upload('documents/report.pdf', file)`, apiURL),
+await eb.storage.upload('documents/report.pdf', file)
+
+// ── Authentication ──
+
+// Sign up a new user
+const { data: signUpData, error: signUpErr } = await eb.auth.signUp({
+  email: 'user@example.com', password: 'securepassword'
+})
+
+// Sign in
+await eb.auth.signIn({ email: 'user@example.com', password: 'securepassword' })
+
+// After sign-in, JWT is sent automatically with every query (RLS enforced)
+eb.auth.onAuthStateChange((event, session) => {
+  console.log(event) // SIGNED_IN | SIGNED_OUT | TOKEN_REFRESHED
+})
+
+// Get current user
+const { data: user } = await eb.auth.getUser()
+
+// Sign out
+await eb.auth.signOut()`, apiURL),
 
 			"curl": fmt.Sprintf(`# List todos
 curl -s '%s/v1/db/todos' \
@@ -118,7 +139,26 @@ curl -s '%s/v1/db/todos' \
 curl -s '%s/v1/db/todos' \
   -X POST -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer $EUROBASE_PUBLIC_KEY' \
-  -d '{"title":"New task","completed":false}' | jq .`, apiURL, apiURL),
+  -d '{"title":"New task","completed":false}' | jq .
+
+# ── Authentication ──
+
+# Sign up a new user
+curl -s '%s/v1/auth/signup' \
+  -X POST -H 'Content-Type: application/json' \
+  -H 'apikey: $EUROBASE_PUBLIC_KEY' \
+  -d '{"email":"user@example.com","password":"securepassword"}' | jq .
+
+# Sign in (returns access_token + refresh_token)
+curl -s '%s/v1/auth/signin' \
+  -X POST -H 'Content-Type: application/json' \
+  -H 'apikey: $EUROBASE_PUBLIC_KEY' \
+  -d '{"email":"user@example.com","password":"securepassword"}' | jq .
+
+# Query as authenticated user (RLS enforced)
+curl -s '%s/v1/db/todos' \
+  -H 'apikey: $EUROBASE_PUBLIC_KEY' \
+  -H 'Authorization: Bearer $ACCESS_TOKEN' | jq .`, apiURL, apiURL, apiURL, apiURL, apiURL),
 		}
 
 		resp := ConnectInfo{
@@ -235,6 +275,17 @@ func generateClaudeMD(name, slug, apiURL, plan string, tables []ConnectTable) st
 	fmt.Fprintf(&b, "// Realtime\neb.realtime.on('todos', 'INSERT', (e) => console.log(e))\n")
 	fmt.Fprintf(&b, "```\n\n")
 
+	fmt.Fprintf(&b, "## Authentication\n\n")
+	fmt.Fprintf(&b, "```typescript\n")
+	fmt.Fprintf(&b, "// Sign up\nconst { data, error } = await eb.auth.signUp({ email: 'user@example.com', password: 'securepassword' })\n\n")
+	fmt.Fprintf(&b, "// Sign in\nawait eb.auth.signIn({ email: 'user@example.com', password: 'securepassword' })\n\n")
+	fmt.Fprintf(&b, "// Get current user\nconst { data: user } = await eb.auth.getUser()\n\n")
+	fmt.Fprintf(&b, "// Listen for auth state changes\neb.auth.onAuthStateChange((event, session) => {\n")
+	fmt.Fprintf(&b, "  console.log(event) // SIGNED_IN | SIGNED_OUT | TOKEN_REFRESHED\n})\n\n")
+	fmt.Fprintf(&b, "// Sign out\nawait eb.auth.signOut()\n")
+	fmt.Fprintf(&b, "```\n\n")
+	fmt.Fprintf(&b, "After sign-in, the JWT is sent automatically with every `eb.db` query. RLS policies are enforced server-side.\n\n")
+
 	fmt.Fprintf(&b, "## Constraints\n\n")
 	fmt.Fprintf(&b, "- All infrastructure is EU-only (Scaleway, Paris FR)\n")
 	fmt.Fprintf(&b, "- No US-incorporated services (AWS, GCP, Azure, Stripe, Vercel, Cloudflare)\n")
@@ -256,7 +307,10 @@ func generateCursorRules(name, slug, apiURL string, tables []ConnectTable) strin
 	fmt.Fprintf(&b, "- Query: `eb.db.from('table').select('*')`\n")
 	fmt.Fprintf(&b, "- Insert: `eb.db.from('table').insert({ ... })`\n")
 	fmt.Fprintf(&b, "- Storage: `eb.storage.upload(key, file)`\n")
-	fmt.Fprintf(&b, "- Realtime: `eb.realtime.on('table', 'INSERT', callback)`\n\n")
+	fmt.Fprintf(&b, "- Realtime: `eb.realtime.on('table', 'INSERT', callback)`\n")
+	fmt.Fprintf(&b, "- Auth: `eb.auth.signUp/signIn/signOut({ email, password })`\n")
+	fmt.Fprintf(&b, "- Auth state: `eb.auth.onAuthStateChange(callback)`\n")
+	fmt.Fprintf(&b, "- After sign-in, JWT is sent automatically with all db queries (RLS enforced)\n\n")
 
 	if len(tables) > 0 {
 		fmt.Fprintf(&b, "## Available tables\n\n")

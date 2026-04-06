@@ -182,8 +182,16 @@ func main() {
 	}
 	subdomainMw := auth.NewSubdomainMiddleware(pool, domainSuffix)
 
+	// ── Edge Functions runner URL (internal ClusterIP of the Deno runner) ──
+	fnRunnerURL := os.Getenv("FUNCTION_RUNNER_URL") // e.g. http://functions:8000
+	if fnRunnerURL != "" {
+		slog.Info("edge functions runner configured", "url", fnRunnerURL)
+	} else {
+		slog.Warn("FUNCTION_RUNNER_URL not set, edge function invocation will return 501")
+	}
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, vaultSvc, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, vaultSvc, fnRunnerURL, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

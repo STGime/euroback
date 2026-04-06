@@ -13,6 +13,7 @@ import (
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
+	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
@@ -31,7 +32,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -157,6 +158,17 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			complianceSvc := compliance.NewComplianceService(pool)
 			r.Get("/compliance/dpa-report", compliance.HandleDPAReport(complianceSvc))
 			r.Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
+
+			// Edge Functions (serverless compute management).
+			fnSvc := functions.NewService(pool)
+			r.Route("/functions", func(r chi.Router) {
+				r.Get("/", functions.HandleList(fnSvc))
+				r.Post("/", functions.HandleCreate(fnSvc, limitsSvc))
+				r.Get("/{name}", functions.HandleGet(fnSvc))
+				r.Put("/{name}", functions.HandleUpdate(fnSvc))
+				r.Delete("/{name}", functions.HandleDelete(fnSvc))
+				r.Get("/{name}/logs", functions.HandleLogs(fnSvc))
+			})
 
 			// Console end-user management — platform-authenticated.
 			r.Route("/users", func(r chi.Router) {
@@ -301,6 +313,14 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 				r.Delete("/{name}", vault.HandleSDKDelete(vaultSvc))
 			})
 		}
+
+		// Edge Functions invocation (API key + optional end-user JWT).
+		sdkFnSvc := functions.NewService(pool)
+		r.Route("/functions", func(r chi.Router) {
+			r.Use(apiKeyMw.Handler)
+			r.Use(endUserMw.Handler)
+			r.HandleFunc("/{name}", functions.HandleInvoke(pool, sdkFnSvc, fnRunnerURL))
+		})
 	})
 
 	return r

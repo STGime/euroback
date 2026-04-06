@@ -553,6 +553,7 @@
 													<button
 														onclick={(e) => { e.stopPropagation(); handleCopyUrl(file); }}
 														class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
+														title="Permanent URL — requires authentication via API key or session"
 													>
 														<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 															<path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
@@ -562,6 +563,7 @@
 													<button
 														onclick={(e) => { e.stopPropagation(); selectFile(file); openDropdown = null; }}
 														class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
+														title="Temporary public URL — no auth needed, expires after chosen duration"
 													>
 														<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 															<path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
@@ -714,6 +716,7 @@
 						<button
 							onclick={() => handleCopyUrl(selectedFile!)}
 							class="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors cursor-pointer"
+							title="Permanent URL — requires authentication via API key or session"
 						>
 							<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
@@ -733,7 +736,8 @@
 
 					<!-- Signed URL generator -->
 					<div class="mt-5 border-t border-gray-200 pt-4">
-						<h4 class="text-sm font-medium text-gray-700 mb-2">Generate Signed URL</h4>
+						<h4 class="text-sm font-medium text-gray-700 mb-1">Generate Signed URL</h4>
+						<p class="text-xs text-gray-400 mb-2">Creates a temporary public link — no authentication needed. Expires after the chosen duration.</p>
 						<div class="flex gap-2">
 							<select
 								bind:value={selectedExpiry}
