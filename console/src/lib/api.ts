@@ -841,6 +841,44 @@ export class EurobaseAPI {
 		return this.fetch<SubProcessorInfo[]>(`/platform/projects/${projectId}/compliance/sub-processors`);
 	}
 
+	// ---- Edge Functions ----
+
+	/** List all edge functions for a project. */
+	async listEdgeFunctions(projectId: string): Promise<EdgeFunction[]> {
+		return this.fetch<EdgeFunction[]>(`/platform/projects/${projectId}/functions`);
+	}
+
+	/** Get a single edge function with code. */
+	async getEdgeFunction(projectId: string, name: string): Promise<EdgeFunction> {
+		return this.fetch<EdgeFunction>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}`);
+	}
+
+	/** Create a new edge function. */
+	async createEdgeFunction(projectId: string, data: { name: string; code: string; verify_jwt?: boolean }): Promise<EdgeFunction> {
+		return this.fetch<EdgeFunction>(`/platform/projects/${projectId}/functions`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Update an edge function's code or settings. */
+	async updateEdgeFunction(projectId: string, name: string, data: { code?: string; verify_jwt?: boolean; status?: string; env_vars?: Record<string, string> }): Promise<EdgeFunction> {
+		return this.fetch<EdgeFunction>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}`, {
+			method: 'PUT',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Delete an edge function. */
+	async deleteEdgeFunction(projectId: string, name: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}`, { method: 'DELETE' });
+	}
+
+	/** Get execution logs for an edge function. */
+	async getEdgeFunctionLogs(projectId: string, name: string, limit = 50): Promise<EdgeFunctionLog[]> {
+		return this.fetch<EdgeFunctionLog[]>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/logs?limit=${limit}`);
+	}
+
 	// ---- Email configuration ----
 
 	/** Check if email sending is configured. */
@@ -980,6 +1018,7 @@ export interface PlanLimits {
 	project_limit: number;
 	log_retention_days: number;
 	custom_templates: boolean;
+	edge_function_limit: number;
 }
 
 export interface ProjectUsage {
@@ -989,6 +1028,7 @@ export interface ProjectUsage {
 		mau_count: number;
 		webhook_count: number;
 		project_count: number;
+		edge_function_count: number;
 	};
 	limits: PlanLimits;
 }
@@ -1191,6 +1231,30 @@ export interface DPAReport {
 		cloud_act_exposure: boolean;
 		cloud_act_details?: string;
 	};
+}
+
+export interface EdgeFunction {
+	id: string;
+	project_id: string;
+	name: string;
+	code?: string;
+	verify_jwt: boolean;
+	env_vars?: Record<string, string>;
+	status: string;
+	version: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface EdgeFunctionLog {
+	id: string;
+	function_id: string;
+	project_id: string;
+	status: number;
+	duration_ms: number;
+	error: string | null;
+	request_method: string;
+	created_at: string;
 }
 
 export const api = new EurobaseAPI();
