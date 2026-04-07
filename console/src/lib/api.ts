@@ -879,6 +879,42 @@ export class EurobaseAPI {
 		return this.fetch<EdgeFunctionLog[]>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/logs?limit=${limit}`);
 	}
 
+	/** List triggers for an edge function. */
+	async listFunctionTriggers(projectId: string, name: string): Promise<FunctionTrigger[]> {
+		return this.fetch<FunctionTrigger[]>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/triggers`);
+	}
+
+	/** Create a trigger for an edge function. */
+	async createFunctionTrigger(projectId: string, name: string, data: { table_name: string; events: string[] }): Promise<FunctionTrigger> {
+		return this.fetch<FunctionTrigger>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/triggers`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
+	/** Delete a trigger from an edge function. */
+	async deleteFunctionTrigger(projectId: string, name: string, triggerId: string): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/triggers/${triggerId}`, { method: 'DELETE' });
+	}
+
+	/** List version history for an edge function. */
+	async listFunctionVersions(projectId: string, name: string): Promise<EdgeFunctionVersion[]> {
+		return this.fetch<EdgeFunctionVersion[]>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/versions`);
+	}
+
+	/** Rollback an edge function to a previous version. */
+	async rollbackFunction(projectId: string, name: string, version: number): Promise<EdgeFunction> {
+		return this.fetch<EdgeFunction>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/rollback`, {
+			method: 'POST',
+			body: JSON.stringify({ version })
+		});
+	}
+
+	/** Get aggregated metrics for an edge function. */
+	async getFunctionMetrics(projectId: string, name: string, period = '24h'): Promise<FunctionMetrics> {
+		return this.fetch<FunctionMetrics>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/metrics?period=${period}`);
+	}
+
 	// ---- Email configuration ----
 
 	/** Check if email sending is configured. */
@@ -1255,6 +1291,33 @@ export interface EdgeFunctionLog {
 	error: string | null;
 	request_method: string;
 	created_at: string;
+}
+
+export interface FunctionTrigger {
+	id: string;
+	function_id: string;
+	project_id: string;
+	table_name: string;
+	events: string[];
+	enabled: boolean;
+	created_at: string;
+}
+
+export interface EdgeFunctionVersion {
+	id: string;
+	function_id: string;
+	version: number;
+	code: string;
+	created_at: string;
+}
+
+export interface FunctionMetrics {
+	total_invocations: number;
+	error_count: number;
+	error_rate: number;
+	avg_duration_ms: number;
+	p95_duration_ms: number;
+	period: string;
 }
 
 export const api = new EurobaseAPI();

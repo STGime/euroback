@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { api, type EdgeFunction, type EdgeFunctionLog, type TableSchema } from '$lib/api.js';
+	import { api, type EdgeFunction, type EdgeFunctionLog, type TableSchema, type FunctionTrigger, type EdgeFunctionVersion, type FunctionMetrics } from '$lib/api.js';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 
 	let projectId = $derived($page.params.id);
@@ -33,6 +33,30 @@
 
 	// Delete state
 	let showDeleteConfirm: string | null = $state(null);
+
+	// Triggers state
+	let triggers: FunctionTrigger[] = $state([]);
+	let showTriggerForm = $state(false);
+	let triggerTable = $state('');
+	let triggerEvents = $state<Record<string, boolean>>({ INSERT: false, UPDATE: false, DELETE: false });
+	let savingTrigger = $state(false);
+
+	// Environment variables state
+	let showEnvVars = $state(false);
+	let envPairs = $state<Array<{ key: string; value: string }>>([]);
+	let savingEnv = $state(false);
+	let envMasked = $state(true);
+
+	// Versioning state
+	let showVersions = $state(false);
+	let versions: EdgeFunctionVersion[] = $state([]);
+	let loadingVersions = $state(false);
+
+	// Metrics state
+	let showMetrics = $state(false);
+	let metrics: FunctionMetrics | null = $state(null);
+	let metricsPeriod = $state('24h');
+	let loadingMetrics = $state(false);
 
 	$effect(() => {
 		loadFunctions();
@@ -100,7 +124,20 @@
 			editorVerifyJWT = full.verify_jwt;
 			editorStatus = full.status;
 			showLogs = false;
+			showVersions = false;
+			showMetrics = false;
 			logs = [];
+			triggers = [];
+			versions = [];
+			metrics = null;
+
+			// Load env vars into pairs
+			const ev = full.env_vars || {};
+			envPairs = Object.entries(ev).map(([key, value]) => ({ key, value }));
+			if (envPairs.length === 0) envPairs = [{ key: '', value: '' }];
+
+			// Load triggers
+			await loadTriggers(fn.name);
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load function';
 		}
@@ -178,6 +215,8 @@
 	async function loadLogs() {
 		if (!selectedFn) return;
 		showLogs = true;
+		showVersions = false;
+		showMetrics = false;
 		try {
 			logs = await api.getEdgeFunctionLogs(projectId, selectedFn.name);
 		} catch (err) {
@@ -189,6 +228,128 @@
 		if (status < 300) return 'text-green-600';
 		if (status < 400) return 'text-yellow-600';
 		return 'text-red-600';
+	}
+
+	// ── Triggers ──
+
+	async function loadTriggers(name: string) {
+		try {
+			triggers = await api.listFunctionTriggers(projectId, name);
+		} catch {
+			// Non-critical
+		}
+	}
+
+	async function createTrigger() {
+		if (!selectedFn || !triggerTable) return;
+		const events = Object.entries(triggerEvents).filter(([, v]) => v).map(([k]) => k);
+		if (events.length === 0) {
+			error = 'Select at least one event';
+			return;
+		}
+		savingTrigger = true;
+		try {
+			await api.createFunctionTrigger(projectId, selectedFn.name, {
+				table_name: triggerTable,
+				events
+			});
+			showTriggerForm = false;
+			triggerTable = '';
+			triggerEvents = { INSERT: false, UPDATE: false, DELETE: false };
+			await loadTriggers(selectedFn.name);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to create trigger';
+		} finally {
+			savingTrigger = false;
+		}
+	}
+
+	async function deleteTrigger(triggerId: string) {
+		if (!selectedFn) return;
+		try {
+			await api.deleteFunctionTrigger(projectId, selectedFn.name, triggerId);
+			await loadTriggers(selectedFn.name);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to delete trigger';
+		}
+	}
+
+	// ── Environment Variables ──
+
+	function addEnvPair() {
+		envPairs = [...envPairs, { key: '', value: '' }];
+	}
+
+	function removeEnvPair(index: number) {
+		envPairs = envPairs.filter((_, i) => i !== index);
+		if (envPairs.length === 0) envPairs = [{ key: '', value: '' }];
+	}
+
+	async function saveEnvVars() {
+		if (!selectedFn) return;
+		savingEnv = true;
+		try {
+			const env_vars: Record<string, string> = {};
+			for (const pair of envPairs) {
+				if (pair.key.trim()) {
+					env_vars[pair.key.trim()] = pair.value;
+				}
+			}
+			await api.updateEdgeFunction(projectId, selectedFn.name, { env_vars });
+			selectedFn = { ...selectedFn, env_vars };
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to save environment variables';
+		} finally {
+			savingEnv = false;
+		}
+	}
+
+	// ── Versions ──
+
+	async function loadVersions() {
+		if (!selectedFn) return;
+		showVersions = true;
+		showLogs = false;
+		showMetrics = false;
+		loadingVersions = true;
+		try {
+			versions = await api.listFunctionVersions(projectId, selectedFn.name);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to load versions';
+		} finally {
+			loadingVersions = false;
+		}
+	}
+
+	async function rollbackToVersion(version: number) {
+		if (!selectedFn) return;
+		try {
+			const updated = await api.rollbackFunction(projectId, selectedFn.name, version);
+			selectedFn = updated;
+			editorCode = updated.code || '';
+			await loadFunctions();
+			await loadVersions();
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to rollback';
+		}
+	}
+
+	// ── Metrics ──
+
+	async function loadMetrics(period?: string) {
+		if (!selectedFn) return;
+		showMetrics = true;
+		showLogs = false;
+		showVersions = false;
+		loadingMetrics = true;
+		if (period) metricsPeriod = period;
+		try {
+			metrics = await api.getFunctionMetrics(projectId, selectedFn.name, metricsPeriod);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to load metrics';
+		} finally {
+			loadingMetrics = false;
+		}
 	}
 </script>
 
@@ -306,6 +467,14 @@
 							</div>
 							<div class="flex items-center gap-2">
 								<button
+									onclick={() => loadMetrics()}
+									class="cursor-pointer rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+								>Metrics</button>
+								<button
+									onclick={loadVersions}
+									class="cursor-pointer rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+								>Versions</button>
+								<button
 									onclick={loadLogs}
 									class="cursor-pointer rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
 								>Logs</button>
@@ -338,18 +507,111 @@
 
 						<!-- Triggers -->
 						<div class="border-b border-gray-100 px-4 py-2.5 bg-gray-50/50">
-							<p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5">Triggers</p>
+							<div class="flex items-center justify-between mb-1.5">
+								<p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Triggers</p>
+								<button
+									onclick={() => { showTriggerForm = !showTriggerForm; }}
+									class="cursor-pointer text-[11px] font-medium text-eurobase-600 hover:text-eurobase-700"
+								>{showTriggerForm ? 'Cancel' : '+ Add Trigger'}</button>
+							</div>
 							<div class="space-y-1.5">
 								<div class="flex items-center gap-2 text-xs text-gray-600">
 									<span class="inline-flex items-center rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700">HTTP</span>
 									<code class="font-mono text-gray-500">POST /v1/functions/{selectedFn.name}</code>
 								</div>
-								<div class="flex items-center gap-2 text-xs text-gray-400">
-									<span class="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-500">DB Event</span>
-									<span>INSERT / UPDATE / DELETE on table</span>
-									<span class="ml-auto inline-flex items-center rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[10px] font-medium text-amber-600">Coming soon</span>
-								</div>
+
+								{#each triggers as trigger}
+									<div class="flex items-center gap-2 text-xs text-gray-600">
+										<span class="inline-flex items-center rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">DB</span>
+										<span class="font-mono text-gray-500">{trigger.events.join(', ')} on {trigger.table_name}</span>
+										<button
+											onclick={() => deleteTrigger(trigger.id)}
+											class="cursor-pointer ml-auto text-[10px] text-red-500 hover:text-red-700"
+										>remove</button>
+									</div>
+								{/each}
+
+								{#if showTriggerForm}
+									<div class="mt-2 rounded-lg border border-gray-200 bg-white p-3 space-y-2">
+										<select
+											bind:value={triggerTable}
+											class="w-full rounded border-gray-300 text-xs px-2 py-1.5"
+										>
+											<option value="">Select a table...</option>
+											{#each tables as table}
+												<option value={table.name}>{table.name}</option>
+											{/each}
+										</select>
+										<div class="flex items-center gap-3">
+											{#each ['INSERT', 'UPDATE', 'DELETE'] as event}
+												<label class="flex items-center gap-1 text-xs text-gray-700">
+													<input type="checkbox" bind:checked={triggerEvents[event]} class="rounded border-gray-300" />
+													{event}
+												</label>
+											{/each}
+										</div>
+										<button
+											onclick={createTrigger}
+											disabled={savingTrigger || !triggerTable}
+											class="cursor-pointer rounded bg-eurobase-600 px-3 py-1 text-xs font-medium text-white hover:bg-eurobase-700 disabled:opacity-50"
+										>{savingTrigger ? 'Saving...' : 'Add Trigger'}</button>
+									</div>
+								{/if}
 							</div>
+						</div>
+
+						<!-- Environment Variables (collapsible) -->
+						<div class="border-b border-gray-100 px-4 py-2.5 bg-gray-50/50">
+							<button
+								onclick={() => { showEnvVars = !showEnvVars; }}
+								class="cursor-pointer flex items-center gap-1.5 w-full text-left"
+							>
+								<svg class="h-3.5 w-3.5 text-gray-400 transition-transform {showEnvVars ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+								</svg>
+								<span class="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Environment Variables</span>
+								<span class="text-[10px] text-gray-400 ml-1">({envPairs.filter(p => p.key.trim()).length})</span>
+							</button>
+
+							{#if showEnvVars}
+								<div class="mt-2 space-y-1.5">
+									{#each envPairs as pair, i}
+										<div class="flex items-center gap-2">
+											<input
+												type="text"
+												bind:value={pair.key}
+												placeholder="KEY"
+												class="w-1/3 rounded border-gray-300 text-xs px-2 py-1.5 font-mono"
+											/>
+											<input
+												type={envMasked ? 'password' : 'text'}
+												bind:value={pair.value}
+												placeholder="value"
+												class="flex-1 rounded border-gray-300 text-xs px-2 py-1.5 font-mono"
+											/>
+											<button
+												onclick={() => removeEnvPair(i)}
+												class="cursor-pointer text-xs text-red-500 hover:text-red-700 shrink-0"
+											>x</button>
+										</div>
+									{/each}
+									<div class="flex items-center gap-2">
+										<button
+											onclick={addEnvPair}
+											class="cursor-pointer text-xs font-medium text-eurobase-600 hover:text-eurobase-700"
+										>+ Add variable</button>
+										<button
+											onclick={() => { envMasked = !envMasked; }}
+											class="cursor-pointer text-xs text-gray-500 hover:text-gray-700"
+										>{envMasked ? 'Show values' : 'Hide values'}</button>
+										<button
+											onclick={saveEnvVars}
+											disabled={savingEnv}
+											class="cursor-pointer ml-auto rounded bg-eurobase-600 px-3 py-1 text-xs font-medium text-white hover:bg-eurobase-700 disabled:opacity-50"
+										>{savingEnv ? 'Saving...' : 'Save'}</button>
+									</div>
+								</div>
+							{/if}
 						</div>
 
 						<!-- Code editor -->
@@ -366,11 +628,94 @@
 						<div class="border-t border-gray-200 px-4 py-3 bg-gray-50">
 							<p class="text-xs font-medium text-gray-500 mb-1.5">Available context:</p>
 							<div class="flex flex-wrap gap-2">
-								{#each ['ctx.db.sql(query, params)', 'ctx.vault.get(name)', 'ctx.storage.upload(key, body)', 'ctx.user.id', 'ctx.log.info(msg)'] as ref}
+								{#each ['ctx.db.sql(query, params)', 'ctx.vault.get(name)', 'ctx.storage.upload(key, body)', 'ctx.user.id', 'ctx.log.info(msg)', 'ctx.env.KEY'] as ref}
 									<code class="rounded bg-gray-200 px-1.5 py-0.5 text-xs text-gray-700">{ref}</code>
 								{/each}
 							</div>
 						</div>
+
+						<!-- Metrics panel -->
+						{#if showMetrics}
+							<div class="border-t border-gray-200">
+								<div class="flex items-center justify-between px-4 py-2 bg-gray-50">
+									<h4 class="text-xs font-semibold text-gray-700">Metrics</h4>
+									<div class="flex items-center gap-2">
+										{#each ['24h', '7d', '30d'] as p}
+											<button
+												onclick={() => loadMetrics(p)}
+												class="cursor-pointer text-xs px-2 py-0.5 rounded {metricsPeriod === p ? 'bg-eurobase-100 text-eurobase-700 font-medium' : 'text-gray-500 hover:text-gray-700'}"
+											>{p}</button>
+										{/each}
+										<button onclick={() => { showMetrics = false; }} class="cursor-pointer text-xs text-gray-500 hover:text-gray-700 ml-2">Close</button>
+									</div>
+								</div>
+								{#if loadingMetrics}
+									<div class="px-4 py-6 text-center text-xs text-gray-500">Loading metrics...</div>
+								{:else if metrics}
+									<div class="grid grid-cols-4 gap-4 px-4 py-4">
+										<div class="text-center">
+											<p class="text-2xl font-semibold text-gray-900">{metrics.total_invocations}</p>
+											<p class="text-[11px] text-gray-500">Invocations</p>
+										</div>
+										<div class="text-center">
+											<p class="text-2xl font-semibold {metrics.error_rate > 5 ? 'text-red-600' : 'text-gray-900'}">{metrics.error_rate.toFixed(1)}%</p>
+											<p class="text-[11px] text-gray-500">Error Rate</p>
+										</div>
+										<div class="text-center">
+											<p class="text-2xl font-semibold text-gray-900">{metrics.avg_duration_ms.toFixed(0)}ms</p>
+											<p class="text-[11px] text-gray-500">Avg Duration</p>
+										</div>
+										<div class="text-center">
+											<p class="text-2xl font-semibold text-gray-900">{metrics.p95_duration_ms.toFixed(0)}ms</p>
+											<p class="text-[11px] text-gray-500">p95 Duration</p>
+										</div>
+									</div>
+								{:else}
+									<p class="px-4 py-6 text-center text-xs text-gray-500">No metrics available</p>
+								{/if}
+							</div>
+						{/if}
+
+						<!-- Versions panel -->
+						{#if showVersions}
+							<div class="border-t border-gray-200">
+								<div class="flex items-center justify-between px-4 py-2 bg-gray-50">
+									<h4 class="text-xs font-semibold text-gray-700">Version History</h4>
+									<button onclick={() => { showVersions = false; }} class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Close</button>
+								</div>
+								{#if loadingVersions}
+									<div class="px-4 py-6 text-center text-xs text-gray-500">Loading versions...</div>
+								{:else if versions.length === 0}
+									<p class="px-4 py-6 text-center text-xs text-gray-500">No previous versions</p>
+								{:else}
+									<div class="max-h-60 overflow-y-auto">
+										<table class="w-full text-xs">
+											<thead class="bg-gray-50 text-gray-500">
+												<tr>
+													<th class="px-4 py-2 text-left font-medium">Version</th>
+													<th class="px-4 py-2 text-left font-medium">Created</th>
+													<th class="px-4 py-2 text-right font-medium">Action</th>
+												</tr>
+											</thead>
+											<tbody class="divide-y divide-gray-100">
+												{#each versions as v}
+													<tr>
+														<td class="px-4 py-1.5 font-mono">v{v.version}</td>
+														<td class="px-4 py-1.5 text-gray-500">{new Date(v.created_at).toLocaleString()}</td>
+														<td class="px-4 py-1.5 text-right">
+															<button
+																onclick={() => rollbackToVersion(v.version)}
+																class="cursor-pointer text-eurobase-600 hover:text-eurobase-700 font-medium"
+															>Restore</button>
+														</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
+									</div>
+								{/if}
+							</div>
+						{/if}
 
 						<!-- Logs panel -->
 						{#if showLogs}

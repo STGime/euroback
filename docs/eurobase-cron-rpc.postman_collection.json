@@ -1,0 +1,657 @@
+{
+	"info": {
+		"name": "Eurobase Cron & RPC",
+		"description": "Tests for Cron Jobs CRUD, execution history, RPC function calls, and SQL execution.\n\n## Setup\n\n1. Gateway running locally or at production URL\n2. Set `base_url`, `platform_token`, `project_id` variables\n3. Optionally set `anon_key` for SDK-level RPC/SQL tests\n\n## Variables\n\n- `base_url` — e.g. http://localhost:8080 or https://newtek2-njyf.eurobase.app\n- `platform_token` — JWT from platform auth\n- `project_id` — target project UUID\n- `anon_key` — project anon key (for SDK endpoints)",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:8080" },
+		{ "key": "platform_token", "value": "" },
+		{ "key": "project_id", "value": "" },
+		{ "key": "anon_key", "value": "" },
+		{ "key": "cron_job_id", "value": "" }
+	],
+	"item": [
+		{
+			"name": "Cron Jobs",
+			"item": [
+				{
+					"name": "C1. List cron jobs (empty)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.be.an('array');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C2. Create cron job (SQL)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"cleanup-expired-tokens\",\n  \"schedule\": \"0 */6 * * *\",\n  \"action_type\": \"sql\",\n  \"action\": \"DELETE FROM sessions WHERE expires_at < now()\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns cron job', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.name).to.eql('cleanup-expired-tokens');",
+									"    pm.expect(json.schedule).to.eql('0 */6 * * *');",
+									"    pm.expect(json.action_type).to.eql('sql');",
+									"    pm.expect(json.enabled).to.be.true;",
+									"    pm.collectionVariables.set('cron_job_id', json.id);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C3. Create cron job (RPC)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"weekly-digest\",\n  \"schedule\": \"0 9 * * 1\",\n  \"action_type\": \"rpc\",\n  \"action\": \"send_weekly_digest\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 201', () => pm.response.to.have.status(201));",
+									"pm.test('Returns RPC cron job', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.action_type).to.eql('rpc');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C4. List cron jobs (non-empty)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has 2 jobs', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.length).to.eql(2);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C5. Update cron job (disable)",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"enabled\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_id}}"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Job is disabled', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.enabled).to.be.false;",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C6. Update cron job (change schedule)",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"schedule\": \"*/30 * * * *\",\n  \"enabled\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_id}}"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Schedule updated', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.schedule).to.eql('*/30 * * * *');",
+									"    pm.expect(json.enabled).to.be.true;",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C7. Get cron job runs (execution history)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_id}}/runs",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_id}}", "runs"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.be.an('array');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C8. Create cron job — invalid schedule",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"bad-schedule\",\n  \"schedule\": \"not a cron\",\n  \"action_type\": \"sql\",\n  \"action\": \"SELECT 1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 400', () => pm.response.to.have.status(400));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C9. Create cron job — missing name",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"schedule\": \"* * * * *\",\n  \"action_type\": \"sql\",\n  \"action\": \"SELECT 1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 400', () => pm.response.to.have.status(400));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C10. List cron jobs — no auth",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 401', () => pm.response.to.have.status(401));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C11. Delete cron job",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/{{cron_job_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "{{cron_job_id}}"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 204', () => pm.response.to.have.status(204));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "C12. Delete nonexistent cron job",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/cron/00000000-0000-0000-0000-000000000000",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "cron", "00000000-0000-0000-0000-000000000000"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 404', () => pm.response.to.have.status(404));"
+								]
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "RPC Functions",
+			"item": [
+				{
+					"name": "R1. Call RPC function (no args)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/rpc/now",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "rpc", "now"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns result', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('result');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "R2. Call RPC function (with args)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"x\": 5,\n  \"y\": 10\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/rpc/add_numbers",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "rpc", "add_numbers"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns result', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('result');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "R3. Call nonexistent RPC function",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/rpc/nonexistent_function",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "rpc", "nonexistent_function"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 404', () => pm.response.to.have.status(404));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "R4. Call RPC — no auth",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/v1/db/rpc/now",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "rpc", "now"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 401', () => pm.response.to.have.status(401));"
+								]
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "SQL Execution",
+			"item": [
+				{
+					"name": "S1. Execute SQL (console — full access)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"sql\": \"SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY table_name\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/sql",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "sql"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has columns and rows', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json).to.have.property('columns');",
+									"    pm.expect(json).to.have.property('rows');",
+									"    pm.expect(json).to.have.property('row_count');",
+									"    pm.expect(json).to.have.property('execution_time_ms');",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "S2. Execute SQL (SDK — SELECT only)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"sql\": \"SELECT 1 AS result\",\n  \"limit\": 10\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns result', () => {",
+									"    const json = pm.response.json();",
+									"    pm.expect(json.rows[0].result).to.eql(1);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "S3. Execute SQL (SDK — reject INSERT)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"sql\": \"INSERT INTO todos (title) VALUES ('test')\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 400 or 403', () => {",
+									"    pm.expect(pm.response.code).to.be.oneOf([400, 403]);",
+									"});"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "S4. Execute SQL — no auth",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"sql\": \"SELECT 1\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/db/sql",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "db", "sql"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 401', () => pm.response.to.have.status(401));"
+								]
+							}
+						}
+					]
+				},
+				{
+					"name": "S5. Execute DDL via console SQL",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"sql\": \"CREATE TABLE IF NOT EXISTS _postman_test (id serial PRIMARY KEY, value text); DROP TABLE IF EXISTS _postman_test;\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/data/sql",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "data", "sql"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));"
+								]
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

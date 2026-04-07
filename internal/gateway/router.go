@@ -161,6 +161,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 
 			// Edge Functions (serverless compute management).
 			fnSvc := functions.NewService(pool)
+			fnTrigSvc := functions.NewTriggerService(pool)
 			r.Route("/functions", func(r chi.Router) {
 				r.Get("/", functions.HandleList(fnSvc))
 				r.Post("/", functions.HandleCreate(fnSvc, limitsSvc))
@@ -168,6 +169,12 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 				r.Put("/{name}", functions.HandleUpdate(fnSvc))
 				r.Delete("/{name}", functions.HandleDelete(fnSvc))
 				r.Get("/{name}/logs", functions.HandleLogs(fnSvc))
+				r.Get("/{name}/triggers", functions.HandleListTriggers(fnSvc, fnTrigSvc))
+				r.Post("/{name}/triggers", functions.HandleCreateTrigger(fnSvc, fnTrigSvc))
+				r.Delete("/{name}/triggers/{triggerId}", functions.HandleDeleteTrigger(fnTrigSvc))
+				r.Get("/{name}/versions", functions.HandleListVersions(fnSvc))
+				r.Post("/{name}/rollback", functions.HandleRollback(fnSvc))
+				r.Get("/{name}/metrics", functions.HandleMetrics(fnSvc))
 			})
 
 			// Console end-user management — platform-authenticated.

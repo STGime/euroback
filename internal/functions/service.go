@@ -182,6 +182,10 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 
 	version := existing.Version
 	if bumpVersion {
+		// Save current code as a version before overwriting.
+		if saveErr := s.SaveVersion(ctx, existing.ID, existing.Version, existing.Code); saveErr != nil {
+			slog.Warn("failed to save function version", "error", saveErr)
+		}
 		version++
 	}
 
@@ -274,4 +278,149 @@ func (s *Service) Count(ctx context.Context, projectID string) (int, error) {
 		return 0, fmt.Errorf("count edge functions: %w", err)
 	}
 	return count, nil
+}
+
+// ── Versioning ──
+
+// EdgeFunctionVersion represents a historical version of a function's code.
+type EdgeFunctionVersion struct {
+	ID         string    `json:"id"`
+	FunctionID string    `json:"function_id"`
+	Version    int       `json:"version"`
+	Code       string    `json:"code"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// SaveVersion stores the current code as a version before an update.
+func (s *Service) SaveVersion(ctx context.Context, functionID string, version int, code string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO edge_function_versions (function_id, version, code)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (function_id, version) DO NOTHING`,
+		functionID, version, code)
+	if err != nil {
+		return fmt.Errorf("save function version: %w", err)
+	}
+	return nil
+}
+
+// ListVersions returns the version history for a function.
+func (s *Service) ListVersions(ctx context.Context, projectID, name string) ([]EdgeFunctionVersion, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT v.id, v.function_id, v.version, v.code, v.created_at
+		 FROM edge_function_versions v
+		 JOIN edge_functions f ON f.id = v.function_id
+		 WHERE f.project_id = $1 AND f.name = $2
+		 ORDER BY v.version DESC`, projectID, name)
+	if err != nil {
+		return nil, fmt.Errorf("list function versions: %w", err)
+	}
+	defer rows.Close()
+
+	var versions []EdgeFunctionVersion
+	for rows.Next() {
+		var v EdgeFunctionVersion
+		if err := rows.Scan(&v.ID, &v.FunctionID, &v.Version, &v.Code, &v.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan function version: %w", err)
+		}
+		versions = append(versions, v)
+	}
+	if versions == nil {
+		versions = []EdgeFunctionVersion{}
+	}
+	return versions, nil
+}
+
+// Rollback restores a function's code from a previous version.
+func (s *Service) Rollback(ctx context.Context, projectID, name string, version int) (*EdgeFunction, error) {
+	// Get the function.
+	fn, err := s.Get(ctx, projectID, name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the target version's code.
+	var code string
+	err = s.pool.QueryRow(ctx,
+		`SELECT code FROM edge_function_versions
+		 WHERE function_id = $1 AND version = $2`,
+		fn.ID, version,
+	).Scan(&code)
+	if err != nil {
+		return nil, fmt.Errorf("version %d not found: %w", version, err)
+	}
+
+	// Save current code as a new version before rollback.
+	if err := s.SaveVersion(ctx, fn.ID, fn.Version, fn.Code); err != nil {
+		slog.Warn("failed to save current version before rollback", "error", err)
+	}
+
+	// Update the function with the rolled-back code.
+	newVersion := fn.Version + 1
+	var updated EdgeFunction
+	err = s.pool.QueryRow(ctx,
+		`UPDATE edge_functions
+		 SET code = $3, version = $4, updated_at = now()
+		 WHERE project_id = $1 AND name = $2
+		 RETURNING id, project_id, name, code, verify_jwt, status, version, created_at, updated_at`,
+		projectID, name, code, newVersion,
+	).Scan(&updated.ID, &updated.ProjectID, &updated.Name, &updated.Code, &updated.VerifyJWT, &updated.Status, &updated.Version, &updated.CreatedAt, &updated.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("rollback edge function: %w", err)
+	}
+
+	slog.Info("edge function rolled back", "project_id", projectID, "name", name, "to_version", version, "new_version", newVersion)
+	return &updated, nil
+}
+
+// ── Metrics ──
+
+// FunctionMetrics contains aggregated invocation statistics.
+type FunctionMetrics struct {
+	TotalInvocations int     `json:"total_invocations"`
+	ErrorCount       int     `json:"error_count"`
+	ErrorRate        float64 `json:"error_rate"`
+	AvgDurationMs    float64 `json:"avg_duration_ms"`
+	P95DurationMs    float64 `json:"p95_duration_ms"`
+	Period           string  `json:"period"`
+}
+
+// GetMetrics returns aggregated invocation stats for a function.
+func (s *Service) GetMetrics(ctx context.Context, projectID, name, period string) (*FunctionMetrics, error) {
+	// Parse period to interval.
+	var interval string
+	switch period {
+	case "7d":
+		interval = "7 days"
+	case "30d":
+		interval = "30 days"
+	default:
+		interval = "24 hours"
+		period = "24h"
+	}
+
+	var m FunctionMetrics
+	m.Period = period
+
+	err := s.pool.QueryRow(ctx,
+		`SELECT
+			COALESCE(count(*), 0),
+			COALESCE(count(*) FILTER (WHERE l.status >= 500), 0),
+			COALESCE(avg(l.duration_ms), 0),
+			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY l.duration_ms), 0)
+		 FROM edge_function_logs l
+		 JOIN edge_functions f ON f.id = l.function_id
+		 WHERE f.project_id = $1 AND f.name = $2
+		   AND l.created_at >= now() - $3::interval`,
+		projectID, name, interval,
+	).Scan(&m.TotalInvocations, &m.ErrorCount, &m.AvgDurationMs, &m.P95DurationMs)
+	if err != nil {
+		return nil, fmt.Errorf("get function metrics: %w", err)
+	}
+
+	if m.TotalInvocations > 0 {
+		m.ErrorRate = float64(m.ErrorCount) / float64(m.TotalInvocations) * 100
+	}
+
+	return &m, nil
 }

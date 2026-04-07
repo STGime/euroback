@@ -884,8 +884,12 @@ on push to main:
 | pgTAP database testing (eurobase test) | 1 day | Done |
 | DPA compliance report | 2 days | Done |
 | Edge Functions — Phase 1 (CRUD, console, CLI, SDK, docs) | 3 days | Done |
+| Edge Functions — Console: schema browser sidebar + trigger config | 1 day | Done |
+| Edge Functions — Console: CodeMirror editor (TS highlighting, lint gutter) | 0.5 day | Done |
+| Edge Functions — Production migration + deployment | 0.5 day | Done |
 | Mollie billing integration | 1 week | Next |
 | Edge Functions — Phase 2 (Deno runner deployment) | 3 days | Planned |
+| Edge Functions — Phase 3 (DB triggers, env vars UI, versioning) | 2 days | Planned |
 | Team collaboration / RBAC | 1 week | Planned |
 | Built-in automations (Layer 1 — token cleanup, log retention, usage alerts) | 2 days | Planned |
 
@@ -1033,7 +1037,7 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 
 | Feature | Why It Matters | Effort | Target |
 |---------|---------------|--------|--------|
-| Edge Functions | Custom server-side logic, webhooks, integrations | 2-3 weeks | v1.3 |
+| Edge Functions | Phase 1 done (CRUD, console, CLI, SDK). Phase 2: Deno runner. Phase 3: DB triggers, env vars UI | 1 week remaining | v1.3 |
 | Local dev (`eurobase start`) | Docker-based local stack, essential for DX | 1 week | v1.3 |
 | Type generation (`eurobase gen types`) | Auto TypeScript types from schema | 3 days | v1.3 |
 | Branching / preview environments | DB branches for staging/preview | 2 weeks | v1.4 |
@@ -1048,7 +1052,7 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 
 **Revenue blocker:** Mollie billing integration (Sprint 2, next up).
 **DX blocker:** Local dev stack + type generation (Sprint 6).
-**Feature blocker:** Edge Functions for advanced use cases (Sprint 7).
+**Feature blocker:** Edge Functions Phase 2 (Deno runner) — CRUD + console done, execution runtime next.
 
 ### Future (v1.3+)
 
@@ -1059,7 +1063,8 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 | Built-in automations: error spike alerts | 1 day | Medium |
 | Built-in automations: scheduled DB export to S3 (pro) | 2 days | Medium |
 | Console RLS test templates ("Test policy as user X") | 2 days | High |
-| Edge Functions (Layer 3 — Scaleway Serverless) | 2 weeks | High |
+| Edge Functions Phase 2 — Deno runner deployment + invocation | 3 days | High |
+| Edge Functions Phase 3 — DB triggers, env vars UI, versioning, rollback | 2 days | High |
 | Encrypt OAuth secrets at application layer (AES-256, server key from env) | 2 days | High |
 | Console: skip sending masked OAuth secrets on save (only send if changed) | 0.5 day | Medium |
 | Python SDK | 1 week | High |

@@ -1,7 +1,7 @@
 {
 	"info": {
 		"name": "Eurobase Edge Functions",
-		"description": "Tests for Edge Functions CRUD, invocation, and logs.\n\n## Setup\n\n1. Gateway running\n2. Migration 026 applied\n3. `platform_token` and `project_id` set",
+		"description": "Tests for Edge Functions CRUD, invocation, triggers, versioning, and metrics.\n\n## Setup\n\n1. Gateway running\n2. Migrations 026-028 applied\n3. `platform_token`, `project_id`, `anon_key`, and `end_user_token` set",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [],
@@ -133,6 +133,25 @@
 							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
 							{ "key": "Content-Type", "value": "application/json" }
 						],
+						"body": { "mode": "raw", "raw": "{\"status\": \"disabled\"}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F1.7b Re-enable function",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Status re-enabled', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.status).to.eql('active');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
 						"body": { "mode": "raw", "raw": "{\"status\": \"active\"}" },
 						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function"] }
 					}
@@ -172,10 +191,127 @@
 			]
 		},
 		{
-			"name": "Phase 2 — Auth",
+			"name": "Phase 2 — Invocation",
 			"item": [
 				{
-					"name": "F2.1 List functions — no auth",
+					"name": "F2.1 Invoke function (success)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Returns response body', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('ok', true);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{}" },
+						"url": { "raw": "{{base_url}}/v1/functions/test-function", "host": ["{{base_url}}"], "path": ["v1", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F2.2 Invoke function with JWT",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Authorization", "value": "Bearer {{end_user_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{}" },
+						"url": { "raw": "{{base_url}}/v1/functions/test-function", "host": ["{{base_url}}"], "path": ["v1", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F2.3 Invoke (no auth, verify_jwt=true) -> 401",
+					"event": [{ "listen": "prerequest", "script": { "exec": [
+						"// First enable verify_jwt on the function",
+						"pm.sendRequest({",
+						"    url: pm.collectionVariables.get('base_url') + '/platform/projects/' + pm.collectionVariables.get('project_id') + '/functions/test-function',",
+						"    method: 'PUT',",
+						"    header: [",
+						"        { key: 'Authorization', value: 'Bearer ' + pm.collectionVariables.get('platform_token') },",
+						"        { key: 'Content-Type', value: 'application/json' }",
+						"    ],",
+						"    body: { mode: 'raw', raw: JSON.stringify({ verify_jwt: true }) }",
+						"});"
+					], "type": "text/javascript" }},
+					{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 401', () => pm.response.to.have.status(401));",
+						"pm.test('Error mentions authentication', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.error).to.include('authentication');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{}" },
+						"url": { "raw": "{{base_url}}/v1/functions/test-function", "host": ["{{base_url}}"], "path": ["v1", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F2.4 Invoke disabled function -> 503",
+					"event": [{ "listen": "prerequest", "script": { "exec": [
+						"pm.sendRequest({",
+						"    url: pm.collectionVariables.get('base_url') + '/platform/projects/' + pm.collectionVariables.get('project_id') + '/functions/test-function',",
+						"    method: 'PUT',",
+						"    header: [",
+						"        { key: 'Authorization', value: 'Bearer ' + pm.collectionVariables.get('platform_token') },",
+						"        { key: 'Content-Type', value: 'application/json' }",
+						"    ],",
+						"    body: { mode: 'raw', raw: JSON.stringify({ status: 'disabled', verify_jwt: false }) }",
+						"});"
+					], "type": "text/javascript" }},
+					{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 503', () => pm.response.to.have.status(503));",
+						"// Re-enable after test",
+						"pm.sendRequest({",
+						"    url: pm.collectionVariables.get('base_url') + '/platform/projects/' + pm.collectionVariables.get('project_id') + '/functions/test-function',",
+						"    method: 'PUT',",
+						"    header: [",
+						"        { key: 'Authorization', value: 'Bearer ' + pm.collectionVariables.get('platform_token') },",
+						"        { key: 'Content-Type', value: 'application/json' }",
+						"    ],",
+						"    body: { mode: 'raw', raw: JSON.stringify({ status: 'active' }) }",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{}" },
+						"url": { "raw": "{{base_url}}/v1/functions/test-function", "host": ["{{base_url}}"], "path": ["v1", "functions", "test-function"] }
+					}
+				},
+				{
+					"name": "F2.5 Invoke nonexistent function -> 404",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "apikey", "value": "{{anon_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{}" },
+						"url": { "raw": "{{base_url}}/v1/functions/does-not-exist", "host": ["{{base_url}}"], "path": ["v1", "functions", "does-not-exist"] }
+					}
+				},
+				{
+					"name": "F2.6 List functions — no auth -> 401",
 					"event": [{ "listen": "test", "script": { "exec": [
 						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
 					], "type": "text/javascript" }}],
@@ -186,19 +322,7 @@
 					}
 				},
 				{
-					"name": "F2.2 Create function — no auth",
-					"event": [{ "listen": "test", "script": { "exec": [
-						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
-					], "type": "text/javascript" }}],
-					"request": {
-						"method": "POST",
-						"header": [{ "key": "Content-Type", "value": "application/json" }],
-						"body": { "mode": "raw", "raw": "{\"name\": \"unauth-fn\", \"code\": \"// test\"}" },
-						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions"] }
-					}
-				},
-				{
-					"name": "F2.3 Get nonexistent function",
+					"name": "F2.7 Get nonexistent function -> 404",
 					"event": [{ "listen": "test", "script": { "exec": [
 						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
 					], "type": "text/javascript" }}],
@@ -211,10 +335,151 @@
 			]
 		},
 		{
-			"name": "Phase 3 — Cleanup",
+			"name": "Phase 3 — Triggers",
 			"item": [
 				{
-					"name": "F3.1 Delete function",
+					"name": "F3.1 Create function trigger",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 201', () => pm.response.to.have.status(201));",
+						"pm.test('Has trigger fields', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('id');",
+						"    pm.expect(json).to.have.property('table_name', 'orders');",
+						"    pm.expect(json.events).to.include('INSERT');",
+						"    pm.expect(json.events).to.include('UPDATE');",
+						"    pm.expect(json).to.have.property('enabled', true);",
+						"    pm.collectionVariables.set('trigger_id', json.id);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"table_name\": \"orders\", \"events\": [\"INSERT\", \"UPDATE\"]}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/triggers", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "triggers"] }
+					}
+				},
+				{
+					"name": "F3.2 List function triggers",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Has triggers', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"    pm.expect(json.length).to.be.at.least(1);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/triggers", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "triggers"] }
+					}
+				},
+				{
+					"name": "F3.3 Delete function trigger",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Trigger deleted', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.status).to.eql('deleted');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/triggers/{{trigger_id}}", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "triggers", "{{trigger_id}}"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Versioning",
+			"item": [
+				{
+					"name": "F3.4 Get function versions",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Has version history', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"    pm.expect(json.length).to.be.at.least(1);",
+						"    pm.collectionVariables.set('rollback_version', json[0].version);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/versions", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "versions"] }
+					}
+				},
+				{
+					"name": "F3.5 Rollback function",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Version incremented after rollback', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.version).to.be.at.least(3);",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{platform_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"version\": {{rollback_version}}}" },
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/rollback", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "rollback"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Metrics",
+			"item": [
+				{
+					"name": "F3.6 Get function metrics (24h)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Has metric fields', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('total_invocations');",
+						"    pm.expect(json).to.have.property('error_count');",
+						"    pm.expect(json).to.have.property('error_rate');",
+						"    pm.expect(json).to.have.property('avg_duration_ms');",
+						"    pm.expect(json).to.have.property('p95_duration_ms');",
+						"    pm.expect(json).to.have.property('period', '24h');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/metrics?period=24h", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "metrics"], "query": [{ "key": "period", "value": "24h" }] }
+					}
+				},
+				{
+					"name": "F3.7 Get function metrics (7d)",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"pm.test('Period is 7d', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json.period).to.eql('7d');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": { "raw": "{{base_url}}/platform/projects/{{project_id}}/functions/test-function/metrics?period=7d", "host": ["{{base_url}}"], "path": ["platform", "projects", "{{project_id}}", "functions", "test-function", "metrics"], "query": [{ "key": "period", "value": "7d" }] }
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 4 — Cleanup",
+			"item": [
+				{
+					"name": "F4.1 Delete function",
 					"event": [{ "listen": "test", "script": { "exec": [
 						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
 						"pm.test('Status is deleted', () => {",
@@ -229,7 +494,7 @@
 					}
 				},
 				{
-					"name": "F3.2 Delete nonexistent (should fail)",
+					"name": "F4.2 Delete nonexistent (should fail)",
 					"event": [{ "listen": "test", "script": { "exec": [
 						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
 					], "type": "text/javascript" }}],
@@ -240,7 +505,7 @@
 					}
 				},
 				{
-					"name": "F3.3 List functions (empty again)",
+					"name": "F4.3 List functions (empty again)",
 					"event": [{ "listen": "test", "script": { "exec": [
 						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
 						"pm.test('Empty after delete', () => {",

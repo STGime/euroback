@@ -50,3 +50,11 @@ deploy/create-secrets.sh
 # Build artifacts (binaries in repo root)
 /gateway
 /worker
+/eurobase
+
+# Cursor
+.cursorrules
+
+# Test artifacts
+test_*.sh
+test_report_*.md

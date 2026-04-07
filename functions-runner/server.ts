@@ -14,6 +14,13 @@ const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50")
 const CODE_CACHE_SIZE = parseInt(Deno.env.get("CODE_CACHE_SIZE") ?? "200");
 const CODE_CACHE_TTL = parseInt(Deno.env.get("CODE_CACHE_TTL_SECONDS") ?? "300") * 1000;
 
+// ── Size limits ──
+
+const REQUEST_SIZE_FREE = 1 * 1024 * 1024;   // 1 MB
+const REQUEST_SIZE_PRO = 5 * 1024 * 1024;     // 5 MB
+const RESPONSE_SIZE_LIMIT = 5 * 1024 * 1024;  // 5 MB
+const LOG_OUTPUT_LIMIT = 10 * 1024;            // 10 KB per invocation
+
 // ── Simple LRU code cache ──
 
 interface CachedFunction {
@@ -89,6 +96,38 @@ async function loadFunction(functionId: string): Promise<CachedFunction | null> 
   }
 }
 
+// ── Log capture with truncation ──
+
+function createLogCapture(projectId: string) {
+  let totalBytes = 0;
+  const logs: string[] = [];
+  let truncated = false;
+
+  function capture(level: string, msg: string, data?: Record<string, unknown>) {
+    if (truncated) return;
+    const line = `[fn:${projectId}] ${level}: ${msg}${data ? " " + JSON.stringify(data) : ""}`;
+    const lineBytes = new TextEncoder().encode(line).length;
+    if (totalBytes + lineBytes > LOG_OUTPUT_LIMIT) {
+      truncated = true;
+      logs.push(`[fn:${projectId}] WARN: Log output truncated at ${LOG_OUTPUT_LIMIT} bytes`);
+      return;
+    }
+    totalBytes += lineBytes;
+    logs.push(line);
+    // Still emit to server console
+    if (level === "ERROR") console.error(line);
+    else if (level === "WARN") console.warn(line);
+    else console.log(line);
+  }
+
+  return {
+    info: (msg: string, data?: Record<string, unknown>) => capture("INFO", msg, data),
+    warn: (msg: string, data?: Record<string, unknown>) => capture("WARN", msg, data),
+    error: (msg: string, data?: Record<string, unknown>) => capture("ERROR", msg, data),
+    getLogs: () => logs,
+  };
+}
+
 // ── Execute function ──
 
 async function executeFunction(
@@ -101,12 +140,15 @@ async function executeFunction(
   const userId = headers.get("X-User-ID") ?? "";
   const userEmail = headers.get("X-User-Email") ?? "";
   const plan = headers.get("X-Plan") ?? "free";
+  const requestId = headers.get("X-Request-ID") ?? crypto.randomUUID();
 
   // Determine timeout based on plan.
   const timeoutMs = plan === "pro" ? 60_000 : 10_000;
 
   // Build the context object that gets injected into the function.
   const db = await getDB();
+
+  const logCapture = createLogCapture(projectId);
 
   const ctx = {
     db: {
@@ -131,11 +173,8 @@ async function executeFunction(
     },
     env: fn.env_vars,
     user: userId ? { id: userId, email: userEmail } : null,
-    log: {
-      info: (msg: string, data?: Record<string, unknown>) => console.log(`[fn:${projectId}] INFO:`, msg, data ?? ""),
-      warn: (msg: string, data?: Record<string, unknown>) => console.warn(`[fn:${projectId}] WARN:`, msg, data ?? ""),
-      error: (msg: string, data?: Record<string, unknown>) => console.error(`[fn:${projectId}] ERROR:`, msg, data ?? ""),
-    },
+    log: logCapture,
+    requestId,
   };
 
   // Execute the function with a timeout.
@@ -143,16 +182,6 @@ async function executeFunction(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // Create a data URL module from the function code.
-    // This runs the code in an isolated module context.
-    const wrappedCode = `
-      ${fn.code}
-
-      // Export the default handler if it exists
-      const _handler = typeof handler !== 'undefined' ? handler : (typeof default_export !== 'undefined' ? default_export : null);
-      export { _handler };
-    `;
-
     // Use Function constructor for sandboxed execution.
     // In production, this would use Deno.Worker or a V8 isolate for stronger isolation.
     const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
@@ -168,31 +197,49 @@ async function executeFunction(
     const response = await handlerFn(req, ctx);
 
     if (response instanceof Response) {
-      return response;
+      // Enforce response size limit.
+      const body = await response.clone().arrayBuffer();
+      if (body.byteLength > RESPONSE_SIZE_LIMIT) {
+        return jsonResponse({
+          error: "Response too large",
+          limit: `${RESPONSE_SIZE_LIMIT / 1024 / 1024}MB`,
+          requestId,
+        }, 413);
+      }
+      // Passthrough X-Request-ID on every response.
+      const newHeaders = new Headers(response.headers);
+      newHeaders.set("X-Request-ID", requestId);
+      return new Response(response.body, {
+        status: response.status,
+        headers: newHeaders,
+      });
     }
 
     // If the function returned something else, wrap it.
     return new Response(JSON.stringify(response), {
       status: 200,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Request-ID": requestId },
     });
   } catch (err) {
     if (controller.signal.aborted) {
-      return new Response(JSON.stringify({ error: "Function timed out" }), {
-        status: 504,
-        headers: { "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Function timed out", requestId }, 504);
     }
 
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`[fn:${projectId}] Execution error:`, message);
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse({ error: message, requestId }, 500);
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ── Helpers ──
+
+function jsonResponse(body: Record<string, unknown>, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 // ── HTTP Server ──
@@ -202,41 +249,43 @@ Deno.serve({ port: PORT }, async (req: Request): Promise<Response> => {
 
   // Health check.
   if (url.pathname === "/health") {
-    return new Response(JSON.stringify({
+    return jsonResponse({
       status: "ok",
       active: activeConcurrency,
       cached: codeCache.size,
-    }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    }, 200);
   }
 
   // Function invocation.
   if (url.pathname === "/invoke") {
     const functionId = req.headers.get("X-Function-ID");
+    const requestId = req.headers.get("X-Request-ID") ?? crypto.randomUUID();
+    const plan = req.headers.get("X-Plan") ?? "free";
+
     if (!functionId) {
-      return new Response(JSON.stringify({ error: "Missing X-Function-ID header" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Missing X-Function-ID header", requestId }, 400);
+    }
+
+    // Enforce request body size limit.
+    const contentLength = parseInt(req.headers.get("Content-Length") ?? "0");
+    const maxRequestSize = plan === "pro" ? REQUEST_SIZE_PRO : REQUEST_SIZE_FREE;
+    if (contentLength > maxRequestSize) {
+      return jsonResponse({
+        error: "Request body too large",
+        limit: `${maxRequestSize / 1024 / 1024}MB`,
+        requestId,
+      }, 413);
     }
 
     // Concurrency check.
     if (activeConcurrency >= MAX_CONCURRENT) {
-      return new Response(JSON.stringify({ error: "Too many concurrent executions" }), {
-        status: 429,
-        headers: { "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Too many concurrent executions", requestId }, 429);
     }
 
     // Load function code.
     const fn = await loadFunction(functionId);
     if (!fn) {
-      return new Response(JSON.stringify({ error: "Function not found or disabled" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "Function not found or disabled", requestId }, 404);
     }
 
     // Execute.
@@ -248,7 +297,7 @@ Deno.serve({ port: PORT }, async (req: Request): Promise<Response> => {
     }
   }
 
-  return new Response("Not found", { status: 404 });
+  return jsonResponse({ error: "Not found" }, 404);
 });
 
 console.log(`Eurobase Function Runner listening on port ${PORT}`);

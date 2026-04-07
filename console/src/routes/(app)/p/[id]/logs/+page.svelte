@@ -1,9 +1,12 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, getContext } from 'svelte';
 	import { page } from '$app/stores';
 	import { api, type RequestLog, type LogStats, type LogsResponse } from '$lib/api.js';
 
+	const projectCtx = getContext<{ id: string; project: import('$lib/api.js').Project | null }>('projectId');
 	let projectId = $derived($page.params.id);
+	let plan = $derived(projectCtx.project?.plan ?? 'free');
+	let isFreePlan = $derived(plan === 'free');
 
 	let logs: RequestLog[] = $state([]);
 	let total = $state(0);
@@ -119,6 +122,34 @@
 		<div class="text-2xl font-bold text-gray-900">{Math.round(stats.p95_latency_ms)}ms</div>
 	</div>
 </div>
+
+<!-- Plan retention banner -->
+{#if isFreePlan}
+	<div class="mb-4 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+		<svg class="h-5 w-5 shrink-0 text-amber-500 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+		</svg>
+		<div class="flex-1">
+			<p class="text-sm font-medium text-amber-800">Free plan — 1 day log retention</p>
+			<p class="mt-0.5 text-sm text-amber-700">
+				Logs older than 24 hours are automatically deleted. Upgrade to Pro for 30-day retention, giving you full visibility into trends, debugging, and performance history.
+			</p>
+		</div>
+		<a
+			href="/p/{projectId}/settings"
+			class="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 transition-colors"
+		>
+			Upgrade
+		</a>
+	</div>
+{:else}
+	<div class="mb-4 flex items-center gap-2 text-xs text-gray-400">
+		<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+		</svg>
+		<span>Pro plan — 30 day log retention</span>
+	</div>
+{/if}
 
 <!-- Filter bar -->
 <div class="flex items-center gap-2 mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
