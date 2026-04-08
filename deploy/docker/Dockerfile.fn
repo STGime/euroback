@@ -17,4 +17,5 @@ EXPOSE 8000
 # --allow-net: connect to Postgres, S3, and external HTTPS APIs
 # --allow-env: read configuration from environment variables
 # --allow-read=/app: read cached function code
-CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read=/app", "/app/server.ts"]
+# --unsafely-ignore-certificate-errors: accept managed DB cert (Scaleway uses internal CA)
+CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read=/app", "--unsafely-ignore-certificate-errors", "/app/server.ts"]

@@ -64,7 +64,7 @@ let sql: any = null;
 async function getDB() {
   if (sql) return sql;
   const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
-  sql = postgres(DB_URL, { max: 10, ssl: { rejectUnauthorized: false } });
+  sql = postgres(DB_URL, { max: 10 });
   return sql;
 }
 
