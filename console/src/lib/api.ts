@@ -15,7 +15,10 @@ export interface ProviderConfig {
 export interface OAuthProviderConfig {
 	enabled: boolean;
 	client_id: string;
-	client_secret: string;
+	/** Only sent on write when the user actually entered a new secret. Never returned by the API. */
+	client_secret?: string;
+	/** Returned by the API on read: true if a client_secret is stored in the vault for this provider. */
+	secret_set?: boolean;
 }
 
 export interface AuthConfig {

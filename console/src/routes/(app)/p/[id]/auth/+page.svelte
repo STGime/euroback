@@ -50,9 +50,13 @@
 	let googleEnabled = $state(false);
 	let googleClientId = $state('');
 	let googleClientSecret = $state('');
+	let googleSecretSet = $state(false);
+	let googleSecretDirty = $state(false);
 	let githubEnabled = $state(false);
 	let githubClientId = $state('');
 	let githubClientSecret = $state('');
+	let githubSecretSet = $state(false);
+	let githubSecretDirty = $state(false);
 	let saving = $state(false);
 	let saveMessage = $state('');
 	let saveError = $state('');
@@ -78,12 +82,16 @@
 			if (oauthCfg?.google) {
 				googleEnabled = oauthCfg.google.enabled ?? false;
 				googleClientId = oauthCfg.google.client_id ?? '';
-				googleClientSecret = oauthCfg.google.client_secret ?? '';
+				googleSecretSet = oauthCfg.google.secret_set ?? false;
+				googleClientSecret = '';
+				googleSecretDirty = false;
 			}
 			if (oauthCfg?.github) {
 				githubEnabled = oauthCfg.github.enabled ?? false;
 				githubClientId = oauthCfg.github.client_id ?? '';
-				githubClientSecret = oauthCfg.github.client_secret ?? '';
+				githubSecretSet = oauthCfg.github.secret_set ?? false;
+				githubClientSecret = '';
+				githubSecretDirty = false;
 			}
 		}
 	});
@@ -93,18 +101,51 @@
 		saveMessage = '';
 		saveError = '';
 		try {
+			// Only send client_secret when the user actually typed a new value —
+			// otherwise the backend leaves whatever is already in the vault alone.
+			const googleProvider: Record<string, any> = {
+				enabled: googleEnabled,
+				client_id: googleClientId
+			};
+			if (googleSecretDirty && googleClientSecret) {
+				googleProvider.client_secret = googleClientSecret;
+			}
+			const githubProvider: Record<string, any> = {
+				enabled: githubEnabled,
+				client_id: githubClientId
+			};
+			if (githubSecretDirty && githubClientSecret) {
+				githubProvider.client_secret = githubClientSecret;
+			}
+
 			const config: AuthConfig = {
 				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled } },
 				oauth_providers: {
-					google: { enabled: googleEnabled, client_id: googleClientId, client_secret: googleClientSecret },
-					github: { enabled: githubEnabled, client_id: githubClientId, client_secret: githubClientSecret }
+					google: googleProvider as any,
+					github: githubProvider as any
 				},
 				password_min_length: passwordMinLength,
 				require_email_confirmation: requireEmailConfirmation,
 				session_duration: sessionDuration,
 				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean)
 			};
-			await api.updateProject(projectCtx.id, { auth_config: config });
+			const updated = await api.updateProject(projectCtx.id, { auth_config: config });
+
+			// Refresh secret_set from the server response so the UI reflects the
+			// new state (and clear the form fields so the user doesn't see their
+			// just-entered secret lingering).
+			const oauthCfg = updated?.auth_config?.oauth_providers;
+			if (oauthCfg?.google) {
+				googleSecretSet = oauthCfg.google.secret_set ?? googleSecretSet;
+			}
+			if (oauthCfg?.github) {
+				githubSecretSet = oauthCfg.github.secret_set ?? githubSecretSet;
+			}
+			googleClientSecret = '';
+			googleSecretDirty = false;
+			githubClientSecret = '';
+			githubSecretDirty = false;
+
 			saveMessage = 'Auth configuration saved.';
 			setTimeout(() => { saveMessage = ''; }, 3000);
 		} catch (err) {
@@ -415,8 +456,23 @@
 									<input id="google-client-id" type="text" bind:value={googleClientId} placeholder="123456789.apps.googleusercontent.com" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
-									<label for="google-client-secret" class="block text-xs font-medium text-gray-700">Client Secret</label>
-									<input id="google-client-secret" type="password" bind:value={googleClientSecret} placeholder="GOCSPX-..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<label for="google-client-secret" class="block text-xs font-medium text-gray-700">
+										Client Secret
+										{#if googleSecretSet && !googleSecretDirty}
+											<span class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700 border border-green-200">
+												<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+												Encrypted in vault
+											</span>
+										{/if}
+									</label>
+									<input
+										id="google-client-secret"
+										type="password"
+										bind:value={googleClientSecret}
+										oninput={() => googleSecretDirty = true}
+										placeholder={googleSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'GOCSPX-...'}
+										class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+									/>
 								</div>
 								<div class="rounded-lg bg-eurobase-50 border border-eurobase-100 p-3">
 									<p class="text-xs font-medium text-eurobase-800">Setup instructions</p>
@@ -455,8 +511,23 @@
 									<input id="github-client-id" type="text" bind:value={githubClientId} placeholder="Iv1.abc123..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
-									<label for="github-client-secret" class="block text-xs font-medium text-gray-700">Client Secret</label>
-									<input id="github-client-secret" type="password" bind:value={githubClientSecret} placeholder="secret_..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<label for="github-client-secret" class="block text-xs font-medium text-gray-700">
+										Client Secret
+										{#if githubSecretSet && !githubSecretDirty}
+											<span class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700 border border-green-200">
+												<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+												Encrypted in vault
+											</span>
+										{/if}
+									</label>
+									<input
+										id="github-client-secret"
+										type="password"
+										bind:value={githubClientSecret}
+										oninput={() => githubSecretDirty = true}
+										placeholder={githubSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'secret_...'}
+										class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+									/>
 								</div>
 								<div class="rounded-lg bg-eurobase-50 border border-eurobase-100 p-3">
 									<p class="text-xs font-medium text-eurobase-800">Setup instructions</p>

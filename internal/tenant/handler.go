@@ -36,14 +36,15 @@ type CreateProjectResponse struct {
 
 // ProjectListItem represents a project in the list response.
 type ProjectListItem struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	Region    string    `json:"region"`
-	Plan      string    `json:"plan"`
-	Status    string    `json:"status"`
-	APIURL    string    `json:"api_url"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	Slug       string          `json:"slug"`
+	Region     string          `json:"region"`
+	Plan       string          `json:"plan"`
+	Status     string          `json:"status"`
+	APIURL     string          `json:"api_url"`
+	AuthConfig json.RawMessage `json:"auth_config,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
 }
 
 var (
@@ -178,18 +179,22 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 			return
 		}
 
-		// Map to list items.
+		// Map to list items. AuthConfig is included so the console can render
+		// the auth settings page without a second round-trip; it has already
+		// been annotated (secret_set flags, no raw client_secret values) by
+		// TenantService.ListProjects.
 		items := make([]ProjectListItem, len(projects))
 		for i, p := range projects {
 			items[i] = ProjectListItem{
-				ID:        p.ID,
-				Name:      p.Name,
-				Slug:      p.Slug,
-				Region:    p.Region,
-				Plan:      p.Plan,
-				Status:    p.Status,
-				APIURL:    p.APIURL,
-				CreatedAt: p.CreatedAt,
+				ID:         p.ID,
+				Name:       p.Name,
+				Slug:       p.Slug,
+				Region:     p.Region,
+				Plan:       p.Plan,
+				Status:     p.Status,
+				APIURL:     p.APIURL,
+				AuthConfig: p.AuthConfig,
+				CreatedAt:  p.CreatedAt,
 			}
 		}
 

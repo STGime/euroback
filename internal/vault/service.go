@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -254,4 +255,56 @@ func (s *VaultService) Count(ctx context.Context, schemaName string) (int, error
 		return 0, fmt.Errorf("count vault secrets: %w", err)
 	}
 	return count, nil
+}
+
+// ── Raw helpers (no Secret struct, no description) ──
+//
+// These helpers are used by the tenant package (and other internal callers)
+// to store machine-managed secrets like OAuth client secrets. They share the
+// same vault_secrets table and encryption, but skip the user-facing metadata.
+
+// SetRaw upserts a secret with an empty description. Equivalent to calling
+// Set(ctx, schemaName, name, value, "") but returns only an error.
+func (s *VaultService) SetRaw(ctx context.Context, schemaName, name, value string) error {
+	_, err := s.Set(ctx, schemaName, name, value, "")
+	return err
+}
+
+// GetRaw returns the decrypted value for a given secret name. Returns an
+// empty string and no error if the secret does not exist (useful for
+// "maybe-present" checks in callers that already know the name).
+func (s *VaultService) GetRaw(ctx context.Context, schemaName, name string) (string, error) {
+	sec, err := s.Get(ctx, schemaName, name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return "", nil
+		}
+		return "", err
+	}
+	return sec.Value, nil
+}
+
+// DeleteRaw removes a secret by name. If the secret does not exist, returns
+// nil (idempotent — used by "disable provider" flows that shouldn't fail
+// when nothing was stored yet).
+func (s *VaultService) DeleteRaw(ctx context.Context, schemaName, name string) error {
+	if err := s.Delete(ctx, schemaName, name); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// HasRaw reports whether a secret with the given name exists in the schema,
+// without decrypting it. Used by "secret_set" annotations in API responses.
+func (s *VaultService) HasRaw(ctx context.Context, schemaName, name string) (bool, error) {
+	sql := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %q.vault_secrets WHERE name = $1)`, schemaName)
+	var exists bool
+	err := s.pool.QueryRow(ctx, sql, name).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check vault secret: %w", err)
+	}
+	return exists, nil
 }

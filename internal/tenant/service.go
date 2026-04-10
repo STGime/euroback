@@ -34,10 +34,22 @@ type Project struct {
 	SecretKey  string `json:"secret_key,omitempty"`
 }
 
+// SecretStore is the minimal interface the tenant package needs to persist
+// OAuth client secrets. It matches vault.VaultService so we can wire the
+// real vault in without a hard import.
+type SecretStore interface {
+	SetRaw(ctx context.Context, schemaName, name, value string) error
+	GetRaw(ctx context.Context, schemaName, name string) (string, error)
+	DeleteRaw(ctx context.Context, schemaName, name string) error
+	HasRaw(ctx context.Context, schemaName, name string) (bool, error)
+	Configured() bool
+}
+
 // TenantService encapsulates database operations for tenant/project management.
 type TenantService struct {
 	pool        *pgxpool.Pool
 	riverClient *river.Client[pgx.Tx]
+	secrets     SecretStore
 }
 
 // NewTenantService creates a new TenantService backed by the given connection pool.
@@ -55,6 +67,14 @@ func NewTenantService(pool *pgxpool.Pool) *TenantService {
 		pool:        pool,
 		riverClient: riverClient,
 	}
+}
+
+// SetSecretStore wires an optional secret store (typically the vault service)
+// into the tenant service. When set, OAuth client secrets from auth_config
+// are routed through the store instead of being persisted to the
+// projects.auth_config JSONB column.
+func (s *TenantService) SetSecretStore(store SecretStore) {
+	s.secrets = store
 }
 
 // CreateProject provisions a new project for the given owner within a transaction.
@@ -214,8 +234,18 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 		return nil, fmt.Errorf("query project: %w", err)
 	}
 	p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
-	p.AuthConfig = MaskSecretsJSON(p.AuthConfig)
+	p.AuthConfig = s.annotateAuthConfig(ctx, p.SchemaName, p.AuthConfig)
 	return &p, nil
+}
+
+// annotateAuthConfig strips any stale client_secret values from auth_config
+// and decorates each OAuth provider with a "secret_set" boolean based on the
+// vault. Safe to call when the vault is not configured — the result will
+// simply report secret_set=false for every provider.
+func (s *TenantService) annotateAuthConfig(ctx context.Context, schemaName string, raw []byte) []byte {
+	return AnnotateOAuthSecretStatus(raw, func(provider string) bool {
+		return s.HasOAuthClientSecret(ctx, schemaName, provider)
+	})
 }
 
 // ListProjects returns all projects owned by the given platform user.
@@ -240,7 +270,7 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
-		p.AuthConfig = MaskSecretsJSON(p.AuthConfig)
+		p.AuthConfig = s.annotateAuthConfig(ctx, p.SchemaName, p.AuthConfig)
 		projects = append(projects, p)
 	}
 
@@ -274,8 +304,57 @@ func (s *TenantService) DeleteProject(ctx context.Context, projectID string) err
 	return nil
 }
 
+// oauthSecretVaultKey returns the canonical vault key used to store an OAuth
+// provider's client_secret for a given project.
+func oauthSecretVaultKey(provider string) string {
+	return "oauth." + provider + ".client_secret"
+}
+
 // UpdateAuthConfig updates the auth_config for a project, verifying ownership.
+//
+// Any client_secret values passed in the incoming config are routed through
+// the configured SecretStore (typically the vault) and stripped from the
+// persisted JSONB. Values that look like masked placeholders (contain "*")
+// are ignored — preserving whatever the vault already holds — so the console
+// can safely echo back a masked secret on save without clobbering the real one.
+// If the vault is not configured, any attempt to set a new OAuth secret fails
+// with a clear error rather than silently falling through to plaintext storage.
 func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID string, config AuthConfig) error {
+	// Resolve project schema up-front — we need it for every vault call.
+	var schemaName string
+	err := s.pool.QueryRow(ctx,
+		`SELECT schema_name FROM projects WHERE id = $1 AND owner_id = $2::uuid`,
+		projectID, ownerID,
+	).Scan(&schemaName)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return fmt.Errorf("project not found or not owned by user")
+		}
+		return fmt.Errorf("lookup project schema: %w", err)
+	}
+
+	// Walk OAuth providers, route secrets to vault, strip from persisted config.
+	for name, provider := range config.OAuthProviders {
+		incoming := provider.ClientSecret
+		// Always strip the secret from the persisted struct.
+		provider.ClientSecret = ""
+		config.OAuthProviders[name] = provider
+
+		if incoming == "" || IsMaskedSecret(incoming) {
+			// No change — leave vault entry alone.
+			continue
+		}
+
+		if s.secrets == nil || !s.secrets.Configured() {
+			return fmt.Errorf("cannot store oauth secret for %q: vault not configured (set VAULT_ENCRYPTION_KEY)", name)
+		}
+
+		if err := s.secrets.SetRaw(ctx, schemaName, oauthSecretVaultKey(name), incoming); err != nil {
+			return fmt.Errorf("store oauth secret for %q: %w", name, err)
+		}
+	}
+
+	// Marshal the (now secret-free) config and persist to auth_config.
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("marshal auth config: %w", err)
@@ -294,4 +373,29 @@ func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID
 
 	slog.Info("auth config updated", "project_id", projectID)
 	return nil
+}
+
+// GetOAuthClientSecret returns the decrypted OAuth client_secret for a given
+// provider by reading it from the vault. Returns an empty string and no error
+// if no secret is stored. Used by the auth service during the OAuth code
+// exchange.
+func (s *TenantService) GetOAuthClientSecret(ctx context.Context, schemaName, providerName string) (string, error) {
+	if s.secrets == nil || !s.secrets.Configured() {
+		return "", fmt.Errorf("vault not configured")
+	}
+	return s.secrets.GetRaw(ctx, schemaName, oauthSecretVaultKey(providerName))
+}
+
+// HasOAuthClientSecret reports whether a vault entry exists for the given
+// provider. Used by AnnotateOAuthSecretStatus to decorate API responses
+// with a "secret_set" boolean so the UI can show "Secret configured".
+func (s *TenantService) HasOAuthClientSecret(ctx context.Context, schemaName, providerName string) bool {
+	if s.secrets == nil || !s.secrets.Configured() {
+		return false
+	}
+	has, err := s.secrets.HasRaw(ctx, schemaName, oauthSecretVaultKey(providerName))
+	if err != nil {
+		return false
+	}
+	return has
 }

@@ -58,12 +58,19 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 
 	// Tenant service.
 	tenantSvc := tenant.NewTenantService(pool)
+	if vaultSvc != nil && vaultSvc.Configured() {
+		tenantSvc.SetSecretStore(vaultSvc)
+	}
 
 	// End-user auth service.
 	endUserAuthSvc := enduser.NewAuthService(pool)
 	if emailService != nil {
 		endUserAuthSvc.SetEmailService(emailService)
 	}
+	// OAuth client_secrets live in the vault — route sign-in through the
+	// tenant service for decryption. Without this, SignInWithOAuth returns
+	// a clear error.
+	endUserAuthSvc.SetOAuthSecretLookup(tenantSvc.GetOAuthClientSecret)
 
 	// API key middleware (for SDK / end-user routes).
 	apiKeyMw := auth.NewAPIKeyMiddleware(pool)

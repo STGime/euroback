@@ -14,10 +14,17 @@ type ProviderConfig struct {
 }
 
 // OAuthProviderConfig holds the settings for a social login provider.
+//
+// ClientSecret is only populated on incoming requests (when the user sets or
+// changes the secret). The secret is never persisted to auth_config JSONB —
+// it is stored encrypted in the project vault at key "oauth.{provider}.client_secret".
+// SecretSet indicates whether a secret exists in the vault (used in API responses
+// so the UI can display "secret configured" without ever sending the value).
 type OAuthProviderConfig struct {
 	Enabled      bool   `json:"enabled"`
 	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	SecretSet    bool   `json:"secret_set,omitempty"`
 }
 
 // AuthConfig holds the per-project authentication configuration.
@@ -76,8 +83,10 @@ func (c *AuthConfig) Validate() error {
 		}
 	}
 	if !hasEnabled {
+		// For OAuth providers we only require a client_id to be set; the
+		// secret lives in the vault and may not be present in this struct.
 		for _, p := range c.OAuthProviders {
-			if p.Enabled && p.ClientID != "" && p.ClientSecret != "" {
+			if p.Enabled && p.ClientID != "" {
 				hasEnabled = true
 				break
 			}
@@ -88,6 +97,14 @@ func (c *AuthConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// IsMaskedSecret returns true if the given string looks like a masked value
+// returned by MaskSecretsJSON (i.e., contains asterisks). Used by the update
+// handler to detect when the console is echoing back a masked value and
+// preserve the vault entry instead of overwriting it.
+func IsMaskedSecret(s string) bool {
+	return strings.Contains(s, "*")
 }
 
 // SessionDurationSeconds parses the session duration string and returns seconds.
@@ -111,13 +128,17 @@ func (c *AuthConfig) IsMagicLinkEnabled() bool {
 	return ok && p.Enabled
 }
 
-// GetOAuthProvider returns the OAuth provider config if it exists, is enabled, and has credentials.
+// GetOAuthProvider returns the OAuth provider config if it exists and is enabled
+// with a client_id configured. The client_secret is NOT checked here — it lives
+// in the vault and is loaded separately by the auth service during the OAuth
+// code exchange. Callers must fetch the secret from the vault using the project
+// schema and the key "oauth.{provider}.client_secret".
 func (c *AuthConfig) GetOAuthProvider(name string) (OAuthProviderConfig, bool) {
 	if c.OAuthProviders == nil {
 		return OAuthProviderConfig{}, false
 	}
 	p, ok := c.OAuthProviders[name]
-	return p, ok && p.Enabled && p.ClientID != "" && p.ClientSecret != ""
+	return p, ok && p.Enabled && p.ClientID != ""
 }
 
 // IsRedirectURLAllowed checks whether the given URL is in the allowed redirect list.
@@ -142,8 +163,12 @@ func (c *AuthConfig) IsRedirectURLAllowed(rawURL string) bool {
 	return false
 }
 
-// MaskSecretsJSON takes raw auth_config JSON and masks OAuth client_secret values.
-// Returns the masked JSON. Used before returning project data in API responses.
+// MaskSecretsJSON takes raw auth_config JSON and removes any client_secret
+// values that may still be present (legacy rows) and replaces them with a
+// secret_set boolean. After the OAuth secret migration, auth_config JSONB
+// should never contain a client_secret at all — this function is a safety
+// net for any pre-migration rows. Used before returning project data in
+// API responses.
 func MaskSecretsJSON(raw []byte) []byte {
 	if len(raw) == 0 {
 		return raw
@@ -156,10 +181,8 @@ func MaskSecretsJSON(raw []byte) []byte {
 		if oauth, ok := oauthRaw.(map[string]interface{}); ok {
 			for providerName, providerRaw := range oauth {
 				if provider, ok := providerRaw.(map[string]interface{}); ok {
-					if secret, ok := provider["client_secret"].(string); ok && len(secret) > 8 {
-						provider["client_secret"] = secret[:4] + strings.Repeat("*", len(secret)-8) + secret[len(secret)-4:]
-					} else if ok && len(secret) > 0 {
-						provider["client_secret"] = strings.Repeat("*", len(secret))
+					if _, hasSecret := provider["client_secret"]; hasSecret {
+						delete(provider, "client_secret")
 					}
 					oauth[providerName] = provider
 				}
@@ -172,6 +195,43 @@ func MaskSecretsJSON(raw []byte) []byte {
 		return raw
 	}
 	return masked
+}
+
+// AnnotateOAuthSecretStatus accepts auth_config JSON and a lookup function
+// that returns whether a given provider has a vault entry. It decorates the
+// oauth_providers map entries with "secret_set": true/false so the UI can
+// show "Secret configured" without ever fetching the actual secret.
+func AnnotateOAuthSecretStatus(raw []byte, hasSecret func(provider string) bool) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return raw
+	}
+	oauthRaw, ok := cfg["oauth_providers"]
+	if !ok {
+		return raw
+	}
+	oauth, ok := oauthRaw.(map[string]interface{})
+	if !ok {
+		return raw
+	}
+	for providerName, providerRaw := range oauth {
+		provider, ok := providerRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		provider["secret_set"] = hasSecret(providerName)
+		delete(provider, "client_secret")
+		oauth[providerName] = provider
+	}
+	cfg["oauth_providers"] = oauth
+	annotated, err := json.Marshal(cfg)
+	if err != nil {
+		return raw
+	}
+	return annotated
 }
 
 // ParseAuthConfig parses a JSON string into an AuthConfig, returning defaults if empty.

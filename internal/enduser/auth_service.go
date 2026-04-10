@@ -20,10 +20,15 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// OAuthSecretLookup returns the decrypted client_secret for a given provider
+// in a given project schema. Satisfied by tenant.TenantService.GetOAuthClientSecret.
+type OAuthSecretLookup func(ctx context.Context, schemaName, providerName string) (string, error)
+
 // AuthService handles end-user auth operations scoped to a tenant schema.
 type AuthService struct {
 	pool         *pgxpool.Pool
 	emailService *email.EmailService
+	oauthSecrets OAuthSecretLookup
 }
 
 // NewAuthService creates a new end-user auth service.
@@ -34,6 +39,13 @@ func NewAuthService(pool *pgxpool.Pool) *AuthService {
 // SetEmailService sets the email service for sending verification/reset emails.
 func (s *AuthService) SetEmailService(svc *email.EmailService) {
 	s.emailService = svc
+}
+
+// SetOAuthSecretLookup wires in a function that resolves encrypted OAuth
+// client_secret values from the vault at sign-in time. If not set, OAuth
+// sign-in will fail with a clear error.
+func (s *AuthService) SetOAuthSecretLookup(lookup OAuthSecretLookup) {
+	s.oauthSecrets = lookup
 }
 
 // SignUp creates a new end-user in the given tenant schema.
@@ -543,10 +555,22 @@ func (s *AuthService) SignInWithMagicLink(ctx context.Context, schemaName, jwtSe
 // SignInWithOAuth exchanges an OAuth authorization code for user info,
 // finds or creates the user, and returns an auth session.
 func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret, projectID string, config tenant.AuthConfig, providerName, code, redirectURL string) (*AuthResponse, error) {
-	// Get OAuth provider config from auth_config.
+	// Get OAuth provider config from auth_config (client_id + enabled flag).
 	providerConfig, ok := config.GetOAuthProvider(providerName)
 	if !ok {
 		return nil, fmt.Errorf("oauth provider %q is not enabled", providerName)
+	}
+
+	// Load the encrypted client_secret from the vault.
+	if s.oauthSecrets == nil {
+		return nil, fmt.Errorf("oauth not available: vault lookup not configured on gateway")
+	}
+	clientSecret, err := s.oauthSecrets(ctx, schemaName, providerName)
+	if err != nil {
+		return nil, fmt.Errorf("load oauth secret for %q: %w", providerName, err)
+	}
+	if clientSecret == "" {
+		return nil, fmt.Errorf("oauth provider %q is missing a client_secret (set one in the console)", providerName)
 	}
 
 	// Get the provider implementation.
@@ -556,7 +580,7 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 	}
 
 	// Exchange code for user info.
-	userInfo, err := provider.ExchangeCode(ctx, providerConfig.ClientID, providerConfig.ClientSecret, code, redirectURL)
+	userInfo, err := provider.ExchangeCode(ctx, providerConfig.ClientID, clientSecret, code, redirectURL)
 	if err != nil {
 		return nil, fmt.Errorf("oauth exchange failed: %w", err)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/storage"
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -170,6 +171,14 @@ func main() {
 		}
 	} else {
 		slog.Warn("VAULT_ENCRYPTION_KEY not set, vault disabled")
+	}
+
+	// ── Migrate legacy plaintext OAuth secrets into the vault ──
+	// Idempotent: once secrets have been moved, subsequent runs scan no rows.
+	if vaultSvc != nil && vaultSvc.Configured() {
+		if err := tenant.MigrateOAuthSecretsToVault(ctx, pool, vaultSvc); err != nil {
+			slog.Error("oauth secret migration failed", "error", err)
+		}
 	}
 
 	// ── Dev mode: bypass platform auth for local testing ──
