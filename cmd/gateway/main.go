@@ -159,6 +159,10 @@ func main() {
 	gateway.StartLogCleanup(ctx, pool)
 	slog.Info("request logging pipeline started")
 
+	// ── Start token cleanup job (expired refresh/email tokens across all tenants) ──
+	gateway.StartTokenCleanup(ctx, pool)
+	slog.Info("token cleanup job started")
+
 	// ── Set up vault (encrypted secrets storage, optional) ──
 	var vaultSvc *vault.VaultService
 	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
