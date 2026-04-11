@@ -295,29 +295,44 @@ func (s *LimitsService) clearAllThresholds(ctx context.Context, projectID, dim s
 	}
 }
 
-// renderAlertEmail builds the subject + HTML body for a usage alert. Kept as
-// a plain Go string template — no per-project customization because this is
-// a platform-level notification, not a user-facing email.
+// renderAlertEmail builds the subject + HTML body for a usage alert.
+//
+// The subject describes which warning threshold was crossed so that the
+// three alerts for a single breach (80/90/100%) are distinguishable. The
+// body lead paragraph shows the *actual* current percent, which can be far
+// higher than the threshold that triggered this particular email — e.g. a
+// project at 200% of its plan fires all three thresholds and every email
+// correctly reports "at 200% of your plan limit".
+//
+// Kept as a plain Go string template — no per-project customization because
+// this is a platform-level notification, not a user-facing email.
 func renderAlertEmail(projectName string, dim dimension, threshold int, current, cap, percent float64) (string, string) {
 	var subject string
-	var severity string
+	var headline string
 	switch threshold {
 	case 100:
 		subject = fmt.Sprintf("[Eurobase] %s: %s limit reached", projectName, dim.label)
-		severity = "You've hit 100% of your plan limit"
+		headline = "Plan limit reached"
 	case 90:
-		subject = fmt.Sprintf("[Eurobase] %s: %s at 90%% of plan limit", projectName, dim.label)
-		severity = "You're at 90% of your plan limit"
+		subject = fmt.Sprintf("[Eurobase] %s: %s crossed 90%% threshold", projectName, dim.label)
+		headline = "90% warning threshold crossed"
 	default: // 80
-		subject = fmt.Sprintf("[Eurobase] %s: %s at 80%% of plan limit", projectName, dim.label)
-		severity = "You're at 80% of your plan limit"
+		subject = fmt.Sprintf("[Eurobase] %s: %s crossed 80%% threshold", projectName, dim.label)
+		headline = "80% warning threshold crossed"
 	}
+
+	// The lead line shows actual usage — never the threshold integer — so
+	// the email is honest even when a single scan crosses multiple
+	// thresholds at once.
+	lead := fmt.Sprintf("Your %s usage is at <strong>%.1f%%</strong> of your plan limit on project <strong>%s</strong>.",
+		dim.label, percent, projectName)
 
 	body := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; color: #111;">
   <h2 style="color: #1e40af; margin-top: 0;">Usage alert: %s</h2>
-  <p>%s on project <strong>%s</strong>.</p>
+  <p>%s</p>
+  <p style="color: #6b7280; font-size: 14px;">%s</p>
   <table style="width: 100%%; border-collapse: collapse; margin: 16px 0; border: 1px solid #e5e7eb; border-radius: 8px;">
     <tr style="background: #f9fafb;">
       <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;"><strong>Metric</strong></td>
@@ -341,8 +356,8 @@ func renderAlertEmail(projectName string, dim dimension, threshold int, current,
 </body>
 </html>`,
 		dim.label,
-		severity,
-		projectName,
+		lead,
+		headline,
 		dim.label,
 		current, dim.unit,
 		cap, dim.unit,
