@@ -34,6 +34,13 @@ func (s *EmailService) Configured() bool {
 	return s.client.Configured()
 }
 
+// SendRaw sends a pre-composed HTML email through the underlying TEM client.
+// Used by internal background jobs (e.g. usage alerts) that build their own
+// subject + body and don't need token generation or template loading.
+func (s *EmailService) SendRaw(ctx context.Context, to, subject, htmlBody string) error {
+	return s.client.Send(ctx, to, subject, htmlBody)
+}
+
 // SendVerificationEmail sends an email verification link to the end-user.
 func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
 	rawToken, tokenHash, err := generateToken()

@@ -163,6 +163,10 @@ func main() {
 	gateway.StartTokenCleanup(ctx, pool)
 	slog.Info("token cleanup job started")
 
+	// ── Start usage alerts job (daily scan, 80/90/100% thresholds) ──
+	limitsSvc.StartUsageAlerts(ctx, emailService)
+	slog.Info("usage alerts job started")
+
 	// ── Set up vault (encrypted secrets storage, optional) ──
 	var vaultSvc *vault.VaultService
 	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {

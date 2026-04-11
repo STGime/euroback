@@ -34,8 +34,20 @@ func (s *LimitsService) GetUsage(ctx context.Context, projectID, schemaName stri
 	}
 	usage.DatabaseSizeMB = float64(dbSizeBytes) / (1024 * 1024)
 
+	// Storage size: sum of uploaded file sizes tracked in the tenant
+	// storage_objects table. Non-fatal on error — storage is platform-managed
+	// and may not be populated yet for a new project.
+	escSchema := strings.ReplaceAll(schemaName, `"`, `""`)
+	var storageBytes int64
+	storageQuery := fmt.Sprintf(`SELECT COALESCE(SUM(size_bytes), 0) FROM "%s".storage_objects`, escSchema)
+	if err := s.pool.QueryRow(ctx, storageQuery).Scan(&storageBytes); err != nil {
+		slog.Error("get usage: storage size query failed", "project_id", projectID, "schema", schemaName, "error", err)
+		storageBytes = 0
+	}
+	usage.StorageSizeMB = float64(storageBytes) / (1024 * 1024)
+
 	// MAU count: number of users in the tenant schema.
-	mauQuery := fmt.Sprintf(`SELECT count(*) FROM "%s".users`, strings.ReplaceAll(schemaName, `"`, `""`))
+	mauQuery := fmt.Sprintf(`SELECT count(*) FROM "%s".users`, escSchema)
 	err = s.pool.QueryRow(ctx, mauQuery).Scan(&usage.MAUCount)
 	if err != nil {
 		slog.Error("get usage: MAU count failed", "project_id", projectID, "schema", schemaName, "error", err)
