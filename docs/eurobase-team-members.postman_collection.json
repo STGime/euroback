@@ -1,0 +1,328 @@
+{
+	"info": {
+		"_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		"name": "Eurobase Team Members API",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080",
+			"type": "default"
+		},
+		{
+			"key": "token",
+			"value": "",
+			"type": "default"
+		},
+		{
+			"key": "project_id",
+			"value": "",
+			"type": "default"
+		},
+		{
+			"key": "member_user_id",
+			"value": "",
+			"type": "default"
+		}
+	],
+	"item": [
+		{
+			"name": "Sign In",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"",
+							"pm.test(\"Extract access_token\", function () {",
+							"    var jsonData = pm.response.json();",
+							"    pm.expect(jsonData.access_token).to.be.a('string');",
+							"    pm.collectionVariables.set(\"token\", jsonData.access_token);",
+							"});"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n\t\"email\": \"stefan.gimeson@gmail.com\",\n\t\"password\": \"Testing12345\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/auth/signin",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"auth",
+						"signin"
+					]
+				}
+			}
+		},
+		{
+			"name": "List Projects",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"",
+							"pm.test(\"Extract first project id\", function () {",
+							"    var jsonData = pm.response.json();",
+							"    pm.expect(jsonData).to.be.an('array').that.is.not.empty;",
+							"    pm.collectionVariables.set(\"project_id\", jsonData[0].id);",
+							"});"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/v1/tenants",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"v1",
+						"tenants"
+					]
+				}
+			}
+		},
+		{
+			"name": "List Members",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/members",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"projects",
+						"{{project_id}}",
+						"members"
+					]
+				}
+			}
+		},
+		{
+			"name": "Invite Member",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n\t\"email\": \"test@example.com\",\n\t\"role\": \"developer\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/members/invite",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"projects",
+						"{{project_id}}",
+						"members",
+						"invite"
+					]
+				}
+			}
+		},
+		{
+			"name": "Resend Invitation",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n\t\"email\": \"test@example.com\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/members/resend",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"projects",
+						"{{project_id}}",
+						"members",
+						"resend"
+					]
+				}
+			}
+		},
+		{
+			"name": "Change Member Role",
+			"request": {
+				"method": "PATCH",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n\t\"role\": \"admin\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/members/{{member_user_id}}",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"projects",
+						"{{project_id}}",
+						"members",
+						"{{member_user_id}}"
+					]
+				}
+			}
+		},
+		{
+			"name": "Remove Member",
+			"request": {
+				"method": "DELETE",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/members/{{member_user_id}}",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"projects",
+						"{{project_id}}",
+						"members",
+						"{{member_user_id}}"
+					]
+				}
+			}
+		},
+		{
+			"name": "Accept Invitation",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n\t\"token\": \"...\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/platform/invitations/accept",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"invitations",
+						"accept"
+					]
+				}
+			}
+		},
+		{
+			"name": "Verify Audit Entry",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/platform/projects/{{project_id}}/compliance/audit-log?action=member.invited",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"platform",
+						"projects",
+						"{{project_id}}",
+						"compliance",
+						"audit-log"
+					],
+					"query": [
+						{
+							"key": "action",
+							"value": "member.invited"
+						}
+					]
+				}
+			}
+		}
+	]
+}
