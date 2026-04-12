@@ -48,17 +48,27 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Check membership (any role grants read access at the schema level).
+			role, roleErr := ResolveRole(r.Context(), pool, projectID, claims.Subject)
+			if roleErr != nil || role == "" {
+				slog.Error("platform tenant context: no membership",
+					"project_id", projectID,
+					"user_id", claims.Subject,
+				)
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
 			var schemaName string
 			err := pool.QueryRow(r.Context(),
 				`SELECT schema_name FROM projects
-				 WHERE id = $1 AND owner_id = $2::uuid AND status = 'active'`,
-				projectID, claims.Subject,
+				 WHERE id = $1 AND status = 'active'`,
+				projectID,
 			).Scan(&schemaName)
 			if err != nil {
 				slog.Error("platform tenant context: project not found",
 					"error", err,
 					"project_id", projectID,
-					"user_id", claims.Subject,
 				)
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 				return
@@ -90,11 +100,18 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 				return
 			}
 
+			// Check membership (any role grants storage access at the project level).
+			role, roleErr := ResolveRole(r.Context(), pool, projectID, claims.Subject)
+			if roleErr != nil || role == "" {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
 			var slug string
 			err := pool.QueryRow(r.Context(),
 				`SELECT slug FROM projects
-				 WHERE id = $1 AND owner_id = $2::uuid AND status = 'active'`,
-				projectID, claims.Subject,
+				 WHERE id = $1 AND status = 'active'`,
+				projectID,
 			).Scan(&slug)
 			if err != nil {
 				slog.Error("platform storage context: project not found",
@@ -150,11 +167,12 @@ func TenantContextMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler
 					return
 				}
 			} else {
-				// Fall back to user's first active project.
+				// Fall back to user's first active project (via membership).
 				err := pool.QueryRow(r.Context(),
 					`SELECT p.id, p.schema_name
 					 FROM projects p
-					 WHERE p.owner_id = $1::uuid AND p.status = 'active'
+					 JOIN project_members pm ON pm.project_id = p.id
+					 WHERE pm.user_id = $1::uuid AND p.status = 'active'
 					 ORDER BY p.created_at ASC
 					 LIMIT 1`,
 					claims.Subject,

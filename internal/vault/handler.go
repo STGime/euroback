@@ -29,7 +29,9 @@ func Routes(svc *VaultService, pool *pgxpool.Pool) chi.Router {
 	return r
 }
 
-// resolveSchema looks up the schema_name for a project owned by the authenticated user.
+// resolveSchema looks up the schema_name for a project the authenticated user
+// has access to (via project_members). The PlatformTenantContext middleware
+// already verifies membership before vault routes run.
 func resolveSchema(r *http.Request, pool *pgxpool.Pool) (string, string, error) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
@@ -37,11 +39,21 @@ func resolveSchema(r *http.Request, pool *pgxpool.Pool) (string, string, error) 
 	}
 
 	projectID := chi.URLParam(r, "id")
+
+	// Verify membership.
+	var memberCount int
+	pool.QueryRow(r.Context(),
+		`SELECT count(*) FROM project_members WHERE project_id = $1 AND user_id = $2`,
+		projectID, claims.Subject,
+	).Scan(&memberCount)
+	if memberCount == 0 {
+		return "", "", fmt.Errorf("project not found")
+	}
+
 	var schemaName string
 	err := pool.QueryRow(r.Context(),
-		`SELECT schema_name FROM projects
-		 WHERE id = $1 AND owner_id = $2::uuid AND status = 'active'`,
-		projectID, claims.Subject,
+		`SELECT schema_name FROM projects WHERE id = $1 AND status = 'active'`,
+		projectID,
 	).Scan(&schemaName)
 	if err != nil {
 		return "", "", fmt.Errorf("project not found")

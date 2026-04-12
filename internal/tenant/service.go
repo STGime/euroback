@@ -177,6 +177,19 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		return nil, fmt.Errorf("read back schema_name: %w", err)
 	}
 
+	// Insert owner membership row so role-based access checks work from
+	// the moment the project is created. Uses ON CONFLICT for idempotency
+	// in case the migration backfill already ran.
+	_, err = tx.Exec(ctx,
+		`INSERT INTO project_members (project_id, user_id, role)
+		 VALUES ($1, $2, 'owner')
+		 ON CONFLICT (project_id, user_id) DO NOTHING`,
+		projectID, ownerID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert owner membership: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -248,13 +261,15 @@ func (s *TenantService) annotateAuthConfig(ctx context.Context, schemaName strin
 	})
 }
 
-// ListProjects returns all projects owned by the given platform user.
+// ListProjects returns all projects the given platform user is a member of
+// (owner, admin, developer, or viewer).
 func (s *TenantService) ListProjects(ctx context.Context, platformUserID string) ([]Project, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
 		        p.region, p.plan, p.status, p.auth_config, p.created_at
 		 FROM projects p
-		 WHERE p.owner_id = $1::uuid
+		 JOIN project_members pm ON pm.project_id = p.id
+		 WHERE pm.user_id = $1::uuid
 		 ORDER BY p.created_at DESC`,
 		platformUserID,
 	)
@@ -321,14 +336,16 @@ func oauthSecretVaultKey(provider string) string {
 // with a clear error rather than silently falling through to plaintext storage.
 func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID string, config AuthConfig) error {
 	// Resolve project schema up-front — we need it for every vault call.
+	// Access control (role check) is done by the handler before calling this
+	// method, so we only need to verify the project exists.
 	var schemaName string
 	err := s.pool.QueryRow(ctx,
-		`SELECT schema_name FROM projects WHERE id = $1 AND owner_id = $2::uuid`,
-		projectID, ownerID,
+		`SELECT schema_name FROM projects WHERE id = $1`,
+		projectID,
 	).Scan(&schemaName)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return fmt.Errorf("project not found or not owned by user")
+			return fmt.Errorf("project not found")
 		}
 		return fmt.Errorf("lookup project schema: %w", err)
 	}
@@ -361,14 +378,14 @@ func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID
 	}
 
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE projects SET auth_config = $1 WHERE id = $2 AND owner_id = $3::uuid`,
-		configJSON, projectID, ownerID,
+		`UPDATE projects SET auth_config = $1 WHERE id = $2`,
+		configJSON, projectID,
 	)
 	if err != nil {
 		return fmt.Errorf("update auth config: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("project not found or not owned by user")
+		return fmt.Errorf("project not found")
 	}
 
 	slog.Info("auth config updated", "project_id", projectID)

@@ -210,13 +210,12 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 // HandleUpdateProject handles PATCH /v1/tenants/{id} to update project settings (e.g. auth_config).
 func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		claims, ok := auth.ClaimsFromContext(r.Context())
+		projectID := chi.URLParam(r, "id")
+
+		claims, _, ok := requireRole(w, r, pool, projectID, "admin")
 		if !ok {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-
-		projectID := chi.URLParam(r, "id")
 
 		var body struct {
 			AuthConfig *AuthConfig `json:"auth_config"`
@@ -271,25 +270,10 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 // DELETE /v1/tenants/{id}
 func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		claims, ok := auth.ClaimsFromContext(r.Context())
-		if !ok {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-
 		projectID := chi.URLParam(r, "id")
 
-		// Verify the user owns this project.
-		var ownerID string
-		err := pool.QueryRow(r.Context(),
-			`SELECT owner_id FROM projects WHERE id = $1`, projectID,
-		).Scan(&ownerID)
-		if err != nil {
-			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
-			return
-		}
-		if ownerID != claims.Subject {
-			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		claims, _, ok := requireRole(w, r, pool, projectID, "owner")
+		if !ok {
 			return
 		}
 

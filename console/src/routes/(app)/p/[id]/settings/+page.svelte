@@ -2,10 +2,13 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { getContext, onMount } from 'svelte';
-	import { api, type Project, type APIKey } from '$lib/api.js';
+	import { api, type Project, type APIKey, type ProjectMember, type ProjectInvitation } from '$lib/api.js';
 
 	const projectCtx = getContext<{ id: string; project: Project | null }>('projectId');
 	let projectId = $derived($page.params.id);
+
+	// Tab state
+	let activeTab = $state<'settings' | 'members'>('settings');
 
 	// API Keys
 	let keys: APIKey[] = $state([]);
@@ -64,9 +67,112 @@
 
 	let publicKey = $derived(keys.find(k => k.type === 'public'));
 	let secretKey = $derived(keys.find(k => k.type === 'secret'));
+
+	// ── Members tab state ──
+	let members: ProjectMember[] = $state([]);
+	let invitations: ProjectInvitation[] = $state([]);
+	let membersLoading = $state(false);
+	let membersError: string | null = $state(null);
+	let inviteEmail = $state('');
+	let inviteRole = $state('developer');
+	let inviting = $state(false);
+	let inviteMessage = $state('');
+	let inviteError = $state('');
+	let resending: string | null = $state(null);
+
+	async function loadMembers() {
+		membersLoading = true;
+		membersError = null;
+		try {
+			const resp = await api.getMembers(projectId);
+			members = resp.members;
+			invitations = resp.invitations;
+		} catch (err) {
+			membersError = err instanceof Error ? err.message : 'Failed to load members';
+		} finally {
+			membersLoading = false;
+		}
+	}
+
+	function switchToMembers() {
+		activeTab = 'members';
+		if (members.length === 0) loadMembers();
+	}
+
+	async function handleInvite() {
+		inviting = true;
+		inviteMessage = '';
+		inviteError = '';
+		try {
+			await api.inviteMember(projectId, inviteEmail, inviteRole);
+			inviteMessage = `Invitation sent to ${inviteEmail}`;
+			inviteEmail = '';
+			loadMembers();
+			setTimeout(() => { inviteMessage = ''; }, 3000);
+		} catch (err) {
+			inviteError = err instanceof Error ? err.message : 'Failed to send invitation';
+		} finally {
+			inviting = false;
+		}
+	}
+
+	async function handleResend(email: string) {
+		resending = email;
+		try {
+			await api.resendInvitation(projectId, email);
+			loadMembers();
+		} catch { /* ignore */ }
+		resending = null;
+	}
+
+	async function handleRemoveMember(userId: string) {
+		if (!confirm('Remove this member from the project?')) return;
+		try {
+			await api.removeMember(projectId, userId);
+			loadMembers();
+		} catch { /* ignore */ }
+	}
+
+	async function handleChangeRole(userId: string, newRole: string) {
+		try {
+			await api.changeMemberRole(projectId, userId, newRole);
+			loadMembers();
+		} catch { /* ignore */ }
+	}
+
+	function formatMemberDate(iso: string): string {
+		return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+	}
+
+	function roleBadgeColor(role: string): string {
+		switch (role) {
+			case 'owner': return 'bg-purple-100 text-purple-700';
+			case 'admin': return 'bg-blue-100 text-blue-700';
+			case 'developer': return 'bg-green-100 text-green-700';
+			case 'viewer': return 'bg-gray-100 text-gray-700';
+			default: return 'bg-gray-100 text-gray-600';
+		}
+	}
 </script>
 
 <div class="mx-auto max-w-4xl space-y-6">
+	<!-- Tab Switcher -->
+	<div class="flex gap-1 rounded-lg bg-gray-100 p-1 w-fit">
+		<button
+			onclick={() => activeTab = 'settings'}
+			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'settings' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
+		>
+			Settings
+		</button>
+		<button
+			onclick={switchToMembers}
+			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'members' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
+		>
+			Members
+		</button>
+	</div>
+
+{#if activeTab === 'settings'}
 	{#if projectCtx.project}
 		<!-- Project Info -->
 		<div class="rounded-xl border border-gray-200 bg-white p-6">
@@ -192,7 +298,6 @@
 			</div>
 		</div>
 	{/if}
-</div>
 
 <!-- Regenerate Confirm -->
 {#if showRegenConfirm}
@@ -274,3 +379,173 @@
 		</div>
 	</div>
 {/if}
+
+{:else}
+	<!-- Members Tab -->
+	<div class="rounded-xl border border-gray-200 bg-white p-6">
+		<h2 class="text-lg font-semibold text-gray-900">Invite a Team Member</h2>
+		<p class="mt-1 text-sm text-gray-500">Members can access this project based on their role.</p>
+		<div class="mt-4 flex items-end gap-3">
+			<div class="flex-1">
+				<label for="invite-email" class="block text-xs font-medium text-gray-700">Email address</label>
+				<input id="invite-email" type="email" bind:value={inviteEmail} placeholder="colleague@example.com"
+					class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-eurobase-500 focus:outline-none" />
+			</div>
+			<div>
+				<label for="invite-role" class="block text-xs font-medium text-gray-700">Role</label>
+				<select id="invite-role" bind:value={inviteRole}
+					class="mt-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer">
+					<option value="viewer">Viewer</option>
+					<option value="developer">Developer</option>
+					<option value="admin">Admin</option>
+				</select>
+			</div>
+			<button
+				type="button"
+				disabled={!inviteEmail || inviting}
+				onclick={handleInvite}
+				class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+			>
+				{inviting ? 'Sending...' : 'Send Invite'}
+			</button>
+		</div>
+		{#if inviteMessage}
+			<p class="mt-2 text-sm text-green-600">{inviteMessage}</p>
+		{/if}
+		{#if inviteError}
+			<p class="mt-2 text-sm text-red-600">{inviteError}</p>
+		{/if}
+	</div>
+
+	{#if membersError}
+		<div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{membersError}</div>
+	{/if}
+
+	<!-- Current Members -->
+	<div class="rounded-xl border border-gray-200 bg-white overflow-hidden">
+		<div class="border-b border-gray-200 px-4 py-3">
+			<h3 class="text-sm font-semibold text-gray-900">Members</h3>
+		</div>
+		<div class="overflow-x-auto">
+			<table class="w-full text-sm">
+				<thead>
+					<tr class="border-b border-gray-200 bg-gray-50">
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Email</th>
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Role</th>
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Joined</th>
+						<th class="px-4 py-2.5 text-right text-xs font-medium uppercase tracking-wider text-gray-500">Actions</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#if membersLoading}
+						{#each Array(3) as _}
+							<tr class="border-b border-gray-100"><td class="px-4 py-3" colspan="4"><div class="h-4 animate-pulse rounded bg-gray-100 w-full"></div></td></tr>
+						{/each}
+					{:else}
+						{#each members as member}
+							<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+								<td class="px-4 py-2.5 text-sm text-gray-700">{member.email}</td>
+								<td class="px-4 py-2.5">
+									{#if member.role === 'owner'}
+										<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold {roleBadgeColor(member.role)}">{member.role}</span>
+									{:else}
+										<select
+											value={member.role}
+											onchange={(e) => handleChangeRole(member.user_id, (e.target as HTMLSelectElement).value)}
+											class="rounded-md border border-gray-200 bg-white px-2 py-0.5 text-xs font-medium text-gray-700 cursor-pointer focus:border-eurobase-500 focus:outline-none"
+										>
+											<option value="viewer">viewer</option>
+											<option value="developer">developer</option>
+											<option value="admin">admin</option>
+										</select>
+									{/if}
+								</td>
+								<td class="px-4 py-2.5 text-xs text-gray-500">{formatMemberDate(member.created_at)}</td>
+								<td class="px-4 py-2.5 text-right">
+									{#if member.role !== 'owner'}
+										<button
+											type="button"
+											onclick={() => handleRemoveMember(member.user_id)}
+											class="cursor-pointer text-xs text-red-600 hover:text-red-800 font-medium"
+										>
+											Remove
+										</button>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					{/if}
+				</tbody>
+			</table>
+		</div>
+	</div>
+
+	<!-- Pending Invitations -->
+	{#if invitations.length > 0}
+		<div class="rounded-xl border border-gray-200 bg-white overflow-hidden">
+			<div class="border-b border-gray-200 px-4 py-3">
+				<h3 class="text-sm font-semibold text-gray-900">Pending Invitations</h3>
+			</div>
+			<div class="overflow-x-auto">
+				<table class="w-full text-sm">
+					<thead>
+						<tr class="border-b border-gray-200 bg-gray-50">
+							<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Email</th>
+							<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Role</th>
+							<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Sent</th>
+							<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Expires</th>
+							<th class="px-4 py-2.5 text-right text-xs font-medium uppercase tracking-wider text-gray-500">Actions</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each invitations as inv}
+							<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+								<td class="px-4 py-2.5 text-sm text-gray-700">{inv.email}</td>
+								<td class="px-4 py-2.5">
+									<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold {roleBadgeColor(inv.role)}">{inv.role}</span>
+								</td>
+								<td class="px-4 py-2.5 text-xs text-gray-500">{formatMemberDate(inv.sent_at)}</td>
+								<td class="px-4 py-2.5 text-xs text-gray-500">{formatMemberDate(inv.expires_at)}</td>
+								<td class="px-4 py-2.5 text-right">
+									<button
+										type="button"
+										disabled={resending === inv.email}
+										onclick={() => handleResend(inv.email)}
+										class="cursor-pointer text-xs text-eurobase-600 hover:text-eurobase-800 font-medium disabled:opacity-50"
+									>
+										{resending === inv.email ? 'Sending...' : 'Resend'}
+									</button>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	{/if}
+
+	<!-- Role descriptions -->
+	<div class="rounded-xl border border-gray-200 bg-white p-6">
+		<h3 class="text-sm font-semibold text-gray-900 mb-3">Role Permissions</h3>
+		<div class="overflow-x-auto">
+			<table class="w-full text-xs">
+				<thead>
+					<tr class="border-b border-gray-200">
+						<th class="px-3 py-2 text-left text-gray-500 font-medium">Permission</th>
+						<th class="px-3 py-2 text-center text-gray-500 font-medium">Viewer</th>
+						<th class="px-3 py-2 text-center text-gray-500 font-medium">Developer</th>
+						<th class="px-3 py-2 text-center text-gray-500 font-medium">Admin</th>
+						<th class="px-3 py-2 text-center text-gray-500 font-medium">Owner</th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-gray-100">
+					<tr><td class="px-3 py-1.5 text-gray-700">View data, logs, compliance</td><td class="text-center text-green-600">Yes</td><td class="text-center text-green-600">Yes</td><td class="text-center text-green-600">Yes</td><td class="text-center text-green-600">Yes</td></tr>
+					<tr><td class="px-3 py-1.5 text-gray-700">Edit data, schema, functions</td><td class="text-center text-gray-300">&mdash;</td><td class="text-center text-green-600">Yes</td><td class="text-center text-green-600">Yes</td><td class="text-center text-green-600">Yes</td></tr>
+					<tr><td class="px-3 py-1.5 text-gray-700">Settings, API keys, vault, invites</td><td class="text-center text-gray-300">&mdash;</td><td class="text-center text-gray-300">&mdash;</td><td class="text-center text-green-600">Yes</td><td class="text-center text-green-600">Yes</td></tr>
+					<tr><td class="px-3 py-1.5 text-gray-700">Delete project, change roles</td><td class="text-center text-gray-300">&mdash;</td><td class="text-center text-gray-300">&mdash;</td><td class="text-center text-gray-300">&mdash;</td><td class="text-center text-green-600">Yes</td></tr>
+				</tbody>
+			</table>
+		</div>
+	</div>
+{/if}
+</div>

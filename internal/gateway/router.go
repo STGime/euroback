@@ -103,6 +103,16 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Post("/delete", auth.HandleDeleteAccount(platformAuthSvc))
 		})
 
+		// Authenticated: accept project invitation (token-based).
+		r.Route("/invitations", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			r.Post("/accept", tenant.HandleAcceptInvitation(pool))
+		})
+
 		// Authenticated: platform config endpoints.
 		r.Route("/config", func(r chi.Router) {
 			if isDev {
@@ -181,6 +191,17 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
 
 			r.Get("/compliance/audit-log", audit.HandleList(auditSvc))
+
+			// Team members (invite, remove, change role).
+			var sendEmailFn func(ctx context.Context, to, subject, html string) error
+			if emailService != nil {
+				sendEmailFn = emailService.SendRaw
+			}
+			r.Get("/members", tenant.HandleListMembers(pool))
+			r.Post("/members/invite", tenant.HandleInviteMember(pool, sendEmailFn))
+			r.Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
+			r.Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
+			r.Patch("/members/{userId}", tenant.HandleChangeRole(pool))
 
 			// Edge Functions (serverless compute management).
 			fnSvc := functions.NewService(pool)

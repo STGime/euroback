@@ -858,6 +858,52 @@ export class EurobaseAPI {
 		return this.fetch<AuditLogResult>(`/platform/projects/${projectId}/compliance/audit-log${query}`);
 	}
 
+	// ---- Team Members ----
+
+	/** List members and pending invitations for a project. */
+	async getMembers(projectId: string): Promise<MembersResponse> {
+		return this.fetch<MembersResponse>(`/platform/projects/${projectId}/members`);
+	}
+
+	/** Invite a new member to the project. */
+	async inviteMember(projectId: string, email: string, role: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/members/invite`, {
+			method: 'POST',
+			body: JSON.stringify({ email, role })
+		});
+	}
+
+	/** Resend an invitation email. */
+	async resendInvitation(projectId: string, email: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/members/resend`, {
+			method: 'POST',
+			body: JSON.stringify({ email })
+		});
+	}
+
+	/** Remove a member from the project. */
+	async removeMember(projectId: string, userId: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/members/${userId}`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** Change a member's role. */
+	async changeMemberRole(projectId: string, userId: string, role: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/members/${userId}`, {
+			method: 'PATCH',
+			body: JSON.stringify({ role })
+		});
+	}
+
+	/** Accept a project invitation. */
+	async acceptInvitation(token: string): Promise<{ status: string; project_id: string; role: string }> {
+		return this.fetch('/platform/invitations/accept', {
+			method: 'POST',
+			body: JSON.stringify({ token })
+		});
+	}
+
 	// ---- Edge Functions ----
 
 	/** List all edge functions for a project. */
@@ -1284,6 +1330,32 @@ export interface DPAReport {
 		cloud_act_exposure: boolean;
 		cloud_act_details?: string;
 	};
+}
+
+export interface ProjectMember {
+	id: string;
+	project_id: string;
+	user_id: string;
+	email: string;
+	role: 'owner' | 'admin' | 'developer' | 'viewer';
+	created_at: string;
+}
+
+export interface ProjectInvitation {
+	id: string;
+	project_id: string;
+	email: string;
+	role: 'admin' | 'developer' | 'viewer';
+	invited_by: string;
+	sent_at: string;
+	expires_at: string;
+	accepted_at: string | null;
+	created_at: string;
+}
+
+export interface MembersResponse {
+	members: ProjectMember[];
+	invitations: ProjectInvitation[];
 }
 
 export interface AuditLogEntry {
