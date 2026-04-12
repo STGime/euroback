@@ -701,17 +701,28 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 		return fmt.Errorf("function body cannot contain '$$'")
 	}
 
-	sql := fmt.Sprintf(
+	createSQL := fmt.Sprintf(
 		"CREATE OR REPLACE FUNCTION %s.%s() RETURNS %s LANGUAGE %s AS $$ %s $$",
 		quoteIdent(schemaName), quoteIdent(req.Name),
 		returns, lang, req.Body,
 	)
 
-	if _, err := pool.Exec(ctx, sql); err != nil {
+	// Set search_path to the tenant schema so unqualified table references
+	// in the function body (e.g. "SELECT * FROM categories") resolve
+	// correctly. Use a transaction so the search_path resets automatically.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+		return fmt.Errorf("set search_path: %w", err)
+	}
+	if _, err := tx.Exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("create function: %w", err)
 	}
-
-	return nil
+	return tx.Commit(ctx)
 }
 
 // DropFunction drops a zero-argument function from the schema.
