@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -116,7 +117,8 @@ func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// logSchemaChange records a DDL operation in the schema_changes table.
+// logSchemaChange records a DDL operation in the schema_changes table and
+// emits an audit log entry (if the audit service is available in context).
 func logSchemaChange(pool *pgxpool.Pool, r *http.Request, projectID, action, tableName string, columnName *string, detail any) {
 	detailJSON, _ := json.Marshal(detail)
 	_, err := pool.Exec(r.Context(),
@@ -126,6 +128,28 @@ func logSchemaChange(pool *pgxpool.Pool, r *http.Request, projectID, action, tab
 	)
 	if err != nil {
 		slog.Error("failed to log schema change", "error", err, "action", action, "table", tableName)
+	}
+
+	// Also write to the audit log so DDL shows up alongside other actions.
+	// Note: we can't import internal/auth here (cycle), so we extract the
+	// actor from the audit-compatible context helper instead. The platform
+	// auth middleware already ran and the audit middleware injected the
+	// service. If neither is available, we log with empty actor fields —
+	// better than skipping the entry entirely.
+	if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
+		actorID, actorEmail := audit.ActorFromContext(r.Context())
+		meta := map[string]interface{}{"table": tableName}
+		if columnName != nil {
+			meta["column"] = *columnName
+		}
+		if detail != nil {
+			meta["detail"] = detail
+		}
+		auditSvc.Log(r.Context(), projectID, actorID, actorEmail,
+			"schema."+action,
+			audit.WithTarget("table", tableName),
+			audit.WithMetadata(meta),
+			audit.WithIP(r.RemoteAddr))
 	}
 }
 

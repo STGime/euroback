@@ -170,10 +170,34 @@ type logOptions struct {
 // service injected into its constructor.
 
 type ctxKey struct{}
+type actorCtxKey struct{}
+
+type actor struct {
+	ID    string
+	Email string
+}
 
 // WithContext stores the audit service in the context.
 func WithContext(ctx context.Context, svc *Service) context.Context {
 	return context.WithValue(ctx, ctxKey{}, svc)
+}
+
+// WithActor stores the authenticated actor's ID and email in the context
+// so downstream packages (like query) can emit audit entries without
+// importing the auth package. Called by the platform auth middleware
+// or the audit injection middleware in the router.
+func WithActor(ctx context.Context, id, email string) context.Context {
+	return context.WithValue(ctx, actorCtxKey{}, &actor{ID: id, Email: email})
+}
+
+// ActorFromContext retrieves the actor ID and email from the context.
+// Returns empty strings if not set.
+func ActorFromContext(ctx context.Context) (id, email string) {
+	a, _ := ctx.Value(actorCtxKey{}).(*actor)
+	if a == nil {
+		return "", ""
+	}
+	return a.ID, a.Email
 }
 
 // FromContext retrieves the audit service from the context. Returns nil if

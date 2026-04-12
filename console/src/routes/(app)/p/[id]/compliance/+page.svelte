@@ -372,6 +372,13 @@
 			<option value="oauth.secret_set">OAuth Secret Set</option>
 			<option value="function.created">Function Created</option>
 			<option value="function.deleted">Function Deleted</option>
+			<option value="schema.create_table">Table Created</option>
+			<option value="schema.drop_table">Table Dropped</option>
+			<option value="schema.add_column">Column Added</option>
+			<option value="schema.drop_column">Column Dropped</option>
+			<option value="schema.alter_column">Column Altered</option>
+			<option value="schema.rename_table">Table Renamed</option>
+			<option value="schema.toggle_rls">RLS Toggled</option>
 			<option value="data.exported">Data Exported</option>
 		</select>
 		<button

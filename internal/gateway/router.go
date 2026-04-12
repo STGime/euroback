@@ -133,10 +133,14 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			if logCh != nil {
 				r.Use(RequestLoggingMiddleware(logCh))
 			}
-			// Inject audit service into every request context.
+			// Inject audit service + actor identity into every request context.
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					next.ServeHTTP(w, r.WithContext(audit.WithContext(r.Context(), auditSvc)))
+					ctx := audit.WithContext(r.Context(), auditSvc)
+					if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
+						ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+					}
+					next.ServeHTTP(w, r.WithContext(ctx))
 				})
 			})
 			r.Get("/logs", HandleLogs(pool))
@@ -239,10 +243,14 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 		} else {
 			r.Use(platformAuth.Handler)
 		}
-		// Inject audit service so tenant CRUD handlers can log.
+		// Inject audit service + actor identity so tenant CRUD handlers can log.
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				next.ServeHTTP(w, r.WithContext(audit.WithContext(r.Context(), auditSvc)))
+				ctx := audit.WithContext(r.Context(), auditSvc)
+				if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
+					ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+				}
+				next.ServeHTTP(w, r.WithContext(ctx))
 			})
 		})
 
