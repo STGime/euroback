@@ -4,7 +4,7 @@
 
 Technical Specification for Development Team
 
-Version 1.2 — March 2026 — Confidential
+Version 1.2 — April 2026 — Confidential
 
 ---
 
@@ -835,6 +835,13 @@ on push to main:
 - [x] API Explorer (auto-generated from schema)
 - [x] Scaleway Kapsule deployment (Terraform + K8s + CI/CD)
 - [x] Wildcard TLS for SDK subdomains
+- [x] Edge Functions — Deno runner with CRUD, invocation, DB triggers, versioning, rollback, metrics
+- [x] Encrypted vault (AES-256-GCM) for secrets
+- [x] RLS policy presets + auth helpers (auth_uid, auth_role, auth_email)
+- [x] Cron jobs and RPC function management
+- [x] CLI tool (30+ commands, Cobra, Go binary)
+- [x] pgTAP database testing
+- [x] DPA compliance report generator
 
 ### Sprint 1: Data API Parity (Easy Wins) -- COMPLETE
 
@@ -876,7 +883,7 @@ on push to main:
 | RLS toggle + policy management in database UI | 1 day | Done |
 | Documentation (RLS guide, Vault guide, auth helpers) | 0.5 day | Done |
 
-### Sprint 5: Developer Workflow (In Progress)
+### Sprint 5: Developer Workflow -- COMPLETE
 
 | Feature | Effort | Status |
 |---------|--------|--------|
@@ -886,12 +893,29 @@ on push to main:
 | Edge Functions — Phase 1 (CRUD, console, CLI, SDK, docs) | 3 days | Done |
 | Edge Functions — Console: schema browser sidebar + trigger config | 1 day | Done |
 | Edge Functions — Console: CodeMirror editor (TS highlighting, lint gutter) | 0.5 day | Done |
-| Edge Functions — Production migration + deployment | 0.5 day | Done |
-| Mollie billing integration | 1 week | Next |
-| Edge Functions — Phase 2 (Deno runner deployment) | 3 days | Planned |
-| Edge Functions — Phase 3 (DB triggers, env vars UI, versioning) | 2 days | Planned |
-| Team collaboration / RBAC | 1 week | Planned |
-| Built-in automations (Layer 1 — token cleanup, log retention, usage alerts) | 2 days | Planned |
+| Edge Functions — Phase 2 (Deno runner deployment + invocation) | 3 days | Done |
+| Edge Functions — Phase 3 (DB triggers, versioning, rollback, metrics) | 2 days | Done |
+| Edge Functions — Production deployment + end-to-end tests | 0.5 day | Done |
+| Free plan log retention banner (upgrade CTA) | 0.5 day | Done |
+
+### Sprint 6: Security, Compliance & Collaboration (Next)
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| Team collaboration / RBAC | 1 week | Next |
+| Built-in automations (Layer 1 — token cleanup, usage alerts) | 3 days | Next |
+| Audit log | 3 days | Planned |
+| GDPR data export (Article 15 — one-click per-user export) | 3 days | Planned |
+| Encrypt OAuth secrets at rest (reuse vault AES-256-GCM) | 3 days | Planned |
+
+### Sprint 7: Monetization (After Sprint 6)
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| Mollie billing integration | 1 week | Planned |
+| Mollie webhooks (payment.paid, payment.failed, subscription lifecycle) | 2 days | Planned |
+| Console billing page (plan selector, payment methods, invoice history) | 3 days | Planned |
+| Dunning flow + payment_overdue project suspension | 2 days | Planned |
 
 ### CLI Tool — Scope (v1 vs v2)
 
@@ -980,7 +1004,7 @@ Triggered by HTTP request, webhook, or schedule.
 
 Comprehensive comparison as of April 2026. This tracks where Eurobase has parity, advantages, gaps, and big gaps relative to Supabase.
 
-#### Parity (16 features — shipped)
+#### Parity (17 features — shipped)
 
 | Feature | Eurobase | Supabase | Notes |
 |---------|----------|----------|-------|
@@ -1000,6 +1024,7 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 | Schema management | DDL API + console | Dashboard | Create/alter/drop tables, columns, indexes |
 | CLI tool | 30+ commands | 30+ commands | Auth, DB, migrations, storage, vault, cron |
 | Plan/usage limits | Free + Pro | Free + Pro | Per-project billing model |
+| Edge Functions | Deno runner + DB triggers + versioning + metrics | Deno runner | Full Phase 1+2+3 shipped and deployed to production |
 
 #### Eurobase Advantages (5 features)
 
@@ -1011,10 +1036,11 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 | Auth helpers in RLS | `auth_uid()`, `auth_role()`, `auth_email()` per-schema | `auth.uid()` via GoTrue schema |
 | pgTAP testing via CLI | `eurobase test` runs RLS policy tests | No built-in test runner |
 
-#### Gaps (17 features — planned)
+#### Gaps (18 features — planned)
 
 | Feature | Priority | Effort | Target |
 |---------|----------|--------|--------|
+| OAuth 2.1 / OIDC Server ("Sign in with Your App") | High | 2 weeks | v1.3 |
 | Python SDK | High | 1 week | v1.3 |
 | MFA / TOTP | Medium | 1 week | v1.3 |
 | Custom domains per project | Medium | 1 week | v1.3 |
@@ -1033,11 +1059,10 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 | Swift SDK (iOS) | Low | 1 week | v1.4 |
 | Kotlin SDK (Android) | Low | 1 week | v1.4 |
 
-#### Big Gaps (5 features — significant effort)
+#### Big Gaps (4 features — significant effort)
 
 | Feature | Why It Matters | Effort | Target |
 |---------|---------------|--------|--------|
-| Edge Functions | Phase 1 done (CRUD, console, CLI, SDK). Phase 2: Deno runner. Phase 3: DB triggers, env vars UI | 1 week remaining | v1.3 |
 | Local dev (`eurobase start`) | Docker-based local stack, essential for DX | 1 week | v1.3 |
 | Type generation (`eurobase gen types`) | Auto TypeScript types from schema | 3 days | v1.3 |
 | Branching / preview environments | DB branches for staging/preview | 2 weeks | v1.4 |
@@ -1045,37 +1070,56 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 
 #### Summary
 
-- **Parity:** 16 features — Eurobase covers the core BaaS workflow
+- **Parity:** 17 features — Eurobase covers the core BaaS workflow including Edge Functions
 - **Advantages:** 5 features — EU sovereignty, DPA reports, vault, auth helpers, pgTAP testing
-- **Gaps:** 17 features — mostly medium/low priority, planned for v1.3-v1.4
-- **Big Gaps:** 5 features — Edge Functions and local dev are the highest priority
+- **Gaps:** 18 features — mostly medium/low priority, planned for v1.3-v1.4 (OAuth 2.1 Server added)
+- **Big Gaps:** 4 features — local dev stack and type generation are the highest DX priorities
 
-**Revenue blocker:** Mollie billing integration (Sprint 2, next up).
-**DX blocker:** Local dev stack + type generation (Sprint 6).
-**Feature blocker:** Edge Functions Phase 2 (Deno runner) — CRUD + console done, execution runtime next.
+**Security/compliance focus first:** Sprint 6 tackles Team/RBAC, audit log, GDPR export, OAuth secret encryption, and automations — all high-priority items that reduce risk and unblock enterprise conversations.
+**Revenue blocker:** Mollie billing integration (Sprint 7, after security/compliance is solid).
+**DX blocker:** Local dev stack + type generation (Sprint 8).
 
 ### Future (v1.3+)
 
+Sorted by priority. Items in Sprint 6 are the immediate next batch.
+
+**High priority (revenue, security, DX blockers):**
+
 | Feature | Effort | Priority |
 |---------|--------|----------|
-| Built-in automations: token cleanup, log retention, usage alerts | 2 days | High |
-| Built-in automations: inactive user flagging, session revocation | 1 day | Medium |
-| Built-in automations: error spike alerts | 1 day | Medium |
-| Built-in automations: scheduled DB export to S3 (pro) | 2 days | Medium |
-| Console RLS test templates ("Test policy as user X") | 2 days | High |
-| Edge Functions Phase 2 — Deno runner deployment + invocation | 3 days | High |
-| Edge Functions Phase 3 — DB triggers, env vars UI, versioning, rollback | 2 days | High |
-| Encrypt OAuth secrets at application layer (AES-256, server key from env) | 2 days | High |
-| Console: skip sending masked OAuth secrets on save (only send if changed) | 0.5 day | Medium |
+| Mollie billing integration (Sprint 6) | 1 week | High |
+| Team collaboration / RBAC (Sprint 6) | 1 week | High |
+| Built-in automations: token cleanup, log retention, usage alerts (Sprint 6) | 2 days | High |
+| Audit log (Sprint 6) | 3 days | High |
+| GDPR data export (one-click) (Sprint 6) | 2 days | High |
+| Encrypt OAuth secrets at application layer (AES-256, server key from env) (Sprint 6) | 2 days | High |
+| OAuth 2.1 / OIDC Server ("Sign in with Your App") — each project acts as an identity provider for third-party apps | 2 weeks | High |
+| Local dev stack (`eurobase start`, Docker Compose) | 1 week | High |
+| Type generation (`eurobase gen types`) | 3 days | High |
 | Python SDK | 1 week | High |
-| Image transformations (resize/crop) | 1 week | Medium |
+| Database backups / PITR visibility in console | 3 days | High |
+| Console RLS test templates ("Test policy as user X") | 2 days | High |
+
+**Medium priority:**
+
+| Feature | Effort | Priority |
+|---------|--------|----------|
+| Image transformations (resize/crop/format) | 1 week | Medium |
 | MFA / TOTP | 1 week | Medium |
 | Custom domains per project | 1 week | Medium |
 | GraphQL API | 2 weeks | Medium |
 | Vector search (pgvector) | 1 week | Medium |
-| GDPR data export (one-click) | 2 days | High |
-| Audit log | 3 days | High |
+| Storage policies (RLS for buckets) | 3 days | Medium |
+| Console: skip sending masked OAuth secrets on save (only send if changed) | 0.5 day | Medium |
+| Built-in automations: inactive user flagging, session revocation | 1 day | Medium |
+| Built-in automations: error spike alerts | 1 day | Medium |
+| Built-in automations: scheduled DB export to S3 (pro) | 2 days | Medium |
 | Data residency certificate API | 1 day | Medium |
+
+**Low priority (v1.4+):**
+
+| Feature | Effort | Priority |
+|---------|--------|----------|
 | Realtime Presence | 1 week | Low |
 | Realtime Broadcast | 1 week | Low |
 | SSE (Server-Sent Events) | 3 days | Low |
@@ -1083,6 +1127,10 @@ Comprehensive comparison as of April 2026. This tracks where Eurobase has parity
 | Self-hosting documentation | 3 days | Low |
 | Swift SDK (iOS) | 1 week | Low |
 | Kotlin SDK (Android) | 1 week | Low |
+| SSO (SAML) | 2 weeks | Low |
+| Phone auth (SMS OTP) | 1 week | Low |
+| Anonymous auth | 2 days | Low |
+| Log drains | 2 days | Low |
 
 ### Pricing Model (Per-Project)
 
@@ -1096,4 +1144,4 @@ See docs/plan-pricing-tiers.md for full details.
 
 ---
 
-*End of Document — Eurobase MVP Implementation Plan v1.2 — March 2026*
+*End of Document — Eurobase MVP Implementation Plan v1.2 — April 2026*
