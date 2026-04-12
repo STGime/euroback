@@ -20,10 +20,11 @@
 		{ id: 'cron', label: '12. Scheduled Jobs' },
 		{ id: 'edge-functions', label: '13. Edge Functions' },
 		{ id: 'logs', label: '14. Monitoring with Logs' },
-		{ id: 'settings', label: '15. Project Settings' },
-		{ id: 'cli', label: '16. CLI Tool' },
-		{ id: 'connect', label: '17. Connecting Your IDE' },
-		{ id: 'account', label: '18. Your Account' },
+		{ id: 'compliance', label: '15. Compliance & Audit Log' },
+		{ id: 'settings', label: '16. Project Settings' },
+		{ id: 'cli', label: '17. CLI Tool' },
+		{ id: 'connect', label: '18. Connecting Your IDE' },
+		{ id: 'account', label: '19. Your Account' },
 		{ id: 'next', label: "What's Next" }
 	];
 
@@ -1345,15 +1346,66 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 
 			<div class="mt-6 text-right">
+				<button onclick={() => scrollTo('compliance')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Compliance &amp; Audit Log &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 15. COMPLIANCE & AUDIT LOG ======================= -->
+		<section id="compliance" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">15. Compliance & Audit Log</h2>
+			<p class="text-sm italic text-gray-500 mb-4">Alex's client asks for proof that their data stays in the EU and a trail of who changed what.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The Compliance page has two tabs: <strong>DPA Report</strong> and <strong>Audit Log</strong>. Together they give you the documentation you need for GDPR compliance reviews, security audits, and customer due diligence.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900">DPA Report</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Generates a Data Processing Agreement (Article 30) report showing your sub-processors, data flow, encryption status, and whether any CLOUD Act exposure exists. Download it as JSON for your compliance records.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Audit Log</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Every sensitive action on your project is automatically recorded in the audit log with a timestamp, actor email, IP address, and metadata. Tracked actions include:
+				</p>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Auth config changes</strong> &mdash; updating login providers, OAuth settings, session duration</li>
+					<li><strong>API key regeneration</strong> &mdash; who rotated keys and when</li>
+					<li><strong>Project deletion</strong> &mdash; logged before the data is removed</li>
+					<li><strong>Schema DDL</strong> &mdash; creating, dropping, or renaming tables and columns</li>
+					<li><strong>RLS policy changes</strong> &mdash; toggling row-level security, applying presets, creating or dropping policies</li>
+					<li><strong>Index changes</strong> &mdash; creating or dropping indexes and constraints</li>
+					<li><strong>OAuth secrets</strong> &mdash; setting or rotating provider client secrets (the secret itself is never logged, only the event)</li>
+				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Filtering</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Use the action filter dropdown to narrow the log to a specific action type &mdash; for example, show only <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">schema.drop_table</code> events to trace who deleted a table and when.
+				</p>
+
+				<div class="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 flex gap-3">
+					<svg class="h-5 w-5 text-blue-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
+					</svg>
+					<p class="text-sm text-blue-800">
+						Audit log entries cannot be edited or deleted. They are append-only and stored in the platform database, separate from your project's tenant schema.
+					</p>
+				</div>
+			</div>
+
+			<div class="mt-6 text-right">
 				<button onclick={() => scrollTo('settings')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Project Settings &rarr;
 				</button>
 			</div>
 		</section>
 
-		<!-- ======================= 11. PROJECT SETTINGS ======================= -->
+		<!-- ======================= 16. PROJECT SETTINGS ======================= -->
 		<section id="settings" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Project Settings</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">16. Project Settings</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to rotate an API key after an intern accidentally committed it.</p>
 
 			<div class="space-y-4">
@@ -1391,7 +1443,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 		<!-- ======================= 15. CLI TOOL ======================= -->
 		<section id="cli" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">15. CLI Tool</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">17. CLI Tool</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to manage projects, run queries, and test RLS policies from the terminal.</p>
 
 			<div class="space-y-4">
@@ -1542,7 +1594,7 @@ ROLLBACK;</pre>
 
 		<!-- ======================= 16. CONNECTING YOUR IDE ======================= -->
 		<section id="connect" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">16. Connecting Your IDE</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">18. Connecting Your IDE</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI coding assistant to understand the LexVault schema.</p>
 
 			<div class="space-y-4">
@@ -1599,7 +1651,7 @@ ROLLBACK;</pre>
 
 		<!-- ======================= 13. YOUR ACCOUNT ======================= -->
 		<section id="account" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">17. Your Account</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">19. Your Account</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
 
 			<div class="space-y-4">
