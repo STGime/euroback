@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -100,6 +102,19 @@ func HandleRegenerateAPIKeys(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		slog.Info("api keys regenerated", "project_id", projectID)
+
+		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			actorID, actorEmail := "", ""
+			if claims != nil {
+				actorID = claims.Subject
+				actorEmail = claims.Email
+			}
+			auditSvc.Log(r.Context(), projectID, actorID, actorEmail,
+				audit.ActionAPIKeysRegenerated,
+				audit.WithTarget("api_keys", projectID),
+				audit.WithIP(r.RemoteAddr))
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

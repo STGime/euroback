@@ -844,6 +844,20 @@ export class EurobaseAPI {
 		return this.fetch<SubProcessorInfo[]>(`/platform/projects/${projectId}/compliance/sub-processors`);
 	}
 
+	/** Get audit log entries for a project. */
+	async getAuditLog(projectId: string, params?: {
+		limit?: number;
+		offset?: number;
+		action?: string;
+	}): Promise<AuditLogResult> {
+		const qs = new URLSearchParams();
+		if (params?.limit) qs.set('limit', String(params.limit));
+		if (params?.offset) qs.set('offset', String(params.offset));
+		if (params?.action) qs.set('action', params.action);
+		const query = qs.toString() ? `?${qs}` : '';
+		return this.fetch<AuditLogResult>(`/platform/projects/${projectId}/compliance/audit-log${query}`);
+	}
+
 	// ---- Edge Functions ----
 
 	/** List all edge functions for a project. */
@@ -1270,6 +1284,24 @@ export interface DPAReport {
 		cloud_act_exposure: boolean;
 		cloud_act_details?: string;
 	};
+}
+
+export interface AuditLogEntry {
+	id: string;
+	project_id: string | null;
+	actor_id: string | null;
+	actor_email: string;
+	action: string;
+	target_type: string | null;
+	target_id: string | null;
+	metadata: Record<string, unknown>;
+	ip_address: string | null;
+	created_at: string;
+}
+
+export interface AuditLogResult {
+	entries: AuditLogEntry[];
+	total: number;
 }
 
 export interface EdgeFunction {

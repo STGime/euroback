@@ -1,13 +1,26 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { api, type DPAReport } from '$lib/api.js';
+	import { api, type DPAReport, type AuditLogEntry } from '$lib/api.js';
 	import { onMount } from 'svelte';
 
 	let projectId = $derived($page.params.id);
 
+	// Tab state
+	let activeTab = $state<'dpa' | 'audit'>('dpa');
+
+	// DPA Report
 	let report: DPAReport | null = $state(null);
 	let loading = $state(true);
 	let error: string | null = $state(null);
+
+	// Audit Log
+	let auditEntries: AuditLogEntry[] = $state([]);
+	let auditTotal = $state(0);
+	let auditOffset = $state(0);
+	let auditLoading = $state(false);
+	let auditError: string | null = $state(null);
+	let auditActionFilter = $state('');
+	const auditPageSize = 50;
 
 	onMount(() => { loadReport(); });
 
@@ -21,6 +34,51 @@
 		} finally {
 			loading = false;
 		}
+	}
+
+	async function loadAuditLog() {
+		auditLoading = true;
+		auditError = null;
+		try {
+			const result = await api.getAuditLog(projectId, {
+				limit: auditPageSize,
+				offset: auditOffset,
+				action: auditActionFilter || undefined
+			});
+			auditEntries = result.entries;
+			auditTotal = result.total;
+		} catch (err) {
+			auditError = err instanceof Error ? err.message : 'Failed to load audit log';
+		} finally {
+			auditLoading = false;
+		}
+	}
+
+	function switchToAudit() {
+		activeTab = 'audit';
+		if (auditEntries.length === 0) loadAuditLog();
+	}
+
+	function auditPrev() {
+		if (auditOffset > 0) { auditOffset = Math.max(0, auditOffset - auditPageSize); loadAuditLog(); }
+	}
+	function auditNext() {
+		if (auditOffset + auditPageSize < auditTotal) { auditOffset += auditPageSize; loadAuditLog(); }
+	}
+	function applyAuditFilter() {
+		auditOffset = 0;
+		loadAuditLog();
+	}
+
+	function formatAction(action: string): string {
+		return action.replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+	}
+
+	function actionColor(action: string): string {
+		if (action.includes('deleted')) return 'bg-red-100 text-red-700';
+		if (action.includes('regenerated')) return 'bg-amber-100 text-amber-700';
+		if (action.includes('created') || action.includes('set') || action.includes('invited')) return 'bg-green-100 text-green-700';
+		return 'bg-blue-100 text-blue-700';
 	}
 
 	function downloadJSON() {
@@ -64,6 +122,23 @@
 </script>
 
 <div class="space-y-6">
+	<!-- Tab Switcher -->
+	<div class="flex gap-1 rounded-lg bg-gray-100 p-1 w-fit">
+		<button
+			onclick={() => activeTab = 'dpa'}
+			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'dpa' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
+		>
+			DPA Report
+		</button>
+		<button
+			onclick={switchToAudit}
+			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'audit' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
+		>
+			Audit Log
+		</button>
+	</div>
+
+{#if activeTab === 'dpa'}
 	<!-- Header -->
 	<div class="flex items-center justify-between">
 		<div>
@@ -274,4 +349,122 @@
 			</p>
 		</div>
 	{/if}
+
+{:else}
+	<!-- Audit Log Tab -->
+	<div class="flex items-center justify-between">
+		<h2 class="text-lg font-semibold text-gray-900">Audit Log</h2>
+	</div>
+
+	<!-- Filter -->
+	<div class="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
+		<select
+			bind:value={auditActionFilter}
+			class="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 focus:border-eurobase-500 focus:outline-none cursor-pointer"
+		>
+			<option value="">All actions</option>
+			<option value="auth_config.updated">Auth Config Updated</option>
+			<option value="api_keys.regenerated">API Keys Regenerated</option>
+			<option value="project.created">Project Created</option>
+			<option value="project.deleted">Project Deleted</option>
+			<option value="vault.secret_set">Vault Secret Set</option>
+			<option value="vault.secret_deleted">Vault Secret Deleted</option>
+			<option value="oauth.secret_set">OAuth Secret Set</option>
+			<option value="function.created">Function Created</option>
+			<option value="function.deleted">Function Deleted</option>
+			<option value="data.exported">Data Exported</option>
+		</select>
+		<button
+			type="button"
+			onclick={applyAuditFilter}
+			class="cursor-pointer rounded-lg bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors"
+		>
+			Apply
+		</button>
+	</div>
+
+	{#if auditError}
+		<div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{auditError}</div>
+	{/if}
+
+	<div class="rounded-xl border border-gray-200 bg-white overflow-hidden">
+		<div class="overflow-x-auto">
+			<table class="w-full text-sm">
+				<thead>
+					<tr class="border-b border-gray-200 bg-gray-50">
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Timestamp</th>
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Actor</th>
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Action</th>
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Target</th>
+						<th class="px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">IP</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#if auditLoading}
+						{#each Array(5) as _}
+							<tr class="border-b border-gray-100"><td class="px-4 py-3" colspan="5"><div class="h-4 animate-pulse rounded bg-gray-100 w-full"></div></td></tr>
+						{/each}
+					{:else if auditEntries.length === 0}
+						<tr>
+							<td class="px-4 py-8 text-center text-gray-400" colspan="5">
+								No audit events recorded yet. Actions like auth config changes, API key regeneration, and project deletion are tracked here automatically.
+							</td>
+						</tr>
+					{:else}
+						{#each auditEntries as entry}
+							<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+								<td class="px-4 py-2.5 text-xs text-gray-500 font-mono whitespace-nowrap">
+									{formatDate(entry.created_at)}
+								</td>
+								<td class="px-4 py-2.5 text-xs text-gray-700">{entry.actor_email}</td>
+								<td class="px-4 py-2.5">
+									<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold {actionColor(entry.action)}">
+										{formatAction(entry.action)}
+									</span>
+								</td>
+								<td class="px-4 py-2.5 text-xs text-gray-500 font-mono">
+									{#if entry.target_type}
+										{entry.target_type}{entry.target_id ? `: ${entry.target_id.substring(0, 8)}...` : ''}
+									{:else}
+										—
+									{/if}
+								</td>
+								<td class="px-4 py-2.5 text-xs text-gray-400 font-mono">{entry.ip_address ?? '—'}</td>
+							</tr>
+						{/each}
+					{/if}
+				</tbody>
+			</table>
+		</div>
+	</div>
+
+	<!-- Pagination -->
+	<div class="flex items-center justify-between">
+		<div class="text-sm text-gray-500">
+			{#if auditTotal > 0}
+				Showing {auditOffset + 1}–{Math.min(auditOffset + auditPageSize, auditTotal)} of {auditTotal}
+			{:else}
+				No entries
+			{/if}
+		</div>
+		<div class="flex items-center gap-2">
+			<button
+				type="button"
+				class="cursor-pointer rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+				disabled={auditOffset <= 0}
+				onclick={auditPrev}
+			>
+				Previous
+			</button>
+			<button
+				type="button"
+				class="cursor-pointer rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+				disabled={auditOffset + auditPageSize >= auditTotal}
+				onclick={auditNext}
+			>
+				Next
+			</button>
+		</div>
+	</div>
+{/if}
 </div>

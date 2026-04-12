@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
@@ -58,6 +59,9 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 
 	// Tenant service.
 	tenantSvc := tenant.NewTenantService(pool)
+
+	// Audit service — shared across all route groups that need to log actions.
+	auditSvc := audit.NewService(pool)
 	if vaultSvc != nil && vaultSvc.Configured() {
 		tenantSvc.SetSecretStore(vaultSvc)
 	}
@@ -129,6 +133,12 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			if logCh != nil {
 				r.Use(RequestLoggingMiddleware(logCh))
 			}
+			// Inject audit service into every request context.
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					next.ServeHTTP(w, r.WithContext(audit.WithContext(r.Context(), auditSvc)))
+				})
+			})
 			r.Get("/logs", HandleLogs(pool))
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
 			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
@@ -165,6 +175,8 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			complianceSvc := compliance.NewComplianceService(pool)
 			r.Get("/compliance/dpa-report", compliance.HandleDPAReport(complianceSvc))
 			r.Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
+
+			r.Get("/compliance/audit-log", audit.HandleList(auditSvc))
 
 			// Edge Functions (serverless compute management).
 			fnSvc := functions.NewService(pool)
@@ -227,6 +239,12 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 		} else {
 			r.Use(platformAuth.Handler)
 		}
+		// Inject audit service so tenant CRUD handlers can log.
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				next.ServeHTTP(w, r.WithContext(audit.WithContext(r.Context(), auditSvc)))
+			})
+		})
 
 		r.Post("/", tenant.HandleCreateProject(pool, tenantSvc, limitsSvc))
 		r.Get("/", tenant.HandleListProjects(pool, tenantSvc))

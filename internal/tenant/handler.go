@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
@@ -247,6 +248,13 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			return
 		}
 
+		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
+			auditSvc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+				audit.ActionAuthConfigUpdated,
+				audit.WithTarget("project", projectID),
+				audit.WithIP(r.RemoteAddr))
+		}
+
 		project, err := svc.GetProject(r.Context(), projectID)
 		if err != nil {
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
@@ -283,6 +291,14 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		if ownerID != claims.Subject {
 			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 			return
+		}
+
+		// Audit BEFORE deletion so the project_id FK still exists.
+		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
+			auditSvc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+				audit.ActionProjectDeleted,
+				audit.WithTarget("project", projectID),
+				audit.WithIP(r.RemoteAddr))
 		}
 
 		if err := svc.DeleteProject(r.Context(), projectID); err != nil {
