@@ -324,8 +324,17 @@ func renderAlertEmail(projectName string, dim dimension, threshold int, current,
 	// The lead line shows actual usage — never the threshold integer — so
 	// the email is honest even when a single scan crosses multiple
 	// thresholds at once.
-	lead := fmt.Sprintf("Your %s usage is at <strong>%.1f%%</strong> of your plan limit on project <strong>%s</strong>.",
+	lead := fmt.Sprintf("Your %s usage is at <strong>%.0f%%</strong> of your plan limit on project <strong>%s</strong>.",
 		dim.label, percent, projectName)
+
+	// Use whole numbers for countable items (users, functions, webhooks)
+	// and one decimal for sizes (MB).
+	currentStr := fmt.Sprintf("%.0f", current)
+	capStr := fmt.Sprintf("%.0f", cap)
+	if dim.unit == "MB" {
+		currentStr = fmt.Sprintf("%.1f", current)
+		capStr = fmt.Sprintf("%.1f", cap)
+	}
 
 	body := fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -340,15 +349,15 @@ func renderAlertEmail(projectName string, dim dimension, threshold int, current,
     </tr>
     <tr>
       <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;"><strong>Current usage</strong></td>
-      <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">%.1f %s</td>
+      <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">%s %s</td>
     </tr>
     <tr style="background: #f9fafb;">
       <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;"><strong>Plan limit</strong></td>
-      <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">%.0f %s</td>
+      <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">%s %s</td>
     </tr>
     <tr>
       <td style="padding: 12px 16px;"><strong>Percent used</strong></td>
-      <td style="padding: 12px 16px;">%.1f%%</td>
+      <td style="padding: 12px 16px;">%.0f%%</td>
     </tr>
   </table>
   <p>If you're on the free plan, consider upgrading to Pro for higher limits. You can manage your project and plan in the Eurobase console.</p>
@@ -359,8 +368,8 @@ func renderAlertEmail(projectName string, dim dimension, threshold int, current,
 		lead,
 		headline,
 		dim.label,
-		current, dim.unit,
-		cap, dim.unit,
+		currentStr, dim.unit,
+		capStr, dim.unit,
 		percent,
 	)
 
