@@ -536,7 +536,9 @@
 									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
 										<li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" class="underline">Google Cloud Console</a></li>
 										<li>Create OAuth 2.0 credentials (Web application)</li>
-										<li>Add your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/google/callback</code> as an authorized redirect URI</li>
+										<li>Add this as an authorized redirect URI:
+											<code class="mt-1 block bg-eurobase-100 px-2 py-1 rounded text-[11px] break-all select-all">{projectCtx.project?.api_url}/v1/auth/oauth/google/callback</code>
+										</li>
 										<li>Copy the Client ID and Client Secret here</li>
 									</ol>
 								</div>
@@ -591,7 +593,9 @@
 									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
 										<li>Go to <a href="https://github.com/settings/developers" target="_blank" rel="noopener" class="underline">GitHub Developer Settings</a></li>
 										<li>Create a new OAuth App</li>
-										<li>Set Authorization callback URL to your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/github/callback</code></li>
+										<li>Set Authorization callback URL to:
+											<code class="mt-1 block bg-eurobase-100 px-2 py-1 rounded text-[11px] break-all select-all">{projectCtx.project?.api_url}/v1/auth/oauth/github/callback</code>
+										</li>
 										<li>Copy the Client ID and Client Secret here</li>
 									</ol>
 								</div>
@@ -646,7 +650,9 @@
 									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
 										<li>Go to <a href="https://www.linkedin.com/developers/apps" target="_blank" rel="noopener" class="underline">LinkedIn Developer Portal</a></li>
 										<li>Create a new app and request the "Sign In with LinkedIn using OpenID Connect" product</li>
-										<li>Under OAuth 2.0 settings, add your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/linkedin/callback</code> as an authorized redirect URL</li>
+										<li>Under OAuth 2.0 settings, add this as an authorized redirect URL:
+											<code class="mt-1 block bg-eurobase-100 px-2 py-1 rounded text-[11px] break-all select-all">{projectCtx.project?.api_url}/v1/auth/oauth/linkedin/callback</code>
+										</li>
 										<li>Copy the Client ID and Client Secret here</li>
 									</ol>
 								</div>
@@ -709,7 +715,9 @@
 									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
 										<li>Go to <a href="https://developer.apple.com/account/resources" target="_blank" rel="noopener" class="underline">Apple Developer Portal</a></li>
 										<li>Register a Services ID (this is the Client ID)</li>
-										<li>Enable "Sign In with Apple" and configure the return URL: your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/apple/callback</code></li>
+										<li>Enable "Sign In with Apple" and configure the return URL to:
+											<code class="mt-1 block bg-eurobase-100 px-2 py-1 rounded text-[11px] break-all select-all">{projectCtx.project?.api_url}/v1/auth/oauth/apple/callback</code>
+										</li>
 										<li>Create a private key for Sign In with Apple — download the .p8 file</li>
 										<li>Copy your Team ID (top-right of developer portal), the Key ID, and paste the private key contents here</li>
 									</ol>
