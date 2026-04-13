@@ -1,0 +1,174 @@
+##############################################################################
+# Grafana Alloy — Scaleway Cockpit collector
+#
+# Alloy scrapes the gateway's /metrics endpoint over the cluster-internal
+# network and remote_writes to Scaleway Cockpit (managed Prometheus + Grafana,
+# hosted in Paris).
+#
+# Required secret (create once, out of band):
+#
+#   kubectl create secret generic cockpit-credentials -n eurobase \
+#     --from-literal=url='https://<your-cockpit-prometheus-push-url>' \
+#     --from-literal=token='<cockpit-push-token>'
+#
+# Get the push URL and token from the Scaleway console:
+#   Cockpit → Data sources → Metrics → "Push URL"
+#   Cockpit → Tokens → create with "Push metrics" scope
+#
+# Sovereignty: Grafana Alloy is an open-source Apache-2.0 agent from Grafana
+# Labs; we run it in our own Scaleway cluster. Scaleway Cockpit itself runs
+# in fr-par (Paris). No US infrastructure is involved in the data path.
+##############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: eurobase
+data:
+  config.alloy: |
+    // Discover every pod in the eurobase namespace that carries the
+    // prometheus.io/scrape=true annotation.
+    discovery.kubernetes "pods" {
+      role = "pod"
+      namespaces {
+        names = ["eurobase"]
+      }
+    }
+
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      // Only scrape pods that opt in via annotation.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+        action        = "keep"
+        regex         = "true"
+      }
+
+      // Allow overriding the scrape port via annotation (defaults to 9100).
+      rule {
+        source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_port"]
+        action        = "replace"
+        target_label  = "__meta_kubernetes_pod_container_port_number"
+        regex         = "(.+)"
+      }
+
+      // Surface pod/container/app labels for dashboards.
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app"]
+        target_label  = "app"
+      }
+    }
+
+    prometheus.scrape "pods" {
+      targets         = discovery.relabel.pods.output
+      forward_to      = [prometheus.remote_write.cockpit.receiver]
+      scrape_interval = "30s"
+      scrape_timeout  = "10s"
+      metrics_path    = "/metrics"
+    }
+
+    // Remote-write to Scaleway Cockpit. The URL and bearer token are mounted
+    // from the `cockpit-credentials` secret.
+    prometheus.remote_write "cockpit" {
+      endpoint {
+        url = sys.env("COCKPIT_PUSH_URL")
+
+        authorization {
+          type        = "Bearer"
+          credentials = sys.env("COCKPIT_PUSH_TOKEN")
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  namespace: eurobase
+  labels:
+    app: alloy
+    component: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alloy
+  template:
+    metadata:
+      labels:
+        app: alloy
+    spec:
+      serviceAccountName: alloy
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.4.2
+          args:
+            - "run"
+            - "/etc/alloy/config.alloy"
+            - "--server.http.listen-addr=0.0.0.0:12345"
+          ports:
+            - name: http
+              containerPort: 12345
+          env:
+            - name: COCKPIT_PUSH_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cockpit-credentials
+                  key: url
+            - name: COCKPIT_PUSH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cockpit-credentials
+                  key: token
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: eurobase
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: eurobase
