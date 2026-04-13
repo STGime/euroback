@@ -393,7 +393,8 @@ func HandleOAuthRedirect(svc *AuthService) http.HandlerFunc {
 	}
 }
 
-// HandleOAuthCallback returns an HTTP handler for GET /v1/auth/oauth/{provider}/callback.
+// HandleOAuthCallback returns an HTTP handler for the OAuth callback.
+// Supports both GET (standard providers) and POST (Apple's form_post response mode).
 // Exchanges the authorization code for user info, creates/finds the user, and redirects
 // back to the client app with tokens in the URL fragment.
 func HandleOAuthCallback(svc *AuthService) http.HandlerFunc {
@@ -408,14 +409,31 @@ func HandleOAuthCallback(svc *AuthService) http.HandlerFunc {
 
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 
-		code := r.URL.Query().Get("code")
-		encodedState := r.URL.Query().Get("state")
+		// Apple uses response_mode=form_post, so the callback comes as POST
+		// with form data. Other providers use GET with query params.
+		var code, encodedState string
+		if r.Method == http.MethodPost {
+			if err := r.ParseForm(); err != nil {
+				writeJSON(w, map[string]string{"error": "invalid form data"}, http.StatusBadRequest)
+				return
+			}
+			code = r.FormValue("code")
+			encodedState = r.FormValue("state")
+		} else {
+			code = r.URL.Query().Get("code")
+			encodedState = r.URL.Query().Get("state")
+		}
 
 		if code == "" {
 			// Provider returned an error.
-			errMsg := r.URL.Query().Get("error_description")
-			if errMsg == "" {
-				errMsg = r.URL.Query().Get("error")
+			var errMsg string
+			if r.Method == http.MethodPost {
+				errMsg = r.FormValue("error")
+			} else {
+				errMsg = r.URL.Query().Get("error_description")
+				if errMsg == "" {
+					errMsg = r.URL.Query().Get("error")
+				}
 			}
 			if errMsg == "" {
 				errMsg = "missing authorization code"

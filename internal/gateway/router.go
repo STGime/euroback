@@ -310,6 +310,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Post("/signin-magic-link", enduser.HandleSignInWithMagicLink(endUserAuthSvc))
 			r.Get("/oauth/{provider}", enduser.HandleOAuthRedirect(endUserAuthSvc))
 			r.Get("/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
+			r.Post("/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {

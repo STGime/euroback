@@ -57,6 +57,18 @@
 	let githubClientSecret = $state('');
 	let githubSecretSet = $state(false);
 	let githubSecretDirty = $state(false);
+	let linkedinEnabled = $state(false);
+	let linkedinClientId = $state('');
+	let linkedinClientSecret = $state('');
+	let linkedinSecretSet = $state(false);
+	let linkedinSecretDirty = $state(false);
+	let appleEnabled = $state(false);
+	let appleClientId = $state('');
+	let appleTeamId = $state('');
+	let appleKeyId = $state('');
+	let applePrivateKey = $state('');
+	let appleSecretSet = $state(false);
+	let appleSecretDirty = $state(false);
 	let saving = $state(false);
 	let saveMessage = $state('');
 	let saveError = $state('');
@@ -93,6 +105,22 @@
 				githubClientSecret = '';
 				githubSecretDirty = false;
 			}
+			if (oauthCfg?.linkedin) {
+				linkedinEnabled = oauthCfg.linkedin.enabled ?? false;
+				linkedinClientId = oauthCfg.linkedin.client_id ?? '';
+				linkedinSecretSet = oauthCfg.linkedin.secret_set ?? false;
+				linkedinClientSecret = '';
+				linkedinSecretDirty = false;
+			}
+			if (oauthCfg?.apple) {
+				appleEnabled = oauthCfg.apple.enabled ?? false;
+				appleClientId = oauthCfg.apple.client_id ?? '';
+				appleTeamId = oauthCfg.apple.team_id ?? '';
+				appleKeyId = oauthCfg.apple.key_id ?? '';
+				appleSecretSet = oauthCfg.apple.secret_set ?? false;
+				applePrivateKey = '';
+				appleSecretDirty = false;
+			}
 		}
 	});
 
@@ -118,11 +146,30 @@
 				githubProvider.client_secret = githubClientSecret;
 			}
 
+			const linkedinProvider: Record<string, any> = {
+				enabled: linkedinEnabled,
+				client_id: linkedinClientId
+			};
+			if (linkedinSecretDirty && linkedinClientSecret) {
+				linkedinProvider.client_secret = linkedinClientSecret;
+			}
+			const appleProvider: Record<string, any> = {
+				enabled: appleEnabled,
+				client_id: appleClientId,
+				team_id: appleTeamId,
+				key_id: appleKeyId
+			};
+			if (appleSecretDirty && applePrivateKey) {
+				appleProvider.client_secret = applePrivateKey;
+			}
+
 			const config: AuthConfig = {
 				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled } },
 				oauth_providers: {
 					google: googleProvider as any,
-					github: githubProvider as any
+					github: githubProvider as any,
+					linkedin: linkedinProvider as any,
+					apple: appleProvider as any
 				},
 				password_min_length: passwordMinLength,
 				require_email_confirmation: requireEmailConfirmation,
@@ -141,10 +188,20 @@
 			if (oauthCfg?.github) {
 				githubSecretSet = oauthCfg.github.secret_set ?? githubSecretSet;
 			}
+			if (oauthCfg?.linkedin) {
+				linkedinSecretSet = oauthCfg.linkedin.secret_set ?? linkedinSecretSet;
+			}
+			if (oauthCfg?.apple) {
+				appleSecretSet = oauthCfg.apple.secret_set ?? appleSecretSet;
+			}
 			googleClientSecret = '';
 			googleSecretDirty = false;
 			githubClientSecret = '';
 			githubSecretDirty = false;
+			linkedinClientSecret = '';
+			linkedinSecretDirty = false;
+			applePrivateKey = '';
+			appleSecretDirty = false;
 
 			saveMessage = 'Auth configuration saved.';
 			setTimeout(() => { saveMessage = ''; }, 3000);
@@ -542,7 +599,129 @@
 						{/if}
 					</div>
 
-					{#if googleEnabled || githubEnabled}
+					<!-- LinkedIn OAuth -->
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">LinkedIn</p>
+								<p class="text-xs text-gray-500">Sign in with LinkedIn account</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={linkedinEnabled}
+								onclick={() => linkedinEnabled = !linkedinEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {linkedinEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {linkedinEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+						{#if linkedinEnabled}
+							<div class="mt-3 space-y-3">
+								<div>
+									<label for="linkedin-client-id" class="block text-xs font-medium text-gray-700">Client ID</label>
+									<input id="linkedin-client-id" type="text" bind:value={linkedinClientId} placeholder="77abc123def456" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div>
+									<label for="linkedin-client-secret" class="block text-xs font-medium text-gray-700">
+										Client Secret
+										{#if linkedinSecretSet && !linkedinSecretDirty}
+											<span class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700 border border-green-200">
+												<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+												Encrypted in vault
+											</span>
+										{/if}
+									</label>
+									<input
+										id="linkedin-client-secret"
+										type="password"
+										bind:value={linkedinClientSecret}
+										oninput={() => linkedinSecretDirty = true}
+										placeholder={linkedinSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'secret_...'}
+										class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+									/>
+								</div>
+								<div class="rounded-lg bg-eurobase-50 border border-eurobase-100 p-3">
+									<p class="text-xs font-medium text-eurobase-800">Setup instructions</p>
+									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
+										<li>Go to <a href="https://www.linkedin.com/developers/apps" target="_blank" rel="noopener" class="underline">LinkedIn Developer Portal</a></li>
+										<li>Create a new app and request the "Sign In with LinkedIn using OpenID Connect" product</li>
+										<li>Under OAuth 2.0 settings, add your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/linkedin/callback</code> as an authorized redirect URL</li>
+										<li>Copy the Client ID and Client Secret here</li>
+									</ol>
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					<!-- Apple OAuth -->
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Apple</p>
+								<p class="text-xs text-gray-500">Sign in with Apple</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={appleEnabled}
+								onclick={() => appleEnabled = !appleEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {appleEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {appleEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+						{#if appleEnabled}
+							<div class="mt-3 space-y-3">
+								<div>
+									<label for="apple-client-id" class="block text-xs font-medium text-gray-700">Service ID (Client ID)</label>
+									<input id="apple-client-id" type="text" bind:value={appleClientId} placeholder="com.example.myapp" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div>
+									<label for="apple-team-id" class="block text-xs font-medium text-gray-700">Team ID</label>
+									<input id="apple-team-id" type="text" bind:value={appleTeamId} placeholder="ABCDE12345" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div>
+									<label for="apple-key-id" class="block text-xs font-medium text-gray-700">Key ID</label>
+									<input id="apple-key-id" type="text" bind:value={appleKeyId} placeholder="ABC123DEFG" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div>
+									<label for="apple-private-key" class="block text-xs font-medium text-gray-700">
+										Private Key (ES256 .p8 file contents)
+										{#if appleSecretSet && !appleSecretDirty}
+											<span class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700 border border-green-200">
+												<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+												Encrypted in vault
+											</span>
+										{/if}
+									</label>
+									<textarea
+										id="apple-private-key"
+										bind:value={applePrivateKey}
+										oninput={() => appleSecretDirty = true}
+										rows="4"
+										placeholder={appleSecretSet ? '•••••••••••••• (leave blank to keep current)' : '-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----'}
+										class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+									></textarea>
+								</div>
+								<div class="rounded-lg bg-eurobase-50 border border-eurobase-100 p-3">
+									<p class="text-xs font-medium text-eurobase-800">Setup instructions</p>
+									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
+										<li>Go to <a href="https://developer.apple.com/account/resources" target="_blank" rel="noopener" class="underline">Apple Developer Portal</a></li>
+										<li>Register a Services ID (this is the Client ID)</li>
+										<li>Enable "Sign In with Apple" and configure the return URL: your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/apple/callback</code></li>
+										<li>Create a private key for Sign In with Apple — download the .p8 file</li>
+										<li>Copy your Team ID (top-right of developer portal), the Key ID, and paste the private key contents here</li>
+									</ol>
+								</div>
+								<div class="rounded-lg bg-amber-50 border border-amber-200 p-3">
+									<p class="text-xs text-amber-700">Apple only sends the user's name on first authorization. If the user has already authorized your app, their name may not appear in Eurobase. Apple may also use a private relay email address.</p>
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					{#if googleEnabled || githubEnabled || linkedinEnabled || appleEnabled}
 						<div class="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
 							<p class="text-xs text-blue-700">Social login uses third-party providers only to verify user identity. No application data is shared. All user records remain in EU infrastructure.</p>
 						</div>

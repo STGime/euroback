@@ -19,6 +19,10 @@ export interface OAuthProviderConfig {
 	client_secret?: string;
 	/** Returned by the API on read: true if a client_secret is stored in the vault for this provider. */
 	secret_set?: boolean;
+	/** Apple only: Team ID from Apple Developer portal. */
+	team_id?: string;
+	/** Apple only: Key ID for the Sign In with Apple private key. */
+	key_id?: string;
 }
 
 export interface AuthConfig {

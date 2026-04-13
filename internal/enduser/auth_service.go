@@ -580,7 +580,14 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 	}
 
 	// Exchange code for user info.
-	userInfo, err := provider.ExchangeCode(ctx, providerConfig.ClientID, clientSecret, code, redirectURL)
+	userInfo, err := provider.ExchangeCode(ctx, oauth.ExchangeConfig{
+		ClientID:     providerConfig.ClientID,
+		ClientSecret: clientSecret,
+		Code:         code,
+		RedirectURL:  redirectURL,
+		TeamID:       providerConfig.TeamID,
+		KeyID:        providerConfig.KeyID,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("oauth exchange failed: %w", err)
 	}

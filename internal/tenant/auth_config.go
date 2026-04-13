@@ -25,6 +25,9 @@ type OAuthProviderConfig struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret,omitempty"`
 	SecretSet    bool   `json:"secret_set,omitempty"`
+	// Apple-specific fields (ignored by other providers).
+	TeamID string `json:"team_id,omitempty"`
+	KeyID  string `json:"key_id,omitempty"`
 }
 
 // AuthConfig holds the per-project authentication configuration.

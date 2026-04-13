@@ -169,7 +169,7 @@
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Eurobase uses a simple email-and-password system. There are no third-party OAuth providers &mdash; your credentials stay within EU infrastructure.
+					Eurobase uses email-and-password authentication by default. You can also enable social login (Google, GitHub, LinkedIn, Apple) &mdash; providers are used only to verify identity; all user records stay within EU infrastructure.
 				</p>
 
 				<div class="flex items-start gap-3">
@@ -529,7 +529,7 @@ const {'{'} data: files {'}'} = await eb.storage
 					<li><strong>Email + Password</strong> &mdash; traditional sign-up and sign-in with email and password</li>
 					<li><strong>Magic Links</strong> &mdash; passwordless sign-in via a one-time email link (no password needed)</li>
 					<li><strong>Passkeys</strong> &mdash; coming soon (WebAuthn / FaceID / fingerprint)</li>
-					<li><strong>Social Login</strong> &mdash; coming soon (Google, GitHub)</li>
+					<li><strong>Social Login</strong> &mdash; Google, GitHub, LinkedIn, Apple (configure in Auth settings)</li>
 				</ul>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Configuration options</h3>
@@ -616,6 +616,79 @@ const {'{'} data, error {'}'} = await eb.auth.signInWithMagicLink(token)
 						<li><code class="bg-white border border-gray-200 rounded px-1">signInWithMagicLink</code> sends the token to <code class="bg-white border border-gray-200 rounded px-1">/v1/auth/signin-magic-link</code></li>
 						<li>The server verifies the token (not expired, not used), marks it as consumed, and returns a JWT + refresh token</li>
 					</ol>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Social Login (OAuth)</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Eurobase supports social login with <strong>Google</strong>, <strong>GitHub</strong>, <strong>LinkedIn</strong>, and <strong>Apple</strong>. Users authenticate with their existing account at the provider &mdash; Eurobase only receives their verified email, name, and profile picture. No application data is shared with the provider, and all user records remain in EU infrastructure.
+				</p>
+
+				<h4 class="text-base font-semibold text-gray-900 mt-4">Setting up a provider</h4>
+				<ol class="text-sm text-gray-700 space-y-1.5 ml-4 list-decimal">
+					<li>Go to <strong>Auth &rarr; Settings</strong> and toggle on the provider you want</li>
+					<li>Create an OAuth app on the provider's developer console (links are shown in the setup instructions)</li>
+					<li>Set the <strong>redirect/callback URL</strong> to your Eurobase API URL + <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/oauth/{'{'}provider{'}'}/callback</code></li>
+					<li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong> into the Eurobase console</li>
+					<li>Add your app's URL to the <strong>Allowed redirect URLs</strong> list in Session Settings</li>
+				</ol>
+
+				<h4 class="text-base font-semibold text-gray-900 mt-4">Provider-specific notes</h4>
+				<div class="space-y-2 mt-2">
+					<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+						<p class="text-xs font-semibold text-gray-700">Google &amp; GitHub</p>
+						<p class="text-xs text-gray-600 mt-1">Standard OAuth 2.0 setup. You need a Client ID and Client Secret from their developer consoles. GitHub fetches the primary verified email if the user's email is private.</p>
+					</div>
+					<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+						<p class="text-xs font-semibold text-gray-700">LinkedIn</p>
+						<p class="text-xs text-gray-600 mt-1">Uses OpenID Connect. When creating your LinkedIn app, you must request the <strong>"Sign In with LinkedIn using OpenID Connect"</strong> product under the Products tab. Standard Client ID + Client Secret setup.</p>
+					</div>
+					<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+						<p class="text-xs font-semibold text-gray-700">Apple</p>
+						<p class="text-xs text-gray-600 mt-1">Requires additional configuration: a <strong>Service ID</strong> (used as Client ID), <strong>Team ID</strong>, <strong>Key ID</strong>, and a <strong>.p8 private key</strong> file from the Apple Developer Portal. Apple only sends the user's name on the first authorization &mdash; subsequent logins won't include it. Users may also receive a private relay email address if they choose to hide their real email.</p>
+					</div>
+				</div>
+
+				<h4 class="text-base font-semibold text-gray-900 mt-4">SDK usage</h4>
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<button
+						onclick={() => copyCode("// Redirect to provider's login page\neb.auth.signInWithOAuth('google', {\n  redirectTo: 'https://myapp.com/auth/callback'\n})\n// Supported providers: 'google', 'github', 'linkedin', 'apple'\n\n// On your callback page — extract tokens from URL fragment\nconst { data, error } = await eb.auth.handleOAuthCallback()\n// data.access_token, data.user — user is now signed in", 'sdk-oauth')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'sdk-oauth' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>// Redirect to provider's login page
+eb.auth.signInWithOAuth('google', {'{'}
+  redirectTo: 'https://myapp.com/auth/callback'
+{'}'})
+// Supported providers: 'google', 'github', 'linkedin', 'apple'
+
+// On your callback page — extract tokens from URL fragment
+const {'{'} data, error {'}'} = await eb.auth.handleOAuthCallback()
+// data.access_token, data.user — user is now signed in</pre>
+				</div>
+
+				<h4 class="text-base font-semibold text-gray-900 mt-4">REST API</h4>
+				<div class="rounded-lg bg-gray-900 p-4 font-mono text-[11px] text-green-400 leading-relaxed overflow-x-auto mt-2">
+					<div class="text-gray-500">// 1. Initiate OAuth — redirects browser to provider</div>
+					<div><span class="text-amber-400">GET</span> /v1/auth/oauth/{'{'}provider{'}'}?redirect_url=https://myapp.com/callback</div>
+					<div class="mt-2 text-gray-500">// 2. Provider redirects back with tokens in the URL fragment</div>
+					<div class="text-gray-400">https://myapp.com/callback#access_token=eyJ...&amp;refresh_token=...&amp;token_type=bearer&amp;expires_in=604800</div>
+				</div>
+
+				<div class="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+					<p class="text-xs font-semibold text-gray-700 mb-1.5">How it works under the hood</p>
+					<ol class="text-xs text-gray-600 space-y-1 ml-4 list-decimal">
+						<li>Your app redirects the user to <code class="bg-white border border-gray-200 rounded px-1">/v1/auth/oauth/{'{'}provider{'}'}</code> with a <code class="bg-white border border-gray-200 rounded px-1">redirect_url</code></li>
+						<li>Eurobase generates a CSRF state token, encodes the redirect URL in it, and redirects the browser to the provider's consent screen</li>
+						<li>The user authenticates at the provider (Google, GitHub, LinkedIn, or Apple)</li>
+						<li>The provider redirects back to Eurobase's callback endpoint with an authorization code</li>
+						<li>Eurobase exchanges the code for user info (email, name, avatar), finds or creates the user, and links the OAuth identity</li>
+						<li>The user is redirected to your app with JWT access and refresh tokens in the URL fragment</li>
+					</ol>
+				</div>
+
+				<div class="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+					<p class="text-xs text-blue-700"><strong>Account linking:</strong> If a user signs up with email/password and later signs in with an OAuth provider using the same email, the accounts are automatically linked &mdash; same user ID, no duplicates. OAuth sign-in also auto-verifies the user's email.</p>
 				</div>
 
 				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">

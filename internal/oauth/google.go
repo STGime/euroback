@@ -26,15 +26,15 @@ func (g *GoogleProvider) AuthURL(clientID, redirectURL, state string) string {
 	return "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
 }
 
-func (g *GoogleProvider) ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURL string) (*UserInfo, error) {
+func (g *GoogleProvider) ExchangeCode(ctx context.Context, cfg ExchangeConfig) (*UserInfo, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	// Exchange authorization code for access token.
 	tokenResp, err := client.PostForm("https://oauth2.googleapis.com/token", url.Values{
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
-		"code":          {code},
-		"redirect_uri":  {redirectURL},
+		"client_id":     {cfg.ClientID},
+		"client_secret": {cfg.ClientSecret},
+		"code":          {cfg.Code},
+		"redirect_uri":  {cfg.RedirectURL},
 		"grant_type":    {"authorization_code"},
 	})
 	if err != nil {
