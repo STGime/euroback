@@ -1,0 +1,142 @@
+##############################################################################
+# Scaleway Cockpit — Recommended alert rules
+#
+# These rules are written in standard Prometheus / Grafana managed-alerting
+# syntax. Load them into Scaleway Cockpit via:
+#
+#   1. Grafana UI → Alerting → Alert rules → New rule → Import
+#   2. OR via Grafana HTTP API: POST /api/ruler/grafana/api/v1/rules/eurobase
+#   3. OR via Terraform with the grafana/grafana provider (resource:
+#      grafana_rule_group).
+#
+# They target the `cockpit` datasource (the managed Prometheus fed by Alloy).
+#
+# Notification policy: configure a contact point in Cockpit (email is the
+# lowest-friction; SMTP relays inside the EU are fine — Scaleway TEM itself
+# works). Avoid PagerDuty / Opsgenie / Slack US SaaS if you want to stay on
+# the EU sovereignty path.
+##############################################################################
+groups:
+  - name: eurobase-gateway
+    interval: 1m
+    rules:
+
+      # ── Availability ─────────────────────────────────────────────────────
+      - alert: GatewayDown
+        expr: up{app="gateway"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: gateway
+        annotations:
+          summary: "Gateway pod {{ $labels.pod }} is down"
+          description: |
+            Alloy has failed to scrape {{ $labels.pod }} for 2+ minutes.
+            Either the pod is crash-looping or the metrics port is unreachable.
+            Check: kubectl -n eurobase get pods -l app=gateway
+
+      - alert: GatewayAllReplicasDown
+        expr: absent(up{app="gateway"} == 1)
+        for: 1m
+        labels:
+          severity: critical
+          service: gateway
+          pager: "true"
+        annotations:
+          summary: "No gateway replicas are reachable"
+          description: "Every gateway replica is failing scrape. The API is likely down. This should page immediately."
+
+      # ── Error rate ───────────────────────────────────────────────────────
+      - alert: GatewayHigh5xxRate
+        expr: |
+          (
+            sum(rate(eurobase_http_requests_total{status="5xx"}[5m]))
+            /
+            sum(rate(eurobase_http_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "Gateway 5xx error rate above 1%"
+          description: |
+            5xx rate is {{ $value | humanizePercentage }} over the last 5 minutes.
+            Inspect logs: kubectl -n eurobase logs -l app=gateway --tail=200
+            Dashboard: Cockpit → Gateway → Errors
+
+      - alert: GatewayCritical5xxRate
+        expr: |
+          (
+            sum(rate(eurobase_http_requests_total{status="5xx"}[5m]))
+            /
+            sum(rate(eurobase_http_requests_total[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          service: gateway
+          pager: "true"
+        annotations:
+          summary: "Gateway 5xx error rate above 5%"
+          description: "5xx rate is {{ $value | humanizePercentage }} — users are seeing errors."
+
+      # ── Latency ──────────────────────────────────────────────────────────
+      - alert: GatewayHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, route) (rate(eurobase_http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "p95 latency on {{ $labels.route }} > 1s"
+          description: "Route {{ $labels.route }} p95 is {{ $value }}s over the last 5 minutes."
+
+      # ── Saturation ───────────────────────────────────────────────────────
+      - alert: GatewayHighInFlight
+        expr: avg(eurobase_http_requests_in_flight) > 200
+        for: 5m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "Gateway is handling {{ $value }} concurrent requests (avg)"
+          description: "Sustained concurrency above 200; consider scaling replicas."
+
+      - alert: GatewayPanicSpike
+        expr: increase(eurobase_http_panics_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: gateway
+        annotations:
+          summary: "Gateway recovered from a panic"
+          description: "Any panic is worth investigating — check logs for the stack trace."
+
+      # ── Resource exhaustion ──────────────────────────────────────────────
+      - alert: GatewayGoroutineLeak
+        expr: go_goroutines{app="gateway"} > 5000
+        for: 15m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "Goroutine count on {{ $labels.pod }} = {{ $value }}"
+          description: "Possible goroutine leak; take a pprof snapshot."
+
+      - alert: GatewayHighMemory
+        expr: |
+          process_resident_memory_bytes{app="gateway"}
+          / on(pod) kube_pod_container_resource_limits{resource="memory", container="gateway"}
+          > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "{{ $labels.pod }} memory > 90% of limit"
+          description: "Container is close to OOMKill; investigate or raise limits."

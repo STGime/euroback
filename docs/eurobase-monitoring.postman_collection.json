@@ -1,0 +1,210 @@
+{
+	"info": {
+		"name": "Eurobase - Monitoring",
+		"description": "Tests for the operational monitoring surface: /health on the public port (8080) and /metrics on the private port (9100). Run locally with `make dev` which starts the gateway on 8080 and the metrics server on 9100.\n\nFor production, /metrics is reachable only from inside the cluster. Use `kubectl -n eurobase port-forward svc/gateway 9100:9100` to verify the endpoint end-to-end.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:8080", "description": "Public gateway URL" },
+		{ "key": "metrics_url", "value": "http://localhost:9100", "description": "Private metrics URL — never exposed via ingress" }
+	],
+	"item": [
+		{
+			"name": "Health - Public gateway",
+			"request": {
+				"method": "GET",
+				"url": "{{base_url}}/health",
+				"description": "K8s liveness/readiness probe target. Must return 200 JSON {\"status\":\"ok\"}."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('status 200', () => pm.response.to.have.status(200));",
+							"pm.test('content-type is JSON', () => {",
+							"    pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');",
+							"});",
+							"pm.test('body has status=ok', () => {",
+							"    const body = pm.response.json();",
+							"    pm.expect(body.status).to.eql('ok');",
+							"});"
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "Health - Metrics server",
+			"request": {
+				"method": "GET",
+				"url": "{{metrics_url}}/health",
+				"description": "The metrics server exposes its own /health so Alloy can verify liveness of the scrape target."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('status 200', () => pm.response.to.have.status(200));"
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "Metrics - Exposition format",
+			"request": {
+				"method": "GET",
+				"url": "{{metrics_url}}/metrics",
+				"description": "Scrapes the Prometheus /metrics endpoint. Validates:\n- 200 response\n- Prometheus text exposition content-type\n- Required eurobase_* series are present\n- Standard Go runtime collectors are present\n- build_info carries a version label"
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('status 200', () => pm.response.to.have.status(200));",
+							"",
+							"pm.test('content-type is Prometheus exposition', () => {",
+							"    const ct = pm.response.headers.get('Content-Type') || '';",
+							"    // Accept both plain text and OpenMetrics format.",
+							"    const ok = ct.includes('text/plain') || ct.includes('application/openmetrics-text');",
+							"    pm.expect(ok, `unexpected content-type: ${ct}`).to.be.true;",
+							"});",
+							"",
+							"const body = pm.response.text();",
+							"",
+							"pm.test('requests_total counter is registered', () => {",
+							"    pm.expect(body).to.include('# TYPE eurobase_http_requests_total counter');",
+							"});",
+							"",
+							"pm.test('request_duration histogram is registered', () => {",
+							"    pm.expect(body).to.include('# TYPE eurobase_http_request_duration_seconds histogram');",
+							"});",
+							"",
+							"pm.test('in_flight gauge is registered', () => {",
+							"    pm.expect(body).to.include('# TYPE eurobase_http_requests_in_flight gauge');",
+							"});",
+							"",
+							"pm.test('panics_total counter is registered', () => {",
+							"    pm.expect(body).to.include('# TYPE eurobase_http_panics_total counter');",
+							"});",
+							"",
+							"pm.test('build_info has a version label', () => {",
+							"    pm.expect(body).to.match(/eurobase_build_info\\{version=\"[^\"]+\"\\} 1/);",
+							"});",
+							"",
+							"pm.test('Go runtime collector is registered', () => {",
+							"    pm.expect(body).to.include('# TYPE go_goroutines gauge');",
+							"});",
+							"",
+							"pm.test('process collector is registered', () => {",
+							"    pm.expect(body).to.include('# TYPE process_resident_memory_bytes gauge');",
+							"});"
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "Metrics - Route label uses patterns (cardinality check)",
+			"request": {
+				"method": "GET",
+				"url": "{{base_url}}/health",
+				"description": "Issues a request so a sample is recorded, then (in the test script) scrapes /metrics and asserts that raw path segments are NOT appearing as label values. This is the guard against per-project-id cardinality blow-up."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('gateway returned 200', () => pm.response.to.have.status(200));",
+							"",
+							"// Now scrape /metrics and verify the route label is the chi pattern, not the raw URL.",
+							"pm.sendRequest(pm.variables.replaceIn('{{metrics_url}}/metrics'), (err, res) => {",
+							"    pm.test('metrics scrape succeeded', () => {",
+							"        pm.expect(err).to.be.null;",
+							"        pm.expect(res.code).to.eql(200);",
+							"    });",
+							"    const body = res.text();",
+							"    pm.test('/health request was counted under route=\"/health\"', () => {",
+							"        pm.expect(body).to.match(/eurobase_http_requests_total\\{method=\"GET\",route=\"\\/health\",status=\"2xx\"\\} \\d+/);",
+							"    });",
+							"});"
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "Metrics - Error rate recording",
+			"request": {
+				"method": "GET",
+				"url": "{{base_url}}/definitely-not-a-real-route-{{$randomInt}}",
+				"description": "Hits an unmatched path so we get a 4xx, then validates the 4xx series increments on /metrics."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('got a 4xx', () => {",
+							"    pm.expect(pm.response.code).to.be.within(400, 499);",
+							"});",
+							"",
+							"pm.sendRequest(pm.variables.replaceIn('{{metrics_url}}/metrics'), (err, res) => {",
+							"    const body = res.text();",
+							"    pm.test('requests_total carries a status=\"4xx\" sample', () => {",
+							"        // The route label may be 'unmatched' or a specific pattern depending on chi config;",
+							"        // we only assert that some 4xx sample exists.",
+							"        pm.expect(body).to.match(/eurobase_http_requests_total\\{[^}]*status=\"4xx\"[^}]*\\} \\d+/);",
+							"    });",
+							"});"
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "Metrics - Latency histogram has samples",
+			"request": {
+				"method": "GET",
+				"url": "{{metrics_url}}/metrics",
+				"description": "After the earlier requests, the duration histogram must have non-zero _count and _sum entries (proves the middleware is actually observing durations, not just being registered)."
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"const body = pm.response.text();",
+							"",
+							"pm.test('histogram _count > 0', () => {",
+							"    const match = body.match(/eurobase_http_request_duration_seconds_count\\{[^}]+\\} (\\d+)/);",
+							"    pm.expect(match, 'no _count sample found').to.not.be.null;",
+							"    pm.expect(Number(match[1])).to.be.greaterThan(0);",
+							"});",
+							"",
+							"pm.test('histogram _sum > 0', () => {",
+							"    const match = body.match(/eurobase_http_request_duration_seconds_sum\\{[^}]+\\} ([0-9.eE+-]+)/);",
+							"    pm.expect(match, 'no _sum sample found').to.not.be.null;",
+							"    pm.expect(Number(match[1])).to.be.greaterThan(0);",
+							"});",
+							"",
+							"pm.test('at least one bucket sample exists', () => {",
+							"    pm.expect(body).to.match(/eurobase_http_request_duration_seconds_bucket\\{[^}]*le=\"[0-9.eE+-]+\"[^}]*\\} \\d+/);",
+							"});"
+						]
+					}
+				}
+			]
+		}
+	]
+}

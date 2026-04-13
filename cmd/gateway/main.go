@@ -15,6 +15,7 @@ import (
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/gateway"
+	"github.com/eurobase/euroback/internal/metrics"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
@@ -40,6 +41,15 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+
+	// Metrics server listens on a separate private port so it is never
+	// exposed through the public ingress. Default 9100 is conventional for
+	// node-level exporters and cleanly distinct from the API port.
+	metricsPort := os.Getenv("METRICS_PORT")
+	if metricsPort == "" {
+		metricsPort = "9100"
+	}
+	buildVersion := os.Getenv("BUILD_VERSION")
 
 	// ── Set up structured logging ──
 	logLevel := parseLogLevel(os.Getenv("LOG_LEVEL"))
@@ -207,8 +217,16 @@ func main() {
 		slog.Warn("FUNCTION_RUNNER_URL not set, edge function invocation will return 501")
 	}
 
+	// ── Set up Prometheus metrics (served on a private port) ──
+	metricsReg := metrics.New(buildVersion)
+	go func() {
+		if err := metricsReg.Serve(ctx, "0.0.0.0:"+metricsPort); err != nil {
+			slog.Error("metrics server error", "error", err)
+		}
+	}()
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, vaultSvc, fnRunnerURL, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, vaultSvc, fnRunnerURL, metricsReg, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

@@ -15,6 +15,7 @@ import (
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/metrics"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
@@ -33,7 +34,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, metricsReg *metrics.Registry, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -42,6 +43,14 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 	r.Use(CORSMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+
+	// Prometheus request metrics — must run after chi has matched the route
+	// so RoutePattern() is populated. chi runs middleware in registration
+	// order but records the pattern before invoking the final handler, so
+	// wrapping here captures everything.
+	if metricsReg != nil {
+		r.Use(metricsReg.Middleware)
+	}
 
 	// Subdomain resolution — resolves {slug}.eurobase.app to a project context.
 	if subdomainMw != nil {
