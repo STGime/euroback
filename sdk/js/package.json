@@ -1,11 +1,20 @@
 {
   "name": "@eurobase/sdk",
   "version": "0.1.0",
-  "description": "Eurobase TypeScript SDK — EU-sovereign Backend-as-a-Service",
+  "description": "Eurobase TypeScript SDK — EU-sovereign Backend-as-a-Service. Auth, database, storage, realtime, functions, and vault.",
   "main": "dist/index.js",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "echo \"No tests yet\" && exit 0"
   },
   "keywords": [
@@ -13,14 +22,36 @@
     "baas",
     "backend-as-a-service",
     "eu-sovereign",
-    "gdpr"
+    "gdpr",
+    "firebase-alternative",
+    "supabase-alternative",
+    "postgres",
+    "auth",
+    "storage",
+    "realtime",
+    "serverless",
+    "european-cloud"
   ],
-  "author": "Eurobase",
+  "author": "Eurobase <founders@eurobase.app>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/STGime/euroback",
+    "directory": "sdk/js"
+  },
+  "homepage": "https://eurobase.app",
+  "bugs": {
+    "url": "https://github.com/STGime/euroback/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
   "devDependencies": {
     "typescript": "^5.9.3"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ]
 }
