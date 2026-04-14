@@ -364,6 +364,7 @@
 				<thead>
 					<tr class="border-b border-gray-200 bg-gray-50/50">
 						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Email</th>
+						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Provider</th>
 						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Display Name</th>
 						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Status</th>
 						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Last Sign In</th>
@@ -385,6 +386,21 @@
 									</div>
 									<span class="text-sm font-medium text-gray-900">{user.email}</span>
 								</button>
+							</td>
+							<td class="px-5 py-3">
+								<div class="flex flex-wrap gap-1">
+									{#each (user.providers?.length ? user.providers : ['email']) as provider}
+										<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium
+											{provider === 'google' ? 'bg-blue-50 text-blue-700' :
+											 provider === 'github' ? 'bg-gray-100 text-gray-700' :
+											 provider === 'linkedin' ? 'bg-sky-50 text-sky-700' :
+											 provider === 'apple' ? 'bg-gray-100 text-gray-900' :
+											 provider === 'phone' ? 'bg-amber-50 text-amber-700' :
+											 'bg-purple-50 text-purple-700'}">
+											{provider}
+										</span>
+									{/each}
+								</div>
 							</td>
 							<td class="px-5 py-3 text-sm text-gray-500">{user.display_name ?? '—'}</td>
 							<td class="px-5 py-3">
@@ -454,7 +470,7 @@
 						<!-- Detail row -->
 						{#if selectedUser?.id === user.id}
 							<tr>
-								<td colspan="6" class="bg-gray-50 px-5 py-4">
+								<td colspan="7" class="bg-gray-50 px-5 py-4">
 									<div class="grid grid-cols-2 gap-6">
 										<div>
 											<h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">User Details</h4>
@@ -466,6 +482,22 @@
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Email</dt>
 													<dd class="text-gray-900">{user.email}</dd>
+												</div>
+												<div class="flex gap-2">
+													<dt class="text-gray-400 w-24 shrink-0">Provider</dt>
+													<dd class="flex flex-wrap gap-1">
+														{#each (user.providers?.length ? user.providers : ['email']) as provider}
+															<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium
+																{provider === 'google' ? 'bg-blue-50 text-blue-700' :
+																 provider === 'github' ? 'bg-gray-100 text-gray-700' :
+																 provider === 'linkedin' ? 'bg-sky-50 text-sky-700' :
+																 provider === 'apple' ? 'bg-gray-100 text-gray-900' :
+																 provider === 'phone' ? 'bg-amber-50 text-amber-700' :
+																 'bg-purple-50 text-purple-700'}">
+																{provider}
+															</span>
+														{/each}
+													</dd>
 												</div>
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Display Name</dt>

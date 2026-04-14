@@ -20,7 +20,9 @@ import (
 type PlatformUser struct {
 	ID           string                 `json:"id"`
 	Email        string                 `json:"email"`
+	Phone        *string                `json:"phone,omitempty"`
 	DisplayName  *string                `json:"display_name"`
+	Providers    []string               `json:"providers"`
 	Metadata     map[string]interface{} `json:"metadata"`
 	BannedAt     *time.Time             `json:"banned_at"`
 	LastSignInAt *time.Time             `json:"last_sign_in_at"`
@@ -66,7 +68,8 @@ func PlatformRoutes(pool *pgxpool.Pool) chi.Router {
 func scanUser(rows interface{ Scan(dest ...interface{}) error }) (PlatformUser, error) {
 	var u PlatformUser
 	var metadataJSON []byte
-	if err := rows.Scan(&u.ID, &u.Email, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.CreatedAt); err != nil {
+	var providersArr []string
+	if err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.CreatedAt, &providersArr); err != nil {
 		return u, err
 	}
 	if metadataJSON != nil {
@@ -75,10 +78,13 @@ func scanUser(rows interface{ Scan(dest ...interface{}) error }) (PlatformUser, 
 	if u.Metadata == nil {
 		u.Metadata = map[string]interface{}{}
 	}
+	u.Providers = providersArr
+	if u.Providers == nil {
+		// If no identities found, infer from password_hash presence.
+		u.Providers = []string{"email"}
+	}
 	return u, nil
 }
-
-const userSelectCols = "id, email, display_name, metadata, banned_at, last_sign_in_at, created_at"
 
 func isValidEmail(email string) bool {
 	parts := strings.SplitN(email, "@", 2)
@@ -118,14 +124,20 @@ func handleListUsers(pool *pgxpool.Pool) http.HandlerFunc {
 		var countQ, listQ string
 		var args []interface{}
 
+		userCols := fmt.Sprintf(
+			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.created_at,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
+			qs,
+		)
+
 		if search != "" {
 			pattern := "%" + search + "%"
 			countQ = fmt.Sprintf(`SELECT count(*) FROM %s.users WHERE email ILIKE $1 OR display_name ILIKE $1`, qs)
-			listQ = fmt.Sprintf(`SELECT %s FROM %s.users WHERE email ILIKE $1 OR display_name ILIKE $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`, userSelectCols, qs)
+			listQ = fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.email ILIKE $1 OR u.display_name ILIKE $1 ORDER BY u.created_at DESC LIMIT $2 OFFSET $3`, userCols, qs)
 			args = []interface{}{pattern, limit, offset}
 		} else {
 			countQ = fmt.Sprintf(`SELECT count(*) FROM %s.users`, qs)
-			listQ = fmt.Sprintf(`SELECT %s FROM %s.users ORDER BY created_at DESC LIMIT $1 OFFSET $2`, userSelectCols, qs)
+			listQ = fmt.Sprintf(`SELECT %s FROM %s.users u ORDER BY u.created_at DESC LIMIT $1 OFFSET $2`, userCols, qs)
 			args = []interface{}{limit, offset}
 		}
 
@@ -180,7 +192,13 @@ func handleGetUser(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		userID := chi.URLParam(r, "userId")
-		q := fmt.Sprintf(`SELECT %s FROM %s.users WHERE id = $1`, userSelectCols, quoteIdent(schema))
+		qs := quoteIdent(schema)
+		userCols := fmt.Sprintf(
+			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.created_at,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
+			qs,
+		)
+		q := fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.id = $1`, userCols, qs)
 		u, err := scanUser(pool.QueryRow(r.Context(), q, userID))
 		if err != nil {
 			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
@@ -232,11 +250,12 @@ func handleCreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 			metadataJSON = []byte("{}")
 		}
 
+		qs := quoteIdent(schema)
 		q := fmt.Sprintf(
 			`INSERT INTO %s.users (email, password_hash, metadata, email_confirmed_at)
 			 VALUES ($1, $2, $3, now())
-			 RETURNING %s`,
-			quoteIdent(schema), userSelectCols,
+			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at, ARRAY[]::text[]`,
+			qs,
 		)
 		u, err := scanUser(pool.QueryRow(r.Context(), q, email, string(hash), string(metadataJSON)))
 		if err != nil {
@@ -309,10 +328,16 @@ func handleUpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		qs := quoteIdent(schema)
+		returnCols := fmt.Sprintf(
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
+			qs,
+		)
 		args = append(args, userID)
 		q := fmt.Sprintf(
 			`UPDATE %s.users SET %s WHERE id = $%d RETURNING %s`,
-			quoteIdent(schema), strings.Join(setClauses, ", "), argIdx, userSelectCols,
+			qs, strings.Join(setClauses, ", "), argIdx, returnCols,
 		)
 
 		u, err := scanUser(pool.QueryRow(r.Context(), q, args...))
@@ -377,9 +402,15 @@ func handleSuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		userID := chi.URLParam(r, "userId")
+		qs := quoteIdent(schema)
+		returnCols := fmt.Sprintf(
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
+			qs,
+		)
 		q := fmt.Sprintf(
 			`UPDATE %s.users SET banned_at = now(), updated_at = now() WHERE id = $1 AND banned_at IS NULL RETURNING %s`,
-			quoteIdent(schema), userSelectCols,
+			qs, returnCols,
 		)
 		u, err := scanUser(pool.QueryRow(r.Context(), q, userID))
 		if err != nil {
@@ -407,9 +438,15 @@ func handleUnsuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		userID := chi.URLParam(r, "userId")
+		qs := quoteIdent(schema)
+		returnCols := fmt.Sprintf(
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
+			qs,
+		)
 		q := fmt.Sprintf(
 			`UPDATE %s.users SET banned_at = NULL, updated_at = now() WHERE id = $1 AND banned_at IS NOT NULL RETURNING %s`,
-			quoteIdent(schema), userSelectCols,
+			qs, returnCols,
 		)
 		u, err := scanUser(pool.QueryRow(r.Context(), q, userID))
 		if err != nil {

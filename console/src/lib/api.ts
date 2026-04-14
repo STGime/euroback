@@ -1154,7 +1154,9 @@ export interface EmailTemplate {
 export interface EndUser {
 	id: string;
 	email: string;
+	phone?: string | null;
 	display_name: string | null;
+	providers: string[];
 	metadata: Record<string, any>;
 	banned_at: string | null;
 	last_sign_in_at: string | null;
