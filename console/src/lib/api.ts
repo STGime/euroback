@@ -1153,7 +1153,7 @@ export interface EmailTemplate {
 
 export interface EndUser {
 	id: string;
-	email: string;
+	email: string | null;
 	phone?: string | null;
 	display_name: string | null;
 	providers: string[];

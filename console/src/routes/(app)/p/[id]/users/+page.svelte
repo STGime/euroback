@@ -121,7 +121,7 @@
 
 	function openEdit(user: EndUser) {
 		editUser = user;
-		editEmail = user.email;
+		editEmail = user.email ?? '';
 		editDisplayName = user.display_name ?? '';
 		editMetadata = JSON.stringify(user.metadata, null, 2);
 		editError = null;
@@ -382,9 +382,9 @@
 									onclick={() => (selectedUser = selectedUser?.id === user.id ? null : user)}
 								>
 									<div class="flex h-8 w-8 items-center justify-center rounded-full {user.banned_at ? 'bg-red-100 text-red-700' : 'bg-eurobase-100 text-eurobase-700'} text-xs font-semibold">
-										{user.email[0].toUpperCase()}
+										{(user.email ?? user.phone ?? '?')[0].toUpperCase()}
 									</div>
-									<span class="text-sm font-medium text-gray-900">{user.email}</span>
+									<span class="text-sm font-medium text-gray-900">{user.email ?? user.phone ?? '—'}</span>
 								</button>
 							</td>
 							<td class="px-5 py-3">
@@ -481,7 +481,7 @@
 												</div>
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Email</dt>
-													<dd class="text-gray-900">{user.email}</dd>
+													<dd class="text-gray-900">{user.email ?? '—'}</dd>
 												</div>
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Provider</dt>

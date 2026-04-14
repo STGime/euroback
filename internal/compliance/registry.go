@@ -132,18 +132,28 @@ func (s *ComplianceService) resolveActiveFeatures(ctx context.Context, pc *proje
 		features = append(features, "billing")
 	}
 
-	// OAuth providers.
+	// OAuth providers and phone auth.
 	var authCfg struct {
+		Providers map[string]struct {
+			Enabled bool `json:"enabled"`
+		} `json:"providers"`
 		OAuthProviders map[string]struct {
 			Enabled bool `json:"enabled"`
 		} `json:"oauth_providers"`
 	}
-	if json.Unmarshal(pc.AuthConfig, &authCfg) == nil && authCfg.OAuthProviders != nil {
-		if p, ok := authCfg.OAuthProviders["google"]; ok && p.Enabled {
-			features = append(features, "oauth_google")
+	if json.Unmarshal(pc.AuthConfig, &authCfg) == nil {
+		if authCfg.OAuthProviders != nil {
+			if p, ok := authCfg.OAuthProviders["google"]; ok && p.Enabled {
+				features = append(features, "oauth_google")
+			}
+			if p, ok := authCfg.OAuthProviders["github"]; ok && p.Enabled {
+				features = append(features, "oauth_github")
+			}
 		}
-		if p, ok := authCfg.OAuthProviders["github"]; ok && p.Enabled {
-			features = append(features, "oauth_github")
+		if authCfg.Providers != nil {
+			if p, ok := authCfg.Providers["phone"]; ok && p.Enabled {
+				features = append(features, "sms")
+			}
 		}
 	}
 
