@@ -18,6 +18,14 @@
 - Backend builds and deploys via GitHub Actions (push to main triggers CI/CD)
 - Do not run deploy scripts manually — just commit and push
 
+## Compliance / Sub-Processors
+When adding a new third-party data processor, three things must be updated:
+1. Insert the processor into the `sub_processors` DB table (via migration)
+2. Add feature detection in `internal/compliance/registry.go` → `resolveActiveFeatures()`
+3. Link the processor to the feature in the `service_dependencies` table (via same migration)
+
+This ensures the compliance DPA report automatically includes the processor when the feature is enabled.
+
 ## Sovereignty
 - All infrastructure runs in EU (France) on Scaleway
 - No US cloud services permitted (AWS, GCP, Azure, Cloudflare, Stripe, Vercel)
