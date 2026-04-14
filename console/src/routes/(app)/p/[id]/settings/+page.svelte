@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { getContext, onMount } from 'svelte';
 	import { api, type Project, type APIKey, type ProjectMember, type ProjectInvitation } from '$lib/api.js';
+	import { user } from '$lib/stores.js';
 
 	const projectCtx = getContext<{ id: string; project: Project | null }>('projectId');
 	let projectId = $derived($page.params.id);
@@ -79,6 +80,7 @@
 	let inviteMessage = $state('');
 	let inviteError = $state('');
 	let resending: string | null = $state(null);
+	let isOwner = $derived(members.some(m => m.role === 'owner' && m.email === $user?.email));
 
 	async function loadMembers() {
 		membersLoading = true;
@@ -446,7 +448,7 @@
 							<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
 								<td class="px-4 py-2.5 text-sm text-gray-700">{member.email}</td>
 								<td class="px-4 py-2.5">
-									{#if member.role === 'owner'}
+									{#if member.role === 'owner' || !isOwner}
 										<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold {roleBadgeColor(member.role)}">{member.role}</span>
 									{:else}
 										<select
@@ -462,7 +464,7 @@
 								</td>
 								<td class="px-4 py-2.5 text-xs text-gray-500">{formatMemberDate(member.created_at)}</td>
 								<td class="px-4 py-2.5 text-right">
-									{#if member.role !== 'owner'}
+									{#if member.role !== 'owner' && isOwner}
 										<button
 											type="button"
 											onclick={() => handleRemoveMember(member.user_id)}
