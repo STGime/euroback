@@ -14,6 +14,10 @@
 - Anon key for public client access
 - Service key for server-side access only — never expose in client code
 
+## Build & Deploy
+- Backend builds and deploys via GitHub Actions (push to main triggers CI/CD)
+- Do not run deploy scripts manually — just commit and push
+
 ## Sovereignty
 - All infrastructure runs in EU (France) on Scaleway
 - No US cloud services permitted (AWS, GCP, Azure, Cloudflare, Stripe, Vercel)
