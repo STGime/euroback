@@ -299,6 +299,12 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 
 	// ── SDK routes (API key authenticated) ──
 	r.Route("/v1", func(r chi.Router) {
+		// OAuth callbacks — no API key needed; project resolved via subdomain.
+		// These must be outside the apiKeyMw group because the OAuth provider
+		// redirects back without forwarding the apikey query parameter.
+		r.Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
+		r.Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
+
 		// Auth endpoints (only need API key, no end-user JWT).
 		r.Route("/auth", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
@@ -313,8 +319,6 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Post("/request-magic-link", enduser.HandleRequestMagicLink(endUserAuthSvc))
 			r.Post("/signin-magic-link", enduser.HandleSignInWithMagicLink(endUserAuthSvc))
 			r.Get("/oauth/{provider}", enduser.HandleOAuthRedirect(endUserAuthSvc))
-			r.Get("/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
-			r.Post("/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 			r.Post("/phone/send-otp", enduser.HandleSendPhoneOTP(endUserAuthSvc))
 			r.Post("/phone/verify", enduser.HandleVerifyPhoneOTP(endUserAuthSvc))
 
