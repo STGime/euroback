@@ -32,13 +32,21 @@ type AuthResponse struct {
 // User represents an end-user in a tenant schema.
 type User struct {
 	ID          string                 `json:"id"`
-	Email       string                 `json:"email"`
+	Email       *string                `json:"email,omitempty"`
 	Phone       *string                `json:"phone,omitempty"`
 	DisplayName *string                `json:"display_name,omitempty"`
 	AvatarURL   *string                `json:"avatar_url,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	CreatedAt   time.Time              `json:"created_at"`
 	UpdatedAt   time.Time              `json:"updated_at"`
+}
+
+// EmailString returns the email as a plain string, or empty if nil.
+func (u *User) EmailString() string {
+	if u.Email != nil {
+		return *u.Email
+	}
+	return ""
 }
 
 // SendPhoneOTPRequest is the JSON body for phone OTP initiation.

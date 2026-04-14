@@ -109,13 +109,13 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 
 	// If email confirmation is required and an email service is available, send verification email.
 	if config.RequireEmailConfirmation && s.emailService != nil {
-		if err := s.emailService.SendVerificationEmail(ctx, projectID, "", schemaName, user.ID, user.Email); err != nil {
+		if err := s.emailService.SendVerificationEmail(ctx, projectID, "", schemaName, user.ID, user.EmailString()); err != nil {
 			slog.Error("failed to send verification email", "error", err, "user_id", user.ID)
 		}
 	}
 
 	sessionDurationSecs := config.SessionDurationSeconds()
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, sessionDurationSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 	slog.Info("end-user signed in", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
 	sessionDurationSecs := config.SessionDurationSeconds()
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, sessionDurationSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +270,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, config.SessionDurationSeconds())
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, config.SessionDurationSeconds())
 	if err != nil {
 		return nil, err
 	}
@@ -540,7 +540,7 @@ func (s *AuthService) SignInWithMagicLink(ctx context.Context, schemaName, jwtSe
 	slog.Info("end-user signed in via magic link", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
 	sessionDurationSecs := config.SessionDurationSeconds()
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, sessionDurationSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -715,7 +715,7 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 	slog.Info("end-user signed in via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
 
 	sessionDurationSecs := config.SessionDurationSeconds()
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.Email, projectID, jwtSecret, sessionDurationSecs)
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, sessionDurationSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -845,7 +845,7 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 	slog.Info("end-user signed in via phone otp", "schema", schemaName, "user_id", user.ID)
 
 	// Use email for JWT subject; fall back to phone if no email.
-	jwtSubject := user.Email
+	jwtSubject := user.EmailString()
 	if jwtSubject == "" && user.Phone != nil {
 		jwtSubject = *user.Phone
 	}
