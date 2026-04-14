@@ -98,6 +98,7 @@
 		FR: '\u{1F1EB}\u{1F1F7}',
 		NL: '\u{1F1F3}\u{1F1F1}',
 		DE: '\u{1F1E9}\u{1F1EA}',
+		DK: '\u{1F1E9}\u{1F1F0}',
 		US: '\u{1F1FA}\u{1F1F8}',
 	};
 
