@@ -131,6 +131,12 @@ func (c *AuthConfig) IsMagicLinkEnabled() bool {
 	return ok && p.Enabled
 }
 
+// IsPhoneAuthEnabled returns whether the phone provider is enabled.
+func (c *AuthConfig) IsPhoneAuthEnabled() bool {
+	p, ok := c.Providers["phone"]
+	return ok && p.Enabled
+}
+
 // GetOAuthProvider returns the OAuth provider config if it exists and is enabled
 // with a client_id configured. The client_secret is NOT checked here — it lives
 // in the vault and is loaded separately by the auth service during the OAuth

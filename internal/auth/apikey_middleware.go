@@ -24,6 +24,10 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiKey := r.Header.Get("apikey")
 		if apiKey == "" {
+			// Fall back to query parameter for browser-initiated flows (e.g. OAuth redirects).
+			apiKey = r.URL.Query().Get("apikey")
+		}
+		if apiKey == "" {
 			http.Error(w, `{"error":"missing apikey header"}`, http.StatusUnauthorized)
 			return
 		}

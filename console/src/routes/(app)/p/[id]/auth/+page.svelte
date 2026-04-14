@@ -43,6 +43,7 @@
 
 	let emailPasswordEnabled = $state(true);
 	let magicLinkEnabled = $state(false);
+	let phoneEnabled = $state(false);
 	let requireEmailConfirmation = $state(false);
 	let passwordMinLength = $state(8);
 	let sessionDuration = $state('168h');
@@ -85,6 +86,7 @@
 			const cfg = loadConfig();
 			emailPasswordEnabled = cfg.providers?.email_password?.enabled ?? true;
 			magicLinkEnabled = cfg.providers?.magic_link?.enabled ?? false;
+			phoneEnabled = cfg.providers?.phone?.enabled ?? false;
 			requireEmailConfirmation = cfg.require_email_confirmation;
 			passwordMinLength = cfg.password_min_length;
 			sessionDuration = cfg.session_duration;
@@ -164,7 +166,7 @@
 			}
 
 			const config: AuthConfig = {
-				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled } },
+				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled }, phone: { enabled: phoneEnabled } },
 				oauth_providers: {
 					google: googleProvider as any,
 					github: githubProvider as any,
@@ -477,6 +479,38 @@
 									<div class="text-gray-400">Body: {"{"}"token": "abc123..."{"}"}</div>
 								</div>
 								<p class="text-[11px] text-eurobase-600 mt-1">Customize the email template in the Email Templates tab.</p>
+							</div>
+						{/if}
+					</div>
+
+					<!-- Phone Auth (SMS OTP) -->
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Phone (SMS OTP)</p>
+								<p class="text-xs text-gray-500">Sign in with phone number via SMS verification code</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={phoneEnabled}
+								onclick={() => phoneEnabled = !phoneEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {phoneEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {phoneEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+						{#if phoneEnabled}
+							<div class="mt-3 rounded-lg bg-eurobase-50 border border-eurobase-100 p-3 space-y-2">
+								<p class="text-xs text-eurobase-700 leading-relaxed">Users enter their phone number and receive a 6-digit code via SMS. The code expires after 10 minutes. Phone-only users are created without an email address.</p>
+								<p class="text-xs font-medium text-eurobase-800 mt-2">REST API</p>
+								<div class="rounded-md bg-gray-900 p-2.5 font-mono text-[11px] text-green-400 leading-relaxed overflow-x-auto">
+									<div><span class="text-amber-400">POST</span> /v1/auth/phone/send-otp</div>
+									<div class="text-gray-400">Body: {"{"}"phone": "+33612345678"{"}"}</div>
+									<div class="mt-1.5"><span class="text-amber-400">POST</span> /v1/auth/phone/verify</div>
+									<div class="text-gray-400">Body: {"{"}"phone": "+33612345678", "code": "123456"{"}"}</div>
+								</div>
+								<p class="text-[11px] text-eurobase-600 mt-1">Requires GATEWAYAPI_TOKEN environment variable on the gateway. SMS is sent via GatewayAPI (EU-based, Denmark).</p>
 							</div>
 						{/if}
 					</div>

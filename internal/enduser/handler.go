@@ -507,6 +507,77 @@ func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURL, errC
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
+// HandleSendPhoneOTP returns an HTTP handler for POST /v1/auth/phone/send-otp.
+func HandleSendPhoneOTP(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+		if !config.IsPhoneAuthEnabled() {
+			writeJSON(w, map[string]string{"error": "phone authentication is not enabled"}, http.StatusBadRequest)
+			return
+		}
+
+		var req SendPhoneOTPRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+		if req.Phone == "" {
+			writeJSON(w, map[string]string{"error": "phone is required"}, http.StatusBadRequest)
+			return
+		}
+
+		if err := svc.SendPhoneOTP(r.Context(), pc.SchemaName, req.Phone); err != nil {
+			slog.Warn("send phone otp failed", "error", err)
+			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, map[string]string{"status": "otp_sent"}, http.StatusOK)
+	}
+}
+
+// HandleVerifyPhoneOTP returns an HTTP handler for POST /v1/auth/phone/verify.
+func HandleVerifyPhoneOTP(svc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+		if !config.IsPhoneAuthEnabled() {
+			writeJSON(w, map[string]string{"error": "phone authentication is not enabled"}, http.StatusBadRequest)
+			return
+		}
+
+		var req VerifyPhoneOTPRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+		if req.Phone == "" || req.Code == "" {
+			writeJSON(w, map[string]string{"error": "phone and code are required"}, http.StatusBadRequest)
+			return
+		}
+
+		resp, err := svc.VerifyPhoneOTP(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req.Phone, req.Code)
+		if err != nil {
+			slog.Warn("verify phone otp failed", "error", err)
+			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, resp, http.StatusOK)
+	}
+}
+
 func writeJSON(w http.ResponseWriter, v interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

@@ -18,6 +18,7 @@ import (
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
+	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
@@ -130,6 +131,19 @@ func main() {
 	// Wire email into platform auth.
 	platformAuthSvc.SetEmailService(emailService)
 
+	// ── Set up GatewayAPI SMS client (optional — degrades gracefully) ──
+	smsAPIToken := os.Getenv("GATEWAYAPI_TOKEN")
+	smsSender := os.Getenv("SMS_SENDER")
+	smsClient := sms.NewClient(smsAPIToken, smsSender)
+	var smsService *sms.Service
+	if smsClient.Configured() {
+		smsService = sms.NewService(smsClient, pool)
+		slog.Info("sms service configured (GatewayAPI)")
+	} else {
+		smsService = sms.NewService(smsClient, pool)
+		slog.Warn("GATEWAYAPI_TOKEN not set, SMS will be logged instead of sent")
+	}
+
 	// ── Set up realtime WebSocket hub ──
 	hub := realtime.NewHub()
 	go hub.Run()
@@ -208,7 +222,7 @@ func main() {
 	}
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, limitsSvc, vaultSvc, fnRunnerURL, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

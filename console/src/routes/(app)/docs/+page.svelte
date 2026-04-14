@@ -528,6 +528,7 @@ const {'{'} data: files {'}'} = await eb.storage
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Email + Password</strong> &mdash; traditional sign-up and sign-in with email and password</li>
 					<li><strong>Magic Links</strong> &mdash; passwordless sign-in via a one-time email link (no password needed)</li>
+					<li><strong>Phone (SMS OTP)</strong> &mdash; sign in with phone number via a 6-digit SMS code (EU-sovereign SMS via GatewayAPI)</li>
 					<li><strong>Passkeys</strong> &mdash; coming soon (WebAuthn / FaceID / fingerprint)</li>
 					<li><strong>Social Login</strong> &mdash; Google, GitHub, LinkedIn, Apple (configure in Auth settings)</li>
 				</ul>
@@ -616,6 +617,40 @@ const {'{'} data, error {'}'} = await eb.auth.signInWithMagicLink(token)
 						<li><code class="bg-white border border-gray-200 rounded px-1">signInWithMagicLink</code> sends the token to <code class="bg-white border border-gray-200 rounded px-1">/v1/auth/signin-magic-link</code></li>
 						<li>The server verifies the token (not expired, not used), marks it as consumed, and returns a JWT + refresh token</li>
 					</ol>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Phone Auth (SMS OTP)</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Phone auth lets users sign in with their phone number instead of an email. They receive a 6-digit verification code via SMS that expires after 10 minutes. Phone numbers must be in E.164 format (e.g., <code class="bg-gray-100 border border-gray-200 rounded px-1">+33612345678</code>).
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Enable phone auth in <strong>Auth &rarr; Settings &rarr; Phone (SMS OTP)</strong> toggle. The gateway must have <code class="bg-gray-100 border border-gray-200 rounded px-1">GATEWAYAPI_TOKEN</code> configured. SMS is sent via GatewayAPI, an EU-based provider (Denmark) &mdash; no data leaves EU infrastructure.
+				</p>
+
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-3">
+					<pre><span class="text-gray-500">// 1. Send OTP to phone</span>
+<span class="text-amber-400">POST</span> /v1/auth/phone/send-otp
+Body: {'{'}"phone": "+33612345678"{'}'}
+
+<span class="text-gray-500">// 2. Verify code and get session</span>
+<span class="text-amber-400">POST</span> /v1/auth/phone/verify
+Body: {'{'}"phone": "+33612345678", "code": "123456"{'}'}
+<span class="text-gray-500">// Returns: access_token, refresh_token, user</span></pre>
+				</div>
+
+				<div class="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+					<p class="text-xs font-semibold text-gray-700 mb-1.5">How it works</p>
+					<ol class="text-xs text-gray-600 space-y-1 ml-4 list-decimal">
+						<li>Your app sends the phone number to <code class="bg-white border border-gray-200 rounded px-1">/v1/auth/phone/send-otp</code></li>
+						<li>Eurobase creates a user (if new) and sends a 6-digit code via SMS</li>
+						<li>The user enters the code in your app</li>
+						<li>Your app sends the phone + code to <code class="bg-white border border-gray-200 rounded px-1">/v1/auth/phone/verify</code></li>
+						<li>Eurobase verifies the code, confirms the phone number, and returns JWT tokens</li>
+					</ol>
+				</div>
+
+				<div class="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+					<p class="text-xs text-blue-700"><strong>Phone-only users:</strong> Users who sign in with only a phone number are created without an email. They can later add an email via account linking. Phone auth can coexist with email/password and social login.</p>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Social Login (OAuth)</h3>

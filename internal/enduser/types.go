@@ -33,9 +33,21 @@ type AuthResponse struct {
 type User struct {
 	ID          string                 `json:"id"`
 	Email       string                 `json:"email"`
+	Phone       *string                `json:"phone,omitempty"`
 	DisplayName *string                `json:"display_name,omitempty"`
 	AvatarURL   *string                `json:"avatar_url,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	CreatedAt   time.Time              `json:"created_at"`
 	UpdatedAt   time.Time              `json:"updated_at"`
+}
+
+// SendPhoneOTPRequest is the JSON body for phone OTP initiation.
+type SendPhoneOTPRequest struct {
+	Phone string `json:"phone"`
+}
+
+// VerifyPhoneOTPRequest is the JSON body for phone OTP verification.
+type VerifyPhoneOTPRequest struct {
+	Phone string `json:"phone"`
+	Code  string `json:"code"`
 }

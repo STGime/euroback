@@ -13,6 +13,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/oauth"
+	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
@@ -28,6 +29,7 @@ type OAuthSecretLookup func(ctx context.Context, schemaName, providerName string
 type AuthService struct {
 	pool         *pgxpool.Pool
 	emailService *email.EmailService
+	smsService   *sms.Service
 	oauthSecrets OAuthSecretLookup
 }
 
@@ -39,6 +41,11 @@ func NewAuthService(pool *pgxpool.Pool) *AuthService {
 // SetEmailService sets the email service for sending verification/reset emails.
 func (s *AuthService) SetEmailService(svc *email.EmailService) {
 	s.emailService = svc
+}
+
+// SetSMSService sets the SMS service for sending phone OTP codes.
+func (s *AuthService) SetSMSService(svc *sms.Service) {
+	s.smsService = svc
 }
 
 // SetOAuthSecretLookup wires in a function that resolves encrypted OAuth
@@ -596,15 +603,35 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 	var metadataJSON []byte
 	var bannedAt *time.Time
 
-	// Try to find user by provider + provider_user_id.
-	findQ := fmt.Sprintf(
-		`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
-		 FROM %s.users
-		 WHERE provider = $1 AND provider_user_id = $2`,
-		quoteIdent(schemaName),
+	// Build identity_data snapshot from provider profile.
+	identityData, _ := json.Marshal(map[string]string{
+		"email":   userInfo.Email,
+		"name":    userInfo.Name,
+		"picture": userInfo.AvatarURL,
+	})
+
+	// Try to find user via user_identities table (supports multiple linked providers).
+	findIdentityQ := fmt.Sprintf(
+		`SELECT u.id, u.email, u.display_name, u.avatar_url, u.metadata, u.banned_at, u.created_at, u.updated_at
+		 FROM %s.user_identities i
+		 JOIN %s.users u ON u.id = i.user_id
+		 WHERE i.provider = $1 AND i.provider_user_id = $2`,
+		quoteIdent(schemaName), quoteIdent(schemaName),
 	)
-	err = s.pool.QueryRow(ctx, findQ, providerName, userInfo.ProviderID).
+	err = s.pool.QueryRow(ctx, findIdentityQ, providerName, userInfo.ProviderID).
 		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+
+	if err == pgx.ErrNoRows {
+		// Fallback: check legacy provider columns on users table.
+		findLegacyQ := fmt.Sprintf(
+			`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
+			 FROM %s.users
+			 WHERE provider = $1 AND provider_user_id = $2`,
+			quoteIdent(schemaName),
+		)
+		err = s.pool.QueryRow(ctx, findLegacyQ, providerName, userInfo.ProviderID).
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+	}
 
 	if err == pgx.ErrNoRows {
 		// Try to find existing user by email (link accounts).
@@ -646,19 +673,35 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 		} else if err != nil {
 			return nil, fmt.Errorf("query user by email: %w", err)
 		} else {
-			// Link existing account: set provider + provider_user_id.
+			// Existing user found by email — auto-confirm email.
 			_ = json.Unmarshal(metadataJSON, &user.Metadata)
-			linkQ := fmt.Sprintf(
-				`UPDATE %s.users SET provider = $1, provider_user_id = $2, email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $3`,
+			confirmQ := fmt.Sprintf(
+				`UPDATE %s.users SET email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $1`,
 				quoteIdent(schemaName),
 			)
-			_, _ = s.pool.Exec(ctx, linkQ, providerName, userInfo.ProviderID, user.ID)
+			_, _ = s.pool.Exec(ctx, confirmQ, user.ID)
 			slog.Info("end-user linked oauth account", "schema", schemaName, "user_id", user.ID, "provider", providerName)
 		}
+
+		// Create identity row (additive — doesn't overwrite other providers).
+		upsertIdentityQ := fmt.Sprintf(
+			`INSERT INTO %s.user_identities (user_id, provider, provider_user_id, identity_data, last_sign_in_at)
+			 VALUES ($1, $2, $3, $4, now())
+			 ON CONFLICT (provider, provider_user_id) DO UPDATE SET identity_data = $4, last_sign_in_at = now(), updated_at = now()`,
+			quoteIdent(schemaName),
+		)
+		_, _ = s.pool.Exec(ctx, upsertIdentityQ, user.ID, providerName, userInfo.ProviderID, identityData)
 	} else if err != nil {
-		return nil, fmt.Errorf("query user by provider: %w", err)
+		return nil, fmt.Errorf("query user by provider identity: %w", err)
 	} else {
 		_ = json.Unmarshal(metadataJSON, &user.Metadata)
+		// Update identity_data with latest profile snapshot.
+		updateIdentityQ := fmt.Sprintf(
+			`UPDATE %s.user_identities SET identity_data = $1, last_sign_in_at = now(), updated_at = now()
+			 WHERE provider = $2 AND provider_user_id = $3`,
+			quoteIdent(schemaName),
+		)
+		_, _ = s.pool.Exec(ctx, updateIdentityQ, identityData, providerName, userInfo.ProviderID)
 	}
 
 	if bannedAt != nil {
@@ -716,4 +759,113 @@ func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projec
 		slog.Error("failed to resend verification email", "error", err, "user_id", userID)
 	}
 	return nil
+}
+
+// SendPhoneOTP finds or creates a user by phone number and sends an OTP code.
+func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, phone string) error {
+	if s.smsService == nil {
+		return fmt.Errorf("sms not available: SMS provider not configured")
+	}
+
+	phone = strings.TrimSpace(phone)
+	if phone == "" || phone[0] != '+' {
+		return fmt.Errorf("phone must be in E.164 format (e.g., +33612345678)")
+	}
+
+	// Find or create user by phone number.
+	var userID string
+	findQ := fmt.Sprintf(`SELECT id FROM %s.users WHERE phone = $1`, quoteIdent(schemaName))
+	err := s.pool.QueryRow(ctx, findQ, phone).Scan(&userID)
+
+	if err == pgx.ErrNoRows {
+		// Create a new user with just a phone number (no email required).
+		insertQ := fmt.Sprintf(
+			`INSERT INTO %s.users (phone, metadata)
+			 VALUES ($1, '{}'::jsonb)
+			 RETURNING id`,
+			quoteIdent(schemaName),
+		)
+		err = s.pool.QueryRow(ctx, insertQ, phone).Scan(&userID)
+		if err != nil {
+			return fmt.Errorf("create phone user: %w", err)
+		}
+		slog.Info("end-user created via phone otp", "schema", schemaName, "user_id", userID)
+	} else if err != nil {
+		return fmt.Errorf("find user by phone: %w", err)
+	}
+
+	return s.smsService.SendOTP(ctx, schemaName, userID, phone)
+}
+
+// VerifyPhoneOTP verifies a phone OTP code and returns an auth session.
+func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret, projectID string, config tenant.AuthConfig, phone, code string) (*AuthResponse, error) {
+	if s.smsService == nil {
+		return nil, fmt.Errorf("sms not available: SMS provider not configured")
+	}
+
+	phone = strings.TrimSpace(phone)
+	code = strings.TrimSpace(code)
+
+	// Verify the OTP code.
+	userID, err := s.smsService.VerifyOTP(ctx, schemaName, code)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load the user and confirm phone.
+	var user User
+	var metadataJSON []byte
+	var bannedAt *time.Time
+	updateQ := fmt.Sprintf(
+		`UPDATE %s.users SET phone_confirmed_at = COALESCE(phone_confirmed_at, now()), last_sign_in_at = now(), updated_at = now()
+		 WHERE id = $1
+		 RETURNING id, email, phone, display_name, avatar_url, metadata, banned_at, created_at, updated_at`,
+		quoteIdent(schemaName),
+	)
+	err = s.pool.QueryRow(ctx, updateQ, userID).
+		Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("load phone user: %w", err)
+	}
+	_ = json.Unmarshal(metadataJSON, &user.Metadata)
+
+	if bannedAt != nil {
+		return nil, fmt.Errorf("account suspended")
+	}
+
+	// Create phone identity if not exists.
+	upsertIdentityQ := fmt.Sprintf(
+		`INSERT INTO %s.user_identities (user_id, provider, provider_user_id, last_sign_in_at)
+		 VALUES ($1, 'phone', $2, now())
+		 ON CONFLICT (provider, provider_user_id) DO UPDATE SET last_sign_in_at = now(), updated_at = now()`,
+		quoteIdent(schemaName),
+	)
+	_, _ = s.pool.Exec(ctx, upsertIdentityQ, user.ID, phone)
+
+	slog.Info("end-user signed in via phone otp", "schema", schemaName, "user_id", user.ID)
+
+	// Use email for JWT subject; fall back to phone if no email.
+	jwtSubject := user.Email
+	if jwtSubject == "" && user.Phone != nil {
+		jwtSubject = *user.Phone
+	}
+
+	sessionDurationSecs := config.SessionDurationSeconds()
+	accessToken, expiresIn, err := generateAccessToken(user.ID, jwtSubject, projectID, jwtSecret, sessionDurationSecs)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err := s.createRefreshToken(ctx, schemaName, user.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuthResponse{
+		AccessToken:  accessToken,
+		TokenType:    "bearer",
+		ExpiresIn:    expiresIn,
+		RefreshToken: refreshToken,
+		User:         user,
+	}, nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/plans"
+	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
@@ -33,7 +34,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -70,6 +71,9 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 	endUserAuthSvc := enduser.NewAuthService(pool)
 	if emailService != nil {
 		endUserAuthSvc.SetEmailService(emailService)
+	}
+	if smsService != nil {
+		endUserAuthSvc.SetSMSService(smsService)
 	}
 	// OAuth client_secrets live in the vault — route sign-in through the
 	// tenant service for decryption. Without this, SignInWithOAuth returns
@@ -311,6 +315,8 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/oauth/{provider}", enduser.HandleOAuthRedirect(endUserAuthSvc))
 			r.Get("/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
 			r.Post("/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
+			r.Post("/phone/send-otp", enduser.HandleSendPhoneOTP(endUserAuthSvc))
+			r.Post("/phone/verify", enduser.HandleVerifyPhoneOTP(endUserAuthSvc))
 
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {
