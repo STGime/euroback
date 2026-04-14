@@ -18,6 +18,8 @@ BEGIN
         EXECUTE format('ALTER TABLE %I.users ADD COLUMN IF NOT EXISTS phone TEXT', rec.schema_name);
         EXECUTE format('ALTER TABLE %I.users ADD COLUMN IF NOT EXISTS phone_confirmed_at TIMESTAMPTZ', rec.schema_name);
         EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON %I.users(phone) WHERE phone IS NOT NULL', rec.schema_name);
+        -- Make email nullable for phone-only users.
+        EXECUTE format('ALTER TABLE %I.users ALTER COLUMN email DROP NOT NULL', rec.schema_name);
 
         -- Create user_identities table.
         EXECUTE format(

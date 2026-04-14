@@ -85,7 +85,7 @@ func (c *Client) Send(ctx context.Context, phone, message string) error {
 		return fmt.Errorf("create sms request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.SetBasicAuth("", c.apiToken)
+	req.Header.Set("Authorization", "Token "+c.apiToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
