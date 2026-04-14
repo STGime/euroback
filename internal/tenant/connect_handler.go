@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -47,28 +46,22 @@ type ConnectColumn struct {
 // GET /platform/projects/{id}/connect
 func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		claims, ok := auth.ClaimsFromContext(r.Context())
-		if !ok {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-
 		projectID := chi.URLParam(r, "id")
 
-		// Verify ownership and get project info.
-		var name, slug, region, plan, schemaName string
-		var ownerID string
-		err := pool.QueryRow(r.Context(),
-			`SELECT p.name, p.slug, p.region, p.plan, p.schema_name, p.owner_id
-			 FROM projects p
-			 WHERE p.id = $1`, projectID,
-		).Scan(&name, &slug, &region, &plan, &schemaName, &ownerID)
-		if err != nil {
-			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+		_, _, ok := requireRole(w, r, pool, projectID, "viewer")
+		if !ok {
 			return
 		}
-		if ownerID != claims.Subject {
-			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+
+		// Get project info.
+		var name, slug, region, plan, schemaName string
+		err := pool.QueryRow(r.Context(),
+			`SELECT p.name, p.slug, p.region, p.plan, p.schema_name
+			 FROM projects p
+			 WHERE p.id = $1`, projectID,
+		).Scan(&name, &slug, &region, &plan, &schemaName)
+		if err != nil {
+			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 			return
 		}
 

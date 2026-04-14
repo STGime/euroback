@@ -107,6 +107,22 @@ export interface SignedUrlResponse {
 
 const TOKEN_KEY = 'eurobase_token';
 
+/** Parse raw API error responses into user-friendly messages. */
+function parseAPIError(status: number, body: string): string {
+	// Try to extract error message from JSON body like {"error":"email already registered"}
+	const jsonMatch = body.match(/\{"error":"(.+?)"\}/);
+	if (jsonMatch) {
+		const msg = jsonMatch[1];
+		return msg.charAt(0).toUpperCase() + msg.slice(1);
+	}
+	// Fallback: common status codes
+	if (status === 403) return 'You do not have permission to access this resource';
+	if (status === 404) return 'Resource not found';
+	if (status === 429) return 'Too many requests — please try again later';
+	if (status === 500) return 'Internal server error — please try again';
+	return `Error ${status}: ${body}`;
+}
+
 export class EurobaseAPI {
 	private baseURL: string;
 
@@ -157,7 +173,7 @@ export class EurobaseAPI {
 				}
 			}
 			const body = await res.text().catch(() => '');
-			throw new Error(`API ${res.status}: ${body || res.statusText}`);
+			throw new Error(parseAPIError(res.status, body || res.statusText));
 		}
 
 		// Handle 204 No Content
@@ -195,7 +211,7 @@ export class EurobaseAPI {
 				}
 			}
 			const body = await res.text().catch(() => '');
-			throw new Error(`API ${res.status}: ${body || res.statusText}`);
+			throw new Error(parseAPIError(res.status, body || res.statusText));
 		}
 
 		return res;
@@ -217,7 +233,7 @@ export class EurobaseAPI {
 
 		if (!res.ok) {
 			const body = await res.text().catch(() => '');
-			throw new Error(`API ${res.status}: ${body || res.statusText}`);
+			throw new Error(parseAPIError(res.status, body || res.statusText));
 		}
 
 		if (res.status === 204) return undefined as unknown as T;
