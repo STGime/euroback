@@ -1,17 +1,23 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { user } from '$lib/stores.js';
 	import { api } from '$lib/api.js';
 
 	let email = $state('');
 	let password = $state('');
-	let isSignUp = $state(false);
+	let isSignUp = $state($page.url.searchParams.get('signup') === '1');
 	let isForgotPassword = $state(false);
 	let forgotPasswordSent = $state(false);
 	let submitting = $state(false);
 	let error = $state('');
 
 	async function redirectAfterLogin() {
+		const redirectUrl = $page.url.searchParams.get('redirect');
+		if (redirectUrl) {
+			await goto(redirectUrl);
+			return;
+		}
 		try {
 			const list = await api.listProjects();
 			await goto(list.length === 0 ? '/onboarding' : '/projects');
