@@ -755,14 +755,21 @@ const {'{'} data, error {'}'} = await eb.auth.handleOAuthCallback()
 
 				<h3 class="text-lg font-semibold text-gray-900">User management features</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>User list</strong> &mdash; searchable table with email, status, and creation date</li>
+					<li><strong>User list</strong> &mdash; searchable table with email/phone, provider badges, status, and creation date</li>
+					<li><strong>Provider column</strong> &mdash; shows how each user signed up (email, google, github, linkedin, apple, phone). Users with multiple linked providers show all badges.</li>
+					<li><strong>Phone-only users</strong> &mdash; users who sign up via SMS OTP appear with their phone number instead of email</li>
 					<li><strong>Create user</strong> &mdash; manually add a user with email and password</li>
-					<li><strong>Edit user</strong> &mdash; update email, metadata, or password</li>
-					<li><strong>Suspend / reactivate</strong> &mdash; temporarily block a user from signing in</li>
+					<li><strong>Edit user</strong> &mdash; update email, display name, or metadata</li>
+					<li><strong>Suspend / reactivate</strong> &mdash; temporarily block a user from signing in (revokes all refresh tokens)</li>
 					<li><strong>Delete user</strong> &mdash; permanently remove a user account</li>
-					<li><strong>Reset password</strong> &mdash; set a new password for a user directly</li>
+					<li><strong>Reset password</strong> &mdash; set a new password for a user directly (revokes all refresh tokens)</li>
 					<li><strong>Metadata JSON</strong> &mdash; attach arbitrary JSON metadata to any user (e.g., role, department, permissions)</li>
 				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Account linking</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					When a user signs in with a social provider (Google, GitHub, etc.) using the same email as an existing account, the accounts are automatically linked. The user can then sign in with either method. All linked providers are shown in the Provider column.
+				</p>
 
 				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3">
 					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -1578,8 +1585,8 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Managing members</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>Change role</strong> &mdash; the owner can change any member's role using the dropdown in the members table</li>
-					<li><strong>Remove</strong> &mdash; admins and owners can remove members (except the owner)</li>
+					<li><strong>Change role</strong> &mdash; only the project owner can change a member's role using the dropdown in the members table</li>
+					<li><strong>Remove</strong> &mdash; only the project owner can remove members. Members cannot remove themselves.</li>
 					<li><strong>Resend invitation</strong> &mdash; if an invitation hasn't been accepted, click Resend to generate a fresh token and re-send the email</li>
 				</ul>
 
