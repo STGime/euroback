@@ -68,7 +68,9 @@
 
 	setContext('projectId', {
 		get id() { return projectId; },
-		get project() { return project; }
+		get project() { return project; },
+		updateProject(p: Project) { project = p; },
+		reload: loadProject
 	});
 </script>
 

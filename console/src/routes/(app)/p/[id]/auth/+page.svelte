@@ -2,7 +2,7 @@
 	import { getContext, onMount } from 'svelte';
 	import { api, type AuthConfig, type EmailTemplate } from '$lib/api.js';
 
-	const projectCtx: { id: string; project: import('$lib/api.js').Project | null } = getContext('projectId');
+	const projectCtx: { id: string; project: import('$lib/api.js').Project | null; updateProject: (p: import('$lib/api.js').Project) => void } = getContext('projectId');
 
 	// Tab state
 	let activeTab = $state<'settings' | 'templates'>('settings');
@@ -179,6 +179,12 @@
 				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean)
 			};
 			const updated = await api.updateProject(projectCtx.id, { auth_config: config });
+
+			// Update the project context so navigation within the same project
+			// picks up the saved auth_config without a full reload.
+			if (updated) {
+				projectCtx.updateProject(updated);
+			}
 
 			// Refresh secret_set from the server response so the UI reflects the
 			// new state (and clear the form fields so the user doesn't see their
