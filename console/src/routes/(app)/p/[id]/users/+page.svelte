@@ -360,37 +360,36 @@
 		</div>
 	{:else}
 		<div class="rounded-xl border border-gray-200 bg-white overflow-hidden">
-			<table class="w-full">
+			<table class="w-full table-fixed">
 				<thead>
 					<tr class="border-b border-gray-200 bg-gray-50/50">
-						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Email / Phone</th>
-						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Provider</th>
-						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Display Name</th>
-						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Status</th>
-						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Last Sign In</th>
-						<th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Created</th>
-						<th class="px-5 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">Actions</th>
+						<th class="w-[30%] px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Email / Phone</th>
+						<th class="w-[12%] px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Provider</th>
+						<th class="w-[10%] px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Status</th>
+						<th class="w-[14%] px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Last Sign In</th>
+						<th class="w-[12%] px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Created</th>
+						<th class="w-[22%] px-3 py-2.5 text-right text-xs font-medium uppercase tracking-wider text-gray-500">Actions</th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-100">
 					{#each users as user}
 						<tr class="hover:bg-gray-50/50 transition-colors">
-							<td class="px-5 py-3">
+							<td class="px-3 py-2.5">
 								<button
 									type="button"
-									class="cursor-pointer flex items-center gap-3 text-left"
+									class="cursor-pointer flex items-center gap-2 text-left min-w-0"
 									onclick={() => (selectedUser = selectedUser?.id === user.id ? null : user)}
 								>
-									<div class="flex h-8 w-8 items-center justify-center rounded-full {user.banned_at ? 'bg-red-100 text-red-700' : 'bg-eurobase-100 text-eurobase-700'} text-xs font-semibold">
+									<div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full {user.banned_at ? 'bg-red-100 text-red-700' : 'bg-eurobase-100 text-eurobase-700'} text-xs font-semibold">
 										{(user.email ?? user.phone ?? '?')[0].toUpperCase()}
 									</div>
-									<span class="text-sm font-medium text-gray-900">{user.email ?? user.phone ?? '—'}</span>
+									<span class="text-sm font-medium text-gray-900 truncate">{user.email ?? user.phone ?? '—'}</span>
 								</button>
 							</td>
-							<td class="px-5 py-3">
+							<td class="px-3 py-2.5">
 								<div class="flex flex-wrap gap-1">
 									{#each (user.providers?.length ? user.providers : ['email']) as provider}
-										<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium
+										<span class="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium
 											{provider === 'google' ? 'bg-blue-50 text-blue-700' :
 											 provider === 'github' ? 'bg-gray-100 text-gray-700' :
 											 provider === 'linkedin' ? 'bg-sky-50 text-sky-700' :
@@ -402,17 +401,16 @@
 									{/each}
 								</div>
 							</td>
-							<td class="px-5 py-3 text-sm text-gray-500">{user.display_name ?? '—'}</td>
-							<td class="px-5 py-3">
+							<td class="px-3 py-2.5">
 								{#if user.banned_at}
 									<span class="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">Suspended</span>
 								{:else}
 									<span class="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">Active</span>
 								{/if}
 							</td>
-							<td class="px-5 py-3 text-sm text-gray-500">{formatDateTime(user.last_sign_in_at)}</td>
-							<td class="px-5 py-3 text-sm text-gray-500">{formatDate(user.created_at)}</td>
-							<td class="px-5 py-3">
+							<td class="px-3 py-2.5 text-xs text-gray-500">{formatDateTime(user.last_sign_in_at)}</td>
+							<td class="px-3 py-2.5 text-xs text-gray-500">{formatDate(user.created_at)}</td>
+							<td class="px-3 py-2.5">
 								<div class="flex items-center justify-end gap-1">
 									<!-- Edit -->
 									<button
@@ -470,7 +468,7 @@
 						<!-- Detail row -->
 						{#if selectedUser?.id === user.id}
 							<tr>
-								<td colspan="7" class="bg-gray-50 px-5 py-4">
+								<td colspan="6" class="bg-gray-50 px-4 py-4">
 									<div class="grid grid-cols-2 gap-6">
 										<div>
 											<h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">User Details</h4>
