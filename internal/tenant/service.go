@@ -325,7 +325,7 @@ func oauthSecretVaultKey(provider string) string {
 	return "oauth." + provider + ".client_secret"
 }
 
-// UpdateAuthConfig updates the auth_config for a project, verifying ownership.
+// UpdateAuthConfig updates the auth_config for a project.
 //
 // Any client_secret values passed in the incoming config are routed through
 // the configured SecretStore (typically the vault) and stripped from the
@@ -334,20 +334,21 @@ func oauthSecretVaultKey(provider string) string {
 // can safely echo back a masked secret on save without clobbering the real one.
 // If the vault is not configured, any attempt to set a new OAuth secret fails
 // with a clear error rather than silently falling through to plaintext storage.
-func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID string, config AuthConfig) error {
+// Returns the list of OAuth provider names whose secrets were rotated.
+func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID string, config AuthConfig) (rotatedProviders []string, err error) {
 	// Resolve project schema up-front — we need it for every vault call.
 	// Access control (role check) is done by the handler before calling this
 	// method, so we only need to verify the project exists.
 	var schemaName string
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`SELECT schema_name FROM projects WHERE id = $1`,
 		projectID,
 	).Scan(&schemaName)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return fmt.Errorf("project not found")
+			return nil, fmt.Errorf("project not found")
 		}
-		return fmt.Errorf("lookup project schema: %w", err)
+		return nil, fmt.Errorf("lookup project schema: %w", err)
 	}
 
 	// Walk OAuth providers, route secrets to vault, strip from persisted config.
@@ -363,18 +364,19 @@ func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID
 		}
 
 		if s.secrets == nil || !s.secrets.Configured() {
-			return fmt.Errorf("cannot store oauth secret for %q: vault not configured (set VAULT_ENCRYPTION_KEY)", name)
+			return nil, fmt.Errorf("cannot store oauth secret for %q: vault not configured (set VAULT_ENCRYPTION_KEY)", name)
 		}
 
 		if err := s.secrets.SetRaw(ctx, schemaName, oauthSecretVaultKey(name), incoming); err != nil {
-			return fmt.Errorf("store oauth secret for %q: %w", name, err)
+			return nil, fmt.Errorf("store oauth secret for %q: %w", name, err)
 		}
+		rotatedProviders = append(rotatedProviders, name)
 	}
 
 	// Marshal the (now secret-free) config and persist to auth_config.
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("marshal auth config: %w", err)
+		return nil, fmt.Errorf("marshal auth config: %w", err)
 	}
 
 	tag, err := s.pool.Exec(ctx,
@@ -382,14 +384,14 @@ func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID
 		configJSON, projectID,
 	)
 	if err != nil {
-		return fmt.Errorf("update auth config: %w", err)
+		return nil, fmt.Errorf("update auth config: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("project not found")
+		return nil, fmt.Errorf("project not found")
 	}
 
 	slog.Info("auth config updated", "project_id", projectID)
-	return nil
+	return rotatedProviders, nil
 }
 
 // GetOAuthClientSecret returns the decrypted OAuth client_secret for a given

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -181,18 +182,27 @@ func main() {
 	limitsSvc.StartUsageAlerts(ctx, emailService)
 	slog.Info("usage alerts job started")
 
-	// ── Set up vault (encrypted secrets storage, optional) ──
+	// ── Dev mode: bypass platform auth for local testing ──
+	devMode := os.Getenv("DEV_MODE") == "true"
+
+	// ── Set up vault (encrypted secrets storage) ──
+	// Required in production — OAuth secrets and vault entries need encryption.
 	var vaultSvc *vault.VaultService
 	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
 		var vaultErr error
 		vaultSvc, vaultErr = vault.NewVaultService(pool, vaultKey)
 		if vaultErr != nil {
 			slog.Error("failed to initialize vault", "error", vaultErr)
+			if !devMode {
+				log.Fatalf("FATAL: vault initialization failed in production: %v", vaultErr)
+			}
 		} else {
 			slog.Info("vault service initialized")
 		}
+	} else if !devMode {
+		log.Fatal("FATAL: VAULT_ENCRYPTION_KEY is required in production — OAuth secrets cannot be stored without encryption")
 	} else {
-		slog.Warn("VAULT_ENCRYPTION_KEY not set, vault disabled")
+		slog.Warn("VAULT_ENCRYPTION_KEY not set, vault disabled (dev mode)")
 	}
 
 	// ── Migrate legacy plaintext OAuth secrets into the vault ──
@@ -202,9 +212,6 @@ func main() {
 			slog.Error("oauth secret migration failed", "error", err)
 		}
 	}
-
-	// ── Dev mode: bypass platform auth for local testing ──
-	devMode := os.Getenv("DEV_MODE") == "true"
 
 	// ── Set up subdomain middleware for SDK URLs ({slug}.eurobase.app) ──
 	domainSuffix := os.Getenv("DOMAIN_SUFFIX")

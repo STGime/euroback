@@ -237,7 +237,8 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			return
 		}
 
-		if err := svc.UpdateAuthConfig(r.Context(), projectID, claims.Subject, *body.AuthConfig); err != nil {
+		rotated, err := svc.UpdateAuthConfig(r.Context(), projectID, claims.Subject, *body.AuthConfig)
+		if err != nil {
 			slog.Error("update auth config failed", "error", err, "project_id", projectID)
 			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "not owned") {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
@@ -252,6 +253,14 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 				audit.ActionAuthConfigUpdated,
 				audit.WithTarget("project", projectID),
 				audit.WithIP(r.RemoteAddr))
+
+			// Log individual secret rotations for compliance.
+			for _, provider := range rotated {
+				auditSvc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+					"oauth_secret.rotated",
+					audit.WithTarget("oauth_provider", provider),
+					audit.WithIP(r.RemoteAddr))
+			}
 		}
 
 		project, err := svc.GetProject(r.Context(), projectID)
