@@ -31,6 +31,8 @@
 
 	// Auth config state (Step 2)
 	let emailPasswordEnabled = $state(true);
+	let magicLinkEnabled = $state(false);
+	let phoneEnabled = $state(false);
 	let requireEmailConfirmation = $state(false);
 	let passwordMinLength = $state(8);
 	let sessionDuration = $state('168h');
@@ -104,7 +106,7 @@
 		authError = '';
 		try {
 			const config: AuthConfig = {
-				providers: { email_password: { enabled: emailPasswordEnabled } },
+				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled }, phone: { enabled: phoneEnabled } },
 				password_min_length: passwordMinLength,
 				require_email_confirmation: requireEmailConfirmation,
 				session_duration: sessionDuration,
@@ -348,6 +350,40 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 							</button>
 						</div>
 
+						<!-- Magic Links -->
+						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Magic Links</p>
+								<p class="text-xs text-gray-500">Passwordless sign-in via email link</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={magicLinkEnabled}
+								onclick={() => magicLinkEnabled = !magicLinkEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {magicLinkEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {magicLinkEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+
+						<!-- Phone (SMS OTP) -->
+						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Phone (SMS OTP)</p>
+								<p class="text-xs text-gray-500">Sign in with phone number via SMS code</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={phoneEnabled}
+								onclick={() => phoneEnabled = !phoneEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {phoneEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {phoneEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+
 						<!-- Passkeys (coming soon) -->
 						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
 							<div>
@@ -357,13 +393,12 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 							<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
 						</div>
 
-						<!-- Social Login (coming soon) -->
-						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
+						<!-- Social Login -->
+						<div class="rounded-lg border border-gray-200 px-4 py-3">
 							<div>
-								<p class="text-sm font-medium text-gray-900">Social Login (Google, GitHub)</p>
-								<p class="text-xs text-gray-500">Let users sign in with existing accounts</p>
+								<p class="text-sm font-medium text-gray-900">Social Login (Google, GitHub, LinkedIn, Apple)</p>
+								<p class="text-xs text-gray-500">Configure OAuth providers after project creation in Auth settings</p>
 							</div>
-							<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
 						</div>
 					</div>
 				</div>
