@@ -27,6 +27,21 @@ func NewStorageHandler(s3 *S3Client) *StorageHandler {
 	return &StorageHandler{s3: s3}
 }
 
+// isAuthenticated checks whether the request has valid auth claims —
+// either platform claims (console/platform access) or end-user claims
+// (SDK access with end-user JWT). Returns the user ID and true if authenticated.
+func isAuthenticated(r *http.Request) (string, bool) {
+	// Check end-user claims first (SDK path: /v1/storage).
+	if eu, ok := auth.EndUserClaimsFromContext(r.Context()); ok && eu != nil {
+		return eu.UserID, true
+	}
+	// Fall back to platform claims (console path: /platform/.../storage).
+	if pc, ok := auth.ClaimsFromContext(r.Context()); ok && pc != nil {
+		return pc.Subject, true
+	}
+	return "", false
+}
+
 // bucketForRequest derives the tenant's S3 bucket name from the request
 // context. The bucket naming convention is "eurobase-{slug}". The slug is
 // provided via the X-Project-Slug header.
@@ -66,7 +81,7 @@ type uploadResponse struct {
 // Accepts multipart/form-data with a "file" field and an optional "key" field.
 // Streams directly to S3 without buffering the entire file in memory.
 func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
-	claims, ok := auth.ClaimsFromContext(r.Context())
+	userID, ok := isAuthenticated(r)
 	if !ok {
 		slog.Warn("storage upload called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -125,7 +140,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		"key", key,
 		"content_type", contentType,
 		"size", size,
-		"user", claims.Subject,
+		"user", userID,
 	)
 
 	if err := h.s3.UploadObject(r.Context(), bucket, key, file, contentType, size); err != nil {
@@ -151,7 +166,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 // Streams the file back to the client with the proper Content-Type and
 // Content-Length headers.
 func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
-	_, ok := auth.ClaimsFromContext(r.Context())
+	_, ok := isAuthenticated(r)
 	if !ok {
 		slog.Warn("storage download called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -200,7 +215,7 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 
 // DeleteFile handles DELETE /v1/storage/{key...}.
 func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
-	_, ok := auth.ClaimsFromContext(r.Context())
+	_, ok := isAuthenticated(r)
 	if !ok {
 		slog.Warn("storage delete called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -240,7 +255,7 @@ type listResponse struct {
 
 // ListFiles handles GET /v1/storage?prefix=...&limit=...&cursor=...
 func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
-	_, ok := auth.ClaimsFromContext(r.Context())
+	_, ok := isAuthenticated(r)
 	if !ok {
 		slog.Warn("storage list called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -300,7 +315,7 @@ type signedURLResponse struct {
 
 // GenerateSignedURL handles POST /v1/storage/signed-url.
 func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Request) {
-	_, ok := auth.ClaimsFromContext(r.Context())
+	_, ok := isAuthenticated(r)
 	if !ok {
 		slog.Warn("storage signed-url called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
