@@ -1,6 +1,7 @@
 package query
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -88,9 +89,24 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 
 // HandleSchemaChanges returns a handler that lists schema change history.
 // GET /platform/projects/{id}/schema/changes
+//
+// On each request it also backfills any tables that exist in the tenant
+// schema but have no "create_table" entry — this catches tables created
+// via CLI migrations, psql, or any path that bypasses the DDL handlers.
 func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
+
+		// Resolve tenant schema for backfill.
+		var schemaName string
+		_ = pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName)
+
+		// Backfill: find tables in the schema that have no create_table log entry.
+		if schemaName != "" {
+			backfillUnloggedTables(r.Context(), pool, projectID, schemaName)
+		}
 
 		rows, err := pool.Query(r.Context(),
 			`SELECT id, project_id, action, table_name, column_name, detail, sql_text, created_at
@@ -114,6 +130,49 @@ func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		jsonResponse(w, changes, http.StatusOK)
+	}
+}
+
+// platformTables are managed by the platform and excluded from schema change tracking.
+var platformTables = map[string]bool{
+	"users": true, "refresh_tokens": true, "email_tokens": true,
+	"storage_objects": true, "user_identities": true, "todos": true,
+}
+
+// backfillUnloggedTables discovers tables in the tenant schema that have no
+// corresponding "create_table" entry in schema_changes and inserts one.
+func backfillUnloggedTables(ctx context.Context, pool *pgxpool.Pool, projectID, schemaName string) {
+	rows, err := pool.Query(ctx,
+		`SELECT t.table_name
+		 FROM information_schema.tables t
+		 WHERE t.table_schema = $1
+		   AND t.table_type = 'BASE TABLE'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM schema_changes sc
+		       WHERE sc.project_id = $2
+		         AND sc.table_name = t.table_name
+		         AND sc.action = 'create_table'
+		   )`, schemaName, projectID)
+	if err != nil {
+		slog.Debug("backfill schema changes: query failed", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			continue
+		}
+		if platformTables[tableName] {
+			continue
+		}
+		// Insert a backfilled create_table entry.
+		_, _ = pool.Exec(ctx,
+			`INSERT INTO schema_changes (project_id, action, table_name, detail)
+			 VALUES ($1, 'create_table', $2, '{"source":"backfill"}'::jsonb)`,
+			projectID, tableName)
+		slog.Info("backfilled schema change", "project_id", projectID, "table", tableName)
 	}
 }
 
