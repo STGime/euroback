@@ -89,9 +89,26 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 	// ── Platform routes ──
 	r.Route("/platform", func(r chi.Router) {
 		// Unauthenticated: platform auth endpoints.
-		r.Post("/auth/signup", auth.HandlePlatformSignUp(platformAuthSvc))
-		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc))
-		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc))
+		// Build rate limiter callback for platform auth (avoids import cycle).
+		var platformRateCheck auth.AuthRateLimiter
+		if limiter != nil {
+			platformRateCheck = func(w http.ResponseWriter, r *http.Request, action, identifier string) bool {
+				limits := map[string]struct{ limit int; window time.Duration }{
+					"platform_signup":    {ratelimit.SignupLimit, ratelimit.SignupWindow},
+					"platform_forgot":    {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
+					"signin_fail":        {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
+					"signin_fail_record": {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
+				}
+				cfg, ok := limits[action]
+				if !ok {
+					cfg = struct{ limit int; window time.Duration }{5, 15 * time.Minute}
+				}
+				return ratelimit.CheckAuthRate(limiter, w, r.Context(), action, identifier, cfg.limit, cfg.window)
+			}
+		}
+		r.Post("/auth/signup", auth.HandlePlatformSignUp(platformAuthSvc, platformRateCheck))
+		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc, platformRateCheck))
+		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/reset-password", auth.HandlePlatformResetPassword(platformAuthSvc))
 
 		// Authenticated: account management.
@@ -308,18 +325,18 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 		// Auth endpoints (only need API key, no end-user JWT).
 		r.Route("/auth", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
-			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc))
-			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc))
+			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc, limiter))
+			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc, limiter))
 			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc))
 			r.Post("/signout", enduser.HandleSignOut(endUserAuthSvc))
-			r.Post("/forgot-password", enduser.HandleForgotPassword(endUserAuthSvc))
+			r.Post("/forgot-password", enduser.HandleForgotPassword(endUserAuthSvc, limiter))
 			r.Post("/reset-password", enduser.HandleResetPassword(endUserAuthSvc))
 			r.Post("/verify-email", enduser.HandleVerifyEmail(endUserAuthSvc))
-			r.Post("/resend-verification", enduser.HandleResendVerification(endUserAuthSvc))
-			r.Post("/request-magic-link", enduser.HandleRequestMagicLink(endUserAuthSvc))
+			r.Post("/resend-verification", enduser.HandleResendVerification(endUserAuthSvc, limiter))
+			r.Post("/request-magic-link", enduser.HandleRequestMagicLink(endUserAuthSvc, limiter))
 			r.Post("/signin-magic-link", enduser.HandleSignInWithMagicLink(endUserAuthSvc))
 			r.Get("/oauth/{provider}", enduser.HandleOAuthRedirect(endUserAuthSvc))
-			r.Post("/phone/send-otp", enduser.HandleSendPhoneOTP(endUserAuthSvc))
+			r.Post("/phone/send-otp", enduser.HandleSendPhoneOTP(endUserAuthSvc, limiter))
 			r.Post("/phone/verify", enduser.HandleVerifyPhoneOTP(endUserAuthSvc))
 
 			// GET /v1/auth/user requires end-user JWT.

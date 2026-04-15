@@ -10,16 +10,26 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/oauth"
+	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
 )
 
 // HandleSignUp returns an HTTP handler for POST /v1/auth/signup.
-func HandleSignUp(svc *AuthService) http.HandlerFunc {
+func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
 			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		// Rate limit signups by IP: 5/hour.
+		if ratelimit.CheckAuthRate(rl, w, r.Context(), "signup", ratelimit.ClientIP(r), ratelimit.SignupLimit, ratelimit.SignupWindow) {
 			return
 		}
 
@@ -48,7 +58,11 @@ func HandleSignUp(svc *AuthService) http.HandlerFunc {
 }
 
 // HandleSignIn returns an HTTP handler for POST /v1/auth/signin.
-func HandleSignIn(svc *AuthService) http.HandlerFunc {
+func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -64,9 +78,19 @@ func HandleSignIn(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
+		// Check signin failure rate limit before attempting auth.
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		if email != "" && ratelimit.CheckSigninFailRate(rl, w, r.Context(), email) {
+			return
+		}
+
 		resp, err := svc.SignIn(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req)
 		if err != nil {
 			slog.Warn("end-user signin failed", "error", err, "project_id", pc.ProjectID)
+			// Record the failure for rate limiting.
+			if email != "" {
+				ratelimit.RecordSigninFailure(rl, r.Context(), email)
+			}
 			if err.Error() == "email_not_confirmed" {
 				writeJSON(w, map[string]string{"error": "email_not_confirmed", "message": "Please verify your email address before signing in. Check your inbox."}, http.StatusForbidden)
 				return
@@ -161,7 +185,11 @@ func HandleGetUser(svc *AuthService) http.HandlerFunc {
 }
 
 // HandleForgotPassword returns an HTTP handler for POST /v1/auth/forgot-password.
-func HandleForgotPassword(svc *AuthService) http.HandlerFunc {
+func HandleForgotPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -174,6 +202,12 @@ func HandleForgotPassword(svc *AuthService) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		// Rate limit: 3 per email per 15 min.
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		if email != "" && ratelimit.CheckAuthRate(rl, w, r.Context(), "forgot_password", email, ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow) {
 			return
 		}
 
@@ -246,7 +280,11 @@ func HandleVerifyEmail(svc *AuthService) http.HandlerFunc {
 }
 
 // HandleRequestMagicLink returns an HTTP handler for POST /v1/auth/request-magic-link.
-func HandleRequestMagicLink(svc *AuthService) http.HandlerFunc {
+func HandleRequestMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -261,6 +299,12 @@ func HandleRequestMagicLink(svc *AuthService) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		// Rate limit: 3 per email per 15 min.
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		if email != "" && ratelimit.CheckAuthRate(rl, w, r.Context(), "magic_link", email, ratelimit.MagicLinkLimit, ratelimit.MagicLinkWindow) {
 			return
 		}
 
@@ -309,7 +353,11 @@ func HandleSignInWithMagicLink(svc *AuthService) http.HandlerFunc {
 }
 
 // HandleResendVerification returns an HTTP handler for POST /v1/auth/resend-verification.
-func HandleResendVerification(svc *AuthService) http.HandlerFunc {
+func HandleResendVerification(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -322,6 +370,12 @@ func HandleResendVerification(svc *AuthService) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+			return
+		}
+
+		// Rate limit: 1 per email per 5 min.
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		if email != "" && ratelimit.CheckAuthRate(rl, w, r.Context(), "resend_verify", email, ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow) {
 			return
 		}
 
@@ -508,7 +562,11 @@ func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURL, errC
 }
 
 // HandleSendPhoneOTP returns an HTTP handler for POST /v1/auth/phone/send-otp.
-func HandleSendPhoneOTP(svc *AuthService) http.HandlerFunc {
+func HandleSendPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -529,6 +587,11 @@ func HandleSendPhoneOTP(svc *AuthService) http.HandlerFunc {
 		}
 		if req.Phone == "" {
 			writeJSON(w, map[string]string{"error": "phone is required"}, http.StatusBadRequest)
+			return
+		}
+
+		// Rate limit: 3 per phone per 15 min.
+		if ratelimit.CheckAuthRate(rl, w, r.Context(), "phone_otp", req.Phone, ratelimit.PhoneOTPLimit, ratelimit.PhoneOTPWindow) {
 			return
 		}
 

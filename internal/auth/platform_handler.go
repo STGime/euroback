@@ -4,7 +4,12 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 )
+
+// AuthRateLimiter is a function that checks rate limits and writes a 429 if exceeded.
+// Returns true if the request should be blocked. Avoids import cycle with ratelimit package.
+type AuthRateLimiter func(w http.ResponseWriter, r *http.Request, action, identifier string) bool
 
 type signUpRequest struct {
 	Email    string `json:"email"`
@@ -17,8 +22,17 @@ type signInRequest struct {
 }
 
 // HandlePlatformSignUp returns an HTTP handler for POST /platform/auth/signup.
-func HandlePlatformSignUp(svc *PlatformAuthService) http.HandlerFunc {
+func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
+	var check AuthRateLimiter
+	if len(rateFn) > 0 {
+		check = rateFn[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Rate limit signups by IP: 5/hour.
+		if check != nil && check(w, r, "platform_signup", clientIP(r)) {
+			return
+		}
+
 		var req signUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -43,7 +57,11 @@ func HandlePlatformSignUp(svc *PlatformAuthService) http.HandlerFunc {
 }
 
 // HandlePlatformSignIn returns an HTTP handler for POST /platform/auth/signin.
-func HandlePlatformSignIn(svc *PlatformAuthService) http.HandlerFunc {
+func HandlePlatformSignIn(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
+	var check AuthRateLimiter
+	if len(rateFn) > 0 {
+		check = rateFn[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req signInRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -51,9 +69,19 @@ func HandlePlatformSignIn(svc *PlatformAuthService) http.HandlerFunc {
 			return
 		}
 
+		// Check signin failure rate limit before attempting auth.
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		if email != "" && check != nil && check(w, r, "signin_fail", "platform:"+email) {
+			return
+		}
+
 		resp, err := svc.SignIn(r.Context(), req.Email, req.Password)
 		if err != nil {
 			slog.Warn("platform signin failed", "error", err, "email", req.Email)
+			// Record the failure for rate limiting (call check to increment counter).
+			if email != "" && check != nil {
+				check(w, r, "signin_fail_record", "platform:"+email)
+			}
 			status := http.StatusUnauthorized
 			if isUserError(err) {
 				status = http.StatusBadRequest
@@ -190,13 +218,23 @@ func HandleDeleteAccount(svc *PlatformAuthService) http.HandlerFunc {
 }
 
 // HandlePlatformForgotPassword returns an HTTP handler for POST /platform/auth/forgot-password.
-func HandlePlatformForgotPassword(svc *PlatformAuthService) http.HandlerFunc {
+func HandlePlatformForgotPassword(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
+	var check AuthRateLimiter
+	if len(rateFn) > 0 {
+		check = rateFn[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Email string `json:"email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Rate limit: 3 per email per 15 min.
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		if email != "" && check != nil && check(w, r, "platform_forgot", email) {
 			return
 		}
 
@@ -253,4 +291,22 @@ func writeJSONError(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		for i := 0; i < len(xff); i++ {
+			if xff[i] == ',' {
+				return xff[:i]
+			}
+		}
+		return xff
+	}
+	addr := r.RemoteAddr
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[:i]
+		}
+	}
+	return addr
 }
