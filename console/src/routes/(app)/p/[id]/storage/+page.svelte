@@ -59,15 +59,45 @@
 		return items;
 	});
 
-	let folders = $derived(
-		filteredItems
-			.filter((f) => f.key.endsWith('/'))
-			.map((f) => ({ ...f, displayName: f.key.replace(currentPrefix, '').replace(/\/$/, '') }))
-	);
+	// Treat `/` as a folder separator: synthesize virtual folders from any key that
+	// contains a `/` after the current prefix. Also honour explicit folder markers
+	// (empty-file uploads with a trailing `/`) created via the "New Folder" button.
+	let folders = $derived.by(() => {
+		const seen = new Map<string, { key: string; displayName: string; size: number; last_modified: string; content_type: string }>();
+		for (const f of filteredItems) {
+			const rel = f.key.startsWith(currentPrefix) ? f.key.slice(currentPrefix.length) : f.key;
+			if (f.key.endsWith('/')) {
+				// Explicit folder marker living directly in the current prefix
+				const name = rel.replace(/\/$/, '');
+				if (name && !name.includes('/') && !seen.has(name)) {
+					seen.set(name, { key: f.key, displayName: name, size: 0, last_modified: f.last_modified, content_type: 'application/x-directory' });
+				}
+				continue;
+			}
+			const slash = rel.indexOf('/');
+			if (slash > 0) {
+				const name = rel.slice(0, slash);
+				if (!seen.has(name)) {
+					seen.set(name, {
+						key: currentPrefix + name + '/',
+						displayName: name,
+						size: 0,
+						last_modified: f.last_modified,
+						content_type: 'application/x-directory'
+					});
+				}
+			}
+		}
+		return Array.from(seen.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
+	});
 
 	let regularFiles = $derived(
 		filteredItems
-			.filter((f) => !f.key.endsWith('/'))
+			.filter((f) => {
+				if (f.key.endsWith('/')) return false;
+				const rel = f.key.startsWith(currentPrefix) ? f.key.slice(currentPrefix.length) : f.key;
+				return !rel.includes('/');
+			})
 			.map((f) => ({ ...f, displayName: f.key.replace(currentPrefix, '') }))
 	);
 
