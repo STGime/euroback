@@ -73,6 +73,26 @@ func sanitizeSessionValue(v string) string {
 	return strings.ReplaceAll(v, "'", "''")
 }
 
+// withTenantTx runs fn inside a transaction with search_path set to the
+// tenant schema. This ensures triggers and PL/pgSQL functions that use
+// unqualified table references resolve to the correct schema.
+func (e *QueryEngine) withTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+		return fmt.Errorf("set search_path: %w", err)
+	}
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // ResolvedRelation holds the resolved foreign key information for a relation.
 type ResolvedRelation struct {
 	Table            string   // related table name
@@ -384,21 +404,28 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 
 	slog.Debug("executing insert query", "sql", sql, "args_count", len(args))
 
-	rows, err := e.pool.Query(ctx, sql, args...)
-	if err != nil {
-		return nil, fmt.Errorf("execute insert: %w", err)
-	}
-	defer rows.Close()
+	var result map[string]interface{}
+	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, sql, args...)
+		if err != nil {
+			return fmt.Errorf("execute insert: %w", err)
+		}
+		defer rows.Close()
 
-	results, err := scanRows(rows)
+		results, err := scanRows(rows)
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			return fmt.Errorf("insert returned no rows")
+		}
+		result = results[0]
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if len(results) == 0 {
-		return nil, fmt.Errorf("insert returned no rows")
-	}
-
-	return results[0], nil
+	return result, nil
 }
 
 // UpdateRow builds and executes a parameterized UPDATE ... WHERE id = $1 RETURNING *.
@@ -424,21 +451,28 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	sql, args := buildUpdateQuery(schemaName, tableName, rowID, data)
 	slog.Debug("executing update query", "sql", sql, "args_count", len(args))
 
-	rows, err := e.pool.Query(ctx, sql, args...)
-	if err != nil {
-		return nil, fmt.Errorf("execute update: %w", err)
-	}
-	defer rows.Close()
+	var result map[string]interface{}
+	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, sql, args...)
+		if err != nil {
+			return fmt.Errorf("execute update: %w", err)
+		}
+		defer rows.Close()
 
-	results, err := scanRows(rows)
+		results, err := scanRows(rows)
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			return fmt.Errorf("row not found: %s", rowID)
+		}
+		result = results[0]
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if len(results) == 0 {
-		return nil, fmt.Errorf("row not found: %s", rowID)
-	}
-
-	return results[0], nil
+	return result, nil
 }
 
 // DeleteRow builds and executes a parameterized DELETE WHERE id = $1.
@@ -451,15 +485,16 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 	sql, args := buildDeleteQuery(schemaName, tableName, rowID)
 	slog.Debug("executing delete query", "sql", sql, "args_count", len(args))
 
-	tag, err := e.pool.Exec(ctx, sql, args...)
-	if err != nil {
-		return fmt.Errorf("execute delete: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("row not found: %s", rowID)
-	}
-
-	return nil
+	return e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, sql, args...)
+		if err != nil {
+			return fmt.Errorf("execute delete: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("row not found: %s", rowID)
+		}
+		return nil
+	})
 }
 
 // DeleteRows deletes multiple rows by ID using ANY($1).
@@ -473,12 +508,19 @@ func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName stri
 	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1)", qt, quoteIdent("id"))
 	slog.Debug("executing bulk delete", "sql", sql, "id_count", len(ids))
 
-	tag, err := e.pool.Exec(ctx, sql, ids)
+	var affected int64
+	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, sql, ids)
+		if err != nil {
+			return fmt.Errorf("execute bulk delete: %w", err)
+		}
+		affected = tag.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("execute bulk delete: %w", err)
+		return 0, err
 	}
-
-	return tag.RowsAffected(), nil
+	return affected, nil
 }
 
 // CallFunction calls a PostgreSQL function via SELECT schema.func(args).
