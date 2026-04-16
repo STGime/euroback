@@ -25,13 +25,13 @@ type AppleProvider struct{}
 
 func (a *AppleProvider) Name() string { return "apple" }
 
-func (a *AppleProvider) AuthURL(clientID, redirectURL, state string) string {
+func (a *AppleProvider) AuthURL(cfg AuthURLConfig) string {
 	params := url.Values{
-		"client_id":     {clientID},
-		"redirect_uri":  {redirectURL},
+		"client_id":     {cfg.ClientID},
+		"redirect_uri":  {cfg.RedirectURL},
 		"response_type": {"code"},
 		"scope":         {"name email"},
-		"state":         {state},
+		"state":         {cfg.State},
 		"response_mode": {"form_post"},
 	}
 	return "https://appleid.apple.com/auth/authorize?" + params.Encode()

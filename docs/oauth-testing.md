@@ -1,6 +1,6 @@
 # OAuth Social Login — Testing Plan
 
-Eurobase supports four OAuth providers: **Google**, **GitHub**, **LinkedIn**, and **Apple**.
+Eurobase supports five OAuth providers: **Google**, **GitHub**, **LinkedIn**, **Apple**, and **Microsoft** (Entra ID / Office 365).
 
 ## Prerequisites
 
@@ -17,10 +17,12 @@ go test ./internal/oauth/ -v
 ```
 
 Tests cover:
-- All 4 providers registered (google, github, linkedin, apple)
+- All 5 providers registered (google, github, linkedin, apple, microsoft)
 - AuthURL returns correct provider domain
 - AuthURL includes correct parameters (client_id, state, scopes)
 - Apple rejects requests without team_id/key_id
+- Microsoft embeds the configured tenant GUID in the authorize URL path
+- Microsoft multi-tenant aliases (common/organizations/consumers) skip `tid` enforcement
 - Unknown provider returns error
 
 ---
@@ -44,6 +46,11 @@ curl -s "http://localhost:8080/v1/auth/oauth/linkedin?redirect_url=http://localh
 curl -s "http://localhost:8080/v1/auth/oauth/apple?redirect_url=http://localhost:3000" \
   -H "apikey: $PUBLIC_KEY" | jq .
 # Expected: 400 {"error": "oauth provider \"apple\" is not enabled"}
+
+# Microsoft redirect — not configured
+curl -s "http://localhost:8080/v1/auth/oauth/microsoft?redirect_url=http://localhost:3000" \
+  -H "apikey: $PUBLIC_KEY" | jq .
+# Expected: 400 {"error": "oauth provider \"microsoft\" is not enabled"}
 
 # Unknown provider
 curl -s "http://localhost:8080/v1/auth/oauth/facebook?redirect_url=http://localhost:3000" \
@@ -192,6 +199,18 @@ curl -s -X POST "http://localhost:8080/v1/auth/oauth/apple/callback" \
 5. In Eurobase console Auth settings, enable Apple and fill in:
    - Service ID (Client ID), Team ID, Key ID, and paste the private key
 
+### Microsoft Setup (Entra ID / Office 365)
+1. Go to https://portal.azure.com → App registrations → New registration
+2. Set the redirect URI (type: Web): `{API_URL}/v1/auth/oauth/microsoft/callback`
+3. Copy the **Application (client) ID** and the **Directory (tenant) ID**
+4. Under *Certificates & secrets* → *New client secret*, copy the **Value** (not the Secret ID) — it is shown once
+5. Under *API permissions*, grant delegated: `openid`, `email`, `profile`, `offline_access`
+6. Choose account types:
+   - Multi-tenant + personal → leave `tenant_id` blank (or set to `common`)
+   - Work/school only → `tenant_id = organizations`
+   - Single organisation → `tenant_id = <tenant GUID>` (recommended for enterprise SSO)
+7. In Eurobase console Auth settings, enable Microsoft and fill in Client ID, Tenant ID, Client Secret
+
 ### Test flow (for each provider)
 1. Open browser: `{API_URL}/v1/auth/oauth/{provider}?redirect_url=http://localhost:3000`
    (Add `&apikey=YOUR_PUBLIC_KEY` if not using a custom domain)
@@ -216,9 +235,10 @@ curl -s "{API_URL}/platform/projects/$PROJECT_ID/users" \
 3. Toggle GitHub on → same
 4. Toggle LinkedIn on → same
 5. Toggle Apple on → shows Service ID, Team ID, Key ID, and Private Key fields with setup instructions and Apple-specific warnings
-6. Sovereignty callout appears when any OAuth is enabled
-7. Save → reload → values persist
-8. Toggle off → save → fields hidden
+6. Toggle Microsoft on → shows Client ID, Tenant ID, and Client Secret fields with Azure portal setup instructions and the EU-data-residency callout
+7. Sovereignty callout appears when any OAuth is enabled
+8. Save → reload → values persist
+9. Toggle off → save → fields hidden
 
 ## Test 7: Account linking
 

@@ -15,13 +15,13 @@ type GoogleProvider struct{}
 
 func (g *GoogleProvider) Name() string { return "google" }
 
-func (g *GoogleProvider) AuthURL(clientID, redirectURL, state string) string {
+func (g *GoogleProvider) AuthURL(cfg AuthURLConfig) string {
 	params := url.Values{
-		"client_id":     {clientID},
-		"redirect_uri":  {redirectURL},
+		"client_id":     {cfg.ClientID},
+		"redirect_uri":  {cfg.RedirectURL},
 		"response_type": {"code"},
 		"scope":         {"openid email profile"},
-		"state":         {state},
+		"state":         {cfg.State},
 	}
 	return "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
 }

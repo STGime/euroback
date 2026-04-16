@@ -15,13 +15,13 @@ type LinkedInProvider struct{}
 
 func (l *LinkedInProvider) Name() string { return "linkedin" }
 
-func (l *LinkedInProvider) AuthURL(clientID, redirectURL, state string) string {
+func (l *LinkedInProvider) AuthURL(cfg AuthURLConfig) string {
 	params := url.Values{
-		"client_id":     {clientID},
-		"redirect_uri":  {redirectURL},
+		"client_id":     {cfg.ClientID},
+		"redirect_uri":  {cfg.RedirectURL},
 		"response_type": {"code"},
 		"scope":         {"openid profile email"},
-		"state":         {state},
+		"state":         {cfg.State},
 	}
 	return "https://www.linkedin.com/oauth/v2/authorization?" + params.Encode()
 }
