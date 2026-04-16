@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { api, type TableSchema, type ColumnInfo, type RLSPolicy } from '$lib/api.js';
+	import { api, type TableSchema, type ColumnInfo, type RLSPolicy, type RLSAuditResponse } from '$lib/api.js';
 	import DataGrid from '$lib/components/DataGrid.svelte';
 	import IndexPanel from './IndexPanel.svelte';
 	import NewTableModal from './NewTableModal.svelte';
@@ -81,9 +81,23 @@
 	let hasPrev = $derived(currentOffset > 0);
 	let hasNext = $derived(currentOffset + pageSize < totalCount);
 
+	// ---- RLS audit state ----
+	let rlsAudit = $state<RLSAuditResponse | null>(null);
+	let rlsAuditDismissed = $state(false);
+
+	async function loadRLSAudit() {
+		if (!projectId) return;
+		try {
+			rlsAudit = await api.getRLSAudit(projectId);
+		} catch {
+			rlsAudit = null;
+		}
+	}
+
 	// ---- Load schema on mount ----
 	onMount(() => {
 		loadSchema();
+		loadRLSAudit();
 	});
 
 	// ---- Reload data when table selection changes ----
@@ -529,6 +543,42 @@
 		}) ?? []
 	);
 </script>
+
+{#if rlsAudit && !rlsAuditDismissed && (rlsAudit.critical_count > 0 || rlsAudit.warning_count > 0)}
+	{@const isCritical = rlsAudit.critical_count > 0}
+	<div class="mb-4 rounded-lg border px-4 py-3 flex items-start gap-3 {isCritical ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'}">
+		<svg class="h-5 w-5 shrink-0 mt-0.5 {isCritical ? 'text-red-500' : 'text-amber-500'}" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+		</svg>
+		<div class="flex-1 min-w-0 text-sm">
+			<p class="font-medium {isCritical ? 'text-red-900' : 'text-amber-900'}">
+				{#if isCritical}
+					{rlsAudit.critical_count} {rlsAudit.critical_count === 1 ? 'table has' : 'tables have'} Row-Level Security disabled
+				{:else}
+					{rlsAudit.warning_count} {rlsAudit.warning_count === 1 ? 'table has' : 'tables have'} no RLS policies
+				{/if}
+			</p>
+			<p class="mt-0.5 {isCritical ? 'text-red-700' : 'text-amber-700'}">
+				{#if isCritical}
+					End-users can read or modify these tables without restriction. Enable RLS and apply a policy preset.
+				{:else}
+					End-users cannot access these tables. Apply a policy preset, or ignore this warning if service-role-only access is intentional.
+				{/if}
+				{#each rlsAudit.entries.filter(e => e.severity !== 'ok').slice(0, 5) as entry, i}{i === 0 ? ' ' : ', '}<button type="button" class="underline hover:no-underline cursor-pointer font-mono text-xs" onclick={() => selectTableAndLoad(entry.table_name)}>{entry.table_name}</button>{/each}{#if rlsAudit.entries.filter(e => e.severity !== 'ok').length > 5}, …{/if}
+			</p>
+		</div>
+		<button
+			type="button"
+			onclick={() => { rlsAuditDismissed = true; }}
+			class="shrink-0 rounded p-1 {isCritical ? 'text-red-400 hover:bg-red-100' : 'text-amber-400 hover:bg-amber-100'} cursor-pointer"
+			aria-label="Dismiss"
+		>
+			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+			</svg>
+		</button>
+	</div>
+{/if}
 
 <div class="flex gap-6 h-[calc(100vh-13rem)] overflow-hidden">
 	<!-- Left sidebar: table list -->

@@ -336,6 +336,11 @@ export class EurobaseAPI {
 		return this.fetch<SchemaChange[]>(`/platform/projects/${projectId}/schema/changes`);
 	}
 
+	/** Get the RLS posture of every user-facing table in a project. */
+	async getRLSAudit(projectId: string): Promise<RLSAuditResponse> {
+		return this.fetch<RLSAuditResponse>(`/platform/projects/${projectId}/schema/rls-audit`);
+	}
+
 	// ---- Database methods ----
 
 	/** Get schema introspection for a project (all tables and columns). */
@@ -1271,6 +1276,20 @@ export interface SchemaChange {
 	detail: any;
 	sql_text: string | null;
 	created_at: string;
+}
+
+export interface RLSAuditEntry {
+	table_name: string;
+	rls_enabled: boolean;
+	policy_count: number;
+	severity: 'ok' | 'warning' | 'critical';
+	message: string;
+}
+
+export interface RLSAuditResponse {
+	entries: RLSAuditEntry[];
+	warning_count: number;
+	critical_count: number;
 }
 
 export interface RequestLog {

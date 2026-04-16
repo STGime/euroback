@@ -781,6 +781,89 @@ type RLSPolicy struct {
 	WithCheck  string `json:"with_check"` // WITH CHECK clause
 }
 
+// RLSAuditEntry describes the RLS posture of a single table.
+type RLSAuditEntry struct {
+	TableName   string `json:"table_name"`
+	RLSEnabled  bool   `json:"rls_enabled"`
+	PolicyCount int    `json:"policy_count"`
+	Severity    string `json:"severity"` // "ok" | "warning" | "critical"
+	Message     string `json:"message"`
+}
+
+// auditPlatformTables are tenant-schema tables managed by the platform; they
+// get their own policies during provisioning and don't need to appear in the
+// self-serve RLS audit (which flags developer-owned tables).
+var auditPlatformTables = map[string]bool{
+	"users": true, "refresh_tokens": true, "storage_objects": true,
+	"email_tokens": true, "user_identities": true, "vault_secrets": true,
+}
+
+// AuditRLS returns an RLS-posture snapshot for every user-facing table in the
+// tenant schema. Use it to surface tables where RLS is disabled or has no
+// policies — the "silent multi-tenant data leak" class of bug.
+func AuditRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]RLSAuditEntry, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT c.relname, c.relrowsecurity, COALESCE(p.policy_count, 0)
+		 FROM pg_class c
+		 JOIN pg_namespace n ON n.oid = c.relnamespace
+		 LEFT JOIN (
+		     SELECT polrelid, COUNT(*) AS policy_count
+		     FROM pg_policy
+		     GROUP BY polrelid
+		 ) p ON p.polrelid = c.oid
+		 WHERE n.nspname = $1 AND c.relkind = 'r'
+		 ORDER BY c.relname`, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("query rls audit: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]RLSAuditEntry, 0)
+	for rows.Next() {
+		var e RLSAuditEntry
+		if err := rows.Scan(&e.TableName, &e.RLSEnabled, &e.PolicyCount); err != nil {
+			return nil, fmt.Errorf("scan rls audit row: %w", err)
+		}
+		if auditPlatformTables[e.TableName] {
+			continue
+		}
+		switch {
+		case !e.RLSEnabled:
+			e.Severity = "critical"
+			e.Message = "RLS is disabled — any end-user can read or modify this table."
+		case e.PolicyCount == 0:
+			e.Severity = "warning"
+			e.Message = "RLS is enabled but no policies exist — end-users cannot access the table. Apply a policy preset or deliberately leave it service-role-only."
+		default:
+			e.Severity = "ok"
+			e.Message = ""
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// ownerColumnCandidates is the list of column names we auto-detect as the
+// owner column for the default owner_access RLS preset on CREATE TABLE.
+// First match wins.
+var ownerColumnCandidates = []string{"user_id", "owner_id", "created_by"}
+
+// detectOwnerColumn returns the first owner-style column present in the
+// provided column list, or "" if none match. Used to auto-apply the
+// owner_access preset on new tables created via the DDL endpoint.
+func detectOwnerColumn(columns []ColumnDefinition) string {
+	names := make(map[string]bool, len(columns))
+	for _, c := range columns {
+		names[strings.ToLower(c.Name)] = true
+	}
+	for _, candidate := range ownerColumnCandidates {
+		if names[candidate] {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // ListPolicies returns all RLS policies for a table.
 func ListPolicies(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]RLSPolicy, error) {
 	rows, err := pool.Query(ctx,

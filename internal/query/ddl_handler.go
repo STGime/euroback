@@ -14,9 +14,18 @@ import (
 )
 
 // CreateTableRequest is the JSON body for POST /platform/projects/{id}/schema/tables.
+//
+// RLSPreset optionally applies an RLS policy preset right after table
+// creation. If left empty, the handler auto-detects an owner-style column
+// (user_id / owner_id / created_by) and applies the "owner_access" preset
+// against it. If no such column exists, the table is created with RLS
+// enabled but no policies (deny-all to end-users) — safe by default.
+// Pass "none" to explicitly skip the auto-preset behaviour.
 type CreateTableRequest struct {
-	Name    string             `json:"name"`
-	Columns []ColumnDefinition `json:"columns"`
+	Name           string             `json:"name"`
+	Columns        []ColumnDefinition `json:"columns"`
+	RLSPreset      string             `json:"rls_preset,omitempty"`
+	RLSUserIDColum string             `json:"rls_user_id_column,omitempty"`
 }
 
 // AddColumnRequest is the JSON body for POST .../tables/{table}/columns.
@@ -85,6 +94,48 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r.Delete("/{table}/policies/{policy}", handleDropPolicy(pool))
 
 	return r
+}
+
+// HandleRLSAudit returns a handler for GET /platform/projects/{id}/schema/rls-audit.
+// It reports every user-facing table's RLS posture so the console can warn
+// developers about tables missing RLS or policies — the "silent multi-tenant
+// data leak" class of bug.
+func HandleRLSAudit(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		entries, err := AuditRLS(r.Context(), pool, schemaName)
+		if err != nil {
+			slog.Error("rls audit failed", "error", err, "schema", schemaName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		warnings := 0
+		critical := 0
+		for _, e := range entries {
+			switch e.Severity {
+			case "warning":
+				warnings++
+			case "critical":
+				critical++
+			}
+		}
+
+		jsonResponse(w, map[string]any{
+			"entries":        entries,
+			"warning_count":  warnings,
+			"critical_count": critical,
+		}, http.StatusOK)
+	}
 }
 
 // HandleSchemaChanges returns a handler that lists schema change history.
@@ -252,14 +303,47 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Apply a default RLS policy preset. RLS itself is already enabled by
+		// CreateTable; this adds a policy so end-users can actually access
+		// the table under the expected ownership model. The request-supplied
+		// preset wins; otherwise we auto-detect a user-identifier column and
+		// apply owner_access; otherwise we leave the table policy-less
+		// (deny-all to end-users — safe, but opaque to clients until the
+		// developer picks a preset). "none" explicitly skips auto-preset.
+		appliedPreset := ""
+		if req.RLSPreset != "" && req.RLSPreset != "none" {
+			userIDCol := req.RLSUserIDColum
+			if userIDCol == "" {
+				userIDCol = detectOwnerColumn(req.Columns)
+			}
+			if userIDCol == "" {
+				userIDCol = "user_id"
+			}
+			if err := ApplyPolicyPreset(r.Context(), pool, schemaName, req.Name, req.RLSPreset, userIDCol); err != nil {
+				slog.Warn("apply default rls preset failed", "error", err, "table", req.Name, "preset", req.RLSPreset)
+			} else {
+				appliedPreset = req.RLSPreset
+			}
+		} else if req.RLSPreset == "" {
+			if owner := detectOwnerColumn(req.Columns); owner != "" {
+				if err := ApplyPolicyPreset(r.Context(), pool, schemaName, req.Name, "owner_access", owner); err != nil {
+					slog.Warn("auto-apply owner_access preset failed", "error", err, "table", req.Name, "owner_column", owner)
+				} else {
+					appliedPreset = "owner_access"
+				}
+			}
+		}
+
 		logSchemaChange(pool, r, projectID, "create_table", req.Name, nil, map[string]any{
-			"columns": req.Columns,
+			"columns":        req.Columns,
+			"rls_preset":     appliedPreset,
 		})
 
-		slog.Info("table created", "schema", schemaName, "table", req.Name, "columns", len(req.Columns))
-		jsonResponse(w, map[string]string{
-			"status": "created",
-			"table":  req.Name,
+		slog.Info("table created", "schema", schemaName, "table", req.Name, "columns", len(req.Columns), "rls_preset", appliedPreset)
+		jsonResponse(w, map[string]any{
+			"status":     "created",
+			"table":      req.Name,
+			"rls_preset": appliedPreset,
 		}, http.StatusCreated)
 	}
 }

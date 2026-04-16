@@ -46,6 +46,74 @@ func TestCreateAndDropTable(t *testing.T) {
 	}
 }
 
+func TestAuditRLSFlagsTables(t *testing.T) {
+	pool, schema, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	// Table with RLS enabled + no policies → warning.
+	if err := CreateTable(ctx, pool, schema, "audit_no_policy", []ColumnDefinition{
+		{Name: "id", Type: "integer", IsPrimaryKey: true},
+		{Name: "title", Type: "text"},
+	}); err != nil {
+		t.Fatalf("CreateTable failed: %v", err)
+	}
+	defer DropTable(ctx, pool, schema, "audit_no_policy") //nolint:errcheck
+
+	// Table with RLS disabled → critical.
+	if err := CreateTable(ctx, pool, schema, "audit_rls_off", []ColumnDefinition{
+		{Name: "id", Type: "integer", IsPrimaryKey: true},
+	}); err != nil {
+		t.Fatalf("CreateTable failed: %v", err)
+	}
+	defer DropTable(ctx, pool, schema, "audit_rls_off") //nolint:errcheck
+	if _, err := pool.Exec(ctx, `ALTER TABLE `+schema+`.audit_rls_off DISABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatalf("disable rls failed: %v", err)
+	}
+
+	entries, err := AuditRLS(ctx, pool, schema)
+	if err != nil {
+		t.Fatalf("AuditRLS failed: %v", err)
+	}
+
+	byName := map[string]RLSAuditEntry{}
+	for _, e := range entries {
+		byName[e.TableName] = e
+	}
+
+	if e, ok := byName["audit_no_policy"]; !ok {
+		t.Fatal("expected audit_no_policy in audit results")
+	} else if e.Severity != "warning" {
+		t.Errorf("audit_no_policy: got severity %q, want warning", e.Severity)
+	}
+
+	if e, ok := byName["audit_rls_off"]; !ok {
+		t.Fatal("expected audit_rls_off in audit results")
+	} else if e.Severity != "critical" {
+		t.Errorf("audit_rls_off: got severity %q, want critical", e.Severity)
+	}
+}
+
+func TestDetectOwnerColumn(t *testing.T) {
+	cases := []struct {
+		name string
+		cols []ColumnDefinition
+		want string
+	}{
+		{"user_id wins", []ColumnDefinition{{Name: "id"}, {Name: "user_id"}}, "user_id"},
+		{"owner_id fallback", []ColumnDefinition{{Name: "id"}, {Name: "owner_id"}}, "owner_id"},
+		{"created_by fallback", []ColumnDefinition{{Name: "id"}, {Name: "created_by"}}, "created_by"},
+		{"none", []ColumnDefinition{{Name: "id"}, {Name: "title"}}, ""},
+		{"case insensitive", []ColumnDefinition{{Name: "User_ID"}}, "user_id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := detectOwnerColumn(tc.cols); got != tc.want {
+				t.Errorf("detectOwnerColumn = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCreateTableDuplicate(t *testing.T) {
 	pool, schema, _ := setupTestDB(t)
 	ctx := context.Background()
