@@ -28,6 +28,10 @@ type OAuthProviderConfig struct {
 	// Apple-specific fields (ignored by other providers).
 	TeamID string `json:"team_id,omitempty"`
 	KeyID  string `json:"key_id,omitempty"`
+	// Microsoft-specific (ignored by other providers). Empty, "common",
+	// "organizations", or "consumers" enable multi-tenant login; a specific
+	// Entra tenant GUID locks sign-in to one organisation.
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 // AuthConfig holds the per-project authentication configuration.

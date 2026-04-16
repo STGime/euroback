@@ -442,7 +442,12 @@ func HandleOAuthRedirect(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
-		authURL := provider.AuthURL(providerConfig.ClientID, callbackURL, encodedState)
+		authURL := provider.AuthURL(oauth.AuthURLConfig{
+			ClientID:    providerConfig.ClientID,
+			RedirectURL: callbackURL,
+			State:       encodedState,
+			TenantID:    providerConfig.TenantID,
+		})
 		http.Redirect(w, r, authURL, http.StatusFound)
 	}
 }

@@ -686,7 +686,7 @@ Body: {'{'}"phone": "+33612345678", "code": "123456"{'}'}
 				<h4 class="text-base font-semibold text-gray-900 mt-4">SDK usage</h4>
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
 					<button
-						onclick={() => copyCode("// Redirect to provider's login page\neb.auth.signInWithOAuth('google', {\n  redirectTo: 'https://myapp.com/auth/callback'\n})\n// Supported providers: 'google', 'github', 'linkedin', 'apple'\n\n// On your callback page — extract tokens from URL fragment\nconst { data, error } = await eb.auth.handleOAuthCallback()\n// data.access_token, data.user — user is now signed in", 'sdk-oauth')}
+						onclick={() => copyCode("// Redirect to provider's login page\neb.auth.signInWithOAuth('google', {\n  redirectTo: 'https://myapp.com/auth/callback'\n})\n// Supported providers: 'google', 'github', 'linkedin', 'apple', 'microsoft'\n\n// On your callback page — extract tokens from URL fragment\nconst { data, error } = await eb.auth.handleOAuthCallback()\n// data.access_token, data.user — user is now signed in", 'sdk-oauth')}
 						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
 					>
 						{copiedId === 'sdk-oauth' ? 'Copied!' : 'Copy'}
@@ -695,7 +695,7 @@ Body: {'{'}"phone": "+33612345678", "code": "123456"{'}'}
 eb.auth.signInWithOAuth('google', {'{'}
   redirectTo: 'https://myapp.com/auth/callback'
 {'}'})
-// Supported providers: 'google', 'github', 'linkedin', 'apple'
+// Supported providers: 'google', 'github', 'linkedin', 'apple', 'microsoft'
 
 // On your callback page — extract tokens from URL fragment
 const {'{'} data, error {'}'} = await eb.auth.handleOAuthCallback()

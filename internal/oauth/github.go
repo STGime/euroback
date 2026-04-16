@@ -17,12 +17,12 @@ type GitHubProvider struct{}
 
 func (g *GitHubProvider) Name() string { return "github" }
 
-func (g *GitHubProvider) AuthURL(clientID, redirectURL, state string) string {
+func (g *GitHubProvider) AuthURL(cfg AuthURLConfig) string {
 	params := url.Values{
-		"client_id":    {clientID},
-		"redirect_uri": {redirectURL},
+		"client_id":    {cfg.ClientID},
+		"redirect_uri": {cfg.RedirectURL},
 		"scope":        {"user:email"},
-		"state":        {state},
+		"state":        {cfg.State},
 	}
 	return "https://github.com/login/oauth/authorize?" + params.Encode()
 }

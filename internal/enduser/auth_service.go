@@ -594,6 +594,7 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 		RedirectURL:  redirectURL,
 		TeamID:       providerConfig.TeamID,
 		KeyID:        providerConfig.KeyID,
+		TenantID:     providerConfig.TenantID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("oauth exchange failed: %w", err)

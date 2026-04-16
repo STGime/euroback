@@ -23,6 +23,8 @@ export interface OAuthProviderConfig {
 	team_id?: string;
 	/** Apple only: Key ID for the Sign In with Apple private key. */
 	key_id?: string;
+	/** Microsoft only: Entra tenant ID. Empty / "common" / "organizations" / "consumers" for multi-tenant, or a specific tenant GUID / verified domain for single-tenant. */
+	tenant_id?: string;
 }
 
 export interface AuthConfig {

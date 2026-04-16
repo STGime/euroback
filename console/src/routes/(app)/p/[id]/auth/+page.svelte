@@ -70,6 +70,12 @@
 	let applePrivateKey = $state('');
 	let appleSecretSet = $state(false);
 	let appleSecretDirty = $state(false);
+	let microsoftEnabled = $state(false);
+	let microsoftClientId = $state('');
+	let microsoftClientSecret = $state('');
+	let microsoftTenantId = $state('');
+	let microsoftSecretSet = $state(false);
+	let microsoftSecretDirty = $state(false);
 	let saving = $state(false);
 	let saveMessage = $state('');
 	let saveError = $state('');
@@ -123,6 +129,14 @@
 				applePrivateKey = '';
 				appleSecretDirty = false;
 			}
+			if (oauthCfg?.microsoft) {
+				microsoftEnabled = oauthCfg.microsoft.enabled ?? false;
+				microsoftClientId = oauthCfg.microsoft.client_id ?? '';
+				microsoftTenantId = oauthCfg.microsoft.tenant_id ?? '';
+				microsoftSecretSet = oauthCfg.microsoft.secret_set ?? false;
+				microsoftClientSecret = '';
+				microsoftSecretDirty = false;
+			}
 		}
 	});
 
@@ -164,6 +178,14 @@
 			if (appleSecretDirty && applePrivateKey) {
 				appleProvider.client_secret = applePrivateKey;
 			}
+			const microsoftProvider: Record<string, any> = {
+				enabled: microsoftEnabled,
+				client_id: microsoftClientId,
+				tenant_id: microsoftTenantId
+			};
+			if (microsoftSecretDirty && microsoftClientSecret) {
+				microsoftProvider.client_secret = microsoftClientSecret;
+			}
 
 			const config: AuthConfig = {
 				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled }, phone: { enabled: phoneEnabled } },
@@ -171,7 +193,8 @@
 					google: googleProvider as any,
 					github: githubProvider as any,
 					linkedin: linkedinProvider as any,
-					apple: appleProvider as any
+					apple: appleProvider as any,
+					microsoft: microsoftProvider as any
 				},
 				password_min_length: passwordMinLength,
 				require_email_confirmation: requireEmailConfirmation,
@@ -202,6 +225,9 @@
 			if (oauthCfg?.apple) {
 				appleSecretSet = oauthCfg.apple.secret_set ?? appleSecretSet;
 			}
+			if (oauthCfg?.microsoft) {
+				microsoftSecretSet = oauthCfg.microsoft.secret_set ?? microsoftSecretSet;
+			}
 			googleClientSecret = '';
 			googleSecretDirty = false;
 			githubClientSecret = '';
@@ -210,6 +236,8 @@
 			linkedinSecretDirty = false;
 			applePrivateKey = '';
 			appleSecretDirty = false;
+			microsoftClientSecret = '';
+			microsoftSecretDirty = false;
 
 			saveMessage = 'Auth configuration saved.';
 			setTimeout(() => { saveMessage = ''; }, 3000);
@@ -769,7 +797,75 @@
 						{/if}
 					</div>
 
-					{#if googleEnabled || githubEnabled || linkedinEnabled || appleEnabled}
+					<!-- Microsoft / Office 365 OAuth -->
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Microsoft</p>
+								<p class="text-xs text-gray-500">Sign in with Microsoft / Office 365 / Entra ID</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={microsoftEnabled}
+								onclick={() => microsoftEnabled = !microsoftEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {microsoftEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {microsoftEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
+						</div>
+						{#if microsoftEnabled}
+							<div class="mt-3 space-y-3">
+								<div>
+									<label for="microsoft-client-id" class="block text-xs font-medium text-gray-700">Application (client) ID</label>
+									<input id="microsoft-client-id" type="text" bind:value={microsoftClientId} placeholder="00000000-0000-0000-0000-000000000000" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+								</div>
+								<div>
+									<label for="microsoft-tenant-id" class="block text-xs font-medium text-gray-700">
+										Tenant ID
+										<span class="ml-1 text-gray-400 font-normal">(leave blank for multi-tenant + personal accounts)</span>
+									</label>
+									<input id="microsoft-tenant-id" type="text" bind:value={microsoftTenantId} placeholder="common  |  organizations  |  consumers  |  &lt;tenant-guid&gt;" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors font-mono" />
+									<p class="mt-1 text-xs text-gray-500">Use a specific tenant GUID to restrict sign-in to a single organisation (enterprise SSO).</p>
+								</div>
+								<div>
+									<label for="microsoft-client-secret" class="block text-xs font-medium text-gray-700">
+										Client secret
+										{#if microsoftSecretSet && !microsoftSecretDirty}
+											<span class="ml-2 inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700 border border-green-200">
+												<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+												Encrypted in vault
+											</span>
+										{/if}
+									</label>
+									<input
+										id="microsoft-client-secret"
+										type="password"
+										bind:value={microsoftClientSecret}
+										oninput={() => microsoftSecretDirty = true}
+										placeholder={microsoftSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'Client secret value (not the secret ID)'}
+										class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+									/>
+								</div>
+								<div class="rounded-lg bg-eurobase-50 border border-eurobase-100 p-3">
+									<p class="text-xs font-medium text-eurobase-800">Setup instructions</p>
+									<ol class="mt-1 text-xs text-eurobase-700 list-decimal list-inside space-y-1">
+										<li>Go to <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener" class="underline">Azure Portal → App registrations</a> and create a new registration</li>
+										<li>Set the redirect URI (type: Web): your Eurobase API URL + <code class="bg-eurobase-100 px-1 rounded">/v1/auth/oauth/microsoft/callback</code></li>
+										<li>Copy the <strong>Application (client) ID</strong> into the field above</li>
+										<li>Copy the <strong>Directory (tenant) ID</strong> if restricting to one organisation, otherwise leave blank</li>
+										<li>Under <em>Certificates &amp; secrets</em> → <em>New client secret</em>, copy the <strong>Value</strong> (not the Secret ID) into the field above</li>
+										<li>Under <em>API permissions</em>, ensure the delegated permissions <code class="bg-eurobase-100 px-1 rounded">openid</code>, <code class="bg-eurobase-100 px-1 rounded">email</code>, <code class="bg-eurobase-100 px-1 rounded">profile</code>, <code class="bg-eurobase-100 px-1 rounded">offline_access</code> are granted</li>
+									</ol>
+								</div>
+								<div class="rounded-lg bg-amber-50 border border-amber-200 p-3">
+									<p class="text-xs text-amber-700">Sign-in redirects transit Microsoft infrastructure. User records and application data remain in Eurobase (Scaleway fr-par). For strict EU-only authentication, restrict to a single Entra tenant hosted in the EU geo.</p>
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					{#if googleEnabled || githubEnabled || linkedinEnabled || appleEnabled || microsoftEnabled}
 						<div class="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
 							<p class="text-xs text-blue-700">Social login uses third-party providers only to verify user identity. No application data is shared. All user records remain in EU infrastructure.</p>
 						</div>
