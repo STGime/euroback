@@ -22,9 +22,19 @@ type PlatformEmailer interface {
 }
 
 type PlatformAuthService struct {
-	pool         *pgxpool.Pool
-	jwtSecret    []byte
-	emailService PlatformEmailer
+	pool              *pgxpool.Pool
+	jwtSecret         []byte
+	emailService      PlatformEmailer
+	AllowPublicSignup bool // when false, only emails in platform_allowlist can sign up
+}
+
+// WaitlistError is returned when a signup attempt is blocked by the allowlist.
+type WaitlistError struct {
+	Email string
+}
+
+func (e *WaitlistError) Error() string {
+	return "waitlist"
 }
 
 // SetEmailService sets the email service for password reset emails.
@@ -66,6 +76,8 @@ func NewPlatformAuthService(pool *pgxpool.Pool, jwtSecret string) *PlatformAuthS
 }
 
 // SignUp creates a new platform user with email + bcrypt-hashed password.
+// When AllowPublicSignup is false (default), only emails present in the
+// platform_allowlist table can register. Others receive a waitlist error.
 func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string) (*PlatformAuthResponse, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
@@ -73,6 +85,17 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	}
 	if len(password) < 8 {
 		return nil, fmt.Errorf("password must be at least 8 characters")
+	}
+
+	if !s.AllowPublicSignup {
+		var allowed bool
+		_ = s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM platform_allowlist WHERE email = $1)`,
+			email,
+		).Scan(&allowed)
+		if !allowed {
+			return nil, &WaitlistError{Email: email}
+		}
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)

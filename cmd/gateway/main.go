@@ -70,6 +70,10 @@ func main() {
 
 	// ── Set up platform auth ──
 	platformAuthSvc := auth.NewPlatformAuthService(pool, platformJWTSecret)
+	platformAuthSvc.AllowPublicSignup = os.Getenv("ALLOW_PUBLIC_SIGNUP") == "true"
+	if !platformAuthSvc.AllowPublicSignup {
+		slog.Info("signup gated behind platform_allowlist (set ALLOW_PUBLIC_SIGNUP=true to open)")
+	}
 	platformAuth := auth.NewPlatformAuthMiddleware(platformAuthSvc)
 
 	// ── Set up rate limiter (optional — degrades gracefully) ──

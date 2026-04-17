@@ -41,6 +41,16 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 
 		resp, err := svc.SignUp(r.Context(), req.Email, req.Password)
 		if err != nil {
+			if _, ok := err.(*WaitlistError); ok {
+				slog.Info("signup blocked by allowlist", "email", req.Email)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "waitlist",
+					"message": "Eurobase is currently in closed beta. You've been added to the waitlist and we'll notify you when your spot opens up.",
+				})
+				return
+			}
 			slog.Warn("platform signup failed", "error", err)
 			status := http.StatusInternalServerError
 			if isUserError(err) {

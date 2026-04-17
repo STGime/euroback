@@ -13,6 +13,7 @@
 	let forgotPasswordSent = $state(false);
 	let submitting = $state(false);
 	let error = $state('');
+	let waitlisted = $state(false);
 
 	function parseError(raw: string): string {
 		const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
@@ -59,7 +60,13 @@
 				await redirectAfterLogin();
 			}
 		} catch (err) {
-			error = parseError(err instanceof Error ? err.message : 'Authentication failed');
+			const msg = err instanceof Error ? err.message : 'Authentication failed';
+			if (msg.toLowerCase().includes('waitlist')) {
+				waitlisted = true;
+				error = '';
+			} else {
+				error = parseError(msg);
+			}
 		} finally {
 			submitting = false;
 		}
@@ -165,7 +172,18 @@
 					{isForgotPassword ? 'Enter your email to receive a reset link' : isSignUp ? 'Get started with Eurobase' : 'Access your Eurobase console'}
 				</p>
 
-				{#if error}
+				{#if waitlisted}
+					<div class="mt-4 rounded-lg bg-eurobase-50 border border-eurobase-200 p-4 text-sm text-eurobase-800">
+						<div class="flex items-center gap-2 font-medium">
+							<svg class="h-5 w-5 text-eurobase-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+							</svg>
+							You're on the waitlist
+						</div>
+						<p class="mt-2 text-eurobase-700">Eurobase is currently in closed beta. We've noted your interest and will notify you at <strong>{email}</strong> when your spot opens up.</p>
+						<button onclick={() => { waitlisted = false; isSignUp = false; email = ''; password = ''; confirmPassword = ''; }} class="mt-3 text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer underline">Already have an account? Sign in</button>
+					</div>
+				{:else if error}
 					<div class="mt-4 flex items-start gap-2.5 rounded-lg bg-red-50 border border-red-200 p-3">
 						<svg class="h-4 w-4 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
