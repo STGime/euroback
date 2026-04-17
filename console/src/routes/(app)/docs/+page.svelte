@@ -414,7 +414,7 @@ const eb = createClient({'{'}
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 					<button
-						onclick={() => copyCode("// Insert a client\nconst { data, error } = await eb.db\n  .from('clients')\n  .insert({ name: 'Acme Legal', email: 'info@acmelegal.eu', firm_name: 'Acme Legal GmbH' })\n\n// Read all clients\nconst { data: clients } = await eb.db\n  .from('clients')\n  .select('*')\n\n// Update a client\nawait eb.db\n  .from('clients')\n  .update({ plan: 'pro' })\n  .eq('email', 'info@acmelegal.eu')\n\n// Delete a client\nawait eb.db\n  .from('clients')\n  .delete()\n  .eq('id', 'some-uuid')", 'sdk-crud')}
+						onclick={() => copyCode("// Insert a client\nconst { data, error } = await eb.db\n  .from('clients')\n  .insert({ name: 'Acme Legal', email: 'info@acmelegal.eu', firm_name: 'Acme Legal GmbH' })\n\n// Read all clients\nconst { data: clients } = await eb.db\n  .from('clients')\n  .select('*')\n\n// Update a client by ID\nawait eb.db\n  .from('clients')\n  .update('some-uuid', { plan: 'pro' })\n\n// Delete a client by ID\nawait eb.db\n  .from('clients')\n  .delete('some-uuid')", 'sdk-crud')}
 						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
 					>
 						{copiedId === 'sdk-crud' ? 'Copied!' : 'Copy'}
@@ -429,17 +429,15 @@ const {'{'} data: clients {'}'} = await eb.db
   .from('clients')
   .select('*')
 
-// Update a client
+// Update a client by ID
 await eb.db
   .from('clients')
-  .update({'{'} plan: 'pro' {'}'})
-  .eq('email', 'info@acmelegal.eu')
+  .update('some-uuid', {'{'} plan: 'pro' {'}'})
 
-// Delete a client
+// Delete a client by ID
 await eb.db
   .from('clients')
-  .delete()
-  .eq('id', 'some-uuid')</pre>
+  .delete('some-uuid')</pre>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Schema management</h3>
@@ -478,23 +476,29 @@ await eb.db
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 					<button
-						onclick={() => copyCode("// Upload a file\nconst file = document.getElementById('fileInput').files[0]\nconst { data, error } = await eb.storage\n  .upload('contracts/nda-acme.pdf', file)\n\n// Get a signed URL (1 hour expiry)\nconst { url } = await eb.storage\n  .getSignedUrl('contracts/nda-acme.pdf', { expiresIn: 3600 })\n\n// List files in a folder\nconst { data: files } = await eb.storage\n  .list('contracts/')", 'sdk-storage')}
+						onclick={() => copyCode("// Upload a file\nconst file = document.getElementById('fileInput').files[0]\nconst { key, error } = await eb.storage\n  .upload('contracts/nda-acme.pdf', file)\n\n// Get a signed download URL (1 hour expiry)\nconst { url } = await eb.storage\n  .createSignedUrl('contracts/nda-acme.pdf', 'download', { expiresIn: 3600 })\n\n// List files in a folder\nconst { objects } = await eb.storage\n  .list({ prefix: 'contracts/' })\n\n// Download a file\nconst blob = await eb.storage.download('contracts/nda-acme.pdf')\n\n// Delete a file\nawait eb.storage.remove('contracts/nda-acme.pdf')", 'sdk-storage')}
 						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
 					>
 						{copiedId === 'sdk-storage' ? 'Copied!' : 'Copy'}
 					</button>
 					<pre>// Upload a file
 const file = document.getElementById('fileInput').files[0]
-const {'{'} data, error {'}'} = await eb.storage
+const {'{'} key, error {'}'} = await eb.storage
   .upload('contracts/nda-acme.pdf', file)
 
-// Get a signed URL (1 hour expiry)
+// Get a signed download URL (1 hour expiry)
 const {'{'} url {'}'} = await eb.storage
-  .getSignedUrl('contracts/nda-acme.pdf', {'{'} expiresIn: 3600 {'}'})
+  .createSignedUrl('contracts/nda-acme.pdf', 'download', {'{'} expiresIn: 3600 {'}'})
 
 // List files in a folder
-const {'{'} data: files {'}'} = await eb.storage
-  .list('contracts/')</pre>
+const {'{'} objects {'}'} = await eb.storage
+  .list({'{'} prefix: 'contracts/' {'}'})
+
+// Download a file
+const blob = await eb.storage.download('contracts/nda-acme.pdf')
+
+// Delete a file
+await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 				</div>
 
 				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3">
