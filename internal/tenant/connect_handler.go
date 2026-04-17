@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -20,6 +21,7 @@ type ConnectInfo struct {
 	APIURL      string            `json:"api_url"`
 	Region      string            `json:"region"`
 	Plan        string            `json:"plan"`
+	DatabaseURL string            `json:"database_url,omitempty"`
 	Tables      []ConnectTable    `json:"tables"`
 	ClaudeMD    string            `json:"claude_md"`
 	CursorRules string            `json:"cursor_rules"`
@@ -161,6 +163,7 @@ curl -s '%s/v1/db/todos' \
 			APIURL:      apiURL,
 			Region:      region,
 			Plan:        plan,
+			DatabaseURL: os.Getenv("DATABASE_URL"),
 			Tables:      tables,
 			ClaudeMD:    claudeMD,
 			CursorRules: cursorRules,

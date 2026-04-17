@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -75,69 +76,140 @@ func migrationsCreateCmd() *cobra.Command {
 }
 
 func migrationsUpCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "up",
-		Short: "Show command to run migrations up",
+	var dryRun bool
+	var dbURL string
+	cmd := &cobra.Command{
+		Use:   "up [N]",
+		Short: "Run pending migrations (or show the command with --dry-run)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := LoadConfig()
-			if err != nil {
-				return err
+			connStr := dbURL
+			if connStr == "" {
+				connStr = os.Getenv("DATABASE_URL")
 			}
-			if err := RequireProject(cfg); err != nil {
-				return err
+			if connStr == "" {
+				cfg, err := LoadConfig()
+				if err != nil {
+					return err
+				}
+				if err := RequireProject(cfg); err != nil {
+					return err
+				}
+				client, err := NewClientFromConfig()
+				if err != nil {
+					return err
+				}
+				connStr, err = getConnectionString(client, cfg)
+				if err != nil {
+					PrintWarning("Could not fetch connection string: " + err.Error())
+					fmt.Println("\nRun manually:")
+					fmt.Println("  migrate -path ./migrations -database \"$DATABASE_URL\" up")
+					return nil
+				}
 			}
 
-			client, err := NewClientFromConfig()
-			if err != nil {
-				return err
+			migrateArgs := []string{"-path", "./migrations", "-database", connStr, "up"}
+			if len(args) > 0 {
+				migrateArgs = append(migrateArgs, args[0])
 			}
 
-			connStr, err := getConnectionString(client, cfg)
-			if err != nil {
-				PrintWarning("Could not fetch connection string: " + err.Error())
-				fmt.Println("\nRun manually:")
-				fmt.Println("  migrate -path ./migrations -database \"$DATABASE_URL\" up")
+			if dryRun {
+				fmt.Println("Run the following command:")
+				fmt.Printf("  migrate %s\n", strings.Join(migrateArgs, " "))
 				return nil
 			}
 
-			fmt.Println("Run the following command:")
-			fmt.Printf("  migrate -path ./migrations -database \"%s\" up\n", connStr)
+			migrateBin, err := exec.LookPath("migrate")
+			if err != nil {
+				PrintWarning("'migrate' CLI not found in PATH. Install it:")
+				fmt.Println("  brew install golang-migrate")
+				fmt.Println("\nOr run manually:")
+				fmt.Printf("  migrate %s\n", strings.Join(migrateArgs, " "))
+				return nil
+			}
+
+			c := exec.Command(migrateBin, migrateArgs...)
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			if err := c.Run(); err != nil {
+				return fmt.Errorf("migrate failed: %w", err)
+			}
+			PrintSuccess("Migrations applied successfully")
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the command instead of running it")
+	cmd.Flags().StringVar(&dbURL, "database", "", "Database URL (overrides API lookup and $DATABASE_URL)")
+	return cmd
 }
 
 func migrationsDownCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "down",
-		Short: "Show command to run migrations down",
+	var dryRun bool
+	var dbURL string
+	cmd := &cobra.Command{
+		Use:   "down [N]",
+		Short: "Roll back migrations (default: 1)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := LoadConfig()
-			if err != nil {
-				return err
+			connStr := dbURL
+			if connStr == "" {
+				connStr = os.Getenv("DATABASE_URL")
 			}
-			if err := RequireProject(cfg); err != nil {
-				return err
+			if connStr == "" {
+				cfg, err := LoadConfig()
+				if err != nil {
+					return err
+				}
+				if err := RequireProject(cfg); err != nil {
+					return err
+				}
+				client, err := NewClientFromConfig()
+				if err != nil {
+					return err
+				}
+				connStr, err = getConnectionString(client, cfg)
+				if err != nil {
+					PrintWarning("Could not fetch connection string: " + err.Error())
+					fmt.Println("\nRun manually:")
+					fmt.Println("  migrate -path ./migrations -database \"$DATABASE_URL\" down 1")
+					return nil
+				}
 			}
 
-			client, err := NewClientFromConfig()
-			if err != nil {
-				return err
+			steps := "1"
+			if len(args) > 0 {
+				steps = args[0]
 			}
+			migrateArgs := []string{"-path", "./migrations", "-database", connStr, "down", steps}
 
-			connStr, err := getConnectionString(client, cfg)
-			if err != nil {
-				PrintWarning("Could not fetch connection string: " + err.Error())
-				fmt.Println("\nRun manually:")
-				fmt.Println("  migrate -path ./migrations -database \"$DATABASE_URL\" down 1")
+			if dryRun {
+				fmt.Println("Run the following command:")
+				fmt.Printf("  migrate %s\n", strings.Join(migrateArgs, " "))
 				return nil
 			}
 
-			fmt.Println("Run the following command:")
-			fmt.Printf("  migrate -path ./migrations -database \"%s\" down 1\n", connStr)
+			migrateBin, err := exec.LookPath("migrate")
+			if err != nil {
+				PrintWarning("'migrate' CLI not found in PATH. Install it:")
+				fmt.Println("  brew install golang-migrate")
+				fmt.Println("\nOr run manually:")
+				fmt.Printf("  migrate %s\n", strings.Join(migrateArgs, " "))
+				return nil
+			}
+
+			c := exec.Command(migrateBin, migrateArgs...)
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			if err := c.Run(); err != nil {
+				return fmt.Errorf("migrate failed: %w", err)
+			}
+			PrintSuccess("Migration rolled back successfully")
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the command instead of running it")
+	cmd.Flags().StringVar(&dbURL, "database", "", "Database URL (overrides API lookup and $DATABASE_URL)")
+	return cmd
 }
 
 func migrationsStatusCmd() *cobra.Command {
