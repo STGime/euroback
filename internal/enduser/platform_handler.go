@@ -62,6 +62,7 @@ func PlatformRoutes(pool *pgxpool.Pool) chi.Router {
 	r.Post("/{userId}/suspend", handleSuspendUser(pool))
 	r.Delete("/{userId}/suspend", handleUnsuspendUser(pool))
 	r.Post("/{userId}/reset-password", handleResetPassword(pool))
+	r.Get("/{userId}/export", HandleGDPRExport(pool))
 	return r
 }
 

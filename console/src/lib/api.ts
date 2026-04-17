@@ -753,6 +753,12 @@ export class EurobaseAPI {
 		});
 	}
 
+	/** GDPR Article 15 — export all personal data for an end-user. */
+	async exportEndUserData(projectId: string, userId: string): Promise<Blob> {
+		const res = await this.rawFetch(`/platform/projects/${projectId}/users/${userId}/export`);
+		return res.blob();
+	}
+
 	// ---- Cron Job methods ----
 
 	async listCronJobs(projectId: string): Promise<CronJob[]> {

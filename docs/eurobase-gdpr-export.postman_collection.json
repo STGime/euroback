@@ -1,0 +1,150 @@
+{
+	"info": {
+		"name": "Eurobase GDPR Data Export (Article 15)",
+		"description": "Tests for the GDPR Article 15 per-user data export endpoint.\n\n## Setup\n\n1. Gateway running\n2. `platform_token` and `project_id` set\n3. At least one end-user exists (set `user_id` variable)\n\n## Variables\n\n- `base_url` — gateway base URL (e.g. http://localhost:8080)\n- `platform_token` — platform auth JWT\n- `project_id` — target project UUID\n- `user_id` — end-user UUID to export",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:8080" },
+		{ "key": "platform_token", "value": "" },
+		{ "key": "project_id", "value": "" },
+		{ "key": "user_id", "value": "" }
+	],
+	"item": [
+		{
+			"name": "Phase 1 — Auth & Validation",
+			"item": [
+				{
+					"name": "E1.1 Export without auth returns 401",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 401', () => pm.response.to.have.status(401));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id}}/export",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id}}", "export"]
+						}
+					}
+				},
+				{
+					"name": "E1.2 Export non-existent user returns 404",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 404', () => pm.response.to.have.status(404));"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/00000000-0000-0000-0000-000000000000/export",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "00000000-0000-0000-0000-000000000000", "export"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 2 — Successful Export",
+			"item": [
+				{
+					"name": "E2.1 Export existing user returns complete data",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"",
+						"pm.test('Has export metadata', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('export_version', '1.0');",
+						"    pm.expect(json).to.have.property('exported_at');",
+						"    pm.expect(json).to.have.property('project_id');",
+						"});",
+						"",
+						"pm.test('Has user profile', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('user');",
+						"    pm.expect(json.user).to.have.property('id');",
+						"    pm.expect(json.user).to.have.property('email');",
+						"    pm.expect(json.user).to.have.property('created_at');",
+						"    pm.expect(json.user).to.have.property('metadata');",
+						"    pm.expect(json.user).to.not.have.property('password_hash');",
+						"});",
+						"",
+						"pm.test('Has identities array', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('identities');",
+						"    pm.expect(json.identities).to.be.an('array');",
+						"});",
+						"",
+						"pm.test('Has storage_objects array', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('storage_objects');",
+						"    pm.expect(json.storage_objects).to.be.an('array');",
+						"});",
+						"",
+						"pm.test('Has refresh_tokens array', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('refresh_tokens');",
+						"    pm.expect(json.refresh_tokens).to.be.an('array');",
+						"});",
+						"",
+						"pm.test('Has user_data object', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.have.property('user_data');",
+						"    pm.expect(json.user_data).to.be.an('object');",
+						"});",
+						"",
+						"pm.test('No sensitive fields leaked', () => {",
+						"    const text = pm.response.text();",
+						"    pm.expect(text).to.not.include('password_hash');",
+						"    pm.expect(text).to.not.include('token_hash');",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/users/{{user_id}}/export",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "users", "{{user_id}}", "export"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Phase 3 — Audit Trail",
+			"item": [
+				{
+					"name": "E3.1 Audit log has data.exported entry",
+					"event": [{ "listen": "test", "script": { "exec": [
+						"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+						"",
+						"pm.test('Has data.exported entry', () => {",
+						"    const json = pm.response.json();",
+						"    pm.expect(json).to.be.an('array');",
+						"    const exportEntry = json.find(e => e.action === 'data.exported');",
+						"    pm.expect(exportEntry).to.not.be.undefined;",
+						"    pm.expect(exportEntry.target_type).to.eql('user');",
+						"    pm.expect(exportEntry.target_id).to.eql(pm.variables.get('user_id'));",
+						"});"
+					], "type": "text/javascript" }}],
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{platform_token}}" }],
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/compliance/audit-log?action=data.exported&limit=10",
+							"host": ["{{base_url}}"],
+							"path": ["platform", "projects", "{{project_id}}", "compliance", "audit-log"],
+							"query": [
+								{ "key": "action", "value": "data.exported" },
+								{ "key": "limit", "value": "10" }
+							]
+						}
+					}
+				}
+			]
+		}
+	]
+}

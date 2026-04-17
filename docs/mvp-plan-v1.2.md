@@ -905,7 +905,7 @@ on push to main:
 | Team collaboration / RBAC | 1 week | Next |
 | Built-in automations (Layer 1 — token cleanup, usage alerts) | 3 days | Next |
 | Audit log | 3 days | Planned |
-| GDPR data export (Article 15 — one-click per-user export) | 3 days | Planned |
+| GDPR data export (Article 15 — one-click per-user export) | 3 days | Done |
 | Encrypt OAuth secrets at rest (reuse vault AES-256-GCM) | 3 days | Planned |
 
 ### Sprint 7: Monetization (After Sprint 6)

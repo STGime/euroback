@@ -45,6 +45,9 @@
 	let deleteConfirmUser: EndUser | null = $state(null);
 	let deleting = $state(false);
 
+	// GDPR export
+	let exporting = $state(false);
+
 	// Detail view
 	let selectedUser: EndUser | null = $state(null);
 
@@ -212,6 +215,28 @@
 			await loadUsers();
 		} catch { /* ignore */ } finally {
 			deleting = false;
+		}
+	}
+
+	async function handleExportUserData(user: EndUser) {
+		if (!projectId) return;
+		exporting = true;
+		try {
+			const blob = await api.exportEndUserData(projectId, user.id);
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			const email = user.email ?? user.id;
+			const date = new Date().toISOString().slice(0, 10);
+			a.download = `${email}_gdpr_export_${date}.json`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		} catch (err) {
+			alert(err instanceof Error ? err.message : 'Export failed');
+		} finally {
+			exporting = false;
 		}
 	}
 
@@ -432,6 +457,18 @@
 									>
 										<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 											<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
+										</svg>
+									</button>
+									<!-- GDPR Export -->
+									<button
+										type="button"
+										class="cursor-pointer rounded p-1.5 text-gray-300 hover:bg-eurobase-50 hover:text-eurobase-600 transition-colors"
+										onclick={() => handleExportUserData(user)}
+										disabled={exporting}
+										title="Export user data (GDPR)"
+									>
+										<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
 										</svg>
 									</button>
 									<!-- Suspend/unsuspend -->
