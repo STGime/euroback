@@ -21,11 +21,17 @@ import (
 // against it. If no such column exists, the table is created with RLS
 // enabled but no policies (deny-all to end-users) — safe by default.
 // Pass "none" to explicitly skip the auto-preset behaviour.
+//
+// DisableRLS explicitly turns RLS OFF after creation. This is an opt-out
+// for developers who know they want a public table with no row-level
+// filtering. The response includes a top-level "warning" when this is set
+// so the client (console or SDK) can surface the risk.
 type CreateTableRequest struct {
 	Name           string             `json:"name"`
 	Columns        []ColumnDefinition `json:"columns"`
 	RLSPreset      string             `json:"rls_preset,omitempty"`
 	RLSUserIDColum string             `json:"rls_user_id_column,omitempty"`
+	DisableRLS     bool               `json:"disable_rls,omitempty"`
 }
 
 // AddColumnRequest is the JSON body for POST .../tables/{table}/columns.
@@ -334,17 +340,36 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		var warning string
+		if req.DisableRLS {
+			qt := qualifiedTable(schemaName, req.Name)
+			if _, err := pool.Exec(r.Context(), fmt.Sprintf("ALTER TABLE %s DISABLE ROW LEVEL SECURITY", qt)); err != nil {
+				slog.Error("disable rls failed", "error", err, "table", req.Name)
+				jsonError(w, "failed to disable rls: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			appliedPreset = ""
+			warning = "RLS is DISABLED on this table — every authenticated request (and potentially anonymous ones depending on GRANTs) can read and write every row. Only do this for genuinely public data."
+			slog.Warn("table created with RLS disabled (explicit opt-out)", "schema", schemaName, "table", req.Name)
+		}
+
 		logSchemaChange(pool, r, projectID, "create_table", req.Name, nil, map[string]any{
-			"columns":        req.Columns,
-			"rls_preset":     appliedPreset,
+			"columns":     req.Columns,
+			"rls_preset":  appliedPreset,
+			"rls_enabled": !req.DisableRLS,
 		})
 
-		slog.Info("table created", "schema", schemaName, "table", req.Name, "columns", len(req.Columns), "rls_preset", appliedPreset)
-		jsonResponse(w, map[string]any{
-			"status":     "created",
-			"table":      req.Name,
-			"rls_preset": appliedPreset,
-		}, http.StatusCreated)
+		slog.Info("table created", "schema", schemaName, "table", req.Name, "columns", len(req.Columns), "rls_preset", appliedPreset, "rls_enabled", !req.DisableRLS)
+		resp := map[string]any{
+			"status":      "created",
+			"table":       req.Name,
+			"rls_preset":  appliedPreset,
+			"rls_enabled": !req.DisableRLS,
+		}
+		if warning != "" {
+			resp["warning"] = warning
+		}
+		jsonResponse(w, resp, http.StatusCreated)
 	}
 }
 

@@ -135,6 +135,34 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Post("/accept", tenant.HandleAcceptInvitation(pool))
 		})
 
+		// Authenticated: superadmin-only platform administration.
+		// These endpoints manage state that spans every tenant (allowlist,
+		// cross-tenant project list). Regular project owners must never
+		// reach these.
+		r.Route("/admin", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			r.Use(superadminMiddleware(pool))
+			// Inject audit service + actor identity.
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					ctx := audit.WithContext(r.Context(), auditSvc)
+					if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
+						ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+					}
+					next.ServeHTTP(w, r.WithContext(ctx))
+				})
+			})
+
+			r.Get("/projects", tenant.AdminListAllProjects(pool))
+			r.Get("/allowlist", tenant.AdminListAllowlist(pool))
+			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))
+			r.Delete("/allowlist/{email}", tenant.AdminRemoveAllowlist(pool))
+		})
+
 		// Authenticated: platform config endpoints.
 		r.Route("/config", func(r chi.Router) {
 			if isDev {
@@ -371,6 +399,19 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 
 			r.Post("/sql", query.HandleSQL(queryEngine))
 			r.Mount("/rpc", query.HandleRPC(queryEngine))
+
+			// Tenant-scoped DDL via SDK. Must be mounted BEFORE the /{table}
+			// wildcard routes so chi resolves /schema/tables to the DDL
+			// handlers, not HandleTableGet. Requires a secret key (eb_sk_*)
+			// since DDL is destructive. The handlers inside HandleDDL expect
+			// chi URL param "id" to be the project ID — sdkDDLAdapter injects
+			// it from the API-key-authenticated ProjectContext.
+			r.Route("/schema/tables", func(r chi.Router) {
+				r.Use(requireSecretKeyForDDL)
+				r.Use(sdkDDLAdapter)
+				r.Mount("/", query.HandleDDL(pool))
+			})
+
 			r.Get("/{table}", query.HandleTableGet(queryEngine))
 			r.Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
 			r.Post("/{table}", query.HandleTableInsert(queryEngine, publisher))
@@ -451,6 +492,76 @@ func projectMembershipMiddleware(pool *pgxpool.Pool, isDev bool) func(http.Handl
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// superadminMiddleware gates routes to platform superadmins only. The flag
+// is read from the Claims set by platformAuth.Handler (which in turn gets
+// it from the JWT issued at sign-in). For sensitive actions, the handler
+// itself should re-verify from platform_users in case the flag was revoked
+// after the token was issued.
+func superadminMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := auth.ClaimsFromContext(r.Context())
+			if !ok || claims == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			if !claims.IsSuperadmin {
+				http.Error(w, `{"error":"superadmin only"}`, http.StatusForbidden)
+				return
+			}
+			// Re-verify against the DB. A stolen token or stale flag shouldn't
+			// grant platform-wide access — the per-request DB hit is cheap
+			// compared to the blast radius.
+			var stillSuper bool
+			if err := pool.QueryRow(r.Context(),
+				`SELECT COALESCE(is_superadmin, false) FROM platform_users WHERE id = $1`,
+				claims.Subject,
+			).Scan(&stillSuper); err != nil || !stillSuper {
+				http.Error(w, `{"error":"superadmin only"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// requireSecretKeyForDDL gates SDK DDL routes to secret API keys only.
+// Public keys (eb_pk_*) live in client-side code and must not be able to
+// run destructive schema operations.
+func requireSecretKeyForDDL(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+		if pc.KeyType != "secret" {
+			http.Error(w, `{"error":"schema DDL requires a secret API key (eb_sk_*)"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// sdkDDLAdapter injects the authenticated ProjectContext.ProjectID as the
+// chi URL param "id" that HandleDDL's handlers expect. This lets the same
+// handlers serve both the platform path (/platform/projects/{id}/schema/...)
+// where {id} comes from the URL and the SDK path (/v1/db/schema/...) where
+// the project is resolved by the API key middleware.
+func sdkDDLAdapter(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok || pc.ProjectID == "" {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			rctx.URLParams.Add("id", pc.ProjectID)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // buildTenantResolver returns a realtime.TenantResolver that looks up the

@@ -27,6 +27,10 @@ func DbCmd() *cobra.Command {
 	cmd.AddCommand(dbSchemaCmd())
 	cmd.AddCommand(dbQueryCmd())
 	cmd.AddCommand(dbDumpCmd())
+	cmd.AddCommand(dbCreateTableCmd())
+	cmd.AddCommand(dbDropTableCmd())
+	cmd.AddCommand(dbAddColumnCmd())
+	cmd.AddCommand(dbDropColumnCmd())
 	return cmd
 }
 
@@ -279,6 +283,229 @@ func dbQueryCmd() *cobra.Command {
 				rows = append(rows, cols)
 			}
 			PrintTable(result.Columns, rows)
+			return nil
+		},
+	}
+}
+
+// columnDef is the request shape accepted by the gateway DDL handler.
+// Mirrors query.ColumnDefinition but duplicated here so the CLI package
+// does not import the gateway server packages.
+type columnDef struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Nullable   bool   `json:"nullable,omitempty"`
+	Default    string `json:"default_value,omitempty"`
+	PrimaryKey bool   `json:"primary_key,omitempty"`
+}
+
+// parseColumnSpec parses a "name:type[:pk][:null][:default=<val>]" spec.
+// Examples: "id:uuid:pk", "title:text", "note:text:null", "created_at:timestamptz:default=now()".
+func parseColumnSpec(spec string) (columnDef, error) {
+	parts := strings.Split(spec, ":")
+	if len(parts) < 2 {
+		return columnDef{}, fmt.Errorf("column %q must be name:type[:pk][:null][:default=VAL]", spec)
+	}
+	col := columnDef{Name: parts[0], Type: parts[1]}
+	for _, mod := range parts[2:] {
+		switch {
+		case mod == "pk" || mod == "primary_key":
+			col.PrimaryKey = true
+		case mod == "null" || mod == "nullable":
+			col.Nullable = true
+		case strings.HasPrefix(mod, "default="):
+			col.Default = strings.TrimPrefix(mod, "default=")
+		default:
+			return columnDef{}, fmt.Errorf("unknown modifier %q in column %q", mod, spec)
+		}
+	}
+	return col, nil
+}
+
+func dbCreateTableCmd() *cobra.Command {
+	var (
+		rlsPreset  string
+		userIDCol  string
+		disableRLS bool
+	)
+	cmd := &cobra.Command{
+		Use:   "create-table <name> <col:type[:mod...]>...",
+		Short: "Create a new table in your tenant schema",
+		Long: `Create a table in your tenant schema. RLS is enabled by default with an
+auto-detected preset (owner_access if an owner-like column is present).
+Pass --disable-rls ONLY for genuinely public data; the response will
+include a warning so you see that the table is unprotected.
+
+Columns are specified as name:type[:modifier...]. Modifiers:
+  pk           — primary key
+  null         — allow NULL (default: NOT NULL)
+  default=VAL  — default expression
+
+Example:
+  eurobase db create-table posts id:uuid:pk title:text body:text:null \
+    created_at:timestamptz:default=now()`,
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+
+			name := args[0]
+			var cols []columnDef
+			for _, spec := range args[1:] {
+				c, err := parseColumnSpec(spec)
+				if err != nil {
+					return err
+				}
+				cols = append(cols, c)
+			}
+
+			body := map[string]interface{}{
+				"name":    name,
+				"columns": cols,
+			}
+			if rlsPreset != "" {
+				body["rls_preset"] = rlsPreset
+			}
+			if userIDCol != "" {
+				body["rls_user_id_column"] = userIDCol
+			}
+			if disableRLS {
+				body["disable_rls"] = true
+			}
+
+			data, err := client.Post("/platform/projects/"+cfg.ActiveProject+"/schema/tables/", body)
+			if err != nil {
+				return err
+			}
+
+			var resp struct {
+				Status     string `json:"status"`
+				Table      string `json:"table"`
+				RLSPreset  string `json:"rls_preset"`
+				RLSEnabled bool   `json:"rls_enabled"`
+				Warning    string `json:"warning,omitempty"`
+			}
+			if err := json.Unmarshal(data, &resp); err != nil {
+				return fmt.Errorf("parsing response: %w", err)
+			}
+
+			PrintSuccess(fmt.Sprintf("Table %q created", resp.Table))
+			if resp.RLSEnabled {
+				if resp.RLSPreset != "" {
+					fmt.Printf("  RLS: on  preset=%s\n", resp.RLSPreset)
+				} else {
+					fmt.Printf("  RLS: on  (no policy — deny-all to end-users)\n")
+				}
+			}
+			if resp.Warning != "" {
+				PrintWarning(resp.Warning)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&rlsPreset, "rls-preset", "", "RLS preset: owner_access, public_read_owner_write, authenticated_read_owner_write, full_access, read_only, or none")
+	cmd.Flags().StringVar(&userIDCol, "rls-user-column", "", "Column to use as the owner identifier for RLS (default: auto-detect)")
+	cmd.Flags().BoolVar(&disableRLS, "disable-rls", false, "Turn RLS OFF — use only for genuinely public data")
+	return cmd
+}
+
+func dbDropTableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "drop-table <name>",
+		Short: "Drop a table from your tenant schema",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			if systemTables[args[0]] {
+				return fmt.Errorf("%q is a platform-managed table and cannot be dropped", args[0])
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+			if _, err := client.Delete("/platform/projects/" + cfg.ActiveProject + "/schema/tables/" + args[0]); err != nil {
+				return err
+			}
+			PrintSuccess(fmt.Sprintf("Table %q dropped", args[0]))
+			return nil
+		},
+	}
+}
+
+func dbAddColumnCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add-column <table> <col:type[:mod...]>",
+		Short: "Add a column to an existing table",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			col, err := parseColumnSpec(args[1])
+			if err != nil {
+				return err
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+			body := map[string]interface{}{
+				"name":     col.Name,
+				"type":     col.Type,
+				"nullable": col.Nullable,
+			}
+			if col.Default != "" {
+				body["default_value"] = col.Default
+			}
+			if _, err := client.Post("/platform/projects/"+cfg.ActiveProject+"/schema/tables/"+args[0]+"/columns", body); err != nil {
+				return err
+			}
+			PrintSuccess(fmt.Sprintf("Column %q added to %q", col.Name, args[0]))
+			return nil
+		},
+	}
+}
+
+func dbDropColumnCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "drop-column <table> <column>",
+		Short: "Drop a column from an existing table",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+			if _, err := client.Delete("/platform/projects/" + cfg.ActiveProject + "/schema/tables/" + args[0] + "/columns/" + args[1]); err != nil {
+				return err
+			}
+			PrintSuccess(fmt.Sprintf("Column %q dropped from %q", args[1], args[0]))
 			return nil
 		},
 	}
