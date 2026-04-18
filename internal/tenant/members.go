@@ -83,9 +83,9 @@ func ResolveRole(ctx context.Context, pool *pgxpool.Pool, projectID, userID stri
 	return role, nil
 }
 
-// requireRole is a helper that resolves the caller's role from the request
+// RequireRole is a helper that resolves the caller's role from the request
 // context and returns 403 if insufficient. Returns the role on success.
-func requireRole(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, projectID, minRole string) (claims *auth.Claims, role string, ok bool) {
+func RequireRole(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, projectID, minRole string) (claims *auth.Claims, role string, ok bool) {
 	c, hasAuth := auth.ClaimsFromContext(r.Context())
 	if !hasAuth || c == nil {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -112,7 +112,7 @@ func requireRole(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, pro
 func HandleListMembers(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
-		claims, _, ok := requireRole(w, r, pool, projectID, "viewer")
+		claims, _, ok := RequireRole(w, r, pool, projectID, "viewer")
 		if !ok {
 			return
 		}
@@ -173,7 +173,7 @@ func HandleListMembers(pool *pgxpool.Pool) http.HandlerFunc {
 func HandleInviteMember(pool *pgxpool.Pool, sendEmail func(ctx context.Context, to, subject, html string) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
-		claims, _, ok := requireRole(w, r, pool, projectID, "admin")
+		claims, _, ok := RequireRole(w, r, pool, projectID, "admin")
 		if !ok {
 			return
 		}
@@ -271,7 +271,7 @@ func HandleInviteMember(pool *pgxpool.Pool, sendEmail func(ctx context.Context, 
 func HandleResendInvitation(pool *pgxpool.Pool, sendEmail func(ctx context.Context, to, subject, html string) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
-		claims, _, ok := requireRole(w, r, pool, projectID, "admin")
+		claims, _, ok := RequireRole(w, r, pool, projectID, "admin")
 		if !ok {
 			return
 		}
@@ -331,7 +331,7 @@ func HandleRemoveMember(pool *pgxpool.Pool) http.HandlerFunc {
 		projectID := chi.URLParam(r, "id")
 		targetUserID := chi.URLParam(r, "userId")
 
-		claims, _, ok := requireRole(w, r, pool, projectID, "admin")
+		claims, _, ok := RequireRole(w, r, pool, projectID, "admin")
 		if !ok {
 			return
 		}
@@ -382,7 +382,7 @@ func HandleChangeRole(pool *pgxpool.Pool) http.HandlerFunc {
 		projectID := chi.URLParam(r, "id")
 		targetUserID := chi.URLParam(r, "userId")
 
-		claims, _, ok := requireRole(w, r, pool, projectID, "owner")
+		claims, _, ok := RequireRole(w, r, pool, projectID, "owner")
 		if !ok {
 			return
 		}

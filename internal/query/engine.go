@@ -28,8 +28,33 @@ func (e *QueryEngine) withEndUserRLS(ctx context.Context, fn func(ctx context.Co
 	keyType := KeyTypeFromContext(ctx)
 
 	// Secret keys bypass RLS (service-level access).
-	if keyType == "secret" || endUserID == "" {
+	if keyType == "secret" {
 		return fn(ctx)
+	}
+
+	// Anonymous access with a public key — enforce RLS with anon role
+	// so that policies can distinguish authenticated vs anonymous requests.
+	if endUserID == "" {
+		conn, err := e.pool.Acquire(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire connection: %w", err)
+		}
+		defer conn.Release()
+
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'anon', true)"); err != nil {
+			return fmt.Errorf("set anon role: %w", err)
+		}
+
+		if err := fn(ctx); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 
 	conn, err := e.pool.Acquire(ctx)
@@ -44,18 +69,18 @@ func (e *QueryEngine) withEndUserRLS(ctx context.Context, fn func(ctx context.Co
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.end_user_id = '%s'", endUserID)); err != nil {
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_id', $1, true)", endUserID); err != nil {
 		return fmt.Errorf("set end_user_id: %w", err)
 	}
 
 	// Set authenticated role for GoTrue-compatible auth helpers.
-	if _, err := tx.Exec(ctx, "SET LOCAL app.end_user_role = 'authenticated'"); err != nil {
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'authenticated', true)"); err != nil {
 		return fmt.Errorf("set end_user_role: %w", err)
 	}
 
 	// Set email if available from context.
 	if email := EndUserEmailFromContext(ctx); email != "" {
-		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.end_user_email = '%s'", sanitizeSessionValue(email))); err != nil {
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_email', $1, true)", email); err != nil {
 			return fmt.Errorf("set end_user_email: %w", err)
 		}
 	}
@@ -67,11 +92,6 @@ func (e *QueryEngine) withEndUserRLS(ctx context.Context, fn func(ctx context.Co
 	return tx.Commit(ctx)
 }
 
-// sanitizeSessionValue escapes single quotes in a value used in SET LOCAL statements
-// to prevent SQL injection via session variables.
-func sanitizeSessionValue(v string) string {
-	return strings.ReplaceAll(v, "'", "''")
-}
 
 // withTenantTx runs fn inside a transaction with search_path set to the
 // tenant schema. This ensures triggers and PL/pgSQL functions that use

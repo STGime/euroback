@@ -16,6 +16,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// quoteIdent double-quotes a SQL identifier, escaping embedded double quotes.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// vaultTable returns a fully-qualified reference to the vault_secrets table.
+func vaultTable(schemaName string) string {
+	return quoteIdent(schemaName) + ".vault_secrets"
+}
+
 // Secret represents a vault secret.
 type Secret struct {
 	ID          string    `json:"id"`
@@ -87,11 +97,8 @@ func (s *VaultService) decrypt(ciphertext, nonce []byte) (string, error) {
 
 // List returns all secret names (NOT values) for a project schema.
 func (s *VaultService) List(ctx context.Context, schemaName string) ([]Secret, error) {
-	sql := fmt.Sprintf(
-		`SELECT id, name, description, created_at, updated_at
-		 FROM %q.vault_secrets ORDER BY name`,
-		schemaName,
-	)
+	sql := `SELECT id, name, description, created_at, updated_at
+		 FROM ` + vaultTable(schemaName) + ` ORDER BY name`
 	rows, err := s.pool.Query(ctx, sql)
 	if err != nil {
 		return nil, fmt.Errorf("list vault secrets: %w", err)
@@ -111,11 +118,8 @@ func (s *VaultService) List(ctx context.Context, schemaName string) ([]Secret, e
 
 // Get returns a single decrypted secret by name.
 func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secret, error) {
-	sql := fmt.Sprintf(
-		`SELECT id, name, secret, nonce, description, created_at, updated_at
-		 FROM %q.vault_secrets WHERE name = $1`,
-		schemaName,
-	)
+	sql := `SELECT id, name, secret, nonce, description, created_at, updated_at
+		 FROM ` + vaultTable(schemaName) + ` WHERE name = $1`
 
 	var sec Secret
 	var encrypted, nonce []byte
@@ -147,17 +151,14 @@ func (s *VaultService) Set(ctx context.Context, schemaName, name, value, descrip
 		return nil, fmt.Errorf("encrypt vault secret: %w", err)
 	}
 
-	sql := fmt.Sprintf(
-		`INSERT INTO %q.vault_secrets (name, secret, nonce, description)
+	sql := `INSERT INTO ` + vaultTable(schemaName) + ` (name, secret, nonce, description)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (name) DO UPDATE SET
 		   secret = EXCLUDED.secret,
 		   nonce = EXCLUDED.nonce,
 		   description = EXCLUDED.description,
 		   updated_at = now()
-		 RETURNING id, name, description, created_at, updated_at`,
-		schemaName,
-	)
+		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
 	err = s.pool.QueryRow(ctx, sql, name, encrypted, nonce, description).Scan(
@@ -183,16 +184,13 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 			return nil, fmt.Errorf("encrypt vault secret: %w", err)
 		}
 
-		sql := fmt.Sprintf(
-			`UPDATE %q.vault_secrets SET
+		sql := `UPDATE ` + vaultTable(schemaName) + ` SET
 			   secret = $2,
 			   nonce = $3,
 			   description = COALESCE($4, description),
 			   updated_at = now()
 			 WHERE name = $1
-			 RETURNING id, name, description, created_at, updated_at`,
-			schemaName,
-		)
+			 RETURNING id, name, description, created_at, updated_at`
 
 		var sec Secret
 		err = s.pool.QueryRow(ctx, sql, name, encrypted, nonce, newDescription).Scan(
@@ -208,14 +206,11 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 	}
 
 	// Only description changing.
-	sql := fmt.Sprintf(
-		`UPDATE %q.vault_secrets SET
+	sql := `UPDATE ` + vaultTable(schemaName) + ` SET
 		   description = $2,
 		   updated_at = now()
 		 WHERE name = $1
-		 RETURNING id, name, description, created_at, updated_at`,
-		schemaName,
-	)
+		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
 	err := s.pool.QueryRow(ctx, sql, name, *newDescription).Scan(
@@ -232,10 +227,7 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 
 // Delete removes a secret by name.
 func (s *VaultService) Delete(ctx context.Context, schemaName, name string) error {
-	sql := fmt.Sprintf(
-		`DELETE FROM %q.vault_secrets WHERE name = $1`,
-		schemaName,
-	)
+	sql := `DELETE FROM ` + vaultTable(schemaName) + ` WHERE name = $1`
 	tag, err := s.pool.Exec(ctx, sql, name)
 	if err != nil {
 		return fmt.Errorf("delete vault secret: %w", err)
@@ -248,7 +240,7 @@ func (s *VaultService) Delete(ctx context.Context, schemaName, name string) erro
 
 // Count returns the number of secrets in a schema.
 func (s *VaultService) Count(ctx context.Context, schemaName string) (int, error) {
-	sql := fmt.Sprintf(`SELECT count(*) FROM %q.vault_secrets`, schemaName)
+	sql := `SELECT count(*) FROM ` + vaultTable(schemaName)
 	var count int
 	err := s.pool.QueryRow(ctx, sql).Scan(&count)
 	if err != nil {
@@ -300,7 +292,7 @@ func (s *VaultService) DeleteRaw(ctx context.Context, schemaName, name string) e
 // HasRaw reports whether a secret with the given name exists in the schema,
 // without decrypting it. Used by "secret_set" annotations in API responses.
 func (s *VaultService) HasRaw(ctx context.Context, schemaName, name string) (bool, error) {
-	sql := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %q.vault_secrets WHERE name = $1)`, schemaName)
+	sql := `SELECT EXISTS(SELECT 1 FROM ` + vaultTable(schemaName) + ` WHERE name = $1)`
 	var exists bool
 	err := s.pool.QueryRow(ctx, sql, name).Scan(&exists)
 	if err != nil {

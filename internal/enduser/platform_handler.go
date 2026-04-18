@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/query"
+	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
@@ -52,7 +53,7 @@ type PlatformUserList struct {
 }
 
 // PlatformRoutes returns a chi.Router with end-user management handlers.
-func PlatformRoutes(pool *pgxpool.Pool) chi.Router {
+func PlatformRoutes(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", handleListUsers(pool))
 	r.Post("/", handleCreateUser(pool))
@@ -62,7 +63,7 @@ func PlatformRoutes(pool *pgxpool.Pool) chi.Router {
 	r.Post("/{userId}/suspend", handleSuspendUser(pool))
 	r.Delete("/{userId}/suspend", handleUnsuspendUser(pool))
 	r.Post("/{userId}/reset-password", handleResetPassword(pool))
-	r.Get("/{userId}/export", HandleGDPRExport(pool))
+	r.Get("/{userId}/export", HandleGDPRExport(pool, limiter))
 	return r
 }
 

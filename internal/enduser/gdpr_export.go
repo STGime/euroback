@@ -11,8 +11,17 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/query"
+	"github.com/eurobase/euroback/internal/ratelimit"
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// gdprExportLimit caps per-actor exports to catch runaway scripts without
+// blocking legitimate admin use. Data exports are expensive and sensitive.
+const (
+	gdprExportLimit  = 5
+	gdprExportWindow = time.Hour
 )
 
 // GDPRExportResponse is the Article 15 subject access request response.
@@ -69,7 +78,8 @@ type GDPRRefreshToken struct {
 }
 
 // HandleGDPRExport returns a handler for GET /platform/projects/{id}/users/{userId}/export.
-func HandleGDPRExport(pool *pgxpool.Pool) http.HandlerFunc {
+// Requires admin or owner role on the project; rate-limited per actor.
+func HandleGDPRExport(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		userID := chi.URLParam(r, "userId")
@@ -77,6 +87,21 @@ func HandleGDPRExport(pool *pgxpool.Pool) http.HandlerFunc {
 		if schema == "" || userID == "" {
 			http.Error(w, `{"error":"missing project or user context"}`, http.StatusBadRequest)
 			return
+		}
+
+		// Gate to admin/owner — viewer and developer can't export PII.
+		claims, _, ok := tenant.RequireRole(w, r, pool, projectID, "admin")
+		if !ok {
+			return
+		}
+
+		// Per-actor rate limit so a compromised admin token can't be used to
+		// bulk-enumerate users.
+		if limiter != nil {
+			if ratelimit.CheckAuthRate(limiter, w, r.Context(), "gdpr_export",
+				claims.Subject, gdprExportLimit, gdprExportWindow) {
+				return
+			}
 		}
 
 		ctx := r.Context()

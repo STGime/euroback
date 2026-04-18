@@ -34,13 +34,14 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, allowedOrigins []string, devMode ...bool) chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware.
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(CORSMiddleware)
+	r.Use(SecurityHeadersMiddleware)
+	r.Use(NewCORSMiddleware(allowedOrigins))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
@@ -161,6 +162,8 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			} else {
 				r.Use(platformAuth.Handler)
 			}
+			// Verify the authenticated user is a member of this project.
+			r.Use(projectMembershipMiddleware(pool, isDev))
 			if logCh != nil {
 				r.Use(RequestLoggingMiddleware(logCh))
 			}
@@ -246,7 +249,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			// Console end-user management — platform-authenticated.
 			r.Route("/users", func(r chi.Router) {
 				r.Use(tenant.PlatformTenantContext(pool))
-				r.Mount("/", enduser.PlatformRoutes(pool))
+				r.Mount("/", enduser.PlatformRoutes(pool, limiter))
 			})
 
 			// Console storage proxy — platform-authenticated access to project storage.
@@ -414,6 +417,40 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 	})
 
 	return r
+}
+
+// projectMembershipMiddleware verifies the authenticated user is a member of
+// the project identified by the {id} URL parameter. Returns 404 if not.
+func projectMembershipMiddleware(pool *pgxpool.Pool, isDev bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// In dev mode, skip membership check (dev user may not have real membership).
+			if isDev {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			claims, ok := auth.ClaimsFromContext(r.Context())
+			if !ok || claims == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+
+			projectID := chi.URLParam(r, "id")
+			if projectID == "" {
+				http.Error(w, `{"error":"missing project id"}`, http.StatusBadRequest)
+				return
+			}
+
+			role, err := tenant.ResolveRole(r.Context(), pool, projectID, claims.Subject)
+			if err != nil || role == "" {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // buildTenantResolver returns a realtime.TenantResolver that looks up the

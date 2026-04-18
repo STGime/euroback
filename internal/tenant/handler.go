@@ -212,7 +212,7 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
-		claims, _, ok := requireRole(w, r, pool, projectID, "admin")
+		claims, _, ok := RequireRole(w, r, pool, projectID, "admin")
 		if !ok {
 			return
 		}
@@ -281,7 +281,7 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
-		claims, _, ok := requireRole(w, r, pool, projectID, "owner")
+		claims, _, ok := RequireRole(w, r, pool, projectID, "owner")
 		if !ok {
 			return
 		}

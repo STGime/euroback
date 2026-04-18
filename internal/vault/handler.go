@@ -7,10 +7,25 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// auditVault records a vault operation via the audit service from context.
+// Noop if no audit service is wired. Never fails the caller.
+func auditVault(r *http.Request, projectID, action, name string) {
+	svc := audit.FromContext(r.Context())
+	if svc == nil {
+		return
+	}
+	actorID, actorEmail := audit.ActorFromContext(r.Context())
+	svc.Log(r.Context(), projectID, actorID, actorEmail, action,
+		audit.WithTarget("vault_secret", name),
+		audit.WithIP(r.RemoteAddr),
+	)
+}
 
 const (
 	freeVaultLimit = 5
@@ -82,7 +97,7 @@ func handlePlatformList(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc 
 
 func handlePlatformGet(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		_, schemaName, err := resolveSchema(r, pool)
+		projectID, schemaName, err := resolveSchema(r, pool)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
@@ -94,6 +109,7 @@ func handlePlatformGet(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc {
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		auditVault(r, projectID, audit.ActionVaultSecretAccessed, name)
 
 		jsonResponse(w, secret, http.StatusOK)
 	}
@@ -139,6 +155,7 @@ func handlePlatformSet(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		slog.Info("vault secret set", "name", req.Name, "project_id", projectID)
+		auditVault(r, projectID, audit.ActionVaultSecretSet, req.Name)
 		jsonResponse(w, secret, http.StatusCreated)
 	}
 }
@@ -169,6 +186,7 @@ func handlePlatformUpdate(svc *VaultService, pool *pgxpool.Pool) http.HandlerFun
 			return
 		}
 
+		auditVault(r, projectID, audit.ActionVaultSecretUpdated, name)
 		jsonResponse(w, secret, http.StatusOK)
 	}
 }
@@ -188,6 +206,7 @@ func handlePlatformDelete(svc *VaultService, pool *pgxpool.Pool) http.HandlerFun
 		}
 
 		slog.Info("vault secret deleted", "name", name, "project_id", projectID)
+		auditVault(r, projectID, audit.ActionVaultSecretDeleted, name)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

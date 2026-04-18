@@ -107,12 +107,12 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 				return
 			}
 
-			var slug string
+			var slug, schema string
 			err := pool.QueryRow(r.Context(),
-				`SELECT slug FROM projects
+				`SELECT slug, schema_name FROM projects
 				 WHERE id = $1 AND status = 'active'`,
 				projectID,
-			).Scan(&slug)
+			).Scan(&slug, &schema)
 			if err != nil {
 				slog.Error("platform storage context: project not found",
 					"error", err,
@@ -123,8 +123,15 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 				return
 			}
 
+			// Inject both the legacy header (for bucket naming) and a
+			// ProjectContext so handlers can read the schema name from
+			// authenticated state rather than the header.
 			r.Header.Set("X-Project-Slug", slug)
-			next.ServeHTTP(w, r)
+			ctx := auth.ContextWithProject(r.Context(), &auth.ProjectContext{
+				ProjectID:  projectID,
+				SchemaName: schema,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

@@ -420,21 +420,23 @@ func HandleOAuthRedirect(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
-		// Generate state token for CSRF protection.
-		state, err := generateRandomHex(16)
+		// Generate state token for CSRF protection. Stored server-side so the
+		// callback can validate it as single-use and bound to this project.
+		state, err := generateRandomHex(32)
 		if err != nil {
 			slog.Error("oauth: failed to generate state", "error", err)
 			writeJSON(w, map[string]string{"error": "internal server error"}, http.StatusInternalServerError)
 			return
 		}
+		if err := storeOAuthState(r.Context(), svc.pool, state, pc.ProjectID, providerName, clientRedirectURL); err != nil {
+			slog.Error("oauth: failed to store state", "error", err)
+			writeJSON(w, map[string]string{"error": "internal server error"}, http.StatusInternalServerError)
+			return
+		}
 
-		// Encode the client redirect URL and state into the OAuth callback redirect_uri.
-		// The callback URL is on the Eurobase gateway itself.
+		// Callback URL is on the Eurobase gateway; only the opaque state goes
+		// to the provider. Redirect URL is NEVER roundtripped through state.
 		callbackURL := fmt.Sprintf("%s://%s/v1/auth/oauth/%s/callback", schemeFromRequest(r), r.Host, providerName)
-
-		// Store client redirect and state in the callback URL as query params.
-		// We encode the client redirect in the state to avoid server-side session storage.
-		encodedState := state + ":" + clientRedirectURL
 
 		provider, err := oauth.Get(providerName)
 		if err != nil {
@@ -445,7 +447,7 @@ func HandleOAuthRedirect(svc *AuthService) http.HandlerFunc {
 		authURL := provider.AuthURL(oauth.AuthURLConfig{
 			ClientID:    providerConfig.ClientID,
 			RedirectURL: callbackURL,
-			State:       encodedState,
+			State:       state,
 			TenantID:    providerConfig.TenantID,
 		})
 		http.Redirect(w, r, authURL, http.StatusFound)
@@ -470,17 +472,17 @@ func HandleOAuthCallback(svc *AuthService) http.HandlerFunc {
 
 		// Apple uses response_mode=form_post, so the callback comes as POST
 		// with form data. Other providers use GET with query params.
-		var code, encodedState string
+		var code, state string
 		if r.Method == http.MethodPost {
 			if err := r.ParseForm(); err != nil {
 				writeJSON(w, map[string]string{"error": "invalid form data"}, http.StatusBadRequest)
 				return
 			}
 			code = r.FormValue("code")
-			encodedState = r.FormValue("state")
+			state = r.FormValue("state")
 		} else {
 			code = r.URL.Query().Get("code")
-			encodedState = r.URL.Query().Get("state")
+			state = r.URL.Query().Get("state")
 		}
 
 		if code == "" {
@@ -502,17 +504,29 @@ func HandleOAuthCallback(svc *AuthService) http.HandlerFunc {
 			return
 		}
 
-		// Extract the client redirect URL from the state.
-		var clientRedirectURL string
-		if idx := strings.Index(encodedState, ":"); idx > 0 {
-			clientRedirectURL = encodedState[idx+1:]
-		}
-		if clientRedirectURL == "" {
-			writeJSON(w, map[string]string{"error": "invalid state parameter"}, http.StatusBadRequest)
+		// Validate state: must exist, be unexpired, bound to this project and
+		// provider. Consuming deletes the row so replay is impossible.
+		if state == "" {
+			writeJSON(w, map[string]string{"error": "missing state parameter"}, http.StatusBadRequest)
 			return
 		}
+		rec, err := consumeOAuthState(r.Context(), svc.pool, state)
+		if err != nil {
+			slog.Warn("oauth callback: invalid state", "error", err, "provider", providerName, "project_id", pc.ProjectID)
+			writeJSON(w, map[string]string{"error": "invalid or expired state"}, http.StatusBadRequest)
+			return
+		}
+		if rec.ProjectID != pc.ProjectID || rec.Provider != providerName {
+			slog.Warn("oauth callback: state/context mismatch",
+				"state_project", rec.ProjectID, "ctx_project", pc.ProjectID,
+				"state_provider", rec.Provider, "url_provider", providerName)
+			writeJSON(w, map[string]string{"error": "invalid state"}, http.StatusBadRequest)
+			return
+		}
+		clientRedirectURL := rec.RedirectURL
 
-		// Validate redirect_url against allowed list.
+		// Re-validate redirect_url against the allowlist — config may have changed
+		// between redirect and callback.
 		if !config.IsRedirectURLAllowed(clientRedirectURL) {
 			writeJSON(w, map[string]string{"error": "redirect_url is not in the allowed redirect URLs"}, http.StatusBadRequest)
 			return

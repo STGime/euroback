@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -187,7 +188,22 @@ func main() {
 	slog.Info("usage alerts job started")
 
 	// ── Dev mode: bypass platform auth for local testing ──
+	// Refuses to start if DEV_MODE is true on a production-looking host, so a
+	// stray env var can't silently disable auth. Override with ALLOW_DEV_MODE_IN_PROD=true
+	// (you'd never set that on a real deploy).
 	devMode := os.Getenv("DEV_MODE") == "true"
+	if devMode && os.Getenv("ALLOW_DEV_MODE_IN_PROD") != "true" {
+		env := strings.ToLower(os.Getenv("ENV"))
+		suffix := strings.ToLower(os.Getenv("DOMAIN_SUFFIX"))
+		if env == "production" || env == "prod" || strings.HasSuffix(suffix, "eurobase.app") {
+			log.Fatal("FATAL: DEV_MODE=true detected on a production-looking environment. " +
+				"This disables all platform auth. Refuse to start. " +
+				"Set ALLOW_DEV_MODE_IN_PROD=true to override (you shouldn't).")
+		}
+	}
+	if devMode {
+		slog.Warn("DEV MODE ACTIVE — platform auth is bypassed; never run this in production")
+	}
 
 	// ── Set up vault (encrypted secrets storage) ──
 	// Required in production — OAuth secrets and vault entries need encryption.
@@ -232,8 +248,27 @@ func main() {
 		slog.Warn("FUNCTION_RUNNER_URL not set, edge function invocation will return 501")
 	}
 
+	// ── CORS allowlist ──
+	// Always include wildcarded project subdomains + apex of the configured
+	// domain suffix; callers can extend with ALLOWED_ORIGINS (comma-separated).
+	allowedOrigins := []string{
+		"https://*." + domainSuffix,
+		"https://" + domainSuffix,
+	}
+	if extra := os.Getenv("ALLOWED_ORIGINS"); extra != "" {
+		for _, o := range strings.Split(extra, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				allowedOrigins = append(allowedOrigins, o)
+			}
+		}
+	}
+	if devMode {
+		allowedOrigins = append(allowedOrigins, "http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173")
+	}
+	slog.Info("cors allowlist configured", "origins", allowedOrigins)
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, devMode)
+	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, allowedOrigins, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

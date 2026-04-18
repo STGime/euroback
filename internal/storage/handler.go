@@ -426,25 +426,14 @@ func extractWildcardKey(r *http.Request) string {
 	return key
 }
 
-// schemaForRequest resolves the tenant schema name for the current request.
-// SDK routes have ProjectContext set by API key middleware; platform routes
-// resolve it from the X-Project-Slug header.
+// schemaForRequest resolves the tenant schema name from the authenticated
+// ProjectContext set by upstream middleware (API key middleware for SDK
+// routes, PlatformStorageContext for console routes). The schema is NEVER
+// derived from client-supplied headers — that would let a caller spoof which
+// tenant's tracking rows are written.
 func (h *StorageHandler) schemaForRequest(r *http.Request) string {
-	if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc.SchemaName != "" {
+	if pc, ok := auth.ProjectFromContext(r.Context()); ok {
 		return pc.SchemaName
 	}
-	// Platform path — resolve from slug.
-	slug := r.Header.Get("X-Project-Slug")
-	if slug == "" || h.pool == nil {
-		return ""
-	}
-	var schema string
-	err := h.pool.QueryRow(r.Context(),
-		`SELECT schema_name FROM projects WHERE slug = $1 AND status = 'active'`, slug,
-	).Scan(&schema)
-	if err != nil {
-		slog.Error("storage: failed to resolve schema from slug", "slug", slug, "error", err)
-		return ""
-	}
-	return schema
+	return ""
 }
