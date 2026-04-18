@@ -30,6 +30,8 @@ const (
 	ActionMemberRoleChanged  = "member.role_changed"
 	ActionFunctionCreated    = "function.created"
 	ActionFunctionDeleted    = "function.deleted"
+	ActionAllowlistAdded     = "allowlist.added"
+	ActionAllowlistRemoved   = "allowlist.removed"
 )
 
 // Entry represents a single audit log row.

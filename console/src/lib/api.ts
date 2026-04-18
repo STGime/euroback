@@ -41,8 +41,27 @@ export interface PlatformProfile {
 	email: string;
 	display_name: string | null;
 	plan: string;
+	is_superadmin: boolean;
 	created_at: string;
 	last_sign_in_at: string | null;
+}
+
+export interface AdminProject {
+	id: string;
+	name: string;
+	slug: string;
+	schema_name: string;
+	plan: string;
+	status: string;
+	owner_id: string;
+	owner_email: string;
+	created_at: string;
+}
+
+export interface AllowlistEntry {
+	email: string;
+	note: string | null;
+	created_at: string;
 }
 
 export interface Project {
@@ -1098,6 +1117,33 @@ export class EurobaseAPI {
 	/** Get all available plans and their limits. */
 	async getPlans(): Promise<PlanLimits[]> {
 		return this.fetch<PlanLimits[]>('/platform/config/plans');
+	}
+
+	// ---- Superadmin ----
+
+	/** List every project across every tenant. Superadmin only. */
+	async adminListAllProjects(): Promise<{ projects: AdminProject[]; total: number }> {
+		return this.fetch<{ projects: AdminProject[]; total: number }>('/platform/admin/projects');
+	}
+
+	/** List all platform_allowlist entries. Superadmin only. */
+	async adminListAllowlist(): Promise<{ entries: AllowlistEntry[]; total: number }> {
+		return this.fetch<{ entries: AllowlistEntry[]; total: number }>('/platform/admin/allowlist');
+	}
+
+	/** Add an email to the platform allowlist. Superadmin only. */
+	async adminAddAllowlist(email: string, note?: string): Promise<{ status: string; email: string }> {
+		return this.fetch('/platform/admin/allowlist', {
+			method: 'POST',
+			body: JSON.stringify({ email, note: note ?? '' })
+		});
+	}
+
+	/** Remove an email from the platform allowlist. Superadmin only. */
+	async adminRemoveAllowlist(email: string): Promise<void> {
+		return this.fetch(`/platform/admin/allowlist/${encodeURIComponent(email)}`, {
+			method: 'DELETE'
+		});
 	}
 
 	/** Get request logs for a project. */

@@ -55,6 +55,7 @@ type PlatformProfile struct {
 	Email        string     `json:"email"`
 	DisplayName  *string    `json:"display_name"`
 	Plan         string     `json:"plan"`
+	IsSuperadmin bool       `json:"is_superadmin"`
 	CreatedAt    time.Time  `json:"created_at"`
 	LastSignInAt *time.Time `json:"last_sign_in_at"`
 }
@@ -119,7 +120,8 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 
 	slog.Info("platform user signed up", "user_id", user.ID, "email", user.Email)
 
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email)
+	// New signups are never superadmin; that flag is granted out-of-band.
+	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, false)
 	if err != nil {
 		return nil, err
 	}
@@ -138,12 +140,13 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 
 	var user PlatformUser
 	var passwordHash string
+	var isSuperadmin bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, display_name, password_hash
+		`SELECT id, email, display_name, password_hash, COALESCE(is_superadmin, false)
 		 FROM platform_users
 		 WHERE email = $1 AND password_hash IS NOT NULL`,
 		email,
-	).Scan(&user.ID, &user.Email, &user.DisplayName, &passwordHash)
+	).Scan(&user.ID, &user.Email, &user.DisplayName, &passwordHash, &isSuperadmin)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("invalid email or password")
@@ -161,9 +164,9 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 		user.ID,
 	)
 
-	slog.Info("platform user signed in", "user_id", user.ID, "email", user.Email)
+	slog.Info("platform user signed in", "user_id", user.ID, "email", user.Email, "is_superadmin", isSuperadmin)
 
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email)
+	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin)
 	if err != nil {
 		return nil, err
 	}
@@ -176,18 +179,22 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 	}, nil
 }
 
-// generatePlatformJWT creates an HS256 JWT for a platform user.
-func (s *PlatformAuthService) generatePlatformJWT(userID, email string) (string, int, error) {
+// generatePlatformJWT creates an HS256 JWT for a platform user. The
+// isSuperadmin flag is embedded in the token so downstream middleware can
+// gate admin routes without a per-request DB hit; it is re-verified from
+// platform_users on sensitive actions.
+func (s *PlatformAuthService) generatePlatformJWT(userID, email string, isSuperadmin bool) (string, int, error) {
 	expiresIn := 24 * 3600 // 24 hours
 	now := time.Now()
 
 	claims := jwt.MapClaims{
-		"sub":   userID,
-		"email": email,
-		"type":  "platform",
-		"iss":   "eurobase",
-		"iat":   now.Unix(),
-		"exp":   now.Add(time.Duration(expiresIn) * time.Second).Unix(),
+		"sub":           userID,
+		"email":         email,
+		"type":          "platform",
+		"iss":           "eurobase",
+		"iat":           now.Unix(),
+		"exp":           now.Add(time.Duration(expiresIn) * time.Second).Unix(),
+		"is_superadmin": isSuperadmin,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -203,10 +210,10 @@ func (s *PlatformAuthService) generatePlatformJWT(userID, email string) (string,
 func (s *PlatformAuthService) GetProfile(ctx context.Context, userID string) (*PlatformProfile, error) {
 	var p PlatformProfile
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, display_name, COALESCE(plan, 'free'), created_at, last_sign_in_at
+		`SELECT id, email, display_name, COALESCE(plan, 'free'), COALESCE(is_superadmin, false), created_at, last_sign_in_at
 		 FROM platform_users WHERE id = $1`,
 		userID,
-	).Scan(&p.ID, &p.Email, &p.DisplayName, &p.Plan, &p.CreatedAt, &p.LastSignInAt)
+	).Scan(&p.ID, &p.Email, &p.DisplayName, &p.Plan, &p.IsSuperadmin, &p.CreatedAt, &p.LastSignInAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("user not found")
@@ -319,14 +326,16 @@ func (s *PlatformAuthService) ValidatePlatformJWT(tokenStr string) (*Claims, err
 
 	sub, _ := mapClaims.GetSubject()
 	email, _ := mapClaims["email"].(string)
+	isSuperadmin, _ := mapClaims["is_superadmin"].(bool)
 
 	if sub == "" {
 		return nil, fmt.Errorf("token missing subject")
 	}
 
 	return &Claims{
-		Subject: sub,
-		Email:   email,
+		Subject:      sub,
+		Email:        email,
+		IsSuperadmin: isSuperadmin,
 	}, nil
 }
 

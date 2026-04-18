@@ -10,8 +10,9 @@ const claimsKey contextKey = iota
 
 // Claims holds the authenticated user's identity extracted from a JWT.
 type Claims struct {
-	Subject string // Platform user ID (UUID from platform_users.id)
-	Email   string // User email
+	Subject       string // Platform user ID (UUID from platform_users.id)
+	Email         string // User email
+	IsSuperadmin  bool   // Platform-wide admin. Granted via platform_users.is_superadmin.
 }
 
 // ClaimsFromContext extracts the authenticated claims from the request context.
