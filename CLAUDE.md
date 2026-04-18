@@ -9,6 +9,12 @@
 - All tenant-scoped queries must use RLS with set_tenant_id()
 - System tables (users, refresh_tokens, storage_objects, email_tokens, vault_secrets) are managed by the platform
 
+## Postgres roles
+- `eurobase_gateway` — runtime role used by the gateway + worker pods. DML only on `public.*`, USAGE + CREATE on tenant schemas so the SDK DDL endpoint works. NO DDL on `public.*`. Wired via `DATABASE_URL` in the `eurobase-secrets` k8s Secret.
+- `eurobase_migrator` — deploy-only role. Owns `public.*` tables and tenant schemas; runs migrations via the `migrate` Kubernetes Job in CI. Wired via `DATABASE_URL_MIGRATOR` in the same Secret.
+- `eurobase_api` — legacy admin role kept for rollback. Once the cutover is proven, delete it via the Scaleway console.
+- Never issue `DATABASE_URL` to tenants. The gateway exposes data via SDK + REST only.
+
 ## Auth
 - Custom auth built in Go (email/password, magic links, OAuth)
 - Anon key for public client access

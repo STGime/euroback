@@ -1,0 +1,49 @@
+##############################################################################
+# Eurobase Migrations — Kubernetes Job
+# Runs before each deploy rolls the gateway/worker. Uses DATABASE_URL_MIGRATOR
+# (eurobase_migrator role) from the eurobase-secrets Secret.
+#
+# Job semantics:
+#  - backoffLimit: 0 — a migration that fails once is broken; retries hide it
+#  - ttlSecondsAfterFinished: 3600 — auto-reap after an hour
+#  - restartPolicy: Never — required for Jobs
+#
+# CI re-creates this object on every deploy (delete-then-apply) because Job
+# specs are largely immutable — re-apply alone wouldn't pick up a new image.
+##############################################################################
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: eurobase
+  labels:
+    app: migrate
+    component: migrations
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: migrate
+        component: migrations
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: rg.fr-par.scw.cloud/eurobase-app/migrations:latest
+          imagePullPolicy: Always
+          args: ["-database", "$(DATABASE_URL_MIGRATOR)", "up"]
+          env:
+            - name: DATABASE_URL_MIGRATOR
+              valueFrom:
+                secretKeyRef:
+                  name: eurobase-secrets
+                  key: DATABASE_URL_MIGRATOR
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "250m"

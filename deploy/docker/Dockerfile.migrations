@@ -1,0 +1,13 @@
+# Migrations image: golang-migrate CLI + baked-in migration files.
+# Run as a Kubernetes Job before the gateway/worker rollout picks up a new
+# image. Uses DATABASE_URL_MIGRATOR (eurobase_migrator role) — the gateway's
+# runtime DATABASE_URL (eurobase_gateway) has no DDL privileges and cannot
+# drive schema changes.
+
+FROM migrate/migrate:v4.18.3
+
+COPY migrations /migrations
+
+# migrate/migrate's entrypoint already points to the binary; ENTRYPOINT
+# is set here for clarity. Pass the -database arg from the Job manifest.
+ENTRYPOINT ["migrate", "-path", "/migrations"]

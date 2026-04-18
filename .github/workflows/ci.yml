@@ -121,6 +121,16 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/functions:${{ github.sha }}
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/functions:latest
 
+      - name: Build and push migrations image
+        run: |
+          docker build \
+            -f deploy/docker/Dockerfile.migrations \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/migrations:${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/migrations:latest \
+            .
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/migrations:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/migrations:latest
+
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
@@ -141,6 +151,20 @@ jobs:
 
       - name: Apply functions K8s manifests
         run: kubectl apply -f deploy/k8s/functions.yaml
+
+      - name: Run database migrations
+        run: |
+          # Job specs are largely immutable — delete any prior instance so
+          # this deploy's image gets picked up. --ignore-not-found covers the
+          # first-ever run. Then apply with this deploy's SHA pinned.
+          kubectl -n eurobase delete job migrate --ignore-not-found
+          sed "s|eurobase-app/migrations:latest|eurobase-app/migrations:${{ github.sha }}|" \
+            deploy/k8s/migrate-job.yaml | kubectl apply -f -
+          # Block the rollout on a successful migration. If it fails, bail
+          # before touching the gateway — the old gateway keeps running on
+          # the old schema.
+          kubectl -n eurobase wait --for=condition=complete --timeout=300s job/migrate \
+            || (kubectl -n eurobase logs job/migrate --tail=200; exit 1)
 
       - name: Deploy to Kapsule
         run: |
