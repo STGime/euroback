@@ -1,4 +1,4 @@
-# Migrations image: golang-migrate CLI + baked-in migration files.
+# Migrations image: golang-migrate CLI + psql + baked-in migration files.
 # Run as a Kubernetes Job before the gateway/worker rollout picks up a new
 # image. Uses DATABASE_URL_MIGRATOR (eurobase_migrator role) — the gateway's
 # runtime DATABASE_URL (eurobase_gateway) has no DDL privileges and cannot
@@ -6,8 +6,13 @@
 
 FROM migrate/migrate:v4.18.3
 
-COPY migrations /migrations
+# psql is used by the entrypoint to do an idempotent ownership bootstrap
+# (REASSIGN OWNED) before running migrations. The migrate/migrate image
+# is Alpine-based.
+RUN apk add --no-cache postgresql16-client bash
 
-# migrate/migrate's entrypoint already points to the binary; ENTRYPOINT
-# is set here for clarity. Pass the -database arg from the Job manifest.
-ENTRYPOINT ["migrate", "-path", "/migrations"]
+COPY migrations /migrations
+COPY deploy/docker/migrate-entrypoint.sh /migrate-entrypoint.sh
+RUN chmod +x /migrate-entrypoint.sh
+
+ENTRYPOINT ["/migrate-entrypoint.sh"]
