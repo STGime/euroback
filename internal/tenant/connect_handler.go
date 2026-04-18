@@ -24,6 +24,7 @@ type ConnectInfo struct {
 	DatabaseURL string            `json:"database_url,omitempty"`
 	Tables      []ConnectTable    `json:"tables"`
 	ClaudeMD    string            `json:"claude_md"`
+	CodexMD     string            `json:"codex_md"`
 	CursorRules string            `json:"cursor_rules"`
 	EnvTemplate string            `json:"env_template"`
 	SampleCode  map[string]string `json:"sample_code"`
@@ -74,6 +75,9 @@ func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build CLAUDE.md content.
 		claudeMD := generateClaudeMD(name, slug, apiURL, plan, tables)
+
+		// Build AGENTS.md content (for OpenAI Codex).
+		codexMD := generateCodexMD(name, slug, apiURL, plan, tables)
 
 		// Build .cursorrules content.
 		cursorRules := generateCursorRules(name, slug, apiURL, tables)
@@ -166,6 +170,7 @@ curl -s '%s/v1/db/todos' \
 			DatabaseURL: os.Getenv("DATABASE_URL"),
 			Tables:      tables,
 			ClaudeMD:    claudeMD,
+			CodexMD:     codexMD,
 			CursorRules: cursorRules,
 			EnvTemplate: envTemplate,
 			SampleCode:  sampleCode,
@@ -229,6 +234,68 @@ func introspectSchema(ctx context.Context, pool *pgxpool.Pool, schemaName string
 }
 
 func generateClaudeMD(name, slug, apiURL, plan string, tables []ConnectTable) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "# %s — Eurobase Project\n\n", name)
+	fmt.Fprintf(&b, "EU-sovereign backend powered by Eurobase. Zero US CLOUD Act exposure.\n\n")
+	fmt.Fprintf(&b, "## Connection\n\n")
+	fmt.Fprintf(&b, "- **API URL**: %s\n", apiURL)
+	fmt.Fprintf(&b, "- **SDK**: `@eurobase/sdk`\n")
+	fmt.Fprintf(&b, "- **Install**: `npm install @eurobase/sdk`\n")
+	fmt.Fprintf(&b, "- **Plan**: %s\n\n", plan)
+
+	if len(tables) > 0 {
+		fmt.Fprintf(&b, "## Database Schema\n\n")
+		for _, t := range tables {
+			fmt.Fprintf(&b, "### %s\n\n", t.Name)
+			fmt.Fprintf(&b, "| Column | Type | Nullable |\n")
+			fmt.Fprintf(&b, "|--------|------|----------|\n")
+			for _, c := range t.Columns {
+				nullable := "no"
+				if c.Nullable {
+					nullable = "yes"
+				}
+				fmt.Fprintf(&b, "| %s | %s | %s |\n", c.Name, c.DataType, nullable)
+			}
+			fmt.Fprintf(&b, "\n")
+		}
+	}
+
+	fmt.Fprintf(&b, "## SDK Usage\n\n")
+	fmt.Fprintf(&b, "```typescript\n")
+	fmt.Fprintf(&b, "import { createClient } from '@eurobase/sdk'\n\n")
+	fmt.Fprintf(&b, "const eb = createClient({\n")
+	fmt.Fprintf(&b, "  url: '%s',\n", apiURL)
+	fmt.Fprintf(&b, "  apiKey: process.env.EUROBASE_PUBLIC_KEY\n")
+	fmt.Fprintf(&b, "})\n\n")
+	fmt.Fprintf(&b, "// Query\nconst { data } = await eb.db.from('todos').select('*')\n\n")
+	fmt.Fprintf(&b, "// Insert\nawait eb.db.from('todos').insert({ title: 'New task' })\n\n")
+	fmt.Fprintf(&b, "// Update\nawait eb.db.from('todos').update({ completed: true }).eq('id', id)\n\n")
+	fmt.Fprintf(&b, "// Delete\nawait eb.db.from('todos').delete().eq('id', id)\n\n")
+	fmt.Fprintf(&b, "// File upload\nawait eb.storage.upload('path/file.pdf', file)\n\n")
+	fmt.Fprintf(&b, "// Realtime\neb.realtime.on('todos', 'INSERT', (e) => console.log(e))\n")
+	fmt.Fprintf(&b, "```\n\n")
+
+	fmt.Fprintf(&b, "## Authentication\n\n")
+	fmt.Fprintf(&b, "```typescript\n")
+	fmt.Fprintf(&b, "// Sign up\nconst { data, error } = await eb.auth.signUp({ email: 'user@example.com', password: 'securepassword' })\n\n")
+	fmt.Fprintf(&b, "// Sign in\nawait eb.auth.signIn({ email: 'user@example.com', password: 'securepassword' })\n\n")
+	fmt.Fprintf(&b, "// Get current user\nconst { data: user } = await eb.auth.getUser()\n\n")
+	fmt.Fprintf(&b, "// Listen for auth state changes\neb.auth.onAuthStateChange((event, session) => {\n")
+	fmt.Fprintf(&b, "  console.log(event) // SIGNED_IN | SIGNED_OUT | TOKEN_REFRESHED\n})\n\n")
+	fmt.Fprintf(&b, "// Sign out\nawait eb.auth.signOut()\n")
+	fmt.Fprintf(&b, "```\n\n")
+	fmt.Fprintf(&b, "After sign-in, the JWT is sent automatically with every `eb.db` query. RLS policies are enforced server-side.\n\n")
+
+	fmt.Fprintf(&b, "## Constraints\n\n")
+	fmt.Fprintf(&b, "- All infrastructure is EU-only (Scaleway, Paris FR)\n")
+	fmt.Fprintf(&b, "- No US-incorporated services (AWS, GCP, Azure, Stripe, Vercel, Cloudflare)\n")
+	fmt.Fprintf(&b, "- GDPR-native by design\n")
+
+	return b.String()
+}
+
+func generateCodexMD(name, slug, apiURL, plan string, tables []ConnectTable) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# %s — Eurobase Project\n\n", name)

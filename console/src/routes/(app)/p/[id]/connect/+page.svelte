@@ -3,13 +3,13 @@
 	import { browser } from '$app/environment';
 	import { api, type ConnectInfo } from '$lib/api.js';
 
-	type IdeTab = 'claude' | 'cursor' | 'windsurf' | 'generic';
+	type IdeTab = 'claude' | 'codex' | 'cursor' | 'windsurf' | 'generic';
 	const STORAGE_KEY = 'eurobase:connect-tab';
 
 	function loadSavedTab(): IdeTab {
 		if (browser) {
 			const saved = localStorage.getItem(STORAGE_KEY);
-			if (saved === 'claude' || saved === 'cursor' || saved === 'windsurf' || saved === 'generic') return saved;
+			if (saved === 'claude' || saved === 'codex' || saved === 'cursor' || saved === 'windsurf' || saved === 'generic') return saved;
 		}
 		return 'claude';
 	}
@@ -91,6 +91,7 @@
 			<nav class="flex gap-6" aria-label="IDE tabs">
 				{#each [
 					{ id: 'claude', label: 'Claude Code' },
+					{ id: 'codex', label: 'Codex' },
 					{ id: 'cursor', label: 'Cursor' },
 					{ id: 'windsurf', label: 'Windsurf' },
 					{ id: 'generic', label: 'Generic' }
@@ -130,6 +131,49 @@
 							</div>
 						</div>
 						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto max-h-80 overflow-y-auto">{info.claude_md}</pre>
+					</div>
+
+					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">.env</p>
+								<p class="text-xs text-gray-500">Environment variables for your project</p>
+							</div>
+							<button
+								onclick={() => downloadFile('.env', info.env_template)}
+								class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
+							>
+								Download
+							</button>
+						</div>
+						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto">{info.env_template}</pre>
+					</div>
+				</div>
+
+			{:else if activeTab === 'codex'}
+				<div class="space-y-4">
+					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">AGENTS.md</p>
+								<p class="text-xs text-gray-500">Drop this into your project root. Codex will use it for context.</p>
+							</div>
+							<div class="flex gap-2">
+								<button
+									onclick={() => copyToClipboard(info.codex_md, 'codex')}
+									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+								>
+									{copiedField === 'codex' ? 'Copied!' : 'Copy'}
+								</button>
+								<button
+									onclick={() => downloadFile('AGENTS.md', info.codex_md)}
+									class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
+								>
+									Download
+								</button>
+							</div>
+						</div>
+						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto max-h-80 overflow-y-auto">{info.codex_md}</pre>
 					</div>
 
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">

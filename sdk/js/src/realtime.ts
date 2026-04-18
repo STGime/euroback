@@ -6,7 +6,7 @@
  * Uses the native WebSocket API (browsers and Node.js 21+).
  */
 
-import type { EurobaseConfig } from './http'
+import type { EurobaseConfig, HttpClient } from './http'
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -42,6 +42,7 @@ export type RealtimeEventType = 'INSERT' | 'UPDATE' | 'DELETE' | '*'
 /** Client that manages WebSocket subscriptions to Eurobase change events. */
 export class RealtimeClient {
   private config: EurobaseConfig
+  private http: HttpClient
   private ws: WebSocket | null = null
   private subscriptions: Map<string, Subscription> = new Map()
   private nextId = 1
@@ -50,8 +51,9 @@ export class RealtimeClient {
   private shouldReconnect = true
   private pendingSubscribes: string[] = []
 
-  constructor(config: EurobaseConfig) {
+  constructor(config: EurobaseConfig, http: HttpClient) {
     this.config = config
+    this.http = http
   }
 
   /**
@@ -108,7 +110,8 @@ export class RealtimeClient {
 
   private connect(): void {
     const baseUrl = this.config.url.replace(/\/+$/, '').replace(/^http/, 'ws')
-    const url = `${baseUrl}/v1/realtime?token=${encodeURIComponent(this.config.apiKey)}`
+    const token = this.http.getAccessToken() || this.config.apiKey
+    const url = `${baseUrl}/v1/realtime?token=${encodeURIComponent(token)}`
 
     this.ws = new WebSocket(url)
 

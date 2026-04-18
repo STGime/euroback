@@ -5,7 +5,7 @@
  * on Eurobase's EU-sovereign infrastructure.
  */
 
-import type { EurobaseConfig } from './http'
+import type { EurobaseConfig, HttpClient } from './http'
 
 export interface FunctionInvokeOptions {
   /** Request body (will be JSON-stringified). */
@@ -22,21 +22,10 @@ export interface FunctionError {
 }
 
 export class FunctionsClient {
-  private config: EurobaseConfig
+  private http: HttpClient
 
-  constructor(config: EurobaseConfig) {
-    this.config = config
-  }
-
-  private get baseUrl(): string {
-    return this.config.url.replace(/\/+$/, '')
-  }
-
-  private defaultHeaders(): Record<string, string> {
-    return {
-      'apikey': this.config.apiKey,
-      'Content-Type': 'application/json',
-    }
+  constructor(config: EurobaseConfig, http: HttpClient) {
+    this.http = http
   }
 
   /**
@@ -53,36 +42,19 @@ export class FunctionsClient {
     functionName: string,
     options?: FunctionInvokeOptions,
   ): Promise<{ data: T | null; error: FunctionError | null }> {
-    const method = options?.method ?? 'POST'
-    const url = `${this.baseUrl}/v1/functions/${functionName}`
+    const path = `/v1/functions/${functionName}`
 
     try {
-      const res = await fetch(url, {
-        method,
-        headers: {
-          ...this.defaultHeaders(),
-          ...options?.headers,
-        },
-        body: options?.body ? JSON.stringify(options.body) : undefined,
-      })
+      const result = await this.http.post(path, options?.body)
 
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
+      if (result.error) {
         return {
           data: null,
-          error: { status: res.status, message: body?.error || `HTTP ${res.status}` },
+          error: { status: 0, message: result.error },
         }
       }
 
-      const contentType = res.headers.get('content-type') || ''
-      if (contentType.includes('application/json')) {
-        const data = await res.json()
-        return { data: data as T, error: null }
-      }
-
-      // Non-JSON response — return as text.
-      const text = await res.text()
-      return { data: text as unknown as T, error: null }
+      return { data: result as T, error: null }
     } catch (err) {
       return {
         data: null,

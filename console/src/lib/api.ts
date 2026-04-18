@@ -1270,6 +1270,7 @@ export interface ConnectInfo {
 	plan: string;
 	tables: { name: string; columns: { name: string; data_type: string; nullable: boolean }[] }[];
 	claude_md: string;
+	codex_md: string;
 	cursor_rules: string;
 	env_template: string;
 	sample_code: Record<string, string>;

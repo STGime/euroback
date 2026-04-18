@@ -44,9 +44,11 @@
 		return 'bg-eurobase-500';
 	}
 
+	let storageUsed = $derived(usage ? formatMB(usage.usage.storage_size_mb) : '—');
+
 	let stats = $derived([
 		{ label: 'Tables', value: tableCount, icon: 'table' },
-		{ label: 'Storage used', value: '—', icon: 'storage' },
+		{ label: 'Storage used', value: storageUsed, icon: 'storage' },
 		{ label: 'API requests', value: requestCount, icon: 'api' }
 	]);
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // maxUploadSize is the gateway-enforced maximum for multipart uploads (50 MB).
@@ -19,12 +20,14 @@ const maxUploadSize = 50 << 20 // 50 MB
 
 // StorageHandler holds dependencies for the storage HTTP handlers.
 type StorageHandler struct {
-	s3 *S3Client
+	s3   *S3Client
+	pool *pgxpool.Pool
 }
 
-// NewStorageHandler creates a new StorageHandler backed by the given S3Client.
-func NewStorageHandler(s3 *S3Client) *StorageHandler {
-	return &StorageHandler{s3: s3}
+// NewStorageHandler creates a new StorageHandler backed by the given S3Client
+// and database pool (used to track uploads in storage_objects).
+func NewStorageHandler(s3 *S3Client, pool *pgxpool.Pool) *StorageHandler {
+	return &StorageHandler{s3: s3, pool: pool}
 }
 
 // isAuthenticated checks whether the request has valid auth claims —
@@ -149,6 +152,22 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the upload in storage_objects so usage tracking works.
+	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
+		escSchema := strings.ReplaceAll(schema, `"`, `""`)
+		q := fmt.Sprintf(
+			`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (key) DO UPDATE SET content_type = $2, size_bytes = $3, uploaded_by = $4`,
+			escSchema,
+		)
+		if _, err := h.pool.Exec(r.Context(), q, key, contentType, size, userID); err != nil {
+			// Non-fatal: the file is already in S3, just log the tracking failure.
+			slog.Error("storage: failed to record upload in storage_objects",
+				"error", err, "schema", schema, "key", key)
+		}
+	}
+
 	resp := uploadResponse{
 		Key:         key,
 		ContentType: contentType,
@@ -239,6 +258,16 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		slog.Error("storage delete failed", "error", err, "bucket", bucket, "key", key)
 		http.Error(w, `{"error":"failed to delete file"}`, http.StatusInternalServerError)
 		return
+	}
+
+	// Remove the tracking row from storage_objects.
+	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
+		escSchema := strings.ReplaceAll(schema, `"`, `""`)
+		q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1`, escSchema)
+		if _, err := h.pool.Exec(r.Context(), q, key); err != nil {
+			slog.Error("storage: failed to delete from storage_objects",
+				"error", err, "schema", schema, "key", key)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -395,4 +424,27 @@ func extractWildcardKey(r *http.Request) string {
 	key := chi.URLParam(r, "*")
 	key = strings.TrimPrefix(key, "/")
 	return key
+}
+
+// schemaForRequest resolves the tenant schema name for the current request.
+// SDK routes have ProjectContext set by API key middleware; platform routes
+// resolve it from the X-Project-Slug header.
+func (h *StorageHandler) schemaForRequest(r *http.Request) string {
+	if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc.SchemaName != "" {
+		return pc.SchemaName
+	}
+	// Platform path — resolve from slug.
+	slug := r.Header.Get("X-Project-Slug")
+	if slug == "" || h.pool == nil {
+		return ""
+	}
+	var schema string
+	err := h.pool.QueryRow(r.Context(),
+		`SELECT schema_name FROM projects WHERE slug = $1 AND status = 'active'`, slug,
+	).Scan(&schema)
+	if err != nil {
+		slog.Error("storage: failed to resolve schema from slug", "slug", slug, "error", err)
+		return ""
+	}
+	return schema
 }
