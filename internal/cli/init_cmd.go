@@ -35,7 +35,6 @@ func InitCmd() *cobra.Command {
 			}
 
 			var conn struct {
-				DatabaseURL string `json:"database_url"`
 				AnonKey     string `json:"anon_key"`
 				ServiceKey  string `json:"service_key"`
 				APIURL      string `json:"api_url"`
@@ -48,14 +47,14 @@ func InitCmd() *cobra.Command {
 
 			var created []string
 
-			// Write .env
+			// Write .env — never includes DATABASE_URL. Tenants access data
+			// through the SDK/HTTP API, which is scoped by their API key.
 			envContent := fmt.Sprintf(`# Eurobase project: %s
 EUROBASE_URL=%s
 EUROBASE_ANON_KEY=%s
 EUROBASE_SERVICE_KEY=%s
 EUROBASE_PROJECT_ID=%s
-DATABASE_URL=%s
-`, conn.ProjectSlug, conn.APIURL, conn.AnonKey, conn.ServiceKey, conn.ProjectID, conn.DatabaseURL)
+`, conn.ProjectSlug, conn.APIURL, conn.AnonKey, conn.ServiceKey, conn.ProjectID)
 
 			if err := os.WriteFile(".env", []byte(envContent), 0600); err != nil {
 				PrintError("Failed to write .env: " + err.Error())
@@ -71,8 +70,8 @@ DATABASE_URL=%s
 - Project ID: %s
 
 ## Database
-- Connection: see .env for DATABASE_URL
-- All tenant-scoped queries must use RLS with set_tenant_id()
+- Access data through the SDK or REST API using EUROBASE_ANON_KEY / EUROBASE_SERVICE_KEY
+- No raw Postgres connection string is exposed — the platform enforces tenant isolation via RLS on the gateway
 - System tables (users, refresh_tokens, storage_objects, email_tokens, vault_secrets) are managed by the platform
 
 ## Auth

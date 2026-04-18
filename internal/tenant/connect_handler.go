@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -14,6 +13,12 @@ import (
 )
 
 // ConnectInfo is the JSON response for the connect endpoint.
+//
+// NOTE: DATABASE_URL is deliberately NOT returned. The gateway's Postgres
+// credential has platform-wide privileges (DDL on public.*, cross-tenant
+// access). Tenants access data through the gateway's HTTP API (RLS-scoped)
+// and never hold a raw DB connection string. Platform migrations are run
+// by the deploy pipeline, not tenants.
 type ConnectInfo struct {
 	ProjectID   string            `json:"project_id"`
 	ProjectName string            `json:"project_name"`
@@ -21,7 +26,6 @@ type ConnectInfo struct {
 	APIURL      string            `json:"api_url"`
 	Region      string            `json:"region"`
 	Plan        string            `json:"plan"`
-	DatabaseURL string            `json:"database_url,omitempty"`
 	Tables      []ConnectTable    `json:"tables"`
 	ClaudeMD    string            `json:"claude_md"`
 	CodexMD     string            `json:"codex_md"`
@@ -51,7 +55,7 @@ func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
-		_, _, ok := requireRole(w, r, pool, projectID, "viewer")
+		_, _, ok := RequireRole(w, r, pool, projectID, "viewer")
 		if !ok {
 			return
 		}
@@ -167,7 +171,6 @@ curl -s '%s/v1/db/todos' \
 			APIURL:      apiURL,
 			Region:      region,
 			Plan:        plan,
-			DatabaseURL: os.Getenv("DATABASE_URL"),
 			Tables:      tables,
 			ClaudeMD:    claudeMD,
 			CodexMD:     codexMD,

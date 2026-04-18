@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -80,32 +79,25 @@ func migrationsUpCmd() *cobra.Command {
 	var dbURL string
 	cmd := &cobra.Command{
 		Use:   "up [N]",
-		Short: "Run pending migrations (or show the command with --dry-run)",
-		Args:  cobra.MaximumNArgs(1),
+		Short: "Run pending platform migrations against a local/dev database",
+		Long: `Run pending migrations against the database pointed to by --database or
+$DATABASE_URL. The CLI does NOT fetch a connection string from the gateway —
+platform migrations are a deploy/development concern and must be run with a
+credential you already hold (local dev DB, or the migrator role in CI/CD).
+
+To change the structure of your own tenant's tables, use the console schema
+editor or the /v1/db DDL endpoints; you do not need DATABASE_URL for that.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			connStr := dbURL
 			if connStr == "" {
 				connStr = os.Getenv("DATABASE_URL")
 			}
 			if connStr == "" {
-				cfg, err := LoadConfig()
-				if err != nil {
-					return err
-				}
-				if err := RequireProject(cfg); err != nil {
-					return err
-				}
-				client, err := NewClientFromConfig()
-				if err != nil {
-					return err
-				}
-				connStr, err = getConnectionString(client, cfg)
-				if err != nil {
-					PrintWarning("Could not fetch connection string: " + err.Error())
-					fmt.Println("\nRun manually:")
-					fmt.Println("  migrate -path ./migrations -database \"$DATABASE_URL\" up")
-					return nil
-				}
+				PrintError("DATABASE_URL is not set and --database was not provided.")
+				fmt.Println("Platform migrations are run by the deploy pipeline or against a local dev DB.")
+				fmt.Println("Set DATABASE_URL in your shell or pass --database <url>.")
+				return fmt.Errorf("missing database url")
 			}
 
 			migrateArgs := []string{"-path", "./migrations", "-database", connStr, "up"}
@@ -148,7 +140,7 @@ func migrationsDownCmd() *cobra.Command {
 	var dbURL string
 	cmd := &cobra.Command{
 		Use:   "down [N]",
-		Short: "Roll back migrations (default: 1)",
+		Short: "Roll back platform migrations against a local/dev database",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			connStr := dbURL
@@ -156,24 +148,9 @@ func migrationsDownCmd() *cobra.Command {
 				connStr = os.Getenv("DATABASE_URL")
 			}
 			if connStr == "" {
-				cfg, err := LoadConfig()
-				if err != nil {
-					return err
-				}
-				if err := RequireProject(cfg); err != nil {
-					return err
-				}
-				client, err := NewClientFromConfig()
-				if err != nil {
-					return err
-				}
-				connStr, err = getConnectionString(client, cfg)
-				if err != nil {
-					PrintWarning("Could not fetch connection string: " + err.Error())
-					fmt.Println("\nRun manually:")
-					fmt.Println("  migrate -path ./migrations -database \"$DATABASE_URL\" down 1")
-					return nil
-				}
+				PrintError("DATABASE_URL is not set and --database was not provided.")
+				fmt.Println("Set DATABASE_URL in your shell or pass --database <url>.")
+				return fmt.Errorf("missing database url")
 			}
 
 			steps := "1"
@@ -254,16 +231,3 @@ func migrationsStatusCmd() *cobra.Command {
 	}
 }
 
-func getConnectionString(client *APIClient, cfg *Config) (string, error) {
-	data, err := client.Get("/platform/projects/" + cfg.ActiveProject + "/connect")
-	if err != nil {
-		return "", err
-	}
-	var conn struct {
-		DatabaseURL string `json:"database_url"`
-	}
-	if err := json.Unmarshal(data, &conn); err != nil {
-		return "", err
-	}
-	return conn.DatabaseURL, nil
-}
