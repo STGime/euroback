@@ -79,9 +79,10 @@ BEGIN
         EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO eurobase_gateway', rec.schema_name);
         EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO eurobase_gateway', rec.schema_name);
         EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO eurobase_gateway', rec.schema_name);
-        -- Default privileges cover tables created by EITHER role in this schema going forward.
+        -- Default privileges for migrator-created tables. Tables the gateway
+        -- creates itself (via SDK DDL) don't need ALTER DEFAULT PRIVILEGES —
+        -- the creator already has all privileges on its own objects.
         EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', rec.schema_name);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_gateway IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', rec.schema_name);
     END LOOP;
 END$$;
 
@@ -238,7 +239,6 @@ BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO eurobase_gateway', v_schema_name);
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO eurobase_gateway', v_schema_name);
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', v_schema_name);
-    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_gateway IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', v_schema_name);
 
     UPDATE public.projects SET schema_name = v_schema_name WHERE id = p_project_id;
     SET search_path TO public;
