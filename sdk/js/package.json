@@ -36,7 +36,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/STGime/euroback",
+    "url": "git+https://github.com/STGime/euroback.git",
     "directory": "sdk/js"
   },
   "homepage": "https://eurobase.app",
