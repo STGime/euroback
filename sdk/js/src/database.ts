@@ -5,6 +5,7 @@
 
 import type { EurobaseConfig } from './http'
 import { httpClient, type HttpClient } from './http'
+import { SchemaClient } from './ddl'
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -265,9 +266,16 @@ export class QueryBuilder<T = Record<string, any>> implements PromiseLike<QueryR
 /** Top-level database client. Start a query chain with `.from(table)`. */
 export class DatabaseClient {
   private http: HttpClient
+  /**
+   * Schema DDL surface — create/drop tables and columns. Requires a
+   * secret API key. Tables created through here live in the caller's
+   * tenant schema only; you cannot reach platform tables.
+   */
+  readonly schema: SchemaClient
 
   constructor(config: EurobaseConfig) {
     this.http = httpClient(config)
+    this.schema = new SchemaClient(config)
   }
 
   /** Start a query chain for the given table. */

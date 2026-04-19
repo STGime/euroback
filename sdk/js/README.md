@@ -123,6 +123,65 @@ const { error } = await eb.db
 
 Pagination: `.limit(n)` and `.offset(n)`.
 
+## Schema (DDL)
+
+Create and drop tables in your tenant schema from code. Requires a **secret API key** (`eb_sk_*`) — the gateway rejects public keys with 403 because DDL is destructive. Your secret key should live in server-side code only (never embed it in a browser bundle).
+
+```ts
+// Create a table. RLS is ON by default and the gateway auto-applies the
+// owner_access preset when it detects an owner column (user_id, owner_id,
+// created_by). end-users can only read/write their own rows.
+const { data, error } = await eb.db.schema.createTable('posts', {
+  columns: [
+    { name: 'id', type: 'uuid', primary_key: true, default_value: 'gen_random_uuid()' },
+    { name: 'title', type: 'text' },
+    { name: 'body', type: 'text', nullable: true },
+    { name: 'user_id', type: 'uuid' },
+    { name: 'created_at', type: 'timestamptz', default_value: 'now()' },
+  ],
+})
+// data.rls_enabled === true
+// data.rls_preset === 'owner_access'
+
+// Add a column later
+await eb.db.schema.addColumn('posts', {
+  name: 'published',
+  type: 'boolean',
+  default_value: 'false',
+})
+
+// Drop a column
+await eb.db.schema.dropColumn('posts', 'body')
+
+// Drop the table (irreversible)
+await eb.db.schema.dropTable('posts')
+```
+
+**Opting out of RLS.** Pass `disableRLS: true` only for genuinely public data. The response will include a `warning` field so you see what you did:
+
+```ts
+const { data } = await eb.db.schema.createTable('public_feed', {
+  columns: [
+    { name: 'id', type: 'uuid', primary_key: true, default_value: 'gen_random_uuid()' },
+    { name: 'body', type: 'text' },
+  ],
+  disableRLS: true,
+})
+console.warn(data.warning) // "RLS is DISABLED on this table — …"
+```
+
+You can also pass an explicit preset:
+
+```ts
+await eb.db.schema.createTable('announcements', {
+  columns: [/* ... */],
+  rlsPreset: 'public_read_owner_write',
+  rlsUserIdColumn: 'author_id',
+})
+```
+
+Available presets: `owner_access`, `public_read_owner_write`, `authenticated_read_owner_write`, `full_access`, `read_only`, `none`.
+
 ## Storage
 
 ```ts

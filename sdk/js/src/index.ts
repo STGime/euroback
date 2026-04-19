@@ -30,6 +30,13 @@ export { FunctionsClient } from './functions'
 export type { FunctionInvokeOptions, FunctionError } from './functions'
 export { VaultClient } from './vault'
 export type { VaultSecret, VaultSecretMeta } from './vault'
+export { SchemaClient } from './ddl'
+export type {
+  ColumnDefinition,
+  CreateTableOptions,
+  CreateTableResult,
+  RLSPreset,
+} from './ddl'
 export type {
   AuthUser,
   AuthSession,
