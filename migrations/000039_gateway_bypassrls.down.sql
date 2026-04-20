@@ -1,16 +1,9 @@
 -- 000039_gateway_bypassrls.down.sql
--- Revoke the BYPASSRLS attribute from eurobase_gateway. Platform-admin
--- paths that depended on `SET LOCAL row_security = off` will fail
--- silently (RLS re-applies) until policies on user-created tables are
--- back-filled with the service-role branch.
+-- No meaningful rollback: removing the `public.is_service_role() OR`
+-- prefix from every policy would require reparsing expression trees
+-- and is not worth the complexity. Platform admin paths would fail
+-- again, but the safe state (RLS enforced) is preserved. If a true
+-- rollback is needed, restore tenant schemas from backup and re-run
+-- migrations up to 000038.
 
-BEGIN;
-
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'eurobase_gateway') THEN
-        EXECUTE 'ALTER ROLE eurobase_gateway NOBYPASSRLS';
-    END IF;
-END$$;
-
-COMMIT;
+SELECT 1;

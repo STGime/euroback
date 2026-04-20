@@ -46,16 +46,6 @@ func RunAsService(ctx context.Context, pool *pgxpool.Pool, fn func(context.Conte
 	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
 		return fmt.Errorf("set service role: %w", err)
 	}
-	// Also disable RLS for this tx. The service-role GUC is sufficient
-	// for the platform-hardcoded policies (rewritten in migration 000038)
-	// but not for user-created tables whose policies predate that change
-	// and don't branch on public.is_service_role(). `row_security = off`
-	// is an authoritative bypass for roles with BYPASSRLS (granted in
-	// migration 000039); a no-op otherwise, which is still safe because
-	// the service role GUC covers the migrator-owned tables.
-	if _, err := tx.Exec(ctx, "SET LOCAL row_security = off"); err != nil {
-		return fmt.Errorf("disable row security: %w", err)
-	}
 
 	if err := fn(ctx, tx); err != nil {
 		return err
