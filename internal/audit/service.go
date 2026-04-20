@@ -32,6 +32,7 @@ const (
 	ActionFunctionDeleted    = "function.deleted"
 	ActionAllowlistAdded     = "allowlist.added"
 	ActionAllowlistRemoved   = "allowlist.removed"
+	ActionAllowlistEmailed   = "allowlist.emailed"
 )
 
 // Entry represents a single audit log row.

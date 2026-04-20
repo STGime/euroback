@@ -161,6 +161,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/allowlist", tenant.AdminListAllowlist(pool))
 			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))
 			r.Delete("/allowlist/{email}", tenant.AdminRemoveAllowlist(pool))
+			r.Post("/allowlist/email", tenant.AdminSendAllowlistEmail(pool, emailService))
 		})
 
 		// Authenticated: platform config endpoints.

@@ -1146,6 +1146,18 @@ export class EurobaseAPI {
 		});
 	}
 
+	/**
+	 * Send an HTML email to one or more allowlist entries. When more than
+	 * one recipient is supplied the server uses BCC, so recipients do not
+	 * see each other. Superadmin only.
+	 */
+	async adminSendAllowlistEmail(emails: string[], subject: string, bodyHtml: string): Promise<{ status: string; sent: number; bcc: boolean }> {
+		return this.fetch('/platform/admin/allowlist/email', {
+			method: 'POST',
+			body: JSON.stringify({ emails, subject, body_html: bodyHtml })
+		});
+	}
+
 	/** Get request logs for a project. */
 	async getLogs(
 		projectId: string,

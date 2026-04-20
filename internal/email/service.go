@@ -42,6 +42,14 @@ func (s *EmailService) Configured() bool {
 	return s.client.Configured()
 }
 
+// SendBulkBCC sends a single HTML email to every recipient via BCC.
+// Recipients do NOT see each other's addresses. Used by superadmin
+// broadcast features (e.g. beta-allowlist invitations) where a single
+// announcement goes to many people.
+func (s *EmailService) SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) error {
+	return s.client.SendBulk(ctx, recipients, subject, htmlBody)
+}
+
 // SendRaw sends a pre-composed HTML email through the underlying TEM client.
 // Used by internal background jobs (e.g. usage alerts) that build their own
 // subject + body and don't need token generation or template loading.

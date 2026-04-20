@@ -1,7 +1,9 @@
 package tenant
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +12,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// BulkEmailer is the subset of internal/email.EmailService that admin
+// broadcast needs. Kept as an interface so this package doesn't import
+// internal/email (would be a circular graph through tenant→email→tenant).
+type BulkEmailer interface {
+	SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) error
+}
 
 // AdminProject is a platform-wide project row returned to superadmins.
 type AdminProject struct {
@@ -128,6 +137,110 @@ func AdminAddAllowlist(pool *pgxpool.Pool) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{"status": "added", "email": email})
+	}
+}
+
+// AdminSendAllowlistEmail sends a single HTML email to one or more
+// allowlist recipients. With two or more recipients the send uses BCC
+// so each recipient sees only themselves in the visible headers —
+// important when invitation lists shouldn't be exposed (e.g. beta
+// testers learning who else is in the cohort). All recipients are
+// validated against the live platform_allowlist table so a compromised
+// superadmin token can't use this as a generic mail relay.
+func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if mailer == nil {
+			http.Error(w, `{"error":"email service not configured"}`, http.StatusServiceUnavailable)
+			return
+		}
+		var req struct {
+			Emails   []string `json:"emails"`
+			Subject  string   `json:"subject"`
+			BodyHTML string   `json:"body_html"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Normalise + dedupe.
+		seen := make(map[string]struct{}, len(req.Emails))
+		recipients := make([]string, 0, len(req.Emails))
+		for _, e := range req.Emails {
+			e = strings.ToLower(strings.TrimSpace(e))
+			if e == "" || !strings.Contains(e, "@") {
+				continue
+			}
+			if _, dup := seen[e]; dup {
+				continue
+			}
+			seen[e] = struct{}{}
+			recipients = append(recipients, e)
+		}
+		if len(recipients) == 0 {
+			http.Error(w, `{"error":"no valid recipients"}`, http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Subject) == "" {
+			http.Error(w, `{"error":"subject is required"}`, http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.BodyHTML) == "" {
+			http.Error(w, `{"error":"body_html is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Validate every recipient is actually on the allowlist. Use
+		// ANY($1) so a single round-trip returns rows we can diff.
+		rows, err := pool.Query(r.Context(),
+			`SELECT email FROM public.platform_allowlist WHERE email = ANY($1::text[])`,
+			recipients,
+		)
+		if err != nil {
+			http.Error(w, `{"error":"allowlist lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		valid := make(map[string]struct{})
+		for rows.Next() {
+			var e string
+			if err := rows.Scan(&e); err == nil {
+				valid[e] = struct{}{}
+			}
+		}
+		rows.Close()
+		final := recipients[:0]
+		for _, e := range recipients {
+			if _, ok := valid[e]; ok {
+				final = append(final, e)
+			}
+		}
+		if len(final) == 0 {
+			http.Error(w, `{"error":"no recipients are on the allowlist"}`, http.StatusBadRequest)
+			return
+		}
+
+		if err := mailer.SendBulkBCC(r.Context(), final, req.Subject, req.BodyHTML); err != nil {
+			slog.Error("admin bulk email failed", "error", err, "count", len(final))
+			http.Error(w, `{"error":"send failed: `+err.Error()+`"}`, http.StatusBadGateway)
+			return
+		}
+
+		if svc := audit.FromContext(r.Context()); svc != nil {
+			actorID, actorEmail := audit.ActorFromContext(r.Context())
+			svc.Log(r.Context(), "", actorID, actorEmail, audit.ActionAllowlistEmailed,
+				audit.WithMetadata(map[string]any{
+					"recipient_count": len(final),
+					"subject":         req.Subject,
+				}),
+				audit.WithIP(r.RemoteAddr))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "sent",
+			"sent":   len(final),
+			"bcc":    len(final) > 1,
+		})
 	}
 }
 
