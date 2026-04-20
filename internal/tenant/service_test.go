@@ -71,8 +71,26 @@ func cleanupProject(t *testing.T, pool *pgxpool.Pool, projectID string) {
 		slog.Warn("delete project cleanup failed", "project_id", projectID, "error", err)
 	}
 
-	// Clean up the platform user created for this test (best-effort).
-	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE hanko_user_id LIKE 'test-%'`)
+	// Clean up test platform users by email suffix.
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email LIKE '%@test.eurobase.local'`)
+}
+
+// insertTestPlatformUser creates a platform_users row with the given email
+// and returns its UUID. Pair with cleanupProject to remove it after the test.
+func insertTestPlatformUser(t *testing.T, pool *pgxpool.Pool, email string) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+		 VALUES ($1, 'x', now())
+		 ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+		 RETURNING id::text`, email,
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert test platform user: %v", err)
+	}
+	return id
 }
 
 func TestCreateProject(t *testing.T) {
@@ -89,7 +107,8 @@ func TestCreateProject(t *testing.T) {
 		Plan:   "free",
 	}
 
-	project, err := svc.CreateProject(ctx, "test-user-create", "test@eurobase.app", req)
+	uid := insertTestPlatformUser(t, pool, "create@test.eurobase.local")
+	project, err := svc.CreateProject(ctx, uid, "create@test.eurobase.local", req)
 	if err != nil {
 		t.Fatalf("CreateProject() returned error: %v", err)
 	}
@@ -150,7 +169,8 @@ func TestCreateProjectDuplicateSlug(t *testing.T) {
 		Plan:   "free",
 	}
 
-	project1, err := svc.CreateProject(ctx, "test-user-dup1", "dup1@eurobase.app", req)
+	uid1 := insertTestPlatformUser(t, pool, "dup1@test.eurobase.local")
+	project1, err := svc.CreateProject(ctx, uid1, "dup1@test.eurobase.local", req)
 	if err != nil {
 		t.Fatalf("first CreateProject() returned error: %v", err)
 	}
@@ -160,13 +180,11 @@ func TestCreateProjectDuplicateSlug(t *testing.T) {
 	})
 
 	// Second creation with the same slug should fail.
-	_, err = svc.CreateProject(ctx, "test-user-dup2", "dup2@eurobase.app", req)
+	uid2 := insertTestPlatformUser(t, pool, "dup2@test.eurobase.local")
+	_, err = svc.CreateProject(ctx, uid2, "dup2@test.eurobase.local", req)
 	if err == nil {
 		t.Fatal("expected error for duplicate slug, got nil")
 	}
-
-	// Clean up any orphaned user from the second attempt.
-	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE hanko_user_id = $1`, "test-user-dup2")
 }
 
 func TestListProjects(t *testing.T) {
@@ -174,7 +192,7 @@ func TestListProjects(t *testing.T) {
 	ctx := context.Background()
 
 	svc := &TenantService{pool: pool}
-	hankoUserID := "test-user-list"
+	uid := insertTestPlatformUser(t, pool, "list@test.eurobase.local")
 
 	req1 := CreateProjectRequest{
 		Name:   "List Test One",
@@ -189,11 +207,11 @@ func TestListProjects(t *testing.T) {
 		Plan:   "free",
 	}
 
-	p1, err := svc.CreateProject(ctx, hankoUserID, "list@eurobase.app", req1)
+	p1, err := svc.CreateProject(ctx, uid, "list@test.eurobase.local", req1)
 	if err != nil {
 		t.Fatalf("CreateProject(1) returned error: %v", err)
 	}
-	p2, err := svc.CreateProject(ctx, hankoUserID, "list@eurobase.app", req2)
+	p2, err := svc.CreateProject(ctx, uid, "list@test.eurobase.local", req2)
 	if err != nil {
 		t.Fatalf("CreateProject(2) returned error: %v", err)
 	}
@@ -203,7 +221,7 @@ func TestListProjects(t *testing.T) {
 		cleanupProject(t, pool, p1.ID)
 	})
 
-	projects, err := svc.ListProjects(ctx, hankoUserID)
+	projects, err := svc.ListProjects(ctx, uid)
 	if err != nil {
 		t.Fatalf("ListProjects() returned error: %v", err)
 	}

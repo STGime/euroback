@@ -9,9 +9,17 @@ import (
 	"log/slog"
 	"strings"
 
+	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// asService runs fn in a service-role tx on s.pool. All email_tokens
+// writes/reads need this — they live in the tenant schema and are
+// hit in pre-auth paths where no end_user context exists.
+func (s *EmailService) asService(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
+	return edb.RunAsService(ctx, s.pool, fn)
+}
 
 // EmailService provides high-level email operations.
 type EmailService struct {
@@ -53,7 +61,10 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 		 VALUES ($1, $2, 'verification', now() + interval '24 hours')`,
 		quoteIdent(schemaName),
 	)
-	if _, err := s.pool.Exec(ctx, q, userID, tokenHash); err != nil {
+	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, userID, tokenHash)
+		return err
+	}); err != nil {
 		return fmt.Errorf("store verification token: %w", err)
 	}
 
@@ -88,7 +99,10 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 		 VALUES ($1, $2, 'password_reset', now() + interval '1 hour')`,
 		quoteIdent(schemaName),
 	)
-	if _, err := s.pool.Exec(ctx, q, userID, tokenHash); err != nil {
+	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, userID, tokenHash)
+		return err
+	}); err != nil {
 		return fmt.Errorf("store password reset token: %w", err)
 	}
 
@@ -123,7 +137,10 @@ func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projec
 		 VALUES ($1, $2, 'magic_link', now() + interval '15 minutes')`,
 		quoteIdent(schemaName),
 	)
-	if _, err := s.pool.Exec(ctx, q, userID, tokenHash); err != nil {
+	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, userID, tokenHash)
+		return err
+	}); err != nil {
 		return fmt.Errorf("store magic link token: %w", err)
 	}
 
@@ -190,7 +207,9 @@ func (s *EmailService) VerifyToken(ctx context.Context, schemaName, rawToken, to
 		 RETURNING user_id`,
 		quoteIdent(schemaName),
 	)
-	err := s.pool.QueryRow(ctx, q, tokenHash, tokenType).Scan(&userID)
+	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, tokenHash, tokenType).Scan(&userID)
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return "", fmt.Errorf("invalid or expired token")

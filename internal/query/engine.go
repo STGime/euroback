@@ -21,81 +21,46 @@ func NewQueryEngine(pool *pgxpool.Pool) *QueryEngine {
 }
 
 
-// withEndUserRLS wraps a function in a transaction with SET LOCAL app.end_user_id
-// if an end-user ID is present in the context and the key type is not "secret".
-func (e *QueryEngine) withEndUserRLS(ctx context.Context, fn func(ctx context.Context) error) error {
-	endUserID := EndUserIDFromContext(ctx)
+// applyRLSContext sets the three app.end_user_* GUCs on the provided tx
+// based on the request context. Secret keys get role='service' (bypasses
+// RLS via the is_service_role() branch in policies). End-user JWTs get
+// role='authenticated' + id + email. Anonymous public-key requests get
+// role='anon'. Must be called on an open transaction BEFORE any tenant-
+// schema query so policies see the right values.
+func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 	keyType := KeyTypeFromContext(ctx)
+	endUserID := EndUserIDFromContext(ctx)
 
-	// Secret keys bypass RLS (service-level access).
-	if keyType == "secret" {
-		return fn(ctx)
-	}
-
-	// Anonymous access with a public key — enforce RLS with anon role
-	// so that policies can distinguish authenticated vs anonymous requests.
-	if endUserID == "" {
-		conn, err := e.pool.Acquire(ctx)
-		if err != nil {
-			return fmt.Errorf("acquire connection: %w", err)
+	switch {
+	case keyType == "secret":
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
+			return fmt.Errorf("set service role: %w", err)
 		}
-		defer conn.Release()
-
-		tx, err := conn.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("begin transaction: %w", err)
-		}
-		defer tx.Rollback(ctx)
-
+	case endUserID == "":
 		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'anon', true)"); err != nil {
 			return fmt.Errorf("set anon role: %w", err)
 		}
-
-		if err := fn(ctx); err != nil {
-			return err
+	default:
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_id', $1, true)", endUserID); err != nil {
+			return fmt.Errorf("set end_user_id: %w", err)
 		}
-		return tx.Commit(ctx)
-	}
-
-	conn, err := e.pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire connection: %w", err)
-	}
-	defer conn.Release()
-
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_id', $1, true)", endUserID); err != nil {
-		return fmt.Errorf("set end_user_id: %w", err)
-	}
-
-	// Set authenticated role for GoTrue-compatible auth helpers.
-	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'authenticated', true)"); err != nil {
-		return fmt.Errorf("set end_user_role: %w", err)
-	}
-
-	// Set email if available from context.
-	if email := EndUserEmailFromContext(ctx); email != "" {
-		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_email', $1, true)", email); err != nil {
-			return fmt.Errorf("set end_user_email: %w", err)
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'authenticated', true)"); err != nil {
+			return fmt.Errorf("set end_user_role: %w", err)
+		}
+		if email := EndUserEmailFromContext(ctx); email != "" {
+			if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_email', $1, true)", email); err != nil {
+				return fmt.Errorf("set end_user_email: %w", err)
+			}
 		}
 	}
-
-	if err := fn(ctx); err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
+	return nil
 }
 
 
 // withTenantTx runs fn inside a transaction with search_path set to the
-// tenant schema. This ensures triggers and PL/pgSQL functions that use
-// unqualified table references resolve to the correct schema.
+// tenant schema AND the end-user RLS context applied. Every tenant-schema
+// query on the gateway must go through this wrapper so RLS policies can
+// filter by the caller (service / anon / authenticated user).
 func (e *QueryEngine) withTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
@@ -105,6 +70,10 @@ func (e *QueryEngine) withTenantTx(ctx context.Context, schemaName string, fn fu
 
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
+	}
+
+	if err := e.applyRLSContext(ctx, tx); err != nil {
+		return err
 	}
 
 	if err := fn(tx); err != nil {
@@ -173,7 +142,9 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 	slog.Debug("executing aggregate query", "sql", sql, "args_count", len(args))
 
 	var result interface{}
-	err := e.pool.QueryRow(ctx, sql, args...).Scan(&result)
+	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, args...).Scan(&result)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("execute aggregate: %w", err)
 	}
@@ -283,65 +254,64 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		params.Limit = 1000
 	}
 
-	// If relations are requested, resolve FKs and build a JOIN query.
-	if len(params.Relations) > 0 {
-		resolvedRels, err := e.resolveRelations(ctx, schemaName, tableName, params.Relations)
-		if err != nil {
-			return nil, 0, err
+	var results []map[string]interface{}
+	var totalCount int
+
+	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		// If relations are requested, resolve FKs and build a JOIN query.
+		if len(params.Relations) > 0 {
+			resolvedRels, err := e.resolveRelations(ctx, schemaName, tableName, params.Relations)
+			if err != nil {
+				return err
+			}
+
+			selectSQL, selectArgs := buildRelationQuery(schemaName, tableName, params, resolvedRels)
+			slog.Debug("executing relation select query", "sql", selectSQL, "args_count", len(selectArgs))
+
+			countSQL, countArgs := buildCountQuery(schemaName, tableName, params)
+
+			rows, err := tx.Query(ctx, selectSQL, selectArgs...)
+			if err != nil {
+				return fmt.Errorf("execute select: %w", err)
+			}
+			defer rows.Close()
+
+			rawResults, err := scanRows(rows)
+			if err != nil {
+				return err
+			}
+			// Nest related columns into sub-objects.
+			results = nestRelationColumns(rawResults, resolvedRels)
+
+			if err := tx.QueryRow(ctx, countSQL, countArgs...).Scan(&totalCount); err != nil {
+				return fmt.Errorf("execute count: %w", err)
+			}
+			return nil
 		}
 
-		selectSQL, selectArgs := buildRelationQuery(schemaName, tableName, params, resolvedRels)
-		slog.Debug("executing relation select query", "sql", selectSQL, "args_count", len(selectArgs))
-
+		selectSQL, selectArgs := buildSelectQuery(schemaName, tableName, params)
+		slog.Debug("executing select query", "sql", selectSQL, "args_count", len(selectArgs))
 		countSQL, countArgs := buildCountQuery(schemaName, tableName, params)
 
-		rows, err := e.pool.Query(ctx, selectSQL, selectArgs...)
+		rows, err := tx.Query(ctx, selectSQL, selectArgs...)
 		if err != nil {
-			return nil, 0, fmt.Errorf("execute select: %w", err)
+			return fmt.Errorf("execute select: %w", err)
 		}
 		defer rows.Close()
 
-		rawResults, err := scanRows(rows)
+		results, err = scanRows(rows)
 		if err != nil {
-			return nil, 0, err
+			return err
 		}
 
-		// Nest related columns into sub-objects.
-		results := nestRelationColumns(rawResults, resolvedRels)
-
-		var totalCount int
-		err = e.pool.QueryRow(ctx, countSQL, countArgs...).Scan(&totalCount)
-		if err != nil {
-			return nil, 0, fmt.Errorf("execute count: %w", err)
+		if err := tx.QueryRow(ctx, countSQL, countArgs...).Scan(&totalCount); err != nil {
+			return fmt.Errorf("execute count: %w", err)
 		}
-
-		return results, totalCount, nil
-	}
-
-	// Build the SELECT query.
-	selectSQL, selectArgs := buildSelectQuery(schemaName, tableName, params)
-	slog.Debug("executing select query", "sql", selectSQL, "args_count", len(selectArgs))
-
-	// Build the COUNT query.
-	countSQL, countArgs := buildCountQuery(schemaName, tableName, params)
-
-	rows, err := e.pool.Query(ctx, selectSQL, selectArgs...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("execute select: %w", err)
-	}
-	defer rows.Close()
-
-	results, err := scanRows(rows)
+		return nil
+	})
 	if err != nil {
 		return nil, 0, err
 	}
-
-	var totalCount int
-	err = e.pool.QueryRow(ctx, countSQL, countArgs...).Scan(&totalCount)
-	if err != nil {
-		return nil, 0, fmt.Errorf("execute count: %w", err)
-	}
-
 	return results, totalCount, nil
 }
 
@@ -598,7 +568,9 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 	slog.Debug("executing function call", "sql", sql, "args_count", len(paramValues))
 
 	var result interface{}
-	err = e.pool.QueryRow(ctx, sql, paramValues...).Scan(&result)
+	err = e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, paramValues...).Scan(&result)
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -640,6 +612,11 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 	// Isolate to tenant schema.
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
 		return nil, nil, fmt.Errorf("set search_path: %w", err)
+	}
+
+	// Apply end-user RLS context so tenant policies filter correctly.
+	if err := e.applyRLSContext(ctx, tx); err != nil {
+		return nil, nil, err
 	}
 
 	// Prevent runaway queries.

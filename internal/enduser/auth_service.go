@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/oauth"
 	"github.com/eurobase/euroback/internal/sms"
@@ -20,6 +21,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// asService runs fn in a service-role transaction. All queries against
+// tenant schemas in AuthService go through this so RLS policies permit
+// the query via the service-role bypass (see migration 000038).
+func (s *AuthService) asService(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
+	return db.RunAsService(ctx, s.pool, fn)
+}
 
 // OAuthSecretLookup returns the decrypted client_secret for a given provider
 // in a given project schema. Satisfied by tenant.TenantService.GetOAuthClientSecret.
@@ -95,8 +103,10 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 		 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
 		quoteIdent(schemaName), emailConfirmedExpr,
 	)
-	err = s.pool.QueryRow(ctx, q, email, string(hash), string(metadataJSON)).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, email, string(hash), string(metadataJSON)).
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 			return nil, fmt.Errorf("email already registered")
@@ -154,8 +164,10 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 		 WHERE email = $1 AND password_hash IS NOT NULL`,
 		quoteIdent(schemaName),
 	)
-	err := s.pool.QueryRow(ctx, q, email).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &passwordHash, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, email).
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &passwordHash, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("invalid email or password")
@@ -176,7 +188,9 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 	if config.RequireEmailConfirmation {
 		var emailConfirmedAt *time.Time
 		confirmQ := fmt.Sprintf(`SELECT email_confirmed_at FROM %s.users WHERE id = $1`, quoteIdent(schemaName))
-		_ = s.pool.QueryRow(ctx, confirmQ, user.ID).Scan(&emailConfirmedAt)
+		_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, confirmQ, user.ID).Scan(&emailConfirmedAt)
+		})
 		if emailConfirmedAt == nil {
 			return nil, fmt.Errorf("email_not_confirmed")
 		}
@@ -184,7 +198,10 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 
 	// Update last_sign_in_at.
 	updateQ := fmt.Sprintf(`UPDATE %s.users SET last_sign_in_at = now() WHERE id = $1`, quoteIdent(schemaName))
-	_, _ = s.pool.Exec(ctx, updateQ, user.ID)
+	_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, updateQ, user.ID)
+		return err
+	})
 
 	slog.Info("end-user signed in", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
@@ -217,6 +234,13 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	// Service role: tenant RLS policies evaluate empty end_user_id and
+	// would filter these queries out. Pre-auth refresh has no end-user
+	// context yet; see migration 000038.
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
+		return nil, fmt.Errorf("set service role: %w", err)
+	}
 
 	// Find and revoke the old refresh token.
 	var userID string
@@ -292,8 +316,10 @@ func (s *AuthService) SignOut(ctx context.Context, schemaName, rawRefreshToken s
 		 WHERE token_hash = $1 AND revoked_at IS NULL`,
 		quoteIdent(schemaName),
 	)
-	_, err := s.pool.Exec(ctx, q, tokenHash)
-	return err
+	return s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, tokenHash)
+		return err
+	})
 }
 
 // GetUser retrieves an end-user by ID.
@@ -305,8 +331,10 @@ func (s *AuthService) GetUser(ctx context.Context, schemaName, userID string) (*
 		 FROM %s.users WHERE id = $1`,
 		quoteIdent(schemaName),
 	)
-	err := s.pool.QueryRow(ctx, q, userID).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, userID).
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("user not found")
@@ -330,7 +358,10 @@ func (s *AuthService) createRefreshToken(ctx context.Context, schemaName, userID
 		 VALUES ($1, $2, now() + interval '30 days')`,
 		quoteIdent(schemaName),
 	)
-	_, err = s.pool.Exec(ctx, q, userID, tokenHash)
+	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, userID, tokenHash)
+		return err
+	})
 	if err != nil {
 		return "", fmt.Errorf("insert refresh token: %w", err)
 	}
@@ -395,7 +426,9 @@ func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID,
 
 	var userID string
 	q := fmt.Sprintf(`SELECT id FROM %s.users WHERE email = $1`, quoteIdent(schemaName))
-	err := s.pool.QueryRow(ctx, q, emailAddr).Scan(&userID)
+	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, emailAddr).Scan(&userID)
+	})
 	if err != nil {
 		// User not found — return nil to prevent enumeration.
 		return nil
@@ -426,16 +459,19 @@ func (s *AuthService) ResetPassword(ctx context.Context, schemaName, rawToken, n
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	// Update password.
+	// Update password + revoke all refresh tokens in a single service-role tx.
 	updateQ := fmt.Sprintf(`UPDATE %s.users SET password_hash = $1, updated_at = now() WHERE id = $2`, quoteIdent(schemaName))
-	if _, err := s.pool.Exec(ctx, updateQ, string(hash), userID); err != nil {
-		return fmt.Errorf("update password: %w", err)
-	}
-
-	// Revoke all refresh tokens for security.
 	revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schemaName))
-	if _, err := s.pool.Exec(ctx, revokeQ, userID); err != nil {
-		slog.Error("failed to revoke refresh tokens after password reset", "error", err, "user_id", userID)
+	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, updateQ, string(hash), userID); err != nil {
+			return fmt.Errorf("update password: %w", err)
+		}
+		if _, err := tx.Exec(ctx, revokeQ, userID); err != nil {
+			slog.Error("failed to revoke refresh tokens after password reset", "error", err, "user_id", userID)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	slog.Info("end-user password reset", "schema", schemaName, "user_id", userID)
@@ -454,7 +490,10 @@ func (s *AuthService) VerifyEmail(ctx context.Context, schemaName, rawToken stri
 	}
 
 	q := fmt.Sprintf(`UPDATE %s.users SET email_confirmed_at = now(), updated_at = now() WHERE id = $1`, quoteIdent(schemaName))
-	if _, err := s.pool.Exec(ctx, q, userID); err != nil {
+	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, userID)
+		return err
+	}); err != nil {
 		return fmt.Errorf("confirm email: %w", err)
 	}
 
@@ -478,7 +517,9 @@ func (s *AuthService) RequestMagicLink(ctx context.Context, schemaName, projectI
 
 	var userID string
 	q := fmt.Sprintf(`SELECT id FROM %s.users WHERE email = $1`, quoteIdent(schemaName))
-	err := s.pool.QueryRow(ctx, q, emailAddr).Scan(&userID)
+	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, emailAddr).Scan(&userID)
+	})
 	if err != nil {
 		// User not found — return nil to prevent enumeration.
 		return nil
@@ -516,8 +557,10 @@ func (s *AuthService) SignInWithMagicLink(ctx context.Context, schemaName, jwtSe
 		 FROM %s.users WHERE id = $1`,
 		quoteIdent(schemaName),
 	)
-	err = s.pool.QueryRow(ctx, userQ, userID).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &emailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
+	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, userQ, userID).
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &emailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("query user: %w", err)
 	}
@@ -527,15 +570,18 @@ func (s *AuthService) SignInWithMagicLink(ctx context.Context, schemaName, jwtSe
 		return nil, fmt.Errorf("account suspended")
 	}
 
-	// Magic link confirms email implicitly.
-	if emailConfirmedAt == nil {
-		confirmQ := fmt.Sprintf(`UPDATE %s.users SET email_confirmed_at = now(), updated_at = now() WHERE id = $1`, quoteIdent(schemaName))
-		_, _ = s.pool.Exec(ctx, confirmQ, userID)
-	}
-
-	// Update last_sign_in_at.
-	updateQ := fmt.Sprintf(`UPDATE %s.users SET last_sign_in_at = now() WHERE id = $1`, quoteIdent(schemaName))
-	_, _ = s.pool.Exec(ctx, updateQ, userID)
+	// Magic link confirms email implicitly + updates last_sign_in_at.
+	_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if emailConfirmedAt == nil {
+			confirmQ := fmt.Sprintf(`UPDATE %s.users SET email_confirmed_at = now(), updated_at = now() WHERE id = $1`, quoteIdent(schemaName))
+			if _, err := tx.Exec(ctx, confirmQ, userID); err != nil {
+				return err
+			}
+		}
+		updateQ := fmt.Sprintf(`UPDATE %s.users SET last_sign_in_at = now() WHERE id = $1`, quoteIdent(schemaName))
+		_, err := tx.Exec(ctx, updateQ, userID)
+		return err
+	})
 
 	slog.Info("end-user signed in via magic link", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
@@ -611,107 +657,119 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 		"picture": userInfo.AvatarURL,
 	})
 
-	// Try to find user via user_identities table (supports multiple linked providers).
-	findIdentityQ := fmt.Sprintf(
-		`SELECT u.id, u.email, u.display_name, u.avatar_url, u.metadata, u.banned_at, u.created_at, u.updated_at
-		 FROM %s.user_identities i
-		 JOIN %s.users u ON u.id = i.user_id
-		 WHERE i.provider = $1 AND i.provider_user_id = $2`,
-		quoteIdent(schemaName), quoteIdent(schemaName),
-	)
-	err = s.pool.QueryRow(ctx, findIdentityQ, providerName, userInfo.ProviderID).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
-
-	if err == pgx.ErrNoRows {
-		// Fallback: check legacy provider columns on users table.
-		findLegacyQ := fmt.Sprintf(
-			`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
-			 FROM %s.users
-			 WHERE provider = $1 AND provider_user_id = $2`,
-			quoteIdent(schemaName),
+	// Run the whole find-or-create flow inside one service-role transaction.
+	txErr := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		// Try to find user via user_identities table (supports multiple linked providers).
+		findIdentityQ := fmt.Sprintf(
+			`SELECT u.id, u.email, u.display_name, u.avatar_url, u.metadata, u.banned_at, u.created_at, u.updated_at
+			 FROM %s.user_identities i
+			 JOIN %s.users u ON u.id = i.user_id
+			 WHERE i.provider = $1 AND i.provider_user_id = $2`,
+			quoteIdent(schemaName), quoteIdent(schemaName),
 		)
-		err = s.pool.QueryRow(ctx, findLegacyQ, providerName, userInfo.ProviderID).
-			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
-	}
-
-	if err == pgx.ErrNoRows {
-		// Try to find existing user by email (link accounts).
-		emailLower := strings.ToLower(strings.TrimSpace(userInfo.Email))
-		findByEmailQ := fmt.Sprintf(
-			`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
-			 FROM %s.users
-			 WHERE email = $1`,
-			quoteIdent(schemaName),
-		)
-		err = s.pool.QueryRow(ctx, findByEmailQ, emailLower).
+		err := tx.QueryRow(ctx, findIdentityQ, providerName, userInfo.ProviderID).
 			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
 
 		if err == pgx.ErrNoRows {
-			// Create new user.
-			var displayName *string
-			if userInfo.Name != "" {
-				displayName = &userInfo.Name
-			}
-			var avatarURL *string
-			if userInfo.AvatarURL != "" {
-				avatarURL = &userInfo.AvatarURL
-			}
-
-			insertQ := fmt.Sprintf(
-				`INSERT INTO %s.users (email, display_name, avatar_url, provider, provider_user_id, email_confirmed_at, metadata)
-				 VALUES ($1, $2, $3, $4, $5, now(), '{}'::jsonb)
-				 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
+			// Fallback: check legacy provider columns on users table.
+			findLegacyQ := fmt.Sprintf(
+				`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
+				 FROM %s.users
+				 WHERE provider = $1 AND provider_user_id = $2`,
 				quoteIdent(schemaName),
 			)
-			err = s.pool.QueryRow(ctx, insertQ, emailLower, displayName, avatarURL, providerName, userInfo.ProviderID).
-				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
-			if err != nil {
-				return nil, fmt.Errorf("create oauth user: %w", err)
-			}
-			_ = json.Unmarshal(metadataJSON, &user.Metadata)
-
-			slog.Info("end-user signed up via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
-		} else if err != nil {
-			return nil, fmt.Errorf("query user by email: %w", err)
-		} else {
-			// Existing user found by email — auto-confirm email.
-			_ = json.Unmarshal(metadataJSON, &user.Metadata)
-			confirmQ := fmt.Sprintf(
-				`UPDATE %s.users SET email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $1`,
-				quoteIdent(schemaName),
-			)
-			_, _ = s.pool.Exec(ctx, confirmQ, user.ID)
-			slog.Info("end-user linked oauth account", "schema", schemaName, "user_id", user.ID, "provider", providerName)
+			err = tx.QueryRow(ctx, findLegacyQ, providerName, userInfo.ProviderID).
+				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
 		}
 
-		// Create identity row (additive — doesn't overwrite other providers).
-		upsertIdentityQ := fmt.Sprintf(
-			`INSERT INTO %s.user_identities (user_id, provider, provider_user_id, identity_data, last_sign_in_at)
-			 VALUES ($1, $2, $3, $4, now())
-			 ON CONFLICT (provider, provider_user_id) DO UPDATE SET identity_data = $4, last_sign_in_at = now(), updated_at = now()`,
-			quoteIdent(schemaName),
-		)
-		_, _ = s.pool.Exec(ctx, upsertIdentityQ, user.ID, providerName, userInfo.ProviderID, identityData)
-	} else if err != nil {
-		return nil, fmt.Errorf("query user by provider identity: %w", err)
-	} else {
-		_ = json.Unmarshal(metadataJSON, &user.Metadata)
-		// Update identity_data with latest profile snapshot.
-		updateIdentityQ := fmt.Sprintf(
-			`UPDATE %s.user_identities SET identity_data = $1, last_sign_in_at = now(), updated_at = now()
-			 WHERE provider = $2 AND provider_user_id = $3`,
-			quoteIdent(schemaName),
-		)
-		_, _ = s.pool.Exec(ctx, updateIdentityQ, identityData, providerName, userInfo.ProviderID)
+		if err == pgx.ErrNoRows {
+			// Try to find existing user by email (link accounts).
+			emailLower := strings.ToLower(strings.TrimSpace(userInfo.Email))
+			findByEmailQ := fmt.Sprintf(
+				`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
+				 FROM %s.users
+				 WHERE email = $1`,
+				quoteIdent(schemaName),
+			)
+			err = tx.QueryRow(ctx, findByEmailQ, emailLower).
+				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+
+			if err == pgx.ErrNoRows {
+				// Create new user.
+				var displayName *string
+				if userInfo.Name != "" {
+					displayName = &userInfo.Name
+				}
+				var avatarURL *string
+				if userInfo.AvatarURL != "" {
+					avatarURL = &userInfo.AvatarURL
+				}
+
+				insertQ := fmt.Sprintf(
+					`INSERT INTO %s.users (email, display_name, avatar_url, provider, provider_user_id, email_confirmed_at, metadata)
+					 VALUES ($1, $2, $3, $4, $5, now(), '{}'::jsonb)
+					 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
+					quoteIdent(schemaName),
+				)
+				err = tx.QueryRow(ctx, insertQ, emailLower, displayName, avatarURL, providerName, userInfo.ProviderID).
+					Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+				if err != nil {
+					return fmt.Errorf("create oauth user: %w", err)
+				}
+				_ = json.Unmarshal(metadataJSON, &user.Metadata)
+				slog.Info("end-user signed up via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
+			} else if err != nil {
+				return fmt.Errorf("query user by email: %w", err)
+			} else {
+				// Existing user found by email — auto-confirm email.
+				_ = json.Unmarshal(metadataJSON, &user.Metadata)
+				confirmQ := fmt.Sprintf(
+					`UPDATE %s.users SET email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $1`,
+					quoteIdent(schemaName),
+				)
+				_, _ = tx.Exec(ctx, confirmQ, user.ID)
+				slog.Info("end-user linked oauth account", "schema", schemaName, "user_id", user.ID, "provider", providerName)
+			}
+
+			// Create identity row (additive — doesn't overwrite other providers).
+			upsertIdentityQ := fmt.Sprintf(
+				`INSERT INTO %s.user_identities (user_id, provider, provider_user_id, identity_data, last_sign_in_at)
+				 VALUES ($1, $2, $3, $4, now())
+				 ON CONFLICT (provider, provider_user_id) DO UPDATE SET identity_data = $4, last_sign_in_at = now(), updated_at = now()`,
+				quoteIdent(schemaName),
+			)
+			_, _ = tx.Exec(ctx, upsertIdentityQ, user.ID, providerName, userInfo.ProviderID, identityData)
+		} else if err != nil {
+			return fmt.Errorf("query user by provider identity: %w", err)
+		} else {
+			_ = json.Unmarshal(metadataJSON, &user.Metadata)
+			// Update identity_data with latest profile snapshot.
+			updateIdentityQ := fmt.Sprintf(
+				`UPDATE %s.user_identities SET identity_data = $1, last_sign_in_at = now(), updated_at = now()
+				 WHERE provider = $2 AND provider_user_id = $3`,
+				quoteIdent(schemaName),
+			)
+			_, _ = tx.Exec(ctx, updateIdentityQ, identityData, providerName, userInfo.ProviderID)
+		}
+
+		if bannedAt != nil {
+			// Don't update last_sign_in_at for suspended accounts; the outer
+			// function still returns "account suspended" after commit.
+			return nil
+		}
+
+		// Update last_sign_in_at.
+		updateQ := fmt.Sprintf(`UPDATE %s.users SET last_sign_in_at = now() WHERE id = $1`, quoteIdent(schemaName))
+		_, _ = tx.Exec(ctx, updateQ, user.ID)
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
 	}
 
 	if bannedAt != nil {
 		return nil, fmt.Errorf("account suspended")
 	}
-
-	// Update last_sign_in_at.
-	updateQ := fmt.Sprintf(`UPDATE %s.users SET last_sign_in_at = now() WHERE id = $1`, quoteIdent(schemaName))
-	_, _ = s.pool.Exec(ctx, updateQ, user.ID)
 
 	slog.Info("end-user signed in via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
 
@@ -747,7 +805,9 @@ func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projec
 	var userID string
 	var emailConfirmedAt *time.Time
 	q := fmt.Sprintf(`SELECT id, email_confirmed_at FROM %s.users WHERE email = $1`, quoteIdent(schemaName))
-	err := s.pool.QueryRow(ctx, q, emailAddr).Scan(&userID, &emailConfirmedAt)
+	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, emailAddr).Scan(&userID, &emailConfirmedAt)
+	})
 	if err != nil {
 		return nil // prevent enumeration
 	}
@@ -776,23 +836,28 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, phone string
 	// Find or create user by phone number.
 	var userID string
 	findQ := fmt.Sprintf(`SELECT id FROM %s.users WHERE phone = $1`, quoteIdent(schemaName))
-	err := s.pool.QueryRow(ctx, findQ, phone).Scan(&userID)
-
-	if err == pgx.ErrNoRows {
-		// Create a new user with just a phone number (no email required).
-		insertQ := fmt.Sprintf(
-			`INSERT INTO %s.users (phone, metadata)
-			 VALUES ($1, '{}'::jsonb)
-			 RETURNING id`,
-			quoteIdent(schemaName),
-		)
-		err = s.pool.QueryRow(ctx, insertQ, phone).Scan(&userID)
-		if err != nil {
-			return fmt.Errorf("create phone user: %w", err)
+	insertQ := fmt.Sprintf(
+		`INSERT INTO %s.users (phone, metadata)
+		 VALUES ($1, '{}'::jsonb)
+		 RETURNING id`,
+		quoteIdent(schemaName),
+	)
+	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		e := tx.QueryRow(ctx, findQ, phone).Scan(&userID)
+		if e == pgx.ErrNoRows {
+			if e = tx.QueryRow(ctx, insertQ, phone).Scan(&userID); e != nil {
+				return fmt.Errorf("create phone user: %w", e)
+			}
+			slog.Info("end-user created via phone otp", "schema", schemaName, "user_id", userID)
+			return nil
 		}
-		slog.Info("end-user created via phone otp", "schema", schemaName, "user_id", userID)
-	} else if err != nil {
-		return fmt.Errorf("find user by phone: %w", err)
+		if e != nil {
+			return fmt.Errorf("find user by phone: %w", e)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	return s.smsService.SendOTP(ctx, schemaName, userID, phone)
@@ -823,25 +888,30 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 		 RETURNING id, email, phone, display_name, avatar_url, metadata, banned_at, created_at, updated_at`,
 		quoteIdent(schemaName),
 	)
-	err = s.pool.QueryRow(ctx, updateQ, userID).
-		Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("load phone user: %w", err)
-	}
-	_ = json.Unmarshal(metadataJSON, &user.Metadata)
-
-	if bannedAt != nil {
-		return nil, fmt.Errorf("account suspended")
-	}
-
-	// Create phone identity if not exists.
 	upsertIdentityQ := fmt.Sprintf(
 		`INSERT INTO %s.user_identities (user_id, provider, provider_user_id, last_sign_in_at)
 		 VALUES ($1, 'phone', $2, now())
 		 ON CONFLICT (provider, provider_user_id) DO UPDATE SET last_sign_in_at = now(), updated_at = now()`,
 		quoteIdent(schemaName),
 	)
-	_, _ = s.pool.Exec(ctx, upsertIdentityQ, user.ID, phone)
+	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if e := tx.QueryRow(ctx, updateQ, userID).
+			Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt); e != nil {
+			return fmt.Errorf("load phone user: %w", e)
+		}
+		_ = json.Unmarshal(metadataJSON, &user.Metadata)
+		if bannedAt != nil {
+			return nil
+		}
+		_, _ = tx.Exec(ctx, upsertIdentityQ, user.ID, phone)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if bannedAt != nil {
+		return nil, fmt.Errorf("account suspended")
+	}
 
 	slog.Info("end-user signed in via phone otp", "schema", schemaName, "user_id", user.ID)
 

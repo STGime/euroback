@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
+	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -107,40 +109,50 @@ func HandleGDPRExport(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.H
 		ctx := r.Context()
 		qs := quoteIdent(schema)
 
-		// 1. User profile.
-		profile, err := exportUserProfile(ctx, pool, qs, userID)
-		if err != nil {
-			slog.Error("gdpr export: user profile", "error", err, "user_id", userID)
+		// Run all export queries inside a single service-role transaction
+		// so RLS policies on the tenant schema permit reading rows owned
+		// by the target user (platform admin is acting on their behalf).
+		var profile *GDPRUserProfile
+		var identities []GDPRIdentity
+		var storageObjs []GDPRStorageObject
+		var tokens []GDPRRefreshToken
+		var userData map[string][]map[string]any
+		profileErr := edb.RunAsService(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+			p, e := exportUserProfile(ctx, tx, qs, userID)
+			if e != nil {
+				return e
+			}
+			profile = p
+			if i, err := exportIdentities(ctx, tx, qs, userID); err != nil {
+				slog.Error("gdpr export: identities", "error", err, "user_id", userID)
+				identities = []GDPRIdentity{}
+			} else {
+				identities = i
+			}
+			if s, err := exportStorageObjects(ctx, tx, qs, userID); err != nil {
+				slog.Error("gdpr export: storage objects", "error", err, "user_id", userID)
+				storageObjs = []GDPRStorageObject{}
+			} else {
+				storageObjs = s
+			}
+			if t, err := exportRefreshTokens(ctx, tx, qs, userID); err != nil {
+				slog.Error("gdpr export: refresh tokens", "error", err, "user_id", userID)
+				tokens = []GDPRRefreshToken{}
+			} else {
+				tokens = t
+			}
+			if d, err := exportUserOwnedRows(ctx, tx, schema, userID); err != nil {
+				slog.Error("gdpr export: user data", "error", err, "user_id", userID)
+				userData = map[string][]map[string]any{}
+			} else {
+				userData = d
+			}
+			return nil
+		})
+		if profileErr != nil {
+			slog.Error("gdpr export: user profile", "error", profileErr, "user_id", userID)
 			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 			return
-		}
-
-		// 2. Identities.
-		identities, err := exportIdentities(ctx, pool, qs, userID)
-		if err != nil {
-			slog.Error("gdpr export: identities", "error", err, "user_id", userID)
-			identities = []GDPRIdentity{}
-		}
-
-		// 3. Storage objects.
-		storageObjs, err := exportStorageObjects(ctx, pool, qs, userID)
-		if err != nil {
-			slog.Error("gdpr export: storage objects", "error", err, "user_id", userID)
-			storageObjs = []GDPRStorageObject{}
-		}
-
-		// 4. Refresh tokens.
-		tokens, err := exportRefreshTokens(ctx, pool, qs, userID)
-		if err != nil {
-			slog.Error("gdpr export: refresh tokens", "error", err, "user_id", userID)
-			tokens = []GDPRRefreshToken{}
-		}
-
-		// 5. User-owned rows in developer tables.
-		userData, err := exportUserOwnedRows(ctx, pool, schema, userID)
-		if err != nil {
-			slog.Error("gdpr export: user data", "error", err, "user_id", userID)
-			userData = map[string][]map[string]any{}
 		}
 
 		resp := GDPRExportResponse{
@@ -169,7 +181,7 @@ func HandleGDPRExport(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.H
 	}
 }
 
-func exportUserProfile(ctx context.Context, pool *pgxpool.Pool, qs, userID string) (*GDPRUserProfile, error) {
+func exportUserProfile(ctx context.Context, tx pgx.Tx, qs, userID string) (*GDPRUserProfile, error) {
 	q := fmt.Sprintf(
 		`SELECT id, email, phone, display_name, avatar_url, metadata, provider,
 		        email_confirmed_at, phone_confirmed_at, last_sign_in_at, created_at, updated_at
@@ -177,7 +189,7 @@ func exportUserProfile(ctx context.Context, pool *pgxpool.Pool, qs, userID strin
 
 	var p GDPRUserProfile
 	var metaBytes []byte
-	err := pool.QueryRow(ctx, q, userID).Scan(
+	err := tx.QueryRow(ctx, q, userID).Scan(
 		&p.ID, &p.Email, &p.Phone, &p.DisplayName, &p.AvatarURL, &metaBytes,
 		&p.Provider, &p.EmailConfirmedAt, &p.PhoneConfirmedAt, &p.LastSignInAt,
 		&p.CreatedAt, &p.UpdatedAt,
@@ -194,12 +206,12 @@ func exportUserProfile(ctx context.Context, pool *pgxpool.Pool, qs, userID strin
 	return &p, nil
 }
 
-func exportIdentities(ctx context.Context, pool *pgxpool.Pool, qs, userID string) ([]GDPRIdentity, error) {
+func exportIdentities(ctx context.Context, tx pgx.Tx, qs, userID string) ([]GDPRIdentity, error) {
 	q := fmt.Sprintf(
 		`SELECT provider, provider_user_id, identity_data, last_sign_in_at, created_at
 		 FROM %s.user_identities WHERE user_id = $1 ORDER BY created_at`, qs)
 
-	rows, err := pool.Query(ctx, q, userID)
+	rows, err := tx.Query(ctx, q, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -226,12 +238,12 @@ func exportIdentities(ctx context.Context, pool *pgxpool.Pool, qs, userID string
 	return out, nil
 }
 
-func exportStorageObjects(ctx context.Context, pool *pgxpool.Pool, qs, userID string) ([]GDPRStorageObject, error) {
+func exportStorageObjects(ctx context.Context, tx pgx.Tx, qs, userID string) ([]GDPRStorageObject, error) {
 	q := fmt.Sprintf(
 		`SELECT key, content_type, size_bytes, metadata, created_at
 		 FROM %s.storage_objects WHERE uploaded_by = $1 ORDER BY created_at`, qs)
 
-	rows, err := pool.Query(ctx, q, userID)
+	rows, err := tx.Query(ctx, q, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -255,12 +267,12 @@ func exportStorageObjects(ctx context.Context, pool *pgxpool.Pool, qs, userID st
 	return out, nil
 }
 
-func exportRefreshTokens(ctx context.Context, pool *pgxpool.Pool, qs, userID string) ([]GDPRRefreshToken, error) {
+func exportRefreshTokens(ctx context.Context, tx pgx.Tx, qs, userID string) ([]GDPRRefreshToken, error) {
 	q := fmt.Sprintf(
 		`SELECT created_at, expires_at, revoked
 		 FROM %s.refresh_tokens WHERE user_id = $1 ORDER BY created_at`, qs)
 
-	rows, err := pool.Query(ctx, q, userID)
+	rows, err := tx.Query(ctx, q, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -291,11 +303,11 @@ var ownerColumns = []string{"user_id", "owner_id", "created_by"}
 
 // exportUserOwnedRows scans every developer-created table in the schema for
 // rows belonging to the given user, identified by any column in ownerColumns.
-func exportUserOwnedRows(ctx context.Context, pool *pgxpool.Pool, schema, userID string) (map[string][]map[string]any, error) {
+func exportUserOwnedRows(ctx context.Context, tx pgx.Tx, schema, userID string) (map[string][]map[string]any, error) {
 	qs := quoteIdent(schema)
 
 	// Discover tables.
-	tableRows, err := pool.Query(ctx,
+	tableRows, err := tx.Query(ctx,
 		`SELECT table_name FROM information_schema.tables
 		 WHERE table_schema = $1 AND table_type = 'BASE TABLE'
 		 ORDER BY table_name`, schema)
@@ -319,14 +331,14 @@ func exportUserOwnedRows(ctx context.Context, pool *pgxpool.Pool, schema, userID
 
 	for _, table := range tables {
 		// Find which owner column exists in this table.
-		col, err := findOwnerColumn(ctx, pool, schema, table)
+		col, err := findOwnerColumn(ctx, tx, schema, table)
 		if err != nil || col == "" {
 			continue
 		}
 
 		q := fmt.Sprintf(`SELECT row_to_json(t)::text FROM %s.%s t WHERE %s = $1`,
 			qs, quoteIdent(table), quoteIdent(col))
-		rows, err := pool.Query(ctx, q, userID)
+		rows, err := tx.Query(ctx, q, userID)
 		if err != nil {
 			slog.Debug("gdpr export: skip table", "table", table, "error", err)
 			continue
@@ -355,7 +367,7 @@ func exportUserOwnedRows(ctx context.Context, pool *pgxpool.Pool, schema, userID
 }
 
 // findOwnerColumn checks if a table has any of the known owner columns.
-func findOwnerColumn(ctx context.Context, pool *pgxpool.Pool, schema, table string) (string, error) {
+func findOwnerColumn(ctx context.Context, tx pgx.Tx, schema, table string) (string, error) {
 	placeholders := make([]string, len(ownerColumns))
 	args := make([]any, len(ownerColumns)+2)
 	args[0] = schema
@@ -372,7 +384,7 @@ func findOwnerColumn(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 		 LIMIT 1`, strings.Join(placeholders, ","))
 
 	var col string
-	err := pool.QueryRow(ctx, q, args...).Scan(&col)
+	err := tx.QueryRow(ctx, q, args...).Scan(&col)
 	if err != nil {
 		return "", err
 	}

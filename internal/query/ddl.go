@@ -936,28 +936,34 @@ func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tabl
 	}
 	defer pool.Exec(ctx, "SET search_path TO public") //nolint:errcheck
 
+	// Every restrictive preset includes a `public.is_service_role() OR ...`
+	// branch so platform-admin paths and pre-auth lookups (which legitimately
+	// have no end-user context) can still read/write the table. See migration
+	// 000038 and internal/db/service.go RunAsService.
+	srv := "public.is_service_role()"
+
 	var sqls []string
 	switch preset {
 	case "owner_access":
 		sqls = []string{
-			fmt.Sprintf("CREATE POLICY owner_select ON %s FOR SELECT USING (%s = auth_uid())", qt, col),
-			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s = auth_uid())", qt, col),
-			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s = auth_uid())", qt, col),
-			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_select ON %s FOR SELECT USING (%s OR %s = auth_uid())", qt, srv, col),
+			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s OR %s = auth_uid())", qt, srv, col),
+			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s OR %s = auth_uid()) WITH CHECK (%s OR %s = auth_uid())", qt, srv, col, srv, col),
+			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s OR %s = auth_uid())", qt, srv, col),
 		}
 	case "public_read_owner_write":
 		sqls = []string{
 			fmt.Sprintf("CREATE POLICY public_select ON %s FOR SELECT USING (true)", qt),
-			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s = auth_uid())", qt, col),
-			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s = auth_uid())", qt, col),
-			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s OR %s = auth_uid())", qt, srv, col),
+			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s OR %s = auth_uid()) WITH CHECK (%s OR %s = auth_uid())", qt, srv, col, srv, col),
+			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s OR %s = auth_uid())", qt, srv, col),
 		}
 	case "authenticated_read_owner_write":
 		sqls = []string{
-			fmt.Sprintf("CREATE POLICY auth_select ON %s FOR SELECT USING (auth_role() = 'authenticated')", qt),
-			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s = auth_uid())", qt, col),
-			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s = auth_uid())", qt, col),
-			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s = auth_uid())", qt, col),
+			fmt.Sprintf("CREATE POLICY auth_select ON %s FOR SELECT USING (%s OR auth_role() = 'authenticated')", qt, srv),
+			fmt.Sprintf("CREATE POLICY owner_insert ON %s FOR INSERT WITH CHECK (%s OR %s = auth_uid())", qt, srv, col),
+			fmt.Sprintf("CREATE POLICY owner_update ON %s FOR UPDATE USING (%s OR %s = auth_uid()) WITH CHECK (%s OR %s = auth_uid())", qt, srv, col, srv, col),
+			fmt.Sprintf("CREATE POLICY owner_delete ON %s FOR DELETE USING (%s OR %s = auth_uid())", qt, srv, col),
 		}
 	case "full_access":
 		sqls = []string{

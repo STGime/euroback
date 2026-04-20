@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -161,7 +164,10 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			 ON CONFLICT (key) DO UPDATE SET content_type = $2, size_bytes = $3, uploaded_by = $4`,
 			escSchema,
 		)
-		if _, err := h.pool.Exec(r.Context(), q, key, contentType, size, userID); err != nil {
+		if err := edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, q, key, contentType, size, userID)
+			return err
+		}); err != nil {
 			// Non-fatal: the file is already in S3, just log the tracking failure.
 			slog.Error("storage: failed to record upload in storage_objects",
 				"error", err, "schema", schema, "key", key)
@@ -264,7 +270,10 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
 		q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1`, escSchema)
-		if _, err := h.pool.Exec(r.Context(), q, key); err != nil {
+		if err := edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, q, key)
+			return err
+		}); err != nil {
 			slog.Error("storage: failed to delete from storage_objects",
 				"error", err, "schema", schema, "key", key)
 		}

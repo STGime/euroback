@@ -1,6 +1,7 @@
 package enduser
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -9,9 +10,11 @@ import (
 	"strings"
 	"time"
 
+	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -143,41 +146,35 @@ func handleListUsers(pool *pgxpool.Pool) http.HandlerFunc {
 			args = []interface{}{limit, offset}
 		}
 
-		// Get total count.
 		var total int
-		if search != "" {
-			err := pool.QueryRow(r.Context(), countQ, args[0]).Scan(&total)
-			if err != nil {
-				slog.Error("count end-users failed", "error", err, "schema", schema)
-				http.Error(w, `{"error":"failed to count users"}`, http.StatusInternalServerError)
-				return
+		users := []PlatformUser{}
+		if err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			if search != "" {
+				if e := tx.QueryRow(ctx, countQ, args[0]).Scan(&total); e != nil {
+					return fmt.Errorf("count users: %w", e)
+				}
+			} else {
+				if e := tx.QueryRow(ctx, countQ).Scan(&total); e != nil {
+					return fmt.Errorf("count users: %w", e)
+				}
 			}
-		} else {
-			err := pool.QueryRow(r.Context(), countQ).Scan(&total)
-			if err != nil {
-				slog.Error("count end-users failed", "error", err, "schema", schema)
-				http.Error(w, `{"error":"failed to count users"}`, http.StatusInternalServerError)
-				return
+			rows, e := tx.Query(ctx, listQ, args...)
+			if e != nil {
+				return fmt.Errorf("list users: %w", e)
 			}
-		}
-
-		rows, err := pool.Query(r.Context(), listQ, args...)
-		if err != nil {
+			defer rows.Close()
+			for rows.Next() {
+				u, e := scanUser(rows)
+				if e != nil {
+					return fmt.Errorf("scan user: %w", e)
+				}
+				users = append(users, u)
+			}
+			return rows.Err()
+		}); err != nil {
 			slog.Error("list end-users failed", "error", err, "schema", schema)
 			http.Error(w, `{"error":"failed to list users"}`, http.StatusInternalServerError)
 			return
-		}
-		defer rows.Close()
-
-		users := []PlatformUser{}
-		for rows.Next() {
-			u, err := scanUser(rows)
-			if err != nil {
-				slog.Error("scan end-user failed", "error", err)
-				http.Error(w, `{"error":"failed to read users"}`, http.StatusInternalServerError)
-				return
-			}
-			users = append(users, u)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -201,8 +198,12 @@ func handleGetUser(pool *pgxpool.Pool) http.HandlerFunc {
 			qs,
 		)
 		q := fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.id = $1`, userCols, qs)
-		u, err := scanUser(pool.QueryRow(r.Context(), q, userID))
-		if err != nil {
+		var u PlatformUser
+		if err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			u, e = scanUser(tx.QueryRow(ctx, q, userID))
+			return e
+		}); err != nil {
 			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 			return
 		}
@@ -259,7 +260,12 @@ func handleCreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at, ARRAY[]::text[]`,
 			qs,
 		)
-		u, err := scanUser(pool.QueryRow(r.Context(), q, email, string(hash), string(metadataJSON)))
+		var u PlatformUser
+		err = edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			u, e = scanUser(tx.QueryRow(ctx, q, email, string(hash), string(metadataJSON)))
+			return e
+		})
 		if err != nil {
 			if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 				http.Error(w, `{"error":"email already exists"}`, http.StatusBadRequest)
@@ -342,7 +348,12 @@ func handleUpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 			qs, strings.Join(setClauses, ", "), argIdx, returnCols,
 		)
 
-		u, err := scanUser(pool.QueryRow(r.Context(), q, args...))
+		var u PlatformUser
+		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			u, e = scanUser(tx.QueryRow(ctx, q, args...))
+			return e
+		})
 		if err != nil {
 			if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 				http.Error(w, `{"error":"email already taken"}`, http.StatusBadRequest)
@@ -379,13 +390,21 @@ func handleDeleteUser(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		q := fmt.Sprintf(`DELETE FROM %s.users WHERE id = $1`, quoteIdent(schema))
-		tag, err := pool.Exec(r.Context(), q, userID)
+		var rowsAffected int64
+		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			tag, e := tx.Exec(ctx, q, userID)
+			if e != nil {
+				return e
+			}
+			rowsAffected = tag.RowsAffected()
+			return nil
+		})
 		if err != nil {
 			slog.Error("delete end-user failed", "error", err, "schema", schema, "user_id", userID)
 			http.Error(w, `{"error":"failed to delete user"}`, http.StatusInternalServerError)
 			return
 		}
-		if tag.RowsAffected() == 0 {
+		if rowsAffected == 0 {
 			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 			return
 		}
@@ -414,15 +433,21 @@ func handleSuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 			`UPDATE %s.users SET banned_at = now(), updated_at = now() WHERE id = $1 AND banned_at IS NULL RETURNING %s`,
 			qs, returnCols,
 		)
-		u, err := scanUser(pool.QueryRow(r.Context(), q, userID))
+		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
+		var u PlatformUser
+		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			u, e = scanUser(tx.QueryRow(ctx, q, userID))
+			if e != nil {
+				return e
+			}
+			_, _ = tx.Exec(ctx, revokeQ, userID)
+			return nil
+		})
 		if err != nil {
 			http.Error(w, `{"error":"user not found or already suspended"}`, http.StatusNotFound)
 			return
 		}
-
-		// Revoke all refresh tokens.
-		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
-		_, _ = pool.Exec(r.Context(), revokeQ, userID)
 
 		slog.Info("platform suspended end-user", "schema", schema, "user_id", userID)
 
@@ -450,7 +475,12 @@ func handleUnsuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 			`UPDATE %s.users SET banned_at = NULL, updated_at = now() WHERE id = $1 AND banned_at IS NOT NULL RETURNING %s`,
 			qs, returnCols,
 		)
-		u, err := scanUser(pool.QueryRow(r.Context(), q, userID))
+		var u PlatformUser
+		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			u, e = scanUser(tx.QueryRow(ctx, q, userID))
+			return e
+		})
 		if err != nil {
 			http.Error(w, `{"error":"user not found or not suspended"}`, http.StatusNotFound)
 			return
@@ -494,20 +524,32 @@ func handleResetPassword(pool *pgxpool.Pool) http.HandlerFunc {
 			`UPDATE %s.users SET password_hash = $1, updated_at = now() WHERE id = $2`,
 			quoteIdent(schema),
 		)
-		tag, err := pool.Exec(r.Context(), q, string(hash), userID)
+		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
+		var rowsAffected int64
+		err = edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+			tag, e := tx.Exec(ctx, q, string(hash), userID)
+			if e != nil {
+				return e
+			}
+			rowsAffected = tag.RowsAffected()
+			if rowsAffected == 0 {
+				return nil
+			}
+			_, _ = tx.Exec(ctx, revokeQ, userID)
+			return nil
+		})
 		if err != nil {
 			slog.Error("reset password failed", "error", err, "schema", schema, "user_id", userID)
 			http.Error(w, `{"error":"failed to reset password"}`, http.StatusInternalServerError)
 			return
 		}
-		if tag.RowsAffected() == 0 {
+		if rowsAffected == 0 {
 			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 			return
 		}
 
-		// Revoke all refresh tokens so the user must sign in with new password.
-		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
-		_, _ = pool.Exec(r.Context(), revokeQ, userID)
+		// Refresh tokens already revoked inside the transaction above.
+
 
 		slog.Info("platform reset end-user password", "schema", schema, "user_id", userID)
 

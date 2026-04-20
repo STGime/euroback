@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"strings"
 
+	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -47,7 +48,10 @@ func (s *Service) SendOTP(ctx context.Context, schemaName, userID, phone string)
 		 VALUES ($1, $2, 'phone_verification', now() + interval '10 minutes')`,
 		quoteIdent(schemaName),
 	)
-	if _, err := s.pool.Exec(ctx, q, userID, codeHash); err != nil {
+	if err := edb.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, userID, codeHash)
+		return err
+	}); err != nil {
 		return fmt.Errorf("store phone otp: %w", err)
 	}
 
@@ -74,7 +78,9 @@ func (s *Service) VerifyOTP(ctx context.Context, schemaName, code string) (strin
 		 RETURNING user_id`,
 		quoteIdent(schemaName),
 	)
-	err := s.pool.QueryRow(ctx, q, codeHash).Scan(&userID)
+	err := edb.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, codeHash).Scan(&userID)
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return "", fmt.Errorf("invalid or expired code")
