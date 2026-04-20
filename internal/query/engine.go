@@ -36,6 +36,16 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
 			return fmt.Errorf("set service role: %w", err)
 		}
+		// Platform-admin and secret-key paths additionally disable RLS
+		// enforcement for this transaction. The `service` GUC covers the
+		// platform-hardcoded policies that reference public.is_service_role()
+		// (from 000038), but user-created tables predating that change have
+		// policies like `user_id = auth_uid()` with no service branch.
+		// row_security = off short-circuits all policies. Requires the role
+		// to hold BYPASSRLS (granted in 000039); silently no-ops otherwise.
+		if _, err := tx.Exec(ctx, "SET LOCAL row_security = off"); err != nil {
+			return fmt.Errorf("disable row security: %w", err)
+		}
 	case endUserID == "":
 		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'anon', true)"); err != nil {
 			return fmt.Errorf("set anon role: %w", err)
