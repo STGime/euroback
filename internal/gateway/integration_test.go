@@ -216,18 +216,24 @@ func TestCreateTenantFlow(t *testing.T) {
 	pool := setupTestDB(t)
 	ts := setupTestServer(t, pool)
 
-	hankoUserID := "test-http-flow-user"
-	email := "httpflow@eurobase.app"
-	tokenStr := generateTestJWT(hankoUserID, email)
+	// Platform user IDs are UUIDs now (hanko_user_id was dropped in 000008).
+	// Insert a real row and use its UUID as the JWT subject.
+	ctx := context.Background()
+	email := "httpflow@test.eurobase.local"
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, email)
+	var userUUID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+		 VALUES ($1, 'x', now()) RETURNING id::text`, email,
+	).Scan(&userUUID); err != nil {
+		t.Fatalf("insert test platform user: %v", err)
+	}
+	tokenStr := generateTestJWT(userUUID, email)
 
 	t.Cleanup(func() {
 		ctx := context.Background()
-		// Clean up projects created by this test.
 		rows, err := pool.Query(ctx,
-			`SELECT p.id FROM projects p
-			 JOIN platform_users u ON p.owner_id = u.id
-			 WHERE u.hanko_user_id = $1`,
-			hankoUserID,
+			`SELECT p.id FROM projects p WHERE p.owner_id = $1::uuid`, userUUID,
 		)
 		if err == nil {
 			defer rows.Close()
@@ -239,7 +245,7 @@ func TestCreateTenantFlow(t *testing.T) {
 				}
 			}
 		}
-		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE hanko_user_id = $1`, hankoUserID)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE id = $1::uuid`, userUUID)
 	})
 
 	// POST /v1/tenants - create a project.
