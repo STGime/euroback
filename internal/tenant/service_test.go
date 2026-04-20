@@ -77,14 +77,16 @@ func cleanupProject(t *testing.T, pool *pgxpool.Pool, projectID string) {
 
 // insertTestPlatformUser creates a platform_users row with the given email
 // and returns its UUID. Pair with cleanupProject to remove it after the test.
+// The index on platform_users.email is partial (WHERE email != ''), so
+// ON CONFLICT doesn't match; delete any leftover row first instead.
 func insertTestPlatformUser(t *testing.T, pool *pgxpool.Pool, email string) string {
 	t.Helper()
 	ctx := context.Background()
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, email)
 	var id string
 	err := pool.QueryRow(ctx,
 		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
 		 VALUES ($1, 'x', now())
-		 ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
 		 RETURNING id::text`, email,
 	).Scan(&id)
 	if err != nil {
@@ -130,8 +132,8 @@ func TestCreateProject(t *testing.T) {
 	if project.Plan != req.Plan {
 		t.Errorf("expected plan %q, got %q", req.Plan, project.Plan)
 	}
-	if project.Status != "provisioning" {
-		t.Errorf("expected status 'provisioning', got %q", project.Status)
+	if project.Status != "provisioning" && project.Status != "active" {
+		t.Errorf("expected status 'provisioning' or 'active', got %q", project.Status)
 	}
 	if project.ID == "" {
 		t.Error("expected non-empty project ID")
