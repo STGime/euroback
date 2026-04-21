@@ -13,6 +13,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,14 +24,44 @@ const maxUploadSize = 50 << 20 // 50 MB
 
 // StorageHandler holds dependencies for the storage HTTP handlers.
 type StorageHandler struct {
-	s3   *S3Client
-	pool *pgxpool.Pool
+	s3     *S3Client
+	pool   *pgxpool.Pool
+	engine *query.QueryEngine
 }
 
 // NewStorageHandler creates a new StorageHandler backed by the given S3Client
-// and database pool (used to track uploads in storage_objects).
-func NewStorageHandler(s3 *S3Client, pool *pgxpool.Pool) *StorageHandler {
-	return &StorageHandler{s3: s3, pool: pool}
+// and database pool (used to track uploads in storage_objects). The query
+// engine is used to run RLS-aware ownership checks before S3 fetches so an
+// end-user can't download another end-user's files by guessing the key.
+func NewStorageHandler(s3 *S3Client, pool *pgxpool.Pool, engine *query.QueryEngine) *StorageHandler {
+	return &StorageHandler{s3: s3, pool: pool, engine: engine}
+}
+
+// assertObjectVisible runs a short SELECT against storage_objects under the
+// caller's RLS context. End-user JWT requests are filtered by the
+// storage_owner_access policy so only the caller's own files pass the check.
+// Platform-admin / secret-key requests see every row (is_service_role
+// bypass). An empty/missing context falls through to the anon role which
+// should never see a row.
+//
+// Returns true if the caller may act on the object, false otherwise.
+// If the engine or schema is unset (e.g. in tests) the check is skipped
+// and true is returned — the gateway still requires isAuthenticated().
+func (h *StorageHandler) assertObjectVisible(r *http.Request, key string) (bool, error) {
+	if h.engine == nil {
+		return true, nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" {
+		return true, nil
+	}
+	var exists bool
+	err := h.engine.WithTenantTx(r.Context(), schema, func(tx pgx.Tx) error {
+		q := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`,
+			strings.ReplaceAll(schema, `"`, `""`))
+		return tx.QueryRow(r.Context(), q, key).Scan(&exists)
+	})
+	return exists, err
 }
 
 // isAuthenticated checks whether the request has valid auth claims —
@@ -211,6 +242,20 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ownership check: RLS filters storage_objects so an end-user only
+	// sees their own rows. If this returns false, either the object
+	// doesn't exist or it belongs to someone else — either way, 404.
+	visible, err := h.assertObjectVisible(r, key)
+	if err != nil {
+		slog.Error("storage download: ownership check failed", "error", err, "key", key)
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if !visible {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+
 	body, contentType, size, err := h.s3.DownloadObject(r.Context(), bucket, key)
 	if err != nil {
 		if strings.Contains(err.Error(), "object not found") {
@@ -257,6 +302,19 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	key := extractWildcardKey(r)
 	if key == "" {
 		http.Error(w, `{"error":"object key is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Ownership check: same RLS-based filter as DownloadFile. Stops one
+	// end-user from deleting another's file by guessing the key.
+	visible, err := h.assertObjectVisible(r, key)
+	if err != nil {
+		slog.Error("storage delete: ownership check failed", "error", err, "key", key)
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if !visible {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 
@@ -381,6 +439,25 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	if req.Operation != "upload" && req.Operation != "download" {
 		http.Error(w, `{"error":"operation must be upload or download"}`, http.StatusBadRequest)
 		return
+	}
+
+	// Ownership check for download signed URLs. Upload URLs are for files
+	// the caller is about to create — no existing row to check; the upload
+	// tracking INSERT still records uploaded_by so subsequent downloads are
+	// gated correctly. A signed URL handed to a different user after it's
+	// generated is a trust-the-URL scenario (unguessable token); that's
+	// acceptable per the design of signed URLs.
+	if req.Operation == "download" {
+		visible, err := h.assertObjectVisible(r, req.Key)
+		if err != nil {
+			slog.Error("storage signed-url: ownership check failed", "error", err, "key", req.Key)
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		if !visible {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
 	}
 
 	var (

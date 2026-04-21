@@ -285,7 +285,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
 					r.Use(tenant.PlatformStorageContext(pool))
-					storageHandler := storage.NewStorageHandler(s3Client, pool)
+					storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool))
 					r.Mount("/", storageHandler.Routes())
 				})
 			}
@@ -431,7 +431,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 					r.Use(endUserMw.Handler)
 				}
 
-				storageHandler := storage.NewStorageHandler(s3Client, pool)
+				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool))
 				r.Mount("/", storageHandler.Routes())
 			})
 		} else {

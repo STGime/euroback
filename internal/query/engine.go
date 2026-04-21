@@ -57,11 +57,11 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 }
 
 
-// withTenantTx runs fn inside a transaction with search_path set to the
+// WithTenantTx runs fn inside a transaction with search_path set to the
 // tenant schema AND the end-user RLS context applied. Every tenant-schema
 // query on the gateway must go through this wrapper so RLS policies can
 // filter by the caller (service / anon / authenticated user).
-func (e *QueryEngine) withTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
+func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -142,7 +142,7 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 	slog.Debug("executing aggregate query", "sql", sql, "args_count", len(args))
 
 	var result interface{}
-	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, args...).Scan(&result)
 	})
 	if err != nil {
@@ -257,7 +257,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 	var results []map[string]interface{}
 	var totalCount int
 
-	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		// If relations are requested, resolve FKs and build a JOIN query.
 		if len(params.Relations) > 0 {
 			resolvedRels, err := e.resolveRelations(ctx, schemaName, tableName, params.Relations)
@@ -395,7 +395,7 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 	slog.Debug("executing insert query", "sql", sql, "args_count", len(args))
 
 	var result map[string]interface{}
-	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, sql, args...)
 		if err != nil {
 			return fmt.Errorf("execute insert: %w", err)
@@ -442,7 +442,7 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	slog.Debug("executing update query", "sql", sql, "args_count", len(args))
 
 	var result map[string]interface{}
-	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, sql, args...)
 		if err != nil {
 			return fmt.Errorf("execute update: %w", err)
@@ -475,7 +475,7 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 	sql, args := buildDeleteQuery(schemaName, tableName, rowID)
 	slog.Debug("executing delete query", "sql", sql, "args_count", len(args))
 
-	return e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	return e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, sql, args...)
 		if err != nil {
 			return fmt.Errorf("execute delete: %w", err)
@@ -499,7 +499,7 @@ func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName stri
 	slog.Debug("executing bulk delete", "sql", sql, "id_count", len(ids))
 
 	var affected int64
-	err := e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, sql, ids)
 		if err != nil {
 			return fmt.Errorf("execute bulk delete: %w", err)
@@ -568,7 +568,7 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 	slog.Debug("executing function call", "sql", sql, "args_count", len(paramValues))
 
 	var result interface{}
-	err = e.withTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, paramValues...).Scan(&result)
 	})
 	if err != nil {
