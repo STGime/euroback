@@ -106,6 +106,12 @@ func HandlePlatformSignIn(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 }
 
 // HandleGetProfile returns an HTTP handler for GET /platform/auth/account/profile.
+//
+// When the request is authenticated via a Personal Access Token, the
+// is_superadmin field is forced to false so the response reflects the
+// token's actual authority rather than the underlying account's flag.
+// (PATs never carry superadmin claims at the middleware layer; this
+// keeps the profile shape consistent with that.)
 func HandleGetProfile(svc *PlatformAuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := ClaimsFromContext(r.Context())
@@ -119,6 +125,10 @@ func HandleGetProfile(svc *PlatformAuthService) http.HandlerFunc {
 			slog.Warn("get profile failed", "error", err)
 			writeJSONError(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+
+		if isPATAuth(r) {
+			profile.IsSuperadmin = false
 		}
 
 		w.Header().Set("Content-Type", "application/json")
