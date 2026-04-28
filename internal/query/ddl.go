@@ -620,13 +620,37 @@ type DBFunction struct {
 	ReturnType string `json:"return_type"`
 }
 
-// ListFunctions returns all user-defined functions in the given schema.
+// ListFunctions returns user-defined functions in the given schema.
+//
+// Filters out:
+//   - extension-provided functions (citext_*, uuid_*, gen_random_uuid, …):
+//     anything with a pg_depend row to pg_extension. Extensions install
+//     into whatever schema they target, so the tenant schema can fill up
+//     with dozens of system functions the user didn't create.
+//   - non-user languages (C, internal): catches extension functions that
+//     might predate a pg_depend entry, plus the few built-in casts that
+//     show up in `information_schema.routines`.
+//
+// Limited to SQL and PL/pgSQL — the same languages CreateFunction allows
+// the user to author, so the list and create surfaces stay symmetric.
 func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]DBFunction, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT routine_name, COALESCE(external_language, 'sql'), data_type
-		 FROM information_schema.routines
-		 WHERE specific_schema = $1 AND routine_type = 'FUNCTION'
-		 ORDER BY routine_name`, schemaName)
+		`SELECT p.proname,
+		        l.lanname,
+		        pg_get_function_result(p.oid)
+		   FROM pg_proc p
+		   JOIN pg_namespace n ON n.oid = p.pronamespace
+		   JOIN pg_language  l ON l.oid = p.prolang
+		  WHERE n.nspname = $1
+		    AND l.lanname IN ('sql', 'plpgsql')
+		    AND NOT EXISTS (
+		          SELECT 1
+		            FROM pg_depend d
+		           WHERE d.classid    = 'pg_proc'::regclass
+		             AND d.objid      = p.oid
+		             AND d.refclassid = 'pg_extension'::regclass
+		    )
+		  ORDER BY p.proname`, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("list functions: %w", err)
 	}
