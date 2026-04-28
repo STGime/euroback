@@ -133,6 +133,24 @@
 						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto max-h-80 overflow-y-auto">{info.claude_md}</pre>
 					</div>
 
+					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
+								<p class="text-xs text-gray-500">Lets Claude Code list tables, run SQL, manage Vault, invoke functions on this project. Run once in your shell — replace the token with your console JWT.</p>
+							</div>
+							<button
+								onclick={() => copyToClipboard(info.mcp_config.claude, 'mcp-claude')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>
+								{copiedField === 'mcp-claude' ? 'Copied!' : 'Copy'}
+							</button>
+						</div>
+						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.claude}</pre>
+						<p class="mt-3 text-xs text-gray-500">Or add to <code class="rounded bg-gray-100 px-1 font-mono">~/.claude/settings.json</code>:</p>
+						<pre class="mt-2 rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto">{info.mcp_config.claude_json}</pre>
+					</div>
+
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
 						<div class="flex items-center justify-between mb-3">
 							<div>
@@ -174,6 +192,22 @@
 							</div>
 						</div>
 						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto max-h-80 overflow-y-auto">{info.codex_md}</pre>
+					</div>
+
+					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
+								<p class="text-xs text-gray-500">Append to <code class="rounded bg-gray-100 px-1 font-mono">~/.codex/config.toml</code> so Codex can run SQL, manage Vault, and invoke functions on this project.</p>
+							</div>
+							<button
+								onclick={() => copyToClipboard(info.mcp_config.codex, 'mcp-codex')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>
+								{copiedField === 'mcp-codex' ? 'Copied!' : 'Copy'}
+							</button>
+						</div>
+						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.codex}</pre>
 					</div>
 
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
@@ -219,6 +253,22 @@
 						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto max-h-80 overflow-y-auto">{info.cursor_rules}</pre>
 					</div>
 
+					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
+								<p class="text-xs text-gray-500">Add to <code class="rounded bg-gray-100 px-1 font-mono">~/.cursor/mcp.json</code> (or your workspace's <code class="rounded bg-gray-100 px-1 font-mono">.cursor/mcp.json</code>) — replace the token with your console JWT.</p>
+							</div>
+							<button
+								onclick={() => copyToClipboard(info.mcp_config.cursor, 'mcp-cursor')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>
+								{copiedField === 'mcp-cursor' ? 'Copied!' : 'Copy'}
+							</button>
+						</div>
+						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.cursor}</pre>
+					</div>
+
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
 						<div class="flex items-center justify-between mb-3">
 							<div>
@@ -260,6 +310,22 @@
 							</div>
 						</div>
 						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto max-h-80 overflow-y-auto">{info.cursor_rules}</pre>
+					</div>
+
+					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
+								<p class="text-xs text-gray-500">Add to Windsurf's MCP config — replace the token with your console JWT.</p>
+							</div>
+							<button
+								onclick={() => copyToClipboard(info.mcp_config.windsurf, 'mcp-windsurf')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>
+								{copiedField === 'mcp-windsurf' ? 'Copied!' : 'Copy'}
+							</button>
+						</div>
+						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.windsurf}</pre>
 					</div>
 				</div>
 
@@ -308,6 +374,23 @@
 							</div>
 						</div>
 						<code class="block rounded-lg bg-gray-900 px-4 py-3 text-sm font-mono text-gray-100 overflow-x-auto">eurobase://<span class="text-amber-400">YOUR_PUBLIC_KEY</span>@{info.slug}.eurobase.app</code>
+					</div>
+
+					<!-- MCP endpoint -->
+					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">MCP Server (Streamable HTTP)</p>
+								<p class="text-xs text-gray-500">Any MCP-compatible client can connect. Auth: <code class="rounded bg-gray-100 px-1 font-mono">Authorization: Bearer &lt;platform JWT&gt;</code></p>
+							</div>
+							<button
+								onclick={() => copyToClipboard(info.mcp_url, 'mcp-url')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>
+								{copiedField === 'mcp-url' ? 'Copied!' : 'Copy'}
+							</button>
+						</div>
+						<code class="block rounded-lg bg-gray-900 px-4 py-3 text-sm font-mono text-gray-100 overflow-x-auto">{info.mcp_url}</code>
 					</div>
 
 					{#if info.sample_code.javascript}

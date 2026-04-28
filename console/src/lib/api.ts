@@ -1326,11 +1326,13 @@ export interface ConnectInfo {
 	api_url: string;
 	region: string;
 	plan: string;
+	mcp_url: string;
 	tables: { name: string; columns: { name: string; data_type: string; nullable: boolean }[] }[];
 	claude_md: string;
 	codex_md: string;
 	cursor_rules: string;
 	env_template: string;
+	mcp_config: Record<string, string>;
 	sample_code: Record<string, string>;
 }
 

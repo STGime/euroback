@@ -26,13 +26,19 @@ type ConnectInfo struct {
 	APIURL      string            `json:"api_url"`
 	Region      string            `json:"region"`
 	Plan        string            `json:"plan"`
+	MCPURL      string            `json:"mcp_url"`
 	Tables      []ConnectTable    `json:"tables"`
 	ClaudeMD    string            `json:"claude_md"`
 	CodexMD     string            `json:"codex_md"`
 	CursorRules string            `json:"cursor_rules"`
 	EnvTemplate string            `json:"env_template"`
+	MCPConfig   map[string]string `json:"mcp_config"`
 	SampleCode  map[string]string `json:"sample_code"`
 }
+
+// mcpServerURL is the public Streamable HTTP endpoint of the Eurobase MCP server.
+// Routed by deploy/k8s/ingress.yaml at host mcp.eurobase.app.
+const mcpServerURL = "https://mcp.eurobase.app/mcp"
 
 // ConnectTable is a simplified table schema for connect info.
 type ConnectTable struct {
@@ -85,6 +91,10 @@ func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build .cursorrules content.
 		cursorRules := generateCursorRules(name, slug, apiURL, tables)
+
+		// Build MCP server config snippets per IDE. Users paste these into
+		// their IDE's MCP config file along with their platform JWT.
+		mcpConfig := generateMCPConfig()
 
 		// Build .env template.
 		envTemplate := fmt.Sprintf("EUROBASE_URL=%s\nEUROBASE_PUBLIC_KEY=eb_pk_...\nEUROBASE_SECRET_KEY=eb_sk_...", apiURL)
@@ -171,11 +181,13 @@ curl -s '%s/v1/db/todos' \
 			APIURL:      apiURL,
 			Region:      region,
 			Plan:        plan,
+			MCPURL:      mcpServerURL,
 			Tables:      tables,
 			ClaudeMD:    claudeMD,
 			CodexMD:     codexMD,
 			CursorRules: cursorRules,
 			EnvTemplate: envTemplate,
+			MCPConfig:   mcpConfig,
 			SampleCode:  sampleCode,
 		}
 
@@ -290,6 +302,28 @@ func generateClaudeMD(name, slug, apiURL, plan string, tables []ConnectTable) st
 	fmt.Fprintf(&b, "```\n\n")
 	fmt.Fprintf(&b, "After sign-in, the JWT is sent automatically with every `eb.db` query. RLS policies are enforced server-side.\n\n")
 
+	fmt.Fprintf(&b, "## MCP Server (Claude Code)\n\n")
+	fmt.Fprintf(&b, "Eurobase ships an MCP server so Claude Code can operate on this project directly — list tables, run SQL, inspect users/files, read & write Vault secrets, invoke edge functions.\n\n")
+	fmt.Fprintf(&b, "Add it once in your shell:\n\n")
+	fmt.Fprintf(&b, "```bash\n")
+	fmt.Fprintf(&b, "claude mcp add --transport http eurobase %s \\\n", mcpServerURL)
+	fmt.Fprintf(&b, "  --header \"Authorization: Bearer $EUROBASE_PLATFORM_TOKEN\"\n")
+	fmt.Fprintf(&b, "```\n\n")
+	fmt.Fprintf(&b, "`EUROBASE_PLATFORM_TOKEN` is your console JWT (sign in at https://console.eurobase.app, it's the `access_token` returned by `/platform/auth/signin`). Tools are auto-namespaced as `mcp__eurobase__*`.\n\n")
+
+	fmt.Fprintf(&b, "### MCP vs SDK vs migrations — pick the right channel\n\n")
+	fmt.Fprintf(&b, "These are not interchangeable. Same project, three audiences:\n\n")
+	fmt.Fprintf(&b, "- **SDK (`@eurobase/sdk`)** — code you write into the *application*. Runs in production at request-time, scoped by RLS to the end-user's JWT. Use it for everything the deployed app does on behalf of its users.\n")
+	fmt.Fprintf(&b, "- **MCP** — tool calls *you* make during the coding session, scoped by my platform JWT. Use it to *inspect* (list tables, describe schema, run SELECT) and for *throwaway* operations.\n")
+	fmt.Fprintf(&b, "- **Migrations (`migrations/NNNNNN_*.up.sql`)** — durable schema changes, version-controlled, reviewed in PR, replayed in CI on every environment.\n\n")
+	fmt.Fprintf(&b, "Rules of thumb when the user asks me to make a change:\n\n")
+	fmt.Fprintf(&b, "1. **Schema change of any kind** (`CREATE TABLE`, `ALTER TABLE`, `DROP`, new index, new RLS policy) → write a migration file under `migrations/`. **Do not** call `mcp__eurobase__db_execute_sql` to silently mutate the live DB; the change won't exist on staging or in any teammate's branch.\n")
+	fmt.Fprintf(&b, "2. **App feature work** (\"add a sign-up form\", \"render the orders list\") → write SDK code in the app. The user's deployed app runs it.\n")
+	fmt.Fprintf(&b, "3. **Inspection** (\"how many rows? what columns?\") → MCP `db_query` / `db_describe_table`. Don't hand-write a `psql` snippet.\n")
+	fmt.Fprintf(&b, "4. **Throwaway debugging** (\"add a `tmp_debug` column to poke at this\") → MCP is fine, but say so explicitly and remove it before the session ends.\n")
+	fmt.Fprintf(&b, "5. **Vault writes / production data mutations** via MCP → confirm with the user first. There's no undo.\n\n")
+	fmt.Fprintf(&b, "Default to read-only via MCP. If a tool call would alter persistent state and isn't backed by a migration or SDK code path, stop and confirm.\n\n")
+
 	fmt.Fprintf(&b, "## Constraints\n\n")
 	fmt.Fprintf(&b, "- All infrastructure is EU-only (Scaleway, Paris FR)\n")
 	fmt.Fprintf(&b, "- No US-incorporated services (AWS, GCP, Azure, Stripe, Vercel, Cloudflare)\n")
@@ -352,6 +386,29 @@ func generateCodexMD(name, slug, apiURL, plan string, tables []ConnectTable) str
 	fmt.Fprintf(&b, "```\n\n")
 	fmt.Fprintf(&b, "After sign-in, the JWT is sent automatically with every `eb.db` query. RLS policies are enforced server-side.\n\n")
 
+	fmt.Fprintf(&b, "## MCP Server (Codex)\n\n")
+	fmt.Fprintf(&b, "Eurobase ships a Streamable-HTTP MCP server so Codex can operate on this project directly — list tables, run SQL, inspect users/files, read & write Vault secrets, invoke edge functions.\n\n")
+	fmt.Fprintf(&b, "Add the following to `~/.codex/config.toml` (Codex 0.20+):\n\n")
+	fmt.Fprintf(&b, "```toml\n")
+	fmt.Fprintf(&b, "[mcp_servers.eurobase]\n")
+	fmt.Fprintf(&b, "url = \"%s\"\n", mcpServerURL)
+	fmt.Fprintf(&b, "headers = { Authorization = \"Bearer ${EUROBASE_PLATFORM_TOKEN}\" }\n")
+	fmt.Fprintf(&b, "```\n\n")
+	fmt.Fprintf(&b, "`EUROBASE_PLATFORM_TOKEN` is your console JWT (the `access_token` returned by `/platform/auth/signin`).\n\n")
+
+	fmt.Fprintf(&b, "### MCP vs SDK vs migrations — pick the right channel\n\n")
+	fmt.Fprintf(&b, "These are not interchangeable. Same project, three audiences:\n\n")
+	fmt.Fprintf(&b, "- **SDK (`@eurobase/sdk`)** — code you write into the *application*. Runs in production at request-time, scoped by RLS to the end-user's JWT. Use it for everything the deployed app does on behalf of its users.\n")
+	fmt.Fprintf(&b, "- **MCP** — tool calls *you* make during the coding session, scoped by my platform JWT. Use it to *inspect* (list tables, describe schema, run SELECT) and for *throwaway* operations.\n")
+	fmt.Fprintf(&b, "- **Migrations (`migrations/NNNNNN_*.up.sql`)** — durable schema changes, version-controlled, reviewed in PR, replayed in CI on every environment.\n\n")
+	fmt.Fprintf(&b, "Rules of thumb when the user asks me to make a change:\n\n")
+	fmt.Fprintf(&b, "1. **Schema change of any kind** (`CREATE TABLE`, `ALTER TABLE`, `DROP`, new index, new RLS policy) → write a migration file under `migrations/`. **Do not** call `db_execute_sql` to silently mutate the live DB; the change won't exist on staging or in any teammate's branch.\n")
+	fmt.Fprintf(&b, "2. **App feature work** (\"add a sign-up form\", \"render the orders list\") → write SDK code in the app. The user's deployed app runs it.\n")
+	fmt.Fprintf(&b, "3. **Inspection** (\"how many rows? what columns?\") → MCP `db_query` / `db_describe_table`. Don't hand-write a `psql` snippet.\n")
+	fmt.Fprintf(&b, "4. **Throwaway debugging** (\"add a `tmp_debug` column to poke at this\") → MCP is fine, but say so explicitly and remove it before the session ends.\n")
+	fmt.Fprintf(&b, "5. **Vault writes / production data mutations** via MCP → confirm with the user first. There's no undo.\n\n")
+	fmt.Fprintf(&b, "Default to read-only via MCP. If a tool call would alter persistent state and isn't backed by a migration or SDK code path, stop and confirm.\n\n")
+
 	fmt.Fprintf(&b, "## Constraints\n\n")
 	fmt.Fprintf(&b, "- All infrastructure is EU-only (Scaleway, Paris FR)\n")
 	fmt.Fprintf(&b, "- No US-incorporated services (AWS, GCP, Azure, Stripe, Vercel, Cloudflare)\n")
@@ -390,9 +447,80 @@ func generateCursorRules(name, slug, apiURL string, tables []ConnectTable) strin
 		fmt.Fprintf(&b, "\n")
 	}
 
+	fmt.Fprintf(&b, "## MCP Server\n\n")
+	fmt.Fprintf(&b, "Eurobase ships an MCP server. Add it to `~/.cursor/mcp.json` (or your workspace's `.cursor/mcp.json`) so Cursor can operate on this project directly — list tables, run SQL, inspect users/files, read & write Vault secrets, invoke edge functions:\n\n")
+	fmt.Fprintf(&b, "```json\n")
+	fmt.Fprintf(&b, "{\n")
+	fmt.Fprintf(&b, "  \"mcpServers\": {\n")
+	fmt.Fprintf(&b, "    \"eurobase\": {\n")
+	fmt.Fprintf(&b, "      \"url\": \"%s\",\n", mcpServerURL)
+	fmt.Fprintf(&b, "      \"headers\": { \"Authorization\": \"Bearer YOUR_PLATFORM_TOKEN\" }\n")
+	fmt.Fprintf(&b, "    }\n")
+	fmt.Fprintf(&b, "  }\n")
+	fmt.Fprintf(&b, "}\n")
+	fmt.Fprintf(&b, "```\n\n")
+	fmt.Fprintf(&b, "`YOUR_PLATFORM_TOKEN` is your console JWT (the `access_token` returned by `/platform/auth/signin`).\n\n")
+	fmt.Fprintf(&b, "## When to use MCP vs SDK vs migrations\n\n")
+	fmt.Fprintf(&b, "- SDK (`@eurobase/sdk`) → code that runs in the *deployed app* at request-time, scoped by end-user RLS\n")
+	fmt.Fprintf(&b, "- MCP → tool calls the *agent* makes during a coding session; default to read-only (SELECT, describe)\n")
+	fmt.Fprintf(&b, "- Migrations (`migrations/NNNNNN_*.up.sql`) → durable schema changes, reviewed in PR, replayed in CI\n\n")
+	fmt.Fprintf(&b, "Rules:\n\n")
+	fmt.Fprintf(&b, "- Any `CREATE TABLE` / `ALTER TABLE` / `DROP` / index / RLS policy → write a migration file. Do not silently mutate the live DB via MCP `db_execute_sql`; the change won't exist on staging or in any teammate's branch.\n")
+	fmt.Fprintf(&b, "- App feature work → SDK code in the app, not MCP.\n")
+	fmt.Fprintf(&b, "- Inspection (counts, schema, sample rows) → MCP `db_query` / `db_describe_table`.\n")
+	fmt.Fprintf(&b, "- Vault writes or production data mutations via MCP → confirm with the user first.\n\n")
+
 	fmt.Fprintf(&b, "## Constraints\n\n")
 	fmt.Fprintf(&b, "- EU-only infrastructure, no US cloud services\n")
 	fmt.Fprintf(&b, "- GDPR compliant — handle user data accordingly\n")
 
 	return b.String()
+}
+
+// generateMCPConfig returns ready-to-paste MCP-server config snippets keyed
+// by IDE: claude (CLI invocation), claude_json (settings.json block),
+// codex (config.toml block), cursor (mcp.json block), windsurf (mcp.json block).
+func generateMCPConfig() map[string]string {
+	return map[string]string{
+		"claude": fmt.Sprintf(`claude mcp add --transport http eurobase %s \
+  --header "Authorization: Bearer $EUROBASE_PLATFORM_TOKEN"`, mcpServerURL),
+
+		"claude_json": fmt.Sprintf(`{
+  "mcpServers": {
+    "eurobase": {
+      "type": "http",
+      "url": "%s",
+      "headers": {
+        "Authorization": "Bearer YOUR_PLATFORM_TOKEN"
+      }
+    }
+  }
+}`, mcpServerURL),
+
+		"codex": fmt.Sprintf(`[mcp_servers.eurobase]
+url = "%s"
+headers = { Authorization = "Bearer ${EUROBASE_PLATFORM_TOKEN}" }`, mcpServerURL),
+
+		"cursor": fmt.Sprintf(`{
+  "mcpServers": {
+    "eurobase": {
+      "url": "%s",
+      "headers": {
+        "Authorization": "Bearer YOUR_PLATFORM_TOKEN"
+      }
+    }
+  }
+}`, mcpServerURL),
+
+		"windsurf": fmt.Sprintf(`{
+  "mcpServers": {
+    "eurobase": {
+      "serverUrl": "%s",
+      "headers": {
+        "Authorization": "Bearer YOUR_PLATFORM_TOKEN"
+      }
+    }
+  }
+}`, mcpServerURL),
+	}
 }

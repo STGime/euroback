@@ -1,0 +1,70 @@
+##############################################################################
+# Eurobase MCP Server — Kubernetes Deployment + Service
+##############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: eurobase
+  labels:
+    app: mcp-server
+    component: mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-server
+  template:
+    metadata:
+      labels:
+        app: mcp-server
+        component: mcp
+    spec:
+      containers:
+        - name: mcp-server
+          image: rg.fr-par.scw.cloud/eurobase-app/mcp-server:latest
+          ports:
+            - containerPort: 3100
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "3100"
+            - name: EUROBASE_PLATFORM_URL
+              value: "http://gateway:8080"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3100
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      imagePullSecrets:
+        - name: scw-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+  namespace: eurobase
+  labels:
+    app: mcp-server
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-server
+  ports:
+    - port: 3100
+      targetPort: 3100
+      protocol: TCP

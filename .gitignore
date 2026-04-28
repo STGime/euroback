@@ -35,6 +35,10 @@ console/build/
 sdk/js/node_modules/
 sdk/js/dist/
 
+# MCP server
+mcp-server/node_modules/
+mcp-server/dist/
+
 # Claude
 .claude/
 
@@ -51,6 +55,7 @@ deploy/create-secrets.sh
 /gateway
 /worker
 /eurobase
+/backfill-storage
 
 # Cursor
 .cursorrules

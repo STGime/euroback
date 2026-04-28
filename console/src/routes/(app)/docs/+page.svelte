@@ -25,7 +25,8 @@
 		{ id: 'team', label: '17. Team Collaboration' },
 		{ id: 'cli', label: '18. CLI Tool' },
 		{ id: 'connect', label: '19. Connecting Your IDE' },
-		{ id: 'account', label: '20. Your Account' },
+		{ id: 'mcp', label: '20. MCP Server' },
+		{ id: 'account', label: '21. Your Account' },
 		{ id: 'next', label: "What's Next" }
 	];
 
@@ -1818,15 +1819,80 @@ ROLLBACK;</pre>
 			</div>
 
 			<div class="mt-6 text-right">
+				<button onclick={() => scrollTo('mcp')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: MCP Server &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 20. MCP SERVER ======================= -->
+		<section id="mcp" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">20. MCP Server</h2>
+			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI assistant to actually <em>do things</em> in LexVault &mdash; list users, run a SELECT, rotate a Vault secret &mdash; not just read schema docs.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The configs in <button onclick={() => scrollTo('connect')} class="text-eurobase-600 hover:underline cursor-pointer">section 19</button> teach an AI assistant <em>about</em> your project. The MCP server lets it <em>operate</em> on your project. Eurobase ships a hosted <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Model Context Protocol</a> server at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">https://mcp.eurobase.app/mcp</code> that exposes the platform API as tool calls.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900">What it can do</h3>
+				<div class="rounded-xl border border-gray-200 bg-white overflow-hidden">
+					<div class="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-700">
+						<div><strong>Projects</strong> &mdash; list and inspect your Eurobase projects</div>
+						<div><strong>Database</strong> &mdash; list tables, describe schema, run SQL, create tables</div>
+						<div><strong>Auth</strong> &mdash; list end-users registered in a project</div>
+						<div><strong>Storage</strong> &mdash; list files, generate signed download URLs</div>
+						<div><strong>Vault</strong> &mdash; list, get, and set encrypted secrets</div>
+						<div><strong>Functions</strong> &mdash; list and invoke edge functions</div>
+					</div>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Authentication</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The MCP server accepts your platform JWT (the same token the console uses) via the <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">Authorization: Bearer &lt;token&gt;</code> header. Every tool call is scoped to whatever projects and roles your account has &mdash; the MCP server never bypasses RLS or the role checks the rest of the platform enforces.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Setup</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The Connect page generates the right snippet for each IDE (Claude Code, Codex, Cursor, Windsurf). For Claude Code the one-liner is:
+				</p>
+				<div class="relative">
+					<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">claude mcp add --transport http eurobase https://mcp.eurobase.app/mcp \
+  --header "Authorization: Bearer $EUROBASE_PLATFORM_TOKEN"</pre>
+					<button
+						onclick={() => copyCode('claude mcp add --transport http eurobase https://mcp.eurobase.app/mcp \\\n  --header "Authorization: Bearer $EUROBASE_PLATFORM_TOKEN"', 'mcp-claude-cli')}
+						class="absolute top-2 right-2 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 text-xs cursor-pointer"
+					>{copiedId === 'mcp-claude-cli' ? 'Copied!' : 'Copy'}</button>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					After this, Alex can ask Claude Code things like <em>"how many active LexVault users signed up this week?"</em> and it will run the SELECT itself.
+				</p>
+
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">
+					<svg class="h-5 w-5 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.008v.008H12v-.008Z" />
+					</svg>
+					<p class="text-sm text-amber-800">
+						The platform JWT expires &mdash; you'll need to refresh it (re-sign-in to the console) when the MCP server starts returning 401s. A long-lived personal access token type is on the roadmap.
+					</p>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Sovereignty</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The MCP server runs in the same Scaleway Paris cluster as the rest of the platform. Tool calls never leave EU infrastructure &mdash; the only data that traverses your AI vendor is whatever the model itself sees in the conversation.
+				</p>
+			</div>
+
+			<div class="mt-6 text-right">
 				<button onclick={() => scrollTo('account')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Your Account &rarr;
 				</button>
 			</div>
 		</section>
 
-		<!-- ======================= 13. YOUR ACCOUNT ======================= -->
+		<!-- ======================= 21. YOUR ACCOUNT ======================= -->
 		<section id="account" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">20. Your Account</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">21. Your Account</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
 
 			<div class="space-y-4">

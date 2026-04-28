@@ -40,6 +40,16 @@ spec:
                 name: console
                 port:
                   number: 3000
+    - host: mcp.eurobase.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server
+                port:
+                  number: 3100
     - host: "*.eurobase.app"
       http:
         paths:
