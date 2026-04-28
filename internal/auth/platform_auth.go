@@ -95,6 +95,16 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 			email,
 		).Scan(&allowed)
 		if !allowed {
+			if _, err := s.pool.Exec(ctx,
+				`INSERT INTO platform_waitlist (email)
+				 VALUES ($1)
+				 ON CONFLICT (email) DO UPDATE
+				    SET last_attempt_at = now(),
+				        attempts        = platform_waitlist.attempts + 1`,
+				email,
+			); err != nil {
+				slog.Warn("record waitlist signup", "email", email, "error", err)
+			}
 			return nil, &WaitlistError{Email: email}
 		}
 	}
