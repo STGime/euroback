@@ -75,7 +75,8 @@ func main() {
 	if !platformAuthSvc.AllowPublicSignup {
 		slog.Info("signup gated behind platform_allowlist (set ALLOW_PUBLIC_SIGNUP=true to open)")
 	}
-	platformAuth := auth.NewPlatformAuthMiddleware(platformAuthSvc)
+	patSvc := auth.NewPATService(pool)
+	platformAuth := auth.NewPlatformAuthMiddleware(platformAuthSvc).WithPATService(patSvc)
 
 	// ── Set up rate limiter (optional — degrades gracefully) ──
 	var limiter *ratelimit.RateLimiter

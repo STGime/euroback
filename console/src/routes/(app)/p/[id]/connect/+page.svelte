@@ -137,7 +137,7 @@
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
-								<p class="text-xs text-gray-500">Lets Claude Code list tables, run SQL, manage Vault, invoke functions on this project. Run once in your shell — replace the token with your console JWT.</p>
+								<p class="text-xs text-gray-500">Lets Claude Code list tables, run SQL, manage Vault, invoke functions on this project. Run once in your shell — paste a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a>.</p>
 							</div>
 							<button
 								onclick={() => copyToClipboard(info.mcp_config.claude, 'mcp-claude')}
@@ -257,7 +257,7 @@
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
-								<p class="text-xs text-gray-500">Add to <code class="rounded bg-gray-100 px-1 font-mono">~/.cursor/mcp.json</code> (or your workspace's <code class="rounded bg-gray-100 px-1 font-mono">.cursor/mcp.json</code>) — replace the token with your console JWT.</p>
+								<p class="text-xs text-gray-500">Add to <code class="rounded bg-gray-100 px-1 font-mono">~/.cursor/mcp.json</code> (or your workspace's <code class="rounded bg-gray-100 px-1 font-mono">.cursor/mcp.json</code>) — paste a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a>.</p>
 							</div>
 							<button
 								onclick={() => copyToClipboard(info.mcp_config.cursor, 'mcp-cursor')}
@@ -316,7 +316,7 @@
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
-								<p class="text-xs text-gray-500">Add to Windsurf's MCP config — replace the token with your console JWT.</p>
+								<p class="text-xs text-gray-500">Add to Windsurf's MCP config — paste a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a>.</p>
 							</div>
 							<button
 								onclick={() => copyToClipboard(info.mcp_config.windsurf, 'mcp-windsurf')}
@@ -381,7 +381,7 @@
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">MCP Server (Streamable HTTP)</p>
-								<p class="text-xs text-gray-500">Any MCP-compatible client can connect. Auth: <code class="rounded bg-gray-100 px-1 font-mono">Authorization: Bearer &lt;platform JWT&gt;</code></p>
+								<p class="text-xs text-gray-500">Any MCP-compatible client can connect. Auth: <code class="rounded bg-gray-100 px-1 font-mono">Authorization: Bearer &lt;PAT&gt;</code> · <a href="/account" class="text-eurobase-700 hover:underline">get your token here</a></p>
 							</div>
 							<button
 								onclick={() => copyToClipboard(info.mcp_url, 'mcp-url')}

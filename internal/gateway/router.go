@@ -84,6 +84,10 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 	// API key middleware (for SDK / end-user routes).
 	apiKeyMw := auth.NewAPIKeyMiddleware(pool)
 
+	// PAT service — shared with platformAuth (via WithPATService in main.go)
+	// for token validation, and used directly here by the CRUD handlers.
+	patSvc := auth.NewPATService(pool)
+
 	// End-user JWT middleware (optional — anonymous if no token).
 	endUserMw := auth.NewEndUserMiddleware()
 
@@ -123,6 +127,11 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Patch("/profile", auth.HandleUpdateProfile(platformAuthSvc))
 			r.Post("/change-password", auth.HandleChangePassword(platformAuthSvc))
 			r.Post("/delete", auth.HandleDeleteAccount(platformAuthSvc))
+
+			// Personal Access Tokens.
+			r.Get("/tokens", auth.HandleListPATs(patSvc))
+			r.Post("/tokens", auth.HandleCreatePAT(patSvc))
+			r.Delete("/tokens/{id}", auth.HandleRevokePAT(patSvc))
 		})
 
 		// Authenticated: accept project invitation (token-based).

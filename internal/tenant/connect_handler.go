@@ -93,7 +93,8 @@ func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 		cursorRules := generateCursorRules(name, slug, apiURL, tables)
 
 		// Build MCP server config snippets per IDE. Users paste these into
-		// their IDE's MCP config file along with their platform JWT.
+		// their IDE's MCP config file along with a Personal Access Token
+		// minted at https://console.eurobase.app/account.
 		mcpConfig := generateMCPConfig()
 
 		// Build .env template.
@@ -307,9 +308,10 @@ func generateClaudeMD(name, slug, apiURL, plan string, tables []ConnectTable) st
 	fmt.Fprintf(&b, "Add it once in your shell:\n\n")
 	fmt.Fprintf(&b, "```bash\n")
 	fmt.Fprintf(&b, "claude mcp add --transport http eurobase %s \\\n", mcpServerURL)
-	fmt.Fprintf(&b, "  --header \"Authorization: Bearer $EUROBASE_PLATFORM_TOKEN\"\n")
+	fmt.Fprintf(&b, "  --header \"Authorization: Bearer $EUROBASE_PAT\"\n")
 	fmt.Fprintf(&b, "```\n\n")
-	fmt.Fprintf(&b, "`EUROBASE_PLATFORM_TOKEN` is your console JWT (sign in at https://console.eurobase.app, it's the `access_token` returned by `/platform/auth/signin`). Tools are auto-namespaced as `mcp__eurobase__*`.\n\n")
+	fmt.Fprintf(&b, "`EUROBASE_PAT` is a Personal Access Token. Mint one at <https://console.eurobase.app/account> → *Personal Access Tokens* → *New token*. The plaintext is shown once on creation; store it in a password manager or your shell rc. Tools are auto-namespaced as `mcp__eurobase__*`.\n\n")
+	fmt.Fprintf(&b, "PATs authenticate as you across every project, but never carry superadmin rights — even if your account has them. They cannot mint other tokens, change passwords, or delete the account.\n\n")
 
 	fmt.Fprintf(&b, "### MCP vs SDK vs migrations — pick the right channel\n\n")
 	fmt.Fprintf(&b, "These are not interchangeable. Same project, three audiences:\n\n")
@@ -392,9 +394,10 @@ func generateCodexMD(name, slug, apiURL, plan string, tables []ConnectTable) str
 	fmt.Fprintf(&b, "```toml\n")
 	fmt.Fprintf(&b, "[mcp_servers.eurobase]\n")
 	fmt.Fprintf(&b, "url = \"%s\"\n", mcpServerURL)
-	fmt.Fprintf(&b, "headers = { Authorization = \"Bearer ${EUROBASE_PLATFORM_TOKEN}\" }\n")
+	fmt.Fprintf(&b, "headers = { Authorization = \"Bearer ${EUROBASE_PAT}\" }\n")
 	fmt.Fprintf(&b, "```\n\n")
-	fmt.Fprintf(&b, "`EUROBASE_PLATFORM_TOKEN` is your console JWT (the `access_token` returned by `/platform/auth/signin`).\n\n")
+	fmt.Fprintf(&b, "`EUROBASE_PAT` is a Personal Access Token minted at <https://console.eurobase.app/account> → *Personal Access Tokens*. The plaintext is shown once; store it in a password manager.\n\n")
+	fmt.Fprintf(&b, "PATs authenticate as you across every project, but never carry superadmin rights — even if your account has them. They cannot mint other tokens, change passwords, or delete the account.\n\n")
 
 	fmt.Fprintf(&b, "### MCP vs SDK vs migrations — pick the right channel\n\n")
 	fmt.Fprintf(&b, "These are not interchangeable. Same project, three audiences:\n\n")
@@ -459,7 +462,7 @@ func generateCursorRules(name, slug, apiURL string, tables []ConnectTable) strin
 	fmt.Fprintf(&b, "  }\n")
 	fmt.Fprintf(&b, "}\n")
 	fmt.Fprintf(&b, "```\n\n")
-	fmt.Fprintf(&b, "`YOUR_PLATFORM_TOKEN` is your console JWT (the `access_token` returned by `/platform/auth/signin`).\n\n")
+	fmt.Fprintf(&b, "`YOUR_PLATFORM_TOKEN` is a Personal Access Token minted at <https://console.eurobase.app/account>. PATs authenticate as you, but never carry superadmin rights and cannot mint more tokens.\n\n")
 	fmt.Fprintf(&b, "## When to use MCP vs SDK vs migrations\n\n")
 	fmt.Fprintf(&b, "- SDK (`@eurobase/sdk`) → code that runs in the *deployed app* at request-time, scoped by end-user RLS\n")
 	fmt.Fprintf(&b, "- MCP → tool calls the *agent* makes during a coding session; default to read-only (SELECT, describe)\n")
@@ -483,7 +486,7 @@ func generateCursorRules(name, slug, apiURL string, tables []ConnectTable) strin
 func generateMCPConfig() map[string]string {
 	return map[string]string{
 		"claude": fmt.Sprintf(`claude mcp add --transport http eurobase %s \
-  --header "Authorization: Bearer $EUROBASE_PLATFORM_TOKEN"`, mcpServerURL),
+  --header "Authorization: Bearer $EUROBASE_PAT"`, mcpServerURL),
 
 		"claude_json": fmt.Sprintf(`{
   "mcpServers": {
@@ -491,7 +494,7 @@ func generateMCPConfig() map[string]string {
       "type": "http",
       "url": "%s",
       "headers": {
-        "Authorization": "Bearer YOUR_PLATFORM_TOKEN"
+        "Authorization": "Bearer YOUR_EUROBASE_PAT"
       }
     }
   }
@@ -499,14 +502,14 @@ func generateMCPConfig() map[string]string {
 
 		"codex": fmt.Sprintf(`[mcp_servers.eurobase]
 url = "%s"
-headers = { Authorization = "Bearer ${EUROBASE_PLATFORM_TOKEN}" }`, mcpServerURL),
+headers = { Authorization = "Bearer ${EUROBASE_PAT}" }`, mcpServerURL),
 
 		"cursor": fmt.Sprintf(`{
   "mcpServers": {
     "eurobase": {
       "url": "%s",
       "headers": {
-        "Authorization": "Bearer YOUR_PLATFORM_TOKEN"
+        "Authorization": "Bearer YOUR_EUROBASE_PAT"
       }
     }
   }
@@ -517,7 +520,7 @@ headers = { Authorization = "Bearer ${EUROBASE_PLATFORM_TOKEN}" }`, mcpServerURL
     "eurobase": {
       "serverUrl": "%s",
       "headers": {
-        "Authorization": "Bearer YOUR_PLATFORM_TOKEN"
+        "Authorization": "Bearer YOUR_EUROBASE_PAT"
       }
     }
   }

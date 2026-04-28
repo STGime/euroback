@@ -46,6 +46,16 @@ export interface PlatformProfile {
 	last_sign_in_at: string | null;
 }
 
+export interface PersonalAccessToken {
+	id: string;
+	user_id: string;
+	name: string;
+	prefix: string;
+	expires_at: string | null;
+	last_used_at: string | null;
+	created_at: string;
+}
+
 export interface AdminProject {
 	id: string;
 	name: string;
@@ -312,6 +322,29 @@ export class EurobaseAPI {
 			method: 'POST',
 			body: JSON.stringify({ confirmation_email: confirmationEmail })
 		});
+	}
+
+	// ---- Personal Access Tokens ----
+
+	/** List all personal access tokens for the current user. */
+	async listPATs(): Promise<PersonalAccessToken[]> {
+		return this.fetch<PersonalAccessToken[]>('/platform/auth/account/tokens');
+	}
+
+	/**
+	 * Create a new personal access token. The plaintext token is returned
+	 * in the response and is only shown once — store it immediately.
+	 */
+	async createPAT(name: string, expiresAt?: string | null): Promise<{ token: string; pat: PersonalAccessToken }> {
+		return this.fetch('/platform/auth/account/tokens', {
+			method: 'POST',
+			body: JSON.stringify({ name, expires_at: expiresAt ?? null })
+		});
+	}
+
+	/** Revoke a personal access token. */
+	async revokePAT(id: string): Promise<void> {
+		return this.fetch(`/platform/auth/account/tokens/${id}`, { method: 'DELETE' });
 	}
 
 	/** List all projects (tenants) for the authenticated user. */
