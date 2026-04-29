@@ -153,11 +153,13 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// For each table, get column info enriched with constraints and indexes.
+		// For each table, get column info enriched with constraints, indexes,
+		// and triggers.
 		type TableSchema struct {
 			Name       string       `json:"name"`
 			Columns    []ColumnInfo `json:"columns"`
 			Indexes    []IndexInfo  `json:"indexes,omitempty"`
+			Triggers   []DBTrigger  `json:"triggers,omitempty"`
 			RLSEnabled bool         `json:"rls_enabled"`
 		}
 
@@ -181,6 +183,12 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
+			triggers, err := GetTableTriggers(r.Context(), pool, schemaName, t)
+			if err != nil {
+				slog.Error("failed to get table triggers", "error", err, "schema", schemaName, "table", t)
+				jsonError(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
 			// Check RLS status.
 			var rlsEnabled bool
 			_ = pool.QueryRow(r.Context(),
@@ -189,7 +197,7 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 				t, schemaName,
 			).Scan(&rlsEnabled)
 
-			result = append(result, TableSchema{Name: t, Columns: cols, Indexes: indexes, RLSEnabled: rlsEnabled})
+			result = append(result, TableSchema{Name: t, Columns: cols, Indexes: indexes, Triggers: triggers, RLSEnabled: rlsEnabled})
 		}
 
 		slog.Debug("schema introspection complete", "project_id", projectID, "schema", schemaName, "table_count", len(result))

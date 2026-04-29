@@ -613,6 +613,247 @@ func DropIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, indexName st
 	return nil
 }
 
+// DBTrigger describes a row- or statement-level trigger attached to a table.
+//
+// Events is the list of operations the trigger fires on (INSERT, UPDATE,
+// DELETE, TRUNCATE — Postgres allows multiple per trigger via OR).
+// WhenClause is the optional WHEN expression as text, e.g.
+// "(OLD.email IS DISTINCT FROM NEW.email)".
+type DBTrigger struct {
+	Name           string   `json:"name"`
+	Table          string   `json:"table"`
+	FunctionSchema string   `json:"function_schema"`
+	FunctionName   string   `json:"function_name"`
+	Timing         string   `json:"timing"` // BEFORE | AFTER | INSTEAD OF
+	Events         []string `json:"events"` // subset of INSERT/UPDATE/DELETE/TRUNCATE
+	Level          string   `json:"level"`  // ROW | STATEMENT
+	WhenClause     *string  `json:"when_clause,omitempty"`
+}
+
+// allowedTriggerTimings is the closed set of trigger timings the platform
+// will issue. INSTEAD OF is included for completeness even though it only
+// applies to views (which the console doesn't currently expose) — keeps
+// the validator honest if views land later.
+var allowedTriggerTimings = map[string]bool{"BEFORE": true, "AFTER": true, "INSTEAD OF": true}
+
+// allowedTriggerEvents are the row operations a trigger can fire on.
+var allowedTriggerEvents = map[string]bool{"INSERT": true, "UPDATE": true, "DELETE": true, "TRUNCATE": true}
+
+// allowedTriggerLevels are the two trigger granularities.
+var allowedTriggerLevels = map[string]bool{"ROW": true, "STATEMENT": true}
+
+// GetTableTriggers returns user-defined triggers attached to the given
+// table. Internal triggers (RI/FK constraint enforcement, etc.) are
+// excluded via tgisinternal=false so the list matches what a user
+// authored, not what Postgres added implicitly when creating constraints.
+//
+// pg_trigger.tgtype is a bitmask:
+//
+//	bit 0 (1)  — ROW (else STATEMENT)
+//	bit 1 (2)  — BEFORE
+//	bit 2 (4)  — INSERT
+//	bit 3 (8)  — DELETE
+//	bit 4 (16) — UPDATE
+//	bit 5 (32) — TRUNCATE
+//	bit 6 (64) — INSTEAD OF
+//
+// Decoded into the structured DBTrigger fields below.
+func GetTableTriggers(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]DBTrigger, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT t.tgname,
+		        ns_p.nspname AS function_schema,
+		        p.proname    AS function_name,
+		        CASE WHEN (t.tgtype & 64) <> 0 THEN 'INSTEAD OF'
+		             WHEN (t.tgtype & 2)  <> 0 THEN 'BEFORE'
+		             ELSE 'AFTER' END AS timing,
+		        CASE WHEN (t.tgtype & 1)  <> 0 THEN 'ROW' ELSE 'STATEMENT' END AS level,
+		        ARRAY_REMOVE(ARRAY[
+		            CASE WHEN (t.tgtype & 4)  <> 0 THEN 'INSERT'   END,
+		            CASE WHEN (t.tgtype & 16) <> 0 THEN 'UPDATE'   END,
+		            CASE WHEN (t.tgtype & 8)  <> 0 THEN 'DELETE'   END,
+		            CASE WHEN (t.tgtype & 32) <> 0 THEN 'TRUNCATE' END
+		        ], NULL) AS events,
+		        pg_get_expr(t.tgqual, t.tgrelid) AS when_clause
+		   FROM pg_trigger t
+		   JOIN pg_class      c    ON c.oid = t.tgrelid
+		   JOIN pg_namespace  ns_c ON ns_c.oid = c.relnamespace
+		   JOIN pg_proc       p    ON p.oid = t.tgfoid
+		   JOIN pg_namespace  ns_p ON ns_p.oid = p.pronamespace
+		  WHERE ns_c.nspname = $1
+		    AND c.relname    = $2
+		    AND NOT t.tgisinternal
+		  ORDER BY t.tgname`, schemaName, tableName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query triggers: %w", err)
+	}
+	defer rows.Close()
+
+	triggers := make([]DBTrigger, 0)
+	for rows.Next() {
+		tr := DBTrigger{Table: tableName}
+		if err := rows.Scan(&tr.Name, &tr.FunctionSchema, &tr.FunctionName,
+			&tr.Timing, &tr.Level, &tr.Events, &tr.WhenClause); err != nil {
+			return nil, fmt.Errorf("scan trigger: %w", err)
+		}
+		triggers = append(triggers, tr)
+	}
+	return triggers, rows.Err()
+}
+
+// ListTriggerFunctions returns the SQL/PL-pgSQL functions in the given
+// schema that return `trigger` — i.e. the candidates a "+ New Trigger"
+// UI can attach to a table. Same exclusions as ListFunctions (extension
+// dependency, language whitelist) so the picker is honest.
+func ListTriggerFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]DBFunction, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT p.proname,
+		        l.lanname,
+		        pg_get_function_result(p.oid)
+		   FROM pg_proc p
+		   JOIN pg_namespace n ON n.oid = p.pronamespace
+		   JOIN pg_language  l ON l.oid = p.prolang
+		  WHERE n.nspname = $1
+		    AND l.lanname IN ('sql', 'plpgsql')
+		    AND pg_get_function_result(p.oid) = 'trigger'
+		    AND NOT EXISTS (
+		          SELECT 1
+		            FROM pg_depend d
+		           WHERE d.classid    = 'pg_proc'::regclass
+		             AND d.objid      = p.oid
+		             AND d.refclassid = 'pg_extension'::regclass
+		    )
+		  ORDER BY p.proname`, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("list trigger functions: %w", err)
+	}
+	defer rows.Close()
+
+	funcs := make([]DBFunction, 0)
+	for rows.Next() {
+		var f DBFunction
+		if err := rows.Scan(&f.Name, &f.Language, &f.ReturnType); err != nil {
+			return nil, fmt.Errorf("scan trigger function: %w", err)
+		}
+		funcs = append(funcs, f)
+	}
+	return funcs, nil
+}
+
+// CreateTriggerRequest describes a trigger to create.
+type CreateTriggerRequest struct {
+	Name         string   `json:"name"`
+	Table        string   `json:"table"`
+	FunctionName string   `json:"function_name"`
+	Timing       string   `json:"timing"` // BEFORE | AFTER | INSTEAD OF
+	Events       []string `json:"events"` // INSERT, UPDATE, DELETE, TRUNCATE
+	Level        string   `json:"level"`  // ROW | STATEMENT
+	WhenClause   string   `json:"when_clause,omitempty"`
+}
+
+// CreateTrigger attaches a trigger to a table, calling a function in the
+// same schema. The function must already exist and return `trigger`.
+//
+// The WHEN clause is passed through verbatim (only wrapped in parens). It
+// is a SQL expression and we can't parameterise it; the security model
+// matches CreateFunction's body input — this endpoint is platform-admin
+// authed and the SQL is executed as the gateway role inside the tenant
+// schema only. Use ListTriggerFunctions to populate a picker so the
+// caller doesn't typo a name.
+func CreateTrigger(ctx context.Context, pool *pgxpool.Pool, schemaName string, req CreateTriggerRequest) error {
+	if err := validateIdentifier(req.Name, "trigger"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(req.Table, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(req.FunctionName, "function"); err != nil {
+		return err
+	}
+
+	timing := strings.ToUpper(strings.TrimSpace(req.Timing))
+	level := strings.ToUpper(strings.TrimSpace(req.Level))
+	if !allowedTriggerTimings[timing] {
+		return fmt.Errorf("invalid timing %q (allowed: BEFORE, AFTER, INSTEAD OF)", req.Timing)
+	}
+	if !allowedTriggerLevels[level] {
+		return fmt.Errorf("invalid level %q (allowed: ROW, STATEMENT)", req.Level)
+	}
+	if len(req.Events) == 0 {
+		return fmt.Errorf("at least one event is required")
+	}
+	events := make([]string, 0, len(req.Events))
+	seen := make(map[string]bool, len(req.Events))
+	for _, e := range req.Events {
+		eu := strings.ToUpper(strings.TrimSpace(e))
+		if !allowedTriggerEvents[eu] {
+			return fmt.Errorf("invalid event %q (allowed: INSERT, UPDATE, DELETE, TRUNCATE)", e)
+		}
+		if seen[eu] {
+			continue
+		}
+		seen[eu] = true
+		events = append(events, eu)
+	}
+
+	if err := ValidateTable(ctx, pool, schemaName, req.Table); err != nil {
+		return err
+	}
+
+	// Confirm the function exists and returns trigger before issuing the
+	// CREATE TRIGGER. Postgres would error with a less obvious message
+	// otherwise (e.g. "function ... does not exist" pointing at a zero-arg
+	// signature when the user created a different one).
+	var returnType string
+	err := pool.QueryRow(ctx,
+		`SELECT pg_get_function_result(p.oid)
+		   FROM pg_proc p
+		   JOIN pg_namespace n ON n.oid = p.pronamespace
+		  WHERE n.nspname = $1 AND p.proname = $2`,
+		schemaName, req.FunctionName,
+	).Scan(&returnType)
+	if err != nil {
+		return fmt.Errorf("function %q not found in schema", req.FunctionName)
+	}
+	if returnType != "trigger" {
+		return fmt.Errorf("function %q does not return trigger (returns %s)", req.FunctionName, returnType)
+	}
+
+	qt := qualifiedTable(schemaName, req.Table)
+	eventClause := strings.Join(events, " OR ")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE TRIGGER %s %s %s ON %s FOR EACH %s",
+		quoteIdent(req.Name), timing, eventClause, qt, level)
+	if when := strings.TrimSpace(req.WhenClause); when != "" {
+		fmt.Fprintf(&b, " WHEN (%s)", when)
+	}
+	fmt.Fprintf(&b, " EXECUTE FUNCTION %s.%s()",
+		quoteIdent(schemaName), quoteIdent(req.FunctionName))
+
+	if _, err := pool.Exec(ctx, b.String()); err != nil {
+		return fmt.Errorf("create trigger: %w", err)
+	}
+	return nil
+}
+
+// DropTrigger removes a trigger from a table. Both identifiers are
+// validated before the SQL is issued.
+func DropTrigger(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, triggerName string) error {
+	if err := validateIdentifier(tableName, "table"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(triggerName, "trigger"); err != nil {
+		return err
+	}
+	qt := qualifiedTable(schemaName, tableName)
+	sql := fmt.Sprintf("DROP TRIGGER %s ON %s", quoteIdent(triggerName), qt)
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("drop trigger: %w", err)
+	}
+	return nil
+}
+
 // DBFunction represents a PostgreSQL function in a schema.
 type DBFunction struct {
 	Name       string `json:"name"`

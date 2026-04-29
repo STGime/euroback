@@ -92,6 +92,11 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r.Post("/{table}/indexes", handleCreateIndex(pool))
 	r.Delete("/{table}/indexes/{index}", handleDropIndex(pool))
 
+	// Triggers
+	r.Get("/{table}/triggers", handleListTriggers(pool))
+	r.Post("/{table}/triggers", handleCreateTrigger(pool))
+	r.Delete("/{table}/triggers/{trigger}", handleDropTrigger(pool))
+
 	// RLS
 	r.Post("/{table}/rls", handleToggleRLS(pool))
 	r.Get("/{table}/policies", handleListPolicies(pool))
@@ -772,11 +777,147 @@ func handleDropIndex(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func handleListTriggers(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		if projectID == "" || tableName == "" {
+			jsonError(w, "project ID and table name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		triggers, err := GetTableTriggers(r.Context(), pool, schemaName, tableName)
+		if err != nil {
+			slog.Error("list triggers failed", "error", err)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		jsonResponse(w, triggers, http.StatusOK)
+	}
+}
+
+func handleCreateTrigger(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+
+		if projectID == "" || tableName == "" {
+			jsonError(w, "project ID and table name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		var req CreateTriggerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		// The URL param is authoritative — ignore Table from body if it differs.
+		req.Table = tableName
+
+		if err := CreateTrigger(r.Context(), pool, schemaName, req); err != nil {
+			slog.Warn("create trigger failed", "error", err, "schema", schemaName, "table", tableName, "name", req.Name)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "create_trigger", tableName, nil, map[string]any{
+			"name":          req.Name,
+			"function_name": req.FunctionName,
+			"timing":        req.Timing,
+			"events":        req.Events,
+			"level":         req.Level,
+		})
+
+		slog.Info("trigger created", "schema", schemaName, "table", tableName, "name", req.Name)
+		jsonResponse(w, map[string]string{"status": "created", "trigger": req.Name}, http.StatusCreated)
+	}
+}
+
+func handleDropTrigger(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		tableName := chi.URLParam(r, "table")
+		triggerName := chi.URLParam(r, "trigger")
+
+		if projectID == "" || tableName == "" || triggerName == "" {
+			jsonError(w, "project ID, table name, and trigger name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		if err := DropTrigger(r.Context(), pool, schemaName, tableName, triggerName); err != nil {
+			slog.Warn("drop trigger failed", "error", err, "schema", schemaName, "table", tableName, "name", triggerName)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		logSchemaChange(pool, r, projectID, "drop_trigger", tableName, nil, map[string]any{
+			"name": triggerName,
+		})
+
+		slog.Info("trigger dropped", "schema", schemaName, "table", tableName, "name", triggerName)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleListTriggerFunctions(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			jsonError(w, "project ID is required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		funcs, err := ListTriggerFunctions(r.Context(), pool, schemaName)
+		if err != nil {
+			slog.Error("list trigger functions failed", "error", err)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		jsonResponse(w, funcs, http.StatusOK)
+	}
+}
+
 // HandleFunctions returns a chi.Router for schema function operations.
 // Mounted at /platform/projects/{id}/schema/functions
 func HandleFunctions(pool *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", handleListFunctions(pool))
+	r.Get("/triggers", handleListTriggerFunctions(pool))
 	r.Post("/", handleCreateFunction(pool))
 	r.Delete("/{funcName}", handleDropFunction(pool))
 	return r
