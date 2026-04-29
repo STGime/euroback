@@ -671,7 +671,11 @@
 								<option value="integer">integer</option>
 								<option value="boolean">boolean</option>
 								<option value="jsonb">jsonb</option>
+								<option value="trigger">trigger (for DB triggers)</option>
 							</select>
+							{#if newFuncReturns === 'trigger'}
+								<p class="text-[10px] text-amber-700 mt-1">Trigger functions don't appear in this RPC list and can't be called via <code class="bg-amber-50 rounded px-0.5">eb.db.rpc()</code>. After creating, attach it to a table in <strong>Database</strong> &rarr; pick a table &rarr; <strong>Triggers</strong>.</p>
+							{/if}
 						</div>
 					</div>
 					<div>
@@ -1003,9 +1007,8 @@
 												<option value="bigint">bigint</option>
 												<option value="boolean">boolean</option>
 												<option value="jsonb">jsonb</option>
-												<option value="trigger">trigger</option>
 											</select>
-											<p class="text-[10px] text-gray-400 mt-0.5">Use <strong>void</strong> for cron jobs. Other types are for functions called from the SDK via <code class="bg-gray-100 rounded px-0.5">eb.db.rpc('name')</code> where the return value is sent to the caller.</p>
+											<p class="text-[10px] text-gray-400 mt-0.5">Use <strong>void</strong> for this cron job. Other types are for functions called from the SDK via <code class="bg-gray-100 rounded px-0.5">eb.db.rpc('name')</code> where the return value is sent to the caller. Trigger functions are created from the Functions tab, not here — cron can't invoke them.</p>
 										</div>
 									</div>
 									<div>

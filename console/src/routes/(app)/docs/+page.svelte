@@ -1271,7 +1271,7 @@ await eb.vault.delete('old_key')</pre>
 				</p>
 
 				<div class="rounded-lg border border-amber-200 bg-amber-50/60 px-4 py-3 mt-2">
-					<p class="text-sm text-amber-900"><span class="font-semibold">RPC vs Edge Function:</span> these are <strong>not</strong> the same thing, even though the SDK shapes look similar. RPC functions (<code class="rounded bg-white border border-amber-200 px-1 text-xs">eb.db.rpc('name')</code>) run <em>inside</em> Postgres and are SQL/PL-pgSQL — single round-trip, transactional, database-only. <button onclick={() => scrollTo('edge-functions')} class="text-amber-900 underline cursor-pointer">Edge Functions</button> (<code class="rounded bg-white border border-amber-200 px-1 text-xs">eb.functions.invoke('name')</code>) run as separate Deno processes — TypeScript with full ecosystem access, can call third-party APIs, but cold-start and outside the DB transaction. Pick RPC for atomic multi-statement DB logic; pick edge for side effects and external calls.</p>
+					<p class="text-sm text-amber-900"><span class="font-semibold">RPC vs Cron Job vs DB Trigger vs Edge Function:</span> Eurobase has four kinds of "server-side code" and the distinction matters. Quick gist: RPC = callable SQL (this section). Cron Job = scheduled SQL (above). DB Trigger = reactive SQL fired by row events on a table (managed in Database &rarr; Triggers). <button onclick={() => scrollTo('edge-functions')} class="text-amber-900 underline cursor-pointer">Edge Function</button> = TypeScript in a Deno container, for external API calls and JS-ecosystem things. The <button onclick={() => scrollTo('edge-functions')} class="text-amber-900 underline cursor-pointer">full comparison table</button> in the Edge Functions chapter has language, transactional semantics, and use cases side by side.</p>
 				</div>
 
 				<h4 class="text-sm font-semibold text-gray-700 mt-4">Creating a function</h4>
@@ -1364,61 +1364,87 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 					<p class="text-sm text-blue-800"><span class="font-semibold">EU Sovereign:</span> Edge Functions run on Scaleway infrastructure in France. Unlike other platforms that route through US-hosted runtimes, your code and secrets never leave the EU.</p>
 				</div>
 
-				<h3 class="text-lg font-semibold text-gray-900 mt-6">Edge Functions vs RPC: which one should I use?</h3>
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Server-side logic in Eurobase: four kinds, when to pick which</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Eurobase has two ways to run server-side logic, and the SDK calls them similarly enough that the distinction can blur. Quick reference:
+					Eurobase has four distinct surfaces for "code that runs on the server." The SDK shapes look similar in places, so it's worth getting the distinction clear before you start building. <strong>RPC functions</strong> and <strong>DB triggers</strong> are both PostgreSQL functions but with different invocation models; <strong>Cron jobs</strong> are scheduled wrappers around either an SQL statement or an RPC; <strong>Edge functions</strong> are a separate Deno runtime entirely.
 				</p>
 				<div class="overflow-x-auto">
 					<table class="w-full text-sm border border-gray-200 rounded-lg">
 						<thead class="bg-gray-50">
 							<tr>
-								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b w-1/3"></th>
-								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">Edge Function</th>
-								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">RPC (DB function)</th>
+								<th class="px-3 py-2 text-left font-medium text-gray-700 border-b align-top">&nbsp;</th>
+								<th class="px-3 py-2 text-left font-medium text-gray-700 border-b align-top">Cron Job</th>
+								<th class="px-3 py-2 text-left font-medium text-gray-700 border-b align-top">RPC Function</th>
+								<th class="px-3 py-2 text-left font-medium text-gray-700 border-b align-top">DB Trigger</th>
+								<th class="px-3 py-2 text-left font-medium text-gray-700 border-b align-top">Edge Function</th>
 							</tr>
 						</thead>
-						<tbody>
+						<tbody class="text-xs">
 							<tr>
-								<td class="px-4 py-2 border-b font-medium text-gray-700">Where it runs</td>
-								<td class="px-4 py-2 border-b text-gray-700">Deno container, outside the database</td>
-								<td class="px-4 py-2 border-b text-gray-700">Inside the Postgres process</td>
+								<td class="px-3 py-2 border-b font-medium text-gray-700 align-top">What it is</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">A schedule that runs SQL or an RPC at a cron expression</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">A reusable Postgres function (SQL/PL-pgSQL) you call by name</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">A Postgres function bound to a row event on a table</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Serverless TS/JS in a Deno container</td>
 							</tr>
 							<tr class="bg-gray-50/40">
-								<td class="px-4 py-2 border-b font-medium text-gray-700">Language</td>
-								<td class="px-4 py-2 border-b text-gray-700">TypeScript / JavaScript</td>
-								<td class="px-4 py-2 border-b text-gray-700">SQL or PL/pgSQL</td>
+								<td class="px-3 py-2 border-b font-medium text-gray-700 align-top">Where it runs</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Inside Postgres (cron worker fires the SQL/RPC)</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Inside Postgres</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Inside Postgres, in the row's transaction</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Deno container, outside the database</td>
 							</tr>
 							<tr>
-								<td class="px-4 py-2 border-b font-medium text-gray-700">Can do</td>
-								<td class="px-4 py-2 border-b text-gray-700">Anything: external APIs, send email, hit Stripe/Mollie, image processing, custom auth flows</td>
-								<td class="px-4 py-2 border-b text-gray-700">Database-side only: query/mutate this project's tables in one transaction</td>
+								<td class="px-3 py-2 border-b font-medium text-gray-700 align-top">How it's invoked</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">By the cron schedule (no caller)</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top"><code class="text-[11px]">eb.db.rpc('name')</code> from the SDK, or from a cron job</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Automatically, when an INSERT / UPDATE / DELETE / TRUNCATE happens on the attached table</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top"><code class="text-[11px]">eb.functions.invoke('name')</code> or HTTP</td>
 							</tr>
 							<tr class="bg-gray-50/40">
-								<td class="px-4 py-2 border-b font-medium text-gray-700">Latency</td>
-								<td class="px-4 py-2 border-b text-gray-700">Cold-start on first call (~100–500ms)</td>
-								<td class="px-4 py-2 border-b text-gray-700">No cold start; one DB round-trip</td>
+								<td class="px-3 py-2 border-b font-medium text-gray-700 align-top">Language</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">SQL (or pick an RPC)</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">SQL or PL/pgSQL</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">PL/pgSQL (return type <code class="text-[11px]">trigger</code>)</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">TypeScript / JavaScript</td>
 							</tr>
 							<tr>
-								<td class="px-4 py-2 border-b font-medium text-gray-700">Transactional</td>
-								<td class="px-4 py-2 border-b text-gray-700">No — separate process</td>
-								<td class="px-4 py-2 border-b text-gray-700">Yes — runs inside the DB transaction</td>
+								<td class="px-3 py-2 border-b font-medium text-gray-700 align-top">Transactional</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Yes — its own transaction at run time</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Yes — runs in the caller's transaction</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Yes — runs in the row operation's transaction (can roll it back by raising)</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">No — separate process</td>
 							</tr>
 							<tr class="bg-gray-50/40">
-								<td class="px-4 py-2 border-b font-medium text-gray-700">SDK call</td>
-								<td class="px-4 py-2 border-b text-gray-700"><code class="text-xs">eb.functions.invoke('name')</code></td>
-								<td class="px-4 py-2 border-b text-gray-700"><code class="text-xs">eb.db.rpc('name')</code></td>
+								<td class="px-3 py-2 border-b font-medium text-gray-700 align-top">Where to manage it</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Cron &amp; RPC &rarr; Scheduled Jobs</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Cron &amp; RPC &rarr; Functions</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Function: Cron &amp; RPC &rarr; Functions (Returns: trigger). Attachment: Database &rarr; table &rarr; Triggers panel</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Functions tab</td>
 							</tr>
 							<tr>
-								<td class="px-4 py-2 font-medium text-gray-700">Pick when</td>
-								<td class="px-4 py-2 text-gray-700">You need to talk to the outside world or use a JS library</td>
-								<td class="px-4 py-2 text-gray-700">Your logic is multi-statement DB work that should be one atomic unit</td>
+								<td class="px-3 py-2 border-b font-medium text-gray-700 align-top">Use case examples</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Daily cleanup of expired sessions; weekly digest aggregation; archiving old rows</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Computed leaderboard, multi-statement bulk update, an atomic check-and-decrement, complex aggregate the SDK can call by name</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Enforcing a max-N-rows-per-user constraint on INSERT; auto-stamping <code class="text-[11px]">updated_at</code>; mirroring inserts into an audit table</td>
+								<td class="px-3 py-2 border-b text-gray-700 align-top">Stripe / Mollie webhook; sending email via TEM; calling an external image-processing API; OAuth callback handling</td>
+							</tr>
+							<tr class="bg-gray-50/40">
+								<td class="px-3 py-2 font-medium text-gray-700 align-top">Pick when</td>
+								<td class="px-3 py-2 text-gray-700 align-top">You want something to run on a schedule, regardless of user activity</td>
+								<td class="px-3 py-2 text-gray-700 align-top">Your app needs to call a chunk of DB-only logic by name, atomically</td>
+								<td class="px-3 py-2 text-gray-700 align-top">A row change must always be accompanied by side-effect SQL — and the side effect must succeed or fail with the row change</td>
+								<td class="px-3 py-2 text-gray-700 align-top">You need the JS ecosystem, an external HTTP call, or anything Postgres can't reach from within the database</td>
 							</tr>
 						</tbody>
 					</table>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Mental model: <strong>Edge Function = a small piece of <em>server</em> code</strong>; <strong>RPC = a piece of <em>database</em> code</strong>. <code class="rounded bg-gray-100 px-1 text-xs">eb.functions.invoke('send-welcome-email')</code> runs TS that calls Scaleway TEM. <code class="rounded bg-gray-100 px-1 text-xs">eb.db.rpc('cleanup_expired_sessions')</code> runs SQL that deletes from a table — never leaves the DB. RPC functions are managed under <button onclick={() => scrollTo('cron')} class="text-eurobase-600 hover:underline cursor-pointer">Cron &amp; RPC</button>.
+					<strong>Mental model</strong>: Cron jobs are <em>scheduled SQL</em>; RPC is <em>callable SQL</em>; DB triggers are <em>reactive SQL</em>; edge functions are <em>everything else</em>. The first three all run inside Postgres and share its transactional model. Edge functions are a separate runtime that talks to the DB over the SDK like your app does.
 				</p>
+				<div class="rounded-lg border border-amber-200 bg-amber-50/60 px-4 py-3">
+					<p class="text-sm text-amber-900"><strong>One subtle gotcha</strong>: a function that <code class="rounded bg-white border border-amber-200 px-1 text-xs">RETURNS trigger</code> is created in the same place as RPC functions, but it won't appear in the RPC list and can't be called via <code class="rounded bg-white border border-amber-200 px-1 text-xs">eb.db.rpc()</code>. It only exists to be attached to a table by a trigger. The Functions list filters it out so the surfaces stay honest. To attach it: Database tab &rarr; pick the table &rarr; expand the <strong>Triggers</strong> panel.</p>
+				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Creating a Function</h3>
 				<p class="text-sm text-gray-700">From the console, navigate to <span class="font-mono text-sm bg-gray-100 px-1 rounded">Functions</span> tab and click <span class="font-mono text-sm bg-gray-100 px-1 rounded">+ New Function</span>. Give it a lowercase name with hyphens (e.g., <code>process-order</code>).</p>

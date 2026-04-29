@@ -185,11 +185,18 @@
 				{#if triggerFnsLoading}
 					<p class="text-xs text-gray-400">Loading functions...</p>
 				{:else if triggerFns.length === 0 && triggerFnsLoaded}
-					<p class="text-xs text-gray-500">
-						No trigger functions in this schema yet. Create one in
-						<a href="/p/{projectId}/cron" class="text-eurobase-600 hover:underline">Cron &amp; RPC</a>
-						with <em>Returns: trigger</em>, then attach it here.
-					</p>
+					<div class="rounded-lg bg-white border border-gray-200 px-3 py-2.5 text-xs text-gray-700 space-y-2">
+						<p class="font-medium text-gray-800">No trigger functions in this schema yet.</p>
+						<p>A trigger needs two things: a <strong>function</strong> (the code that runs) and an <strong>attachment</strong> (this panel, wiring it to a row event). You're missing the function. Create one first:</p>
+						<ol class="ml-4 list-decimal space-y-1">
+							<li>Open <a href="/p/{projectId}/cron" class="text-eurobase-600 hover:underline">Cron &amp; RPC</a> &rarr; <strong>Functions</strong> tab.</li>
+							<li>Click <strong>+ New Function</strong>.</li>
+							<li>Set <strong>Returns</strong> to <code class="bg-gray-100 rounded px-1">trigger (for DB triggers)</code>. Language stays PL/pgSQL.</li>
+							<li>Write the body (typically references <code class="bg-gray-100 rounded px-1">NEW</code>, <code class="bg-gray-100 rounded px-1">OLD</code>, raises exceptions, returns <code class="bg-gray-100 rounded px-1">NEW</code> or <code class="bg-gray-100 rounded px-1">OLD</code>) and click <strong>Create</strong>.</li>
+							<li>Come back here and pick it from the function dropdown above.</li>
+						</ol>
+						<p class="text-[11px] text-gray-500 italic">Trigger functions won't appear in the RPC list once created — they're hidden because they can't be called via <code class="bg-gray-100 rounded px-1">eb.db.rpc()</code>. The dropdown above will find them.</p>
+					</div>
 				{:else}
 					<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
 						<input
