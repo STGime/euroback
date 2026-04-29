@@ -100,6 +100,22 @@ export interface IndexInfo {
 	is_unique: boolean;
 }
 
+/**
+ * Database trigger attached to a table. Distinct from `FunctionTrigger`
+ * (which wires an edge function to a row event). DBTrigger is a
+ * native Postgres trigger calling a PL/pgSQL or SQL function.
+ */
+export interface DBTrigger {
+	name: string;
+	table: string;
+	function_schema: string;
+	function_name: string;
+	timing: 'BEFORE' | 'AFTER' | 'INSTEAD OF';
+	events: ('INSERT' | 'UPDATE' | 'DELETE' | 'TRUNCATE')[];
+	level: 'ROW' | 'STATEMENT';
+	when_clause?: string | null;
+}
+
 export interface ColumnInfo {
 	name: string;
 	data_type: string;
@@ -115,6 +131,7 @@ export interface TableSchema {
 	columns: ColumnInfo[];
 	row_count: number;
 	indexes?: IndexInfo[];
+	triggers?: DBTrigger[];
 	rls_enabled?: boolean;
 }
 
@@ -678,6 +695,56 @@ export class EurobaseAPI {
 		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/indexes/${indexName}`, {
 			method: 'DELETE'
 		});
+	}
+
+	// ---- Trigger methods ----
+	// Database-level triggers (PL/pgSQL functions invoked on row events).
+	// Distinct from FunctionTrigger (edge-function webhooks).
+
+	/** List triggers attached to a table. Schema fetch already includes
+	 * triggers per table; use this only for a fresh per-table reload. */
+	async getTriggers(
+		projectId: string,
+		table: string
+	): Promise<DBTrigger[]> {
+		return this.fetch<DBTrigger[]>(`/platform/projects/${projectId}/schema/tables/${table}/triggers`);
+	}
+
+	/** Create a trigger on a table. The function must already exist
+	 * in the project schema and return `trigger`. */
+	async createTrigger(
+		projectId: string,
+		table: string,
+		req: {
+			name: string;
+			function_name: string;
+			timing: 'BEFORE' | 'AFTER' | 'INSTEAD OF';
+			events: ('INSERT' | 'UPDATE' | 'DELETE' | 'TRUNCATE')[];
+			level: 'ROW' | 'STATEMENT';
+			when_clause?: string;
+		}
+	): Promise<{ status: string; trigger: string }> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/triggers`, {
+			method: 'POST',
+			body: JSON.stringify(req)
+		});
+	}
+
+	/** Drop a trigger from a table. */
+	async dropTrigger(
+		projectId: string,
+		table: string,
+		triggerName: string
+	): Promise<void> {
+		return this.fetch(`/platform/projects/${projectId}/schema/tables/${table}/triggers/${triggerName}`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** List functions in the schema that return `trigger` — for the
+	 * "+ New Trigger" function picker. */
+	async listTriggerFunctions(projectId: string): Promise<DBFunction[]> {
+		return this.fetch<DBFunction[]>(`/platform/projects/${projectId}/schema/functions/triggers`);
 	}
 
 	// ---- SQL Editor methods ----

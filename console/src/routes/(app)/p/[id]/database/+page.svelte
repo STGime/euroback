@@ -4,6 +4,7 @@
 	import { api, type TableSchema, type ColumnInfo, type RLSPolicy, type RLSAuditResponse } from '$lib/api.js';
 	import DataGrid from '$lib/components/DataGrid.svelte';
 	import IndexPanel from './IndexPanel.svelte';
+	import TriggerPanel from './TriggerPanel.svelte';
 	import NewTableModal from './NewTableModal.svelte';
 	import RenameTableModal from './RenameTableModal.svelte';
 	import ColumnEditModal from './ColumnEditModal.svelte';
@@ -984,6 +985,12 @@
 					tableName={selectedTable}
 					columns={selectedSchema.columns}
 					indexes={selectedSchema.indexes ?? []}
+					onChanged={() => loadSchema()}
+				/>
+				<TriggerPanel
+					{projectId}
+					tableName={selectedTable}
+					triggers={selectedSchema.triggers ?? []}
 					onChanged={() => loadSchema()}
 				/>
 			{/if}
