@@ -620,19 +620,33 @@ type DBFunction struct {
 	ReturnType string `json:"return_type"`
 }
 
-// ListFunctions returns user-defined functions in the given schema.
+// ListFunctions returns user-authored RPC-callable functions in the
+// given schema.
 //
-// Filters out:
-//   - extension-provided functions (citext_*, uuid_*, gen_random_uuid, …):
-//     anything with a pg_depend row to pg_extension. Extensions install
-//     into whatever schema they target, so the tenant schema can fill up
-//     with dozens of system functions the user didn't create.
-//   - non-user languages (C, internal): catches extension functions that
-//     might predate a pg_depend entry, plus the few built-in casts that
-//     show up in `information_schema.routines`.
+// The Cron & RPC UI describes this list as "reusable PostgreSQL
+// functions, callable from cron jobs or the SDK via eb.db.rpc('name')".
+// Anything else is excluded:
 //
-// Limited to SQL and PL/pgSQL — the same languages CreateFunction allows
-// the user to author, so the list and create surfaces stay symmetric.
+//   - Extension-provided functions (citext_*, uuid_*, gen_random_uuid,
+//     …): anything with a pg_depend row to pg_extension. Extensions
+//     install into whatever schema they target, so the tenant schema
+//     can fill up with dozens of system functions the user didn't create.
+//   - Non-user languages (C, internal): catches extension functions
+//     that might predate a pg_depend entry, plus the few built-in
+//     casts that show up in `information_schema.routines`.
+//   - Platform-provisioned helpers (auth_uid, is_service_role,
+//     current_end_user_id, …): these are created by provision_tenant()
+//     and owned by eurobase_migrator. User-authored functions land
+//     owned by eurobase_gateway because the gateway runs CREATE FUNCTION
+//     on the user's behalf via the SDK / DDL handler.
+//   - Trigger functions (RETURNS trigger): invoked by the trigger
+//     system, never by eb.db.rpc(). Showing them here is misleading —
+//     they belong with the table they're attached to, not in the
+//     RPC list.
+//
+// Limited to SQL and PL/pgSQL — the same languages CreateFunction
+// allows the user to author, so the list and create surfaces stay
+// symmetric.
 func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]DBFunction, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT p.proname,
@@ -641,8 +655,11 @@ func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) (
 		   FROM pg_proc p
 		   JOIN pg_namespace n ON n.oid = p.pronamespace
 		   JOIN pg_language  l ON l.oid = p.prolang
+		   JOIN pg_authid    a ON a.oid = p.proowner
 		  WHERE n.nspname = $1
 		    AND l.lanname IN ('sql', 'plpgsql')
+		    AND a.rolname <> 'eurobase_migrator'
+		    AND pg_get_function_result(p.oid) <> 'trigger'
 		    AND NOT EXISTS (
 		          SELECT 1
 		            FROM pg_depend d
