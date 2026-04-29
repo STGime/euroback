@@ -357,12 +357,17 @@
 	<div class="flex items-center justify-between">
 		<div>
 			<h2 class="text-lg font-semibold text-gray-900">Edge Functions</h2>
-			<p class="text-sm text-gray-500">Serverless TypeScript/JavaScript functions running on EU-sovereign infrastructure</p>
+			<p class="text-sm text-gray-500">Serverless TypeScript/JavaScript that runs <em>outside</em> the database — for external API calls, sending email, payments, image processing, anything that needs the JS ecosystem. Invoked via <code class="bg-gray-100 rounded px-1 text-xs">eb.functions.invoke('name')</code>.</p>
 		</div>
 		<button
 			onclick={() => { showCreate = true; }}
 			class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
 		>+ New Function</button>
+	</div>
+
+	<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600">
+		<span class="font-semibold text-gray-700">Edge Function vs RPC:</span>
+		Edge Functions run as a separate process (Deno) — they can call out to third-party APIs and use any JS library. <a href="/p/{$page.params.id}/cron" class="text-eurobase-600 hover:underline">RPC functions</a> run <em>inside</em> Postgres (SQL/PL-pgSQL) — single round-trip, transactional, but database-only. Pick edge for side effects and external calls; pick RPC for atomic multi-statement DB logic.
 	</div>
 
 	{#if error}

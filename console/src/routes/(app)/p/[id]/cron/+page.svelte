@@ -537,7 +537,7 @@
 	{#if activeSubTab === 'functions'}
 	<!-- Functions tab -->
 	<div class="flex items-center justify-between">
-		<p class="text-sm text-gray-500">Reusable PostgreSQL functions. Call from cron jobs or the SDK via <code class="bg-gray-100 rounded px-1 text-xs">eb.db.rpc('name')</code>.</p>
+		<p class="text-sm text-gray-500">Reusable PostgreSQL functions (SQL or PL/pgSQL) that run <em>inside</em> the database. Call from cron jobs or the SDK via <code class="bg-gray-100 rounded px-1 text-xs">eb.db.rpc('name')</code>.</p>
 		<button
 			type="button"
 			class="cursor-pointer inline-flex items-center gap-1.5 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
@@ -548,6 +548,11 @@
 			</svg>
 			New Function
 		</button>
+	</div>
+
+	<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600">
+		<span class="font-semibold text-gray-700">RPC vs Edge Function:</span>
+		RPC functions run <em>inside</em> Postgres (single round-trip, transactional, database-only). <a href="/p/{$page.params.id}/functions" class="text-eurobase-600 hover:underline">Edge Functions</a> run as separate Deno processes — they can hit third-party APIs and use any JS library, but pay a cold-start and can't be part of your DB transaction. Pick RPC for atomic multi-statement DB logic; pick edge for side effects and external calls.
 	</div>
 
 	{#if functionsLoading}

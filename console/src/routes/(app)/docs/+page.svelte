@@ -1270,6 +1270,10 @@ await eb.vault.delete('old_key')</pre>
 					RPC (Remote Procedure Call) functions are reusable PostgreSQL functions stored in your database. Unlike raw SQL cron actions, functions can contain complex logic (loops, conditionals, error handling) and can be called from both cron jobs and your app via the SDK.
 				</p>
 
+				<div class="rounded-lg border border-amber-200 bg-amber-50/60 px-4 py-3 mt-2">
+					<p class="text-sm text-amber-900"><span class="font-semibold">RPC vs Edge Function:</span> these are <strong>not</strong> the same thing, even though the SDK shapes look similar. RPC functions (<code class="rounded bg-white border border-amber-200 px-1 text-xs">eb.db.rpc('name')</code>) run <em>inside</em> Postgres and are SQL/PL-pgSQL — single round-trip, transactional, database-only. <button onclick={() => scrollTo('edge-functions')} class="text-amber-900 underline cursor-pointer">Edge Functions</button> (<code class="rounded bg-white border border-amber-200 px-1 text-xs">eb.functions.invoke('name')</code>) run as separate Deno processes — TypeScript with full ecosystem access, can call third-party APIs, but cold-start and outside the DB transaction. Pick RPC for atomic multi-statement DB logic; pick edge for side effects and external calls.</p>
+				</div>
+
 				<h4 class="text-sm font-semibold text-gray-700 mt-4">Creating a function</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					When creating a cron job, select "RPC Function" and click "Create New Function". Choose a name, language, return type, and write the function body.
@@ -1359,6 +1363,62 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 				<div class="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
 					<p class="text-sm text-blue-800"><span class="font-semibold">EU Sovereign:</span> Edge Functions run on Scaleway infrastructure in France. Unlike other platforms that route through US-hosted runtimes, your code and secrets never leave the EU.</p>
 				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Edge Functions vs RPC: which one should I use?</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Eurobase has two ways to run server-side logic, and the SDK calls them similarly enough that the distinction can blur. Quick reference:
+				</p>
+				<div class="overflow-x-auto">
+					<table class="w-full text-sm border border-gray-200 rounded-lg">
+						<thead class="bg-gray-50">
+							<tr>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b w-1/3"></th>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">Edge Function</th>
+								<th class="px-4 py-2 text-left font-medium text-gray-700 border-b">RPC (DB function)</th>
+							</tr>
+						</thead>
+						<tbody>
+							<tr>
+								<td class="px-4 py-2 border-b font-medium text-gray-700">Where it runs</td>
+								<td class="px-4 py-2 border-b text-gray-700">Deno container, outside the database</td>
+								<td class="px-4 py-2 border-b text-gray-700">Inside the Postgres process</td>
+							</tr>
+							<tr class="bg-gray-50/40">
+								<td class="px-4 py-2 border-b font-medium text-gray-700">Language</td>
+								<td class="px-4 py-2 border-b text-gray-700">TypeScript / JavaScript</td>
+								<td class="px-4 py-2 border-b text-gray-700">SQL or PL/pgSQL</td>
+							</tr>
+							<tr>
+								<td class="px-4 py-2 border-b font-medium text-gray-700">Can do</td>
+								<td class="px-4 py-2 border-b text-gray-700">Anything: external APIs, send email, hit Stripe/Mollie, image processing, custom auth flows</td>
+								<td class="px-4 py-2 border-b text-gray-700">Database-side only: query/mutate this project's tables in one transaction</td>
+							</tr>
+							<tr class="bg-gray-50/40">
+								<td class="px-4 py-2 border-b font-medium text-gray-700">Latency</td>
+								<td class="px-4 py-2 border-b text-gray-700">Cold-start on first call (~100–500ms)</td>
+								<td class="px-4 py-2 border-b text-gray-700">No cold start; one DB round-trip</td>
+							</tr>
+							<tr>
+								<td class="px-4 py-2 border-b font-medium text-gray-700">Transactional</td>
+								<td class="px-4 py-2 border-b text-gray-700">No — separate process</td>
+								<td class="px-4 py-2 border-b text-gray-700">Yes — runs inside the DB transaction</td>
+							</tr>
+							<tr class="bg-gray-50/40">
+								<td class="px-4 py-2 border-b font-medium text-gray-700">SDK call</td>
+								<td class="px-4 py-2 border-b text-gray-700"><code class="text-xs">eb.functions.invoke('name')</code></td>
+								<td class="px-4 py-2 border-b text-gray-700"><code class="text-xs">eb.db.rpc('name')</code></td>
+							</tr>
+							<tr>
+								<td class="px-4 py-2 font-medium text-gray-700">Pick when</td>
+								<td class="px-4 py-2 text-gray-700">You need to talk to the outside world or use a JS library</td>
+								<td class="px-4 py-2 text-gray-700">Your logic is multi-statement DB work that should be one atomic unit</td>
+							</tr>
+						</tbody>
+					</table>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Mental model: <strong>Edge Function = a small piece of <em>server</em> code</strong>; <strong>RPC = a piece of <em>database</em> code</strong>. <code class="rounded bg-gray-100 px-1 text-xs">eb.functions.invoke('send-welcome-email')</code> runs TS that calls Scaleway TEM. <code class="rounded bg-gray-100 px-1 text-xs">eb.db.rpc('cleanup_expired_sessions')</code> runs SQL that deletes from a table — never leaves the DB. RPC functions are managed under <button onclick={() => scrollTo('cron')} class="text-eurobase-600 hover:underline cursor-pointer">Cron &amp; RPC</button>.
+				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Creating a Function</h3>
 				<p class="text-sm text-gray-700">From the console, navigate to <span class="font-mono text-sm bg-gray-100 px-1 rounded">Functions</span> tab and click <span class="font-mono text-sm bg-gray-100 px-1 rounded">+ New Function</span>. Give it a lowercase name with hyphens (e.g., <code>process-order</code>).</p>
