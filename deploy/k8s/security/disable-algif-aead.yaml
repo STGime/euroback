@@ -1,0 +1,62 @@
+##############################################################################
+# CVE-2026-31431 ("Copy Fail") mitigation.
+#
+# Blocks the algif_aead kernel module on every Kapsule node. Disclosed by
+# Scaleway 2026-04-30; nodes provisioned before 14:20 CEST that day ship the
+# vulnerable module. Eurobase runs untrusted tenant JS in the functions-runner
+# pods (functions-runner/server.ts) on shared nodes, so the LPE → container
+# escape path is in scope until every node is on a mitigated image.
+#
+# This DaemonSet is belt-and-suspenders alongside node rotation: it ensures any
+# node the autoscaler brings up between rotations is also hardened on first
+# boot. Safe to keep indefinitely — algif_aead is not on the hot path for the
+# Go stack or V8/Deno crypto. Rollback: kubectl delete -f this file, then
+# `modprobe algif_aead` on each node.
+##############################################################################
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: disable-algif-aead
+  namespace: kube-system
+  labels:
+    app: disable-algif-aead
+spec:
+  selector:
+    matchLabels:
+      app: disable-algif-aead
+  template:
+    metadata:
+      labels:
+        app: disable-algif-aead
+    spec:
+      hostPID: true
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+      initContainers:
+        - name: disable-algif-aead
+          image: alpine:3.23
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "install algif_aead /bin/false" > /etc/modprobe.d/disable-algif-aead.conf
+              rmmod algif_aead 2>/dev/null || true
+          volumeMounts:
+            - name: modprobe-d
+              mountPath: /etc/modprobe.d
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            limits:
+              cpu: 1m
+              memory: 8Mi
+      volumes:
+        - name: modprobe-d
+          hostPath:
+            path: /etc/modprobe.d
