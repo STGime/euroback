@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -664,6 +665,112 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 	return []string{"result"}, []map[string]interface{}{
 		{"result": fmt.Sprintf("%s (%d rows affected)", tag.String(), tag.RowsAffected())},
 	}, nil
+}
+
+// StatementResult is the per-statement outcome of an ExecuteSQLTransaction call.
+type StatementResult struct {
+	Index           int                      `json:"index"`
+	Command         string                   `json:"command"`
+	RowCount        int64                    `json:"row_count"`
+	Columns         []string                 `json:"columns,omitempty"`
+	Rows            []map[string]interface{} `json:"rows,omitempty"`
+	ExecutionTimeMs float64                  `json:"execution_time_ms"`
+}
+
+// ExecuteSQLTransaction runs a slice of statements inside a single
+// transaction. Each statement is sent on its own as a parameterless
+// Exec/Query so the extended-protocol "first statement only" trap is
+// avoided. If any statement fails the whole transaction is rolled back
+// and the error is returned alongside the results gathered so far.
+func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName string, statements []string, maxRows int) ([]StatementResult, error) {
+	if maxRows <= 0 || maxRows > 1000 {
+		maxRows = 1000
+	}
+
+	conn, err := e.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+		return nil, fmt.Errorf("set search_path: %w", err)
+	}
+	if err := e.applyRLSContext(ctx, tx); err != nil {
+		return nil, err
+	}
+	// Each individual statement still gets a per-statement timeout.
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {
+		return nil, fmt.Errorf("set statement_timeout: %w", err)
+	}
+
+	results := make([]StatementResult, 0, len(statements))
+	for i, raw := range statements {
+		stmt := strings.TrimSpace(raw)
+		stmt = strings.TrimRight(stmt, "; \t\r\n")
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		// Reject embedded multi-statement strings inside a single array
+		// element — that's the same pgx pitfall, just one level down.
+		if HasMultipleStatements(stmt) {
+			return results, fmt.Errorf("statement %d contains multiple statements; pass each as its own array element", i)
+		}
+
+		start := time.Now()
+		upper := strings.ToUpper(stmt)
+		isSelect := strings.HasPrefix(upper, "SELECT") || strings.HasPrefix(upper, "WITH") || strings.HasPrefix(upper, "TABLE") || strings.HasPrefix(upper, "VALUES") || strings.HasPrefix(upper, "SHOW") || strings.HasPrefix(upper, "EXPLAIN")
+
+		if isSelect {
+			wrapped := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", stmt, maxRows)
+			rows, err := tx.Query(ctx, wrapped)
+			if err != nil {
+				return results, fmt.Errorf("statement %d: %w", i, err)
+			}
+			fieldDescs := rows.FieldDescriptions()
+			columns := make([]string, len(fieldDescs))
+			for j, fd := range fieldDescs {
+				columns[j] = fd.Name
+			}
+			scanned, err := scanRows(rows)
+			rows.Close()
+			if err != nil {
+				return results, fmt.Errorf("statement %d: %w", i, err)
+			}
+			results = append(results, StatementResult{
+				Index:           i,
+				Command:         "SELECT",
+				RowCount:        int64(len(scanned)),
+				Columns:         columns,
+				Rows:            scanned,
+				ExecutionTimeMs: float64(time.Since(start).Microseconds()) / 1000.0,
+			})
+			continue
+		}
+
+		tag, err := tx.Exec(ctx, stmt)
+		if err != nil {
+			return results, fmt.Errorf("statement %d: %w", i, err)
+		}
+		results = append(results, StatementResult{
+			Index:           i,
+			Command:         tag.String(),
+			RowCount:        tag.RowsAffected(),
+			ExecutionTimeMs: float64(time.Since(start).Microseconds()) / 1000.0,
+		})
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return results, fmt.Errorf("commit: %w", err)
+	}
+	return results, nil
 }
 
 // scanRows converts pgx rows into a slice of maps, normalizing types

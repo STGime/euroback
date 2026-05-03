@@ -33,13 +33,29 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'runSQL',
-    'Execute a SQL query against a project database. Use with caution — can modify data.',
+    'Execute a SINGLE SQL statement against a project database. The server uses pgx\'s extended query protocol, which only runs the first statement of a multi-statement string — to prevent silent partial migrations, multi-statement input is rejected with a clear error. For migrations or any multi-statement script, use runSQLTransaction instead.',
     {
       projectId: z.string().describe('The project UUID'),
-      query: z.string().describe('The SQL query to execute'),
+      query: z.string().describe('A single SQL statement (one query, no internal `;` between statements)'),
     },
     async ({ projectId, query }) => {
-      const data = await getClient().post(`/platform/projects/${projectId}/data/sql`, { query });
+      const data = await getClient().post(`/platform/projects/${projectId}/data/sql`, { sql: query });
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'runSQLTransaction',
+    'Execute multiple SQL statements as one atomic transaction. Pass each statement as its own array element (do NOT concatenate with `;`). The server runs them in order inside BEGIN...COMMIT and rolls everything back if any statement fails. Use this for migrations, schema changes with seed data, or any multi-step DDL/DML.',
+    {
+      projectId: z.string().describe('The project UUID'),
+      statements: z.array(z.string()).describe('Array of SQL statements. Each element must be exactly one statement; do not embed multiple statements in one string.'),
+      limit: z.number().int().positive().max(1000).optional().describe('Optional row cap for any SELECTs in the batch (default and max 1000)'),
+    },
+    async ({ projectId, statements, limit }) => {
+      const body: Record<string, unknown> = { statements };
+      if (limit !== undefined) body.limit = limit;
+      const data = await getClient().post(`/platform/projects/${projectId}/data/sql/transaction`, body);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
   );

@@ -309,6 +309,7 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 				publisher := realtime.NewEventPublisher(nil, hub)
 
 				r.Post("/sql", query.HandlePlatformSQL(queryEngine))
+				r.Post("/sql/transaction", query.HandlePlatformSQLTransaction(queryEngine))
 				r.Get("/{table}", query.HandleTableGet(queryEngine))
 				r.Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
 				r.Post("/{table}", query.HandleTableInsert(queryEngine, publisher))
