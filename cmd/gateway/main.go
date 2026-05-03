@@ -24,6 +24,7 @@ import (
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -64,6 +65,29 @@ func main() {
 	}
 	defer pool.Close()
 	slog.Info("database connection pool established")
+
+	// Optional second pool for platform-authenticated developer traffic
+	// (DATABASE_URL_DEVELOPER → eurobase_developer role, member of
+	// eurobase_migrator). Wired only into routes under /platform that
+	// run developer-authored SQL/DDL on tenant schemas. SDK runtime
+	// traffic stays on the gateway pool above. If the env var is empty
+	// (local dev before bootstrap, or staging without the role) we leave
+	// developerPool nil and the router falls back to the gateway pool —
+	// migrations that need ALTER/REFERENCES will still fail with a clear
+	// error from the SET ROLE attempt.
+	developerDatabaseURL := os.Getenv("DATABASE_URL_DEVELOPER")
+	var developerPool *pgxpool.Pool
+	if developerDatabaseURL != "" {
+		developerPool, err = db.NewPool(ctx, developerDatabaseURL)
+		if err != nil {
+			slog.Error("failed to connect with DATABASE_URL_DEVELOPER", "error", err)
+			os.Exit(1)
+		}
+		defer developerPool.Close()
+		slog.Info("developer database connection pool established")
+	} else {
+		slog.Warn("DATABASE_URL_DEVELOPER not set — platform routes will run on the gateway pool and will fail on tenant DDL until the developer role is configured")
+	}
 
 	// ── Set up plan limits ──
 	limitsSvc := plans.NewLimitsService(pool)
@@ -269,7 +293,7 @@ func main() {
 	slog.Info("cors allowlist configured", "origins", allowedOrigins)
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, allowedOrigins, devMode)
+	r := gateway.NewRouter(pool, developerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, allowedOrigins, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

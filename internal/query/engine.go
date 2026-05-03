@@ -62,12 +62,21 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 // tenant schema AND the end-user RLS context applied. Every tenant-schema
 // query on the gateway must go through this wrapper so RLS policies can
 // filter by the caller (service / anon / authenticated user).
+//
+// If DeveloperRoleFromContext(ctx) is true, the transaction also runs
+// `SET LOCAL ROLE eurobase_migrator` so DDL on tenant schemas works
+// against migrator-owned tables. This is set only by the platform-route
+// middleware; SDK runtime traffic leaves it off.
 func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if err := applyDeveloperRole(ctx, tx); err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
@@ -81,6 +90,20 @@ func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn fu
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// applyDeveloperRole runs `SET LOCAL ROLE eurobase_migrator` if the
+// request context carries the developer-role flag. No-op otherwise.
+// Order matters: must run before any other SET LOCAL or schema-changing
+// query so subsequent statements execute as the elevated role.
+func applyDeveloperRole(ctx context.Context, tx pgx.Tx) error {
+	if !DeveloperRoleFromContext(ctx) {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
+		return fmt.Errorf("set role eurobase_migrator: %w", err)
+	}
+	return nil
 }
 
 // ResolvedRelation holds the resolved foreign key information for a relation.
@@ -610,6 +633,11 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 		}
 	}
 
+	// Elevate to migrator role for platform-developer traffic.
+	if err := applyDeveloperRole(ctx, tx); err != nil {
+		return nil, nil, err
+	}
+
 	// Isolate to tenant schema.
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
 		return nil, nil, fmt.Errorf("set search_path: %w", err)
@@ -699,6 +727,9 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	if err := applyDeveloperRole(ctx, tx); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
 		return nil, fmt.Errorf("set search_path: %w", err)
 	}

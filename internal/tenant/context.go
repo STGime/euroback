@@ -77,6 +77,11 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			ctx := query.ContextWithSchema(r.Context(), schemaName)
 			// Console operates with "secret" level access.
 			ctx = query.ContextWithKeyType(ctx, "secret")
+			// Platform-authenticated developer traffic: the engine elevates
+			// to eurobase_migrator inside the tx so DDL on tenant schemas
+			// works against migrator-owned tables and new objects are
+			// owned by the migrator (uniform with CI-applied migrations).
+			ctx = query.WithDeveloperRole(ctx)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

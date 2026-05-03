@@ -55,3 +55,24 @@ func KeyTypeFromContext(ctx context.Context) string {
 	s, _ := ctx.Value(apiKeyTypeKey{}).(string)
 	return s
 }
+
+type developerRoleKey struct{}
+
+// WithDeveloperRole flags the request as platform-authenticated developer
+// traffic. The query engine reads this flag and, when set, runs
+// `SET LOCAL ROLE eurobase_migrator` at the start of every transaction
+// so DDL on tenant schemas works against migrator-owned tables and
+// objects created during the request are owned by the migrator —
+// keeping ownership uniform with CI-applied migrations.
+//
+// Only the platform-route middleware should set this. The SDK runtime
+// path leaves it unset.
+func WithDeveloperRole(ctx context.Context) context.Context {
+	return context.WithValue(ctx, developerRoleKey{}, true)
+}
+
+// DeveloperRoleFromContext reports whether the developer-role flag is set.
+func DeveloperRoleFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(developerRoleKey{}).(bool)
+	return v
+}

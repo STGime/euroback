@@ -10,10 +10,12 @@
 - System tables (users, refresh_tokens, storage_objects, email_tokens, vault_secrets) are managed by the platform
 
 ## Postgres roles
-- `eurobase_gateway` — runtime role used by the gateway + worker pods. DML only on `public.*`, USAGE + CREATE on tenant schemas so the SDK DDL endpoint works. NO DDL on `public.*`. Wired via `DATABASE_URL` in the `eurobase-secrets` k8s Secret.
+- `eurobase_gateway` — runtime role used by the gateway + worker pods for **SDK runtime traffic** (`/v1/*`). DML only on `public.*`, USAGE + CREATE on tenant schemas so the SDK DDL endpoint works. NO DDL on `public.*`. Wired via `DATABASE_URL` in the `eurobase-secrets` k8s Secret.
+- `eurobase_developer` — runtime role used by the gateway pod for **platform-authenticated developer traffic** (console + MCP under `/platform/*`). Member of `eurobase_migrator` with INHERIT, so it gets ownership-equivalent privileges. Each platform tx runs `SET LOCAL ROLE eurobase_migrator`, so DDL/REFERENCES against migrator-owned tables works and any newly created objects are owned by the migrator (uniform with CI-applied migrations). Wired via `DATABASE_URL_DEVELOPER` in the same Secret. **Two distinct DB pools share one process by design** — runtime exploit ≠ elevated privileges.
 - `eurobase_migrator` — deploy-only role. Owns `public.*` tables and tenant schemas; runs migrations via the `migrate` Kubernetes Job in CI. Wired via `DATABASE_URL_MIGRATOR` in the same Secret.
 - `eurobase_api` — legacy admin role kept for rollback. Once the cutover is proven, delete it via the Scaleway console.
-- Never issue `DATABASE_URL` to tenants. The gateway exposes data via SDK + REST only.
+- All three runtime roles must be created via the Scaleway console **before** their migrations run (`000037` for gateway/migrator, `000043` for developer). The migration files only do GRANT / REVOKE / membership.
+- Never issue `DATABASE_URL` (or `DATABASE_URL_DEVELOPER`) to tenants. The gateway exposes data via SDK + REST only.
 
 ## Auth
 - Custom auth built in Go (email/password, magic links, OAuth)

@@ -31,10 +31,27 @@ import (
 
 // NewRouter creates and configures the chi router.
 //
+// `pool` is the gateway runtime pool, wired to eurobase_gateway. Used for
+// SDK runtime traffic and queries against public.* metadata.
+//
+// `developerPool` is the platform-authenticated pool, wired to
+// eurobase_developer (member of eurobase_migrator). Used only for routes
+// that run developer-authored SQL/DDL on tenant schemas. Pass nil to
+// fall back to the gateway pool for those routes (acceptable in local
+// dev before the eurobase_developer role is bootstrapped; production
+// callers should always pass a real pool).
+//
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, allowedOrigins []string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, allowedOrigins []string, devMode ...bool) chi.Router {
+	// Local dev fallback: if no developer pool is provided, reuse the
+	// gateway pool. The engine will still try `SET LOCAL ROLE
+	// eurobase_migrator` and fail with a clear error, which is the
+	// signal to bootstrap the developer role.
+	if developerPool == nil {
+		developerPool = pool
+	}
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -219,8 +236,10 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			r.Get("/schema", query.HandleSchemaIntrospection(pool))
 			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
 			r.Get("/schema/rls-audit", query.HandleRLSAudit(pool))
-			r.Mount("/schema/tables", query.HandleDDL(pool))
-			r.Mount("/schema/functions", query.HandleFunctions(pool))
+			// DDL on tenant schemas runs against the developer pool so
+			// CREATE/ALTER/REFERENCES on migrator-owned tables works.
+			r.Mount("/schema/tables", query.HandleDDL(developerPool))
+			r.Mount("/schema/functions", query.HandleFunctions(developerPool))
 			r.Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
 			r.Mount("/cron", cron.Routes(cronSvc))
@@ -302,10 +321,18 @@ func NewRouter(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, pl
 			// Console data proxy — platform-authenticated access to project data.
 			// Note: {id} here shadows the outer {id} (project ID) which is fine —
 			// PlatformTenantContext already resolved the project in middleware.
+			//
+			// Uses the developer pool: PlatformTenantContext sets the
+			// developer-role flag, and the engine elevates each tx to
+			// eurobase_migrator so DDL/REFERENCES against migrator-owned
+			// tables work for the authenticated developer. The membership
+			// check in the middleware (ResolveRole, line 64 of
+			// internal/tenant/context.go) still uses the gateway pool —
+			// that's a public.* read.
 			r.Route("/data", func(r chi.Router) {
 				r.Use(tenant.PlatformTenantContext(pool))
 
-				queryEngine := query.NewQueryEngine(pool)
+				queryEngine := query.NewQueryEngine(developerPool)
 				publisher := realtime.NewEventPublisher(nil, hub)
 
 				r.Post("/sql", query.HandlePlatformSQL(queryEngine))
