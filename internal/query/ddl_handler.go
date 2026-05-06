@@ -10,6 +10,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -348,7 +349,11 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 		var warning string
 		if req.DisableRLS {
 			qt := qualifiedTable(schemaName, req.Name)
-			if _, err := pool.Exec(r.Context(), fmt.Sprintf("ALTER TABLE %s DISABLE ROW LEVEL SECURITY", qt)); err != nil {
+			err := runDDL(r.Context(), pool, func(tx pgx.Tx) error {
+				_, err := tx.Exec(r.Context(), fmt.Sprintf("ALTER TABLE %s DISABLE ROW LEVEL SECURITY", qt))
+				return err
+			})
+			if err != nil {
 				slog.Error("disable rls failed", "error", err, "table", req.Name)
 				jsonError(w, "failed to disable rls: "+err.Error(), http.StatusInternalServerError)
 				return
@@ -1151,7 +1156,11 @@ func handleToggleRLS(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		sql := fmt.Sprintf("ALTER TABLE %s %s ROW LEVEL SECURITY", qt, action)
-		if _, err := pool.Exec(r.Context(), sql); err != nil {
+		err = runDDL(r.Context(), pool, func(tx pgx.Tx) error {
+			_, err := tx.Exec(r.Context(), sql)
+			return err
+		})
+		if err != nil {
 			slog.Error("toggle RLS failed", "error", err, "table", tableName, "action", action)
 			jsonError(w, "failed to toggle RLS: "+err.Error(), http.StatusInternalServerError)
 			return
