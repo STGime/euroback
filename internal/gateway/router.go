@@ -238,8 +238,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			r.Get("/schema/rls-audit", query.HandleRLSAudit(pool))
 			// DDL on tenant schemas runs against the developer pool so
 			// CREATE/ALTER/REFERENCES on migrator-owned tables works.
-			r.Mount("/schema/tables", query.HandleDDL(developerPool))
-			r.Mount("/schema/functions", query.HandleFunctions(developerPool))
+			// withDeveloperRole adds the flag the DDL helpers read inside
+			// runDDL to elevate `SET LOCAL ROLE eurobase_migrator` — without
+			// it, tables would be developer-owned and cross-tool DDL would
+			// fail with "must be owner". (PlatformTenantContext also sets
+			// this flag, but it's only mounted on /data/sql and below.)
+			r.With(withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
+			r.With(withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
 			r.Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
 			r.Mount("/cron", cron.Routes(cronSvc))
@@ -570,6 +575,17 @@ func superadminMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// withDeveloperRole flags the request context for eurobase_migrator role
+// elevation inside DDL transactions (see internal/query/engine.go
+// applyDeveloperRole). Apply to platform-authenticated DDL routes that
+// don't already go through tenant.PlatformTenantContext (which sets the
+// same flag).
+func withDeveloperRole(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(query.WithDeveloperRole(r.Context())))
+	})
 }
 
 // requireSecretKeyForDDL gates SDK DDL routes to secret API keys only.
