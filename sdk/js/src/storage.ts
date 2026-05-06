@@ -81,8 +81,8 @@ export interface SignedUrlOptions {
 export class StorageClient {
   private http: HttpClient
 
-  constructor(config: EurobaseConfig) {
-    this.http = httpClient(config)
+  constructor(config: EurobaseConfig, http?: HttpClient) {
+    this.http = http ?? httpClient(config)
   }
 
   /**

@@ -130,9 +130,9 @@ export function createClient(configOrConnectionString: EurobaseConfig | string):
 
   return {
     auth: authClient,
-    db: new DatabaseClient(config),
+    db: new DatabaseClient(config, http),
     functions: new FunctionsClient(config, http),
-    storage: new StorageClient(config),
+    storage: new StorageClient(config, http),
     realtime: new RealtimeClient(config, http),
     vault: new VaultClient(config),
     async status() {
