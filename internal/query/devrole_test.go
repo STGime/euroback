@@ -245,6 +245,60 @@ func TestExecuteSQLTransaction_DeveloperRole_AppliesMigratorOwnership(t *testing
 	_, _ = pool.Exec(context.Background(), "ALTER TABLE "+pgIdent(schema)+".users DROP COLUMN IF EXISTS mig_demo_marker")
 }
 
+// TestDDLHelpers_DeveloperRole_AppliesMigratorOwnership covers the
+// regression behind issues #40, #41, #42: the per-helper DDL functions
+// in ddl.go must elevate to eurobase_migrator when the request context
+// carries the developer-role flag, so tables created via the SDK or MCP
+// path are uniformly migrator-owned. Without this elevation, SDK DDL
+// produces gateway-owned tables and MCP DDL produces developer-owned
+// tables — neither role can ALTER/DROP the other's objects, and
+// gateway-pool introspection returns columns:null on developer-owned
+// tables.
+func TestDDLHelpers_DeveloperRole_AppliesMigratorOwnership(t *testing.T) {
+	pool, schema, _ := setupTestDB(t)
+	ctx := WithDeveloperRole(context.Background())
+
+	tableName := "ddl_helper_owner_test"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			"DROP TABLE IF EXISTS "+pgIdent(schema)+"."+pgIdent(tableName)+" CASCADE")
+	})
+
+	if err := CreateTable(ctx, pool, schema, tableName, []ColumnDefinition{
+		{Name: "id", Type: "uuid", IsPrimaryKey: true, DefaultValue: "public.uuid_generate_v4()"},
+		{Name: "title", Type: "text"},
+	}); err != nil {
+		t.Fatalf("CreateTable with developer-role flag: %v", err)
+	}
+
+	var owner string
+	err := pool.QueryRow(context.Background(),
+		`SELECT tableowner FROM pg_tables WHERE schemaname = $1 AND tablename = $2`,
+		schema, tableName,
+	).Scan(&owner)
+	if err != nil {
+		t.Fatalf("read tableowner: %v", err)
+	}
+	if owner != "eurobase_migrator" {
+		t.Errorf("CreateTable owner = %q, want %q (the SET LOCAL ROLE didn't take effect inside runDDL)", owner, "eurobase_migrator")
+	}
+
+	// Drop via DropTable — also goes through runDDL → applyDeveloperRole.
+	// Confirms the symmetric drop path works on a migrator-owned table.
+	if err := DropTable(ctx, pool, schema, tableName); err != nil {
+		t.Fatalf("DropTable with developer-role flag: %v", err)
+	}
+
+	var stillExists bool
+	_ = pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2)`,
+		schema, tableName,
+	).Scan(&stillExists)
+	if stillExists {
+		t.Error("DropTable did not remove the table")
+	}
+}
+
 // pgIdent quotes a Postgres identifier for use in raw SQL. Mirrors the
 // engine's quoteIdent helper but available to tests in this file.
 func pgIdent(name string) string {

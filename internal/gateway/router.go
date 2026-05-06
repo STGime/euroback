@@ -444,10 +444,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			// since DDL is destructive. The handlers inside HandleDDL expect
 			// chi URL param "id" to be the project ID — sdkDDLAdapter injects
 			// it from the API-key-authenticated ProjectContext.
+			//
+			// Routed through developerPool (not the runtime gateway pool) +
+			// the developer-role flag so all SDK DDL elevates to
+			// eurobase_migrator inside its tx, producing migrator-owned
+			// tables identical to the platform/MCP DDL path. Without this,
+			// SDK-created tables are gateway-owned and cannot be ALTER/DROP'd
+			// from the platform path (and vice versa). See issues #40/#41/#42.
 			r.Route("/schema/tables", func(r chi.Router) {
 				r.Use(requireSecretKeyForDDL)
 				r.Use(sdkDDLAdapter)
-				r.Mount("/", query.HandleDDL(pool))
+				r.Mount("/", query.HandleDDL(developerPool))
 			})
 
 			r.Get("/{table}", query.HandleTableGet(queryEngine))
@@ -584,10 +591,16 @@ func requireSecretKeyForDDL(next http.Handler) http.Handler {
 }
 
 // sdkDDLAdapter injects the authenticated ProjectContext.ProjectID as the
-// chi URL param "id" that HandleDDL's handlers expect. This lets the same
-// handlers serve both the platform path (/platform/projects/{id}/schema/...)
-// where {id} comes from the URL and the SDK path (/v1/db/schema/...) where
-// the project is resolved by the API key middleware.
+// chi URL param "id" that HandleDDL's handlers expect, and flags the
+// request context for eurobase_migrator role elevation inside the DDL
+// transactions (see internal/query/engine.go applyDeveloperRole).
+//
+// This lets the same handlers serve both the platform path
+// (/platform/projects/{id}/schema/...) where {id} comes from the URL and
+// the developer-role flag is set by tenant.PlatformTenantContext, and the
+// SDK path (/v1/db/schema/...) where the project is resolved by the API
+// key middleware and the dev-role flag is set here. Both paths therefore
+// produce uniformly migrator-owned tables.
 func sdkDDLAdapter(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
@@ -598,7 +611,8 @@ func sdkDDLAdapter(next http.Handler) http.Handler {
 		if rctx := chi.RouteContext(r.Context()); rctx != nil {
 			rctx.URLParams.Add("id", pc.ProjectID)
 		}
-		next.ServeHTTP(w, r)
+		ctx := query.WithDeveloperRole(r.Context())
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
