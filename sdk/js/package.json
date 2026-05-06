@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "test": "echo \"No tests yet\" && exit 0"
+    "test": "npm run build && node test/fix-dist-imports.mjs && node test/token-propagation.mjs"
   },
   "keywords": [
     "eurobase",

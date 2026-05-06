@@ -273,8 +273,8 @@ export class DatabaseClient {
    */
   readonly schema: SchemaClient
 
-  constructor(config: EurobaseConfig) {
-    this.http = httpClient(config)
+  constructor(config: EurobaseConfig, http?: HttpClient) {
+    this.http = http ?? httpClient(config)
     this.schema = new SchemaClient(config)
   }
 
