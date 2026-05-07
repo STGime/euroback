@@ -12,9 +12,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// All vault methods run inside a service-role transaction (db.RunAsService)
+// because PR #65 (advisory GHSA-wcg9-846j-ch78) tightened the RLS policy
+// on tenant_*.vault_secrets to `USING (public.is_service_role())`. The
+// previous direct pool queries silently failed RLS after that migration
+// applied — closes #71. Same pattern that AuthService uses.
 
 // quoteIdent double-quotes a SQL identifier, escaping embedded double quotes.
 func quoteIdent(name string) string {
@@ -99,21 +106,26 @@ func (s *VaultService) decrypt(ciphertext, nonce []byte) (string, error) {
 func (s *VaultService) List(ctx context.Context, schemaName string) ([]Secret, error) {
 	sql := `SELECT id, name, description, created_at, updated_at
 		 FROM ` + vaultTable(schemaName) + ` ORDER BY name`
-	rows, err := s.pool.Query(ctx, sql)
-	if err != nil {
-		return nil, fmt.Errorf("list vault secrets: %w", err)
-	}
-	defer rows.Close()
-
 	secrets := make([]Secret, 0)
-	for rows.Next() {
-		var sec Secret
-		if err := rows.Scan(&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan vault secret: %w", err)
+	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, sql)
+		if err != nil {
+			return fmt.Errorf("list vault secrets: %w", err)
 		}
-		secrets = append(secrets, sec)
+		defer rows.Close()
+		for rows.Next() {
+			var sec Secret
+			if err := rows.Scan(&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt); err != nil {
+				return fmt.Errorf("scan vault secret: %w", err)
+			}
+			secrets = append(secrets, sec)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return secrets, rows.Err()
+	return secrets, nil
 }
 
 // Get returns a single decrypted secret by name.
@@ -123,10 +135,12 @@ func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secre
 
 	var sec Secret
 	var encrypted, nonce []byte
-	err := s.pool.QueryRow(ctx, sql, name).Scan(
-		&sec.ID, &sec.Name, &encrypted, &nonce,
-		&sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
-	)
+	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, name).Scan(
+			&sec.ID, &sec.Name, &encrypted, &nonce,
+			&sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
+		)
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("secret %q not found", name)
@@ -161,9 +175,11 @@ func (s *VaultService) Set(ctx context.Context, schemaName, name, value, descrip
 		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
-	err = s.pool.QueryRow(ctx, sql, name, encrypted, nonce, description).Scan(
-		&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
-	)
+	err = db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, name, encrypted, nonce, description).Scan(
+			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
+		)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("upsert vault secret: %w", err)
 	}
@@ -193,9 +209,11 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 			 RETURNING id, name, description, created_at, updated_at`
 
 		var sec Secret
-		err = s.pool.QueryRow(ctx, sql, name, encrypted, nonce, newDescription).Scan(
-			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
-		)
+		err = db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, sql, name, encrypted, nonce, newDescription).Scan(
+				&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
+			)
+		})
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				return nil, fmt.Errorf("secret %q not found", name)
@@ -213,9 +231,11 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
-	err := s.pool.QueryRow(ctx, sql, name, *newDescription).Scan(
-		&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
-	)
+	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, name, *newDescription).Scan(
+			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
+		)
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("secret %q not found", name)
@@ -228,11 +248,19 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 // Delete removes a secret by name.
 func (s *VaultService) Delete(ctx context.Context, schemaName, name string) error {
 	sql := `DELETE FROM ` + vaultTable(schemaName) + ` WHERE name = $1`
-	tag, err := s.pool.Exec(ctx, sql, name)
+	var rowsAffected int64
+	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, sql, name)
+		if err != nil {
+			return err
+		}
+		rowsAffected = tag.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("delete vault secret: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		return fmt.Errorf("secret %q not found", name)
 	}
 	return nil
@@ -242,7 +270,9 @@ func (s *VaultService) Delete(ctx context.Context, schemaName, name string) erro
 func (s *VaultService) Count(ctx context.Context, schemaName string) (int, error) {
 	sql := `SELECT count(*) FROM ` + vaultTable(schemaName)
 	var count int
-	err := s.pool.QueryRow(ctx, sql).Scan(&count)
+	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql).Scan(&count)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("count vault secrets: %w", err)
 	}
@@ -294,7 +324,9 @@ func (s *VaultService) DeleteRaw(ctx context.Context, schemaName, name string) e
 func (s *VaultService) HasRaw(ctx context.Context, schemaName, name string) (bool, error) {
 	sql := `SELECT EXISTS(SELECT 1 FROM ` + vaultTable(schemaName) + ` WHERE name = $1)`
 	var exists bool
-	err := s.pool.QueryRow(ctx, sql, name).Scan(&exists)
+	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, name).Scan(&exists)
+	})
 	if err != nil {
 		return false, fmt.Errorf("check vault secret: %w", err)
 	}
