@@ -16,6 +16,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
+	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/gateway"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/ratelimit"
@@ -273,6 +274,33 @@ func main() {
 		slog.Warn("FUNCTION_RUNNER_URL not set, edge function invocation will return 501")
 	}
 
+	// ── Functions runner HMAC signer ──
+	// Closes layer 3 of advisory GHSA-7428-mvpp-rhr7. The runner verifies
+	// the signature on every /invoke; cluster-internal forgery is blocked.
+	// Production: secret missing aborts startup. Dev/staging without
+	// FUNCTIONS_RUNNER_HMAC_SECRET runs unsigned (the runner is in soft
+	// mode by default, so requests still succeed); a clear warning is
+	// logged.
+	var fnSigner *functions.Signer
+	if secret := os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"); secret != "" {
+		s, err := functions.NewSigner(secret)
+		if err != nil {
+			log.Fatalf("FATAL: FUNCTIONS_RUNNER_HMAC_SECRET invalid: %v", err)
+		}
+		fnSigner = s
+		slog.Info("functions runner HMAC signing enabled")
+	} else {
+		// Fail closed in obvious-prod environments. Same fence shape as
+		// DEV_MODE (line ~219).
+		env := strings.ToLower(os.Getenv("ENV"))
+		suffix := strings.ToLower(os.Getenv("DOMAIN_SUFFIX"))
+		if env == "production" || env == "prod" || strings.HasSuffix(suffix, "eurobase.app") {
+			log.Fatal("FATAL: FUNCTIONS_RUNNER_HMAC_SECRET is required in production. " +
+				"Generate via `openssl rand -hex 32` and add to the eurobase-secrets k8s Secret.")
+		}
+		slog.Warn("FUNCTIONS_RUNNER_HMAC_SECRET not set — gateway will send UNSIGNED requests to the functions runner. Only acceptable in dev/staging while the runner is in soft mode.")
+	}
+
 	// ── CORS allowlist ──
 	// Always include wildcarded project subdomains + apex of the configured
 	// domain suffix; callers can extend with ALLOWED_ORIGINS (comma-separated).
@@ -293,7 +321,7 @@ func main() {
 	slog.Info("cors allowlist configured", "origins", allowedOrigins)
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, allowedOrigins, devMode)
+	r := gateway.NewRouter(pool, developerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, allowedOrigins, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
