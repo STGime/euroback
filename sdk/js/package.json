@@ -1,6 +1,6 @@
 {
   "name": "@eurobase/sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Eurobase TypeScript SDK — EU-sovereign Backend-as-a-Service. Auth, database, storage, realtime, functions, vault, and schema DDL.",
   "main": "dist/index.js",
   "module": "dist/index.js",
