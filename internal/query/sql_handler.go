@@ -106,6 +106,16 @@ func handleSQLInternal(engine *QueryEngine, readOnly bool) http.HandlerFunc {
 				jsonError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			// Closes advisory GHSA-5cj5-c9f7-9gcj — without this check the
+			// gateway pool's broad cross-schema grants combined with the
+			// service-role RLS bypass let any caller with a secret API key
+			// read another tenant's data via fully-qualified `tenant_<other>.…`
+			// references. The check rejects qualified references to any
+			// schema other than the caller's tenant schema (and pg_temp).
+			if err := ValidateNoCrossSchemaRefs(req.SQL, schema); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		// Guard: pgx Tx.Exec uses the extended query protocol, which runs
