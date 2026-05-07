@@ -8,7 +8,20 @@
  * is NEVER exposed to the public internet. Only the Gateway can reach it.
  */
 
-const DB_URL = Deno.env.get("DATABASE_URL") ?? "";
+import { quoteIdent, tenantFuncRole, validIdentRe } from "./role.ts";
+
+// Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
+// `eurobase_function_runner`, a role with no direct grants on any tenant
+// schema. Each invocation does `SET LOCAL ROLE <schema>_func` inside a
+// transaction so user SQL physically cannot reach other tenants — the
+// `<schema>_func` role is granted only on its own schema.
+//
+// The legacy DATABASE_URL env var is kept as a fallback during the
+// rollout window so the runner doesn't crash on a partial-state deploy
+// (k8s Secret update racing with pod restart). Once
+// DATABASE_URL_FUNCTION_RUNNER is in every environment, the fallback
+// can be removed.
+const DB_URL = Deno.env.get("DATABASE_URL_FUNCTION_RUNNER") ?? Deno.env.get("DATABASE_URL") ?? "";
 const PORT = parseInt(Deno.env.get("PORT") ?? "8000");
 const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50");
 const CODE_CACHE_SIZE = parseInt(Deno.env.get("CODE_CACHE_SIZE") ?? "200");
@@ -56,8 +69,12 @@ let activeConcurrency = 0;
 
 // ── Database connection ──
 
-// Use dynamic import for postgres — Deno supports it natively via deno.land/x
-// For production, pin to a specific version.
+// Use dynamic import for postgres — Deno supports it natively via deno.land/x.
+// The runner role (eurobase_function_runner) has membership in every
+// per-tenant `<schema>_func` role but no direct grants on tenant schemas
+// or `public.*` (beyond a couple of helper functions). Per-invocation
+// code wraps every query in a transaction with `SET LOCAL ROLE` so the
+// SQL runs with the executing tenant's grants only.
 // deno-lint-ignore no-explicit-any
 let sql: any = null;
 
@@ -145,30 +162,58 @@ async function executeFunction(
   // Determine timeout based on plan.
   const timeoutMs = plan === "pro" ? 60_000 : 10_000;
 
+  // Defence-in-depth: validate schema name shape before it reaches SQL.
+  // The gateway already validates this, but the runner is on the cluster
+  // network and a future misconfiguration could expose it more broadly
+  // (cf. PR 3c which adds HMAC verification of these headers).
+  if (!validIdentRe.test(schemaName)) {
+    return jsonResponse({ error: "invalid schema name", requestId }, 400);
+  }
+  const funcRole = tenantFuncRole(schemaName);
+  if (!validIdentRe.test(funcRole)) {
+    // Belt-and-braces: tenantFuncRole() should never return invalid since
+    // schemaName already passed validIdentRe, but hard-fail if it does.
+    return jsonResponse({ error: "invalid tenant role", requestId }, 400);
+  }
+
   // Build the context object that gets injected into the function.
   const db = await getDB();
 
   const logCapture = createLogCapture(projectId);
 
+  // ctx.db.sql wraps every user query in a transaction with
+  // `SET LOCAL ROLE <schema>_func` and `SET LOCAL search_path TO <schema>`
+  // (no `, public`). The per-tenant role has grants only on its own
+  // schema; cross-tenant references fail with `permission denied`. SET
+  // LOCAL keeps both settings tx-scoped — they auto-reset on commit so
+  // they cannot leak between invocations sharing a connection.
+  //
+  // Closes GHSA-7428-mvpp-rhr7 layer 1.
+  const setRoleSQL = "SET LOCAL ROLE " + quoteIdent(funcRole);
+  const setPathSQL = "SET LOCAL search_path TO " + quoteIdent(schemaName);
+
   const ctx = {
     db: {
-      async sql(query: string, params: unknown[] = []) {
-        // Set search path to project schema, then execute.
-        await db`SELECT set_config('search_path', ${schemaName}, true)`;
-        return await db.unsafe(query, params);
+      // deno-lint-ignore no-explicit-any
+      async sql(query: string, params: unknown[] = []): Promise<any> {
+        // deno-lint-ignore no-explicit-any
+        return await db.begin(async (tx: any) => {
+          await tx.unsafe(setRoleSQL);
+          await tx.unsafe(setPathSQL);
+          return await tx.unsafe(query, params);
+        });
       },
     },
     vault: {
-      async get(name: string): Promise<string | null> {
-        try {
-          const [row] = await db`
-            SELECT value FROM vault_secrets
-            WHERE project_id = ${projectId} AND name = ${name}
-          `;
-          return row?.value ?? null;
-        } catch {
-          return null;
-        }
+      // ctx.vault.get is a stub — the runner has no access to the vault
+      // encryption key, and pre-PR-3 the SQL it ran was broken (selected
+      // a `value` column that doesn't exist; result always null). Vault
+      // access belongs in a dedicated controlled API, planned alongside
+      // the Deno.Worker isolate work in PR 3b. Until then, callers get
+      // null.
+      // deno-lint-ignore require-await
+      async get(_name: string): Promise<string | null> {
+        return null;
       },
     },
     env: fn.env_vars,
