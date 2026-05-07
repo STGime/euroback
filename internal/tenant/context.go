@@ -128,13 +128,13 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 				return
 			}
 
-			// Inject both the legacy header (for bucket naming) and a
-			// ProjectContext so handlers can read the schema name from
-			// authenticated state rather than the header.
-			r.Header.Set("X-Project-Slug", slug)
+			// Storage handlers read slug + schema from the authenticated
+			// ProjectContext only. The X-Project-Slug header is no longer
+			// trusted (advisory GHSA-gvrg-vq6j-j647).
 			ctx := auth.ContextWithProject(r.Context(), &auth.ProjectContext{
 				ProjectID:  projectID,
 				SchemaName: schema,
+				Slug:       slug,
 			})
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

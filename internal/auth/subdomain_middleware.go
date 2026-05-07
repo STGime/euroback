@@ -53,7 +53,7 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
-		var pc ProjectContext
+		pc := ProjectContext{Slug: slug}
 		err := m.pool.QueryRow(r.Context(),
 			`SELECT id, schema_name, jwt_secret, auth_config
 			 FROM projects

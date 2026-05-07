@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -21,6 +22,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// ErrAccountExistsLinkRequired is returned when an OAuth callback resolves
+// to an email that matches an existing user but no provider identity is
+// linked yet. The caller must reject the OAuth signin and tell the user
+// to first sign in with their existing credentials, then add the provider
+// from a settings page (where the link can be authenticated by the
+// existing user, not by the OAuth provider's email claim).
+//
+// Closed advisory GHSA-269x-fqhj-x9jq.
+var ErrAccountExistsLinkRequired = errors.New("account exists — sign in with your existing credentials and link this provider from settings")
 
 // asService runs fn in a service-role transaction. All queries against
 // tenant schemas in AuthService go through this so RLS policies permit
@@ -683,55 +694,58 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 		}
 
 		if err == pgx.ErrNoRows {
-			// Try to find existing user by email (link accounts).
+			// Closed advisory GHSA-269x-fqhj-x9jq: previously this branch
+			// auto-linked the OAuth identity to any existing user with a
+			// matching email — without checking the provider's email-
+			// verified flag and without an out-of-band confirmation. An
+			// attacker who could create a provider account claiming a
+			// victim's address could take over the victim's account.
+			//
+			// We now refuse to auto-link entirely. If the email matches an
+			// existing user, the OAuth flow returns ErrAccountExistsLinkRequired
+			// and the caller surfaces a "sign in with your existing
+			// credentials and add this provider from settings" error.
 			emailLower := strings.ToLower(strings.TrimSpace(userInfo.Email))
 			findByEmailQ := fmt.Sprintf(
-				`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
-				 FROM %s.users
-				 WHERE email = $1`,
+				`SELECT 1 FROM %s.users WHERE email = $1`,
 				quoteIdent(schemaName),
 			)
-			err = tx.QueryRow(ctx, findByEmailQ, emailLower).
-				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
-
-			if err == pgx.ErrNoRows {
-				// Create new user.
-				var displayName *string
-				if userInfo.Name != "" {
-					displayName = &userInfo.Name
-				}
-				var avatarURL *string
-				if userInfo.AvatarURL != "" {
-					avatarURL = &userInfo.AvatarURL
-				}
-
-				insertQ := fmt.Sprintf(
-					`INSERT INTO %s.users (email, display_name, avatar_url, provider, provider_user_id, email_confirmed_at, metadata)
-					 VALUES ($1, $2, $3, $4, $5, now(), '{}'::jsonb)
-					 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
-					quoteIdent(schemaName),
-				)
-				err = tx.QueryRow(ctx, insertQ, emailLower, displayName, avatarURL, providerName, userInfo.ProviderID).
-					Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
-				if err != nil {
-					return fmt.Errorf("create oauth user: %w", err)
-				}
-				_ = json.Unmarshal(metadataJSON, &user.Metadata)
-				slog.Info("end-user signed up via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
-			} else if err != nil {
+			var exists int
+			err = tx.QueryRow(ctx, findByEmailQ, emailLower).Scan(&exists)
+			if err == nil {
+				slog.Warn("oauth signup blocked — email already registered to another identity",
+					"schema", schemaName, "provider", providerName, "email_lower", emailLower)
+				return ErrAccountExistsLinkRequired
+			}
+			if err != pgx.ErrNoRows {
 				return fmt.Errorf("query user by email: %w", err)
-			} else {
-				// Existing user found by email — auto-confirm email.
-				_ = json.Unmarshal(metadataJSON, &user.Metadata)
-				confirmQ := fmt.Sprintf(
-					`UPDATE %s.users SET email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $1`,
-					quoteIdent(schemaName),
-				)
-				_, _ = tx.Exec(ctx, confirmQ, user.ID)
-				slog.Info("end-user linked oauth account", "schema", schemaName, "user_id", user.ID, "provider", providerName)
 			}
 
-			// Create identity row (additive — doesn't overwrite other providers).
+			// No existing user for this email — create a fresh one.
+			var displayName *string
+			if userInfo.Name != "" {
+				displayName = &userInfo.Name
+			}
+			var avatarURL *string
+			if userInfo.AvatarURL != "" {
+				avatarURL = &userInfo.AvatarURL
+			}
+
+			insertQ := fmt.Sprintf(
+				`INSERT INTO %s.users (email, display_name, avatar_url, provider, provider_user_id, email_confirmed_at, metadata)
+				 VALUES ($1, $2, $3, $4, $5, now(), '{}'::jsonb)
+				 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
+				quoteIdent(schemaName),
+			)
+			err = tx.QueryRow(ctx, insertQ, emailLower, displayName, avatarURL, providerName, userInfo.ProviderID).
+				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+			if err != nil {
+				return fmt.Errorf("create oauth user: %w", err)
+			}
+			_ = json.Unmarshal(metadataJSON, &user.Metadata)
+			slog.Info("end-user signed up via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
+
+			// Create identity row.
 			upsertIdentityQ := fmt.Sprintf(
 				`INSERT INTO %s.user_identities (user_id, provider, provider_user_id, identity_data, last_sign_in_at)
 				 VALUES ($1, $2, $3, $4, now())
