@@ -13,9 +13,10 @@
 - `eurobase_gateway` — runtime role used by the gateway + worker pods for **SDK runtime traffic** (`/v1/*`). DML only on `public.*`, USAGE + CREATE on tenant schemas so the SDK DDL endpoint works. NO DDL on `public.*`. Wired via `DATABASE_URL` in the `eurobase-secrets` k8s Secret.
 - `eurobase_developer` — runtime role used by the gateway pod for **platform-authenticated developer traffic** (console + MCP under `/platform/*`). Member of `eurobase_migrator` with INHERIT, so it gets ownership-equivalent privileges. Each platform tx runs `SET LOCAL ROLE eurobase_migrator`, so DDL/REFERENCES against migrator-owned tables works and any newly created objects are owned by the migrator (uniform with CI-applied migrations). Wired via `DATABASE_URL_DEVELOPER` in the same Secret. **Two distinct DB pools share one process by design** — runtime exploit ≠ elevated privileges.
 - `eurobase_migrator` — deploy-only role. Owns `public.*` tables and tenant schemas; runs migrations via the `migrate` Kubernetes Job in CI. Wired via `DATABASE_URL_MIGRATOR` in the same Secret.
+- `eurobase_function_runner` — runtime role used by the **edge functions runner pod** (deploy/k8s/functions.yaml). NO direct grants on any tenant schema or `public.*` (beyond USAGE + helper-function EXECUTE). Member of every per-tenant `<schema>_func` role; the runner does `SET LOCAL ROLE <schema>_func` per invocation so user JS can only reach the executing tenant. Wired via `DATABASE_URL_FUNCTION_RUNNER` in the same Secret. Per-tenant `<schema>_func` roles are created by `provision_tenant` (migration `000047`).
 - `eurobase_api` — legacy admin role kept for rollback. Once the cutover is proven, delete it via the Scaleway console.
-- All three runtime roles must be created via the Scaleway console **before** their migrations run (`000037` for gateway/migrator, `000044` for developer). The migration files only do GRANT / REVOKE / membership.
-- Never issue `DATABASE_URL` (or `DATABASE_URL_DEVELOPER`) to tenants. The gateway exposes data via SDK + REST only.
+- All four runtime roles must be created via the Scaleway console **before** their migrations run (`000037` for gateway/migrator, `000044` for developer, `000047` for function_runner). The migration files only do GRANT / REVOKE / membership.
+- Never issue `DATABASE_URL` (or `DATABASE_URL_DEVELOPER` / `DATABASE_URL_FUNCTION_RUNNER`) to tenants. The gateway exposes data via SDK + REST only.
 
 ## Auth
 - Custom auth built in Go (email/password, magic links, OAuth)
