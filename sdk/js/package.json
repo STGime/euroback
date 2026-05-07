@@ -4,18 +4,18 @@
   "description": "Eurobase TypeScript SDK — EU-sovereign Backend-as-a-Service. Auth, database, storage, realtime, functions, vault, and schema DDL.",
   "main": "dist/index.js",
   "module": "dist/index.js",
+  "type": "module",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.js"
+      "import": "./dist/index.js"
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node test/fix-dist-imports.mjs",
     "prepublishOnly": "npm run build",
-    "test": "npm run build && node test/fix-dist-imports.mjs && node test/token-propagation.mjs"
+    "test": "npm run build && node test/token-propagation.mjs"
   },
   "keywords": [
     "eurobase",
