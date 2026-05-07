@@ -9,6 +9,12 @@
  */
 
 import { quoteIdent, tenantFuncRole, validIdentRe } from "./role.ts";
+import type {
+  ParentToWorker,
+  SerializedRequest,
+  SerializedResponse,
+  WorkerToParent,
+} from "./bridge.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
 // `eurobase_function_runner`, a role with no direct grants on any tenant
@@ -66,6 +72,26 @@ function setCache(key: string, fn: CachedFunction): void {
 // ── Concurrency limiter ──
 
 let activeConcurrency = 0;
+
+// ── Worker bootstrap ──
+//
+// Loaded once at startup. Each invocation creates a per-tenant Web
+// Worker from this code with `permissions: 'none'` — no net, no env, no
+// read/write/run/ffi. User JS runs there in isolation; capability calls
+// (DB, vault, log) are proxied back to this parent process via
+// postMessage.
+//
+// Closes GHSA-7428-mvpp-rhr7 layer 2.
+const BOOTSTRAP_PATH = new URL("./worker_bootstrap.js", import.meta.url);
+let bootstrapBlobUrl: string | null = null;
+
+async function getBootstrapBlobUrl(): Promise<string> {
+  if (bootstrapBlobUrl) return bootstrapBlobUrl;
+  const code = await Deno.readTextFile(BOOTSTRAP_PATH);
+  const blob = new Blob([code], { type: "application/javascript" });
+  bootstrapBlobUrl = URL.createObjectURL(blob);
+  return bootstrapBlobUrl;
+}
 
 // ── Database connection ──
 
@@ -176,106 +202,200 @@ async function executeFunction(
     return jsonResponse({ error: "invalid tenant role", requestId }, 400);
   }
 
-  // Build the context object that gets injected into the function.
-  const db = await getDB();
-
-  const logCapture = createLogCapture(projectId);
-
-  // ctx.db.sql wraps every user query in a transaction with
-  // `SET LOCAL ROLE <schema>_func` and `SET LOCAL search_path TO <schema>`
-  // (no `, public`). The per-tenant role has grants only on its own
-  // schema; cross-tenant references fail with `permission denied`. SET
-  // LOCAL keeps both settings tx-scoped — they auto-reset on commit so
-  // they cannot leak between invocations sharing a connection.
-  //
-  // Closes GHSA-7428-mvpp-rhr7 layer 1.
+  // The per-invocation Web Worker (created below) runs user JS with
+  // `permissions: 'none'`. DB / vault calls come back to this parent
+  // over postMessage and run here under the per-tenant role.
   const setRoleSQL = "SET LOCAL ROLE " + quoteIdent(funcRole);
   const setPathSQL = "SET LOCAL search_path TO " + quoteIdent(schemaName);
+  const db = await getDB();
+  const logCapture = createLogCapture(projectId);
 
-  const ctx = {
-    db: {
-      // deno-lint-ignore no-explicit-any
-      async sql(query: string, params: unknown[] = []): Promise<any> {
-        // deno-lint-ignore no-explicit-any
-        return await db.begin(async (tx: any) => {
-          await tx.unsafe(setRoleSQL);
-          await tx.unsafe(setPathSQL);
-          return await tx.unsafe(query, params);
-        });
-      },
-    },
-    vault: {
-      // ctx.vault.get is a stub — the runner has no access to the vault
-      // encryption key, and pre-PR-3 the SQL it ran was broken (selected
-      // a `value` column that doesn't exist; result always null). Vault
-      // access belongs in a dedicated controlled API, planned alongside
-      // the Deno.Worker isolate work in PR 3b. Until then, callers get
-      // null.
-      // deno-lint-ignore require-await
-      async get(_name: string): Promise<string | null> {
-        return null;
-      },
-    },
-    env: fn.env_vars,
-    user: userId ? { id: userId, email: userEmail } : null,
-    log: logCapture,
-    requestId,
+  // deno-lint-ignore no-explicit-any
+  async function runDBSql(query: string, params: unknown[]): Promise<any> {
+    // deno-lint-ignore no-explicit-any
+    return await db.begin(async (tx: any) => {
+      await tx.unsafe(setRoleSQL);
+      await tx.unsafe(setPathSQL);
+      return await tx.unsafe(query, params);
+    });
+  }
+
+  // Materialise the request body up front. The worker can't stream
+  // across the postMessage boundary, and we already enforce a 5MB
+  // request-size limit upstream, so a single Uint8Array is fine.
+  let bodyBytes: Uint8Array | null = null;
+  if (req.body) {
+    bodyBytes = new Uint8Array(await req.arrayBuffer());
+  }
+  const serializedRequest: SerializedRequest = {
+    method: req.method,
+    url: req.url,
+    headers: [...req.headers.entries()],
+    body: bodyBytes,
   };
 
-  // Execute the function with a timeout.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const bootstrapUrl = await getBootstrapBlobUrl();
+  // permissions: 'none' is the load-bearing security property here. Any
+  // future change to this options object should preserve it.
+  const worker = new Worker(bootstrapUrl, {
+    type: "module",
+    deno: {
+      permissions: "none",
+    },
+  });
 
-  try {
-    // Use Function constructor for sandboxed execution.
-    // In production, this would use Deno.Worker or a V8 isolate for stronger isolation.
-    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-    const handlerFn = new AsyncFunction("req", "ctx", `
-      ${fn.code}
+  return await runUserHandlerInWorker({
+    worker,
+    fn,
+    requestId,
+    projectId,
+    serializedRequest,
+    user: userId ? { id: userId, email: userEmail } : null,
+    timeoutMs,
+    runDBSql,
+    logCapture,
+  });
+}
 
-      // Call the default export
-      if (typeof handler === 'function') return handler(req, ctx);
-      if (typeof exports !== 'undefined' && typeof exports.default === 'function') return exports.default(req, ctx);
-      throw new Error('Function must export a default handler');
-    `);
+// runUserHandlerInWorker drives the load → invoke → result lifecycle for
+// a single Worker. Wires up the postMessage RPC for db.sql / vault.get /
+// log, enforces the timeout, and tears the worker down on every exit.
+async function runUserHandlerInWorker(opts: {
+  worker: Worker;
+  fn: CachedFunction;
+  requestId: string;
+  projectId: string;
+  serializedRequest: SerializedRequest;
+  user: { id: string; email: string } | null;
+  timeoutMs: number;
+  runDBSql: (query: string, params: unknown[]) => Promise<unknown>;
+  // deno-lint-ignore no-explicit-any
+  logCapture: ReturnType<typeof createLogCapture>;
+}): Promise<Response> {
+  const {
+    worker,
+    fn,
+    requestId,
+    projectId,
+    serializedRequest,
+    user,
+    timeoutMs,
+    runDBSql,
+    logCapture,
+  } = opts;
 
-    const response = await handlerFn(req, ctx);
+  let timeoutTimer: number | undefined;
+  let settled = false;
 
-    if (response instanceof Response) {
-      // Enforce response size limit.
-      const body = await response.clone().arrayBuffer();
-      if (body.byteLength > RESPONSE_SIZE_LIMIT) {
-        return jsonResponse({
+  return new Promise<Response>((resolve) => {
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+      try {
+        worker.terminate();
+      } catch (_) {
+        // worker may already be gone.
+      }
+    };
+
+    const respondError = (status: number, message: string) => {
+      cleanup();
+      resolve(jsonResponse({ error: message, requestId }, status));
+    };
+
+    const respondResponse = (serialized: SerializedResponse) => {
+      cleanup();
+      if (serialized.body.byteLength > RESPONSE_SIZE_LIMIT) {
+        resolve(jsonResponse({
           error: "Response too large",
           limit: `${RESPONSE_SIZE_LIMIT / 1024 / 1024}MB`,
           requestId,
-        }, 413);
+        }, 413));
+        return;
       }
-      // Passthrough X-Request-ID on every response.
-      const newHeaders = new Headers(response.headers);
-      newHeaders.set("X-Request-ID", requestId);
-      return new Response(response.body, {
-        status: response.status,
-        headers: newHeaders,
-      });
-    }
+      const headers = new Headers();
+      for (const [k, v] of serialized.headers) headers.set(k, v);
+      headers.set("X-Request-ID", requestId);
+      resolve(new Response(serialized.body, {
+        status: serialized.status,
+        headers,
+      }));
+    };
 
-    // If the function returned something else, wrap it.
-    return new Response(JSON.stringify(response), {
-      status: 200,
-      headers: { "Content-Type": "application/json", "X-Request-ID": requestId },
+    timeoutTimer = setTimeout(() => {
+      respondError(504, "Function timed out");
+    }, timeoutMs);
+
+    worker.addEventListener("error", (e: ErrorEvent) => {
+      console.error(`[fn:${projectId}] Worker error:`, e.message);
+      respondError(500, e.message || "worker error");
     });
-  } catch (err) {
-    if (controller.signal.aborted) {
-      return jsonResponse({ error: "Function timed out", requestId }, 504);
-    }
 
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`[fn:${projectId}] Execution error:`, message);
-    return jsonResponse({ error: message, requestId }, 500);
-  } finally {
-    clearTimeout(timer);
-  }
+    worker.addEventListener("message", (event: MessageEvent) => {
+      if (settled) return;
+      const msg = event.data as WorkerToParent;
+      if (!msg || typeof msg.type !== "string") return;
+      switch (msg.type) {
+        case "loaded": {
+          const invokeMsg: ParentToWorker = {
+            type: "invoke",
+            request: serializedRequest,
+            env: fn.env_vars,
+            user,
+            requestId,
+            timeoutMs,
+          };
+          worker.postMessage(invokeMsg);
+          break;
+        }
+        case "result":
+          respondResponse(msg.response);
+          break;
+        case "error":
+          respondError(500, msg.message);
+          break;
+        case "log":
+          if (msg.level === "ERROR") logCapture.error(msg.msg, msg.data as Record<string, unknown> | undefined);
+          else if (msg.level === "WARN") logCapture.warn(msg.msg, msg.data as Record<string, unknown> | undefined);
+          else logCapture.info(msg.msg, msg.data as Record<string, unknown> | undefined);
+          break;
+        case "db.sql.call": {
+          // Run the query under the per-tenant role and post the
+          // result back. Errors are reported as `error` strings so the
+          // worker's RPC layer can rebuild an Error.
+          runDBSql(msg.query, msg.params)
+            .then((rows) => {
+              if (settled) return;
+              const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };
+              worker.postMessage(reply);
+            })
+            .catch((err) => {
+              if (settled) return;
+              const text = err instanceof Error ? err.message : String(err);
+              const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, error: text };
+              worker.postMessage(reply);
+            });
+          break;
+        }
+        case "vault.get.call": {
+          // Vault remains a stub for this PR — see comment in the
+          // legacy ctx.vault.get implementation. Always returns null.
+          const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null };
+          worker.postMessage(reply);
+          break;
+        }
+      }
+    });
+
+    // First message: ship user code so the worker can load it via
+    // Function constructor. Doing this on a tick separation ensures
+    // the message-event listener above is fully wired before we send.
+    queueMicrotask(() => {
+      const loadMsg: ParentToWorker = { type: "load", code: fn.code };
+      worker.postMessage(loadMsg);
+    });
+  });
 }
 
 // ── Helpers ──
