@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -545,9 +546,20 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// defaultConsoleURL is the production console origin used when the
+// CONSOLE_URL env var is not set. Keeps prod working out of the box and
+// lets dev/staging/self-hosted deployments override.
+const defaultConsoleURL = "https://console.eurobase.app"
+
+func consoleURL() string {
+	if u := strings.TrimRight(os.Getenv("CONSOLE_URL"), "/"); u != "" {
+		return u
+	}
+	return defaultConsoleURL
+}
+
 func renderInviteEmail(projectName, recipientEmail, role, inviterEmail, token string) string {
-	// In production, CONSOLE_URL would be used. For now, hardcode the pattern.
-	acceptURL := fmt.Sprintf("https://console.eurobase.app/invite?token=%s", token)
+	acceptURL := fmt.Sprintf("%s/invite?token=%s", consoleURL(), token)
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>

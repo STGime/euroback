@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -118,25 +119,72 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 }
 
 // executeJob runs a single cron job action within the project's tenant schema.
+//
+// Closed advisory GHSA-fjjq-cqq9-q793: the previous implementation used
+// `pool.Exec(ctx, "SET search_path TO X; <user-sql>")` — pgx's simple
+// query protocol ran every `;`-separated statement, the gateway role had
+// DML on `public.*` and every tenant schema, and a project member could
+// thus issue arbitrary SQL across the platform.
+//
+// The current path:
+//  1. Validates the action (rejects multi-statement, forbidden-schema refs).
+//  2. Opens a transaction.
+//  3. Sets `search_path` and `statement_timeout` via `SET LOCAL` so they
+//     auto-reset on commit/rollback and never leak into other handlers
+//     sharing the connection.
+//  4. Executes the action via `tx.Exec` — the extended query protocol,
+//     which runs only the first statement (defence-in-depth on top of
+//     the multi-statement rejection).
 func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
-	// Set the search_path to the tenant schema, then execute the action.
 	switch job.ActionType {
 	case "sql":
-		_, err := e.pool.Exec(ctx,
-			fmt.Sprintf("SET search_path TO %s; %s", quoteIdent(job.SchemaName), job.Action))
-		if err != nil {
-			return fmt.Errorf("execute sql: %w", err)
+		if err := validateCronSQLAction(job.Action); err != nil {
+			return err
 		}
+		return e.runInTenantTx(ctx, job.SchemaName, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, job.Action); err != nil {
+				return fmt.Errorf("execute sql: %w", err)
+			}
+			return nil
+		})
 	case "rpc":
-		_, err := e.pool.Exec(ctx,
-			fmt.Sprintf("SET search_path TO %s; SELECT %s()", quoteIdent(job.SchemaName), quoteIdent(job.Action)))
-		if err != nil {
-			return fmt.Errorf("execute rpc: %w", err)
+		if err := validateCronRPCName(job.Action); err != nil {
+			return err
 		}
+		return e.runInTenantTx(ctx, job.SchemaName, func(tx pgx.Tx) error {
+			sql := fmt.Sprintf("SELECT %s()", quoteIdent(job.Action))
+			if _, err := tx.Exec(ctx, sql); err != nil {
+				return fmt.Errorf("execute rpc: %w", err)
+			}
+			return nil
+		})
 	default:
 		return fmt.Errorf("unknown action_type: %s", job.ActionType)
 	}
-	return nil
+}
+
+// runInTenantTx wraps a cron action in a transaction with `SET LOCAL
+// search_path` and `SET LOCAL statement_timeout`. Both reset on commit.
+// search_path intentionally does NOT include `public` — qualified
+// references are blocked by validateCronSQLAction; this stops accidental
+// resolution of unqualified names (`projects`, `api_keys`) into the
+// platform schema.
+func (e *Executor) runInTenantTx(ctx context.Context, schemaName string, fn func(pgx.Tx) error) error {
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", quoteIdent(schemaName))); err != nil {
+		return fmt.Errorf("set search_path: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
+		return fmt.Errorf("set statement_timeout: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // quoteIdent quotes an identifier to prevent SQL injection.

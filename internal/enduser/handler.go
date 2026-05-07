@@ -2,6 +2,7 @@ package enduser
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -538,7 +539,16 @@ func HandleOAuthCallback(svc *AuthService) http.HandlerFunc {
 		resp, err := svc.SignInWithOAuth(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, providerName, code, callbackURL)
 		if err != nil {
 			slog.Warn("oauth signin failed", "error", err, "provider", providerName, "project_id", pc.ProjectID)
-			// Redirect to client with error.
+			// Closed advisory GHSA-269x-fqhj-x9jq: when OAuth signin
+			// resolves to an existing user by email but no provider
+			// identity is linked, refuse to auto-link. Surface a
+			// distinct error code so client apps can guide the user
+			// to sign in with their existing credentials and link
+			// the provider from settings.
+			if errors.Is(err, ErrAccountExistsLinkRequired) {
+				redirectWithError(w, r, clientRedirectURL, "account_exists_link_required", err.Error())
+				return
+			}
 			redirectWithError(w, r, clientRedirectURL, "oauth_error", err.Error())
 			return
 		}

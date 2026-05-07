@@ -79,15 +79,25 @@ func isAuthenticated(r *http.Request) (string, bool) {
 	return "", false
 }
 
-// bucketForRequest derives the tenant's S3 bucket name from the request
-// context. The bucket naming convention is "eurobase-{slug}". The slug is
-// provided via the X-Project-Slug header.
+// bucketForRequest derives the tenant's S3 bucket name from the
+// authenticated ProjectContext. The bucket naming convention is
+// "eurobase-{slug}".
+//
+// The slug is read from auth.ProjectContext only — never from a request
+// header. Reading it from a header (as a previous version did) let any
+// authenticated SDK caller choose another tenant's bucket by sending
+// `X-Project-Slug: victim` (advisory GHSA-gvrg-vq6j-j647).
+//
+// Both the SDK path (apiKeyMiddleware sets ProjectContext.Slug from
+// the API-key → project lookup) and the platform path
+// (PlatformStorageContext sets it after the membership check) populate
+// Slug server-side.
 func bucketForRequest(r *http.Request) (string, error) {
-	slug := r.Header.Get("X-Project-Slug")
-	if slug == "" {
-		return "", fmt.Errorf("missing X-Project-Slug header")
+	pc, ok := auth.ProjectFromContext(r.Context())
+	if !ok || pc == nil || pc.Slug == "" {
+		return "", fmt.Errorf("project context missing — storage requires authenticated project")
 	}
-	return "eurobase-" + slug, nil
+	return "eurobase-" + pc.Slug, nil
 }
 
 // Routes returns a chi.Router with all storage sub-routes mounted.

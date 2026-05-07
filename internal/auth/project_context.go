@@ -11,6 +11,7 @@ type projectContextKey struct{}
 type ProjectContext struct {
 	ProjectID  string
 	SchemaName string
+	Slug       string // Used for storage bucket naming; never read from request headers.
 	JWTSecret  string
 	KeyType    string // "public" or "secret"
 	Plan       string // billing plan: "free", "pro"
