@@ -18,6 +18,14 @@
 - All four runtime roles must be created via the Scaleway console **before** their migrations run (`000037` for gateway/migrator, `000044` for developer, `000047` for function_runner). The migration files only do GRANT / REVOKE / membership.
 - Never issue `DATABASE_URL` (or `DATABASE_URL_DEVELOPER` / `DATABASE_URL_FUNCTION_RUNNER`) to tenants. The gateway exposes data via SDK + REST only.
 
+## Functions runner HMAC
+- Gateway → runner traffic is HMAC-SHA256-signed using `FUNCTIONS_RUNNER_HMAC_SECRET` (≥32 bytes) shared via the `eurobase-secrets` k8s Secret. Both gateway and functions Deployments read it via `envFrom: secretRef: eurobase-secrets`.
+- Generate via `openssl rand -hex 32`. Rotate by setting a new value and rolling both Deployments together.
+- Runner enforcement is controlled by `FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED`:
+  - `true` → strict; missing or invalid signature → 401.
+  - unset/other → soft mode (warn-only on missing); invalid signature still 401. Use during rollout window.
+- Gateway aborts startup if the secret is missing in production (`ENV=production` or `DOMAIN_SUFFIX` ends with `eurobase.app`).
+
 ## Auth
 - Custom auth built in Go (email/password, magic links, OAuth)
 - Anon key for public client access

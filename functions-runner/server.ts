@@ -15,6 +15,7 @@ import type {
   SerializedResponse,
   WorkerToParent,
 } from "./bridge.ts";
+import { newVerifier, type Verifier } from "./hmac.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
 // `eurobase_function_runner`, a role with no direct grants on any tenant
@@ -32,6 +33,18 @@ const PORT = parseInt(Deno.env.get("PORT") ?? "8000");
 const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50");
 const CODE_CACHE_SIZE = parseInt(Deno.env.get("CODE_CACHE_SIZE") ?? "200");
 const CODE_CACHE_TTL = parseInt(Deno.env.get("CODE_CACHE_TTL_SECONDS") ?? "300") * 1000;
+
+// HMAC settings — closes GHSA-7428-mvpp-rhr7 layer 3.
+//
+// FUNCTIONS_RUNNER_HMAC_SECRET: shared secret with the gateway, ≥32 bytes.
+// FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED:
+//   - "true"  → strict mode: missing/invalid signatures return 401.
+//   - other   → soft mode: warn-only on missing signatures, but invalid
+//               signatures are still rejected. Used briefly during the
+//               rollout window where some gateway pods may not yet have
+//               the secret.
+const HMAC_SECRET = Deno.env.get("FUNCTIONS_RUNNER_HMAC_SECRET") ?? "";
+const HMAC_REQUIRE_SIGNED = (Deno.env.get("FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED") ?? "").toLowerCase() === "true";
 
 // ── Size limits ──
 
@@ -407,12 +420,74 @@ function jsonResponse(body: Record<string, unknown>, status: number): Response {
   });
 }
 
+// ── HMAC verifier (lazy-initialised) ──
+//
+// Constructed once on the first authenticated request. We don't await
+// the import key at module-load so a transient secret-typo crash
+// surfaces as a 500 on the first request, not at process boot — the
+// pod stays running and operators can fix the env var without rolling
+// the deployment.
+let _verifier: Verifier | null = null;
+let _verifierError: Error | null = null;
+
+async function getVerifier(): Promise<Verifier | null> {
+  if (_verifier) return _verifier;
+  if (_verifierError) return null;
+  if (!HMAC_SECRET) return null;
+  try {
+    _verifier = await newVerifier(HMAC_SECRET);
+    return _verifier;
+  } catch (err) {
+    _verifierError = err instanceof Error ? err : new Error(String(err));
+    console.error(
+      "FATAL: failed to initialise HMAC verifier — gateway → runner traffic is unauthenticated",
+      _verifierError,
+    );
+    return null;
+  }
+}
+
+// authenticateRequest verifies the HMAC signature on /invoke. Behaviour:
+//   - Strict mode (HMAC_REQUIRE_SIGNED=true) and HMAC_SECRET set:
+//     returns 401 on missing or bad signature.
+//   - Soft mode (default) and HMAC_SECRET set:
+//     missing signature → warn + accept; bad signature → 401.
+//   - HMAC_SECRET unset:
+//     warn + accept (rollout window only).
+//
+// Returns null on success, a Response on rejection.
+async function authenticateRequest(req: Request, requestId: string): Promise<Response | null> {
+  if (!HMAC_SECRET) {
+    if (HMAC_REQUIRE_SIGNED) {
+      console.error(
+        "rejecting unsigned request: FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED=true but HMAC_SECRET is empty",
+      );
+      return jsonResponse({ error: "runner misconfigured", requestId }, 500);
+    }
+    console.warn("HMAC_SECRET not set — accepting unsigned request (rollout-window soft mode)");
+    return null;
+  }
+  const verifier = await getVerifier();
+  if (!verifier) {
+    return jsonResponse({ error: "runner misconfigured", requestId }, 500);
+  }
+  const result = await verifier.verify(req.headers);
+  if (result.ok) return null;
+
+  if (result.reason === "missing" && !HMAC_REQUIRE_SIGNED) {
+    console.warn("accepting unsigned request (soft mode); set FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED=true to enforce");
+    return null;
+  }
+  console.warn(`rejecting request: ${result.reason}`);
+  return jsonResponse({ error: "unauthorized", reason: result.reason, requestId }, 401);
+}
+
 // ── HTTP Server ──
 
 Deno.serve({ port: PORT }, async (req: Request): Promise<Response> => {
   const url = new URL(req.url);
 
-  // Health check.
+  // Health check — never authenticated.
   if (url.pathname === "/health") {
     return jsonResponse({
       status: "ok",
@@ -426,6 +501,10 @@ Deno.serve({ port: PORT }, async (req: Request): Promise<Response> => {
     const functionId = req.headers.get("X-Function-ID");
     const requestId = req.headers.get("X-Request-ID") ?? crypto.randomUUID();
     const plan = req.headers.get("X-Plan") ?? "free";
+
+    // Authenticate before doing any work.
+    const rejection = await authenticateRequest(req, requestId);
+    if (rejection) return rejection;
 
     if (!functionId) {
       return jsonResponse({ error: "Missing X-Function-ID header", requestId }, 400);

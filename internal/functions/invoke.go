@@ -13,7 +13,15 @@ import (
 
 // HandleInvoke proxies a function invocation to the Function Runner service.
 // If no runner is configured, it returns 501 Not Implemented.
-func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string) http.HandlerFunc {
+//
+// signer (optional) HMAC-signs the identity headers before forwarding so
+// the runner can authenticate the request as having come from a real
+// gateway and not a cluster-internal forger. Closes layer 3 of advisory
+// GHSA-7428-mvpp-rhr7. Pass nil during the rollout window where the
+// runner is in soft-mode (warn-only) — gateway pods without the secret
+// can keep working until the secret + corresponding env var land in
+// every environment.
+func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Signer) http.HandlerFunc {
 	client := &http.Client{Timeout: 65 * time.Second} // slightly above max function timeout
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +83,12 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string) http.Handl
 		if claims, ok := auth.EndUserClaimsFromContext(r.Context()); ok && claims != nil {
 			proxyReq.Header.Set("X-User-ID", claims.UserID)
 			proxyReq.Header.Set("X-User-Email", claims.Email)
+		}
+
+		// Sign the identity headers AFTER they're all set. Order
+		// matters: the signature has to cover the final values.
+		if signer != nil {
+			signer.Sign(proxyReq.Header, time.Now())
 		}
 
 		resp, err := client.Do(proxyReq)
