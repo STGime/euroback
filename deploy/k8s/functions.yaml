@@ -27,7 +27,9 @@ spec:
       nodeSelector:
         k8s.scaleway.com/pool-name: functions-pool
       tolerations:
-        - key: workload
+        # Scaleway prefixes taint keys with k8s.scaleway.com/ when provisioned
+        # via pool tags (format "taint=<key>=<value>:<Effect>").
+        - key: k8s.scaleway.com/workload
           operator: Equal
           value: functions
           effect: NoSchedule

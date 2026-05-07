@@ -133,14 +133,13 @@ resource "scaleway_k8s_pool" "functions" {
   autoscaling = true
   autohealing = true
 
-  tags = ["eurobase", var.environment, "functions-isolation"]
-
-  taints = [
-    {
-      key    = "workload"
-      value  = "functions"
-      effect = "NoSchedule"
-    }
+  # Scaleway encodes K8s taints via the tags argument:
+  # "taint=<key>=<value>:<Effect>" → node taint k8s.scaleway.com/<key>=<value>:<Effect>
+  tags = [
+    "eurobase",
+    var.environment,
+    "functions-isolation",
+    "taint=workload=functions:NoSchedule",
   ]
 }
 
