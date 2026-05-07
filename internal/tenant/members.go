@@ -558,6 +558,11 @@ func consoleURL() string {
 	return defaultConsoleURL
 }
 
+// issueTrackerURL points to the public GitHub issues for the Eurobase
+// repository. Surfaced in invite emails so collaborators have a clear
+// place to file bug reports or feature requests.
+const issueTrackerURL = "https://github.com/STGime/euroback/issues"
+
 func renderInviteEmail(projectName, recipientEmail, role, inviterEmail, token string) string {
 	acceptURL := fmt.Sprintf("%s/invite?token=%s", consoleURL(), token)
 
@@ -573,7 +578,12 @@ func renderInviteEmail(projectName, recipientEmail, role, inviterEmail, token st
     </a>
   </p>
   <p style="color: #6b7280; font-size: 13px;">This invitation expires in 7 days. If you don't have a Eurobase account, sign up first and then click the link above.</p>
-  <p style="color: #9ca3af; font-size: 12px; margin-top: 32px;">If you didn't expect this invitation, you can safely ignore this email.</p>
+  <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0 16px;">
+  <p style="color: #6b7280; font-size: 13px; margin: 0 0 8px;">
+    Found a bug or have a feature request? <a href="%s" style="color: #2563eb; text-decoration: underline;">Open an issue on GitHub</a>
+    — Eurobase is open source and your feedback shapes the roadmap.
+  </p>
+  <p style="color: #9ca3af; font-size: 12px; margin: 16px 0 0;">If you didn't expect this invitation, you can safely ignore this email.</p>
 </body>
-</html>`, inviterEmail, projectName, role, acceptURL)
+</html>`, inviterEmail, projectName, role, acceptURL, issueTrackerURL)
 }
