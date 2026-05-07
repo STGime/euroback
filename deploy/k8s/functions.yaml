@@ -61,6 +61,14 @@ spec:
               value: "200"
             - name: CODE_CACHE_TTL_SECONDS
               value: "300"
+            # Closes Phase 2 of GHSA-7428-mvpp-rhr7 layer 3: strict
+            # HMAC verification on every /invoke request. Missing or
+            # invalid signature → 401. Soft-mode warnings observed in
+            # logs after the PR 3c rollout window stabilised should now
+            # be impossible — every gateway pod has the secret and
+            # signs its requests.
+            - name: FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED
+              value: "true"
       imagePullSecrets:
         - name: scw-registry
 ---
