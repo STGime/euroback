@@ -20,6 +20,17 @@ spec:
         app: functions
         component: runtime
     spec:
+      # Pin to the isolated functions node pool (see deploy/terraform/main.tf:
+      # scaleway_k8s_pool.functions). Scaleway labels each pool's nodes with
+      # k8s.scaleway.com/pool-name automatically. The toleration matches the
+      # NoSchedule taint on that pool so functions pods land there exclusively.
+      nodeSelector:
+        k8s.scaleway.com/pool-name: functions-pool
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: functions
+          effect: NoSchedule
       containers:
         - name: deno-runner
           image: rg.fr-par.scw.cloud/eurobase-app/functions:latest

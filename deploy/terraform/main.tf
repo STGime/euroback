@@ -113,6 +113,37 @@ resource "scaleway_k8s_pool" "eurobase" {
   tags = ["eurobase", var.environment]
 }
 
+# Dedicated node pool for the functions runner.
+#
+# Rationale: the functions runner executes untrusted tenant JS via AsyncFunction
+# on shared nodes. A kernel exploit (see CVE-2026-31431 hotfix) from a tenant
+# function can escape the container and reach co-located pods. Isolating the
+# functions workload on its own pool means gateway/worker pods — and the DB
+# credentials they carry — are never co-located with tenant code.
+#
+# The pool carries a NoSchedule taint; only functions pods (which have the
+# matching toleration) will land here. All other workloads stay on eurobase-pool.
+resource "scaleway_k8s_pool" "functions" {
+  cluster_id  = scaleway_k8s_cluster.eurobase.id
+  name        = "functions-pool"
+  node_type   = "DEV1-S"
+  size        = 1
+  min_size    = 1
+  max_size    = 3
+  autoscaling = true
+  autohealing = true
+
+  tags = ["eurobase", var.environment, "functions-isolation"]
+
+  taints = [
+    {
+      key    = "workload"
+      value  = "functions"
+      effect = "NoSchedule"
+    }
+  ]
+}
+
 # ---------------------------------------------------------------------------
 # Managed PostgreSQL 16
 # ---------------------------------------------------------------------------
