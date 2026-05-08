@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
@@ -653,21 +654,35 @@ func buildTenantResolver(pool *pgxpool.Pool) realtime.TenantResolver {
 	}
 }
 
-// devAuthMiddleware injects a hardcoded test user for local development.
+// devAuthMiddleware injects a test user for local development.
 // An Authorization header must still be present (any value works), so that
 // "no auth" requests are correctly rejected with 401.
-// This must NEVER be used in production.
+// This middleware is wired only when DEV_MODE=true, which is fenced at
+// startup against production hosts (cmd/gateway/main.go).
+//
+// Closes #60: subject/email come from env vars (DEV_AUTH_SUBJECT /
+// DEV_AUTH_EMAIL) so the binary itself doesn't carry a hardcoded
+// backdoor identity. Defaults are kept for ergonomic local dev.
+const (
+	defaultDevSubject = "00000000-0000-0000-0000-000000000001"
+	defaultDevEmail   = "dev@eurobase.eu"
+)
+
 func devAuthMiddleware(next http.Handler) http.Handler {
+	subject := os.Getenv("DEV_AUTH_SUBJECT")
+	if subject == "" {
+		subject = defaultDevSubject
+	}
+	email := os.Getenv("DEV_AUTH_EMAIL")
+	if email == "" {
+		email = defaultDevEmail
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
 			return
 		}
-
-		subject := "00000000-0000-0000-0000-000000000001"
-		email := "dev@eurobase.eu"
-
 		ctx := auth.ContextWithClaims(r.Context(), &auth.Claims{
 			Subject: subject,
 			Email:   email,

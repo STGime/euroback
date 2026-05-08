@@ -53,7 +53,55 @@ var (
 	validSlugRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 )
 
+// reservedSlugs are subdomains the platform reserves for its own use
+// (current or future). Closes #49: previously a tenant could grab a
+// project slug like "www" or "admin" and collide with planned platform
+// subdomains, OAuth callback paths, or brand-impersonation routes.
+//
+// Lowercase keys; check against strings.ToLower(slug). Add to this list
+// if a new platform subdomain is planned.
+var reservedSlugs = map[string]bool{
+	"account":     true,
+	"admin":       true,
+	"api":         true,
+	"app":         true,
+	"auth":        true,
+	"billing":     true,
+	"blog":        true,
+	"callback":    true,
+	"cdn":         true,
+	"console":     true,
+	"dashboard":   true,
+	"docs":        true,
+	"eurobase":    true,
+	"help":        true,
+	"login":       true,
+	"mail":        true,
+	"marketing":   true,
+	"oauth":       true,
+	"public":      true,
+	"security":    true,
+	"signup":      true,
+	"sso":         true,
+	"static":      true,
+	"status":      true,
+	"superadmin":  true,
+	"support":     true,
+	"system":      true,
+	"www":         true,
+}
+
+// slugIsReserved reports whether the slug collides with a platform-
+// reserved subdomain or path.
+func slugIsReserved(slug string) bool {
+	return reservedSlugs[strings.ToLower(slug)]
+}
+
 // slugify converts a project name into a URL-safe slug.
+//
+// Reserved slugs (see slugIsReserved) get a "-app" suffix automatically
+// when auto-derived. Explicitly-supplied reserved slugs are rejected at
+// the handler.
 func slugify(name string) string {
 	s := strings.ToLower(strings.TrimSpace(name))
 	s = strings.ReplaceAll(s, " ", "-")
@@ -61,6 +109,9 @@ func slugify(name string) string {
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "project"
+	}
+	if slugIsReserved(s) {
+		s = s + "-app"
 	}
 	return s
 }
@@ -107,6 +158,10 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		if req.Slug != "" {
 			if !validSlugRe.MatchString(req.Slug) {
 				http.Error(w, `{"error":"slug must be lowercase alphanumeric with hyphens (e.g. my-app)"}`, http.StatusBadRequest)
+				return
+			}
+			if slugIsReserved(req.Slug) {
+				http.Error(w, `{"error":"this slug is reserved for platform use — please choose a different name"}`, http.StatusBadRequest)
 				return
 			}
 		}

@@ -155,6 +155,12 @@ func (c *AuthConfig) GetOAuthProvider(name string) (OAuthProviderConfig, bool) {
 }
 
 // IsRedirectURLAllowed checks whether the given URL is in the allowed redirect list.
+//
+// Path matching requires a segment boundary — closes #48. Previously a
+// substring HasPrefix let `https://app.example.com/cb-evil` match an
+// allowed entry of `https://app.example.com/cb`, which (combined with a
+// foothold on a same-host path) would let an attacker intercept the OAuth
+// authorization code.
 func (c *AuthConfig) IsRedirectURLAllowed(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -166,11 +172,20 @@ func (c *AuthConfig) IsRedirectURLAllowed(rawURL string) bool {
 		if err != nil {
 			continue
 		}
-		// Match scheme + host. If allowed URL has a path, the candidate must start with it.
-		if a.Scheme == u.Scheme && a.Host == u.Host {
-			if a.Path == "" || a.Path == "/" || strings.HasPrefix(candidate, a.Scheme+"://"+a.Host+a.Path) {
-				return true
-			}
+		if a.Scheme != u.Scheme || a.Host != u.Host {
+			continue
+		}
+		// Empty/root allowed-path → any path on the host is fine.
+		if a.Path == "" || a.Path == "/" {
+			return true
+		}
+		allowedURL := a.Scheme + "://" + a.Host + a.Path
+		// Exact path match, OR the candidate path is a deeper segment
+		// (must start with allowed + "/" to enforce a boundary).
+		// `u.Path` parsed off the candidate already strips query and
+		// fragment, so segment-boundary on `/` is the only concern.
+		if candidate == allowedURL || strings.HasPrefix(candidate, allowedURL+"/") {
+			return true
 		}
 	}
 	return false

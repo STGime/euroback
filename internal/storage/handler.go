@@ -79,6 +79,42 @@ func isAuthenticated(r *http.Request) (string, bool) {
 	return "", false
 }
 
+// validateStorageKey rejects object keys that would be unsafe to round-
+// trip through any future code path that joins them into a filesystem
+// path or local URL. Closes #61. Today's S3 client treats keys as opaque
+// blobs so traversal is bounded, but the moment any handler or signed-
+// URL path-prefix logic joins these, untrusted keys become a real
+// path-traversal vector.
+//
+// Rules:
+//   - non-empty
+//   - ≤ 1024 chars (S3 key spec is 1024; we mirror)
+//   - no leading "/" — that flips path-join semantics
+//   - no ".." segment — classic traversal
+//   - no NUL or control bytes (< 0x20, 0x7f)
+func validateStorageKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("key is required")
+	}
+	if len(key) > 1024 {
+		return fmt.Errorf("key too long (max 1024 chars)")
+	}
+	if strings.HasPrefix(key, "/") {
+		return fmt.Errorf("key must not start with /")
+	}
+	for _, seg := range strings.Split(key, "/") {
+		if seg == ".." {
+			return fmt.Errorf("key must not contain .. segment")
+		}
+	}
+	for _, r := range key {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("key must not contain control characters")
+		}
+	}
+	return nil
+}
+
 // bucketForRequest derives the tenant's S3 bucket name from the
 // authenticated ProjectContext. The bucket naming convention is
 // "eurobase-{slug}".
@@ -169,8 +205,8 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	if key == "" {
 		key = header.Filename
 	}
-	if key == "" {
-		http.Error(w, `{"error":"file name or key is required"}`, http.StatusBadRequest)
+	if err := validateStorageKey(key); err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -247,8 +283,8 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := extractWildcardKey(r)
-	if key == "" {
-		http.Error(w, `{"error":"object key is required"}`, http.StatusBadRequest)
+	if err := validateStorageKey(key); err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -310,8 +346,8 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := extractWildcardKey(r)
-	if key == "" {
-		http.Error(w, `{"error":"object key is required"}`, http.StatusBadRequest)
+	if err := validateStorageKey(key); err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -442,8 +478,8 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if req.Key == "" {
-		http.Error(w, `{"error":"key is required"}`, http.StatusBadRequest)
+	if err := validateStorageKey(req.Key); err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
 	if req.Operation != "upload" && req.Operation != "download" {
