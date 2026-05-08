@@ -26,7 +26,8 @@
 		password_min_length: 8,
 		require_email_confirmation: false,
 		session_duration: '168h',
-		redirect_urls: ['http://localhost:3000']
+		redirect_urls: ['http://localhost:3000'],
+		cors_origins: []
 	};
 
 	function loadConfig(): AuthConfig {
@@ -37,7 +38,8 @@
 			password_min_length: cfg.password_min_length || defaults.password_min_length,
 			require_email_confirmation: cfg.require_email_confirmation ?? defaults.require_email_confirmation,
 			session_duration: cfg.session_duration || defaults.session_duration,
-			redirect_urls: cfg.redirect_urls?.length ? cfg.redirect_urls : defaults.redirect_urls
+			redirect_urls: cfg.redirect_urls?.length ? cfg.redirect_urls : defaults.redirect_urls,
+			cors_origins: cfg.cors_origins ?? []
 		};
 	}
 
@@ -48,6 +50,7 @@
 	let passwordMinLength = $state(8);
 	let sessionDuration = $state('168h');
 	let redirectUrls = $state('http://localhost:3000');
+	let corsOrigins = $state('');
 	let googleEnabled = $state(false);
 	let googleClientId = $state('');
 	let googleClientSecret = $state('');
@@ -97,6 +100,7 @@
 			passwordMinLength = cfg.password_min_length;
 			sessionDuration = cfg.session_duration;
 			redirectUrls = cfg.redirect_urls.join('\n');
+			corsOrigins = (cfg.cors_origins ?? []).join('\n');
 
 			const oauthCfg = projectCtx.project?.auth_config?.oauth_providers;
 			if (oauthCfg?.google) {
@@ -199,7 +203,8 @@
 				password_min_length: passwordMinLength,
 				require_email_confirmation: requireEmailConfirmation,
 				session_duration: sessionDuration,
-				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean)
+				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean),
+				cors_origins: corsOrigins.split('\n').map(u => u.trim()).filter(Boolean)
 			};
 			const updated = await api.updateProject(projectCtx.id, { auth_config: config });
 
@@ -898,6 +903,18 @@
 							bind:value={redirectUrls}
 							rows="3"
 							placeholder="http://localhost:3000&#10;https://myapp.com"
+							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						></textarea>
+					</div>
+
+					<div>
+						<label for="cors-origins" class="block text-sm font-medium text-gray-700">Allowed CORS origins</label>
+						<p class="text-xs text-gray-400 mt-0.5">Browser origins permitted to call this project's API. One per line, in the form <code class="bg-gray-100 border border-gray-200 rounded px-1">scheme://host[:port]</code> with no path or trailing slash (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">http://localhost:3000</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">https://app.example.com</code>). Eurobase platform origins (<code class="bg-gray-100 border border-gray-200 rounded px-1">*.eurobase.app</code>) are always allowed — this list is additive for your own apps. Leave empty if you only call the API from a server.</p>
+						<textarea
+							id="cors-origins"
+							bind:value={corsOrigins}
+							rows="3"
+							placeholder="http://localhost:3000&#10;https://app.example.com"
 							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 						></textarea>
 					</div>

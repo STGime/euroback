@@ -34,6 +34,9 @@ export interface AuthConfig {
 	require_email_confirmation: boolean;
 	session_duration: string;
 	redirect_urls: string[];
+	/** Browser origins (scheme://host[:port]) that may call this project's API.
+	 * Platform origins (eurobase.app, *.eurobase.app) are always allowed; this list is additive. */
+	cors_origins?: string[];
 }
 
 export interface PlatformProfile {

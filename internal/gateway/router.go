@@ -59,14 +59,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(SecurityHeadersMiddleware)
-	r.Use(NewCORSMiddleware(allowedOrigins))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
 	// Subdomain resolution — resolves {slug}.eurobase.app to a project context.
+	// Must run BEFORE CORS so per-project cors_origins can be looked up
+	// during the preflight (browsers strip auth headers on OPTIONS, so
+	// the apikey middleware can't be the source of project context for
+	// preflight).
 	if subdomainMw != nil {
 		r.Use(subdomainMw.Handler)
 	}
+
+	// CORS — checks origin against the global allowlist, then against
+	// the per-project cors_origins from AuthConfig if a subdomain
+	// resolved a project. See cors.go for the full layering.
+	r.Use(NewCORSMiddleware(allowedOrigins))
 
 	isDev := len(devMode) > 0 && devMode[0]
 

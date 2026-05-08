@@ -544,6 +544,7 @@ await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 					<li><strong>Email confirmation</strong> &mdash; require users to verify their email before signing in</li>
 					<li><strong>Session duration</strong> &mdash; how long access tokens remain valid (1h to 30 days)</li>
 					<li><strong>Redirect URLs</strong> &mdash; whitelist URLs your app can redirect to after auth callbacks</li>
+					<li><strong>CORS origins</strong> &mdash; browser origins (scheme://host[:port]) allowed to call this project's API. Add your dev and production app origins. Eurobase platform origins (<code class="bg-gray-100 border border-gray-200 rounded px-1">*.eurobase.app</code>) are always allowed.</li>
 				</ul>
 
 				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">

@@ -36,12 +36,20 @@ type OAuthProviderConfig struct {
 
 // AuthConfig holds the per-project authentication configuration.
 type AuthConfig struct {
-	Providers                map[string]ProviderConfig        `json:"providers"`
-	OAuthProviders           map[string]OAuthProviderConfig   `json:"oauth_providers,omitempty"`
-	PasswordMinLength        int                              `json:"password_min_length"`
-	RequireEmailConfirmation bool                             `json:"require_email_confirmation"`
-	SessionDuration          string                           `json:"session_duration"`
-	RedirectURLs             []string                         `json:"redirect_urls"`
+	Providers                map[string]ProviderConfig      `json:"providers"`
+	OAuthProviders           map[string]OAuthProviderConfig `json:"oauth_providers,omitempty"`
+	PasswordMinLength        int                            `json:"password_min_length"`
+	RequireEmailConfirmation bool                           `json:"require_email_confirmation"`
+	SessionDuration          string                         `json:"session_duration"`
+	RedirectURLs             []string                       `json:"redirect_urls"`
+	// CORSOrigins are browser origins permitted to call this project's
+	// API endpoints. Format: scheme + host + optional :port, no path.
+	// Examples: "http://localhost:3000", "https://app.example.com".
+	// The platform's own origins (eurobase.app, *.eurobase.app, plus any
+	// gateway-configured ALLOWED_ORIGINS) are always allowed regardless
+	// of this setting; this list is purely additive for tenant-owned
+	// browser apps. Empty list = same as default (platform origins only).
+	CORSOrigins []string `json:"cors_origins,omitempty"`
 }
 
 // allowedSessionDurations is the set of valid session duration values.
@@ -79,6 +87,22 @@ func (c *AuthConfig) Validate() error {
 		u, err := url.Parse(rawURL)
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return fmt.Errorf("invalid redirect URL: %s", rawURL)
+		}
+	}
+
+	for _, raw := range c.CORSOrigins {
+		// CORS origin format: scheme://host[:port], no path. Browsers
+		// send the Origin header in this exact shape; mismatches don't
+		// match.
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("invalid cors_origin: %s (use scheme://host[:port])", raw)
+		}
+		if u.Path != "" && u.Path != "/" {
+			return fmt.Errorf("cors_origin must not include a path: %s", raw)
+		}
+		if u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("cors_origin must not include query or fragment: %s", raw)
 		}
 	}
 
@@ -152,6 +176,26 @@ func (c *AuthConfig) GetOAuthProvider(name string) (OAuthProviderConfig, bool) {
 	}
 	p, ok := c.OAuthProviders[name]
 	return p, ok && p.Enabled && p.ClientID != ""
+}
+
+// IsCORSOriginAllowed reports whether the given browser Origin header
+// matches one of the project's configured cors_origins entries. Match
+// is exact on scheme+host+port — the spec requires browsers to send
+// the Origin in canonical form, so substring matches and trailing
+// slashes are not accepted.
+func (c *AuthConfig) IsCORSOriginAllowed(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	for _, allowed := range c.CORSOrigins {
+		// Trim a trailing slash someone may have stored — purely a
+		// quality-of-life fix, the Validate() above also strips it on
+		// write. Browsers themselves never send a trailing slash.
+		if strings.TrimRight(allowed, "/") == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // IsRedirectURLAllowed checks whether the given URL is in the allowed redirect list.
