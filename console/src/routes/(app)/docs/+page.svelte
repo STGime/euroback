@@ -948,7 +948,7 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 
 				<h3 class="text-lg font-semibold text-gray-900">Auth helper functions</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Eurobase provides built-in functions you can use in RLS policies to access the current user's identity:
+					Eurobase provides built-in functions you can use in RLS policies to access the current user's identity. Both the native (no-dot) and Supabase-style (<code class="bg-gray-100 border border-gray-200 rounded px-1">auth.*</code>) forms are equivalent &mdash; pick whichever reads better. <code class="bg-gray-100 border border-gray-200 rounded px-1">is_service_role()</code> is true for service-key calls and lets you write a single policy that admits both end-users and trusted server-side code.
 				</p>
 
 				<div class="rounded-lg border border-gray-200 overflow-hidden">
@@ -961,11 +961,20 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-gray-100">
-							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_uid()</td><td class="px-3 py-1.5 text-gray-500">uuid</td><td class="px-3 py-1.5 text-gray-500">Current user's ID</td></tr>
-							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_email()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">Current user's email</td></tr>
-							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_role()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">'authenticated' or 'anon'</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_uid() / auth.uid()</td><td class="px-3 py-1.5 text-gray-500">uuid</td><td class="px-3 py-1.5 text-gray-500">Current user's ID, NULL when no end-user context</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_email() / auth.email()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">Current user's email</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_role() / auth.role()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">'service_role', 'authenticated', or 'anon'</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">is_service_role()</td><td class="px-3 py-1.5 text-gray-500">boolean</td><td class="px-3 py-1.5 text-gray-500">True for calls made with the service key (bypasses end-user RLS)</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth.jwt()</td><td class="px-3 py-1.5 text-gray-500">jsonb</td><td class="px-3 py-1.5 text-gray-500">{'{'} sub, email, role {'}'} &mdash; for policies that read JWT claims</td></tr>
 						</tbody>
 					</table>
+				</div>
+
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 mt-3">
+					<p class="text-xs text-amber-800">
+						<strong>Heads up &mdash; do not redefine <code class="bg-amber-100 border border-amber-200 rounded px-1">auth.uid()</code> in your migrations.</strong>
+						The Supabase boilerplate that reads <code class="bg-amber-100 border border-amber-200 rounded px-1">request.jwt.claims</code> won't work here &mdash; Eurobase uses a different session GUC. The built-in <code class="bg-amber-100 border border-amber-200 rounded px-1">auth.uid()</code> already does the right thing.
+					</p>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Common RLS patterns</h3>
