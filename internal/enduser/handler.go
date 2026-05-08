@@ -92,10 +92,13 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 			if email != "" {
 				ratelimit.RecordSigninFailure(rl, r.Context(), email)
 			}
-			if err.Error() == "email_not_confirmed" {
-				writeJSON(w, map[string]string{"error": "email_not_confirmed", "message": "Please verify your email address before signing in. Check your inbox."}, http.StatusForbidden)
-				return
-			}
+			// Closes #53: previously a correct password against an
+			// unverified account returned 403 email_not_confirmed,
+			// which lets an attacker probe both account existence AND
+			// password correctness. We now collapse both rejection
+			// reasons into the same 401. Verification reminders should
+			// be delivered out-of-band (TODO: send a hint email when we
+			// know the account exists but is unverified).
 			writeJSON(w, map[string]string{"error": "invalid email or password"}, http.StatusUnauthorized)
 			return
 		}

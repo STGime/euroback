@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
@@ -64,8 +65,14 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 		}
 
 		// Update last_used_at (fire and forget).
+		// Closes #63: r.Context() is canceled when the response is
+		// written, so the goroutine raced with cancellation and the
+		// UPDATE silently dropped on fast handlers. context.WithoutCancel
+		// preserves the values (request id, audit actor) but detaches
+		// from the cancel signal.
+		bgCtx := context.WithoutCancel(r.Context())
 		go func() {
-			_, _ = m.pool.Exec(r.Context(),
+			_, _ = m.pool.Exec(bgCtx,
 				`UPDATE api_keys SET last_used_at = now() WHERE key_hash = $1`,
 				keyHash,
 			)
@@ -81,9 +88,17 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 	})
 }
 
+// safePrefix returns a key fragment safe to log: the literal prefix
+// (eb_pk_ / eb_sk_) plus 6 hex chars of entropy, which is enough to
+// disambiguate two keys per project visually but not enough to be
+// useful in offline brute-force.
+//
+// Closes #59 — the previous 14-char window leaked ~32 bits of key
+// entropy into log pipelines.
 func safePrefix(key string) string {
-	if len(key) > 14 {
-		return key[:14] + "..."
+	const window = 12 // 6-char prefix + 6 hex chars
+	if len(key) > window {
+		return key[:window] + "..."
 	}
 	return "***"
 }
