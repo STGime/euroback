@@ -3,17 +3,35 @@ package gateway
 import (
 	"net/http"
 	"strings"
+
+	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/tenant"
 )
 
 // NewCORSMiddleware builds a CORS middleware that only reflects the Origin
 // header for allowlisted origins. Requests from other origins get no CORS
 // response headers — browsers block them by default.
 //
-// Each allowed entry is either an exact origin ("https://console.eurobase.app")
-// or a wildcard ("https://*.eurobase.app") where the `*` matches a single
-// hostname label. Scheme must match exactly; `*` is scheme-scoped.
+// Two allowlist layers:
 //
-// With an empty allowlist, no cross-origin request is permitted.
+//  1. **Global** — passed in here at construction time. Each entry is
+//     either an exact origin ("https://console.eurobase.app") or a
+//     wildcard ("https://*.eurobase.app") where `*` matches a single
+//     hostname label. This covers platform origins.
+//
+//  2. **Per-project** — read at request time from
+//     `auth.ProjectFromContext(r.Context()).AuthConfig.cors_origins`.
+//     Tenant-controlled, set via PATCH /v1/tenants/{id}. Closes the
+//     "browser app on a tenant's own domain can't talk to its own
+//     project" gap reported by beta testers — the global allowlist
+//     is for the platform, this layer is for each tenant's apps.
+//
+// To make per-project work, this middleware must run AFTER the
+// subdomain middleware (so the ProjectContext is set when we look it
+// up). For non-subdomain requests (apex, console paths), no project
+// context is available at preflight time — those fall back to the
+// global allowlist. Beta testers hitting `{slug}.eurobase.app` get
+// per-project CORS automatically.
 func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 	patterns := make([]originPattern, 0, len(allowedOrigins))
 	for _, o := range allowedOrigins {
@@ -27,11 +45,26 @@ func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			if origin == "" || !originAllowed(origin, patterns) {
-				// Not a cross-origin request, or origin is not allowed.
-				// For preflight from a disallowed origin, respond 204 with no
-				// CORS headers so the browser rejects the real request.
-				if r.Method == http.MethodOptions && origin != "" {
+			if origin == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			allowed := originAllowed(origin, patterns)
+			if !allowed {
+				if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil && len(pc.AuthConfig) > 0 {
+					cfg := tenant.ParseAuthConfig(pc.AuthConfig)
+					if cfg.IsCORSOriginAllowed(origin) {
+						allowed = true
+					}
+				}
+			}
+
+			if !allowed {
+				// Not allowed by global or per-project. For preflight
+				// respond 204 with no CORS headers so the browser
+				// rejects the real request.
+				if r.Method == http.MethodOptions {
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
