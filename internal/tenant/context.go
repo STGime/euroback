@@ -136,6 +136,13 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 				SchemaName: schema,
 				Slug:       slug,
 			})
+			// Console traffic operates with service-role access — the
+			// admin is authorised against this project via ResolveRole
+			// above. Without this, applyRLSContext defaults to
+			// role='anon' and assertObjectVisible's storage_objects
+			// SELECT is filtered to nothing, so the console returned
+			// 404 on every download/delete (closes #87 second half).
+			ctx = query.ContextWithKeyType(ctx, "secret")
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
