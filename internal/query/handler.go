@@ -461,6 +461,17 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 // handleQueryError writes the appropriate HTTP error response for a query engine error.
 // Returns true if it handled the error, false if the caller should use a generic 500.
 func handleQueryError(w http.ResponseWriter, err error) bool {
+	if isRLSViolation(err) {
+		policy := extractRLSPolicy(err)
+		body := map[string]string{"error": "row-level security policy denied this operation"}
+		if policy != "" {
+			body["policy"] = policy
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(body)
+		return true
+	}
 	if isUniqueViolation(err) {
 		field := extractConflictField(err)
 		msg := "a record with this value already exists"
@@ -554,6 +565,32 @@ func extractConstraintMessage(err error) string {
 func isUniqueViolation(err error) bool {
 	msg := err.Error()
 	return contains(msg, "SQLSTATE 23505") || contains(msg, "duplicate key") || contains(msg, "unique constraint")
+}
+
+// isRLSViolation checks if the error is a PostgreSQL row-level security check
+// failure (SQLSTATE 42501, "new row violates row-level security policy").
+// SELECT-side denials silently filter rows and never reach this path; only
+// INSERT/UPDATE/DELETE that fail WITH CHECK or USING surface as errors.
+func isRLSViolation(err error) bool {
+	msg := err.Error()
+	return contains(msg, "new row violates row-level security policy") ||
+		(contains(msg, "SQLSTATE 42501") && contains(msg, "row-level security"))
+}
+
+// extractRLSPolicy pulls the policy name out of a Postgres RLS violation
+// message of the form: `new row violates row-level security policy "<name>" for table "<t>"`.
+func extractRLSPolicy(err error) string {
+	msg := err.Error()
+	const marker = "row-level security policy \""
+	idx := strings.Index(msg, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := msg[idx+len(marker):]
+	if end := strings.IndexByte(rest, '"'); end >= 0 {
+		return rest[:end]
+	}
+	return ""
 }
 
 // extractConflictField tries to extract the column name from a unique violation error.
