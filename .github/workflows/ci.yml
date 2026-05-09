@@ -206,6 +206,10 @@ jobs:
           kubectl apply -f deploy/k8s/security/disable-algif-aead.yaml
           kubectl apply -f deploy/k8s/ingress.yaml
           kubectl apply -f deploy/k8s/functions.yaml
+          # NetworkPolicy must apply BEFORE the pod rollout so the new
+          # net-allowed worker permissions never have a window of
+          # reaching cluster-internal IPs.
+          kubectl apply -f deploy/k8s/functions-networkpolicy.yaml
           kubectl apply -f deploy/k8s/mcp-server.yaml
 
       - name: Run database migrations

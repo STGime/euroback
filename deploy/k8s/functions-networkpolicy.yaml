@@ -1,0 +1,57 @@
+# Egress NetworkPolicy for the functions runner pod.
+#
+# Closes #83 (defence in depth): user code inside an edge function now
+# has `permissions: { net: true }` at the Deno layer so it can call
+# external APIs (Stripe, OpenAI, fal.ai). Without this NetworkPolicy,
+# that net capability would also reach cluster-internal IPs — gateway,
+# console, MCP server, other tenants' pods, etcd. This policy blocks
+# all egress to RFC1918 + link-local ranges, allows DNS to kube-dns,
+# and lets traffic to the public internet through.
+#
+# Scope: applies only to pods labelled `app: functions`. Other
+# Deployments are unaffected.
+#
+# Caveat: the managed Postgres and Redis the runner connects to are at
+# public Scaleway IPs (51.158.x, 212.47.x), so they remain reachable.
+# If we ever move those to a private VPC, this policy needs updated
+# allow rules.
+#
+# Cluster requirement: the CNI must enforce NetworkPolicy. Scaleway
+# Kapsule's default CNI (Cilium) does. If we ever switch CNIs we must
+# verify policy enforcement before relying on this for isolation.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: functions-egress
+  namespace: eurobase
+spec:
+  podSelector:
+    matchLabels:
+      app: functions
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS resolution against kube-dns. UDP/53 is the standard;
+    # TCP/53 covers large responses (DNSSEC, big TXT records).
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow everything to the public internet, except RFC1918 and
+    # link-local. This covers Scaleway's managed Postgres/Redis (they
+    # sit on public IPs) plus any third-party API the function calls.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
