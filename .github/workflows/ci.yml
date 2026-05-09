@@ -77,10 +77,12 @@ jobs:
       - name: Run tests
         # --no-check: skip type-checking remote std imports (slow, not what
         # this job is for — Docker build catches type errors at image-build
-        # time). Permissions: read for blob-URL worker bootstrap, env so
-        # vault_test can set/clear VAULT_ENCRYPTION_KEY, net for the std
-        # assert imports.
-        run: deno test --no-check --allow-read --allow-env --allow-net functions-runner/
+        # time). --unstable-worker-options: needed for sandbox_test.ts
+        # which exercises the `Worker { deno: { permissions: 'none' } }`
+        # API the runtime relies on. Permissions: read for blob-URL worker
+        # bootstrap, env so vault_test can set/clear VAULT_ENCRYPTION_KEY,
+        # net for the std assert imports.
+        run: deno test --no-check --unstable-worker-options --allow-read --allow-env --allow-net functions-runner/
 
   # -------------------------------------------------------------------------
   # MCP server build check
