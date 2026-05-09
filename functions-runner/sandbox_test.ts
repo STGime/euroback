@@ -1,21 +1,20 @@
 // End-to-end Deno tests for the worker-isolate sandbox introduced in
-// PR 3b (advisory GHSA-7428-mvpp-rhr7 layer 2).
+// PR 3b (advisory GHSA-7428-mvpp-rhr7 layer 2). Updated for #83 so the
+// worker now has `net: true` to let edge functions call external APIs;
+// internal egress is blocked by k8s NetworkPolicy in production rather
+// than at the Deno permissions layer.
 //
-// These tests spawn a real Web Worker with the same `permissions: 'none'`
+// These tests spawn a real Web Worker with the same permissions
 // configuration the runner uses in production, load user code into it,
-// invoke it, and assert that capability boundaries hold:
+// invoke it, and assert that the credential-isolation boundaries hold:
 //
-//   - Reading Deno.env returns nothing (`Deno.env.get` is undefined or throws).
+//   - Reading Deno.env returns nothing (load-bearing — protects
+//     VAULT_ENCRYPTION_KEY, DATABASE_URL, etc.).
 //   - Reading the filesystem fails.
-//   - Outbound network connections fail.
-//   - postMessage RPC for db.sql is the only DB path.
+//   - postMessage RPC for db.sql / vault.get is the only DB / vault path.
 //
-// Run locally with:
-//   deno test --no-check --allow-read --allow-net=blob: sandbox_test.ts
-//
-// (--allow-read for the parent to read worker_bootstrap.js; --allow-net=blob:
-//  for blob URL loading. The PARENT having permissions does not grant them
-//  to the worker; permissions: 'none' is the load-bearing setting.)
+// Outbound network is intentionally allowed; the corresponding test was
+// dropped in #83.
 //
 // CI runs these via the test-functions-runner job (.github/workflows/ci.yml).
 
@@ -48,7 +47,21 @@ function spawnAndInvoke(opts: {
   return new Promise((resolve) => {
     const worker = new Worker(BOOTSTRAP_PATH, {
       type: "module",
-      deno: { permissions: "none" },
+      deno: {
+        // Mirror the production permission set in server.ts. Every key
+        // is listed explicitly because unspecified permissions inherit
+        // from the parent process.
+        permissions: {
+          net: true,
+          env: false,
+          read: false,
+          write: false,
+          run: false,
+          ffi: false,
+          sys: false,
+          import: false,
+        },
+      },
     });
     const rpcCalls: { type: string; payload: unknown }[] = [];
     let settled = false;
@@ -205,34 +218,11 @@ Deno.test("user JS cannot Deno.readTextFile arbitrary paths", async () => {
   assertStrictEquals(parsed.leaked, false, "filesystem read succeeded — sandbox is broken");
 });
 
-Deno.test("user JS cannot fetch arbitrary URLs", async () => {
-  const result = await spawnAndInvoke({
-    userCode: `
-      globalThis.handler = async () => {
-        let ok = false;
-        let errMsg = null;
-        try {
-          // Non-routable address; should fail fast either with
-          // PermissionDenied (preferred) or network unreachable.
-          const r = await fetch("http://169.254.169.254/latest/meta-data/", { signal: AbortSignal.timeout(1000) });
-          ok = r.ok;
-        } catch (e) {
-          errMsg = e && e.message ? e.message : String(e);
-        }
-        return new Response(JSON.stringify({ leaked: ok, errMsg }), {
-          headers: { "Content-Type": "application/json" },
-        });
-      };
-    `,
-  });
-  assert(result.ok, "invocation failed: " + result.error);
-  const parsed = JSON.parse(result.body!);
-  assertStrictEquals(parsed.leaked, false, "fetch to 169.254 succeeded — net permission leaked");
-  assert(
-    typeof parsed.errMsg === "string" && parsed.errMsg.length > 0,
-    "expected an error message from the blocked fetch",
-  );
-});
+// (The previous "user JS cannot fetch arbitrary URLs" test was removed
+// in #83 — outbound network is now intentionally allowed at the Deno
+// permission layer. Cluster-internal egress is blocked by NetworkPolicy
+// at runtime, which CI cannot exercise; that's verified manually after
+// each deploy.)
 
 // ──────────────────────────────────────────────────────────────────
 // Functional tests — user JS still does what it should via the RPC bridge.

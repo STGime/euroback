@@ -749,7 +749,7 @@
 														<td class="px-4 py-1.5 font-mono">{log.request_method}</td>
 														<td class="px-4 py-1.5 font-mono {statusColor(log.status)}">{log.status}</td>
 														<td class="px-4 py-1.5">{log.duration_ms}ms</td>
-														<td class="px-4 py-1.5 text-red-600 max-w-[200px] truncate">{log.error || ''}</td>
+														<td class="px-4 py-1.5 text-red-600 align-top whitespace-pre-wrap break-words max-w-xl"><code class="text-[11px] leading-snug">{log.error || ''}</code></td>
 														<td class="px-4 py-1.5 text-gray-500">{new Date(log.created_at).toLocaleString()}</td>
 													</tr>
 												{/each}

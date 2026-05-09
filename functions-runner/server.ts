@@ -249,12 +249,31 @@ async function executeFunction(
   };
 
   const bootstrapUrl = await getBootstrapBlobUrl();
-  // permissions: 'none' is the load-bearing security property here. Any
-  // future change to this options object should preserve it.
+  // Worker capability boundaries — closes #83. We allow outbound `net`
+  // because edge functions need to call external APIs (Stripe, OpenAI,
+  // fal.ai, etc.); cluster-internal egress (Postgres, gateway, kube-dns
+  // beyond UDP/53) is blocked by the k8s NetworkPolicy on the functions
+  // Deployment, so user JS still can't reach internal services. Every
+  // other permission is explicitly denied to keep credential isolation
+  // intact (env was the original load-bearing property — sandbox_test
+  // still asserts Deno.env is unreadable).
+  //
+  // Defaults of unspecified keys would inherit from the parent process,
+  // which has --allow-env / --allow-read=/app — so we list every
+  // permission explicitly and never rely on defaults.
   const worker = new Worker(bootstrapUrl, {
     type: "module",
     deno: {
-      permissions: "none",
+      permissions: {
+        net: true,
+        env: false,
+        read: false,
+        write: false,
+        run: false,
+        ffi: false,
+        sys: false,
+        import: false,
+      },
     },
   });
 
