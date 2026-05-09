@@ -321,7 +321,7 @@ func main() {
 	slog.Info("cors allowlist configured", "origins", allowedOrigins)
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, allowedOrigins, devMode)
+	r := gateway.NewRouter(pool, developerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), allowedOrigins, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
