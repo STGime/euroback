@@ -17,7 +17,7 @@
 //  for blob URL loading. The PARENT having permissions does not grant them
 //  to the worker; permissions: 'none' is the load-bearing setting.)
 //
-// CI doesn't currently run Deno tests; these are local + documentation.
+// CI runs these via the test-functions-runner job (.github/workflows/ci.yml).
 
 import { assert, assertEquals, assertStrictEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { ParentToWorker, WorkerToParent } from "./bridge.ts";

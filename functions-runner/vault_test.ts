@@ -43,13 +43,16 @@ function stubDBThrowing(message: string): any {
 
 Deno.test("vault.get round-trips a Go-encrypted secret", async () => {
   Deno.env.set("VAULT_ENCRYPTION_KEY", KEY_B64);
-  // Re-import to pick up the env var (Deno caches modules, but we run
-  // this file once per `deno test` invocation so this is fine).
-  const { resolveVaultSecret: resolve } = await import("./vault.ts?cb=" + Date.now());
   const { encrypted, nonce } = await encryptForGateway("fal_ai_key_value", KEY_RAW);
-
-  const got = await resolve(stubDB([{ encrypted, nonce }]), "11111111-2222-3333-4444-555555555555", "FAL_AI_KEY");
+  const got = await resolveVaultSecret(stubDB([{ encrypted, nonce }]), "11111111-2222-3333-4444-555555555555", "FAL_AI_KEY");
   assertEquals(got, "fal_ai_key_value");
+});
+
+Deno.test("vault.get returns null when VAULT_ENCRYPTION_KEY is unset", async () => {
+  Deno.env.delete("VAULT_ENCRYPTION_KEY");
+  const { encrypted, nonce } = await encryptForGateway("x", KEY_RAW);
+  const got = await resolveVaultSecret(stubDB([{ encrypted, nonce }]), "p", "K");
+  assertEquals(got, null);
 });
 
 Deno.test("vault.get returns null when the secret does not exist", async () => {

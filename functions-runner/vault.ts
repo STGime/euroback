@@ -12,16 +12,23 @@
 // Web Crypto's AES-GCM expects the auth tag appended to the ciphertext —
 // same layout as Go's GCM, so we pass the bytea blob through directly.
 
-const VAULT_ENCRYPTION_KEY = Deno.env.get("VAULT_ENCRYPTION_KEY") ?? "";
-
+// Lazy: read VAULT_ENCRYPTION_KEY on first use rather than at module
+// load. Lets tests set the env var after import without resorting to
+// cache-busting URL params, and matches how the gateway boots vault.
 let _key: CryptoKey | null = null;
+let _keyEnv: string | null = null;
 
 async function getCryptoKey(): Promise<CryptoKey | null> {
-  if (_key) return _key;
-  if (!VAULT_ENCRYPTION_KEY) return null;
+  const env = Deno.env.get("VAULT_ENCRYPTION_KEY") ?? "";
+  if (_key && env === _keyEnv) return _key;
+  // Reset if env changed (only meaningful in tests; in production the
+  // pod env is fixed for its lifetime).
+  _key = null;
+  _keyEnv = env;
+  if (!env) return null;
   let raw: Uint8Array;
   try {
-    raw = Uint8Array.from(atob(VAULT_ENCRYPTION_KEY), (c) => c.charCodeAt(0));
+    raw = Uint8Array.from(atob(env), (c) => c.charCodeAt(0));
   } catch (_) {
     console.error("[vault] VAULT_ENCRYPTION_KEY is not valid base64");
     return null;
