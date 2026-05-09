@@ -29,14 +29,30 @@
   }
 
   // Catch RPC results and route to the right pending Promise.
+  // Each call's wrapper in ctx.* knows what shape it expects, so this
+  // resolves with the whole message minus type/id and lets the caller
+  // pick out the field it cares about. (Pre-#85 db.sql/vault.get
+  // helpers above this layer continue to consume `.rows` / `.value`.)
   function handleRpcResult(msg) {
     const handler = pending.get(msg.id);
     if (!handler) return;
     pending.delete(msg.id);
-    if (msg.error) handler.reject(new Error(String(msg.error)));
-    else if (Object.prototype.hasOwnProperty.call(msg, "rows")) handler.resolve(msg.rows);
-    else if (Object.prototype.hasOwnProperty.call(msg, "value")) handler.resolve(msg.value);
-    else handler.resolve(undefined);
+    if (msg.error) {
+      handler.reject(new Error(String(msg.error)));
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(msg, "rows")) {
+      handler.resolve(msg.rows);
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(msg, "value")) {
+      handler.resolve(msg.value);
+      return;
+    }
+    // Storage RPCs: hand back the full payload object. Strip type/id so
+    // the caller doesn't see the bridge plumbing.
+    const { type: _t, id: _i, ...rest } = msg;
+    handler.resolve(rest);
   }
 
   function buildRequest(serialized) {
@@ -124,6 +140,37 @@
       vault: {
         get: (name) => rpc("vault.get.call", { name }),
       },
+      // ctx.storage — closes #85. The parent process calls back to the
+      // gateway's HMAC-protected /internal/functions/storage endpoints.
+      // Bodies are passed as Uint8Array (structured-cloneable). Each
+      // helper returns a shaped object the function can destructure.
+      storage: {
+        async upload(key, body, opts = {}) {
+          if (!(body instanceof Uint8Array)) {
+            // Accept ArrayBuffer / Blob / string for ergonomics; convert
+            // to Uint8Array before sending across the postMessage bridge.
+            if (body instanceof ArrayBuffer) body = new Uint8Array(body);
+            else if (typeof body === "string") body = new TextEncoder().encode(body);
+            else if (body && typeof body.arrayBuffer === "function") body = new Uint8Array(await body.arrayBuffer());
+            else throw new Error("ctx.storage.upload: body must be Uint8Array, ArrayBuffer, Blob, or string");
+          }
+          return rpc("storage.upload.call", { key, body, contentType: opts.contentType });
+        },
+        createSignedUrl(key, operation, opts = {}) {
+          if (operation !== "upload" && operation !== "download") {
+            return Promise.reject(new Error("ctx.storage.createSignedUrl: operation must be 'upload' or 'download'"));
+          }
+          return rpc("storage.signed_url.call", {
+            key,
+            operation,
+            expiresIn: opts.expiresIn,
+            contentType: opts.contentType,
+          });
+        },
+        delete(key) {
+          return rpc("storage.delete.call", { key });
+        },
+      },
       env: invokeMsg.env || {},
       user: invokeMsg.user || null,
       requestId: invokeMsg.requestId,
@@ -158,7 +205,13 @@
     const msg = e.data;
     if (!msg || typeof msg.type !== "string") return;
 
-    if (msg.type === "db.sql.result" || msg.type === "vault.get.result") {
+    if (
+      msg.type === "db.sql.result" ||
+      msg.type === "vault.get.result" ||
+      msg.type === "storage.upload.result" ||
+      msg.type === "storage.signed_url.result" ||
+      msg.type === "storage.delete.result"
+    ) {
       handleRpcResult(msg);
       return;
     }

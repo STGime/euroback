@@ -54,7 +54,11 @@ export type ParentToWorker =
   // route to the right Promise.
   | { type: "db.sql.result"; id: string; rows?: unknown; error?: string }
   // RPC result for `vault.get`.
-  | { type: "vault.get.result"; id: string; value: string | null };
+  | { type: "vault.get.result"; id: string; value: string | null }
+  // RPC results for `ctx.storage.*` (closes #85).
+  | { type: "storage.upload.result"; id: string; key?: string; size?: number; error?: string }
+  | { type: "storage.signed_url.result"; id: string; url?: string; expiresAt?: string; error?: string }
+  | { type: "storage.delete.result"; id: string; error?: string };
 
 // Worker → Parent messages.
 export type WorkerToParent =
@@ -65,4 +69,9 @@ export type WorkerToParent =
   // query under the per-tenant role and posts back db.sql.result.
   | { type: "db.sql.call"; id: string; query: string; params: unknown[] }
   | { type: "vault.get.call"; id: string; name: string }
+  // ctx.storage.* RPCs (closes #85). The parent calls back to the
+  // gateway's HMAC-protected /internal/functions/storage endpoints.
+  | { type: "storage.upload.call"; id: string; key: string; body: Uint8Array; contentType?: string }
+  | { type: "storage.signed_url.call"; id: string; key: string; operation: "upload" | "download"; expiresIn?: number; contentType?: string }
+  | { type: "storage.delete.call"; id: string; key: string }
   | { type: "log"; level: "INFO" | "WARN" | "ERROR"; msg: string; data?: unknown };

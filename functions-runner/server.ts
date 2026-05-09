@@ -17,6 +17,7 @@ import type {
 } from "./bridge.ts";
 import { newVerifier, type Verifier } from "./hmac.ts";
 import { resolveVaultSecret } from "./vault.ts";
+import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
 // `eurobase_function_runner`, a role with no direct grants on any tenant
@@ -282,6 +283,8 @@ async function executeFunction(
     fn,
     requestId,
     projectId,
+    schemaName,
+    userId,
     serializedRequest,
     user: userId ? { id: userId, email: userEmail } : null,
     timeoutMs,
@@ -299,6 +302,8 @@ async function runUserHandlerInWorker(opts: {
   fn: CachedFunction;
   requestId: string;
   projectId: string;
+  schemaName: string;
+  userId: string;
   serializedRequest: SerializedRequest;
   user: { id: string; email: string } | null;
   timeoutMs: number;
@@ -313,6 +318,8 @@ async function runUserHandlerInWorker(opts: {
     fn,
     requestId,
     projectId,
+    schemaName,
+    userId,
     serializedRequest,
     user,
     timeoutMs,
@@ -320,6 +327,7 @@ async function runUserHandlerInWorker(opts: {
     db,
     logCapture,
   } = opts;
+  const storageCtx = { projectID: projectId, schemaName, userID: userId };
 
   let timeoutTimer: number | undefined;
   let settled = false;
@@ -433,6 +441,38 @@ async function runUserHandlerInWorker(opts: {
               const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null };
               worker.postMessage(reply);
             });
+          break;
+        }
+        case "storage.upload.call": {
+          // Closes #85. POST the bytes to the gateway's HMAC-protected
+          // /internal/functions/storage/upload. Errors come back as
+          // `{ error: string }` so the worker's RPC layer rejects the
+          // user-side Promise; success delivers `{ key, size }`.
+          uploadObject(storageCtx, msg.key, msg.body, msg.contentType ?? "application/octet-stream")
+            .then((result) => {
+              if (settled) return;
+              const reply: ParentToWorker = { type: "storage.upload.result", id: msg.id, ...result };
+              worker.postMessage(reply);
+            });
+          break;
+        }
+        case "storage.signed_url.call": {
+          createSignedUrl(storageCtx, msg.key, msg.operation, {
+            expiresIn: msg.expiresIn,
+            contentType: msg.contentType,
+          }).then((result) => {
+            if (settled) return;
+            const reply: ParentToWorker = { type: "storage.signed_url.result", id: msg.id, ...result };
+            worker.postMessage(reply);
+          });
+          break;
+        }
+        case "storage.delete.call": {
+          deleteObject(storageCtx, msg.key).then((result) => {
+            if (settled) return;
+            const reply: ParentToWorker = { type: "storage.delete.result", id: msg.id, ...result };
+            worker.postMessage(reply);
+          });
           break;
         }
       }

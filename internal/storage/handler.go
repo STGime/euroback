@@ -79,12 +79,16 @@ func isAuthenticated(r *http.Request) (string, bool) {
 	return "", false
 }
 
-// validateStorageKey rejects object keys that would be unsafe to round-
+// ValidateStorageKey rejects object keys that would be unsafe to round-
 // trip through any future code path that joins them into a filesystem
 // path or local URL. Closes #61. Today's S3 client treats keys as opaque
 // blobs so traversal is bounded, but the moment any handler or signed-
 // URL path-prefix logic joins these, untrusted keys become a real
 // path-traversal vector.
+//
+// Exported because the functions package's internal storage RPC handler
+// (added in #85) reuses these same rules so user code that calls
+// ctx.storage.upload sees identical validation as the SDK path.
 //
 // Rules:
 //   - non-empty
@@ -92,7 +96,7 @@ func isAuthenticated(r *http.Request) (string, bool) {
 //   - no leading "/" — that flips path-join semantics
 //   - no ".." segment — classic traversal
 //   - no NUL or control bytes (< 0x20, 0x7f)
-func validateStorageKey(key string) error {
+func ValidateStorageKey(key string) error {
 	if key == "" {
 		return fmt.Errorf("key is required")
 	}
@@ -205,7 +209,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	if key == "" {
 		key = header.Filename
 	}
-	if err := validateStorageKey(key); err != nil {
+	if err := ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
@@ -283,7 +287,7 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := extractWildcardKey(r)
-	if err := validateStorageKey(key); err != nil {
+	if err := ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
@@ -346,7 +350,7 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := extractWildcardKey(r)
-	if err := validateStorageKey(key); err != nil {
+	if err := ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
@@ -478,7 +482,7 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := validateStorageKey(req.Key); err != nil {
+	if err := ValidateStorageKey(req.Key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}

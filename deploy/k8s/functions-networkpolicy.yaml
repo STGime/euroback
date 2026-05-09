@@ -43,6 +43,16 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Allow egress to the gateway for the internal storage RPC
+    # (closes #85). The gateway's /internal/functions/storage/* routes
+    # are HMAC-protected and only reachable from inside the cluster.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8080
     # Allow everything to the public internet, except RFC1918 and
     # link-local. This covers Scaleway's managed Postgres/Redis (they
     # sit on public IPs) plus any third-party API the function calls.

@@ -20,8 +20,8 @@ func TestValidateStorageKey_Accepts(t *testing.T) {
 		"a", // single char
 		strings.Repeat("a", 1024), // boundary
 	} {
-		if err := validateStorageKey(k); err != nil {
-			t.Errorf("validateStorageKey(%q) = %v, want nil", k, err)
+		if err := ValidateStorageKey(k); err != nil {
+			t.Errorf("ValidateStorageKey(%q) = %v, want nil", k, err)
 		}
 	}
 }
@@ -46,8 +46,8 @@ func TestValidateStorageKey_Rejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateStorageKey(tc.key); err == nil {
-				t.Errorf("validateStorageKey(%q) = nil, want error", tc.key)
+			if err := ValidateStorageKey(tc.key); err == nil {
+				t.Errorf("ValidateStorageKey(%q) = nil, want error", tc.key)
 			}
 		})
 	}
@@ -57,8 +57,8 @@ func TestValidateStorageKey_AllowsDotDotInSegment(t *testing.T) {
 	// `..` is rejected only as a path SEGMENT. A filename like
 	// `archive..tar.gz` or `back..up` should pass.
 	for _, k := range []string{"archive..tar.gz", "back..up", "..hidden.txt"} {
-		if err := validateStorageKey(k); err != nil {
-			t.Errorf("validateStorageKey(%q) = %v, want nil — `..` only forbidden as a full segment", k, err)
+		if err := ValidateStorageKey(k); err != nil {
+			t.Errorf("ValidateStorageKey(%q) = %v, want nil — `..` only forbidden as a full segment", k, err)
 		}
 	}
 }
