@@ -16,6 +16,7 @@ import type {
   WorkerToParent,
 } from "./bridge.ts";
 import { newVerifier, type Verifier } from "./hmac.ts";
+import { resolveVaultSecret } from "./vault.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
 // `eurobase_function_runner`, a role with no direct grants on any tenant
@@ -266,6 +267,7 @@ async function executeFunction(
     user: userId ? { id: userId, email: userEmail } : null,
     timeoutMs,
     runDBSql,
+    db,
     logCapture,
   });
 }
@@ -283,6 +285,8 @@ async function runUserHandlerInWorker(opts: {
   timeoutMs: number;
   runDBSql: (query: string, params: unknown[]) => Promise<unknown>;
   // deno-lint-ignore no-explicit-any
+  db: any;
+  // deno-lint-ignore no-explicit-any
   logCapture: ReturnType<typeof createLogCapture>;
 }): Promise<Response> {
   const {
@@ -294,6 +298,7 @@ async function runUserHandlerInWorker(opts: {
     user,
     timeoutMs,
     runDBSql,
+    db,
     logCapture,
   } = opts;
 
@@ -392,10 +397,23 @@ async function runUserHandlerInWorker(opts: {
           break;
         }
         case "vault.get.call": {
-          // Vault remains a stub for this PR — see comment in the
-          // legacy ctx.vault.get implementation. Always returns null.
-          const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null };
-          worker.postMessage(reply);
+          // Closes #79: read the encrypted blob via the SECURITY DEFINER
+          // helper public.vault_get_for_runner (added by migration 000049)
+          // and decrypt locally with VAULT_ENCRYPTION_KEY. Failure modes
+          // (missing secret, no encryption key, decrypt failure) all
+          // resolve to null so the worker contract stays `string | null`.
+          resolveVaultSecret(db, projectId, msg.name)
+            .then((value) => {
+              if (settled) return;
+              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value };
+              worker.postMessage(reply);
+            })
+            .catch((err) => {
+              if (settled) return;
+              console.error(`[fn:${projectId}] vault.get failed`, err);
+              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null };
+              worker.postMessage(reply);
+            });
           break;
         }
       }
