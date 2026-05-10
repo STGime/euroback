@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/gateway"
@@ -215,6 +216,24 @@ func main() {
 		slog.Info("edge functions runner configured", "url", fnRunnerURL)
 	} else {
 		slog.Warn("FUNCTION_RUNNER_URL not set, edge function invocation will return 501")
+	}
+
+	// ── Start DSAR export cleanup job (delete expired exports + S3 objects hourly) ──
+	if s3Client != nil {
+		exportCleanupSvc := compliance.NewExportService(pool, s3Client, nil)
+		go func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					exportCleanupSvc.CleanupExpired(ctx)
+				}
+			}
+		}()
+		slog.Info("DSAR export cleanup job started (hourly)")
 	}
 
 	// ── Set up Prometheus metrics (served on a private port) ──
