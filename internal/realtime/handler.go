@@ -15,16 +15,6 @@ const (
 	proConnectionLimit  = 10000
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// In production, this should validate the Origin header against
-		// allowed origins for the tenant. For now, allow all origins.
-		return true
-	},
-}
-
 // TenantResolver resolves a user subject (Hanko ID) to a tenant ID and plan.
 // It is injected by the caller so the realtime package does not depend on the
 // auth or tenant packages directly.
@@ -36,7 +26,29 @@ type TenantResolver func(ctx context.Context, subject string) (tenantID, plan st
 //
 // tokenValidator, if non-nil, validates the token and returns the user subject.
 // When nil (dev mode), connections are accepted without authentication.
-func HandleWebSocket(hub *Hub, tokenValidator func(token string) (subject string, err error), tenantResolver TenantResolver, devMode bool) http.HandlerFunc {
+//
+// originChecker validates the browser Origin header on the upgrade request.
+// Same layered logic as the HTTP CORS path (global allowlist + per-project
+// cors_origins), built by gateway.BuildOriginChecker. nil → accept all
+// origins, used only in devMode. Closes #47 (CSWSH defence-in-depth).
+func HandleWebSocket(hub *Hub, tokenValidator func(token string) (subject string, err error), tenantResolver TenantResolver, originChecker func(*http.Request) bool, devMode bool) http.HandlerFunc {
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			if devMode {
+				return true
+			}
+			if originChecker == nil {
+				// Production with no checker configured: refuse so a
+				// misconfiguration fails closed rather than falling back
+				// to "allow any origin" (the old behaviour, advisory #47).
+				return false
+			}
+			return originChecker(r)
+		},
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		var tenantID, plan string
 

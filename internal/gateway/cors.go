@@ -33,14 +33,7 @@ import (
 // global allowlist. Beta testers hitting `{slug}.eurobase.app` get
 // per-project CORS automatically.
 func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
-	patterns := make([]originPattern, 0, len(allowedOrigins))
-	for _, o := range allowedOrigins {
-		o = strings.TrimSpace(o)
-		if o == "" {
-			continue
-		}
-		patterns = append(patterns, compileOriginPattern(o))
-	}
+	check := BuildOriginChecker(allowedOrigins)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,15 +43,7 @@ func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 				return
 			}
 
-			allowed := originAllowed(origin, patterns)
-			if !allowed {
-				if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil && len(pc.AuthConfig) > 0 {
-					cfg := tenant.ParseAuthConfig(pc.AuthConfig)
-					if cfg.IsCORSOriginAllowed(origin) {
-						allowed = true
-					}
-				}
-			}
+			allowed := check(r)
 
 			if !allowed {
 				// Not allowed by global or per-project. For preflight
@@ -92,6 +77,43 @@ func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+// BuildOriginChecker compiles the global allowlist patterns once and
+// returns a closure that decides per-request whether the request's
+// Origin header is allowed. The closure layers the same two checks as
+// NewCORSMiddleware (global allowlist, then per-project cors_origins
+// from ProjectContext) so anything that needs an origin check —
+// including the WebSocket upgrader — gets identical behaviour.
+//
+// Empty Origin returns false. Callers that want to permit
+// non-CORS-shaped requests (e.g. server-to-server) should branch on
+// that themselves rather than rely on this helper.
+func BuildOriginChecker(allowedOrigins []string) func(*http.Request) bool {
+	patterns := make([]originPattern, 0, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		patterns = append(patterns, compileOriginPattern(o))
+	}
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return false
+		}
+		if originAllowed(origin, patterns) {
+			return true
+		}
+		if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil && len(pc.AuthConfig) > 0 {
+			cfg := tenant.ParseAuthConfig(pc.AuthConfig)
+			if cfg.IsCORSOriginAllowed(origin) {
+				return true
+			}
+		}
+		return false
 	}
 }
 
