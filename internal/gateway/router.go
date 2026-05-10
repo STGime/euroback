@@ -417,7 +417,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 		if !isDev {
 			tokenValidator = platformAuth.ValidateToken
 		}
-		wsHandler := realtime.HandleWebSocket(hub, tokenValidator, buildTenantResolver(pool), isDev)
+		wsHandler := realtime.HandleWebSocket(hub, tokenValidator, buildTenantResolver(pool), BuildOriginChecker(allowedOrigins), isDev)
 		r.Get("/v1/realtime", wsHandler)
 	} else {
 		slog.Warn("realtime hub not configured, websocket route disabled")
