@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
@@ -329,6 +330,24 @@ func main() {
 		allowedOrigins = append(allowedOrigins, "http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173")
 	}
 	slog.Info("cors allowlist configured", "origins", allowedOrigins)
+
+	// ── Start DSAR export cleanup job (delete expired exports + S3 objects hourly) ──
+	if s3Client != nil {
+		exportCleanupSvc := compliance.NewExportService(pool, s3Client, nil)
+		go func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					exportCleanupSvc.CleanupExpired(ctx)
+				}
+			}
+		}()
+		slog.Info("DSAR export cleanup job started (hourly)")
+	}
 
 	// ── Set up Prometheus metrics (served on a private port) ──
 	metricsReg := metrics.New(buildVersion)

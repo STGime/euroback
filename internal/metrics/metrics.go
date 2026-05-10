@@ -28,11 +28,12 @@ import (
 type Registry struct {
 	reg *prometheus.Registry
 
-	requestsTotal   *prometheus.CounterVec
-	requestDuration *prometheus.HistogramVec
+	requestsTotal    *prometheus.CounterVec
+	requestDuration  *prometheus.HistogramVec
 	requestsInFlight prometheus.Gauge
-	panicsTotal     prometheus.Counter
-	buildInfo       *prometheus.GaugeVec
+	panicsTotal      prometheus.Counter
+	buildInfo        *prometheus.GaugeVec
+	ExportsTotal     *prometheus.CounterVec
 }
 
 // New creates and registers all gateway metrics.
@@ -47,8 +48,18 @@ func New(buildVersion string) *Registry {
 	reg.MustRegister(collectors.NewGoCollector())
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
+	exportsTotal := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "eurobase_exports_total",
+			Help: "Total DSAR exports completed or failed, by type and status.",
+		},
+		[]string{"type", "status"},
+	)
+	reg.MustRegister(exportsTotal)
+
 	r := &Registry{
-		reg: reg,
+		reg:          reg,
+		ExportsTotal: exportsTotal,
 		requestsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "eurobase_http_requests_total",

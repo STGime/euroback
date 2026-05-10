@@ -91,6 +91,14 @@ func main() {
 		S3:     s3Client,
 		DBPool: pool,
 	})
+	river.AddWorker(riverWorkers, &workers.TenantExportWorker{
+		DBPool: pool,
+		S3:     s3Client,
+	})
+	river.AddWorker(riverWorkers, &workers.UserExportWorker{
+		DBPool: pool,
+		S3:     s3Client,
+	})
 
 	// ── Create River client in worker mode ──
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{

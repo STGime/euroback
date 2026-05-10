@@ -6,7 +6,7 @@
 	let projectId = $derived($page.params.id);
 
 	// Tab state
-	let activeTab = $state<'dpa' | 'audit'>('dpa');
+	let activeTab = $state<'dpa' | 'audit' | 'export'>('dpa');
 
 	// DPA Report
 	let report: DPAReport | null = $state(null);
@@ -120,6 +120,80 @@
 	let hasCloudActProviders = $derived(
 		report?.sub_processors?.some(sp => sp.cloud_act_risk) ?? false
 	);
+
+	// Data Export tab state
+	interface ExportEntry {
+		id: string;
+		status: string;
+		format: string;
+		user_id?: string;
+		file_size?: number;
+		download_url?: string;
+		created_at: string;
+		completed_at?: string;
+		expires_at?: string;
+	}
+
+	let exports: ExportEntry[] = $state([]);
+	let exportsLoading = $state(false);
+	let exportError: string | null = $state(null);
+	let exportFormat = $state<'json' | 'csv'>('json');
+	let exportRequesting = $state(false);
+
+	async function loadExports() {
+		exportsLoading = true;
+		exportError = null;
+		try {
+			const res = await api.fetch(`/platform/projects/${projectId}/compliance/exports?limit=20`);
+			const data = await res.json();
+			exports = data.exports ?? [];
+		} catch (err) {
+			exportError = err instanceof Error ? err.message : 'Failed to load exports';
+		} finally {
+			exportsLoading = false;
+		}
+	}
+
+	async function requestTenantExport() {
+		exportRequesting = true;
+		exportError = null;
+		try {
+			const res = await api.fetch(`/platform/projects/${projectId}/compliance/export`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ format: exportFormat })
+			});
+			if (res.status === 429) {
+				exportError = 'Rate limit: 1 export per hour. Please wait.';
+				return;
+			}
+			if (!res.ok) {
+				const data = await res.json();
+				exportError = data.error || 'Failed to request export';
+				return;
+			}
+			await loadExports();
+		} catch (err) {
+			exportError = err instanceof Error ? err.message : 'Failed to request export';
+		} finally {
+			exportRequesting = false;
+		}
+	}
+
+	async function refreshExportStatus(exportId: string) {
+		try {
+			const res = await api.fetch(`/platform/projects/${projectId}/compliance/exports/${exportId}`);
+			const updated = await res.json();
+			exports = exports.map(e => e.id === exportId ? updated : e);
+		} catch { /* ignore */ }
+	}
+
+	function formatBytes(bytes?: number): string {
+		if (!bytes) return '-';
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	}
 </script>
 
 <div class="space-y-6">
@@ -136,6 +210,12 @@
 			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'audit' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
 		>
 			Audit Log
+		</button>
+		<button
+			onclick={() => { activeTab = 'export'; if (exports.length === 0) loadExports(); }}
+			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'export' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
+		>
+			Data Export
 		</button>
 	</div>
 
@@ -472,6 +552,103 @@
 			>
 				Next
 			</button>
+		</div>
+	</div>
+{/if}
+
+{#if activeTab === 'export'}
+	<div class="space-y-6">
+		<div class="flex items-center justify-between">
+			<div>
+				<h2 class="text-lg font-semibold text-gray-900">Data Export (DSAR)</h2>
+				<p class="mt-1 text-sm text-gray-500">
+					Export all project data or a specific user's data for GDPR Article 15/20 compliance.
+				</p>
+			</div>
+		</div>
+
+		<!-- Request new export -->
+		<div class="rounded-lg border border-gray-200 p-4 space-y-3">
+			<h3 class="text-sm font-semibold text-gray-900">Request Full Project Export</h3>
+			<p class="text-xs text-gray-500">Exports all tables, user records, storage manifest, and audit log as a zip file.</p>
+			<div class="flex items-center gap-3">
+				<select bind:value={exportFormat} class="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none">
+					<option value="json">JSON</option>
+					<option value="csv">CSV</option>
+				</select>
+				<button
+					onclick={requestTenantExport}
+					disabled={exportRequesting}
+					class="cursor-pointer inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+				>
+					{#if exportRequesting}
+						<svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+						Requesting...
+					{:else}
+						Export Project Data
+					{/if}
+				</button>
+			</div>
+			{#if exportError}
+				<p class="text-xs text-red-600">{exportError}</p>
+			{/if}
+			<div class="rounded-lg bg-blue-50 border border-blue-200 p-3">
+				<p class="text-xs text-blue-700">Exports are processed in the background. Large projects may take a few minutes. Download links expire after 7 days. All data remains in EU infrastructure (Scaleway fr-par).</p>
+			</div>
+		</div>
+
+		<!-- Export history -->
+		<div class="rounded-lg border border-gray-200 overflow-hidden">
+			<div class="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+				<h3 class="text-sm font-semibold text-gray-900">Export History</h3>
+				<button onclick={loadExports} class="cursor-pointer text-xs text-eurobase-600 hover:text-eurobase-700 font-medium">Refresh</button>
+			</div>
+			{#if exportsLoading}
+				<div class="px-4 py-6 text-center text-sm text-gray-500">Loading...</div>
+			{:else if exports.length === 0}
+				<div class="px-4 py-6 text-center text-sm text-gray-500">No exports yet.</div>
+			{:else}
+				<table class="min-w-full divide-y divide-gray-200">
+					<thead class="bg-gray-50">
+						<tr>
+							<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+							<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+							<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Format</th>
+							<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Size</th>
+							<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Requested</th>
+							<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-gray-200 bg-white">
+						{#each exports as exp}
+							<tr>
+								<td class="px-4 py-2 text-xs">
+									<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium
+										{exp.status === 'completed' ? 'bg-green-100 text-green-700' :
+										 exp.status === 'failed' ? 'bg-red-100 text-red-700' :
+										 exp.status === 'running' ? 'bg-blue-100 text-blue-700' :
+										 'bg-gray-100 text-gray-700'}">
+										{exp.status}
+									</span>
+								</td>
+								<td class="px-4 py-2 text-xs text-gray-700">{exp.user_id ? 'User' : 'Project'}</td>
+								<td class="px-4 py-2 text-xs text-gray-700 uppercase">{exp.format}</td>
+								<td class="px-4 py-2 text-xs text-gray-700">{formatBytes(exp.file_size)}</td>
+								<td class="px-4 py-2 text-xs text-gray-500">{formatDate(exp.created_at)}</td>
+								<td class="px-4 py-2 text-xs">
+									{#if exp.status === 'completed' && exp.download_url}
+										<a href={exp.download_url} target="_blank" rel="noopener" class="text-eurobase-600 hover:text-eurobase-700 font-medium">Download</a>
+									{:else if exp.status === 'pending' || exp.status === 'running'}
+										<button onclick={() => refreshExportStatus(exp.id)} class="cursor-pointer text-eurobase-600 hover:text-eurobase-700 font-medium">Refresh</button>
+									{:else if exp.status === 'failed'}
+										<span class="text-red-500">Failed</span>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			{/if}
 		</div>
 	</div>
 {/if}
