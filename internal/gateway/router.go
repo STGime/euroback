@@ -16,6 +16,7 @@ import (
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/metrics"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/query"
@@ -45,7 +46,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, allowedOrigins []string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -61,6 +62,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 	r.Use(SecurityHeadersMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+
+	// Prometheus request metrics — must run after chi has matched the route
+	// so RoutePattern() is populated. chi runs middleware in registration
+	// order but records the pattern before invoking the final handler, so
+	// wrapping here captures everything.
+	if metricsReg != nil {
+		r.Use(metricsReg.Middleware)
+	}
 
 	// Subdomain resolution — resolves {slug}.eurobase.app to a project context.
 	// Must run BEFORE CORS so per-project cors_origins can be looked up

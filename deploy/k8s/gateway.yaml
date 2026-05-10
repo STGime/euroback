@@ -19,12 +19,22 @@ spec:
       labels:
         app: gateway
         component: api
+      annotations:
+        # Scraped by Grafana Alloy (see deploy/k8s/cockpit/alloy.yaml),
+        # which remote-writes to Scaleway Cockpit.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: gateway
           image: rg.fr-par.scw.cloud/eurobase-app/gateway:latest
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9100
               protocol: TCP
           resources:
             requests:
@@ -55,6 +65,13 @@ spec:
           env:
             - name: PORT
               value: "8080"
+            - name: METRICS_PORT
+              value: "9100"
+            - name: BUILD_VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app.kubernetes.io/version']
+                  # Falls back to "unknown" inside the app if the label is unset.
             - name: ENVIRONMENT
               valueFrom:
                 configMapKeyRef:
@@ -75,6 +92,11 @@ spec:
   selector:
     app: gateway
   ports:
-    - port: 8080
-      targetPort: 8080
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9100
+      targetPort: metrics
       protocol: TCP
