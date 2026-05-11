@@ -312,12 +312,23 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 				r.With(tenant.RequireMinRole("admin")).Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
 
-			// Compliance (DPA report, sub-processor registry).
+			// Compliance (DPA report, sub-processor registry, DSAR exports).
 			complianceSvc := compliance.NewComplianceService(pool)
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/dpa-report", compliance.HandleDPAReport(complianceSvc))
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
 
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-log", audit.HandleList(auditSvc))
+
+			// DSAR exports (tenant-level and per-user). Triggering an
+			// export pulls every row from every tenant table, so this
+			// is a "settings"-shaped capability — minimum admin per #50.
+			// Listing + status are also admin-only since the URLs they
+			// hand back are presigned and give the holder the file.
+			exportSvc := compliance.NewExportService(pool, s3Client, auditSvc)
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/export", compliance.HandleRequestTenantExport(exportSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/user-export", compliance.HandleRequestUserExport(exportSvc))
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports", compliance.HandleListExports(exportSvc))
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports/{exportId}", compliance.HandleGetExport(exportSvc))
 
 			// Team members (invite, remove, change role).
 			var sendEmailFn func(ctx context.Context, to, subject, html string) error
@@ -476,6 +487,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			r.Group(func(r chi.Router) {
 				r.Use(endUserMw.Handler)
 				r.Get("/user", enduser.HandleGetUser(endUserAuthSvc))
+				// DSAR self-serve: end-user exports their own data.
+				r.Post("/me/export", compliance.HandleSelfServeExport(pool, s3Client, auditSvc))
+				r.Get("/me/export/{exportId}", compliance.HandleSelfServeExportStatus(pool, s3Client, auditSvc))
 			})
 		})
 

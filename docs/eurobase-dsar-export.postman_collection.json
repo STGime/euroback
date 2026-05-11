@@ -1,0 +1,283 @@
+{
+	"info": {
+		"name": "Eurobase - DSAR Export",
+		"description": "Tests for GDPR Data Subject Access Request (DSAR) export endpoints.\n\n## Setup\n1. Gateway running: `make dev`\n2. Migration 000032 applied\n3. Platform user signed in (set `token` variable)\n4. Project created (set `project_id` variable)\n5. At least one end-user exists in the project\n\n## Endpoints\n- Platform: POST/GET /platform/projects/{id}/compliance/export|user-export|exports\n- SDK self-serve: POST/GET /v1/auth/me/export",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:8080" },
+		{ "key": "project_id", "value": "YOUR_PROJECT_ID" },
+		{ "key": "token", "value": "YOUR_PLATFORM_JWT" },
+		{ "key": "end_user_id", "value": "YOUR_END_USER_ID" },
+		{ "key": "public_key", "value": "YOUR_PUBLIC_API_KEY" },
+		{ "key": "end_user_token", "value": "YOUR_END_USER_JWT" }
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [{ "key": "token", "value": "{{token}}" }]
+	},
+	"item": [
+		{
+			"name": "Tenant Export",
+			"item": [
+				{
+					"name": "Request tenant export (JSON)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+									"pm.test('Response has export ID', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.id).to.be.a('string');",
+									"    pm.expect(body.status).to.eql('pending');",
+									"    pm.expect(body.format).to.eql('json');",
+									"    pm.collectionVariables.set('export_id', body.id);",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/platform/projects/{{project_id}}/compliance/export",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\"format\": \"json\"}" }
+					}
+				},
+				{
+					"name": "Request tenant export (CSV)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 202 or 429 (rate limited)', () => {",
+									"    pm.expect([202, 429]).to.include(pm.response.code);",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/platform/projects/{{project_id}}/compliance/export",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\"format\": \"csv\"}" }
+					}
+				},
+				{
+					"name": "Get export status",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has status field', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(['pending','running','completed','failed']).to.include(body.status);",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/platform/projects/{{project_id}}/compliance/exports/{{export_id}}"
+					}
+				},
+				{
+					"name": "List exports",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Returns array', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.exports).to.be.an('array');",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/platform/projects/{{project_id}}/compliance/exports?limit=10",
+							"query": [{ "key": "limit", "value": "10" }]
+						}
+					}
+				},
+				{
+					"name": "Invalid format returns 400",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error message', () => {",
+									"    pm.expect(pm.response.json().error).to.include('format');",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/platform/projects/{{project_id}}/compliance/export",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\"format\": \"xml\"}" }
+					}
+				}
+			]
+		},
+		{
+			"name": "User Export (Platform)",
+			"item": [
+				{
+					"name": "Request user export",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+									"pm.test('Response has user_id', () => {",
+									"    const body = pm.response.json();",
+									"    pm.expect(body.user_id).to.be.a('string');",
+									"    pm.expect(body.status).to.eql('pending');",
+									"    pm.collectionVariables.set('user_export_id', body.id);",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/platform/projects/{{project_id}}/compliance/user-export",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\"user_id\": \"{{end_user_id}}\", \"format\": \"json\"}" }
+					}
+				},
+				{
+					"name": "Missing user_id returns 400",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 400', () => pm.response.to.have.status(400));",
+									"pm.test('Error mentions user_id', () => {",
+									"    pm.expect(pm.response.json().error).to.include('user_id');",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/platform/projects/{{project_id}}/compliance/user-export",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\"format\": \"json\"}" }
+					}
+				}
+			]
+		},
+		{
+			"name": "Self-Serve Export (End-User SDK)",
+			"item": [
+				{
+					"name": "End-user requests own data export",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+									"pm.test('Response is pending', () => {",
+									"    pm.expect(pm.response.json().status).to.eql('pending');",
+									"    pm.collectionVariables.set('self_export_id', pm.response.json().id);",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/v1/auth/me/export",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Authorization", "value": "Bearer {{end_user_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"format\": \"json\"}" },
+						"auth": { "type": "noauth" }
+					}
+				},
+				{
+					"name": "End-user checks export status",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 200', () => pm.response.to.have.status(200));",
+									"pm.test('Has status', () => {",
+									"    pm.expect(['pending','running','completed','failed']).to.include(pm.response.json().status);",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/v1/auth/me/export/{{self_export_id}}",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Authorization", "value": "Bearer {{end_user_token}}" }
+						],
+						"auth": { "type": "noauth" }
+					}
+				},
+				{
+					"name": "Unauthenticated request returns 401",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('Status 401', () => pm.response.to.have.status(401));"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/v1/auth/me/export",
+						"header": [
+							{ "key": "apikey", "value": "{{public_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\"format\": \"json\"}" },
+						"auth": { "type": "noauth" }
+					}
+				}
+			]
+		}
+	]
+}
