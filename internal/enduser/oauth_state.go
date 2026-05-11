@@ -3,6 +3,7 @@ package enduser
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,8 +37,13 @@ func storeOAuthState(ctx context.Context, pool *pgxpool.Pool, state, projectID, 
 }
 
 // consumeOAuthState atomically fetches and deletes a state row, enforcing
-// single-use semantics. Expired rows are rejected and removed in the same
-// call. Returns ErrOAuthStateNotFound if no matching unexpired row exists.
+// single-use semantics. Expired rows are rejected (and quietly skipped by
+// the WHERE clause). Returns ErrOAuthStateNotFound if no matching unexpired
+// row exists.
+//
+// Bulk cleanup of expired rows runs out of band — see RunOAuthStateSweeper
+// — so this hot path stays a single indexed DELETE … RETURNING rather than
+// also doing a full-table sweep on every miss.
 func consumeOAuthState(ctx context.Context, pool *pgxpool.Pool, state string) (*OAuthStateRecord, error) {
 	var rec OAuthStateRecord
 	err := pool.QueryRow(ctx,
@@ -48,11 +54,56 @@ func consumeOAuthState(ctx context.Context, pool *pgxpool.Pool, state string) (*
 	).Scan(&rec.ProjectID, &rec.Provider, &rec.RedirectURL)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Opportunistically clean expired rows — cheap and keeps the table small.
-			_, _ = pool.Exec(ctx, `DELETE FROM public.oauth_states WHERE expires_at <= now()`)
 			return nil, ErrOAuthStateNotFound
 		}
 		return nil, err
 	}
 	return &rec, nil
+}
+
+// CleanupExpiredOAuthStates deletes every oauth_states row whose
+// expires_at is in the past. The query is an indexed range scan
+// (idx_oauth_states_expires) so it's O(deleted), not O(table).
+// Returns the number of rows removed.
+func CleanupExpiredOAuthStates(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	tag, err := pool.Exec(ctx, `DELETE FROM public.oauth_states WHERE expires_at <= now()`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// RunOAuthStateSweeper runs CleanupExpiredOAuthStates on `every` cadence
+// until ctx is cancelled. Closes #58 — the previous design only swept
+// opportunistically on lookup misses, which both pile up rows during
+// quiet periods and emit a redundant full-scan DELETE on every miss
+// during busy periods.
+//
+// Errors are logged and swallowed — losing one sweep is harmless; the
+// next tick will pick up the same rows.
+func RunOAuthStateSweeper(ctx context.Context, pool *pgxpool.Pool, every time.Duration) {
+	if every <= 0 {
+		every = 10 * time.Minute
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := CleanupExpiredOAuthStates(ctx, pool)
+			if err != nil {
+				// Tick log; cancellation also lands here.
+				if ctx.Err() != nil {
+					return
+				}
+				slog.Warn("oauth state sweeper failed", "error", err)
+				continue
+			}
+			if n > 0 {
+				slog.Debug("oauth state sweeper removed expired rows", "count", n)
+			}
+		}
+	}
 }

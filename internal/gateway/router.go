@@ -266,10 +266,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 					next.ServeHTTP(w, r.WithContext(ctx))
 				})
 			})
-			r.Get("/logs", HandleLogs(pool))
-			r.Get("/schema", query.HandleSchemaIntrospection(pool))
-			r.Get("/schema/changes", query.HandleSchemaChanges(pool))
-			r.Get("/schema/rls-audit", query.HandleRLSAudit(pool))
+			// Per-route role gates — closes #50. The mapping mirrors
+			// the user-facing Role Permissions table (Members tab):
+			//   View data/logs/compliance → viewer
+			//   Edit data/schema/functions → developer
+			//   Settings/API keys/vault/invites → admin
+			//   Delete project / change roles → owner
+			r.With(tenant.RequireMinRole("viewer")).Get("/logs", HandleLogs(pool))
+			r.With(tenant.RequireMinRole("viewer")).Get("/schema", query.HandleSchemaIntrospection(pool))
+			r.With(tenant.RequireMinRole("viewer")).Get("/schema/changes", query.HandleSchemaChanges(pool))
+			r.With(tenant.RequireMinRole("viewer")).Get("/schema/rls-audit", query.HandleRLSAudit(pool))
 			// DDL on tenant schemas runs against the developer pool so
 			// CREATE/ALTER/REFERENCES on migrator-owned tables works.
 			// withDeveloperRole adds the flag the DDL helpers read inside
@@ -277,41 +283,41 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			// it, tables would be developer-owned and cross-tool DDL would
 			// fail with "must be owner". (PlatformTenantContext also sets
 			// this flag, but it's only mounted on /data/sql and below.)
-			r.With(withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
-			r.With(withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
-			r.Mount("/webhooks", webhook.Routes(pool, limitsSvc))
+			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
+			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
+			r.With(tenant.RequireMinRole("developer")).Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
-			r.Mount("/cron", cron.Routes(cronSvc))
-			r.Get("/api-keys", tenant.HandleListAPIKeys(pool))
-			r.Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
-			r.Get("/connect", tenant.HandleConnect(pool))
+			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/api-keys", tenant.HandleListAPIKeys(pool))
+			r.With(tenant.RequireMinRole("admin")).Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
+			r.With(tenant.RequireMinRole("viewer")).Get("/connect", tenant.HandleConnect(pool))
 
 			// Plan usage.
 			if limitsSvc != nil {
-				r.Get("/usage", plans.HandleGetUsage(limitsSvc, pool))
+				r.With(tenant.RequireMinRole("viewer")).Get("/usage", plans.HandleGetUsage(limitsSvc, pool))
 			}
 
 			// Email template management.
 			if emailService != nil {
 				tmplHandler := email.NewTemplateHandler(pool, emailService, limitsSvc)
-				r.Get("/email-templates", tmplHandler.HandleList())
-				r.Put("/email-templates/{type}", tmplHandler.HandleUpdate())
-				r.Delete("/email-templates/{type}", tmplHandler.HandleDelete())
-				r.Post("/email-templates/{type}/preview", tmplHandler.HandlePreview())
-				r.Post("/email-templates/{type}/test", tmplHandler.HandleTest())
+				r.With(tenant.RequireMinRole("viewer")).Get("/email-templates", tmplHandler.HandleList())
+				r.With(tenant.RequireMinRole("developer")).Put("/email-templates/{type}", tmplHandler.HandleUpdate())
+				r.With(tenant.RequireMinRole("developer")).Delete("/email-templates/{type}", tmplHandler.HandleDelete())
+				r.With(tenant.RequireMinRole("developer")).Post("/email-templates/{type}/preview", tmplHandler.HandlePreview())
+				r.With(tenant.RequireMinRole("developer")).Post("/email-templates/{type}/test", tmplHandler.HandleTest())
 			}
 
 			// Vault (encrypted secrets storage) — platform-authenticated.
 			if vaultSvc != nil && vaultSvc.Configured() {
-				r.Mount("/vault", vault.Routes(vaultSvc, pool))
+				r.With(tenant.RequireMinRole("admin")).Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
 
 			// Compliance (DPA report, sub-processor registry, DSAR exports).
 			complianceSvc := compliance.NewComplianceService(pool)
-			r.Get("/compliance/dpa-report", compliance.HandleDPAReport(complianceSvc))
-			r.Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/dpa-report", compliance.HandleDPAReport(complianceSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
 
-			r.Get("/compliance/audit-log", audit.HandleList(auditSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-log", audit.HandleList(auditSvc))
 
 			// DSAR exports (tenant-level and per-user).
 			exportSvc := compliance.NewExportService(pool, s3Client, auditSvc)
@@ -325,42 +331,56 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			if emailService != nil {
 				sendEmailFn = emailService.SendRaw
 			}
-			r.Get("/members", tenant.HandleListMembers(pool))
-			r.Post("/members/invite", tenant.HandleInviteMember(pool, sendEmailFn))
-			r.Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
-			r.Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
-			r.Patch("/members/{userId}", tenant.HandleChangeRole(pool))
+			// Member CRUD: handler-level RequireRole already enforces
+			// these levels via a second DB lookup; the middleware gate
+			// short-circuits before that DB call. Belt-and-braces; the
+			// inner check stays so the cleanup is a separate follow-up.
+			r.With(tenant.RequireMinRole("viewer")).Get("/members", tenant.HandleListMembers(pool))
+			r.With(tenant.RequireMinRole("admin")).Post("/members/invite", tenant.HandleInviteMember(pool, sendEmailFn))
+			r.With(tenant.RequireMinRole("admin")).Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
+			r.With(tenant.RequireMinRole("admin")).Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
+			r.With(tenant.RequireMinRole("owner")).Patch("/members/{userId}", tenant.HandleChangeRole(pool))
 
 			// Edge Functions (serverless compute management).
 			fnSvc := functions.NewService(pool)
 			fnTrigSvc := functions.NewTriggerService(pool)
 			r.Route("/functions", func(r chi.Router) {
-				r.Get("/", functions.HandleList(fnSvc))
-				r.Post("/", functions.HandleCreate(fnSvc, limitsSvc))
-				r.Get("/{name}", functions.HandleGet(fnSvc))
-				r.Put("/{name}", functions.HandleUpdate(fnSvc))
-				r.Delete("/{name}", functions.HandleDelete(fnSvc))
-				r.Get("/{name}/logs", functions.HandleLogs(fnSvc))
-				r.Get("/{name}/triggers", functions.HandleListTriggers(fnSvc, fnTrigSvc))
-				r.Post("/{name}/triggers", functions.HandleCreateTrigger(fnSvc, fnTrigSvc))
-				r.Delete("/{name}/triggers/{triggerId}", functions.HandleDeleteTrigger(fnTrigSvc))
-				r.Get("/{name}/versions", functions.HandleListVersions(fnSvc))
-				r.Post("/{name}/rollback", functions.HandleRollback(fnSvc))
-				r.Get("/{name}/metrics", functions.HandleMetrics(fnSvc))
+				// Reads → viewer; mutations → developer (closes #50).
+				r.With(tenant.RequireMinRole("viewer")).Get("/", functions.HandleList(fnSvc))
+				r.With(tenant.RequireMinRole("developer")).Post("/", functions.HandleCreate(fnSvc, limitsSvc))
+				r.With(tenant.RequireMinRole("viewer")).Get("/{name}", functions.HandleGet(fnSvc))
+				r.With(tenant.RequireMinRole("developer")).Put("/{name}", functions.HandleUpdate(fnSvc))
+				r.With(tenant.RequireMinRole("developer")).Delete("/{name}", functions.HandleDelete(fnSvc))
+				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/logs", functions.HandleLogs(fnSvc))
+				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/triggers", functions.HandleListTriggers(fnSvc, fnTrigSvc))
+				r.With(tenant.RequireMinRole("developer")).Post("/{name}/triggers", functions.HandleCreateTrigger(fnSvc, fnTrigSvc))
+				r.With(tenant.RequireMinRole("developer")).Delete("/{name}/triggers/{triggerId}", functions.HandleDeleteTrigger(fnTrigSvc))
+				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/versions", functions.HandleListVersions(fnSvc))
+				r.With(tenant.RequireMinRole("developer")).Post("/{name}/rollback", functions.HandleRollback(fnSvc))
+				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/metrics", functions.HandleMetrics(fnSvc))
 			})
 
 			// Console end-user management — platform-authenticated.
+			// End-user admin is a "settings"-shaped capability (closes #50).
 			r.Route("/users", func(r chi.Router) {
+				r.Use(tenant.RequireMinRole("admin"))
 				r.Use(tenant.PlatformTenantContext(pool))
 				r.Mount("/", enduser.PlatformRoutes(pool, limiter))
 			})
 
 			// Console storage proxy — platform-authenticated access to project storage.
+			// Reads → viewer; uploads/deletes → developer (closes #50).
+			// We bypass storageHandler.Routes() here so each method gets
+			// its own gate; the SDK mount keeps using Routes() unchanged.
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
 					r.Use(tenant.PlatformStorageContext(pool))
 					storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool))
-					r.Mount("/", storageHandler.Routes())
+					r.With(tenant.RequireMinRole("developer")).Post("/upload", storageHandler.UploadFile)
+					r.With(tenant.RequireMinRole("developer")).Post("/signed-url", storageHandler.GenerateSignedURL)
+					r.With(tenant.RequireMinRole("viewer")).Get("/", storageHandler.ListFiles)
+					r.With(tenant.RequireMinRole("viewer")).Get("/*", storageHandler.DownloadFile)
+					r.With(tenant.RequireMinRole("developer")).Delete("/*", storageHandler.DeleteFile)
 				})
 			}
 
@@ -381,14 +401,18 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 				queryEngine := query.NewQueryEngine(developerPool)
 				publisher := realtime.NewEventPublisher(nil, hub)
 
-				r.Post("/sql", query.HandlePlatformSQL(queryEngine))
-				r.Post("/sql/transaction", query.HandlePlatformSQLTransaction(queryEngine))
-				r.Get("/{table}", query.HandleTableGet(queryEngine))
-				r.Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
-				r.Post("/{table}", query.HandleTableInsert(queryEngine, publisher))
-				r.Post("/{table}/bulk-delete", query.HandleTableBulkDelete(queryEngine, publisher))
-				r.Patch("/{table}/{id}", query.HandleTableUpdate(queryEngine, publisher))
-				r.Delete("/{table}/{id}", query.HandleTableDelete(queryEngine, publisher))
+				// Reads → viewer; mutations + SQL exec → developer
+				// (closes #50). HandlePlatformSQL{,Transaction} can run
+				// arbitrary SQL including DDL, so they belong in the
+				// "Edit data, schema, functions" row.
+				r.With(tenant.RequireMinRole("developer")).Post("/sql", query.HandlePlatformSQL(queryEngine))
+				r.With(tenant.RequireMinRole("developer")).Post("/sql/transaction", query.HandlePlatformSQLTransaction(queryEngine))
+				r.With(tenant.RequireMinRole("viewer")).Get("/{table}", query.HandleTableGet(queryEngine))
+				r.With(tenant.RequireMinRole("viewer")).Get("/{table}/{id}", query.HandleTableGetByID(queryEngine))
+				r.With(tenant.RequireMinRole("developer")).Post("/{table}", query.HandleTableInsert(queryEngine, publisher))
+				r.With(tenant.RequireMinRole("developer")).Post("/{table}/bulk-delete", query.HandleTableBulkDelete(queryEngine, publisher))
+				r.With(tenant.RequireMinRole("developer")).Patch("/{table}/{id}", query.HandleTableUpdate(queryEngine, publisher))
+				r.With(tenant.RequireMinRole("developer")).Delete("/{table}/{id}", query.HandleTableDelete(queryEngine, publisher))
 			})
 		})
 	})
@@ -424,7 +448,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 		if !isDev {
 			tokenValidator = platformAuth.ValidateToken
 		}
-		wsHandler := realtime.HandleWebSocket(hub, tokenValidator, buildTenantResolver(pool), isDev)
+		wsHandler := realtime.HandleWebSocket(hub, tokenValidator, buildTenantResolver(pool), BuildOriginChecker(allowedOrigins), isDev)
 		r.Get("/v1/realtime", wsHandler)
 	} else {
 		slog.Warn("realtime hub not configured, websocket route disabled")
@@ -583,7 +607,10 @@ func projectMembershipMiddleware(pool *pgxpool.Pool, isDev bool) func(http.Handl
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			// Stash the resolved role on the context so per-route
+			// middleware (tenant.RequireMinRole) can gate without a
+			// second DB hit. Closes #50.
+			next.ServeHTTP(w, r.WithContext(tenant.WithRole(r.Context(), role)))
 		})
 	}
 }

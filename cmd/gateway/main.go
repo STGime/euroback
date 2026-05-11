@@ -17,6 +17,7 @@ import (
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
+	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/gateway"
 	"github.com/eurobase/euroback/internal/metrics"
@@ -209,6 +210,13 @@ func main() {
 		slog.Warn("REDIS_URL not set, realtime cross-instance fan-out disabled")
 	}
 	_ = rtBridge // Available for cross-instance fan-out via EventPublisher.
+
+	// ── Periodic sweeper for expired OAuth state rows (closes #58) ──
+	// 10-minute cadence matches the state TTL so a row sits in the
+	// table for at most ~20 minutes after expiry. consumeOAuthState
+	// no longer cleans opportunistically on lookup miss, so this
+	// goroutine is the sole reaper.
+	go enduser.RunOAuthStateSweeper(ctx, pool, 10*time.Minute)
 
 	// ── Set up request log pipeline ──
 	logCh := make(chan gateway.LogEntry, 10000)

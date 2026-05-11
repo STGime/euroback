@@ -143,7 +143,17 @@ func handleSQLInternal(engine *QueryEngine, readOnly bool) http.HandlerFunc {
 
 		if err != nil {
 			slog.Error("sql execution failed", "error", err, "schema", schema)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			// Closes #52. SDK callers (readOnly path) get a sanitised
+			// message — the raw pgx Error() output leaks Detail/Hint/
+			// position which can echo offending values, internal paths,
+			// or schema layout. Platform admins running ad-hoc SQL
+			// through the console keep the full message because they
+			// already see the schema.
+			if readOnly {
+				jsonError(w, sanitizeSDKSQLError(err), http.StatusBadRequest)
+			} else {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+			}
 			return
 		}
 
