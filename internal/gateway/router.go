@@ -319,12 +319,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-log", audit.HandleList(auditSvc))
 
-			// DSAR exports (tenant-level and per-user).
+			// DSAR exports (tenant-level and per-user). Triggering an
+			// export pulls every row from every tenant table, so this
+			// is a "settings"-shaped capability — minimum admin per #50.
+			// Listing + status are also admin-only since the URLs they
+			// hand back are presigned and give the holder the file.
 			exportSvc := compliance.NewExportService(pool, s3Client, auditSvc)
-			r.Post("/compliance/export", compliance.HandleRequestTenantExport(exportSvc))
-			r.Post("/compliance/user-export", compliance.HandleRequestUserExport(exportSvc))
-			r.Get("/compliance/exports", compliance.HandleListExports(exportSvc))
-			r.Get("/compliance/exports/{exportId}", compliance.HandleGetExport(exportSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/export", compliance.HandleRequestTenantExport(exportSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/user-export", compliance.HandleRequestUserExport(exportSvc))
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports", compliance.HandleListExports(exportSvc))
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports/{exportId}", compliance.HandleGetExport(exportSvc))
 
 			// Team members (invite, remove, change role).
 			var sendEmailFn func(ctx context.Context, to, subject, html string) error
