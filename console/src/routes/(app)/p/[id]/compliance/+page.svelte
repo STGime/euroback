@@ -144,9 +144,8 @@
 		exportsLoading = true;
 		exportError = null;
 		try {
-			const res = await api.fetch(`/platform/projects/${projectId}/compliance/exports?limit=20`);
-			const data = await res.json();
-			exports = data.exports ?? [];
+			const data = await api.listExports(projectId);
+			exports = (data.exports ?? []) as unknown as ExportEntry[];
 		} catch (err) {
 			exportError = err instanceof Error ? err.message : 'Failed to load exports';
 		} finally {
@@ -158,23 +157,13 @@
 		exportRequesting = true;
 		exportError = null;
 		try {
-			const res = await api.fetch(`/platform/projects/${projectId}/compliance/export`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ format: exportFormat })
-			});
-			if (res.status === 429) {
-				exportError = 'Rate limit: 1 export per hour. Please wait.';
-				return;
-			}
-			if (!res.ok) {
-				const data = await res.json();
-				exportError = data.error || 'Failed to request export';
-				return;
-			}
+			await api.requestTenantExport(projectId, exportFormat);
 			await loadExports();
 		} catch (err) {
-			exportError = err instanceof Error ? err.message : 'Failed to request export';
+			const msg = err instanceof Error ? err.message : 'Failed to request export';
+			// parseAPIError surfaces rate-limit text as a friendly message;
+			// keep the explicit hint for the 429 case so the UI is unchanged.
+			exportError = /rate.?limit/i.test(msg) ? 'Rate limit: 1 export per hour. Please wait.' : msg;
 		} finally {
 			exportRequesting = false;
 		}
@@ -182,9 +171,8 @@
 
 	async function refreshExportStatus(exportId: string) {
 		try {
-			const res = await api.fetch(`/platform/projects/${projectId}/compliance/exports/${exportId}`);
-			const updated = await res.json();
-			exports = exports.map(e => e.id === exportId ? updated : e);
+			const updated = await api.getExport(projectId, exportId);
+			exports = exports.map(e => e.id === exportId ? (updated as unknown as ExportEntry) : e);
 		} catch { /* ignore */ }
 	}
 
