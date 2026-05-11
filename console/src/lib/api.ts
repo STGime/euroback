@@ -1013,6 +1013,35 @@ export class EurobaseAPI {
 		return this.fetch<AuditLogResult>(`/platform/projects/${projectId}/compliance/audit-log${query}`);
 	}
 
+	// ---- DSAR exports ----
+
+	/** Request a full-tenant DSAR export. Returns the created export request row. */
+	async requestTenantExport(projectId: string, format: 'json' | 'csv'): Promise<ExportRequestRow> {
+		return this.fetch<ExportRequestRow>(`/platform/projects/${projectId}/compliance/export`, {
+			method: 'POST',
+			body: JSON.stringify({ format }),
+		});
+	}
+
+	/** Request a per-user DSAR export. */
+	async requestUserExport(projectId: string, userId: string, format: 'json' | 'csv'): Promise<ExportRequestRow> {
+		return this.fetch<ExportRequestRow>(`/platform/projects/${projectId}/compliance/user-export`, {
+			method: 'POST',
+			body: JSON.stringify({ user_id: userId, format }),
+		});
+	}
+
+	/** Paginated history of export requests for a project. */
+	async listExports(projectId: string, limit = 20, offset = 0): Promise<{ exports: ExportRequestRow[] }> {
+		const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+		return this.fetch<{ exports: ExportRequestRow[] }>(`/platform/projects/${projectId}/compliance/exports?${qs}`);
+	}
+
+	/** Get a single export by ID. download_url is populated when status === 'completed'. */
+	async getExport(projectId: string, exportId: string): Promise<ExportRequestRow> {
+		return this.fetch<ExportRequestRow>(`/platform/projects/${projectId}/compliance/exports/${exportId}`);
+	}
+
 	// ---- Team Members ----
 
 	/** List members and pending invitations for a project. */
@@ -1587,6 +1616,26 @@ export interface AuditLogEntry {
 export interface AuditLogResult {
 	entries: AuditLogEntry[];
 	total: number;
+}
+
+/** DSAR export request row, returned by requestTenantExport / requestUserExport /
+ * listExports / getExport. Mirrors compliance.ExportRequest on the Go side. */
+export interface ExportRequestRow {
+	id: string;
+	project_id: string;
+	user_id?: string | null;
+	status: 'pending' | 'running' | 'completed' | 'failed';
+	format: 'json' | 'csv';
+	s3_key?: string | null;
+	file_size?: number | null;
+	error?: string | null;
+	requested_by: string;
+	requested_by_type: 'platform' | 'enduser';
+	download_url?: string;
+	started_at?: string | null;
+	completed_at?: string | null;
+	expires_at?: string | null;
+	created_at: string;
 }
 
 export interface EdgeFunction {
