@@ -265,7 +265,11 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 	req.Header.Set("X-Schema-Name", job.SchemaName)
 	req.Header.Set("X-Function-Name", job.Action)
 	req.Header.Set("X-Function-ID", fnID)
-	req.Header.Set("X-Plan", "free") // schedule-fired invocations don't carry plan; runner uses for limits only
+	plan := job.Plan
+	if plan == "" {
+		plan = "free"
+	}
+	req.Header.Set("X-Plan", plan)
 	req.Header.Set("X-Cron-Job-ID", job.ID)
 	if req.Header.Get("Content-Type") == "" && len(job.Payload) > 0 {
 		req.Header.Set("Content-Type", "application/json")
@@ -283,6 +287,8 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("function returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
+	// Drain so the connection can be reused by http.Client's transport pool.
+	io.Copy(io.Discard, resp.Body)
 	return nil
 }
 

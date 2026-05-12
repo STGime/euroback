@@ -13,6 +13,10 @@ import (
 const (
 	// freePlanCronLimit is the max number of cron jobs on the free plan.
 	freePlanCronLimit = 2
+	// maxScheduleBodyBytes caps SDK schedule create/update bodies.
+	// Schedule rows are small (cron + name + optional payload/headers)
+	// — 1 MB is plenty and stops a leaked secret key from posting GBs.
+	maxScheduleBodyBytes = 1 << 20
 )
 
 // Routes returns a chi.Router for cron job CRUD operations.
@@ -217,6 +221,7 @@ func handleSDKCreate(svc *CronService) http.HandlerFunc {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleBodyBytes)
 		var req CreateCronJobRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -257,6 +262,7 @@ func handleSDKUpdate(svc *CronService) http.HandlerFunc {
 		}
 		name := chi.URLParam(r, "name")
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleBodyBytes)
 		var req UpdateCronJobRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)

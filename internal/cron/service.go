@@ -42,10 +42,14 @@ type CronJob struct {
 	UpdatedAt   time.Time       `json:"updated_at"`
 }
 
-// DueJob extends CronJob with the tenant schema name for execution.
+// DueJob extends CronJob with the tenant schema name + plan needed for
+// execution. Plan flows through to the runner's X-Plan header so
+// pro-plan projects get pro-tier limits on schedule-fired invocations
+// (review feedback on PR #113).
 type DueJob struct {
 	CronJob
 	SchemaName string
+	Plan       string
 }
 
 // CreateCronJobRequest is the payload for creating a new cron job.
@@ -278,13 +282,15 @@ func (s *CronService) DeleteByName(ctx context.Context, projectID, name string) 
 	return nil
 }
 
-// GetDueJobs returns all enabled cron jobs for active projects, including the schema name.
+// GetDueJobs returns all enabled cron jobs for active projects, including
+// the schema name and plan. Plan is needed so the executor can pass the
+// correct X-Plan to the function runner for pro-tier limits.
 func (s *CronService) GetDueJobs(ctx context.Context) ([]DueJob, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT cj.id, cj.project_id, cj.name, cj.schedule, cj.timezone, cj.action_type,
 		        cj.action, cj.description, cj.payload, cj.headers, cj.enabled,
 		        cj.last_run_at, cj.last_error, cj.run_count,
-		        cj.created_at, cj.updated_at, p.schema_name
+		        cj.created_at, cj.updated_at, p.schema_name, COALESCE(p.plan, 'free')
 		 FROM cron_jobs cj
 		 JOIN projects p ON cj.project_id = p.id
 		 WHERE cj.enabled = true AND p.status = 'active'`)
@@ -299,7 +305,7 @@ func (s *CronService) GetDueJobs(ctx context.Context) ([]DueJob, error) {
 		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.Schedule, &d.Timezone,
 			&d.ActionType, &d.Action, &d.Description, &d.Payload, &d.Headers,
 			&d.Enabled, &d.LastRunAt, &d.LastError, &d.RunCount,
-			&d.CreatedAt, &d.UpdatedAt, &d.SchemaName); err != nil {
+			&d.CreatedAt, &d.UpdatedAt, &d.SchemaName, &d.Plan); err != nil {
 			return nil, fmt.Errorf("scan due job: %w", err)
 		}
 		jobs = append(jobs, d)
