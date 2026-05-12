@@ -12,6 +12,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/workers"
 	"github.com/riverqueue/river"
@@ -122,6 +123,30 @@ func main() {
 	// ── Start cron executor ──
 	cronSvc := cron.NewCronService(pool)
 	cronExec := cron.NewExecutor(cronSvc, pool)
+
+	// Wire the function-runner invoker so schedules with action_type
+	// `function` (issue #112) can fire deployed edge functions. Optional
+	// — without it, function schedules fail-fast with a clear message,
+	// SQL/RPC schedules keep working. Same env vars as the gateway.
+	fnRunnerURL := os.Getenv("FUNCTION_RUNNER_URL")
+	if fnRunnerURL != "" {
+		var signer *functions.Signer
+		if secret := os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"); secret != "" {
+			s, err := functions.NewSigner(secret)
+			if err != nil {
+				slog.Error("FUNCTIONS_RUNNER_HMAC_SECRET invalid for worker", "error", err)
+				os.Exit(1)
+			}
+			signer = s
+		}
+		cronExec = cronExec.WithFunctionInvoker(cron.FunctionInvoker{
+			RunnerURL: fnRunnerURL,
+			Signer:    signer,
+		})
+		slog.Info("cron executor wired to functions runner", "url", fnRunnerURL, "signed", signer != nil)
+	} else {
+		slog.Warn("FUNCTION_RUNNER_URL not set on worker — `function` schedules will fail-fast")
+	}
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()

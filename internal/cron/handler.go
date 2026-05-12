@@ -2,15 +2,21 @@ package cron
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
 )
 
 const (
 	// freePlanCronLimit is the max number of cron jobs on the free plan.
 	freePlanCronLimit = 2
+	// maxScheduleBodyBytes caps SDK schedule create/update bodies.
+	// Schedule rows are small (cron + name + optional payload/headers)
+	// — 1 MB is plenty and stops a leaked secret key from posting GBs.
+	maxScheduleBodyBytes = 1 << 20
 )
 
 // Routes returns a chi.Router for cron job CRUD operations.
@@ -22,6 +28,24 @@ func Routes(svc *CronService) chi.Router {
 	r.Patch("/{jobId}", handleUpdate(svc))
 	r.Delete("/{jobId}", handleDelete(svc))
 	r.Get("/{jobId}/runs", handleListRuns(svc))
+	return r
+}
+
+// SDKRoutes returns a chi.Router exposing the schedule surface to the JS
+// SDK (`eb.functions.schedules.*`). Mounted at /v1/schedules under the
+// API-key middleware. Schedules are addressed by their stable name, not
+// by server-allocated UUID — see #112.
+//
+// Service-key gating is done by the route wrapper (see router.go), since
+// editing schedules is a control-plane operation and public keys must
+// not have write access.
+func SDKRoutes(svc *CronService) chi.Router {
+	r := chi.NewRouter()
+	r.Get("/", handleSDKList(svc))
+	r.Post("/", handleSDKCreate(svc))
+	r.Get("/{name}", handleSDKGet(svc))
+	r.Patch("/{name}", handleSDKUpdate(svc))
+	r.Delete("/{name}", handleSDKDelete(svc))
 	return r
 }
 
@@ -44,43 +68,28 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
-		// Parse and validate request body first.
 		var req CreateCronJobRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
 
-		// Validate fields before checking plan limits.
 		if err := req.Validate(); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		// Enforce plan limit: free plan gets 2 cron jobs.
-		count, err := svc.Count(r.Context(), projectID)
-		if err != nil {
-			slog.Error("count cron jobs failed", "error", err, "project_id", projectID)
-			jsonError(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-
-		var plan string
-		err = svc.pool.QueryRow(r.Context(),
-			`SELECT COALESCE(plan, 'free') FROM projects WHERE id = $1`, projectID).Scan(&plan)
-		if err != nil {
-			slog.Error("get project plan failed", "error", err, "project_id", projectID)
-			jsonError(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-
-		if plan == "free" && count >= freePlanCronLimit {
-			jsonError(w, "free plan is limited to 2 scheduled jobs — upgrade to pro for unlimited", http.StatusForbidden)
+		if err := enforcePlanLimit(r, svc, projectID); err != nil {
+			jsonError(w, err.message, err.status)
 			return
 		}
 
 		job, err := svc.Create(r.Context(), projectID, req)
 		if err != nil {
+			if errors.Is(err, ErrNameAlreadyExists) {
+				jsonError(w, err.Error(), http.StatusConflict)
+				return
+			}
 			slog.Error("create cron job failed", "error", err, "project_id", projectID)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -103,7 +112,7 @@ func handleUpdate(svc *CronService) http.HandlerFunc {
 
 		job, err := svc.Update(r.Context(), projectID, jobID, req)
 		if err != nil {
-			if err.Error() == "cron job not found" {
+			if errors.Is(err, ErrNotFound) {
 				jsonError(w, "cron job not found", http.StatusNotFound)
 				return
 			}
@@ -123,7 +132,7 @@ func handleDelete(svc *CronService) http.HandlerFunc {
 
 		err := svc.Delete(r.Context(), projectID, jobID)
 		if err != nil {
-			if err.Error() == "cron job not found" {
+			if errors.Is(err, ErrNotFound) {
 				jsonError(w, "cron job not found", http.StatusNotFound)
 				return
 			}
@@ -153,6 +162,171 @@ func handleListRuns(svc *CronService) http.HandlerFunc {
 
 		jsonResponse(w, runs, http.StatusOK)
 	}
+}
+
+// ── SDK handlers (addressed by name, project from API-key context) ──
+
+func projectIDFromAPIKey(r *http.Request) (string, bool) {
+	pc, ok := auth.ProjectFromContext(r.Context())
+	if !ok || pc == nil {
+		return "", false
+	}
+	return pc.ProjectID, true
+}
+
+func handleSDKList(svc *CronService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID, ok := projectIDFromAPIKey(r)
+		if !ok {
+			jsonError(w, "missing project context", http.StatusUnauthorized)
+			return
+		}
+		jobs, err := svc.List(r.Context(), projectID)
+		if err != nil {
+			slog.Error("sdk list schedules failed", "error", err, "project_id", projectID)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, jobs, http.StatusOK)
+	}
+}
+
+func handleSDKGet(svc *CronService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID, ok := projectIDFromAPIKey(r)
+		if !ok {
+			jsonError(w, "missing project context", http.StatusUnauthorized)
+			return
+		}
+		name := chi.URLParam(r, "name")
+		job, err := svc.GetByName(r.Context(), projectID, name)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				jsonError(w, "schedule not found", http.StatusNotFound)
+				return
+			}
+			slog.Error("sdk get schedule failed", "error", err, "project_id", projectID, "name", name)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, job, http.StatusOK)
+	}
+}
+
+func handleSDKCreate(svc *CronService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID, ok := projectIDFromAPIKey(r)
+		if !ok {
+			jsonError(w, "missing project context", http.StatusUnauthorized)
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleBodyBytes)
+		var req CreateCronJobRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := req.Validate(); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := enforcePlanLimit(r, svc, projectID); err != nil {
+			jsonError(w, err.message, err.status)
+			return
+		}
+
+		job, err := svc.Create(r.Context(), projectID, req)
+		if err != nil {
+			if errors.Is(err, ErrNameAlreadyExists) {
+				// 409 lets the SDK surface this as `already_exists`
+				// per #112 — callers should retry with update().
+				jsonError(w, err.Error(), http.StatusConflict)
+				return
+			}
+			slog.Error("sdk create schedule failed", "error", err, "project_id", projectID)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, job, http.StatusCreated)
+	}
+}
+
+func handleSDKUpdate(svc *CronService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID, ok := projectIDFromAPIKey(r)
+		if !ok {
+			jsonError(w, "missing project context", http.StatusUnauthorized)
+			return
+		}
+		name := chi.URLParam(r, "name")
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleBodyBytes)
+		var req UpdateCronJobRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		job, err := svc.UpdateByName(r.Context(), projectID, name, req)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				jsonError(w, "schedule not found", http.StatusNotFound)
+				return
+			}
+			slog.Error("sdk update schedule failed", "error", err, "project_id", projectID, "name", name)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, job, http.StatusOK)
+	}
+}
+
+func handleSDKDelete(svc *CronService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID, ok := projectIDFromAPIKey(r)
+		if !ok {
+			jsonError(w, "missing project context", http.StatusUnauthorized)
+			return
+		}
+		name := chi.URLParam(r, "name")
+		if err := svc.DeleteByName(r.Context(), projectID, name); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				jsonError(w, "schedule not found", http.StatusNotFound)
+				return
+			}
+			slog.Error("sdk delete schedule failed", "error", err, "project_id", projectID, "name", name)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// httpErr is a small bag for plan-limit failures so create handlers can
+// surface either 403 (over limit) or 500 (DB error) with a single check.
+type httpErr struct {
+	status  int
+	message string
+}
+
+func enforcePlanLimit(r *http.Request, svc *CronService, projectID string) *httpErr {
+	count, err := svc.Count(r.Context(), projectID)
+	if err != nil {
+		slog.Error("count cron jobs failed", "error", err, "project_id", projectID)
+		return &httpErr{status: http.StatusInternalServerError, message: "internal server error"}
+	}
+	var plan string
+	if err := svc.pool.QueryRow(r.Context(),
+		`SELECT COALESCE(plan, 'free') FROM projects WHERE id = $1`, projectID).Scan(&plan); err != nil {
+		slog.Error("get project plan failed", "error", err, "project_id", projectID)
+		return &httpErr{status: http.StatusInternalServerError, message: "internal server error"}
+	}
+	if plan == "free" && count >= freePlanCronLimit {
+		return &httpErr{status: http.StatusForbidden, message: "free plan is limited to 2 scheduled jobs — upgrade to pro for unlimited"}
+	}
+	return nil
 }
 
 func jsonResponse(w http.ResponseWriter, data any, status int) {

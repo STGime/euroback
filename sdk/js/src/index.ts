@@ -27,7 +27,14 @@ export type {
 } from './realtime'
 export { AuthClient } from './auth'
 export { FunctionsClient } from './functions'
-export type { FunctionInvokeOptions, FunctionError } from './functions'
+export type {
+  FunctionInvokeOptions,
+  FunctionError,
+  ScheduleSpec,
+  ScheduleRow,
+  ScheduleError,
+} from './functions'
+export { SchedulesClient } from './schedules'
 export { VaultClient } from './vault'
 export type { VaultSecret, VaultSecretMeta } from './vault'
 export { SchemaClient } from './ddl'

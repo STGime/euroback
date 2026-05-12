@@ -583,6 +583,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			r.Use(endUserMw.Handler)
 			r.HandleFunc("/{name}", functions.HandleInvoke(pool, sdkFnSvc, fnRunnerURL, fnSigner))
 		})
+
+		// Schedules — SDK control-plane for cron jobs. Closes #112.
+		// Service-key only: editing schedules is destructive (writes to
+		// cron_jobs) and public keys live in client code.
+		r.Route("/schedules", func(r chi.Router) {
+			r.Use(apiKeyMw.Handler)
+			r.Use(requireSecretKeyForSchedules)
+			sdkCronSvc := cron.NewCronService(pool)
+			r.Mount("/", cron.SDKRoutes(sdkCronSvc))
+		})
 	})
 
 	return r
@@ -666,6 +676,26 @@ func superadminMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 func withDeveloperRole(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r.WithContext(query.WithDeveloperRole(r.Context())))
+	})
+}
+
+// requireSecretKeyForSchedules gates SDK `/v1/schedules` to secret API
+// keys only. Schedules are control-plane state — they fire arbitrary
+// edge-function invocations on a recurring cadence. Public keys live in
+// client-side code and a leaked public key must not be able to install
+// or remove a schedule.
+func requireSecretKeyForSchedules(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pc, ok := auth.ProjectFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+		if pc.KeyType != "secret" {
+			http.Error(w, `{"error":"managing schedules requires a secret API key (eb_sk_*)"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
