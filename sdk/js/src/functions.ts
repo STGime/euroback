@@ -6,6 +6,9 @@
  */
 
 import type { EurobaseConfig, HttpClient } from './http'
+import { SchedulesClient } from './schedules'
+
+export type { ScheduleSpec, ScheduleRow, ScheduleError } from './schedules'
 
 export interface FunctionInvokeOptions {
   /** Request body (will be JSON-stringified). */
@@ -24,8 +27,15 @@ export interface FunctionError {
 export class FunctionsClient {
   private http: HttpClient
 
+  /**
+   * Cron schedules for deployed functions. See `schedules.ts`. Requires
+   * an `eb_sk_*` secret key. Closes #112.
+   */
+  readonly schedules: SchedulesClient
+
   constructor(config: EurobaseConfig, http: HttpClient) {
     this.http = http
+    this.schedules = new SchedulesClient(http)
   }
 
   /**

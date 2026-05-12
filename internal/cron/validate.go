@@ -12,6 +12,11 @@ import (
 // validator uses elsewhere).
 var validRPCNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
+// validFunctionNameRe matches safe edge-function names. Edge functions
+// use kebab-case (`purge-expired-images`) so we allow hyphens here. The
+// expression is reused via validateFunctionName in service.go.
+var validFunctionNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
 // forbiddenSchemaRe matches qualified references to schemas that a tenant
 // cron job has no legitimate need to touch. The list:
 //
