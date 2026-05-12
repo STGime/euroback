@@ -25,13 +25,21 @@ var ErrUnauthorized = errors.New("realtime: unauthorized")
 var ErrForbidden = errors.New("realtime: forbidden")
 
 // Authorize validates the caller's token for the requested project and
-// returns the project's plan. Implementations are responsible for
-// handling both platform-JWT and end-user-JWT clients — the realtime
-// package stays decoupled from auth wiring.
+// returns the project's plan plus the resolved project UUID. The
+// resolved value is what the hub keys connections on — it lets an
+// apikey token derive the project server-side so the caller can omit
+// the project_id query param.
+//
+// requestedProjectID is the value of the `?project_id=` query param,
+// or "" if absent. Implementations may either return that value back
+// (after validating membership), or substitute one derived from the
+// token (apikey path). Returning a different projectID than what the
+// caller requested when a request was made is treated as ErrForbidden
+// upstream.
 //
 // Return ErrUnauthorized for a bad token, ErrForbidden for a valid
-// token without access to projectID; any other error maps to 500.
-type Authorize func(ctx context.Context, token, projectID string) (plan string, err error)
+// token without access; any other error maps to 500.
+type Authorize func(ctx context.Context, token, requestedProjectID string) (projectID, plan string, err error)
 
 // HandleWebSocket returns an http.HandlerFunc that upgrades connections to
 // WebSocket on /v1/realtime and manages client lifecycle. Closes #62 —
@@ -66,10 +74,11 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		projectID := r.URL.Query().Get("project_id")
-		var plan string
+		requestedProjectID := r.URL.Query().Get("project_id")
+		var projectID, plan string
 
 		if devMode {
+			projectID = requestedProjectID
 			if projectID == "" {
 				projectID = "dev-project-001"
 			}
@@ -78,10 +87,6 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 				"project_id", projectID,
 			)
 		} else {
-			if projectID == "" {
-				http.Error(w, `{"error":"missing project_id query parameter"}`, http.StatusBadRequest)
-				return
-			}
 			token := r.URL.Query().Get("token")
 			if token == "" {
 				http.Error(w, `{"error":"missing token query parameter"}`, http.StatusUnauthorized)
@@ -93,19 +98,24 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 			}
 
 			var err error
-			plan, err = authorize(r.Context(), token, projectID)
+			projectID, plan, err = authorize(r.Context(), token, requestedProjectID)
 			if err != nil {
 				switch {
 				case errors.Is(err, ErrUnauthorized):
-					slog.Warn("realtime auth failed", "project_id", projectID)
+					slog.Warn("realtime auth failed", "project_id", requestedProjectID)
 					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
 				case errors.Is(err, ErrForbidden):
-					slog.Warn("realtime forbidden", "project_id", projectID)
+					slog.Warn("realtime forbidden", "project_id", requestedProjectID)
 					http.Error(w, `{"error":"not a member of this project"}`, http.StatusForbidden)
 				default:
-					slog.Error("realtime authorize failed", "error", err, "project_id", projectID)
+					slog.Error("realtime authorize failed", "error", err, "project_id", requestedProjectID)
 					http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 				}
+				return
+			}
+			if projectID == "" {
+				slog.Error("realtime authorize returned empty project_id", "requested", requestedProjectID)
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 				return
 			}
 		}

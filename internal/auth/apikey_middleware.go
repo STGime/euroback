@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -19,6 +20,40 @@ type APIKeyMiddleware struct {
 func NewAPIKeyMiddleware(pool *pgxpool.Pool) *APIKeyMiddleware {
 	return &APIKeyMiddleware{pool: pool}
 }
+
+// ResolveAPIKey looks up an API key value and returns the project
+// context. Exported so non-middleware code paths (the realtime
+// WebSocket authorize callback in #62) can validate apikeys without
+// the middleware glue. Returns an error if the key is unknown, the
+// project is not active, or the lookup fails.
+func ResolveAPIKey(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*ProjectContext, error) {
+	if apiKey == "" {
+		return nil, errInvalidAPIKey
+	}
+	h := sha256.Sum256([]byte(apiKey))
+	keyHash := hex.EncodeToString(h[:])
+
+	var pc ProjectContext
+	err := pool.QueryRow(ctx,
+		`SELECT p.id, p.schema_name, p.slug, p.jwt_secret, ak.type, COALESCE(p.plan, 'free'), p.auth_config
+		 FROM api_keys ak
+		 JOIN projects p ON ak.project_id = p.id
+		 WHERE ak.key_hash = $1 AND p.status = 'active'`,
+		keyHash,
+	).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType, &pc.Plan, &pc.AuthConfig)
+	if err != nil {
+		return nil, errInvalidAPIKey
+	}
+	return &pc, nil
+}
+
+var errInvalidAPIKey = errors.New("invalid API key")
+
+// ErrInvalidAPIKey is returned by ResolveAPIKey when the key is
+// unknown or the project is inactive. Callers can compare against
+// this to distinguish "bad key" from transient DB errors (though
+// today the lookup always returns this on any failure).
+var ErrInvalidAPIKey = errInvalidAPIKey
 
 // Handler is the chi-compatible middleware func.
 func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {

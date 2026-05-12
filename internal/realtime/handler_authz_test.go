@@ -36,24 +36,67 @@ func dial(t *testing.T, wsURL, query string) (*http.Response, error) {
 	return resp, err
 }
 
-func TestRealtime_RejectsMissingProjectID(t *testing.T) {
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, _ string) (string, error) {
-		return "free", nil
+func TestRealtime_NonApikeyTokenWithoutProjectIDFails(t *testing.T) {
+	// The realtime package delegates the "is project_id required for
+	// this token shape" decision to the Authorize callback. A typical
+	// production implementation accepts apikey tokens without a
+	// project_id but requires it for JWTs. Modelled here as: empty
+	// input → ErrUnauthorized.
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
+		if qpID == "" {
+			return "", "", ErrUnauthorized
+		}
+		return qpID, "free", nil
 	}, false)
 	defer stop()
 
-	resp, err := dial(t, wsURL, "token=t")
+	resp, err := dial(t, wsURL, "token=t-not-an-apikey")
 	if err == nil {
-		t.Fatal("expected handshake to fail with no project_id")
+		t.Fatal("expected handshake to fail when project_id is missing for a JWT-shaped token")
 	}
-	if resp == nil || resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %v", resp)
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %v", resp)
+	}
+}
+
+func TestRealtime_ApikeyResolvedProjectID(t *testing.T) {
+	// Apikey path: callback resolves project_id from the token alone;
+	// project_id query param can be omitted. The hub keys connections
+	// on the resolved project.
+	hub := NewHub()
+	go hub.Run()
+	originOK := func(_ *http.Request) bool { return true }
+	authorize := func(_ context.Context, token, _ string) (string, string, error) {
+		if token == "eb_pk_abc" {
+			return "p-from-apikey", "pro", nil
+		}
+		return "", "", ErrUnauthorized
+	}
+	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originOK, false))
+	defer srv.Close()
+	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
+
+	c, _, err := websocket.DefaultDialer.Dial(wsURL+"?token=eb_pk_abc",
+		http.Header{"Origin": []string{"http://test"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	// The welcome frame names the resolved project — proves the
+	// callback's returned projectID is what the hub keys on.
+	_, msg, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read welcome: %v", err)
+	}
+	if !strings.Contains(string(msg), "p-from-apikey") {
+		t.Errorf("expected welcome to name p-from-apikey, got %q", string(msg))
 	}
 }
 
 func TestRealtime_RejectsMissingToken(t *testing.T) {
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, _ string) (string, error) {
-		return "free", nil
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
+		return qpID, "free", nil
 	}, false)
 	defer stop()
 
@@ -67,8 +110,8 @@ func TestRealtime_RejectsMissingToken(t *testing.T) {
 }
 
 func TestRealtime_AuthorizeReturnsUnauthorized(t *testing.T) {
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, _ string) (string, error) {
-		return "", ErrUnauthorized
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
+		return "", "", ErrUnauthorized
 	}, false)
 	defer stop()
 
@@ -82,8 +125,8 @@ func TestRealtime_AuthorizeReturnsUnauthorized(t *testing.T) {
 }
 
 func TestRealtime_AuthorizeReturnsForbidden(t *testing.T) {
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, _ string) (string, error) {
-		return "", ErrForbidden
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
+		return "", "", ErrForbidden
 	}, false)
 	defer stop()
 
@@ -98,9 +141,9 @@ func TestRealtime_AuthorizeReturnsForbidden(t *testing.T) {
 
 func TestRealtime_AuthorizeReceivesQueriedProjectID(t *testing.T) {
 	var captured atomic.Value
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, token, projectID string) (string, error) {
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, token, projectID string) (string, string, error) {
 		captured.Store([2]string{token, projectID})
-		return "pro", nil
+		return projectID, "pro", nil
 	}, false)
 	defer stop()
 
@@ -122,7 +165,7 @@ func TestRealtime_PublishWithProjectID_DeliversToMatchingSubscriber(t *testing.T
 	// subscriber connected as project_id=X receives the event.
 	hub := NewHub()
 	go hub.Run()
-	authorize := func(_ context.Context, _, _ string) (string, error) { return "pro", nil }
+	authorize := func(_ context.Context, _, qpID string) (string, string, error) { return qpID, "pro", nil }
 	originOK := func(_ *http.Request) bool { return true }
 	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originOK, false))
 	defer srv.Close()
@@ -171,7 +214,7 @@ func TestRealtime_PublishWithDifferentProjectID_DoesNotDeliver(t *testing.T) {
 	// direction (over-broadcast).
 	hub := NewHub()
 	go hub.Run()
-	authorize := func(_ context.Context, _, _ string) (string, error) { return "pro", nil }
+	authorize := func(_ context.Context, _, qpID string) (string, string, error) { return qpID, "pro", nil }
 	originOK := func(_ *http.Request) bool { return true }
 	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originOK, false))
 	defer srv.Close()

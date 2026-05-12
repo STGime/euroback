@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
@@ -713,63 +714,81 @@ func sdkDDLAdapter(next http.Handler) http.Handler {
 }
 
 // buildRealtimeAuthorize returns a realtime.Authorize closure that
-// validates the WebSocket token against the requested project_id.
-// Closes #62.
+// validates the WebSocket token. Closes #62. Three token shapes are
+// accepted:
 //
-// Tries platform-JWT first (membership-gated via project_members).
-// Falls back to end-user-JWT verified against the project's own
-// jwt_secret — the claims must carry the same project_id the caller
-// asked for, otherwise it's ErrForbidden.
+//  1. **API key** (`eb_pk_…` / `eb_sk_…`) — resolved server-side to a
+//     project. `?project_id=` may be omitted; if provided it must
+//     match the apikey's project. This is the SDK path (the JS client
+//     already passes its apikey as `?token=`).
+//  2. **Platform JWT** — validated against the platform secret,
+//     subject is a platform user. Requires `?project_id=` and a
+//     project_members row.
+//  3. **End-user JWT** — validated against the project's own
+//     jwt_secret. Requires `?project_id=` matching the JWT's claim.
 //
-// Returns (plan, nil) on success so the realtime handler can enforce
-// the per-project connection limit.
+// The function returns the resolved project UUID, the project's plan,
+// or an ErrUnauthorized / ErrForbidden sentinel.
 func buildRealtimeAuthorize(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware) realtime.Authorize {
-	return func(ctx context.Context, token, projectID string) (string, error) {
-		// 1. Try the platform path. Successful validation gives us a
-		//    platform_users.id; we then check membership on the
-		//    requested project. Membership at any role grants the
-		//    realtime subscription (read-only by nature of the
-		//    publish/subscribe contract).
+	return func(ctx context.Context, token, requestedProjectID string) (string, string, error) {
+		// 1. API key path — covers the SDK realtime use case.
+		if strings.HasPrefix(token, "eb_pk_") || strings.HasPrefix(token, "eb_sk_") {
+			pc, err := auth.ResolveAPIKey(ctx, pool, token)
+			if err != nil {
+				return "", "", realtime.ErrUnauthorized
+			}
+			if requestedProjectID != "" && requestedProjectID != pc.ProjectID {
+				return "", "", realtime.ErrForbidden
+			}
+			return pc.ProjectID, pc.Plan, nil
+		}
+
+		// Beyond the apikey path a project_id is required: the JWT
+		// alone doesn't unambiguously pick a project (platform users
+		// can be in many projects; end-user JWTs name one explicitly
+		// and we cross-check against the query param).
+		if requestedProjectID == "" {
+			return "", "", realtime.ErrUnauthorized
+		}
+
+		// 2. Platform JWT path — subject is platform_users.id; require
+		//    membership on the requested project.
 		if subject, err := platformAuth.ValidateToken(token); err == nil && subject != "" {
-			role, roleErr := tenant.ResolveRole(ctx, pool, projectID, subject)
+			role, roleErr := tenant.ResolveRole(ctx, pool, requestedProjectID, subject)
 			if roleErr != nil {
-				return "", fmt.Errorf("resolve role: %w", roleErr)
+				return "", "", fmt.Errorf("resolve role: %w", roleErr)
 			}
 			if role == "" {
-				return "", realtime.ErrForbidden
+				return "", "", realtime.ErrForbidden
 			}
 			var plan string
 			if err := pool.QueryRow(ctx,
 				`SELECT COALESCE(plan, 'free') FROM projects WHERE id = $1 AND status = 'active'`,
-				projectID,
+				requestedProjectID,
 			).Scan(&plan); err != nil {
-				return "", fmt.Errorf("load project plan: %w", err)
+				return "", "", fmt.Errorf("load project plan: %w", err)
 			}
-			return plan, nil
+			return requestedProjectID, plan, nil
 		}
 
-		// 2. Try the end-user path. Look up the project's jwt_secret
-		//    and validate the token against it. The end-user JWT itself
-		//    carries project_id; that must match the requested one or
-		//    we forbid (otherwise a stolen JWT for project A could
-		//    subscribe to project B's stream — unlikely given the
-		//    secret-per-project model, but defence-in-depth).
+		// 3. End-user JWT — validated against the requested project's
+		//    own jwt_secret. The JWT's project_id claim must match.
 		var jwtSecret, plan string
 		err := pool.QueryRow(ctx,
 			`SELECT jwt_secret, COALESCE(plan, 'free') FROM projects WHERE id = $1 AND status = 'active'`,
-			projectID,
+			requestedProjectID,
 		).Scan(&jwtSecret, &plan)
 		if err != nil {
-			return "", realtime.ErrUnauthorized
+			return "", "", realtime.ErrUnauthorized
 		}
 		claims, err := auth.ValidateEndUserJWT(token, jwtSecret)
 		if err != nil || claims == nil {
-			return "", realtime.ErrUnauthorized
+			return "", "", realtime.ErrUnauthorized
 		}
-		if claims.ProjectID != "" && claims.ProjectID != projectID {
-			return "", realtime.ErrForbidden
+		if claims.ProjectID != "" && claims.ProjectID != requestedProjectID {
+			return "", "", realtime.ErrForbidden
 		}
-		return plan, nil
+		return requestedProjectID, plan, nil
 	}
 }
 

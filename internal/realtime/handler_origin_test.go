@@ -33,8 +33,8 @@ func startServer(t *testing.T, originChecker func(*http.Request) bool, devMode b
 		// Stub authorize: accept any token, return "free" plan so we
 		// can exercise the CheckOrigin path past the auth gate. Real
 		// auth is exercised in router/realtime integration tests.
-		authorize = func(_ context.Context, _, _ string) (string, error) {
-			return "free", nil
+		authorize = func(_ context.Context, _, qpID string) (string, string, error) {
+			return qpID, "free", nil
 		}
 	}
 
