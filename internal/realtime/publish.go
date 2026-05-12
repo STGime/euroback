@@ -27,25 +27,25 @@ func NewEventPublisher(bridge *RedisBridge, hub *Hub) *EventPublisher {
 }
 
 // PublishInsert broadcasts an INSERT event for the given table and record.
-func (p *EventPublisher) PublishInsert(ctx context.Context, tenantID, table string, record map[string]interface{}) error {
-	return p.publish(ctx, tenantID, table, "INSERT", record, nil)
+func (p *EventPublisher) PublishInsert(ctx context.Context, projectID, table string, record map[string]interface{}) error {
+	return p.publish(ctx, projectID, table, "INSERT", record, nil)
 }
 
 // PublishUpdate broadcasts an UPDATE event with both old and new records.
-func (p *EventPublisher) PublishUpdate(ctx context.Context, tenantID, table string, record, oldRecord map[string]interface{}) error {
-	return p.publish(ctx, tenantID, table, "UPDATE", record, oldRecord)
+func (p *EventPublisher) PublishUpdate(ctx context.Context, projectID, table string, record, oldRecord map[string]interface{}) error {
+	return p.publish(ctx, projectID, table, "UPDATE", record, oldRecord)
 }
 
 // PublishDelete broadcasts a DELETE event for the removed record.
-func (p *EventPublisher) PublishDelete(ctx context.Context, tenantID, table string, record map[string]interface{}) error {
-	return p.publish(ctx, tenantID, table, "DELETE", record, nil)
+func (p *EventPublisher) PublishDelete(ctx context.Context, projectID, table string, record map[string]interface{}) error {
+	return p.publish(ctx, projectID, table, "DELETE", record, nil)
 }
 
 // publish is the internal method that handles both local and Redis broadcasting.
-func (p *EventPublisher) publish(ctx context.Context, tenantID, table, eventType string, record, oldRecord map[string]interface{}) error {
+func (p *EventPublisher) publish(ctx context.Context, projectID, table, eventType string, record, oldRecord map[string]interface{}) error {
 	if p.hub == nil {
 		slog.Debug("realtime publisher: hub is nil, skipping event",
-			"tenant_id", tenantID,
+			"project_id", projectID,
 			"table", table,
 			"type", eventType,
 		)
@@ -64,7 +64,7 @@ func (p *EventPublisher) publish(ctx context.Context, tenantID, table, eventType
 	if err != nil {
 		slog.Error("realtime publisher: failed to marshal event",
 			"error", err,
-			"tenant_id", tenantID,
+			"project_id", projectID,
 			"table", table,
 		)
 		return err
@@ -72,10 +72,10 @@ func (p *EventPublisher) publish(ctx context.Context, tenantID, table, eventType
 
 	// If Redis bridge is available, publish via Redis for cross-instance delivery.
 	if p.bridge != nil {
-		if err := p.bridge.Publish(ctx, tenantID, table, eventType, record, oldRecord); err != nil {
+		if err := p.bridge.Publish(ctx, projectID, table, eventType, record, oldRecord); err != nil {
 			slog.Error("realtime publisher: redis publish failed, falling back to local",
 				"error", err,
-				"tenant_id", tenantID,
+				"project_id", projectID,
 				"table", table,
 			)
 			// Fall through to local broadcast.
@@ -87,10 +87,10 @@ func (p *EventPublisher) publish(ctx context.Context, tenantID, table, eventType
 	}
 
 	// Local-only broadcast (no Redis, or Redis publish failed).
-	p.hub.Broadcast(tenantID, event.Channel, payload)
+	p.hub.Broadcast(projectID, event.Channel, payload)
 
 	slog.Debug("realtime publisher: broadcast locally",
-		"tenant_id", tenantID,
+		"project_id", projectID,
 		"channel", event.Channel,
 		"type", eventType,
 	)

@@ -24,6 +24,7 @@ func TenantContextFromProject() func(http.Handler) http.Handler {
 			}
 
 			ctx := query.ContextWithSchema(r.Context(), pc.SchemaName)
+			ctx = query.ContextWithProjectID(ctx, pc.ProjectID)
 			ctx = query.ContextWithKeyType(ctx, pc.KeyType)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -75,6 +76,7 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			}
 
 			ctx := query.ContextWithSchema(r.Context(), schemaName)
+			ctx = query.ContextWithProjectID(ctx, projectID)
 			// Console operates with "secret" level access.
 			ctx = query.ContextWithKeyType(ctx, "secret")
 			// Platform-authenticated developer traffic: the engine elevates
@@ -213,6 +215,7 @@ func TenantContextMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler
 			)
 
 			ctx := query.ContextWithSchema(r.Context(), schemaName)
+			ctx = query.ContextWithProjectID(ctx, projectID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

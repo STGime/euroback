@@ -107,8 +107,11 @@ func HandleTableBulkDelete(engine *QueryEngine, pub *realtime.EventPublisher) ht
 		}
 
 		if pub != nil {
+			// Realtime fan-out key is the project UUID, not schema name —
+			// the WebSocket subscriber also keys on the UUID (closes #62).
+			projectID := ProjectIDFromContext(r.Context())
 			for _, id := range body.IDs {
-				_ = pub.PublishDelete(r.Context(), schema, tableName, map[string]interface{}{"id": id})
+				_ = pub.PublishDelete(r.Context(), projectID, tableName, map[string]interface{}{"id": id})
 			}
 		}
 
@@ -335,7 +338,7 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishInsert(r.Context(), schema, tableName, row)
+			_ = pub.PublishInsert(r.Context(), ProjectIDFromContext(r.Context()), tableName, row)
 		}
 
 		slog.Debug("row inserted", "schema", schema, "table", tableName)
@@ -375,7 +378,7 @@ func handleUpdateRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishUpdate(r.Context(), schema, tableName, row, nil)
+			_ = pub.PublishUpdate(r.Context(), ProjectIDFromContext(r.Context()), tableName, row, nil)
 		}
 
 		slog.Debug("row updated", "schema", schema, "table", tableName, "id", rowID)
@@ -409,7 +412,7 @@ func handleDeleteRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishDelete(r.Context(), schema, tableName, map[string]interface{}{"id": rowID})
+			_ = pub.PublishDelete(r.Context(), ProjectIDFromContext(r.Context()), tableName, map[string]interface{}{"id": rowID})
 		}
 
 		slog.Debug("row deleted", "schema", schema, "table", tableName, "id", rowID)

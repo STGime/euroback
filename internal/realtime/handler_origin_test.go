@@ -28,16 +28,17 @@ func startServer(t *testing.T, originChecker func(*http.Request) bool, devMode b
 	hub := NewHub()
 	go hub.Run()
 
-	var tokenValidator func(string) (string, error)
-	var tenantResolver TenantResolver
+	var authorize Authorize
 	if !devMode {
-		tokenValidator = func(token string) (string, error) { return "subj-1", nil }
-		tenantResolver = func(_ context.Context, _ string) (string, string, error) {
-			return "t-1", "free", nil
+		// Stub authorize: accept any token, return "free" plan so we
+		// can exercise the CheckOrigin path past the auth gate. Real
+		// auth is exercised in router/realtime integration tests.
+		authorize = func(_ context.Context, _, qpID string) (string, string, error) {
+			return qpID, "free", nil
 		}
 	}
 
-	srv := httptest.NewServer(HandleWebSocket(hub, tokenValidator, tenantResolver, originChecker, devMode))
+	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originChecker, devMode))
 	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
 	return wsURL, srv.Close
 }
@@ -48,9 +49,9 @@ func dialWith(t *testing.T, wsURL, origin string) (*http.Response, error) {
 	if origin != "" {
 		hdr.Set("Origin", origin)
 	}
-	// Token only needed in production mode; dev mode ignores it. Either
-	// way the stub validator above accepts anything.
-	c, resp, err := websocket.DefaultDialer.Dial(wsURL+"?token=t&tenant_id=t-1", hdr)
+	// Both project_id and token are needed in production mode; dev mode
+	// fills in a default project_id so the token can be omitted.
+	c, resp, err := websocket.DefaultDialer.Dial(wsURL+"?token=t&project_id=p-1", hdr)
 	if c != nil {
 		_ = c.Close()
 	}

@@ -64,7 +64,7 @@ func (m *EndUserMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
-		claims, err := validateEndUserJWT(tokenStr, pc.JWTSecret)
+		claims, err := ValidateEndUserJWT(tokenStr, pc.JWTSecret)
 		if err != nil {
 			slog.Warn("invalid end-user JWT", "error", err, "project_id", pc.ProjectID)
 			http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
@@ -79,7 +79,11 @@ func (m *EndUserMiddleware) Handler(next http.Handler) http.Handler {
 	})
 }
 
-func validateEndUserJWT(tokenStr, secret string) (*EndUserClaims, error) {
+// ValidateEndUserJWT verifies the JWT against the project's secret and
+// returns the parsed claims. Exported so non-middleware code (the
+// realtime WebSocket authorize callback in #62) can validate without
+// duplicating the parse logic.
+func ValidateEndUserJWT(tokenStr, secret string) (*EndUserClaims, error) {
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
