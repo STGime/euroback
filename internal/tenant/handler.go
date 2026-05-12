@@ -148,6 +148,18 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 			return
 		}
 
+		// #70 diagnostic: log the decoded plan/region so a repro of
+		// "Pro selected → plan=free in DB" can be pinned to either the
+		// HTTP body, the JSON decode, or somewhere downstream. Drop once
+		// the bug is closed.
+		slog.Info("create project: decoded body",
+			"name", req.Name,
+			"slug", req.Slug,
+			"region", req.Region,
+			"plan", req.Plan,
+			"owner_id", claims.Subject,
+		)
+
 		// Validate name.
 		if strings.TrimSpace(req.Name) == "" {
 			http.Error(w, `{"error":"name is required"}`, http.StatusBadRequest)
@@ -180,6 +192,9 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 			req.Plan = "free"
 		}
 
+		// #70 diagnostic: log right before the INSERT so we can see if
+		// anything between decode and CreateProject mutated req.Plan.
+		slog.Info("create project: handing to service", "plan", req.Plan, "name", req.Name)
 		project, err := svc.CreateProject(r.Context(), claims.Subject, claims.Email, req)
 		if err != nil {
 			slog.Error("failed to create project", "error", err, "user_id", claims.Subject)

@@ -52,7 +52,7 @@
 			await api.createProject({
 				name: newName.trim(),
 				slug: newSlug,
-				region: 'eu-west-paris',
+				region: 'fr-par',
 				plan: newPlan
 			});
 			showNewModal = false;
