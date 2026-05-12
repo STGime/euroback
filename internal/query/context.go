@@ -17,6 +17,28 @@ func SchemaFromContext(ctx context.Context) string {
 	return s
 }
 
+type projectIDContextKey struct{}
+
+// ContextWithProjectID stores the tenant project UUID in the context.
+// Set alongside ContextWithSchema by the tenant middleware so handlers
+// can broadcast realtime events keyed on the project UUID (which is
+// what WebSocket subscribers also key on — see internal/realtime).
+//
+// Closes #62: without this, the SDK runtime path only had the schema
+// name, and the realtime publisher was broadcasting on schema name
+// while subscribers were listening on project UUID — no events ever
+// matched.
+func ContextWithProjectID(ctx context.Context, projectID string) context.Context {
+	return context.WithValue(ctx, projectIDContextKey{}, projectID)
+}
+
+// ProjectIDFromContext extracts the project UUID from the context.
+// Returns empty string if not present.
+func ProjectIDFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(projectIDContextKey{}).(string)
+	return s
+}
+
 type endUserIDKey struct{}
 
 // ContextWithEndUserID stores the end-user ID in the context for RLS.

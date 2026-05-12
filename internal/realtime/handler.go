@@ -3,6 +3,7 @@ package realtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -10,28 +11,46 @@ import (
 )
 
 const (
-	// Connection limits per tenant by plan.
+	// Connection limits per project by plan.
 	freeConnectionLimit = 100
 	proConnectionLimit  = 10000
 )
 
-// TenantResolver resolves a user subject (Hanko ID) to a tenant ID and plan.
-// It is injected by the caller so the realtime package does not depend on the
-// auth or tenant packages directly.
-type TenantResolver func(ctx context.Context, subject string) (tenantID, plan string, err error)
+// ErrUnauthorized is returned by an Authorize callback when the token
+// is missing or invalid. The realtime handler maps it to HTTP 401.
+var ErrUnauthorized = errors.New("realtime: unauthorized")
+
+// ErrForbidden is returned when the token is valid but the caller is
+// not a member of the requested project. Maps to HTTP 403.
+var ErrForbidden = errors.New("realtime: forbidden")
+
+// Authorize validates the caller's token for the requested project and
+// returns the project's plan. Implementations are responsible for
+// handling both platform-JWT and end-user-JWT clients — the realtime
+// package stays decoupled from auth wiring.
+//
+// Return ErrUnauthorized for a bad token, ErrForbidden for a valid
+// token without access to projectID; any other error maps to 500.
+type Authorize func(ctx context.Context, token, projectID string) (plan string, err error)
 
 // HandleWebSocket returns an http.HandlerFunc that upgrades connections to
-// WebSocket and manages client lifecycle. Auth is performed via ?token= query
-// parameter because WebSocket connections cannot send custom headers.
+// WebSocket on /v1/realtime and manages client lifecycle. Closes #62 —
+// the connection is now keyed on the requested project_id (UUID),
+// matching what the SDK publisher emits, so events actually reach
+// subscribers.
 //
-// tokenValidator, if non-nil, validates the token and returns the user subject.
-// When nil (dev mode), connections are accepted without authentication.
+// Query parameters:
 //
-// originChecker validates the browser Origin header on the upgrade request.
-// Same layered logic as the HTTP CORS path (global allowlist + per-project
-// cors_origins), built by gateway.BuildOriginChecker. nil → accept all
-// origins, used only in devMode. Closes #47 (CSWSH defence-in-depth).
-func HandleWebSocket(hub *Hub, tokenValidator func(token string) (subject string, err error), tenantResolver TenantResolver, originChecker func(*http.Request) bool, devMode bool) http.HandlerFunc {
+//	token       — JWT (platform or end-user). Required outside dev mode.
+//	project_id  — project UUID the client wants to subscribe to. Required.
+//
+// devMode skips auth and accepts any project_id (or none — falls back
+// to a fixed dev project). Production fences in cmd/gateway/main.go
+// fail closed if dev mode leaks out.
+//
+// originChecker rejects upgrades from disallowed origins; nil in dev
+// mode accepts any origin. Closes #47.
+func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Request) bool, devMode bool) http.HandlerFunc {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -40,9 +59,6 @@ func HandleWebSocket(hub *Hub, tokenValidator func(token string) (subject string
 				return true
 			}
 			if originChecker == nil {
-				// Production with no checker configured: refuse so a
-				// misconfiguration fails closed rather than falling back
-				// to "allow any origin" (the old behaviour, advisory #47).
 				return false
 			}
 			return originChecker(r)
@@ -50,64 +66,58 @@ func HandleWebSocket(hub *Hub, tokenValidator func(token string) (subject string
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		var tenantID, plan string
+		projectID := r.URL.Query().Get("project_id")
+		var plan string
 
 		if devMode {
-			// Dev mode: accept any connection with a hardcoded tenant.
-			tenantID = r.URL.Query().Get("tenant_id")
-			if tenantID == "" {
-				tenantID = "dev-tenant-001"
+			if projectID == "" {
+				projectID = "dev-project-001"
 			}
 			plan = "pro"
 			slog.Warn("realtime dev mode: accepting unauthenticated websocket",
-				"tenant_id", tenantID,
+				"project_id", projectID,
 			)
 		} else {
-			// Production: validate the token query parameter.
+			if projectID == "" {
+				http.Error(w, `{"error":"missing project_id query parameter"}`, http.StatusBadRequest)
+				return
+			}
 			token := r.URL.Query().Get("token")
 			if token == "" {
 				http.Error(w, `{"error":"missing token query parameter"}`, http.StatusUnauthorized)
 				return
 			}
-
-			if tokenValidator == nil {
+			if authorize == nil {
 				http.Error(w, `{"error":"auth not configured"}`, http.StatusInternalServerError)
 				return
 			}
 
-			subject, err := tokenValidator(token)
+			var err error
+			plan, err = authorize(r.Context(), token, projectID)
 			if err != nil {
-				slog.Warn("realtime auth failed", "error", err)
-				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
-				return
-			}
-
-			if tenantResolver == nil {
-				http.Error(w, `{"error":"tenant resolver not configured"}`, http.StatusInternalServerError)
-				return
-			}
-
-			var resolveErr error
-			tenantID, plan, resolveErr = tenantResolver(r.Context(), subject)
-			if resolveErr != nil {
-				slog.Error("realtime: failed to resolve tenant",
-					"error", resolveErr,
-					"subject", subject,
-				)
-				http.Error(w, `{"error":"tenant not found"}`, http.StatusNotFound)
+				switch {
+				case errors.Is(err, ErrUnauthorized):
+					slog.Warn("realtime auth failed", "project_id", projectID)
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+				case errors.Is(err, ErrForbidden):
+					slog.Warn("realtime forbidden", "project_id", projectID)
+					http.Error(w, `{"error":"not a member of this project"}`, http.StatusForbidden)
+				default:
+					slog.Error("realtime authorize failed", "error", err, "project_id", projectID)
+					http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				}
 				return
 			}
 		}
 
-		// Enforce per-tenant connection limit.
+		// Enforce per-project connection limit.
 		limit := freeConnectionLimit
 		if plan == "pro" || plan == "enterprise" {
 			limit = proConnectionLimit
 		}
-
-		if hub.ConnectionCount(tenantID) >= limit {
+		if hub.ConnectionCount(projectID) >= limit {
 			slog.Warn("realtime connection limit reached",
-				"tenant_id", tenantID,
+				"project_id", projectID,
 				"limit", limit,
 				"plan", plan,
 			)
@@ -125,24 +135,22 @@ func HandleWebSocket(hub *Hub, tokenValidator func(token string) (subject string
 		client := &Client{
 			hub:      hub,
 			conn:     conn,
-			tenantID: tenantID,
+			tenantID: projectID, // hub still uses "tenantID" internally; semantically it's projectID now
 			send:     make(chan []byte, 256),
 		}
 
 		hub.register <- client
 
-		// Send welcome message.
 		welcome, _ := json.Marshal(map[string]interface{}{
-			"type":      "welcome",
-			"tenant_id": tenantID,
-			"message":   "connected to eurobase realtime",
+			"type":       "welcome",
+			"project_id": projectID,
+			"message":    "connected to eurobase realtime",
 		})
 		select {
 		case client.send <- welcome:
 		default:
 		}
 
-		// Start read and write pumps in separate goroutines.
 		go writePump(client)
 		go readPump(client)
 	}

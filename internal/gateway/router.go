@@ -447,12 +447,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 	})
 
 	// ── WebSocket realtime route ──
+	// Closes #62. Authorize takes (token, project_id) and supports both
+	// platform JWTs (verified via platformAuth + project_members
+	// membership check) and end-user JWTs (verified against the
+	// project's own jwt_secret). Returns the project's plan so the hub
+	// can enforce per-project connection limits.
 	if hub != nil {
-		var tokenValidator func(token string) (string, error)
+		var authorize realtime.Authorize
 		if !isDev {
-			tokenValidator = platformAuth.ValidateToken
+			authorize = buildRealtimeAuthorize(pool, platformAuth)
 		}
-		wsHandler := realtime.HandleWebSocket(hub, tokenValidator, buildTenantResolver(pool), BuildOriginChecker(allowedOrigins), isDev)
+		wsHandler := realtime.HandleWebSocket(hub, authorize, BuildOriginChecker(allowedOrigins), isDev)
 		r.Get("/v1/realtime", wsHandler)
 	} else {
 		slog.Warn("realtime hub not configured, websocket route disabled")
@@ -707,24 +712,64 @@ func sdkDDLAdapter(next http.Handler) http.Handler {
 	})
 }
 
-// buildTenantResolver returns a realtime.TenantResolver that looks up the
-// user's default project and plan from the database.
-func buildTenantResolver(pool *pgxpool.Pool) realtime.TenantResolver {
-	return func(ctx context.Context, subject string) (string, string, error) {
-		var projectID, plan string
-		err := pool.QueryRow(ctx,
-			`SELECT p.id, COALESCE(p.plan, 'free')
-			 FROM projects p
-			 JOIN platform_users u ON p.owner_id = u.id
-			 WHERE u.id = $1 AND p.status = 'active'
-			 ORDER BY p.created_at ASC
-			 LIMIT 1`,
-			subject,
-		).Scan(&projectID, &plan)
-		if err != nil {
-			return "", "", fmt.Errorf("resolve tenant for subject %s: %w", subject, err)
+// buildRealtimeAuthorize returns a realtime.Authorize closure that
+// validates the WebSocket token against the requested project_id.
+// Closes #62.
+//
+// Tries platform-JWT first (membership-gated via project_members).
+// Falls back to end-user-JWT verified against the project's own
+// jwt_secret — the claims must carry the same project_id the caller
+// asked for, otherwise it's ErrForbidden.
+//
+// Returns (plan, nil) on success so the realtime handler can enforce
+// the per-project connection limit.
+func buildRealtimeAuthorize(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware) realtime.Authorize {
+	return func(ctx context.Context, token, projectID string) (string, error) {
+		// 1. Try the platform path. Successful validation gives us a
+		//    platform_users.id; we then check membership on the
+		//    requested project. Membership at any role grants the
+		//    realtime subscription (read-only by nature of the
+		//    publish/subscribe contract).
+		if subject, err := platformAuth.ValidateToken(token); err == nil && subject != "" {
+			role, roleErr := tenant.ResolveRole(ctx, pool, projectID, subject)
+			if roleErr != nil {
+				return "", fmt.Errorf("resolve role: %w", roleErr)
+			}
+			if role == "" {
+				return "", realtime.ErrForbidden
+			}
+			var plan string
+			if err := pool.QueryRow(ctx,
+				`SELECT COALESCE(plan, 'free') FROM projects WHERE id = $1 AND status = 'active'`,
+				projectID,
+			).Scan(&plan); err != nil {
+				return "", fmt.Errorf("load project plan: %w", err)
+			}
+			return plan, nil
 		}
-		return projectID, plan, nil
+
+		// 2. Try the end-user path. Look up the project's jwt_secret
+		//    and validate the token against it. The end-user JWT itself
+		//    carries project_id; that must match the requested one or
+		//    we forbid (otherwise a stolen JWT for project A could
+		//    subscribe to project B's stream — unlikely given the
+		//    secret-per-project model, but defence-in-depth).
+		var jwtSecret, plan string
+		err := pool.QueryRow(ctx,
+			`SELECT jwt_secret, COALESCE(plan, 'free') FROM projects WHERE id = $1 AND status = 'active'`,
+			projectID,
+		).Scan(&jwtSecret, &plan)
+		if err != nil {
+			return "", realtime.ErrUnauthorized
+		}
+		claims, err := auth.ValidateEndUserJWT(token, jwtSecret)
+		if err != nil || claims == nil {
+			return "", realtime.ErrUnauthorized
+		}
+		if claims.ProjectID != "" && claims.ProjectID != projectID {
+			return "", realtime.ErrForbidden
+		}
+		return plan, nil
 	}
 }
 
