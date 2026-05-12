@@ -216,8 +216,12 @@ jobs:
         run: |
           # Job specs are largely immutable — delete any prior instance so
           # this deploy's image gets picked up. --ignore-not-found covers the
-          # first-ever run. Then apply with this deploy's SHA pinned.
-          kubectl -n eurobase delete job migrate --ignore-not-found
+          # first-ever run. --cascade=foreground waits for the Job object
+          # (and its pods) to be fully removed from the API before the
+          # next command runs — without it, the subsequent `apply` raced
+          # the background reaper and hit `field is immutable` on the
+          # spec.template (PR #107's deploy failed that way).
+          kubectl -n eurobase delete job migrate --ignore-not-found --cascade=foreground
           sed "s|eurobase-app/migrations:latest|eurobase-app/migrations:${{ github.sha }}|" \
             deploy/k8s/migrate-job.yaml | kubectl apply -f -
           # Block the rollout on a successful migration. If it fails, bail
