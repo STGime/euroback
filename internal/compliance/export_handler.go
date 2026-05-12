@@ -132,6 +132,13 @@ func HandleRequestUserExport(exportSvc *ExportService) http.HandlerFunc {
 
 // HandleListExports returns paginated export history for a project.
 // GET /platform/projects/{id}/compliance/exports
+//
+// Completed rows are decorated with a fresh presigned download URL
+// (1h TTL) so the console can render a working "Download" link from
+// the list view alone — without it, the table shows "completed" but
+// no link, and the user has to click a per-row Refresh to call
+// HandleGetExport. The bucket lookup is one extra query per call;
+// the per-row presign is local-only (HMAC over the URL).
 func HandleListExports(exportSvc *ExportService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
@@ -146,6 +153,25 @@ func HandleListExports(exportSvc *ExportService) http.HandlerFunc {
 		if exports == nil {
 			exports = []ExportRequest{}
 		}
+
+		// Resolve the bucket once for the project, then presign every
+		// completed row. If the bucket lookup fails the list still
+		// returns; the rows just won't have download_url set.
+		var bucket string
+		_ = exportSvc.Pool.QueryRow(r.Context(),
+			`SELECT s3_bucket FROM projects WHERE id = $1`, projectID,
+		).Scan(&bucket)
+		if bucket != "" {
+			for i := range exports {
+				if exports[i].Status == "completed" && exports[i].S3Key != nil {
+					url, err := exportSvc.GenerateDownloadURL(r.Context(), bucket, *exports[i].S3Key)
+					if err == nil {
+						exports[i].DownloadURL = url
+					}
+				}
+			}
+		}
+
 		writeExportJSON(w, map[string]interface{}{"exports": exports}, http.StatusOK)
 	}
 }

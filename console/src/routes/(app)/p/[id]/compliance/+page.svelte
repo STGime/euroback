@@ -22,7 +22,16 @@
 	let auditActionFilter = $state('');
 	const auditPageSize = 50;
 
-	onMount(() => { loadReport(); });
+	onMount(() => {
+		loadReport();
+		// Stop the export poll loop when the page unmounts.
+		return () => {
+			if (pollTimer !== null) {
+				clearInterval(pollTimer);
+				pollTimer = null;
+			}
+		};
+	});
 
 	async function loadReport() {
 		loading = true;
@@ -140,12 +149,29 @@
 	let exportFormat = $state<'json' | 'csv'>('json');
 	let exportRequesting = $state(false);
 
+	// Auto-poll: when any export row is still pending or running, re-fetch
+	// the list every 3s until all rows have settled. Stops automatically
+	// to avoid a wake-lock when nothing is in flight. Cleared on unmount
+	// via the existing onMount cleanup (returned function).
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+	function startPollIfNeeded() {
+		const anyInFlight = exports.some(e => e.status === 'pending' || e.status === 'running');
+		if (anyInFlight && pollTimer === null) {
+			pollTimer = setInterval(loadExports, 3000);
+		} else if (!anyInFlight && pollTimer !== null) {
+			clearInterval(pollTimer);
+			pollTimer = null;
+		}
+	}
+
 	async function loadExports() {
 		exportsLoading = true;
 		exportError = null;
 		try {
 			const data = await api.listExports(projectId);
 			exports = (data.exports ?? []) as unknown as ExportEntry[];
+			startPollIfNeeded();
 		} catch (err) {
 			exportError = err instanceof Error ? err.message : 'Failed to load exports';
 		} finally {
@@ -173,6 +199,7 @@
 		try {
 			const updated = await api.getExport(projectId, exportId);
 			exports = exports.map(e => e.id === exportId ? (updated as unknown as ExportEntry) : e);
+			startPollIfNeeded();
 		} catch { /* ignore */ }
 	}
 
