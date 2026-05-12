@@ -21,17 +21,19 @@
 	const INVITATION_TEMPLATE = {
 		subject: "You're invited to Eurobase (closed beta)",
 		body: `<p>Hi,</p>
-<p>You're on the early-access list for <strong>Eurobase</strong> — the EU-sovereign backend-as-a-service built in France. We're opening the beta to a small cohort this week and you're in it.</p>
+<p>You're on the early-access list for <strong>Eurobase</strong> — the EU-sovereign backend-as-a-service, made in Berlin. We're opening the beta to a small cohort this week and you're in it.</p>
+<p style="background:#fef3c7;border-left:3px solid #f59e0b;padding:10px 12px;margin:14px 0;color:#92400e;font-size:14px;"><strong>Heads-up — this is a beta test system.</strong> Features may change or break without notice. There are no uptime, data-retention, or backup guarantees during the beta. Please don't run production workloads on it yet.</p>
 <p>To get started:</p>
 <ol>
   <li>Go to <a href="https://console.eurobase.app">console.eurobase.app</a> and sign up with this email.</li>
-  <li>Create your first project — the CLI (<code>npm install -g @eurobase/sdk</code>) gets you hacking in a minute.</li>
+  <li>Create your first project — the SDK (<code>npm install @eurobase/sdk</code>) gets you hacking in a minute.</li>
   <li>Read the <a href="https://console.eurobase.app/docs">docs</a> for auth, database, storage, and realtime examples.</li>
 </ol>
-<p>If anything breaks or you have questions, just reply — I read every mail personally.</p>
+<p>You stay in control of your data: you can delete a project (schema + storage objects) directly from the console at any time.</p>
+<p>Found a bug or have an idea? File it on GitHub at <a href="https://github.com/STGime/euroback/issues">github.com/STGime/euroback/issues</a> — or just reply to this mail, I read every word.</p>
 <p>— Stefan</p>
 <hr/>
-<p style="color:#6b7280;font-size:12px;">All your data stays in EU jurisdiction (Scaleway, France). GDPR by design. No US-CLOUD-Act exposure.</p>`
+<p style="color:#6b7280;font-size:12px;">All your data stays in EU jurisdiction (Scaleway, France). GDPR by design.</p>`
 	};
 
 	const UPDATE_TEMPLATE = {
