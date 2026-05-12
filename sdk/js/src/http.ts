@@ -6,6 +6,9 @@
 export interface EurobaseConfig {
   url: string
   apiKey: string
+  /** Project UUID (optional; required for end-user JWT realtime). See
+   * client.ts for the user-facing docs. */
+  projectId?: string
 }
 
 export interface HttpClient {

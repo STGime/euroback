@@ -20,6 +20,18 @@ export interface EurobaseConfig {
   url: string
   /** Project API key used for authentication. */
   apiKey: string
+  /**
+   * Project UUID. Only required if you call `realtime.*` with an
+   * end-user access token (e.g. after `auth.signIn`) — the gateway
+   * needs the project ID up front to validate the JWT against the
+   * project's secret. For API-key-only realtime usage it can be
+   * omitted; the gateway derives the project from the key.
+   *
+   * Connection strings of the form
+   * `eurobase://API_KEY@SLUG.eurobase.app` do NOT populate this — set
+   * it explicitly if you need end-user JWT realtime.
+   */
+  projectId?: string
 }
 
 /** The top-level Eurobase client with database, storage, realtime, and auth access. */

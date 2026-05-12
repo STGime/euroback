@@ -108,12 +108,37 @@ export class RealtimeClient {
     this.connect()
   }
 
-  private connect(): void {
+  /**
+   * Build the WebSocket URL for the realtime endpoint.
+   *
+   * Token precedence: the end-user access token (if signed in) wins over
+   * the project API key. Either form is accepted by /v1/realtime:
+   *
+   *   - **API key** (`eb_pk_…` / `eb_sk_…`) — the gateway resolves the
+   *     project server-side, no `project_id` needed.
+   *   - **End-user JWT** — `project_id` must be supplied so the gateway
+   *     can look up the project's `jwt_secret` to verify. Provided via
+   *     `EurobaseConfig.projectId` when the SDK is bootstrapped.
+   *
+   * Exposed as a method (rather than inlined) so unit tests can assert
+   * the URL shape without spinning up a real WebSocket.
+   */
+  buildWebSocketURL(): string {
     const baseUrl = this.config.url.replace(/\/+$/, '').replace(/^http/, 'ws')
-    const token = this.http.getAccessToken() || this.config.apiKey
-    const url = `${baseUrl}/v1/realtime?token=${encodeURIComponent(token)}`
+    const accessToken = this.http.getAccessToken()
+    const token = accessToken || this.config.apiKey
+    const params = new URLSearchParams({ token })
+    // The end-user JWT path needs project_id to find the right
+    // jwt_secret. The apikey path doesn't, but adding it costs nothing
+    // — the gateway cross-checks it against the apikey's project.
+    if (this.config.projectId) {
+      params.set('project_id', this.config.projectId)
+    }
+    return `${baseUrl}/v1/realtime?${params.toString()}`
+  }
 
-    this.ws = new WebSocket(url)
+  private connect(): void {
+    this.ws = new WebSocket(this.buildWebSocketURL())
 
     this.ws.onopen = () => {
       this.reconnectAttempts = 0
