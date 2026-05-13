@@ -1,0 +1,75 @@
+##############################################################################
+# CVE-2026-43284 ("Dirty Frag") mitigation.
+#
+# Linux kernel LPE via the ESP (esp4/esp6) IPsec transform modules and the
+# AF_RXRPC socket family (rxrpc). A local unprivileged user can escalate to
+# root or escape a container — same threat shape as CVE-2026-31431 (Copy
+# Fail). Disclosed by Scaleway 2026-05-12 alongside patched Debian/AlmaLinux/
+# Ubuntu node images.
+#
+# Eurobase runs untrusted tenant JS in the functions-runner pods on shared
+# Kapsule nodes, so the LPE → container escape path is in scope until every
+# node is on a patched kernel. This DaemonSet is the in-cluster block that
+# keeps us safe between disclosure and the node-pool roll; it also self-
+# applies to any node the autoscaler brings up between rotations.
+#
+# Risk: none of esp4 / esp6 / rxrpc are on the hot path for the Go stack,
+# pgx, gorilla/websocket, Deno, or V8 crypto. esp4/esp6 are IPsec transforms
+# (we terminate TLS at the LB, not IPsec); rxrpc is AF_RXRPC (AFS), unused.
+#
+# Rollback: kubectl delete -f this file, then `modprobe esp4 esp6 rxrpc` on
+# each node.
+##############################################################################
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: disable-dirty-frag
+  namespace: kube-system
+  labels:
+    app: disable-dirty-frag
+spec:
+  selector:
+    matchLabels:
+      app: disable-dirty-frag
+  template:
+    metadata:
+      labels:
+        app: disable-dirty-frag
+    spec:
+      hostPID: true
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+      initContainers:
+        - name: disable-dirty-frag
+          image: alpine:3.23
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              {
+                echo "install esp4 /bin/false"
+                echo "install esp6 /bin/false"
+                echo "install rxrpc /bin/false"
+              } > /etc/modprobe.d/disable-dirty-frag.conf
+              rmmod esp4 2>/dev/null || true
+              rmmod esp6 2>/dev/null || true
+              rmmod rxrpc 2>/dev/null || true
+          volumeMounts:
+            - name: modprobe-d
+              mountPath: /etc/modprobe.d
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            limits:
+              cpu: 1m
+              memory: 8Mi
+      volumes:
+        - name: modprobe-d
+          hostPath:
+            path: /etc/modprobe.d
