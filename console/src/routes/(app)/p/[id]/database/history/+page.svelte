@@ -17,14 +17,23 @@
 		loading = false;
 	});
 
-	function actionLabel(action: string): string {
-		switch (action) {
+	function actionLabel(change: SchemaChange): string {
+		// Backfill rows are synthetic — we discovered the table existed
+		// via information_schema, we didn't observe its creation. Label
+		// them differently so the timeline doesn't claim they were
+		// created at the moment we found them.
+		if (isBackfill(change)) return 'Detected table';
+		switch (change.action) {
 			case 'create_table': return 'Created table';
 			case 'drop_table': return 'Dropped table';
 			case 'add_column': return 'Added column';
 			case 'drop_column': return 'Dropped column';
-			default: return action;
+			default: return change.action;
 		}
+	}
+
+	function isBackfill(change: SchemaChange): boolean {
+		return change.detail?.source === 'backfill' || change.created_at === null;
 	}
 
 	function actionColor(action: string): string {
@@ -103,15 +112,19 @@
 									{actionIcon(change.action)}
 								</span>
 								<span class="text-sm font-medium text-gray-900">
-									{actionLabel(change.action)}
+									{actionLabel(change)}
 								</span>
 								<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">{change.table_name}</code>
 								{#if change.column_name && change.action.includes('column')}
 									<span class="text-xs text-gray-400">.</span>
 									<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">{change.column_name}</code>
 								{/if}
-								<span class="ml-auto text-[11px] text-gray-400">
-									{new Date(change.created_at).toLocaleString('en-GB', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+								<span class="ml-auto text-[11px] text-gray-400" title={isBackfill(change) ? 'Discovered via information_schema — table existed before tracking began' : ''}>
+									{#if change.created_at}
+										{new Date(change.created_at).toLocaleString('en-GB', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+									{:else}
+										existed before tracking
+									{/if}
 								</span>
 							</div>
 							{#if formatDetail(change)}

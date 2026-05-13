@@ -1476,7 +1476,9 @@ export interface SchemaChange {
 	column_name: string | null;
 	detail: any;
 	sql_text: string | null;
-	created_at: string;
+	/** Null for backfill rows: tables discovered via information_schema
+	 *  that we have no actual creation timestamp for. */
+	created_at: string | null;
 }
 
 export interface RLSAuditEntry {

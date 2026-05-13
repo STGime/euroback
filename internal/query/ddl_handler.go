@@ -43,16 +43,19 @@ type AddColumnRequest struct {
 	DefaultValue string `json:"default_value,omitempty"`
 }
 
-// SchemaChange represents a logged DDL operation.
+// SchemaChange represents a logged DDL operation. CreatedAt is nullable
+// because backfill rows (synthetic "we discovered this table existed"
+// entries) have no real creation timestamp; the column carries NULL for
+// those and the console UI renders them as "Detected".
 type SchemaChange struct {
-	ID         string    `json:"id"`
-	ProjectID  string    `json:"project_id"`
-	Action     string    `json:"action"`
-	TableName  string    `json:"table_name"`
-	ColumnName *string   `json:"column_name"`
-	Detail     any       `json:"detail"`
-	SQLText    *string   `json:"sql_text"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	ProjectID  string     `json:"project_id"`
+	Action     string     `json:"action"`
+	TableName  string     `json:"table_name"`
+	ColumnName *string    `json:"column_name"`
+	Detail     any        `json:"detail"`
+	SQLText    *string    `json:"sql_text"`
+	CreatedAt  *time.Time `json:"created_at"`
 }
 
 // RenameTableRequest is the JSON body for PATCH /schema/tables/{table}.
@@ -230,10 +233,16 @@ func backfillUnloggedTables(ctx context.Context, pool *pgxpool.Pool, projectID, 
 		if platformTables[tableName] {
 			continue
 		}
-		// Insert a backfilled create_table entry.
+		// Insert a backfilled entry with NULL created_at — these rows
+		// represent tables we *discovered* in information_schema, not
+		// tables we observed being created. Defaulting created_at to
+		// now() makes every page load look like a fresh DDL event,
+		// which is the bug. Frontend renders NULL as "Detected
+		// (existed before tracking)" with no specific timestamp; NULL
+		// also sorts to the bottom under `ORDER BY created_at DESC`.
 		_, _ = pool.Exec(ctx,
-			`INSERT INTO schema_changes (project_id, action, table_name, detail)
-			 VALUES ($1, 'create_table', $2, '{"source":"backfill"}'::jsonb)`,
+			`INSERT INTO schema_changes (project_id, action, table_name, detail, created_at)
+			 VALUES ($1, 'create_table', $2, '{"source":"backfill"}'::jsonb, NULL)`,
 			projectID, tableName)
 		slog.Info("backfilled schema change", "project_id", projectID, "table", tableName)
 	}
