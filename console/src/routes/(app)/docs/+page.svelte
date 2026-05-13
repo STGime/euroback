@@ -411,6 +411,24 @@ const eb = createClient({'{'}
 					<li><strong>Bulk delete</strong> &mdash; select multiple rows with checkboxes and delete them at once</li>
 				</ul>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Migration history</h3>
+
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Database &rarr; <strong>Migration History</strong> shows a timeline of schema changes &mdash; tables created, columns added, indexes dropped, and so on. Each entry records the action, target table/column, and timestamp.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					The platform tracks DDL from any path that goes through the gateway: the console (Table Editor, SQL Runner), the SDK (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb.db.sql()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb.schema.createTable()</code>), and MCP tools (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">runSQL</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">createTable</code>).
+				</p>
+				<div class="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+					<p class="text-sm font-medium text-amber-900">Limitation: direct database access is not audited</p>
+					<p class="mt-1 text-xs text-amber-800 leading-relaxed">
+						Migration History tracks DDL that reaches the platform via the gateway. Schema changes made through a <strong>direct database connection</strong> &mdash; for example, <code class="rounded bg-amber-100 px-1 py-0.5 text-[11px] font-mono">psql</code> connected to your <code class="rounded bg-amber-100 px-1 py-0.5 text-[11px] font-mono">DATABASE_URL</code>, an ORM/migration tool running on your own infrastructure, or the Scaleway database console &mdash; <strong>do not appear</strong> in the history. They are real changes against your schema and your code/queries should still work, but the audit trail won't show them.
+					</p>
+					<p class="mt-2 text-xs text-amber-800 leading-relaxed">
+						This is a deliberate trade-off: capturing every change uniformly would require Postgres superuser privileges, which managed-Postgres providers (Scaleway, RDS, etc.) reserve for themselves. If you need a complete audit trail, prefer the gateway-mediated paths (SQL Runner / SDK / MCP) over direct DB access for any schema-changing operation.
+					</p>
+				</div>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Using the SDK</h3>
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
