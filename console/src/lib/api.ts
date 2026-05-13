@@ -1476,8 +1476,7 @@ export interface SchemaChange {
 	column_name: string | null;
 	detail: any;
 	sql_text: string | null;
-	/** Null for legacy backfill rows pre-dating the event-trigger audit (#120). */
-	created_at: string | null;
+	created_at: string;
 }
 
 export interface RLSAuditEntry {
