@@ -27,8 +27,11 @@
 --
 -- Resilience — every log path is wrapped in EXCEPTION blocks. A bug
 -- in the trigger function MUST NOT cause the user's DDL to roll back.
-
-BEGIN;
+--
+-- No explicit BEGIN/COMMIT — golang-migrate (the CI migrator) wraps
+-- each .up.sql in its own transaction. Nested BEGIN here would warn
+-- ("there is already a transaction in progress") and the inner COMMIT
+-- would close migrate's outer transaction prematurely.
 
 -- ── ddl_command_end: CREATE / ALTER ────────────────────────────────
 --
@@ -209,37 +212,50 @@ BEGIN
         v_table  := NULL;
         v_column := NULL;
 
-        IF obj.object_type = 'table' THEN
-            v_action := 'drop_table';
-            v_table  := obj.object_name;
-        ELSIF obj.object_type = 'table column' THEN
-            v_action := 'drop_column';
-            -- object_identity for table column is 'schema.table.column';
-            -- object_name is the column itself.
-            v_table  := split_part(obj.object_identity, '.', 2);
-            v_column := obj.object_name;
-        ELSIF obj.object_type = 'index' THEN
-            v_action := 'drop_index';
-            v_table  := obj.object_name;
-        ELSE
-            CONTINUE;
-        END IF;
-
-        BEGIN
-            INSERT INTO public.schema_changes
-                (project_id, action, table_name, column_name, detail)
-            VALUES (
-                v_project_id,
-                v_action,
-                COALESCE(v_table, ''),
-                v_column,
-                jsonb_build_object(
-                    'source',      'event_trigger_drop',
-                    'object_type', obj.object_type
-                )
+        DECLARE
+            v_detail jsonb := jsonb_build_object(
+                'source',      'event_trigger_drop',
+                'object_type', obj.object_type
             );
-        EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING 'log_ddl_drop: insert failed: %', SQLERRM;
+        BEGIN
+            IF obj.object_type = 'table' THEN
+                v_action := 'drop_table';
+                v_table  := obj.object_name;
+            ELSIF obj.object_type = 'table column' THEN
+                v_action := 'drop_column';
+                -- object_identity for table column is 'schema.table.column';
+                -- object_name is the column itself.
+                v_table  := split_part(obj.object_identity, '.', 2);
+                v_column := obj.object_name;
+            ELSIF obj.object_type = 'index' THEN
+                v_action := 'drop_index';
+                -- The target table cannot be resolved at sql_drop time —
+                -- pg_index.indrelid is already gone from the catalog by
+                -- the time this trigger fires. We surface the index name
+                -- itself in table_name as a fallback and flag the gap in
+                -- detail so the console UI can render accordingly.
+                v_table  := obj.object_name;
+                v_detail := v_detail || jsonb_build_object(
+                    'index_name', obj.object_name,
+                    'note',       'table_name contains the index name; target table is not resolvable at sql_drop time'
+                );
+            ELSE
+                CONTINUE;
+            END IF;
+
+            BEGIN
+                INSERT INTO public.schema_changes
+                    (project_id, action, table_name, column_name, detail)
+                VALUES (
+                    v_project_id,
+                    v_action,
+                    COALESCE(v_table, ''),
+                    v_column,
+                    v_detail
+                );
+            EXCEPTION WHEN OTHERS THEN
+                RAISE WARNING 'log_ddl_drop: insert failed: %', SQLERRM;
+            END;
         END;
     END LOOP;
 END;
@@ -262,5 +278,3 @@ CREATE EVENT TRIGGER trg_log_ddl_end
 CREATE EVENT TRIGGER trg_log_ddl_drop
     ON sql_drop
     EXECUTE FUNCTION public.log_ddl_drop();
-
-COMMIT;
