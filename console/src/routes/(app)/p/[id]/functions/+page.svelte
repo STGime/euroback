@@ -166,23 +166,52 @@
 		if (!newName.trim()) return;
 		creating = true;
 		try {
-			const defaultCode = `export default async function handler(req: Request, ctx: Eurobase.FunctionContext) {
-  const body = await req.json();
+			// Closes #117. The runner loads user code with `new Function(wrapped)()`,
+			// not as a module — so `import` / `export default` would fail on parse.
+			// Use `module.exports = async (req, ctx) => …` (or
+			// `globalThis.handler = …` / `exports.default = …`).
+			const defaultCode = `// Eurobase edge function.
+//
+// Runtime contract:
+//   • Export your handler with one of:
+//       module.exports = async (req, ctx) => { ... }   ← recommended
+//       globalThis.handler = async (req, ctx) => { ... }
+//       exports.default   = async (req, ctx) => { ... }
+//   • No \`import\` / \`export default\` — the runner does not load
+//     user code as an ES module.
+//
+// Available on \`ctx\`:
+//   ctx.db.sql(query, params)              run SQL on your tenant schema
+//   ctx.vault.get(name)                    read an encrypted vault secret
+//   ctx.storage.upload(key, body, opts)    upload object to your bucket
+//   ctx.storage.createSignedUrl(key, op)   pre-signed URL ('upload'|'download')
+//   ctx.storage.delete(key)                delete object
+//   ctx.env                                env vars set on the function
+//   ctx.user                               end-user JWT claims (if verify_jwt)
+//   ctx.requestId                          per-invocation id
+//   ctx.log.info(msg, data) / .warn / .error
 
-  // Access database (scoped to your project schema)
-  // const [row] = await ctx.db.sql("SELECT * FROM your_table WHERE id = $1", [body.id]);
+module.exports = async (req, ctx) => {
+  const body = await req.json().catch(() => ({}));
 
-  // Access vault secrets
+  // Example: query the database (scoped to your project schema).
+  // const { rows } = await ctx.db.sql(
+  //   "SELECT * FROM your_table WHERE id = $1",
+  //   [body.id]
+  // );
+
+  // Example: read a vault secret.
   // const apiKey = await ctx.vault.get("MY_API_KEY");
 
-  // Access authenticated user (if verify_jwt is enabled)
+  // Example: end-user identity (when verify_jwt is enabled).
   // const userId = ctx.user?.id;
 
   return new Response(JSON.stringify({ message: "Hello from Eurobase!" }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
-}`;
+};
+`;
 			const fn = await api.createEdgeFunction(projectId, {
 				name: newName.trim(),
 				code: defaultCode
