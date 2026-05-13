@@ -44,18 +44,33 @@ spec:
           effect: NoExecute
       initContainers:
         - name: disable-dirty-frag
-          image: alpine:3.23
+          # Pinned to digest: this init container runs privileged with
+          # host filesystem access, so it's a high-value supply chain
+          # target. Bump by re-resolving `docker manifest inspect
+          # alpine:3.23` if the tag is rolled forward.
+          image: alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
           securityContext:
             privileged: true
           command:
             - /bin/sh
             - -c
             - |
+              # Block both the base modules and their *_offload variants.
+              # The offload modules depend on esp4/esp6, so leaving them
+              # loaded (a) keeps `rmmod esp4` failing with EBUSY, and
+              # (b) lets a userspace `modprobe esp4_offload` auto-load
+              # esp4 back in even after this init runs.
               {
                 echo "install esp4 /bin/false"
                 echo "install esp6 /bin/false"
+                echo "install esp4_offload /bin/false"
+                echo "install esp6_offload /bin/false"
                 echo "install rxrpc /bin/false"
               } > /etc/modprobe.d/disable-dirty-frag.conf
+              # Order matters: unload offload (dependent) before the
+              # base esp{4,6} modules, or rmmod returns EBUSY.
+              rmmod esp4_offload 2>/dev/null || true
+              rmmod esp6_offload 2>/dev/null || true
               rmmod esp4 2>/dev/null || true
               rmmod esp6 2>/dev/null || true
               rmmod rxrpc 2>/dev/null || true
