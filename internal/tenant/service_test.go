@@ -95,6 +95,42 @@ func insertTestPlatformUser(t *testing.T, pool *pgxpool.Pool, email string) stri
 	return id
 }
 
+// TestCreateProject_PlanPersisted is the regression test for #70.
+// Asserts that a Pro plan in the request body survives the INSERT and is
+// readable back from the DB row — not just echoed from the in-memory req.
+func TestCreateProject_PlanPersisted(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	svc := &TenantService{pool: pool}
+
+	for _, plan := range []string{"free", "pro"} {
+		t.Run(plan, func(t *testing.T) {
+			uid := insertTestPlatformUser(t, pool, "plan-"+plan+"@test.eurobase.local")
+			project, err := svc.CreateProject(ctx, uid, "plan-"+plan+"@test.eurobase.local", CreateProjectRequest{
+				Name:   "Plan " + plan,
+				Slug:   "plan-test-" + plan,
+				Region: "fr-par",
+				Plan:   plan,
+			})
+			if err != nil {
+				t.Fatalf("CreateProject(plan=%q): %v", plan, err)
+			}
+			t.Cleanup(func() { cleanupProject(t, pool, project.ID) })
+
+			// Read back from the DB — don't trust the returned struct
+			// since it echoes req.Plan rather than re-SELECTing.
+			var dbPlan string
+			if err := pool.QueryRow(ctx,
+				`SELECT plan FROM projects WHERE id = $1`, project.ID).Scan(&dbPlan); err != nil {
+				t.Fatalf("read back plan: %v", err)
+			}
+			if dbPlan != plan {
+				t.Errorf("DB row has plan=%q, want %q (issue #70)", dbPlan, plan)
+			}
+		})
+	}
+}
+
 func TestCreateProject(t *testing.T) {
 	pool := setupTestDB(t)
 	ctx := context.Background()
