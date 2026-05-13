@@ -43,16 +43,20 @@ type AddColumnRequest struct {
 	DefaultValue string `json:"default_value,omitempty"`
 }
 
-// SchemaChange represents a logged DDL operation.
+// SchemaChange represents a logged DDL operation. CreatedAt is nullable
+// for historical backfill rows: migration 000054 swept the synthesised
+// page-load timestamps from the (now-removed in #123) backfill to NULL,
+// because they were never real DDL events. The console renders NULL as
+// "existed before tracking".
 type SchemaChange struct {
-	ID         string    `json:"id"`
-	ProjectID  string    `json:"project_id"`
-	Action     string    `json:"action"`
-	TableName  string    `json:"table_name"`
-	ColumnName *string   `json:"column_name"`
-	Detail     any       `json:"detail"`
-	SQLText    *string   `json:"sql_text"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	ProjectID  string     `json:"project_id"`
+	Action     string     `json:"action"`
+	TableName  string     `json:"table_name"`
+	ColumnName *string    `json:"column_name"`
+	Detail     any        `json:"detail"`
+	SQLText    *string    `json:"sql_text"`
+	CreatedAt  *time.Time `json:"created_at"`
 }
 
 // RenameTableRequest is the JSON body for PATCH /schema/tables/{table}.

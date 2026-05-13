@@ -1476,7 +1476,10 @@ export interface SchemaChange {
 	column_name: string | null;
 	detail: any;
 	sql_text: string | null;
-	created_at: string;
+	/** Null for legacy backfill rows whose synthesised timestamps were
+	 *  swept by migration 000054 (#120 follow-up). Renders as
+	 *  "existed before tracking". */
+	created_at: string | null;
 }
 
 export interface RLSAuditEntry {
