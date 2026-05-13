@@ -1,7 +1,6 @@
 package query
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -43,16 +42,19 @@ type AddColumnRequest struct {
 	DefaultValue string `json:"default_value,omitempty"`
 }
 
-// SchemaChange represents a logged DDL operation.
+// SchemaChange represents a logged DDL operation. CreatedAt is nullable
+// for historical backfill rows that pre-date the event-trigger audit
+// (#119/#120). Going forward every row written by the event triggers
+// carries a real timestamp.
 type SchemaChange struct {
-	ID         string    `json:"id"`
-	ProjectID  string    `json:"project_id"`
-	Action     string    `json:"action"`
-	TableName  string    `json:"table_name"`
-	ColumnName *string   `json:"column_name"`
-	Detail     any       `json:"detail"`
-	SQLText    *string   `json:"sql_text"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	ProjectID  string     `json:"project_id"`
+	Action     string     `json:"action"`
+	TableName  string     `json:"table_name"`
+	ColumnName *string    `json:"column_name"`
+	Detail     any        `json:"detail"`
+	SQLText    *string    `json:"sql_text"`
+	CreatedAt  *time.Time `json:"created_at"`
 }
 
 // RenameTableRequest is the JSON body for PATCH /schema/tables/{table}.
@@ -153,23 +155,15 @@ func HandleRLSAudit(pool *pgxpool.Pool) http.HandlerFunc {
 // HandleSchemaChanges returns a handler that lists schema change history.
 // GET /platform/projects/{id}/schema/changes
 //
-// On each request it also backfills any tables that exist in the tenant
-// schema but have no "create_table" entry — this catches tables created
-// via CLI migrations, psql, or any path that bypasses the DDL handlers.
+// Closes #120: every CREATE / ALTER / DROP on a tenant schema is logged by
+// the public.log_ddl_event() / log_ddl_drop() Postgres event triggers
+// (migration 000055), regardless of which path issued the DDL (typed
+// handlers, SQL runner, MCP, SDK, direct DB access). This handler is a
+// straight read against schema_changes — no backfill, no client-side
+// reconciliation.
 func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
-
-		// Resolve tenant schema for backfill.
-		var schemaName string
-		_ = pool.QueryRow(r.Context(),
-			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
-		).Scan(&schemaName)
-
-		// Backfill: find tables in the schema that have no create_table log entry.
-		if schemaName != "" {
-			backfillUnloggedTables(r.Context(), pool, projectID, schemaName)
-		}
 
 		rows, err := pool.Query(r.Context(),
 			`SELECT id, project_id, action, table_name, column_name, detail, sql_text, created_at
@@ -196,61 +190,17 @@ func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// platformTables are managed by the platform and excluded from schema change tracking.
-var platformTables = map[string]bool{
-	"users": true, "refresh_tokens": true, "email_tokens": true,
-	"storage_objects": true, "user_identities": true, "todos": true,
-}
-
-// backfillUnloggedTables discovers tables in the tenant schema that have no
-// corresponding "create_table" entry in schema_changes and inserts one.
-func backfillUnloggedTables(ctx context.Context, pool *pgxpool.Pool, projectID, schemaName string) {
-	rows, err := pool.Query(ctx,
-		`SELECT t.table_name
-		 FROM information_schema.tables t
-		 WHERE t.table_schema = $1
-		   AND t.table_type = 'BASE TABLE'
-		   AND NOT EXISTS (
-		       SELECT 1 FROM schema_changes sc
-		       WHERE sc.project_id = $2
-		         AND sc.table_name = t.table_name
-		         AND sc.action = 'create_table'
-		   )`, schemaName, projectID)
-	if err != nil {
-		slog.Debug("backfill schema changes: query failed", "error", err)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
-			continue
-		}
-		if platformTables[tableName] {
-			continue
-		}
-		// Insert a backfilled create_table entry.
-		_, _ = pool.Exec(ctx,
-			`INSERT INTO schema_changes (project_id, action, table_name, detail)
-			 VALUES ($1, 'create_table', $2, '{"source":"backfill"}'::jsonb)`,
-			projectID, tableName)
-		slog.Info("backfilled schema change", "project_id", projectID, "table", tableName)
-	}
-}
-
-// logSchemaChange records a DDL operation in the schema_changes table and
-// emits an audit log entry (if the audit service is available in context).
+// logSchemaChange emits an audit log entry for a typed-handler DDL
+// operation. Since #120 the schema_changes insert is handled by the
+// Postgres event triggers (migration 000055), so we no longer write to
+// schema_changes here — that would produce duplicate rows for every
+// typed-handler DDL. The audit_log write stays so DDL actions appear
+// alongside other admin actions in the audit feed.
+//
+// pool is kept in the signature to avoid touching every call site even
+// though the function no longer uses it; remove on the next pass.
 func logSchemaChange(pool *pgxpool.Pool, r *http.Request, projectID, action, tableName string, columnName *string, detail any) {
-	detailJSON, _ := json.Marshal(detail)
-	_, err := pool.Exec(r.Context(),
-		`INSERT INTO schema_changes (project_id, action, table_name, column_name, detail)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		projectID, action, tableName, columnName, detailJSON,
-	)
-	if err != nil {
-		slog.Error("failed to log schema change", "error", err, "action", action, "table", tableName)
-	}
+	_ = pool
 
 	// Also write to the audit log so DDL shows up alongside other actions.
 	// Note: we can't import internal/auth here (cycle), so we extract the
