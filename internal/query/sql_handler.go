@@ -7,6 +7,36 @@ import (
 	"time"
 )
 
+// auditDDLFromSQL inspects the SQL the runner just executed for any DDL
+// shapes and writes them to schema_changes. Closes #120: SQL that lands
+// outside the typed handlers (console SQL editor, MCP runSQL, SDK
+// runSQL) used to silently skip the migration-history audit. This pass
+// catches the common shapes (CREATE/DROP TABLE, ADD/DROP/ALTER/RENAME
+// COLUMN, RENAME TABLE, CREATE/DROP INDEX) without needing event-
+// trigger superuser privileges that managed Postgres won't grant.
+//
+// Best-effort: detection misses (direct DB shell, weird syntax) and
+// audit-write failures both stay silent in the user request path. The
+// existing typed-handler logSchemaChange in ddl_handler.go covers the
+// authoritative path for handler-driven DDL — this is the SQL-runner
+// supplement.
+func auditDDLFromSQL(r *http.Request, engine *QueryEngine, sql string) {
+	projectID := ProjectIDFromContext(r.Context())
+	if projectID == "" {
+		// Without a project the schema_changes FK would reject the
+		// insert. SDK paths set this via the apikey middleware; the
+		// platform path via PlatformTenantContext. Both run before
+		// these handlers — if we ever land here without it, log so
+		// the gap is visible.
+		slog.Debug("auditDDLFromSQL: no project_id in context, skipping")
+		return
+	}
+	ops := DetectDDL(sql)
+	for _, op := range ops {
+		logSchemaChange(engine.pool, r, projectID, op.Action, op.TableName, op.ColumnName, op.Detail)
+	}
+}
+
 // SQLRequest is the JSON body for POST /v1/db/sql.
 type SQLRequest struct {
 	SQL   string `json:"sql"`
@@ -76,6 +106,13 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 			slog.Error("sql transaction failed", "error", err, "schema", schema, "completed", len(results), "total", len(req.Statements))
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+
+		// Closes #120 for the multi-statement path. Each statement
+		// committed successfully (the whole tx did), so audit any DDL
+		// shapes we can recognise.
+		for _, stmt := range req.Statements {
+			auditDDLFromSQL(r, engine, stmt)
 		}
 
 		jsonResponse(w, SQLTransactionResponse{
@@ -159,6 +196,14 @@ func handleSQLInternal(engine *QueryEngine, readOnly bool) http.HandlerFunc {
 
 		if rows == nil {
 			rows = make([]map[string]interface{}, 0)
+		}
+
+		// Closes #120 for the single-statement path. SDK (read-only)
+		// can't issue DDL via this endpoint — ValidateSelectOnly above
+		// rejects it — so we only need to audit when the caller had
+		// write access.
+		if !readOnly {
+			auditDDLFromSQL(r, engine, req.SQL)
 		}
 
 		resp := SQLResponse{
