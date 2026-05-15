@@ -56,6 +56,24 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 		return fmt.Errorf("mark completed: %w", err)
 	}
 
+	// Closes #100. The request-time audit row was written by the
+	// HTTP handler; here we close the loop with the completion
+	// event. Workers have no http.Request so we pass an empty
+	// actor (the request audit already records who initiated it)
+	// and put the matching export_id in target_id so the two rows
+	// link cleanly.
+	if w.AuditSvc != nil {
+		w.AuditSvc.Log(ctx, args.ProjectID, "", "",
+			audit.ActionExportCompleted,
+			audit.WithTarget("export", args.ExportID),
+			audit.WithMetadata(map[string]any{
+				"s3_key":    s3Key,
+				"file_size": buf.Len(),
+				"rows":      totalRows,
+				"scope":     "tenant",
+			}))
+	}
+
 	logger.Info("tenant export completed", "size", buf.Len(), "rows", totalRows)
 	return nil
 }
@@ -100,6 +118,20 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 
 	if err := exportSvc.MarkCompleted(ctx, args.ExportID, s3Key, int64(buf.Len())); err != nil {
 		return fmt.Errorf("mark completed: %w", err)
+	}
+
+	// Closes #100, per-user / self-serve variant.
+	if w.AuditSvc != nil {
+		w.AuditSvc.Log(ctx, args.ProjectID, "", "",
+			audit.ActionExportCompleted,
+			audit.WithTarget("export", args.ExportID),
+			audit.WithMetadata(map[string]any{
+				"s3_key":         s3Key,
+				"file_size":      buf.Len(),
+				"rows":           totalRows,
+				"scope":          "user",
+				"target_user_id": args.UserID,
+			}))
 	}
 
 	logger.Info("user export completed", "size", buf.Len(), "rows", totalRows)
