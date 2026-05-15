@@ -28,6 +28,7 @@
 		[
 			{ label: 'Projects', href: '/projects', icon: 'projects' },
 			{ label: 'Account', href: '/account', icon: 'account' },
+			{ label: 'Pricing', href: '/pricing', icon: 'pricing' },
 			{ label: 'Documentation', href: '/docs', icon: 'docs' },
 			...(isSuperadmin ? [{ label: 'Admin', href: '/admin', icon: 'admin' }] : [])
 		]
@@ -73,6 +74,10 @@
 						{:else if item.icon === 'docs'}
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+							</svg>
+						{:else if item.icon === 'pricing'}
+							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z" />
 							</svg>
 						{:else if item.icon === 'admin'}
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

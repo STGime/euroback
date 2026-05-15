@@ -4,6 +4,7 @@
 
 	let limits: PlanLimits[] = $state([]);
 	let loading = $state(true);
+	let signedIn = $state(false);
 
 	onMount(async () => {
 		// Only fetch live limits when the visitor is already signed in.
@@ -11,7 +12,8 @@
 		// would 401 and the api wrapper's 401 handler force-redirects
 		// to /login — fatal on a public marketing page. Anonymous
 		// visitors see the static defaults inline below.
-		if (!api.getToken()) {
+		signedIn = !!api.getToken();
+		if (!signedIn) {
 			loading = false;
 			return;
 		}
@@ -85,8 +87,12 @@
 		<div class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
 			<a href="/" class="text-lg font-bold text-gray-900">Eurobase</a>
 			<div class="flex items-center gap-3 text-sm">
-				<a href="/login" class="text-gray-600 hover:text-gray-900">Sign in</a>
-				<a href="/login" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Get started</a>
+				{#if signedIn}
+					<a href="/projects" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Back to dashboard</a>
+				{:else}
+					<a href="/login" class="text-gray-600 hover:text-gray-900">Sign in</a>
+					<a href="/login" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Get started</a>
+				{/if}
 			</div>
 		</div>
 	</header>
