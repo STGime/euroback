@@ -15,6 +15,12 @@
 				Sign In
 			</a>
 			<a
+				href="/pricing"
+				class="rounded-lg border border-gray-300 bg-white px-6 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
+			>
+				Pricing
+			</a>
+			<a
 				href="/projects"
 				class="rounded-lg border border-gray-300 bg-white px-6 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
 			>
