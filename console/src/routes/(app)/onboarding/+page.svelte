@@ -239,7 +239,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				<!-- Plan selector -->
 				<fieldset>
 					<legend class="block text-sm font-medium text-gray-700">Plan for this project</legend>
-					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently. You can mix Free and Pro projects.</p>
+					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently. You can mix Free and Pro projects. <a href="/pricing" class="text-eurobase-600 hover:text-eurobase-700 underline">See full comparison</a></p>
 					<div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
 						<label class="cursor-pointer">
 							<input type="radio" name="onb-plan" value="free" bind:group={plan} class="peer sr-only" />
@@ -248,18 +248,27 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 									<p class="text-sm font-semibold text-gray-900">Free</p>
 									<span class="text-xs font-medium text-gray-400">$0/mo</span>
 								</div>
+								<p class="mt-1.5 text-xs text-gray-500">For prototypes &amp; side projects.</p>
 								<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 									<li class="flex items-center gap-1.5">
-										<svg class="h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										{freePlan ? formatLimit(freePlan.db_size_mb) : '500 MB'} database
+										<svg class="h-3.5 w-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										{freePlan ? formatLimit(freePlan.db_size_mb) : '500 MB'} database, {freePlan ? formatLimit(freePlan.storage_mb) : '1 GB'} file storage
 									</li>
 									<li class="flex items-center gap-1.5">
-										<svg class="h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										{freePlan ? formatLimit(freePlan.storage_mb) : '1 GB'} file storage
-									</li>
-									<li class="flex items-center gap-1.5">
-										<svg class="h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										<svg class="h-3.5 w-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
 										{freePlan ? (freePlan.mau_limit / 1000).toFixed(0) + 'k' : '10k'} auth users
+									</li>
+									<li class="flex items-center gap-1.5">
+										<svg class="h-3.5 w-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										100 concurrent realtime connections
+									</li>
+									<li class="flex items-center gap-1.5">
+										<svg class="h-3.5 w-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										3 edge functions, 2 cron jobs, 3 webhooks
+									</li>
+									<li class="flex items-center gap-1.5">
+										<svg class="h-3.5 w-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										24h log retention
 									</li>
 								</ul>
 							</div>
@@ -271,18 +280,27 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 									<p class="text-sm font-semibold text-gray-900">Pro</p>
 									<span class="text-sm font-semibold text-eurobase-700">&euro;19/mo per project</span>
 								</div>
+								<p class="mt-1.5 text-xs text-gray-500">For production workloads.</p>
 								<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 									<li class="flex items-center gap-1.5">
-										<svg class="h-3.5 w-3.5 text-eurobase-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										{proPlan ? formatLimit(proPlan.db_size_mb) : '5 GB'} database
+										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										{proPlan ? formatLimit(proPlan.db_size_mb) : '5 GB'} database, {proPlan ? formatLimit(proPlan.storage_mb) : '50 GB'} file storage
 									</li>
 									<li class="flex items-center gap-1.5">
-										<svg class="h-3.5 w-3.5 text-eurobase-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										{proPlan ? formatLimit(proPlan.storage_mb) : '50 GB'} file storage
-									</li>
-									<li class="flex items-center gap-1.5">
-										<svg class="h-3.5 w-3.5 text-eurobase-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
 										{proPlan ? (proPlan.mau_limit / 1000).toFixed(0) + 'k' : '100k'} auth users
+									</li>
+									<li class="flex items-center gap-1.5">
+										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										10,000 concurrent realtime connections
+									</li>
+									<li class="flex items-center gap-1.5">
+										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										25 edge functions, unlimited cron &amp; webhooks
+									</li>
+									<li class="flex items-center gap-1.5">
+										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+										30-day log retention, custom email templates
 									</li>
 								</ul>
 							</div>
