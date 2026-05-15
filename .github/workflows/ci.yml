@@ -14,6 +14,14 @@ on:
 env:
   REGISTRY: rg.fr-par.scw.cloud
   REGISTRY_NS: eurobase-app
+  # Closes #96. actions/checkout@v4, setup-go@v5, setup-node@v4
+  # are pinned on Node 20 which GitHub deprecates on 2026-06-02
+  # (auto-upgraded to Node 24) and removes on 2026-09-16. Opting
+  # in to Node 24 now surfaces any incompatibility on CI runs
+  # before the platform-wide cutover. Bump the action major
+  # versions when each maintainer ships a Node-24-native release;
+  # the env var becomes a no-op then.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   # -------------------------------------------------------------------------

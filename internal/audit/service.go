@@ -33,6 +33,13 @@ const (
 	ActionAllowlistAdded     = "allowlist.added"
 	ActionAllowlistRemoved   = "allowlist.removed"
 	ActionAllowlistEmailed   = "allowlist.emailed"
+	// Compliance / DSAR export lifecycle. Closes #100. Tenant +
+	// per-user exports run on the platform admin path; self-serve
+	// is an end-user-initiated export of their own data.
+	ActionExportRequested     = "compliance.export.requested"
+	ActionExportSelfRequested = "compliance.export.self_requested"
+	ActionExportCompleted     = "compliance.export.completed"
+	ActionExportFailed        = "compliance.export.failed"
 )
 
 // Entry represents a single audit log row.

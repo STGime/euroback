@@ -99,6 +99,33 @@ func (s *ExportService) CreateExportRequest(ctx context.Context, projectID strin
 	return &req, nil
 }
 
+// UserExistsInTenant reports whether the given user_id exists in the
+// tenant's `users` table. Closes #102: HandleRequestUserExport used
+// to accept any UUID and enqueue a worker even if the user wasn't in
+// the tenant — producing a useless near-empty zip and burning compute.
+//
+// schema_name is resolved from projects in one round-trip; we use a
+// single QueryRow with EXISTS so the call is cheap (~1ms on hot path).
+// quoteIdent guards the schema name even though it comes from a
+// platform-controlled column, on the principle that defence in depth
+// for identifier interpolation is free.
+func (s *ExportService) UserExistsInTenant(ctx context.Context, projectID, userID string) (bool, error) {
+	var schemaName string
+	err := s.Pool.QueryRow(ctx,
+		`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+	).Scan(&schemaName)
+	if err != nil {
+		return false, fmt.Errorf("resolve project schema: %w", err)
+	}
+
+	var exists bool
+	q := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.users WHERE id = $1)`, quoteIdent(schemaName))
+	if err := s.Pool.QueryRow(ctx, q, userID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check user existence: %w", err)
+	}
+	return exists, nil
+}
+
 // GetExportRequest retrieves an export request by ID, scoped to a project.
 func (s *ExportService) GetExportRequest(ctx context.Context, exportID, projectID string) (*ExportRequest, error) {
 	var req ExportRequest
@@ -592,10 +619,51 @@ func writeCSV(w io.Writer, rows []map[string]interface{}) (int, error) {
 	for _, row := range rows {
 		record := make([]string, len(cols))
 		for i, col := range cols {
-			record[i] = fmt.Sprintf("%v", row[col])
+			record[i] = formatCSVCell(row[col])
 		}
 		_ = cw.Write(record)
 	}
 	cw.Flush()
 	return len(rows), cw.Error()
+}
+
+// formatCSVCell renders one column value for the DSAR CSV export.
+//
+// Closes #103. The previous fmt.Sprintf("%v", …) path mangled jsonb
+// and array columns into Go's map[k:v] / [a b c] string forms, which
+// is neither valid JSON nor parseable back into anything useful. The
+// DSAR recipient needed those columns intact to satisfy GDPR's
+// "machine readable, structured format" obligation.
+//
+// Behaviour by type:
+//   - nil               → empty string (CSV null)
+//   - map / slice / any composite → json.Marshal so jsonb /
+//                         text[] / row arrays round-trip
+//   - time.Time          → RFC3339Nano (matches what pgx emits and
+//                         what most spreadsheet apps recognise)
+//   - []byte             → string conversion (Postgres bytea
+//                         literal; if it happens to be UTF-8 text,
+//                         the cell is human-readable, otherwise
+//                         the recipient gets the raw bytes the
+//                         pg driver returned)
+//   - everything else    → fmt.Sprint, same as before
+func formatCSVCell(v any) string {
+	switch v := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case time.Time:
+		return v.Format(time.RFC3339Nano)
+	case []byte:
+		return string(v)
+	case map[string]interface{}, []interface{}:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return string(b)
+	default:
+		return fmt.Sprint(v)
+	}
 }

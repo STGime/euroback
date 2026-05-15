@@ -73,6 +73,21 @@ func HandleRequestTenantExport(exportSvc *ExportService) http.HandlerFunc {
 			return
 		}
 
+		// Closes #100. Defence-in-depth audit trail: a malicious
+		// admin who exfiltrates project data via DSAR shouldn't be
+		// able to operate without leaving a trace beyond the
+		// (deletable-with-DB-access) export_requests row.
+		if svc := audit.FromContext(r.Context()); svc != nil {
+			svc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+				audit.ActionExportRequested,
+				audit.WithTarget("export", req.ID),
+				audit.WithMetadata(map[string]any{
+					"format": body.Format,
+					"scope":  "tenant",
+				}),
+				audit.WithIP(r.RemoteAddr))
+		}
+
 		writeExportJSON(w, req, http.StatusAccepted)
 	}
 }
@@ -104,6 +119,22 @@ func HandleRequestUserExport(exportSvc *ExportService) http.HandlerFunc {
 			return
 		}
 
+		// Closes #102: verify the user actually exists in this tenant
+		// before enqueueing. Skipping this lets a typo'd UUID burn
+		// worker time and produce an almost-empty zip; worse, no real
+		// data leaks but the export looks legitimate to the requester.
+		// We check before the rate limit so a 404 doesn't consume the
+		// daily slot.
+		exists, err := exportSvc.UserExistsInTenant(r.Context(), projectID, body.UserID)
+		if err != nil {
+			writeExportError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !exists {
+			writeExportError(w, "user not found", http.StatusNotFound)
+			return
+		}
+
 		limited, err := exportSvc.CheckRateLimit(r.Context(), projectID, &body.UserID)
 		if err != nil {
 			writeExportError(w, "internal error", http.StatusInternalServerError)
@@ -124,6 +155,21 @@ func HandleRequestUserExport(exportSvc *ExportService) http.HandlerFunc {
 			_ = exportSvc.MarkFailed(r.Context(), req.ID, "failed to enqueue job")
 			writeExportError(w, "failed to enqueue export", http.StatusInternalServerError)
 			return
+		}
+
+		// Closes #100, per-user variant. target_id is the export
+		// request UUID; the affected end-user goes into metadata so
+		// the audit log can answer "who was exported, when, by whom".
+		if svc := audit.FromContext(r.Context()); svc != nil {
+			svc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+				audit.ActionExportRequested,
+				audit.WithTarget("export", req.ID),
+				audit.WithMetadata(map[string]any{
+					"format":         body.Format,
+					"scope":          "user",
+					"target_user_id": body.UserID,
+				}),
+				audit.WithIP(r.RemoteAddr))
 		}
 
 		writeExportJSON(w, req, http.StatusAccepted)
@@ -260,6 +306,26 @@ func HandleSelfServeExport(pool *pgxpool.Pool, s3 *storage.S3Client, auditSvc *a
 			_ = exportSvc.MarkFailed(r.Context(), req.ID, "failed to enqueue job")
 			writeExportError(w, "failed to enqueue export", http.StatusInternalServerError)
 			return
+		}
+
+		// Closes #100, self-serve variant. End-user-initiated rather
+		// than admin-initiated: actor = the end-user themselves, no
+		// platform user. The action constant distinguishes it from
+		// the platform-admin DSAR exports so the audit feed can be
+		// filtered cleanly.
+		if auditSvc != nil {
+			email := ""
+			if endUserClaims != nil {
+				email = endUserClaims.Email
+			}
+			auditSvc.Log(r.Context(), pc.ProjectID, userID, email,
+				audit.ActionExportSelfRequested,
+				audit.WithTarget("export", req.ID),
+				audit.WithMetadata(map[string]any{
+					"format": body.Format,
+					"scope":  "user",
+				}),
+				audit.WithIP(r.RemoteAddr))
 		}
 
 		writeExportJSON(w, req, http.StatusAccepted)
