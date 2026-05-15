@@ -113,7 +113,8 @@
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{fmt(freePlan?.db_size_mb, '500 MB')} database, {fmt(freePlan?.storage_mb, '1 GB')} file storage</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{kmau(freePlan?.mau_limit, '10k')} monthly active users</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{freePlan?.ws_connections ?? 100} realtime connections</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span>2 projects per organisation</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{freePlan?.edge_function_limit ?? 3} edge functions, {freePlan?.webhook_limit ?? 3} webhooks</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{freePlan?.project_limit ?? 2} projects per organisation</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>EU-hosted, GDPR-by-design</span></li>
 				</ul>
 			</div>
@@ -131,10 +132,9 @@
 				<ul class="mt-6 space-y-2 text-sm text-gray-700">
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{fmt(proPlan?.db_size_mb, '5 GB')} database, {fmt(proPlan?.storage_mb, '50 GB')} file storage</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{kmau(proPlan?.mau_limit, '100k')} MAU, {(proPlan?.rate_limit_rps ?? 1000)} rps</span></li>
-					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>10,000 realtime connections (100× Free)</span></li>
-					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>Unlimited cron jobs &amp; webhooks</span></li>
-					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>25 edge functions, custom email templates</span></li>
-					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>30-day log retention</span></li>
+					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{kmau(proPlan?.ws_connections, '10k')} realtime connections</span></li>
+					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.edge_function_limit ?? 25} edge functions, unlimited cron &amp; webhooks</span></li>
+					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.log_retention_days ?? 30}-day log retention, custom email templates</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>EU-hosted, GDPR-by-design</span></li>
 				</ul>
 			</div>
