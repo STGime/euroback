@@ -219,6 +219,15 @@ jobs:
           # docs/runbooks/cost-tier.md.
           kubectl apply -f deploy/k8s/redis.yaml
           kubectl apply -f deploy/k8s/ingress.yaml
+          # All Deployment manifests get applied so changes to
+          # replicas, resource requests, probes, etc. propagate via
+          # the normal deploy. Image tag changes still go through
+          # the `kubectl set image` step below — set image wins on
+          # the container image; everything else is sourced from
+          # the manifest.
+          kubectl apply -f deploy/k8s/gateway.yaml
+          kubectl apply -f deploy/k8s/worker.yaml
+          kubectl apply -f deploy/k8s/console.yaml
           kubectl apply -f deploy/k8s/functions.yaml
           # NetworkPolicy must apply BEFORE the pod rollout so the new
           # net-allowed worker permissions never have a window of

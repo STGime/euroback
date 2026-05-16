@@ -17,7 +17,7 @@ Restores redundancy on the gateway path. Do this **first** — paying users get 
 
 ```bash
 # Pick the pool ID from the console: Kubernetes → eurobase-cluster → Node pools
-scw k8s pool update <pool-id> autoscaler.min-size=1 autoscaler.max-size=2
+scw k8s pool update <pool-id> region=fr-par min-size=1 max-size=2
 
 # Or, via the console: Kapsule → cluster → pool → Edit → Autoscaler:
 #   Min size: 1   Max size: 2
@@ -26,7 +26,7 @@ scw k8s pool update <pool-id> autoscaler.min-size=1 autoscaler.max-size=2
 Kapsule's autoscaler will provision the second DEV1-M when the next pod pressure event happens (e.g. when you scale a Deployment to 2 — step 2 below). For an immediate roll, manually scale the pool:
 
 ```bash
-scw k8s pool update <pool-id> size=2
+scw k8s pool update <pool-id> region=fr-par size=2
 ```
 
 The new node picks up an IPv4 Flexible IP automatically — no extra config.
@@ -107,8 +107,8 @@ kubectl scale deployment/mcp-server --replicas=1 -n eurobase
 # Patch the HPA to allow min=1 (functions Deployment will follow)
 kubectl patch hpa functions -n eurobase --type=merge -p '{"spec":{"minReplicas":1}}'
 
-scw k8s pool update <pool-id> autoscaler.min-size=1 autoscaler.max-size=1
-scw k8s pool update <pool-id> size=1
+scw k8s pool update <pool-id> region=fr-par min-size=1 max-size=1
+scw k8s pool update <pool-id> region=fr-par size=1
 ```
 
 The autoscaler will drain and remove the second node within ~5 minutes. The freed IPv4 Flexible IP releases automatically (verify in Network → Public IPs that count is back to 1).
