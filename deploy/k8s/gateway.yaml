@@ -10,7 +10,10 @@ metadata:
     app: gateway
     component: api
 spec:
-  replicas: 2
+  # Single replica during beta to keep the bill on one Kapsule node.
+  # See docs/runbooks/cost-tier.md — bump back to 2 when the first
+  # paying customer lands.
+  replicas: 1
   selector:
     matchLabels:
       app: gateway
