@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { api, type DPAReport, type AuditLogEntry } from '$lib/api.js';
+	import { api, type DPAReport, type AuditLogEntry, type EndUser } from '$lib/api.js';
 	import { onMount } from 'svelte';
 
 	let projectId = $derived($page.params.id);
@@ -192,6 +192,76 @@
 			exportError = /rate.?limit/i.test(msg) ? 'Rate limit: 1 export per hour. Please wait.' : msg;
 		} finally {
 			exportRequesting = false;
+		}
+	}
+
+	// ── Per-user DSAR export ────────────────────────────────────────
+	//
+	// The backend route (POST /platform/projects/{id}/compliance/user-export)
+	// has been live since DSAR shipped; the page just never wired a
+	// picker for the user_id. Add a debounced search-by-email box that
+	// hits the existing list-users endpoint and lets the operator pick.
+	let userSearch = $state('');
+	let userSearchResults: EndUser[] = $state([]);
+	let userSearching = $state(false);
+	let selectedUser: EndUser | null = $state(null);
+	let userExportFormat = $state<'json' | 'csv'>('json');
+	let userExportRequesting = $state(false);
+	let userExportError: string | null = $state(null);
+	let userSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function onUserSearchChange() {
+		// Debounce: list-users is paginated and cheap, but spamming
+		// keystrokes is wasteful. 250ms feels instant; tweak if needed.
+		if (userSearchTimer !== null) clearTimeout(userSearchTimer);
+		userSearchTimer = setTimeout(runUserSearch, 250);
+	}
+
+	async function runUserSearch() {
+		const query = userSearch.trim();
+		if (query === '') {
+			userSearchResults = [];
+			return;
+		}
+		userSearching = true;
+		try {
+			const result = await api.listEndUsers(projectId, { search: query, limit: 10 });
+			userSearchResults = result.users;
+		} catch (err) {
+			userExportError = err instanceof Error ? err.message : 'Failed to search users';
+		} finally {
+			userSearching = false;
+		}
+	}
+
+	function pickUser(u: EndUser) {
+		selectedUser = u;
+		userSearch = u.email ?? u.id;
+		userSearchResults = [];
+	}
+
+	function clearSelection() {
+		selectedUser = null;
+		userSearch = '';
+		userSearchResults = [];
+	}
+
+	async function requestUserExport() {
+		if (!selectedUser) {
+			userExportError = 'pick a user first';
+			return;
+		}
+		userExportRequesting = true;
+		userExportError = null;
+		try {
+			await api.requestUserExport(projectId, selectedUser.id, userExportFormat);
+			clearSelection();
+			await loadExports();
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Failed to request user export';
+			userExportError = /rate.?limit/i.test(msg) ? 'Rate limit: 1 user export per 24 hours. Please wait.' : msg;
+		} finally {
+			userExportRequesting = false;
 		}
 	}
 
@@ -612,6 +682,89 @@
 			</div>
 		</div>
 
+		<!-- Request single-user export -->
+		<div class="rounded-lg border border-gray-200 p-4 space-y-3">
+			<h3 class="text-sm font-semibold text-gray-900">Request Single-User Export</h3>
+			<p class="text-xs text-gray-500">
+				When an end-user files a GDPR Article 15 Subject Access Request,
+				use this to export only their data — rows from every table that
+				references their <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px] font-mono text-gray-700">user_id</code>,
+				plus their auth record. Rate-limited to 1 export per user per 24 hours.
+			</p>
+
+			<!-- Search box -->
+			<div class="relative">
+				<input
+					type="text"
+					bind:value={userSearch}
+					oninput={onUserSearchChange}
+					placeholder="Search by email or paste a user UUID"
+					class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+				/>
+				{#if userSearchResults.length > 0 && !selectedUser}
+					<ul class="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg max-h-60 overflow-y-auto">
+						{#each userSearchResults as u}
+							<li>
+								<button
+									type="button"
+									onclick={() => pickUser(u)}
+									class="cursor-pointer w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-eurobase-50 hover:text-eurobase-700 flex items-center justify-between gap-2"
+								>
+									<span class="truncate">
+										<span class="font-medium">{u.email ?? u.phone ?? 'no email'}</span>
+										{#if u.display_name}<span class="text-gray-400"> · {u.display_name}</span>{/if}
+									</span>
+									<span class="shrink-0 font-mono text-[10px] text-gray-400">{u.id.substring(0, 8)}…</span>
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{:else if userSearch.trim() !== '' && !selectedUser && !userSearching}
+					<p class="mt-1 text-xs text-gray-400">No users matched.</p>
+				{/if}
+			</div>
+
+			{#if selectedUser}
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50 px-3 py-2 flex items-center justify-between gap-2">
+					<div class="text-sm">
+						<span class="font-medium text-gray-900">{selectedUser.email ?? selectedUser.phone ?? '(no email)'}</span>
+						<span class="font-mono text-[11px] text-gray-500 ml-2">{selectedUser.id}</span>
+					</div>
+					<button
+						onclick={clearSelection}
+						class="cursor-pointer text-xs text-gray-500 hover:text-gray-700 font-medium"
+					>
+						Clear
+					</button>
+				</div>
+			{/if}
+
+			<div class="flex items-center gap-3">
+				<select
+					bind:value={userExportFormat}
+					class="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+				>
+					<option value="json">JSON</option>
+					<option value="csv">CSV</option>
+				</select>
+				<button
+					onclick={requestUserExport}
+					disabled={userExportRequesting || !selectedUser}
+					class="cursor-pointer inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+				>
+					{#if userExportRequesting}
+						<svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+						Requesting...
+					{:else}
+						Export User Data
+					{/if}
+				</button>
+			</div>
+			{#if userExportError}
+				<p class="text-xs text-red-600">{userExportError}</p>
+			{/if}
+		</div>
+
 		<!-- Export history -->
 		<div class="rounded-lg border border-gray-200 overflow-hidden">
 			<div class="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
@@ -646,7 +799,14 @@
 										{exp.status}
 									</span>
 								</td>
-								<td class="px-4 py-2 text-xs text-gray-700">{exp.user_id ? 'User' : 'Project'}</td>
+								<td class="px-4 py-2 text-xs text-gray-700">
+									{#if exp.user_id}
+										<span>User</span>
+										<span class="ml-1 font-mono text-[10px] text-gray-400">{exp.user_id.substring(0, 8)}…</span>
+									{:else}
+										Project
+									{/if}
+								</td>
 								<td class="px-4 py-2 text-xs text-gray-700 uppercase">{exp.format}</td>
 								<td class="px-4 py-2 text-xs text-gray-700">{formatBytes(exp.file_size)}</td>
 								<td class="px-4 py-2 text-xs text-gray-500">{formatDate(exp.created_at)}</td>
