@@ -10,7 +10,8 @@ metadata:
     app: mcp-server
     component: mcp
 spec:
-  replicas: 2
+  # Single replica during beta. See docs/runbooks/cost-tier.md.
+  replicas: 1
   selector:
     matchLabels:
       app: mcp-server

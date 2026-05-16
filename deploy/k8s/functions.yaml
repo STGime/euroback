@@ -10,7 +10,9 @@ metadata:
     app: functions
     component: runtime
 spec:
-  replicas: 2
+  # Single replica during beta. The HPA below has minReplicas=1 to
+  # match. See docs/runbooks/cost-tier.md.
+  replicas: 1
   selector:
     matchLabels:
       app: functions
@@ -98,7 +100,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: functions
-  minReplicas: 2
+  minReplicas: 1
   maxReplicas: 10
   metrics:
     - type: Resource

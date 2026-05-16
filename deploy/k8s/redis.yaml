@@ -1,0 +1,89 @@
+##############################################################################
+# In-cluster Redis — replaces Scaleway Managed Redis (RED1-micro, ~€59/mo).
+#
+# Used by the gateway for rate-limit counters and realtime cross-instance
+# fan-out. Both consumers fall back gracefully when REDIS_URL is unset
+# (cmd/gateway/main.go:124 and :210) — restarts here lose ephemeral state
+# but never corrupt anything persistent.
+#
+# Configuration is intentionally bare:
+#   --save ""         — disable RDB snapshots, no disk writes
+#   --appendonly no   — disable AOF, pure in-memory
+#   resources         — small enough to fit alongside everything else on
+#                       a single DEV1-M Kapsule node (3 vCPU / 4 GB)
+#
+# When we add a paying customer and need cross-AZ realtime or a more
+# durable rate-limit counter, swap REDIS_URL back to a Scaleway managed
+# instance and delete this StatefulSet. See docs/runbooks/cost-tier.md.
+##############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: eurobase
+  labels:
+    app: redis
+spec:
+  # Headless service — the StatefulSet's `redis-0` pod gets a stable
+  # DNS name (`redis-0.redis.eurobase.svc.cluster.local`). We expose
+  # the short form too (`redis.eurobase.svc.cluster.local`) which
+  # resolves to the same single pod.
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: eurobase
+  labels:
+    app: redis
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--save"
+            - ""
+            - "--appendonly"
+            - "no"
+            - "--maxmemory"
+            - "192mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+          ports:
+            - containerPort: 6379
+              name: redis
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 15

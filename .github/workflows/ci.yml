@@ -212,6 +212,12 @@ jobs:
           # CVE-2026-31431 mitigation must land before any pod restart so newly
           # scheduled pods can't briefly run on a node with algif_aead loaded.
           kubectl apply -f deploy/k8s/security/disable-algif-aead.yaml
+          # In-cluster Redis replaces managed RED1-micro to cut the
+          # beta-stage bill (~€59/mo). Apply before the gateway/worker
+          # rollout so REDIS_URL=redis://redis.eurobase.svc.cluster.local
+          # resolves the first time those pods start. See
+          # docs/runbooks/cost-tier.md.
+          kubectl apply -f deploy/k8s/redis.yaml
           kubectl apply -f deploy/k8s/ingress.yaml
           kubectl apply -f deploy/k8s/functions.yaml
           # NetworkPolicy must apply BEFORE the pod rollout so the new
@@ -258,6 +264,11 @@ jobs:
 
       - name: Verify rollout
         run: |
+          # In-cluster Redis goes first so rate-limiting + realtime fan-out
+          # connect cleanly on gateway startup. Failure here is non-blocking
+          # for the gateway (it logs a warning and disables those features),
+          # but a clean roll keeps the failure paths out of the deploy log.
+          kubectl rollout status statefulset/redis -n eurobase --timeout=120s
           kubectl rollout status deployment/gateway -n eurobase --timeout=120s
           kubectl rollout status deployment/worker -n eurobase --timeout=120s
           kubectl rollout status deployment/console -n eurobase --timeout=120s
