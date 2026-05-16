@@ -313,15 +313,34 @@ func (s *S3Client) GeneratePresignedUploadURL(ctx context.Context, bucketName, k
 // GeneratePresignedDownloadURL creates a pre-signed GET URL for direct client
 // downloads. Default expiry is 1 hour if expiry <= 0.
 func (s *S3Client) GeneratePresignedDownloadURL(ctx context.Context, bucketName, key string, expiry time.Duration) (string, error) {
+	return s.GeneratePresignedDownloadURLAs(ctx, bucketName, key, expiry, "")
+}
+
+// GeneratePresignedDownloadURLAs is like GeneratePresignedDownloadURL but
+// embeds a `Content-Disposition: attachment; filename="…"` directive in
+// the presigned URL via the `response-content-disposition` query
+// parameter. When the browser follows the link, S3 echoes the header
+// back and the user gets a download with the suggested name instead of
+// the opaque S3 key (which is the export's UUID for DSAR zips).
+//
+// suggestedFilename is set verbatim; callers are responsible for
+// sanitising any characters that would break a filename or HTTP header.
+// Pass "" to fall back to the S3 key's basename (browser default).
+func (s *S3Client) GeneratePresignedDownloadURLAs(ctx context.Context, bucketName, key string, expiry time.Duration, suggestedFilename string) (string, error) {
 	if expiry <= 0 {
 		expiry = 1 * time.Hour
 	}
 
-	slog.Info("generating presigned download URL", "bucket", bucketName, "key", key, "expiry", expiry)
+	slog.Info("generating presigned download URL", "bucket", bucketName, "key", key, "expiry", expiry, "filename", suggestedFilename)
 
 	input := &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(key),
+	}
+	if suggestedFilename != "" {
+		input.ResponseContentDisposition = aws.String(
+			fmt.Sprintf(`attachment; filename="%s"`, suggestedFilename),
+		)
 	}
 
 	presigned, err := s.presignClient.PresignGetObject(ctx, input, s3.WithPresignExpires(expiry))
