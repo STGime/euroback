@@ -74,6 +74,27 @@ await eb.auth.signOut()
 
 Sessions are automatically persisted to `localStorage` (in browsers) and refreshed before expiry.
 
+### Self-Serve Data Export (GDPR Article 15 / 20)
+
+Let signed-in end-users export their own data as a zip — rows from every table that references them, plus their auth record. Useful for "Download my data" buttons in privacy / settings pages.
+
+```ts
+// Request the export (async — small projects complete in seconds,
+// larger tenants take minutes). Rate-limited per user (default:
+// 1 export per 24 hours).
+const { data, error } = await eb.auth.exportMyData('json')   // or 'csv'
+if (data) {
+  // Poll until ready. Each call returns a fresh 1h presigned download_url
+  // when status === 'completed'.
+  const { data: ready } = await eb.auth.getMyExport(data.id)
+  if (ready?.status === 'completed') {
+    window.location.href = ready.download_url!
+  }
+}
+```
+
+The polling loop is left to the caller — apps know whether they want a tight poll, a push notification, or email-on-ready.
+
 ## Database
 
 ```ts
@@ -263,6 +284,30 @@ const { data } = await eb.functions.invoke('webhook-proxy', {
 })
 ```
 
+### Scheduled Functions (cron)
+
+Declare a function's schedule from the same repo that ships the function. Requires a secret API key (`eb_sk_*`) — schedules are control-plane state.
+
+```ts
+await eb.functions.schedules.create('purge-expired-images', {
+  functionName: 'purge-expired-images',  // must already be deployed
+  cron: '0 4 * * *',                     // POSIX 5-field
+  timezone: 'UTC',                        // optional IANA tz
+  description: 'Daily purge of session_images past 24h TTL',
+})
+
+// Idempotent provisioning — create-or-update
+await eb.functions.schedules.createOrUpdate('purge-expired-images', { ... })
+
+// List / get / update / delete
+const { data } = await eb.functions.schedules.list()
+const { data } = await eb.functions.schedules.get('purge-expired-images')
+await eb.functions.schedules.update('purge-expired-images', { enabled: false })
+await eb.functions.schedules.delete('purge-expired-images')
+```
+
+`create()` returns `{ error: { code: 'already_exists' } }` (HTTP 409) if a schedule with the same name exists; use `update()` or `createOrUpdate()` to change one. Missed ticks during downtime are dropped (no backfill). Each tick is independent — no overlap protection in v1.
+
 ## Vault
 
 ```ts
@@ -298,16 +343,25 @@ import type {
   QueryResult,
   AuthUser,
   AuthSession,
+  ExportRequest,
+  ExportStatus,
   RealtimeEvent,
   ObjectInfo,
   VaultSecret,
   FunctionInvokeOptions,
+  ScheduleSpec,
+  ScheduleRow,
+  ScheduleError,
 } from '@eurobase/sdk'
 ```
 
 ## EU Sovereignty
 
-All data processed through the Eurobase SDK stays on EU infrastructure (Scaleway, France). No US CLOUD Act exposure. GDPR-compliant by design.
+All data processed through the Eurobase SDK stays in EU jurisdiction (Scaleway, France). GDPR-compliant by design.
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md).
 
 ## License
 
