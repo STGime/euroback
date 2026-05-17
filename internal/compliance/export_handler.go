@@ -210,7 +210,7 @@ func HandleListExports(exportSvc *ExportService) http.HandlerFunc {
 		if bucket != "" {
 			for i := range exports {
 				if exports[i].Status == "completed" && exports[i].S3Key != nil {
-					url, err := exportSvc.GenerateDownloadURL(r.Context(), bucket, *exports[i].S3Key)
+					url, err := exportSvc.GenerateDownloadURL(r.Context(), bucket, &exports[i])
 					if err == nil {
 						exports[i].DownloadURL = url
 					}
@@ -239,7 +239,7 @@ func HandleGetExport(exportSvc *ExportService) http.HandlerFunc {
 			var bucket string
 			_ = exportSvc.Pool.QueryRow(r.Context(), `SELECT s3_bucket FROM projects WHERE id = $1`, projectID).Scan(&bucket)
 			if bucket != "" {
-				url, err := exportSvc.GenerateDownloadURL(r.Context(), bucket, *req.S3Key)
+				url, err := exportSvc.GenerateDownloadURL(r.Context(), bucket, req)
 				if err == nil {
 					req.DownloadURL = url
 				}
@@ -364,7 +364,7 @@ func HandleSelfServeExportStatus(pool *pgxpool.Pool, s3 *storage.S3Client, audit
 			var bucket string
 			_ = pool.QueryRow(r.Context(), `SELECT s3_bucket FROM projects WHERE id = $1`, pc.ProjectID).Scan(&bucket)
 			if bucket != "" {
-				url, err := exportSvc.GenerateDownloadURL(r.Context(), bucket, *req.S3Key)
+				url, err := exportSvc.GenerateDownloadURL(r.Context(), bucket, req)
 				if err == nil {
 					req.DownloadURL = url
 				}

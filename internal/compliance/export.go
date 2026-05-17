@@ -251,8 +251,89 @@ func (s *ExportService) MarkFailed(ctx context.Context, exportID, errMsg string)
 }
 
 // GenerateDownloadURL creates a presigned S3 URL for a completed export.
-func (s *ExportService) GenerateDownloadURL(ctx context.Context, bucket, s3Key string) (string, error) {
-	return s.S3.GeneratePresignedDownloadURL(ctx, bucket, s3Key, 1*time.Hour)
+// The URL carries a `Content-Disposition: attachment; filename=…` directive
+// so the browser saves the zip with a recognisable name (project slug +
+// scope + date) instead of the export UUID. Falls back to the S3 key's
+// basename if the project lookup fails — the URL still works, only the
+// suggested filename is generic.
+func (s *ExportService) GenerateDownloadURL(ctx context.Context, bucket string, req *ExportRequest) (string, error) {
+	if req == nil || req.S3Key == nil || *req.S3Key == "" {
+		return "", fmt.Errorf("export request has no s3 key")
+	}
+	filename := s.buildExportFilename(ctx, req)
+	return s.S3.GeneratePresignedDownloadURLAs(ctx, bucket, *req.S3Key, 1*time.Hour, filename)
+}
+
+// buildExportFilename derives a human-readable filename for a DSAR
+// download. Format:
+//
+//	eurobase-<slug>-<scope>-<YYYY-MM-DD>.zip
+//
+// where <scope> is `project` for a tenant export or `user-<short>` for
+// a per-user export. The slug comes from public.projects; if the
+// lookup fails we use the project_id's first 8 chars as a fallback so
+// the file still has something distinctive in the name.
+func (s *ExportService) buildExportFilename(ctx context.Context, req *ExportRequest) string {
+	slug := s.lookupProjectSlug(ctx, req.ProjectID)
+	if slug == "" {
+		slug = shortID(req.ProjectID)
+	}
+
+	scope := "project"
+	if req.UserID != nil && *req.UserID != "" {
+		scope = "user-" + shortID(*req.UserID)
+	}
+
+	date := req.CreatedAt.UTC().Format("2006-01-02")
+	return fmt.Sprintf("eurobase-%s-%s-%s.zip", sanitiseFilenamePart(slug), scope, date)
+}
+
+// lookupProjectSlug fetches the slug for a project. Returns "" on any
+// error — the caller falls back to the project_id prefix. Best-effort:
+// the download URL itself still works regardless.
+func (s *ExportService) lookupProjectSlug(ctx context.Context, projectID string) string {
+	var slug string
+	err := s.Pool.QueryRow(ctx,
+		`SELECT slug FROM projects WHERE id = $1`, projectID,
+	).Scan(&slug)
+	if err != nil {
+		return ""
+	}
+	return slug
+}
+
+// shortID returns the first 8 characters of a UUID-shaped id, or the
+// full string if it's shorter. Used as a stable, recognisable handle
+// in the filename when we can't or don't want to leak the full UUID.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// sanitiseFilenamePart strips characters that are awkward in a
+// filename or in a `Content-Disposition` header. Quotes, slashes,
+// backslashes, and control chars go. Whitespace collapses to '-'.
+// We're already starting from a slug, but defence-in-depth.
+func sanitiseFilenamePart(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\' || r == '/' || r < 0x20 || r == 0x7f:
+			// drop
+		case r == ' ' || r == '\t':
+			b.WriteRune('-')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if out == "" {
+		out = "project"
+	}
+	return out
 }
 
 // CleanupExpired deletes expired export records and their S3 objects.
