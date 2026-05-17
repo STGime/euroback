@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
+	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/jackc/pgx/v5"
@@ -104,11 +105,15 @@ func (s *ExportService) CreateExportRequest(ctx context.Context, projectID strin
 // to accept any UUID and enqueue a worker even if the user wasn't in
 // the tenant — producing a useless near-empty zip and burning compute.
 //
-// schema_name is resolved from projects in one round-trip; we use a
-// single QueryRow with EXISTS so the call is cheap (~1ms on hot path).
-// quoteIdent guards the schema name even though it comes from a
-// platform-controlled column, on the principle that defence in depth
-// for identifier interpolation is free.
+// schema_name is resolved from projects in one round-trip; the EXISTS
+// query against the tenant's users table runs through edb.RunAsService
+// so app.end_user_role='service' is set for the transaction. Without
+// that GUC, RLS on `<schema>.users` filters every row out (no
+// authenticated end-user context exists here — the actor is the
+// platform admin), and EXISTS would falsely return false even for a
+// user that's clearly present. listEndUsers already uses the same
+// pattern. quoteIdent guards the schema identifier even though it
+// comes from a platform-controlled column, as defence-in-depth.
 func (s *ExportService) UserExistsInTenant(ctx context.Context, projectID, userID string) (bool, error) {
 	var schemaName string
 	err := s.Pool.QueryRow(ctx,
@@ -120,7 +125,9 @@ func (s *ExportService) UserExistsInTenant(ctx context.Context, projectID, userI
 
 	var exists bool
 	q := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.users WHERE id = $1)`, quoteIdent(schemaName))
-	if err := s.Pool.QueryRow(ctx, q, userID).Scan(&exists); err != nil {
+	if err := edb.RunAsService(ctx, s.Pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, userID).Scan(&exists)
+	}); err != nil {
 		return false, fmt.Errorf("check user existence: %w", err)
 	}
 	return exists, nil
