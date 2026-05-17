@@ -136,9 +136,16 @@ func handleListUsers(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		if search != "" {
+			// Match email / display_name / id. The id::text cast lets
+			// operators paste a UUID from an audit row or a support
+			// ticket and find the user without needing to type the
+			// email exactly. Phone is intentionally not searched —
+			// formatting (E.164 vs national vs spaces) makes ILIKE
+			// flaky and the picker UI already covers phone-only
+			// users via display_name when one is set.
 			pattern := "%" + search + "%"
-			countQ = fmt.Sprintf(`SELECT count(*) FROM %s.users WHERE email ILIKE $1 OR display_name ILIKE $1`, qs)
-			listQ = fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.email ILIKE $1 OR u.display_name ILIKE $1 ORDER BY u.created_at DESC LIMIT $2 OFFSET $3`, userCols, qs)
+			countQ = fmt.Sprintf(`SELECT count(*) FROM %s.users WHERE email ILIKE $1 OR display_name ILIKE $1 OR id::text ILIKE $1`, qs)
+			listQ = fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.email ILIKE $1 OR u.display_name ILIKE $1 OR u.id::text ILIKE $1 ORDER BY u.created_at DESC LIMIT $2 OFFSET $3`, userCols, qs)
 			args = []interface{}{pattern, limit, offset}
 		} else {
 			countQ = fmt.Sprintf(`SELECT count(*) FROM %s.users`, qs)
