@@ -41,6 +41,29 @@ export interface SignInCredentials {
 export type AuthEvent = 'SIGNED_IN' | 'SIGNED_OUT' | 'TOKEN_REFRESHED'
 export type AuthStateChangeCallback = (event: AuthEvent, session: AuthSession | null) => void
 
+/** Status of an end-user-initiated DSAR export (Article 15/20). */
+export type ExportStatus = 'pending' | 'running' | 'completed' | 'failed'
+
+/** A row from POST /v1/auth/me/export or GET /v1/auth/me/export/{id}. */
+export interface ExportRequest {
+  id: string
+  project_id: string
+  /** Always the signed-in user's id for self-serve exports. */
+  user_id?: string
+  status: ExportStatus
+  format: 'json' | 'csv'
+  /** Only set when status === 'completed'. Presigned, 1h TTL. */
+  download_url?: string
+  /** Set when status === 'failed'. */
+  error?: string
+  file_size?: number
+  /** When the download link itself stops working. 7 days after completion. */
+  expires_at?: string
+  started_at?: string
+  completed_at?: string
+  created_at: string
+}
+
 // ---------------------------------------------------------------------------
 // AuthClient
 // ---------------------------------------------------------------------------
@@ -205,6 +228,52 @@ export class AuthClient {
       return { data: null, error: result.error }
     }
     return { data: result, error: null }
+  }
+
+  /**
+   * Request a DSAR export of the signed-in user's own data
+   * (GDPR Article 15 / 20). Returns the queued export request — poll
+   * with `getMyExport(id)` until `status === 'completed'`, then read
+   * `download_url`.
+   *
+   * Rate-limited per user (1 export / 24h on Free; configurable on
+   * higher tiers). The download link, once issued, expires after 7
+   * days.
+   *
+   * @example
+   * const { data } = await eb.auth.exportMyData('json')
+   * if (data) {
+   *   // poll
+   *   const { data: ready } = await eb.auth.getMyExport(data.id)
+   *   if (ready?.status === 'completed') window.location = ready.download_url!
+   * }
+   */
+  async exportMyData(
+    format: 'json' | 'csv' = 'json',
+  ): Promise<{ data: ExportRequest | null; error: string | null }> {
+    const result = await this.http.post('/v1/auth/me/export', { format })
+    if (result?.error) {
+      return { data: null, error: result.error }
+    }
+    return { data: result as ExportRequest, error: null }
+  }
+
+  /**
+   * Fetch the status of an export the signed-in user previously
+   * requested. Returns `status` + (when completed) a presigned
+   * `download_url`.
+   *
+   * Each call generates a fresh 1-hour-TTL download URL — safe to
+   * call repeatedly.
+   */
+  async getMyExport(
+    exportId: string,
+  ): Promise<{ data: ExportRequest | null; error: string | null }> {
+    const result = await this.http.get(`/v1/auth/me/export/${encodeURIComponent(exportId)}`)
+    if (result?.error) {
+      return { data: null, error: result.error }
+    }
+    return { data: result as ExportRequest, error: null }
   }
 
   /** Get the current session (from memory, not server). */

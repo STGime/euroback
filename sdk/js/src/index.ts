@@ -51,4 +51,6 @@ export type {
   SignInCredentials,
   AuthEvent,
   AuthStateChangeCallback,
+  ExportRequest,
+  ExportStatus,
 } from './auth'
