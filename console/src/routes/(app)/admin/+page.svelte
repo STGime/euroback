@@ -17,6 +17,12 @@
 	let composeBusy = $state(false);
 	let composeError = $state<string | null>(null);
 	let composeSuccess = $state<string | null>(null);
+	// Closes #35. When some chunks fail (Scaleway TEM quota,
+	// network blip), the API returns status=partial plus an `errors`
+	// array. We capture it here so the operator can see WHICH chunks
+	// didn't go out and retry just those — much better than the
+	// pre-fix "send 9, deselect, send next 9, lather, rinse" loop.
+	let composeFailures = $state<{ recipients: string[]; error: string }[]>([]);
 
 	const INVITATION_TEMPLATE = {
 		subject: "You're invited to Eurobase (closed beta)",
@@ -135,11 +141,24 @@
 		)
 			return;
 		composeBusy = true;
+		composeFailures = [];
 		try {
 			const res = await api.adminSendAllowlistEmail(recipients, composeSubject, composeBody);
-			composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.`;
+			// Partial success: the server sent SOME chunks, others
+			// failed. Show how many landed + surface the failing
+			// chunks so the operator can retry just those addresses
+			// instead of re-sending to everyone.
+			if (res.status === 'partial') {
+				composeSuccess = `Partial: ${res.sent} sent, ${res.failed} failed${res.bcc ? ' (BCC)' : ''}.`;
+				composeFailures = res.errors ?? [];
+				// Keep the failed addresses selected so the operator
+				// can click Email again to retry just them.
+				selected = new Set(composeFailures.flatMap((e) => e.recipients));
+			} else {
+				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.`;
+				selected = new Set();
+			}
 			// Leave modal open so the user can see confirmation; they close manually.
-			selected = new Set();
 		} catch (e: any) {
 			composeError = e?.message ?? 'Send failed';
 		} finally {
@@ -151,6 +170,7 @@
 		composeOpen = false;
 		composeError = null;
 		composeSuccess = null;
+		composeFailures = [];
 	}
 </script>
 
@@ -381,6 +401,21 @@
 				{/if}
 				{#if composeSuccess}
 					<div class="rounded-md bg-green-50 border border-green-200 p-2 text-xs text-green-800">{composeSuccess}</div>
+				{/if}
+				{#if composeFailures.length > 0}
+					<details class="rounded-md border border-amber-200 bg-amber-50 text-xs text-amber-900">
+						<summary class="cursor-pointer px-3 py-2 font-medium">
+							{composeFailures.length} chunk{composeFailures.length === 1 ? '' : 's'} failed — click Email to retry the still-selected addresses
+						</summary>
+						<ul class="border-t border-amber-200 px-3 py-2 space-y-1">
+							{#each composeFailures as f}
+								<li>
+									<div class="font-mono text-[11px] text-amber-800">{f.recipients.join(', ')}</div>
+									<div class="text-[11px] text-amber-700">{f.error}</div>
+								</li>
+							{/each}
+						</ul>
+					</details>
 				{/if}
 			</div>
 

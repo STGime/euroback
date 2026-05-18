@@ -46,7 +46,11 @@ func (s *EmailService) Configured() bool {
 // Recipients do NOT see each other's addresses. Used by superadmin
 // broadcast features (e.g. beta-allowlist invitations) where a single
 // announcement goes to many people.
-func (s *EmailService) SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) error {
+//
+// Closes #35. Returns a BulkResult so the handler can surface partial
+// success ("8/10 sent · 2 failed") to the console. The error is
+// non-nil only when nothing went out at all.
+func (s *EmailService) SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) (BulkResult, error) {
 	return s.client.SendBulk(ctx, recipients, subject, htmlBody)
 }
 
