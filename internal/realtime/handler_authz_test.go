@@ -42,11 +42,11 @@ func TestRealtime_NonApikeyTokenWithoutProjectIDFails(t *testing.T) {
 	// production implementation accepts apikey tokens without a
 	// project_id but requires it for JWTs. Modelled here as: empty
 	// input → ErrUnauthorized.
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (AuthorizedClient, error) {
 		if qpID == "" {
-			return "", "", ErrUnauthorized
+			return AuthorizedClient{}, ErrUnauthorized
 		}
-		return qpID, "free", nil
+		return AuthorizedClient{ProjectID: qpID, Plan: "free"}, nil
 	}, false)
 	defer stop()
 
@@ -66,11 +66,11 @@ func TestRealtime_ApikeyResolvedProjectID(t *testing.T) {
 	hub := NewHub()
 	go hub.Run()
 	originOK := func(_ *http.Request) bool { return true }
-	authorize := func(_ context.Context, token, _ string) (string, string, error) {
+	authorize := func(_ context.Context, token, _ string) (AuthorizedClient, error) {
 		if token == "eb_pk_abc" {
-			return "p-from-apikey", "pro", nil
+			return AuthorizedClient{ProjectID: "p-from-apikey", Plan: "pro"}, nil
 		}
-		return "", "", ErrUnauthorized
+		return AuthorizedClient{}, ErrUnauthorized
 	}
 	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originOK, false))
 	defer srv.Close()
@@ -95,8 +95,8 @@ func TestRealtime_ApikeyResolvedProjectID(t *testing.T) {
 }
 
 func TestRealtime_RejectsMissingToken(t *testing.T) {
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
-		return qpID, "free", nil
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (AuthorizedClient, error) {
+		return AuthorizedClient{ProjectID: qpID, Plan: "free"}, nil
 	}, false)
 	defer stop()
 
@@ -110,8 +110,8 @@ func TestRealtime_RejectsMissingToken(t *testing.T) {
 }
 
 func TestRealtime_AuthorizeReturnsUnauthorized(t *testing.T) {
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
-		return "", "", ErrUnauthorized
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (AuthorizedClient, error) {
+		return AuthorizedClient{}, ErrUnauthorized
 	}, false)
 	defer stop()
 
@@ -125,8 +125,8 @@ func TestRealtime_AuthorizeReturnsUnauthorized(t *testing.T) {
 }
 
 func TestRealtime_AuthorizeReturnsForbidden(t *testing.T) {
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (string, string, error) {
-		return "", "", ErrForbidden
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, _, qpID string) (AuthorizedClient, error) {
+		return AuthorizedClient{}, ErrForbidden
 	}, false)
 	defer stop()
 
@@ -141,9 +141,9 @@ func TestRealtime_AuthorizeReturnsForbidden(t *testing.T) {
 
 func TestRealtime_AuthorizeReceivesQueriedProjectID(t *testing.T) {
 	var captured atomic.Value
-	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, token, projectID string) (string, string, error) {
+	wsURL, stop := startServerWithAuthorize(t, func(_ context.Context, token, projectID string) (AuthorizedClient, error) {
 		captured.Store([2]string{token, projectID})
-		return projectID, "pro", nil
+		return AuthorizedClient{ProjectID: projectID, Plan: "pro"}, nil
 	}, false)
 	defer stop()
 
@@ -165,7 +165,9 @@ func TestRealtime_PublishWithProjectID_DeliversToMatchingSubscriber(t *testing.T
 	// subscriber connected as project_id=X receives the event.
 	hub := NewHub()
 	go hub.Run()
-	authorize := func(_ context.Context, _, qpID string) (string, string, error) { return qpID, "pro", nil }
+	authorize := func(_ context.Context, _, qpID string) (AuthorizedClient, error) {
+		return AuthorizedClient{ProjectID: qpID, Plan: "pro"}, nil
+	}
 	originOK := func(_ *http.Request) bool { return true }
 	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originOK, false))
 	defer srv.Close()
@@ -214,7 +216,9 @@ func TestRealtime_PublishWithDifferentProjectID_DoesNotDeliver(t *testing.T) {
 	// direction (over-broadcast).
 	hub := NewHub()
 	go hub.Run()
-	authorize := func(_ context.Context, _, qpID string) (string, string, error) { return qpID, "pro", nil }
+	authorize := func(_ context.Context, _, qpID string) (AuthorizedClient, error) {
+		return AuthorizedClient{ProjectID: qpID, Plan: "pro"}, nil
+	}
 	originOK := func(_ *http.Request) bool { return true }
 	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originOK, false))
 	defer srv.Close()

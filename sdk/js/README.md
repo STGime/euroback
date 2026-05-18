@@ -264,6 +264,23 @@ eb.realtime.disconnect()
 
 Reconnects automatically with exponential backoff (1s, 2s, 4s, ... up to 30s).
 
+### Server-side row filtering
+
+Realtime events are filtered on the server before they reach a subscriber, based on the row's owner column (`user_id`, `owner_id`, `created_by`, or `uploaded_by`):
+
+| Subscriber identity | Table has an owner column | Table has no owner column |
+|---|---|---|
+| End-user JWT (`accessToken` set after sign-in) | Receives only rows where the owner column equals their `user_id` | Receives every event |
+| Server / admin (`eb_sk_*` secret API key, or signed-in console user) | Receives every event | Receives every event |
+| Anonymous (`eb_pk_*` public API key, no end-user JWT) | **Receives nothing** | Receives every event |
+
+This matches the `owner_access` RLS preset applied by `eb.db.schema.createTable()` when an owner column is detected, so realtime and REST agree on which rows a subscriber can see.
+
+**Limitations.** The server-side filter is column-based, not a full RLS evaluator:
+
+- Custom or composite RLS policies (e.g. `USING (org_id = current_org() OR is_admin)`) are not enforced over realtime. Subscribers on those tables will see every row.
+- If you need stricter realtime authorisation than the owner column provides, gate sensitive tables off realtime entirely until [#108 follow-up](https://github.com/STGime/euroback/issues/108) ships full policy evaluation in v1.1.
+
 ## Edge Functions
 
 ```ts
