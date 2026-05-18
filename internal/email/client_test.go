@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -229,9 +230,13 @@ func TestSendBulk_EmptyRecipients(t *testing.T) {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func makeAddrs(n int) []string {
+	// Use a printf-formed local-part so the addresses stay valid no
+	// matter how large n grows. Earlier version used
+	// string(rune('a'+i)) which produced non-letter runes ({, |, etc.)
+	// at i>=26.
 	out := make([]string, n)
 	for i := 0; i < n; i++ {
-		out[i] = string(rune('a'+i)) + "@test.local"
+		out[i] = fmt.Sprintf("user%d@test.local", i)
 	}
 	return out
 }
