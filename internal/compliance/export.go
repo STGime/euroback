@@ -2,7 +2,6 @@ package compliance
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -203,12 +202,22 @@ func (s *ExportService) ListExports(ctx context.Context, projectID string, limit
 
 // CheckRateLimit returns true if the rate limit for this export type is exceeded.
 // Tenant: 1 per project per hour. User: 1 per user per 24 hours.
+//
+// Closes #101. The previous query counted every row, including ones
+// that ended in `status = 'failed'`. That punished users for our
+// failures: if a worker crashed (bad schema, S3 outage, OOM), the
+// retry was blocked for 24h. The fix is one predicate — only
+// in-flight (pending/running) and completed exports count toward
+// the budget. A failed export is effectively a no-op and the user
+// can re-request immediately.
 func (s *ExportService) CheckRateLimit(ctx context.Context, projectID string, userID *string) (bool, error) {
 	var count int
 	if userID != nil {
 		err := s.Pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM export_requests
-			 WHERE project_id = $1 AND user_id = $2 AND created_at > now() - interval '24 hours'`,
+			 WHERE project_id = $1 AND user_id = $2
+			   AND status <> 'failed'
+			   AND created_at > now() - interval '24 hours'`,
 			projectID, *userID,
 		).Scan(&count)
 		if err != nil {
@@ -217,7 +226,9 @@ func (s *ExportService) CheckRateLimit(ctx context.Context, projectID string, us
 	} else {
 		err := s.Pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM export_requests
-			 WHERE project_id = $1 AND user_id IS NULL AND created_at > now() - interval '1 hour'`,
+			 WHERE project_id = $1 AND user_id IS NULL
+			   AND status <> 'failed'
+			   AND created_at > now() - interval '1 hour'`,
 			projectID,
 		).Scan(&count)
 		if err != nil {
@@ -471,39 +482,48 @@ type ExportMetadata struct {
 	TotalRows   int       `json:"total_rows"`
 }
 
-// BuildTenantExportZip generates a zip archive of all tenant data.
-func BuildTenantExportZip(ctx context.Context, pool *pgxpool.Pool, schemaName, projectID, exportID, format string) (*bytes.Buffer, int, error) {
-	buf := &bytes.Buffer{}
-	zw := zip.NewWriter(buf)
+// WriteTenantExport streams a tenant-scope export zip into w. Closes
+// #99: the previous BuildTenantExportZip materialised the entire archive
+// in a *bytes.Buffer and accumulated every row of every table into a
+// []map[string]interface{} before zipping — a single tenant with one
+// large table could OOM the worker pod. The streaming variant iterates
+// rows.Next() row-by-row through the zip writer, so memory is bounded
+// by one row + zip compression buffer regardless of table size.
+//
+// Callers pass a temp file or io.Pipe so the zip never lands in RAM.
+// Returns total rows written.
+func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, w io.Writer, schemaName, projectID, exportID, format string) (int, error) {
+	zw := zip.NewWriter(w)
 	totalRows := 0
 
 	tables, err := ListTenantTables(ctx, pool, schemaName)
 	if err != nil {
-		return nil, 0, err
+		_ = zw.Close()
+		return 0, err
 	}
 
 	for _, table := range tables {
-		rows, err := queryTable(ctx, pool, schemaName, table, "", "")
+		q := fmt.Sprintf(`SELECT * FROM %s.%s LIMIT 100000`, quoteIdent(schemaName), quoteIdent(table))
+		n, err := streamQueryToZip(ctx, pool, zw, q, nil, fmt.Sprintf("tables/%s", table), format)
 		if err != nil {
-			slog.Warn("export: failed to query table", "table", table, "error", err)
-			continue
-		}
-		n, err := writeTableToZip(zw, fmt.Sprintf("tables/%s", table), rows, format)
-		if err != nil {
-			slog.Warn("export: failed to write table", "table", table, "error", err)
+			slog.Warn("export: failed to stream table", "table", table, "error", err)
 			continue
 		}
 		totalRows += n
 	}
 
-	// Audit log for this project
-	auditData, err := queryRaw(ctx, pool,
+	// Audit log for this project. The 10k cap is a soft bound — a
+	// streaming archive could in principle take more, but at 10k
+	// rows the zip is already representative of "what we audited"
+	// and beyond that the recipient is better served by a targeted
+	// query.
+	n, err := streamQueryToZip(ctx, pool, zw,
 		`SELECT id, actor_id, actor_email, action, target_type, target_id, metadata, ip_address, created_at
 		 FROM public.audit_log WHERE project_id = $1 ORDER BY created_at DESC LIMIT 10000`,
-		projectID,
+		[]interface{}{projectID},
+		"_audit_log", format,
 	)
-	if err == nil && len(auditData) > 0 {
-		n, _ := writeTableToZip(zw, "_audit_log", auditData, format)
+	if err == nil {
 		totalRows += n
 	}
 
@@ -518,53 +538,54 @@ func BuildTenantExportZip(ctx context.Context, pool *pgxpool.Pool, schemaName, p
 	writeJSONToZip(zw, "_metadata.json", meta)
 
 	if err := zw.Close(); err != nil {
-		return nil, 0, fmt.Errorf("close zip: %w", err)
+		return totalRows, fmt.Errorf("close zip: %w", err)
 	}
-	return buf, totalRows, nil
+	return totalRows, nil
 }
 
-// BuildUserExportZip generates a zip archive of a specific user's data.
-func BuildUserExportZip(ctx context.Context, pool *pgxpool.Pool, schemaName, projectID, userID, exportID, format string) (*bytes.Buffer, int, error) {
-	buf := &bytes.Buffer{}
-	zw := zip.NewWriter(buf)
+// WriteUserExport streams a per-user export zip into w. Same streaming
+// contract as WriteTenantExport — see #99.
+func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, w io.Writer, schemaName, projectID, userID, exportID, format string) (int, error) {
+	zw := zip.NewWriter(w)
 	totalRows := 0
 
 	// User profile
-	profileData, err := queryTable(ctx, pool, schemaName, "users", "id", userID)
-	if err == nil && len(profileData) > 0 {
-		n, _ := writeTableToZip(zw, "_user_profile", profileData, format)
+	n, err := streamQueryToZip(ctx, pool, zw,
+		fmt.Sprintf(`SELECT * FROM %s.users WHERE id = $1`, quoteIdent(schemaName)),
+		[]interface{}{userID},
+		"_user_profile", format,
+	)
+	if err == nil {
 		totalRows += n
 	}
 
-	// Discover tables with user_id references
 	refs, err := DiscoverUserTables(ctx, pool, schemaName)
 	if err != nil {
-		return nil, 0, err
+		_ = zw.Close()
+		return totalRows, err
 	}
 
 	for _, ref := range refs {
-		rows, err := queryTable(ctx, pool, schemaName, ref.TableName, ref.UserColumn, userID)
+		q := fmt.Sprintf(`SELECT * FROM %s.%s WHERE %s = $1 LIMIT 100000`,
+			quoteIdent(schemaName), quoteIdent(ref.TableName), quoteIdent(ref.UserColumn))
+		n, err := streamQueryToZip(ctx, pool, zw, q, []interface{}{userID}, fmt.Sprintf("tables/%s", ref.TableName), format)
 		if err != nil {
-			slog.Warn("export: failed to query user table", "table", ref.TableName, "error", err)
-			continue
-		}
-		n, err := writeTableToZip(zw, fmt.Sprintf("tables/%s", ref.TableName), rows, format)
-		if err != nil {
+			slog.Warn("export: failed to stream user table", "table", ref.TableName, "error", err)
 			continue
 		}
 		totalRows += n
 	}
 
 	// User's audit entries
-	auditData, err := queryRaw(ctx, pool,
+	n, err = streamQueryToZip(ctx, pool, zw,
 		`SELECT id, actor_id, actor_email, action, target_type, target_id, metadata, ip_address, created_at
 		 FROM public.audit_log
 		 WHERE project_id = $1 AND (actor_id = $2 OR target_id = $2)
 		 ORDER BY created_at DESC LIMIT 5000`,
-		projectID, userID,
+		[]interface{}{projectID, userID},
+		"_audit_log", format,
 	)
-	if err == nil && len(auditData) > 0 {
-		n, _ := writeTableToZip(zw, "_audit_log", auditData, format)
+	if err == nil {
 		totalRows += n
 	}
 
@@ -580,9 +601,9 @@ func BuildUserExportZip(ctx context.Context, pool *pgxpool.Pool, schemaName, pro
 	writeJSONToZip(zw, "_metadata.json", meta)
 
 	if err := zw.Close(); err != nil {
-		return nil, 0, fmt.Errorf("close zip: %w", err)
+		return totalRows, fmt.Errorf("close zip: %w", err)
 	}
-	return buf, totalRows, nil
+	return totalRows, nil
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
@@ -591,69 +612,118 @@ func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-func queryTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, filterCol, filterVal string) ([]map[string]interface{}, error) {
-	q := fmt.Sprintf(`SELECT * FROM %s.%s`, quoteIdent(schemaName), quoteIdent(tableName))
-	var args []interface{}
-	if filterCol != "" && filterVal != "" {
-		q += fmt.Sprintf(` WHERE %s = $1`, quoteIdent(filterCol))
-		args = append(args, filterVal)
-	}
-	q += " LIMIT 100000"
-
-	rows, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	descs := rows.FieldDescriptions()
-	var results []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			return nil, err
-		}
-		row := make(map[string]interface{}, len(descs))
-		for i, desc := range descs {
-			row[string(desc.Name)] = vals[i]
-		}
-		results = append(results, row)
-	}
-	return results, nil
-}
-
-func writeTableToZip(zw *zip.Writer, name string, rows []map[string]interface{}, format string) (int, error) {
-	if len(rows) == 0 {
-		return 0, nil
-	}
-	if format == "csv" {
-		return writeCSVToZip(zw, name+".csv", rows)
-	}
-	return writeJSONRowsToZip(zw, name+".json", rows)
-}
-
-// queryRaw executes a SQL query and returns the results as generic maps.
-func queryRaw(ctx context.Context, pool *pgxpool.Pool, sql string, args ...interface{}) ([]map[string]interface{}, error) {
+// streamQueryToZip opens a zip entry, runs the query, and pipes rows
+// through it without ever holding more than one row in Go memory at a
+// time. Skips creating the entry if the query returns zero rows so
+// empty tables stay out of the archive (matches previous behaviour).
+//
+// JSON output is an indented array — same shape as the old
+// json.Encoder.Encode([]map) so existing consumers (the SDK test
+// fixtures, the console download viewer, any scripts customers wrote
+// against v0.4) don't see a format change. The cost of preserving the
+// array shape over streaming JSON Lines is one extra byte per row plus
+// some bookkeeping.
+func streamQueryToZip(ctx context.Context, pool *pgxpool.Pool, zw *zip.Writer, sql string, args []interface{}, zipPath, format string) (int, error) {
 	rows, err := pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer rows.Close()
 
 	descs := rows.FieldDescriptions()
-	var results []map[string]interface{}
+	cols := make([]string, len(descs))
+	for i, d := range descs {
+		cols[i] = string(d.Name)
+	}
+
+	// Defer the zw.Create() call until we've seen at least one row.
+	// Empty tables don't get a file in the zip.
+	var entry io.Writer
+	var cw *csv.Writer
+	var jsonFirst bool
+	var jsonInited bool
+
+	rowCount := 0
 	for rows.Next() {
 		vals, err := rows.Values()
 		if err != nil {
-			return nil, err
+			return rowCount, err
 		}
-		row := make(map[string]interface{}, len(descs))
-		for i, desc := range descs {
-			row[string(desc.Name)] = vals[i]
+
+		if entry == nil {
+			name := zipPath
+			if format == "csv" {
+				name += ".csv"
+			} else {
+				name += ".json"
+			}
+			entry, err = zw.Create(name)
+			if err != nil {
+				return rowCount, err
+			}
+			if format == "csv" {
+				cw = csv.NewWriter(entry)
+				if err := cw.Write(cols); err != nil {
+					return rowCount, err
+				}
+			} else {
+				if _, err := io.WriteString(entry, "[\n"); err != nil {
+					return rowCount, err
+				}
+				jsonFirst = true
+				jsonInited = true
+			}
 		}
-		results = append(results, row)
+
+		if format == "csv" {
+			record := make([]string, len(cols))
+			for i, c := range cols {
+				_ = c
+				record[i] = formatCSVCell(vals[i])
+			}
+			if err := cw.Write(record); err != nil {
+				return rowCount, err
+			}
+		} else {
+			row := make(map[string]interface{}, len(cols))
+			for i, c := range cols {
+				row[c] = vals[i]
+			}
+			if !jsonFirst {
+				if _, err := io.WriteString(entry, ",\n"); err != nil {
+					return rowCount, err
+				}
+			}
+			jsonFirst = false
+			b, err := json.MarshalIndent(row, "  ", "  ")
+			if err != nil {
+				return rowCount, err
+			}
+			if _, err := io.WriteString(entry, "  "); err != nil {
+				return rowCount, err
+			}
+			if _, err := entry.Write(b); err != nil {
+				return rowCount, err
+			}
+		}
+		rowCount++
 	}
-	return results, nil
+	if err := rows.Err(); err != nil {
+		return rowCount, err
+	}
+
+	if cw != nil {
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			return rowCount, err
+		}
+	}
+	if jsonInited {
+		if _, err := io.WriteString(entry, "\n]\n"); err != nil {
+			return rowCount, err
+		}
+	}
+	return rowCount, nil
 }
 
 func writeJSONToZip(zw *zip.Writer, name string, data interface{}) {
@@ -664,55 +734,6 @@ func writeJSONToZip(zw *zip.Writer, name string, data interface{}) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(data)
-}
-
-func writeJSONRowsToZip(zw *zip.Writer, name string, rows []map[string]interface{}) (int, error) {
-	w, err := zw.Create(name)
-	if err != nil {
-		return 0, err
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return 0, err
-	}
-	return len(rows), nil
-}
-
-func writeCSVToZip(zw *zip.Writer, name string, rows []map[string]interface{}) (int, error) {
-	if len(rows) == 0 {
-		return 0, nil
-	}
-	w, err := zw.Create(name)
-	if err != nil {
-		return 0, err
-	}
-	return writeCSV(w, rows)
-}
-
-func writeCSV(w io.Writer, rows []map[string]interface{}) (int, error) {
-	if len(rows) == 0 {
-		return 0, nil
-	}
-
-	// Collect column names from first row (stable order).
-	var cols []string
-	for k := range rows[0] {
-		cols = append(cols, k)
-	}
-
-	cw := csv.NewWriter(w)
-	_ = cw.Write(cols)
-
-	for _, row := range rows {
-		record := make([]string, len(cols))
-		for i, col := range cols {
-			record[i] = formatCSVCell(row[col])
-		}
-		_ = cw.Write(record)
-	}
-	cw.Flush()
-	return len(rows), cw.Error()
 }
 
 // formatCSVCell renders one column value for the DSAR CSV export.

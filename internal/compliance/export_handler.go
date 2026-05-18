@@ -69,6 +69,23 @@ func HandleRequestTenantExport(exportSvc *ExportService) http.HandlerFunc {
 		if err := exportSvc.EnqueueTenantExport(r.Context(), req.ID, projectID, body.Format); err != nil {
 			slog.Error("enqueue tenant export job failed", "error", err)
 			_ = exportSvc.MarkFailed(r.Context(), req.ID, "failed to enqueue job")
+			// Closes #100 (failed-paths follow-up). The request-time
+			// audit row is only written below on success; emit the
+			// failure variant explicitly here so the audit feed
+			// shows what happened from the requester's perspective
+			// (queueing failed → no completion event will follow).
+			if svc := audit.FromContext(r.Context()); svc != nil {
+				svc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+					audit.ActionExportFailed,
+					audit.WithTarget("export", req.ID),
+					audit.WithMetadata(map[string]any{
+						"format": body.Format,
+						"scope":  "tenant",
+						"stage":  "enqueue",
+						"error":  "failed to enqueue job",
+					}),
+					audit.WithIP(r.RemoteAddr))
+			}
 			writeExportError(w, "failed to enqueue export", http.StatusInternalServerError)
 			return
 		}
@@ -153,6 +170,19 @@ func HandleRequestUserExport(exportSvc *ExportService) http.HandlerFunc {
 
 		if err := exportSvc.EnqueueUserExport(r.Context(), req.ID, projectID, body.UserID, body.Format); err != nil {
 			_ = exportSvc.MarkFailed(r.Context(), req.ID, "failed to enqueue job")
+			if svc := audit.FromContext(r.Context()); svc != nil {
+				svc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+					audit.ActionExportFailed,
+					audit.WithTarget("export", req.ID),
+					audit.WithMetadata(map[string]any{
+						"format":         body.Format,
+						"scope":          "user",
+						"target_user_id": body.UserID,
+						"stage":          "enqueue",
+						"error":          "failed to enqueue job",
+					}),
+					audit.WithIP(r.RemoteAddr))
+			}
 			writeExportError(w, "failed to enqueue export", http.StatusInternalServerError)
 			return
 		}
@@ -304,6 +334,22 @@ func HandleSelfServeExport(pool *pgxpool.Pool, s3 *storage.S3Client, auditSvc *a
 
 		if err := exportSvc.EnqueueUserExport(r.Context(), req.ID, pc.ProjectID, userID, body.Format); err != nil {
 			_ = exportSvc.MarkFailed(r.Context(), req.ID, "failed to enqueue job")
+			if auditSvc != nil {
+				email := ""
+				if endUserClaims != nil {
+					email = endUserClaims.Email
+				}
+				auditSvc.Log(r.Context(), pc.ProjectID, userID, email,
+					audit.ActionExportFailed,
+					audit.WithTarget("export", req.ID),
+					audit.WithMetadata(map[string]any{
+						"format": body.Format,
+						"scope":  "user",
+						"stage":  "enqueue",
+						"error":  "failed to enqueue job",
+					}),
+					audit.WithIP(r.RemoteAddr))
+			}
 			writeExportError(w, "failed to enqueue export", http.StatusInternalServerError)
 			return
 		}
