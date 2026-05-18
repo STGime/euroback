@@ -96,3 +96,10 @@ const ACCESS_TOKEN = 'eyJ-fake-end-user-jwt'
 }
 
 console.log('\nAll realtime URL tests passed.')
+
+// Several scenarios above call setSession(), which schedules an
+// auto-refresh setTimeout ~59m out that keeps the Node event loop
+// alive after assertions pass. Exit explicitly so `npm test` chains
+// on to the next file instead of hanging. Same pattern as
+// test/auth-export.mjs.
+process.exit(0)

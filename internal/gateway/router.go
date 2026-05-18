@@ -744,33 +744,43 @@ func sdkDDLAdapter(next http.Handler) http.Handler {
 }
 
 // buildRealtimeAuthorize returns a realtime.Authorize closure that
-// validates the WebSocket token. Closes #62. Three token shapes are
-// accepted:
+// validates the WebSocket token. Closes #62 (project routing) and
+// extends per #108 to attach the per-row filter identity.
+//
+// Three token shapes are accepted:
 //
 //  1. **API key** (`eb_pk_…` / `eb_sk_…`) — resolved server-side to a
 //     project. `?project_id=` may be omitted; if provided it must
-//     match the apikey's project. This is the SDK path (the JS client
-//     already passes its apikey as `?token=`).
+//     match the apikey's project. `eb_sk_*` is treated as service-role
+//     (sees every row); `eb_pk_*` is anonymous (sees only rows
+//     without an owner column).
 //  2. **Platform JWT** — validated against the platform secret,
 //     subject is a platform user. Requires `?project_id=` and a
-//     project_members row.
+//     project_members row. Treated as service-role.
 //  3. **End-user JWT** — validated against the project's own
 //     jwt_secret. Requires `?project_id=` matching the JWT's claim.
+//     The JWT's subject is threaded down as the realtime filter
+//     identity so the hub only delivers rows where the owner column
+//     matches.
 //
-// The function returns the resolved project UUID, the project's plan,
-// or an ErrUnauthorized / ErrForbidden sentinel.
+// Returns ErrUnauthorized for a bad token, ErrForbidden for a valid
+// token without access.
 func buildRealtimeAuthorize(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware) realtime.Authorize {
-	return func(ctx context.Context, token, requestedProjectID string) (string, string, error) {
+	return func(ctx context.Context, token, requestedProjectID string) (realtime.AuthorizedClient, error) {
 		// 1. API key path — covers the SDK realtime use case.
 		if strings.HasPrefix(token, "eb_pk_") || strings.HasPrefix(token, "eb_sk_") {
 			pc, err := auth.ResolveAPIKey(ctx, pool, token)
 			if err != nil {
-				return "", "", realtime.ErrUnauthorized
+				return realtime.AuthorizedClient{}, realtime.ErrUnauthorized
 			}
 			if requestedProjectID != "" && requestedProjectID != pc.ProjectID {
-				return "", "", realtime.ErrForbidden
+				return realtime.AuthorizedClient{}, realtime.ErrForbidden
 			}
-			return pc.ProjectID, pc.Plan, nil
+			return realtime.AuthorizedClient{
+				ProjectID: pc.ProjectID,
+				Plan:      pc.Plan,
+				Service:   pc.KeyType == "secret",
+			}, nil
 		}
 
 		// Beyond the apikey path a project_id is required: the JWT
@@ -778,27 +788,33 @@ func buildRealtimeAuthorize(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthM
 		// can be in many projects; end-user JWTs name one explicitly
 		// and we cross-check against the query param).
 		if requestedProjectID == "" {
-			return "", "", realtime.ErrUnauthorized
+			return realtime.AuthorizedClient{}, realtime.ErrUnauthorized
 		}
 
 		// 2. Platform JWT path — subject is platform_users.id; require
-		//    membership on the requested project.
+		//    membership on the requested project. Platform users
+		//    are admins for the project, so service=true (they see
+		//    every row regardless of owner column).
 		if subject, err := platformAuth.ValidateToken(token); err == nil && subject != "" {
 			role, roleErr := tenant.ResolveRole(ctx, pool, requestedProjectID, subject)
 			if roleErr != nil {
-				return "", "", fmt.Errorf("resolve role: %w", roleErr)
+				return realtime.AuthorizedClient{}, fmt.Errorf("resolve role: %w", roleErr)
 			}
 			if role == "" {
-				return "", "", realtime.ErrForbidden
+				return realtime.AuthorizedClient{}, realtime.ErrForbidden
 			}
 			var plan string
 			if err := pool.QueryRow(ctx,
 				`SELECT COALESCE(plan, 'free') FROM projects WHERE id = $1 AND status = 'active'`,
 				requestedProjectID,
 			).Scan(&plan); err != nil {
-				return "", "", fmt.Errorf("load project plan: %w", err)
+				return realtime.AuthorizedClient{}, fmt.Errorf("load project plan: %w", err)
 			}
-			return requestedProjectID, plan, nil
+			return realtime.AuthorizedClient{
+				ProjectID: requestedProjectID,
+				Plan:      plan,
+				Service:   true,
+			}, nil
 		}
 
 		// 3. End-user JWT — validated against the requested project's
@@ -809,16 +825,20 @@ func buildRealtimeAuthorize(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthM
 			requestedProjectID,
 		).Scan(&jwtSecret, &plan)
 		if err != nil {
-			return "", "", realtime.ErrUnauthorized
+			return realtime.AuthorizedClient{}, realtime.ErrUnauthorized
 		}
 		claims, err := auth.ValidateEndUserJWT(token, jwtSecret)
 		if err != nil || claims == nil {
-			return "", "", realtime.ErrUnauthorized
+			return realtime.AuthorizedClient{}, realtime.ErrUnauthorized
 		}
 		if claims.ProjectID != "" && claims.ProjectID != requestedProjectID {
-			return "", "", realtime.ErrForbidden
+			return realtime.AuthorizedClient{}, realtime.ErrForbidden
 		}
-		return requestedProjectID, plan, nil
+		return realtime.AuthorizedClient{
+			ProjectID: requestedProjectID,
+			Plan:      plan,
+			EndUserID: claims.UserID,
+		}, nil
 	}
 }
 

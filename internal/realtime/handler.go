@@ -24,22 +24,37 @@ var ErrUnauthorized = errors.New("realtime: unauthorized")
 // not a member of the requested project. Maps to HTTP 403.
 var ErrForbidden = errors.New("realtime: forbidden")
 
+// AuthorizedClient is what the Authorize callback returns. ProjectID
+// + Plan drive routing and quota; EndUserID + Service drive the #108
+// per-row filter applied at fan-out time:
+//
+//   - Service=true sees every row regardless of owner column. Mapped
+//     to: eb_sk_* apikey (server-side), platform JWT (console/admin).
+//   - EndUserID non-empty filters to rows whose owner column equals
+//     this value, plus rows without an owner column. Mapped to:
+//     end-user JWT.
+//   - Both empty: anonymous subscriber (eb_pk_* apikey only). Receives
+//     rows without an owner column; rows with one are dropped.
+type AuthorizedClient struct {
+	ProjectID string
+	Plan      string
+	EndUserID string
+	Service   bool
+}
+
 // Authorize validates the caller's token for the requested project and
-// returns the project's plan plus the resolved project UUID. The
-// resolved value is what the hub keys connections on — it lets an
-// apikey token derive the project server-side so the caller can omit
-// the project_id query param.
+// returns the resolved AuthorizedClient. The ProjectID is what the hub
+// keys connections on — it lets an apikey token derive the project
+// server-side so the caller can omit the project_id query param.
 //
 // requestedProjectID is the value of the `?project_id=` query param,
 // or "" if absent. Implementations may either return that value back
 // (after validating membership), or substitute one derived from the
-// token (apikey path). Returning a different projectID than what the
-// caller requested when a request was made is treated as ErrForbidden
-// upstream.
+// token (apikey path).
 //
 // Return ErrUnauthorized for a bad token, ErrForbidden for a valid
 // token without access; any other error maps to 500.
-type Authorize func(ctx context.Context, token, requestedProjectID string) (projectID, plan string, err error)
+type Authorize func(ctx context.Context, token, requestedProjectID string) (AuthorizedClient, error)
 
 // HandleWebSocket returns an http.HandlerFunc that upgrades connections to
 // WebSocket on /v1/realtime and manages client lifecycle. Closes #62 —
@@ -75,16 +90,17 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestedProjectID := r.URL.Query().Get("project_id")
-		var projectID, plan string
+		var ac AuthorizedClient
 
 		if devMode {
-			projectID = requestedProjectID
-			if projectID == "" {
-				projectID = "dev-project-001"
+			ac.ProjectID = requestedProjectID
+			if ac.ProjectID == "" {
+				ac.ProjectID = "dev-project-001"
 			}
-			plan = "pro"
+			ac.Plan = "pro"
+			ac.Service = true // dev mode: act as a service client (sees everything)
 			slog.Warn("realtime dev mode: accepting unauthenticated websocket",
-				"project_id", projectID,
+				"project_id", ac.ProjectID,
 			)
 		} else {
 			token := r.URL.Query().Get("token")
@@ -98,7 +114,7 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 			}
 
 			var err error
-			projectID, plan, err = authorize(r.Context(), token, requestedProjectID)
+			ac, err = authorize(r.Context(), token, requestedProjectID)
 			if err != nil {
 				switch {
 				case errors.Is(err, ErrUnauthorized):
@@ -113,12 +129,14 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 				}
 				return
 			}
-			if projectID == "" {
+			if ac.ProjectID == "" {
 				slog.Error("realtime authorize returned empty project_id", "requested", requestedProjectID)
 				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 				return
 			}
 		}
+		projectID := ac.ProjectID
+		plan := ac.Plan
 
 		// Enforce per-project connection limit.
 		limit := freeConnectionLimit
@@ -143,10 +161,12 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 		}
 
 		client := &Client{
-			hub:      hub,
-			conn:     conn,
-			tenantID: projectID, // hub still uses "tenantID" internally; semantically it's projectID now
-			send:     make(chan []byte, 256),
+			hub:       hub,
+			conn:      conn,
+			tenantID:  projectID, // hub still uses "tenantID" internally; semantically it's projectID now
+			endUserID: ac.EndUserID,
+			service:   ac.Service,
+			send:      make(chan []byte, 256),
 		}
 
 		hub.register <- client

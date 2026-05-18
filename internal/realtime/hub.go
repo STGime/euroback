@@ -13,13 +13,46 @@ import (
 )
 
 // Client represents a single WebSocket connection.
+//
+// Closes #108. endUserID + service let the hub decide per-event whether
+// a given client is entitled to receive a row. The two fields are
+// populated by HandleWebSocket from the Authorize callback:
+//   - service=true → eb_sk_* apikey or platform JWT. The client sees
+//     every row; matches the "service role" semantics RLS already uses
+//     on the REST side.
+//   - endUserID != "" → end-user JWT. The client sees rows whose
+//     ownership column (user_id/owner_id/created_by/uploaded_by) equals
+//     this value, plus any row without an owner column.
+//   - both empty → eb_pk_* apikey, no signed-in user. The client sees
+//     rows without an owner column; rows with one are dropped. Anon
+//     subscribers cannot be the row owner so this is the safer default
+//     than the pre-fix "broadcast everything" behaviour.
 type Client struct {
 	hub           *Hub
 	conn          *websocket.Conn
 	tenantID      string
+	endUserID     string
+	service       bool
 	subscriptions []string // channels like "db:users", "db:users:uuid", "storage:bucket"
 	send          chan []byte
 	mu            sync.Mutex // protects subscriptions
+}
+
+// shouldReceive reports whether this client is entitled to a row whose
+// detected owner column equals ownerUserID. ownerUserID is "" when the
+// row has no owner column at all; in that case every client receives,
+// preserving v0.4 behaviour. Full RLS is a v1.1 follow-up.
+func (c *Client) shouldReceive(ownerUserID string) bool {
+	if ownerUserID == "" {
+		return true
+	}
+	if c.service {
+		return true
+	}
+	if c.endUserID == "" {
+		return false
+	}
+	return c.endUserID == ownerUserID
 }
 
 // Event represents a database change event broadcast to clients.
@@ -50,8 +83,9 @@ type Hub struct {
 // broadcastMsg carries an event together with the target key so the Run loop
 // can route it to the correct set of clients.
 type broadcastMsg struct {
-	key   string // "tenantID:channel"
-	event []byte // JSON-encoded Event
+	key         string // "tenantID:channel"
+	event       []byte // JSON-encoded Event
+	ownerUserID string // "" if the row has no owner column; otherwise the value of user_id/owner_id/created_by/uploaded_by
 }
 
 // NewHub creates a Hub ready to be started with Run().
@@ -88,6 +122,13 @@ func (h *Hub) Run() {
 			h.mu.RUnlock()
 
 			for client := range clients {
+				if !client.shouldReceive(msg.ownerUserID) {
+					// Closes #108. Row has an owner column but
+					// this client isn't the owner (or is anon).
+					// Silent skip — equivalent to a SELECT that
+					// returned no rows under RLS.
+					continue
+				}
 				select {
 				case client.send <- msg.event:
 				default:
@@ -148,11 +189,16 @@ func (h *Hub) Unsubscribe(client *Client, channel string) {
 	slog.Debug("client unsubscribed", "tenant_id", client.tenantID, "channel", channel)
 }
 
-// Broadcast sends a JSON-encoded event to all clients subscribed to the key.
-func (h *Hub) Broadcast(tenantID, channel string, data []byte) {
+// Broadcast sends a JSON-encoded event to clients subscribed to the
+// key. ownerUserID, when non-empty, is the row's owner column value
+// (user_id / owner_id / created_by / uploaded_by) — used to filter
+// delivery to that user only. Pass "" to broadcast to everyone (rows
+// with no owner column, or system/notification events).
+func (h *Hub) Broadcast(tenantID, channel string, data []byte, ownerUserID string) {
 	h.broadcast <- &broadcastMsg{
-		key:   tenantID + ":" + channel,
-		event: data,
+		key:         tenantID + ":" + channel,
+		event:       data,
+		ownerUserID: ownerUserID,
 	}
 }
 

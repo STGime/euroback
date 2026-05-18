@@ -69,6 +69,24 @@ func (b *RedisBridge) Subscribe(ctx context.Context) {
 	}
 }
 
+// redisEnvelope wraps the event JSON for cross-instance fan-out so the
+// receiving Hub can apply the #108 per-row filter without re-detecting
+// the owner column. Wire shape (compact keys keep the Redis payload
+// small):
+//
+//	{"e": <Event JSON>, "o": "<ownerUserID|empty>"}
+//
+// Receiving instances try this shape first; if it doesn't decode they
+// fall back to treating the raw payload as a v0.4 Event (no owner →
+// broadcast to all). The fallback exists so a rolling deploy where
+// old publishers and new receivers coexist for a few minutes doesn't
+// break — once every instance is on the new code, every event carries
+// its envelope and the filter takes effect everywhere.
+type redisEnvelope struct {
+	Event       json.RawMessage `json:"e"`
+	OwnerUserID string          `json:"o,omitempty"`
+}
+
 // handleMessage parses a Redis pub/sub message and broadcasts it to Hub
 // clients. The Redis channel format is "rt:tenant:{tenantID}:{table}".
 func (b *RedisBridge) handleMessage(msg *redis.Message) {
@@ -87,18 +105,31 @@ func (b *RedisBridge) handleMessage(msg *redis.Message) {
 	table := parts[2]
 	channel := "db:" + table
 
+	// New envelope shape carries owner_user_id; legacy raw-Event
+	// payload from a still-rolling instance is handled as no-owner.
+	payload := []byte(msg.Payload)
+	ownerUserID := ""
+	var env redisEnvelope
+	if err := json.Unmarshal(payload, &env); err == nil && len(env.Event) > 0 {
+		payload = env.Event
+		ownerUserID = env.OwnerUserID
+	}
+
 	slog.Debug("received redis realtime event",
 		"tenant_id", tenantID,
 		"table", table,
 		"channel", channel,
+		"has_owner", ownerUserID != "",
 	)
 
-	b.hub.Broadcast(tenantID, channel, []byte(msg.Payload))
+	b.hub.Broadcast(tenantID, channel, payload, ownerUserID)
 }
 
 // Publish publishes an event to Redis so that all gateway instances can
-// broadcast it to their connected clients.
-func (b *RedisBridge) Publish(ctx context.Context, tenantID, table, eventType string, record, oldRecord map[string]interface{}) error {
+// broadcast it to their connected clients. ownerUserID is the row's
+// owner column value (or "" if the row has no owner column); the
+// receiving Hub uses it to apply per-subscriber #108 filtering.
+func (b *RedisBridge) Publish(ctx context.Context, tenantID, table, eventType string, record, oldRecord map[string]interface{}, ownerUserID string) error {
 	event := Event{
 		Channel:   "db:" + table,
 		Type:      eventType,
@@ -107,14 +138,19 @@ func (b *RedisBridge) Publish(ctx context.Context, tenantID, table, eventType st
 		Timestamp: time.Now().UTC(),
 	}
 
-	payload, err := json.Marshal(event)
+	eventJSON, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal realtime event: %w", err)
 	}
 
+	envelope, err := json.Marshal(redisEnvelope{Event: eventJSON, OwnerUserID: ownerUserID})
+	if err != nil {
+		return fmt.Errorf("marshal realtime envelope: %w", err)
+	}
+
 	redisChannel := fmt.Sprintf("rt:tenant:%s:%s", tenantID, table)
 
-	if err := b.client.Publish(ctx, redisChannel, payload).Err(); err != nil {
+	if err := b.client.Publish(ctx, redisChannel, envelope).Err(); err != nil {
 		return fmt.Errorf("publish to redis: %w", err)
 	}
 
