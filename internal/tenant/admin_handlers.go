@@ -9,15 +9,17 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/email"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // BulkEmailer is the subset of internal/email.EmailService that admin
-// broadcast needs. Kept as an interface so this package doesn't import
-// internal/email (would be a circular graph through tenant→email→tenant).
+// broadcast needs. Returns a BulkResult so the handler can surface
+// per-chunk success/failure to the console after a chunked TEM send
+// (closes #35).
 type BulkEmailer interface {
-	SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) error
+	SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) (email.BulkResult, error)
 }
 
 // AdminProject is a platform-wide project row returned to superadmins.
@@ -219,10 +221,23 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			return
 		}
 
-		if err := mailer.SendBulkBCC(r.Context(), final, req.Subject, req.BodyHTML); err != nil {
-			slog.Error("admin bulk email failed", "error", err, "count", len(final))
+		result, err := mailer.SendBulkBCC(r.Context(), final, req.Subject, req.BodyHTML)
+		if err != nil && result.Sent == 0 {
+			// Every chunk failed. Return 502 so the console treats it
+			// as a hard failure to retry.
+			slog.Error("admin bulk email: every chunk failed", "error", err, "count", len(final))
 			http.Error(w, `{"error":"send failed: `+err.Error()+`"}`, http.StatusBadGateway)
 			return
+		}
+
+		// status reflects what reached TEM: "sent" when every chunk
+		// went out, "partial" when some chunks landed and some didn't.
+		// The shape (sent / failed / errors) lets the console show
+		// "12 / 15 delivered" and an expandable list of failures so
+		// the operator can retry just the failed addresses.
+		status := "sent"
+		if result.Failed > 0 {
+			status = "partial"
 		}
 
 		if svc := audit.FromContext(r.Context()); svc != nil {
@@ -230,6 +245,8 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			svc.Log(r.Context(), "", actorID, actorEmail, audit.ActionAllowlistEmailed,
 				audit.WithMetadata(map[string]any{
 					"recipient_count": len(final),
+					"sent":            result.Sent,
+					"failed":          result.Failed,
 					"subject":         req.Subject,
 				}),
 				audit.WithIP(r.RemoteAddr))
@@ -237,8 +254,10 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"status": "sent",
-			"sent":   len(final),
+			"status": status,
+			"sent":   result.Sent,
+			"failed": result.Failed,
+			"errors": result.Errors,
 			"bcc":    len(final) > 1,
 		})
 	}

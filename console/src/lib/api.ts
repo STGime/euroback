@@ -1283,7 +1283,17 @@ export class EurobaseAPI {
 	 * one recipient is supplied the server uses BCC, so recipients do not
 	 * see each other. Superadmin only.
 	 */
-	async adminSendAllowlistEmail(emails: string[], subject: string, bodyHtml: string): Promise<{ status: string; sent: number; bcc: boolean }> {
+	async adminSendAllowlistEmail(
+		emails: string[],
+		subject: string,
+		bodyHtml: string
+	): Promise<{
+		status: 'sent' | 'partial';
+		sent: number;
+		failed: number;
+		errors?: { recipients: string[]; error: string }[];
+		bcc: boolean;
+	}> {
 		return this.fetch('/platform/admin/allowlist/email', {
 			method: 'POST',
 			body: JSON.stringify({ emails, subject, body_html: bodyHtml })
