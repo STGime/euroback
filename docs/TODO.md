@@ -1,17 +1,16 @@
 # TODO
 
-## Scaleway Infrastructure — Wildcard Subdomain Setup
+## Scaleway Infrastructure — Wildcard Subdomain Setup ✅ DONE (verified 2026-05-18)
 
-These steps are required to make SDK URLs (`{slug}.eurobase.app`) work in production.
+SDK URLs (`{slug}.eurobase.app`) resolve in production.
 
-- [ ] Install [Scaleway cert-manager webhook](https://github.com/scaleway/cert-manager-webhook-scaleway) in the Kapsule cluster
-- [ ] Create `scaleway-credentials` secret in cert-manager namespace with `SCW_ACCESS_KEY` and `SCW_SECRET_KEY`
-- [ ] Add wildcard DNS record: `*.eurobase.app` → ingress load balancer IP (A or CNAME)
-- [ ] Deploy updated `deploy/k8s/ingress.yaml` (wildcard rule + DNS-01 issuer + Certificate resource)
-- [ ] Verify wildcard TLS cert is issued: `kubectl get certificate eurobase-wildcard -n eurobase`
-- [ ] Deploy updated gateway (includes `SubdomainMiddleware`)
-- [ ] Set `DOMAIN_SUFFIX=eurobase.app` in gateway deployment env (or omit — it's the default)
-- [ ] Smoke test: `curl -H "apikey: eb_pk_..." https://{slug}.eurobase.app/v1/db/{table}`
+- [x] Scaleway cert-manager webhook installed (cert-manager ns active)
+- [x] `scaleway-credentials` secret present in cert-manager namespace
+- [x] Wildcard DNS `*.eurobase.app` → `163.172.128.215` (ingress-nginx LB)
+- [x] `deploy/k8s/ingress.yaml` applied — wildcard rule + DNS-01 ClusterIssuer + Certificate
+- [x] `kubectl get certificate eurobase-wildcard -n eurobase` → Ready=True (valid until 2026-06-24)
+- [x] Gateway running with `SubdomainMiddleware`; `DOMAIN_SUFFIX` defaults to `eurobase.app`
+- [x] Smoke: real slug resolves (401 missing apikey), unknown slug returns `{"error":"project not found"}`
 
 ## Scaleway TEM — Transactional Email (Pre-Production)
 

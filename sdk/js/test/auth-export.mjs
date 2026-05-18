@@ -150,3 +150,10 @@ const completedRow = {
 }
 
 console.log('\nAll auth-export SDK tests passed.')
+
+// setSession() schedules a setTimeout for the auto-refresh ~1h out;
+// that timer keeps the Node event loop alive and `npm test` would
+// otherwise hang for an hour after this file's last assertion. The
+// other SDK test files never call setSession so they exit cleanly on
+// their own. Explicit signOut() clears the timer.
+await eb.auth.signOut()
