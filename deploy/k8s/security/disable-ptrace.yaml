@@ -1,0 +1,82 @@
+##############################################################################
+# CVE-2026-46333 ("ssh-keysign-pwn") mitigation.
+#
+# Linux kernel logical flaw in process management allows Local Privilege
+# Escalation and Information Disclosure. An attacker within a pod can use
+# unprivileged process tracing (ptrace) to extract host-level secrets
+# (SSH private keys, /etc/shadow), leading to full host compromise and
+# container escape. Public exploits are available as of 2026-05-14.
+#
+# Eurobase runs untrusted tenant JS in the functions-runner pods on
+# shared Kapsule nodes, so the LPE → container escape path is in scope
+# until every node is on a patched kernel.
+#
+# Mitigation: set kernel.yama.ptrace_scope=3 (no process may trace any
+# other process). This is the most restrictive setting and the
+# Scaleway-recommended workaround. No Eurobase component uses ptrace:
+# the Go gateway/worker, Deno functions runner, pgx, gorilla/websocket,
+# and V8 crypto all operate without it. `kubectl exec` still works
+# (it uses the CRI API, not ptrace).
+#
+# Rollback: kubectl delete -f this file, then
+#   sysctl -w kernel.yama.ptrace_scope=1
+# on each node if immediate effect is needed.
+##############################################################################
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: disable-ptrace
+  namespace: kube-system
+  labels:
+    app: disable-ptrace
+spec:
+  selector:
+    matchLabels:
+      app: disable-ptrace
+  template:
+    metadata:
+      labels:
+        app: disable-ptrace
+    spec:
+      hostPID: true
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+      initContainers:
+        - name: disable-ptrace
+          image: alpine:3.23
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Set ptrace_scope=3 via sysctl (immediate effect).
+              sysctl -w kernel.yama.ptrace_scope=3
+              # Persist into sysctl.d so a `sysctl --system` reload
+              # re-applies the setting. Does NOT survive a reboot on
+              # its own — the DaemonSet re-runs on node boot.
+              echo "kernel.yama.ptrace_scope = 3" > /host-sysctl/99-disable-ptrace.conf
+              # Verify.
+              actual=$(cat /proc/sys/kernel/yama/ptrace_scope)
+              if [ "$actual" != "3" ]; then
+                echo "ERROR: ptrace_scope is $actual, expected 3"
+                exit 1
+              fi
+              echo "ptrace_scope set to 3 — CVE-2026-46333 mitigated"
+          volumeMounts:
+            - name: host-sysctl
+              mountPath: /host-sysctl
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            limits:
+              cpu: 1m
+              memory: 8Mi
+      volumes:
+        - name: host-sysctl
+          hostPath:
+            path: /etc/sysctl.d
