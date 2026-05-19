@@ -48,11 +48,11 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'authenticated', true)"); err != nil {
 			return fmt.Errorf("set end_user_role: %w", err)
 		}
-		if email := EndUserEmailFromContext(ctx); email != "" {
-			if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_email', $1, true)", email); err != nil {
-				return fmt.Errorf("set end_user_email: %w", err)
-			}
-		}
+		// app.end_user_email is no longer set — auth.email() and
+		// auth_email() now look up live from <schema>.users in
+		// migration 000052 (closes #55). The end-user email on the
+		// context is still used elsewhere (audit, logging) so the
+		// EndUserEmailFromContext getter stays.
 	}
 	return nil
 }
