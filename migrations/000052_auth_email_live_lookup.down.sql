@@ -4,8 +4,8 @@
 -- app.end_user_email GUC. Policies that started depending on the live
 -- lookup will silently revert to stale-JWT behaviour after this runs;
 -- check call sites before using.
-
-BEGIN;
+--
+-- No explicit BEGIN/COMMIT — golang-migrate wraps the file.
 
 CREATE OR REPLACE FUNCTION auth.email() RETURNS text
     LANGUAGE sql STABLE AS $$
@@ -25,5 +25,3 @@ BEGIN
         );
     END LOOP;
 END$$;
-
-COMMIT;

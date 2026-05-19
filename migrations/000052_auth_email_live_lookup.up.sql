@@ -17,8 +17,10 @@
 -- using `auth.email()` were already doing schema reads, so this is
 -- an extra row read per policy evaluation — acceptable for the
 -- correctness gain.
-
-BEGIN;
+--
+-- No explicit BEGIN/COMMIT: golang-migrate wraps each .up.sql in its
+-- own transaction by default, and an explicit COMMIT inside would
+-- commit the runner's outer tx prematurely (same footgun as #121).
 
 -- ── 1. Global auth.email() (added by 000048) ─────────────────────────
 -- search_path is set per-request to the tenant schema + public, so
@@ -279,5 +281,3 @@ END;
 $fn$;
 
 ALTER FUNCTION public.provision_tenant(UUID, TEXT, TEXT) OWNER TO eurobase_migrator;
-
-COMMIT;
