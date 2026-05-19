@@ -81,6 +81,10 @@ To switch:
 
 The reverse direction — what we just did to get here. Documented so you can recover the savings on a quiet weekend.
 
+**One-shot:** `bash deploy/scripts/cost-tier-to-beta.sh` runs all three steps below, with verification between each and a typed confirmation before the only destructive action (deleting the managed Redis).
+
+The manual sequence is documented below for the cases the script can't handle (e.g. stuck PDBs, partial state, debugging).
+
 ### Step 1 — apply the in-cluster Redis manifest
 
 ```bash
