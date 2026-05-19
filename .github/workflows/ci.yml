@@ -209,9 +209,12 @@ jobs:
 
       - name: Apply K8s manifests (security, ingress, functions, MCP server)
         run: |
-          # CVE-2026-31431 mitigation must land before any pod restart so newly
-          # scheduled pods can't briefly run on a node with algif_aead loaded.
+          # CVE-2026-31431 (Copy Fail) and CVE-2026-46333 (ssh-keysign-pwn)
+          # mitigations must land before any pod restart so newly scheduled
+          # pods can't briefly run on a node with algif_aead loaded or
+          # unprivileged ptrace enabled.
           kubectl apply -f deploy/k8s/security/disable-algif-aead.yaml
+          kubectl apply -f deploy/k8s/security/disable-ptrace.yaml
           # In-cluster Redis replaces managed RED1-micro to cut the
           # beta-stage bill (~€59/mo). Apply before the gateway/worker
           # rollout so REDIS_URL=redis://redis.eurobase.svc.cluster.local
@@ -278,6 +281,7 @@ jobs:
           # for the gateway (it logs a warning and disables those features),
           # but a clean roll keeps the failure paths out of the deploy log.
           kubectl rollout status statefulset/redis -n eurobase --timeout=120s
+          kubectl rollout status daemonset/disable-ptrace -n kube-system --timeout=120s
           kubectl rollout status deployment/gateway -n eurobase --timeout=120s
           kubectl rollout status deployment/worker -n eurobase --timeout=120s
           kubectl rollout status deployment/console -n eurobase --timeout=120s
