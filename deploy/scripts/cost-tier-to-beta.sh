@@ -108,7 +108,15 @@ bold "  checking gateway logs for the redis-connect line..."
 # The Go gateway logs structured JSON. Look for either of the two
 # success messages from internal/ratelimit/limiter.go:71 or
 # internal/realtime/redis.go:39.
-sleep 4   # give the new pods a beat to emit the line
+#
+# Wait for at least one gateway pod to be Ready before grepping —
+# a fixed sleep was the original approach but cold starts (image
+# pull, slow node) could blow past 4s and miss the log line, then
+# the script would bail and force a re-run. `kubectl wait` blocks
+# until the pod's Ready condition is true (or 60s, whichever
+# comes first) and exits non-zero on the timeout so we still error
+# out cleanly if the rollout itself is broken.
+kubectl wait --for=condition=Ready pod -l app=gateway -n "$NAMESPACE" --timeout=60s >/dev/null
 log_hit=$(kubectl logs -n "$NAMESPACE" -l app=gateway --tail=400 --all-containers=true 2>&1 \
   | grep -iE 'rate limiter redis connected|realtime redis bridge connected' || true)
 if [[ -z "$log_hit" ]]; then
