@@ -149,7 +149,10 @@ func setupTestServer(t *testing.T, pool *pgxpool.Pool) *httptest.Server {
 	// V1 routes with test auth.
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(testAuthMiddleware)
-		r.Post("/tenants", tenant.HandleCreateProject(pool, tenantSvc))
+		// nil CheckoutStarter → Pro requests fall back to immediate
+		// creation (the pre-#70 behaviour). This integration test
+		// doesn't exercise the Mollie path.
+		r.Post("/tenants", tenant.HandleCreateProject(pool, tenantSvc, nil))
 		r.Get("/tenants", tenant.HandleListProjects(pool, tenantSvc))
 	})
 

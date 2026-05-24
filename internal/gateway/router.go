@@ -12,6 +12,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/billing"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/email"
@@ -89,6 +90,38 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 	isDev := len(devMode) > 0 && devMode[0]
 
 	// Health check (unauthenticated).
+	// ── Mollie billing — singleton service ─────────────────────────────────
+	// Constructed once at boot so the webhook handler and the per-project
+	// handlers share the same client. Configured() returns false if either
+	// env is unset; in that case the routes are still mounted but every
+	// handler short-circuits with 503 so a forgotten env var fails closed.
+	mollieClient := billing.NewMollieClient(
+		os.Getenv("MOLLIE_API_KEY"),
+		os.Getenv("MOLLIE_WEBHOOK_SECRET"),
+	)
+	billingConsoleURL := os.Getenv("CONSOLE_URL")
+	if billingConsoleURL == "" {
+		billingConsoleURL = "http://localhost:5173"
+	}
+	billingWebhookBase := os.Getenv("PUBLIC_GATEWAY_URL")
+	if billingWebhookBase == "" {
+		billingWebhookBase = "https://api.eurobase.app"
+	}
+	auditSvcForBilling := audit.NewService(pool)
+	billingSvc := billing.NewService(pool, mollieClient, auditSvcForBilling, billingConsoleURL, billingWebhookBase)
+	if !mollieClient.Configured() {
+		slog.Warn("billing: Mollie not configured (MOLLIE_API_KEY / MOLLIE_WEBHOOK_SECRET unset) — /billing endpoints will 503")
+	} else if mollieClient.TestMode() {
+		slog.Warn("billing: Mollie TEST mode active — production should use a live_ key")
+	}
+
+	// Mollie webhook receiver — top-level, unauthenticated by design.
+	// Signature verification + Mollie API roundtrip inside the handler.
+	// See internal/billing/handler.go HandleWebhook for the threat model.
+	// The pending-project materialiser callback is wired further down
+	// once tenantSvc is in scope.
+	r.Post("/webhooks/mollie", billing.HandleWebhook(billingSvc))
+
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -113,6 +146,35 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 
 	// Tenant service.
 	tenantSvc := tenant.NewTenantService(pool)
+
+	// #70: wire the pending-project materialiser so a paid Mollie
+	// checkout for a deferred Pro project triggers real project
+	// creation inside the webhook handler. Avoids a tenant→billing
+	// import cycle by handing the billing service a callback. Safe
+	// to wire even when Mollie isn't configured — the callback is
+	// never invoked in that case because the pending-projects
+	// reservation never gets a payment ID written to it.
+	billingSvc.SetProjectProvisioner(func(ctx context.Context, pendingProjectID string) (string, error) {
+		var ownerID, name, slug, region, plan string
+		err := pool.QueryRow(ctx,
+			`SELECT owner_id::text, name, slug, region, plan
+			 FROM public.pending_projects WHERE id = $1`,
+			pendingProjectID,
+		).Scan(&ownerID, &name, &slug, &region, &plan)
+		if err != nil {
+			return "", fmt.Errorf("load pending project %s: %w", pendingProjectID, err)
+		}
+		var ownerEmail string
+		_ = pool.QueryRow(ctx,
+			`SELECT email FROM public.platform_users WHERE id = $1`, ownerID,
+		).Scan(&ownerEmail)
+		req := tenant.CreateProjectRequest{Name: name, Slug: slug, Region: region, Plan: plan}
+		project, err := tenantSvc.CreateProject(ctx, ownerID, ownerEmail, req)
+		if err != nil {
+			return "", fmt.Errorf("provision project from pending row: %w", err)
+		}
+		return project.ID, nil
+	})
 
 	// Audit service — shared across all route groups that need to log actions.
 	auditSvc := audit.NewService(pool)
@@ -331,6 +393,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports", compliance.HandleListExports(exportSvc))
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports/{exportId}", compliance.HandleGetExport(exportSvc))
 
+			// Billing — Mollie subscription flow (#2). Reads → viewer
+			// (a viewer can see the plan + invoice list); mutations
+			// → admin (settings-shaped capability per the #50 mapping).
+			// The webhook is mounted at top-level above; this is the
+			// per-project surface only.
+			r.With(tenant.RequireMinRole("viewer")).Get("/billing/subscription", billing.HandleGetSubscription(billingSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/billing/invoices", billing.HandleListInvoices(billingSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/billing/checkout", billing.HandleCheckout(billingSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/billing/cancel", billing.HandleCancel(billingSvc))
+
 			// Team members (invite, remove, change role).
 			var sendEmailFn func(ctx context.Context, to, subject, html string) error
 			if emailService != nil {
@@ -441,7 +513,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			})
 		})
 
-		r.Post("/", tenant.HandleCreateProject(pool, tenantSvc, limitsSvc))
+		// #70 fix: when the request asks for plan="pro" AND Mollie is
+		// configured, the handler defers project creation to the
+		// webhook-paid path. Pass the billing service's
+		// StartUpgradeForPending as the CheckoutStarter; pass nil
+		// when Mollie is unconfigured (dev/test) so Pro requests
+		// fall back to immediate creation.
+		var checkoutStarter tenant.CheckoutStarter
+		if mollieClient.Configured() {
+			checkoutStarter = billingSvc.StartUpgradeForPending
+		}
+		r.Post("/", tenant.HandleCreateProject(pool, tenantSvc, checkoutStarter, limitsSvc))
 		r.Get("/", tenant.HandleListProjects(pool, tenantSvc))
 		r.Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
 		r.Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))

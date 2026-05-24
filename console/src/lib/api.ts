@@ -386,8 +386,13 @@ export class EurobaseAPI {
 		slug?: string;
 		region?: string;
 		plan?: string;
-	}): Promise<Project> {
-		return this.fetch<Project>('/v1/tenants', {
+	}): Promise<Project | PendingProjectResponse> {
+		// #70: when plan='pro' is requested AND Mollie is configured
+		// server-side, the backend returns 202 with a pending_payment
+		// shape instead of creating the project synchronously. Callers
+		// must narrow on the `status` field before treating the
+		// response as a Project.
+		return this.fetch<Project | PendingProjectResponse>('/v1/tenants', {
 			method: 'POST',
 			body: JSON.stringify(data)
 		});
@@ -1326,6 +1331,31 @@ export class EurobaseAPI {
 		const qs = searchParams.toString();
 		return this.fetch<LogsResponse>(`/platform/projects/${projectId}/logs${qs ? `?${qs}` : ''}`);
 	}
+
+	// ── Billing (Mollie) ─────────────────────────────────────────────────
+	// Per-project subscription state + checkout. The Mollie webhook is
+	// server-only (POST /webhooks/mollie) — the console never calls it.
+
+	async getSubscription(projectId: string): Promise<SubscriptionView> {
+		return this.fetch<SubscriptionView>(`/platform/projects/${projectId}/billing/subscription`);
+	}
+
+	async listInvoices(projectId: string): Promise<{ invoices: Invoice[] }> {
+		return this.fetch<{ invoices: Invoice[] }>(`/platform/projects/${projectId}/billing/invoices`);
+	}
+
+	async startCheckout(projectId: string, plan: 'pro' = 'pro'): Promise<{ checkout_url: string }> {
+		return this.fetch<{ checkout_url: string }>(`/platform/projects/${projectId}/billing/checkout`, {
+			method: 'POST',
+			body: JSON.stringify({ plan })
+		});
+	}
+
+	async cancelSubscription(projectId: string): Promise<{ status: string }> {
+		return this.fetch<{ status: string }>(`/platform/projects/${projectId}/billing/cancel`, {
+			method: 'POST'
+		});
+	}
 }
 
 export interface VaultSecret {
@@ -1700,6 +1730,35 @@ export interface FunctionMetrics {
 	avg_duration_ms: number;
 	p95_duration_ms: number;
 	period: string;
+}
+
+// ── Billing types ───────────────────────────────────────────────────────────
+
+/** Returned by createProject when the user picked Pro and the server
+ *  deferred creation pending payment (#70). */
+export interface PendingProjectResponse {
+	status: 'pending_payment';
+	pending_project_id: string;
+	checkout_url: string;
+}
+
+export interface SubscriptionView {
+	plan: 'free' | 'pro';
+	status: 'free' | 'pending_payment' | 'active' | 'grace' | 'pro_until_period_end' | 'cancelled';
+	amount_eur?: string;
+	current_period_end?: string;
+	cancel_at_period_end: boolean;
+	grace_until?: string;
+}
+
+export interface Invoice {
+	id: string;
+	mollie_payment_id: string;
+	amount_cents: number;
+	currency: string;
+	status: string;
+	paid_at?: string;
+	created_at: string;
 }
 
 export const api = new EurobaseAPI();
