@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
@@ -196,10 +197,14 @@ func HandleWebhook(svc *Service) http.HandlerFunc {
 		}
 
 		// Mollie sends payment IDs as form data: id=tr_xxxxxxxx.
+		// We already drained r.Body into `raw` for signature
+		// verification, so `r.ParseForm()` reads an empty body and
+		// returns nothing — that was a real bug caught in PR #163
+		// review. Parse the already-read bytes instead.
 		paymentID := ""
 		if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
-			if err := r.ParseForm(); err == nil {
-				paymentID = r.PostFormValue("id")
+			if values, err := url.ParseQuery(string(raw)); err == nil {
+				paymentID = values.Get("id")
 			}
 		}
 		if paymentID == "" {

@@ -102,7 +102,7 @@
 	<header>
 		<h1 class="text-2xl font-semibold text-gray-900">Billing</h1>
 		<p class="text-sm text-gray-500 mt-1">
-			Eurobase Pro — €9/month. Payments processed by Mollie (EU, Netherlands).
+			Eurobase Pro — €19/month. Payments processed by Mollie (EU, Netherlands).
 		</p>
 	</header>
 

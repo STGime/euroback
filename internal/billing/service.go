@@ -21,8 +21,16 @@ import (
 const (
 	PlanPro          = "pro"
 	PlanFree         = "free"
-	ProPriceEUR      = "9.00"
-	ProAmountCents   = 900
+	// Pricing is single-source-of-truth here for the moment.
+	// The marketing site (`/pricing`, the onboarding card, the
+	// projects list "€19/mo" tag in console/src/routes/(app)/projects)
+	// and this constant MUST match — review feedback on PR #163 caught
+	// a €9/€19 mismatch that would have given the first paying
+	// customer a different price at checkout than what they were
+	// shown. When a Team or annual tier ships, move pricing into
+	// the plan_limits table so there's only one place to look.
+	ProPriceEUR      = "19.00"
+	ProAmountCents   = 1900
 	ProDescription   = "Eurobase Pro — monthly subscription"
 	GracePeriodHours = 72 // 3 days
 
