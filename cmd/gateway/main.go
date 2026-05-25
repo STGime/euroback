@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/billing"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
@@ -231,6 +233,26 @@ func main() {
 	// ── Start usage alerts job (daily scan, 80/90/100% thresholds) ──
 	limitsSvc.StartUsageAlerts(ctx, emailService)
 	slog.Info("usage alerts job started")
+
+	// ── Start billing dunning sweep (hourly) ──
+	// Idempotent + lightweight; safe to run alongside the workers
+	// pod's River queue. Only fires real DB writes when subscriptions
+	// have actually exited grace or hit cancel_at_period_end.
+	{
+		auditSvc := audit.NewService(pool)
+		mollieClient := billing.NewMollieClient(
+			os.Getenv("MOLLIE_API_KEY"),
+			os.Getenv("MOLLIE_WEBHOOK_SECRET"),
+		)
+		billingConsoleURL := consoleURL
+		billingWebhookBase := os.Getenv("PUBLIC_GATEWAY_URL")
+		if billingWebhookBase == "" {
+			billingWebhookBase = "https://api.eurobase.app"
+		}
+		billingSvc := billing.NewService(pool, mollieClient, auditSvc, billingConsoleURL, billingWebhookBase)
+		go billingSvc.StartDunningWorker(ctx)
+		slog.Info("billing dunning worker started")
+	}
 
 	// ── Dev mode: bypass platform auth for local testing ──
 	// Refuses to start if DEV_MODE is true on a production-looking host, so a

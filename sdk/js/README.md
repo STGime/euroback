@@ -372,6 +372,44 @@ import type {
 } from '@eurobase/sdk'
 ```
 
+## Testing
+
+The query builder is **thenable** — `QueryBuilder` implements `PromiseLike`, so you can `await` any chain directly without a terminal call:
+
+```ts
+// Both of these work identically. The first form is recommended.
+const { data, error } = await eb.db.from('todos').select('*').eq('completed', false)
+const { data, error } = await eb.db.from('todos').select('*').eq('completed', false).execute()
+```
+
+Under the hood, the builder's `then()` calls `execute()` the first time the Promise machinery touches it (`await`, `.then`, `Promise.all`, etc.).
+
+### Writing test mocks
+
+If you replace the SDK with a mock in your tests, the mock has to be thenable too — otherwise `await mock.from(...).select(...)` resolves to the mock object instead of the `{ data, error }` shape your code expects. Make every chain method return `this` *and* implement `then()`:
+
+```ts
+class MockQueryBuilder {
+  constructor(private result: { data: any; error: string | null }) {}
+
+  from()   { return this }
+  select() { return this }
+  eq()     { return this }
+  // …add any other methods your code under test calls
+
+  // The crucial piece: thenable. Without this, await returns `this`.
+  then(onFulfilled?: any, onRejected?: any) {
+    return Promise.resolve(this.result).then(onFulfilled, onRejected)
+  }
+}
+
+const mockEb = {
+  db: { from: () => new MockQueryBuilder({ data: [{ id: 1 }], error: null }) },
+}
+```
+
+A mock that supports chaining without `then()` will appear to work — the chain compiles and runs — but every `await` returns the builder object itself, which is the most common surprise when migrating tests from a v1-style SDK that required an explicit `.execute()`.
+
 ## EU Sovereignty
 
 All data processed through the Eurobase SDK stays in EU jurisdiction (Scaleway, France). GDPR-compliant by design.

@@ -2,6 +2,7 @@
 package tenant
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -116,11 +117,25 @@ func slugify(name string) string {
 	return s
 }
 
+// CheckoutStarter is what HandleCreateProject calls when a Pro plan
+// is requested. Returns the Mollie payment ID + checkout URL. Wired
+// in from the billing package (gateway/router.go composes both).
+// Pass nil to disable the pending-project flow — in which case Pro
+// requests fall back to immediate creation (the pre-#70 behaviour).
+type CheckoutStarter func(ctx context.Context, pendingProjectID, ownerID, ownerEmail, ownerName, plan string) (paymentID, checkoutURL string, err error)
+
 // HandleCreateProject returns an http.HandlerFunc that creates a new project
 // (tenant) for the authenticated platform user.
 //
 // POST /v1/tenants
-func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*plans.LimitsService) http.HandlerFunc {
+//
+// #70: when the caller requests plan="pro" AND a CheckoutStarter is
+// configured, the project is NOT created immediately. Instead a
+// pending_projects reservation is written, a Mollie checkout is
+// started, and the response carries { status: "pending_payment",
+// checkout_url, pending_project_id }. The real public.projects row
+// is materialised by the webhook handler on payment.paid.
+func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, startCheckout CheckoutStarter, limitsSvc ...*plans.LimitsService) http.HandlerFunc {
 	_ = pool // pool is held by svc; kept in signature for consistency
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +205,68 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		// Default plan.
 		if req.Plan == "" {
 			req.Plan = "free"
+		}
+
+		// #70 fix: when Pro is requested AND billing is configured,
+		// defer creation. Reserve the slug in pending_projects so a
+		// second user can't grab it during the payment window, start
+		// Mollie checkout, and return a `pending_payment` response.
+		// The project is created in the webhook handler on the
+		// payment.paid event via the provisioner callback wired in
+		// router.go. Falls through to immediate creation if Mollie
+		// is not configured (dev/test).
+		if req.Plan == "pro" && startCheckout != nil {
+			slog.Info("create project: deferring Pro creation pending payment",
+				"name", req.Name, "owner_id", claims.Subject)
+
+			// Derive slug if not provided so the pending row holds a
+			// definite one (matches what svc.CreateProject would do).
+			slug := req.Slug
+			if slug == "" {
+				slug = slugify(req.Name)
+			}
+
+			var pendingID string
+			err := pool.QueryRow(r.Context(),
+				`INSERT INTO public.pending_projects (owner_id, name, slug, region, plan)
+				 VALUES ($1, $2, $3, $4, $5)
+				 RETURNING id::text`,
+				claims.Subject, req.Name, slug, req.Region, req.Plan,
+			).Scan(&pendingID)
+			if err != nil {
+				if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
+					http.Error(w, `{"error":"This project URL is already taken (pending payment from another attempt). Please pick a different name."}`, http.StatusConflict)
+					return
+				}
+				slog.Error("pending project insert failed", "error", err, "user_id", claims.Subject)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+
+			paymentID, checkoutURL, err := startCheckout(r.Context(), pendingID, claims.Subject, claims.Email, claims.Email, req.Plan)
+			if err != nil {
+				// Rollback the reservation so the user can retry
+				// without their slug being orphaned for 24h.
+				_, _ = pool.Exec(r.Context(), `DELETE FROM public.pending_projects WHERE id = $1`, pendingID)
+				slog.Error("pending project checkout start failed", "error", err, "pending", pendingID)
+				http.Error(w, `{"error":"failed to start checkout"}`, http.StatusBadGateway)
+				return
+			}
+			// Save the Mollie payment ID so the webhook can find this
+			// row by either ID. The payment metadata also carries
+			// pending_project_id so either lookup path works.
+			_, _ = pool.Exec(r.Context(),
+				`UPDATE public.pending_projects SET mollie_payment_id = $2 WHERE id = $1`,
+				pendingID, paymentID)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status":             "pending_payment",
+				"pending_project_id": pendingID,
+				"checkout_url":       checkoutURL,
+			})
+			return
 		}
 
 		// #70 diagnostic: log right before the INSERT so we can see if

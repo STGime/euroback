@@ -40,6 +40,19 @@ const (
 	ActionExportSelfRequested = "compliance.export.self_requested"
 	ActionExportCompleted     = "compliance.export.completed"
 	ActionExportFailed        = "compliance.export.failed"
+
+	// Billing / subscription lifecycle. Part of #2 (Mollie). Every
+	// transition the dunning state machine can make emits one of
+	// these so the Compliance → Audit Log feed answers "what
+	// happened, when, who" without a Mollie dashboard lookup. Each
+	// row carries a metadata blob with the Mollie IDs so the
+	// support flow can cross-reference without exposing them in
+	// the UI.
+	ActionSubscriptionCreated   = "billing.subscription.created"
+	ActionSubscriptionCancelled = "billing.subscription.cancelled"
+	ActionPaymentSucceeded      = "billing.payment.succeeded"
+	ActionPaymentFailed         = "billing.payment.failed"
+	ActionPlanChanged           = "billing.plan.changed"
 )
 
 // Entry represents a single audit log row.
