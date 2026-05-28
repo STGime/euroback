@@ -33,11 +33,17 @@ import (
 // Closed advisory GHSA-269x-fqhj-x9jq.
 var ErrAccountExistsLinkRequired = errors.New("account exists — sign in with your existing credentials and link this provider from settings")
 
-// asService runs fn in a service-role transaction. All queries against
-// tenant schemas in AuthService go through this so RLS policies permit
-// the query via the service-role bypass (see migration 000038).
+// asService runs fn in an auth-service-role transaction. Sets both
+// `app.end_user_role='service'` (RLS service bypass, migration
+// 000038) AND `app.intent='internal_auth_path'` (migration 000055
+// for #164). All queries against tenant schemas in AuthService —
+// notably the refresh_tokens CRUD — go through this so policies
+// permit the query.
+//
+// The intent GUC is what blocks a prompt-injected `runSQL` via MCP
+// from reading these tables; the generic SQL handler doesn't set it.
 func (s *AuthService) asService(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
-	return db.RunAsService(ctx, s.pool, fn)
+	return db.RunAsAuthService(ctx, s.pool, fn)
 }
 
 // OAuthSecretLookup returns the decrypted client_secret for a given provider

@@ -53,3 +53,50 @@ func RunAsService(ctx context.Context, pool *pgxpool.Pool, fn func(context.Conte
 
 	return tx.Commit(ctx)
 }
+
+// RunAsAuthService is RunAsService PLUS an additional GUC
+// `app.intent='internal_auth_path'`. Used exclusively by the auth /
+// email / SMS / vault code paths that legitimately need to read or
+// write the credential and secret tables (`refresh_tokens`,
+// `email_tokens`, `vault_secrets`). Closes #164 — the MCP prompt-
+// injection mitigation.
+//
+// Why this exists alongside RunAsService:
+// Migration 000055 narrows the RLS policy on those three tables from
+// `is_service_role()` to `is_internal_auth_path()`. The generic SQL
+// handler (which the MCP server's `runSQL` tool ultimately calls) sets
+// `app.end_user_role='service'` but NOT `app.intent`. So a prompt-
+// injected SQL query — no matter what the LLM is tricked into
+// emitting — cannot satisfy the policy on those tables and gets back
+// zero rows.
+//
+// Only Go code paths that ALWAYS run as part of legitimate auth flows
+// (refresh, email-token verify, magic link, vault encrypt/decrypt,
+// GDPR export, background token cleanup) get this helper. Adding a
+// new caller is a security-review-worthy change.
+func RunAsAuthService(ctx context.Context, pool *pgxpool.Pool, fn func(context.Context, pgx.Tx) error) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
+		return fmt.Errorf("set service role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.intent', 'internal_auth_path', true)"); err != nil {
+		return fmt.Errorf("set internal_auth_path intent: %w", err)
+	}
+
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}

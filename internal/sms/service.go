@@ -48,7 +48,9 @@ func (s *Service) SendOTP(ctx context.Context, schemaName, userID, phone string)
 		 VALUES ($1, $2, 'phone_verification', now() + interval '10 minutes')`,
 		quoteIdent(schemaName),
 	)
-	if err := edb.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	// Closes #164. Phone OTP writes to email_tokens, which is now
+	// RLS-gated behind the internal_auth_path intent (migration 000055).
+	if err := edb.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, q, userID, codeHash)
 		return err
 	}); err != nil {
@@ -78,7 +80,7 @@ func (s *Service) VerifyOTP(ctx context.Context, schemaName, code string) (strin
 		 RETURNING user_id`,
 		quoteIdent(schemaName),
 	)
-	err := edb.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := edb.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, codeHash).Scan(&userID)
 	})
 	if err != nil {

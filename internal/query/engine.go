@@ -710,10 +710,11 @@ type StatementResult struct {
 // Exec/Query so the extended-protocol "first statement only" trap is
 // avoided. If any statement fails the whole transaction is rolled back
 // and the error is returned alongside the results gathered so far.
-func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName string, statements []string, maxRows int) ([]StatementResult, error) {
+func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName string, statements []string, maxRows int, readOnly ...bool) ([]StatementResult, error) {
 	if maxRows <= 0 || maxRows > 1000 {
 		maxRows = 1000
 	}
+	isReadOnly := len(readOnly) > 0 && readOnly[0]
 
 	conn, err := e.pool.Acquire(ctx)
 	if err != nil {
@@ -735,6 +736,15 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	}
 	if err := e.applyRLSContext(ctx, tx); err != nil {
 		return nil, err
+	}
+	// Closes part of #165. When the caller passes read_only=true
+	// (the MCP server's default), wrap the whole transaction in
+	// SET TRANSACTION READ ONLY so any embedded write raises
+	// SQLSTATE 25006 and rolls everything back.
+	if isReadOnly {
+		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+			return nil, fmt.Errorf("set transaction read only: %w", err)
+		}
 	}
 	// Each individual statement still gets a per-statement timeout.
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {

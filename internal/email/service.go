@@ -14,11 +14,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// asService runs fn in a service-role tx on s.pool. All email_tokens
-// writes/reads need this — they live in the tenant schema and are
-// hit in pre-auth paths where no end_user context exists.
+// asService runs fn in an auth-service-role tx on s.pool. All
+// email_tokens writes/reads go through this — they live in the
+// tenant schema and are hit in pre-auth paths where no end_user
+// context exists. Closes #164: migration 000055 narrowed the
+// email_tokens RLS policy to require `app.intent=internal_auth_path`,
+// which RunAsAuthService sets and the generic SQL handler does NOT.
+// So a prompt-injected runSQL via MCP cannot reach email_tokens.
 func (s *EmailService) asService(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
-	return edb.RunAsService(ctx, s.pool, fn)
+	return edb.RunAsAuthService(ctx, s.pool, fn)
 }
 
 // EmailService provides high-level email operations.

@@ -117,7 +117,11 @@ func HandleGDPRExport(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.H
 		var storageObjs []GDPRStorageObject
 		var tokens []GDPRRefreshToken
 		var userData map[string][]map[string]any
-		profileErr := edb.RunAsService(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+		// Closes #164. The GDPR export reads refresh_tokens (line 273),
+		// email_tokens, vault_secrets — all RLS-gated behind the
+		// internal_auth_path intent by migration 000055. This is a
+		// legitimate admin path so the GUC is set explicitly.
+		profileErr := edb.RunAsAuthService(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 			p, e := exportUserProfile(ctx, tx, qs, userID)
 			if e != nil {
 				return e

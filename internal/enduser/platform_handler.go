@@ -442,7 +442,7 @@ func handleSuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
 		var u PlatformUser
-		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err := edb.RunAsAuthService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 			var e error
 			u, e = scanUser(tx.QueryRow(ctx, q, userID))
 			if e != nil {
@@ -533,7 +533,7 @@ func handleResetPassword(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
 		var rowsAffected int64
-		err = edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err = edb.RunAsAuthService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
 			tag, e := tx.Exec(ctx, q, string(hash), userID)
 			if e != nil {
 				return e

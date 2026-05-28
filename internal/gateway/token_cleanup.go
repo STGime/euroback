@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -91,24 +93,31 @@ func cleanupExpiredTokens(ctx context.Context, pool *pgxpool.Pool) {
 	totalRefresh := int64(0)
 	totalEmail := int64(0)
 	for _, schema := range schemas {
-		// refresh_tokens
-		if result, err := pool.Exec(ctx,
-			fmt.Sprintf(`DELETE FROM %q.refresh_tokens WHERE expires_at < $1`, schema),
-			cutoff,
-		); err != nil {
-			slog.Error("token cleanup: refresh_tokens delete failed", "schema", schema, "error", err)
-		} else {
-			totalRefresh += result.RowsAffected()
-		}
-
-		// email_tokens
-		if result, err := pool.Exec(ctx,
-			fmt.Sprintf(`DELETE FROM %q.email_tokens WHERE expires_at < $1`, schema),
-			cutoff,
-		); err != nil {
-			slog.Error("token cleanup: email_tokens delete failed", "schema", schema, "error", err)
-		} else {
-			totalEmail += result.RowsAffected()
+		// Closes #164. Migration 000055 narrowed the RLS policies on
+		// refresh_tokens + email_tokens to require the
+		// internal_auth_path intent GUC. RunAsAuthService sets it; a
+		// plain pool.Exec would now be RLS-filtered to zero rows.
+		schemaCopy := schema
+		if err := edb.RunAsAuthService(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+			if result, e := tx.Exec(ctx,
+				fmt.Sprintf(`DELETE FROM %q.refresh_tokens WHERE expires_at < $1`, schemaCopy),
+				cutoff,
+			); e != nil {
+				slog.Error("token cleanup: refresh_tokens delete failed", "schema", schemaCopy, "error", e)
+			} else {
+				totalRefresh += result.RowsAffected()
+			}
+			if result, e := tx.Exec(ctx,
+				fmt.Sprintf(`DELETE FROM %q.email_tokens WHERE expires_at < $1`, schemaCopy),
+				cutoff,
+			); e != nil {
+				slog.Error("token cleanup: email_tokens delete failed", "schema", schemaCopy, "error", e)
+			} else {
+				totalEmail += result.RowsAffected()
+			}
+			return nil
+		}); err != nil {
+			slog.Error("token cleanup: tx failed", "schema", schemaCopy, "error", err)
 		}
 	}
 
