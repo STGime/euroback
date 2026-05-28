@@ -31,22 +31,43 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
     }
   );
 
+  // Closes part of #165. runSQL / runSQLTransaction default to
+  // READ-ONLY mode — the backend wraps the statements in SET
+  // TRANSACTION READ ONLY, so writes raise SQLSTATE 25006 and roll
+  // back. Defence-in-depth on top of the RLS gate in migration 000055
+  // (#164): even if a prompt-injected query tried to write its
+  // exfiltrated tokens into a row the attacker controls, the write
+  // would never commit.
+  //
+  // Opt out only by setting EUROBASE_MCP_ALLOW_WRITES=true on the
+  // MCP server's environment and restarting. Intended for
+  // migration-running scripts; do NOT enable in interactive Cursor /
+  // Claude Code sessions where prompt-injection-via-data is in scope.
+  const allowWrites = process.env.EUROBASE_MCP_ALLOW_WRITES === 'true';
+  const writeNote = allowWrites
+    ? ' EUROBASE_MCP_ALLOW_WRITES=true is set, so this tool runs with write capability.'
+    : ' READ-ONLY: writes will fail with SQLSTATE 25006. To allow writes, set EUROBASE_MCP_ALLOW_WRITES=true on the MCP server and restart.';
+
   server.tool(
     'runSQL',
-    'Execute a SINGLE SQL statement against a project database. The server uses pgx\'s extended query protocol, which only runs the first statement of a multi-statement string — to prevent silent partial migrations, multi-statement input is rejected with a clear error. For migrations or any multi-statement script, use runSQLTransaction instead.',
+    'Execute a SINGLE SQL statement against a project database.' + writeNote +
+      ' The server uses pgx\'s extended query protocol, which only runs the first statement of a multi-statement string — to prevent silent partial migrations, multi-statement input is rejected with a clear error. For migrations or any multi-statement script, use runSQLTransaction instead.',
     {
       projectId: z.string().describe('The project UUID'),
       query: z.string().describe('A single SQL statement (one query, no internal `;` between statements)'),
     },
     async ({ projectId, query }) => {
-      const data = await getClient().post(`/platform/projects/${projectId}/data/sql`, { sql: query });
+      const body: Record<string, unknown> = { sql: query };
+      if (!allowWrites) body.read_only = true;
+      const data = await getClient().post(`/platform/projects/${projectId}/data/sql`, body);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
   );
 
   server.tool(
     'runSQLTransaction',
-    'Execute multiple SQL statements as one atomic transaction. Pass each statement as its own array element (do NOT concatenate with `;`). The server runs them in order inside BEGIN...COMMIT and rolls everything back if any statement fails. Use this for migrations, schema changes with seed data, or any multi-step DDL/DML.',
+    'Execute multiple SQL statements as one atomic transaction.' + writeNote +
+      ' Pass each statement as its own array element (do NOT concatenate with `;`). The server runs them in order inside BEGIN...COMMIT and rolls everything back if any statement fails. Use this for migrations, schema changes with seed data, or any multi-step DDL/DML.',
     {
       projectId: z.string().describe('The project UUID'),
       statements: z.array(z.string()).describe('Array of SQL statements. Each element must be exactly one statement; do not embed multiple statements in one string.'),
@@ -55,6 +76,7 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
     async ({ projectId, statements, limit }) => {
       const body: Record<string, unknown> = { statements };
       if (limit !== undefined) body.limit = limit;
+      if (!allowWrites) body.read_only = true;
       const data = await getClient().post(`/platform/projects/${projectId}/data/sql/transaction`, body);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }

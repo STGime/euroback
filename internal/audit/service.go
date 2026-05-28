@@ -40,6 +40,16 @@ const (
 	ActionExportSelfRequested = "compliance.export.self_requested"
 	ActionExportCompleted     = "compliance.export.completed"
 	ActionExportFailed        = "compliance.export.failed"
+
+	// MCP server lifecycle — Closes #165. The platform SQL handler
+	// can be called either from the console (full access) or via
+	// the MCP server's runSQL tool (read-only by default). The
+	// audit-log entry distinguishes them via metadata.source='mcp'
+	// so operators can filter for MCP-origin traffic and notice
+	// unusual patterns (e.g. a Cursor session that queried
+	// `vault_secrets` before the policy gated it).
+	ActionMCPSQLExecuted          = "mcp.sql.executed"
+	ActionMCPSQLRejectedReadOnly  = "mcp.sql.rejected_write_in_readonly"
 )
 
 // Entry represents a single audit log row.

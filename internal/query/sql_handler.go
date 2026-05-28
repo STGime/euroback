@@ -41,6 +41,14 @@ func auditDDLFromSQL(r *http.Request, engine *QueryEngine, sql string) {
 type SQLRequest struct {
 	SQL   string `json:"sql"`
 	Limit int    `json:"limit,omitempty"`
+	// ReadOnly opts the call into a read-only transaction even on the
+	// platform endpoint. The MCP server sets this to true by default
+	// (closes #165 / part of #164 mitigation) so a prompt-injected
+	// query cannot mutate state. Writes raise SQLSTATE 25006 and roll
+	// back. Honoured only when the handler-level forceReadOnly is
+	// false; on the SDK path forceReadOnly already gates writes via
+	// ValidateSelectOnly.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // SQLResponse is the JSON response for a successful SQL execution.
@@ -67,6 +75,10 @@ func HandlePlatformSQL(engine *QueryEngine) http.HandlerFunc {
 type SQLTransactionRequest struct {
 	Statements []string `json:"statements"`
 	Limit      int      `json:"limit,omitempty"`
+	// ReadOnly wraps the whole transaction in SET TRANSACTION READ ONLY.
+	// MCP-origin requests set this true to block prompt-injected writes
+	// (closes part of #165).
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // SQLTransactionResponse is the JSON response for HandlePlatformSQLTransaction.
@@ -100,7 +112,7 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 		}
 
 		start := time.Now()
-		results, err := engine.ExecuteSQLTransaction(r.Context(), schema, req.Statements, req.Limit)
+		results, err := engine.ExecuteSQLTransaction(r.Context(), schema, req.Statements, req.Limit, req.ReadOnly)
 		elapsed := time.Since(start)
 		if err != nil {
 			slog.Error("sql transaction failed", "error", err, "schema", schema, "completed", len(results), "total", len(req.Statements))
@@ -123,7 +135,7 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 	}
 }
 
-func handleSQLInternal(engine *QueryEngine, readOnly bool) http.HandlerFunc {
+func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := SchemaFromContext(r.Context())
 		if schema == "" {
@@ -137,7 +149,14 @@ func handleSQLInternal(engine *QueryEngine, readOnly bool) http.HandlerFunc {
 			return
 		}
 
-		if readOnly {
+		// Effective read-only: the SDK path (forceReadOnly=true) is
+		// always read-only; the platform path (forceReadOnly=false)
+		// honours the body's `read_only` field. Closes part of #165:
+		// the MCP server sets read_only=true on its outbound calls so
+		// a prompt-injected query cannot mutate state.
+		readOnly := forceReadOnly || req.ReadOnly
+
+		if forceReadOnly {
 			// SDK: validate SELECT-only.
 			if err := ValidateSelectOnly(req.SQL); err != nil {
 				jsonError(w, err.Error(), http.StatusBadRequest)

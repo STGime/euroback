@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// All vault methods run inside a service-role transaction (db.RunAsService)
+// All vault methods run inside a service-role transaction (db.RunAsAuthService)
 // because PR #65 (advisory GHSA-wcg9-846j-ch78) tightened the RLS policy
 // on tenant_*.vault_secrets to `USING (public.is_service_role())`. The
 // previous direct pool queries silently failed RLS after that migration
@@ -107,7 +107,7 @@ func (s *VaultService) List(ctx context.Context, schemaName string) ([]Secret, e
 	sql := `SELECT id, name, description, created_at, updated_at
 		 FROM ` + vaultTable(schemaName) + ` ORDER BY name`
 	secrets := make([]Secret, 0)
-	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, sql)
 		if err != nil {
 			return fmt.Errorf("list vault secrets: %w", err)
@@ -135,7 +135,7 @@ func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secre
 
 	var sec Secret
 	var encrypted, nonce []byte
-	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name).Scan(
 			&sec.ID, &sec.Name, &encrypted, &nonce,
 			&sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
@@ -175,7 +175,7 @@ func (s *VaultService) Set(ctx context.Context, schemaName, name, value, descrip
 		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
-	err = db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err = db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name, encrypted, nonce, description).Scan(
 			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 		)
@@ -209,7 +209,7 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 			 RETURNING id, name, description, created_at, updated_at`
 
 		var sec Secret
-		err = db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		err = db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, sql, name, encrypted, nonce, newDescription).Scan(
 				&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 			)
@@ -231,7 +231,7 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
-	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name, *newDescription).Scan(
 			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 		)
@@ -249,7 +249,7 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 func (s *VaultService) Delete(ctx context.Context, schemaName, name string) error {
 	sql := `DELETE FROM ` + vaultTable(schemaName) + ` WHERE name = $1`
 	var rowsAffected int64
-	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, sql, name)
 		if err != nil {
 			return err
@@ -270,7 +270,7 @@ func (s *VaultService) Delete(ctx context.Context, schemaName, name string) erro
 func (s *VaultService) Count(ctx context.Context, schemaName string) (int, error) {
 	sql := `SELECT count(*) FROM ` + vaultTable(schemaName)
 	var count int
-	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql).Scan(&count)
 	})
 	if err != nil {
@@ -324,7 +324,7 @@ func (s *VaultService) DeleteRaw(ctx context.Context, schemaName, name string) e
 func (s *VaultService) HasRaw(ctx context.Context, schemaName, name string) (bool, error) {
 	sql := `SELECT EXISTS(SELECT 1 FROM ` + vaultTable(schemaName) + ` WHERE name = $1)`
 	var exists bool
-	err := db.RunAsService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name).Scan(&exists)
 	})
 	if err != nil {
