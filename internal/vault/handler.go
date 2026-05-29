@@ -64,7 +64,16 @@ func handlePlatformRekey(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		slog.Info("vault rekeyed", "project_id", projectID, "rekeyed", rekeyed)
-		auditVault(r, projectID, audit.ActionVaultRekeyed, "")
+		// Rekey is schema-wide, not per-secret, so there's no single target
+		// name — record the count in metadata instead, keeping the entry
+		// self-describing.
+		if asvc := audit.FromContext(r.Context()); asvc != nil {
+			actorID, actorEmail := audit.ActorFromContext(r.Context())
+			asvc.Log(r.Context(), projectID, actorID, actorEmail, audit.ActionVaultRekeyed,
+				audit.WithMetadata(map[string]any{"rekeyed": rekeyed}),
+				audit.WithIP(r.RemoteAddr),
+			)
+		}
 		jsonResponse(w, map[string]any{"rekeyed": rekeyed}, http.StatusOK)
 	}
 }

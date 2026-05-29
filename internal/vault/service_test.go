@@ -254,3 +254,70 @@ func TestVaultRawHelpers_AreServiceScoped(t *testing.T) {
 		t.Errorf("DeleteRaw(existing) returned error: %v", err)
 	}
 }
+
+// TestVaultRekeySchema_LegacyToCurrent exercises the full rotation path
+// against a real database: a row sealed at the legacy version 0 (shared
+// master key, simulating a pre-#167 secret) is re-encrypted under the
+// current per-tenant version, while a row already at the current version is
+// left untouched. This covers the select-FOR UPDATE → decrypt-at-old-version
+// → re-seal-at-current → update transaction in RekeySchema — the rotation
+// path GDPR review depends on.
+func TestVaultRekeySchema_LegacyToCurrent(t *testing.T) {
+	svc, schema, _ := setupVaultTest(t)
+	ctx := context.Background()
+
+	hk, ok := svc.provider.(*hkdfKeyProvider)
+	if !ok {
+		t.Fatalf("expected *hkdfKeyProvider, got %T", svc.provider)
+	}
+
+	// Seal one secret at the legacy version 0 (shared master key) by
+	// temporarily pointing the provider's current version at 0, then
+	// restore it so subsequent writes use the per-tenant v1.
+	hk.current = legacyKeyVersion
+	if _, err := svc.Set(ctx, schema, "LEGACY", "v0-value", "from before per-tenant keys"); err != nil {
+		t.Fatalf("Set legacy secret: %v", err)
+	}
+	hk.current = firstDerivedKeyVersion
+
+	// A fresh secret is sealed at the current per-tenant version.
+	if _, err := svc.Set(ctx, schema, "MODERN", "v1-value", ""); err != nil {
+		t.Fatalf("Set modern secret: %v", err)
+	}
+
+	// First rekey: only the legacy (v0) row is below the current version,
+	// so exactly one row should be re-encrypted.
+	n, err := svc.RekeySchema(ctx, schema)
+	if err != nil {
+		t.Fatalf("RekeySchema: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("first RekeySchema rekeyed %d rows, want 1 (only the v0 row)", n)
+	}
+
+	// Both secrets must still decrypt to their original plaintext after the
+	// key change.
+	legacy, err := svc.Get(ctx, schema, "LEGACY")
+	if err != nil {
+		t.Fatalf("Get LEGACY after rekey: %v", err)
+	}
+	if legacy.Value != "v0-value" {
+		t.Errorf("LEGACY value after rekey = %q, want %q", legacy.Value, "v0-value")
+	}
+	modern, err := svc.Get(ctx, schema, "MODERN")
+	if err != nil {
+		t.Fatalf("Get MODERN after rekey: %v", err)
+	}
+	if modern.Value != "v1-value" {
+		t.Errorf("MODERN value after rekey = %q, want %q", modern.Value, "v1-value")
+	}
+
+	// Second rekey is a no-op: every row is now at the current version.
+	n2, err := svc.RekeySchema(ctx, schema)
+	if err != nil {
+		t.Fatalf("second RekeySchema: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("second RekeySchema rekeyed %d rows, want 0 (all already current)", n2)
+	}
+}
