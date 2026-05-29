@@ -45,12 +45,14 @@ type Secret struct {
 
 // VaultService provides encrypted secret storage backed by PostgreSQL.
 type VaultService struct {
-	pool *pgxpool.Pool
-	key  []byte // 32-byte AES-256 key
+	pool     *pgxpool.Pool
+	provider KeyProvider
 }
 
 // NewVaultService creates a new VaultService. The encryptionKey must be a
-// base64-encoded 32-byte key for AES-256-GCM.
+// base64-encoded 32-byte master secret. Per-tenant keys are derived from it
+// (see KeyProvider / hkdfKeyProvider); the master secret is never used
+// directly to seal new rows.
 func NewVaultService(pool *pgxpool.Pool, encryptionKey string) (*VaultService, error) {
 	key, err := base64.StdEncoding.DecodeString(encryptionKey)
 	if err != nil {
@@ -59,17 +61,40 @@ func NewVaultService(pool *pgxpool.Pool, encryptionKey string) (*VaultService, e
 	if len(key) != 32 {
 		return nil, fmt.Errorf("VAULT_ENCRYPTION_KEY must be 32 bytes (got %d)", len(key))
 	}
-	return &VaultService{pool: pool, key: key}, nil
+	return &VaultService{pool: pool, provider: newHKDFKeyProvider(key)}, nil
 }
 
 // Configured returns true if the vault service is ready to use.
 func (s *VaultService) Configured() bool {
-	return s != nil && len(s.key) == 32
+	return s != nil && s.provider != nil
 }
 
-// encrypt using AES-256-GCM.
-func (s *VaultService) encrypt(plaintext string) (ciphertext, nonce []byte, err error) {
-	block, err := aes.NewCipher(s.key)
+// seal encrypts plaintext for a tenant using the provider's current key
+// version, returning the ciphertext, nonce, and the version used so the
+// caller can persist it alongside the row.
+func (s *VaultService) seal(ctx context.Context, schemaName, plaintext string) (ciphertext, nonce []byte, version int16, err error) {
+	version = s.provider.CurrentVersion()
+	key, err := s.provider.DeriveKey(ctx, schemaName, version)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	ciphertext, nonce, err = encryptWith(key, plaintext)
+	return ciphertext, nonce, version, err
+}
+
+// open decrypts a row's ciphertext using the key for the version it was
+// sealed with.
+func (s *VaultService) open(ctx context.Context, schemaName string, ciphertext, nonce []byte, version int16) (string, error) {
+	key, err := s.provider.DeriveKey(ctx, schemaName, version)
+	if err != nil {
+		return "", err
+	}
+	return decryptWith(key, ciphertext, nonce)
+}
+
+// encryptWith seals plaintext under a 32-byte AES-256-GCM key.
+func encryptWith(key []byte, plaintext string) (ciphertext, nonce []byte, err error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -85,9 +110,9 @@ func (s *VaultService) encrypt(plaintext string) (ciphertext, nonce []byte, err 
 	return ciphertext, nonce, nil
 }
 
-// decrypt using AES-256-GCM.
-func (s *VaultService) decrypt(ciphertext, nonce []byte) (string, error) {
-	block, err := aes.NewCipher(s.key)
+// decryptWith opens AES-256-GCM ciphertext under the given key.
+func decryptWith(key, ciphertext, nonce []byte) (string, error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
@@ -130,14 +155,15 @@ func (s *VaultService) List(ctx context.Context, schemaName string) ([]Secret, e
 
 // Get returns a single decrypted secret by name.
 func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secret, error) {
-	sql := `SELECT id, name, secret, nonce, description, created_at, updated_at
+	sql := `SELECT id, name, secret, nonce, key_version, description, created_at, updated_at
 		 FROM ` + vaultTable(schemaName) + ` WHERE name = $1`
 
 	var sec Secret
 	var encrypted, nonce []byte
+	var keyVersion int16
 	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name).Scan(
-			&sec.ID, &sec.Name, &encrypted, &nonce,
+			&sec.ID, &sec.Name, &encrypted, &nonce, &keyVersion,
 			&sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 		)
 	})
@@ -148,9 +174,9 @@ func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secre
 		return nil, fmt.Errorf("get vault secret: %w", err)
 	}
 
-	value, err := s.decrypt(encrypted, nonce)
+	value, err := s.open(ctx, schemaName, encrypted, nonce, keyVersion)
 	if err != nil {
-		slog.Error("vault decryption failed", "name", name, "error", err)
+		slog.Error("vault decryption failed", "name", name, "key_version", keyVersion, "error", err)
 		return nil, fmt.Errorf("decrypt vault secret: %w", err)
 	}
 	sec.Value = value
@@ -160,23 +186,24 @@ func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secre
 
 // Set creates or updates (upserts) a secret.
 func (s *VaultService) Set(ctx context.Context, schemaName, name, value, description string) (*Secret, error) {
-	encrypted, nonce, err := s.encrypt(value)
+	encrypted, nonce, version, err := s.seal(ctx, schemaName, value)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt vault secret: %w", err)
 	}
 
-	sql := `INSERT INTO ` + vaultTable(schemaName) + ` (name, secret, nonce, description)
-		 VALUES ($1, $2, $3, $4)
+	sql := `INSERT INTO ` + vaultTable(schemaName) + ` (name, secret, nonce, key_version, description)
+		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (name) DO UPDATE SET
 		   secret = EXCLUDED.secret,
 		   nonce = EXCLUDED.nonce,
+		   key_version = EXCLUDED.key_version,
 		   description = EXCLUDED.description,
 		   updated_at = now()
 		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
 	err = db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, sql, name, encrypted, nonce, description).Scan(
+		return tx.QueryRow(ctx, sql, name, encrypted, nonce, version, description).Scan(
 			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 		)
 	})
@@ -193,9 +220,9 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 		return nil, fmt.Errorf("nothing to update")
 	}
 
-	// If value is changing, re-encrypt.
+	// If value is changing, re-encrypt (at the current key version).
 	if newValue != nil {
-		encrypted, nonce, err := s.encrypt(*newValue)
+		encrypted, nonce, version, err := s.seal(ctx, schemaName, *newValue)
 		if err != nil {
 			return nil, fmt.Errorf("encrypt vault secret: %w", err)
 		}
@@ -203,14 +230,15 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 		sql := `UPDATE ` + vaultTable(schemaName) + ` SET
 			   secret = $2,
 			   nonce = $3,
-			   description = COALESCE($4, description),
+			   key_version = $4,
+			   description = COALESCE($5, description),
 			   updated_at = now()
 			 WHERE name = $1
 			 RETURNING id, name, description, created_at, updated_at`
 
 		var sec Secret
 		err = db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, sql, name, encrypted, nonce, newDescription).Scan(
+			return tx.QueryRow(ctx, sql, name, encrypted, nonce, version, newDescription).Scan(
 				&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 			)
 		})
@@ -277,6 +305,75 @@ func (s *VaultService) Count(ctx context.Context, schemaName string) (int, error
 		return 0, fmt.Errorf("count vault secrets: %w", err)
 	}
 	return count, nil
+}
+
+// RekeySchema re-encrypts every secret in a tenant schema under the
+// provider's current key version. Rows already at the current version are
+// skipped. It returns the number of rows re-encrypted.
+//
+// This is the rotation path: bump the provider's current version (or swap in
+// a new KeyProvider) and run RekeySchema to migrate historic ciphertext —
+// including legacy version-0 rows still sealed with the shared master key —
+// onto the new per-tenant key. The whole schema is rekeyed in a single
+// service-role transaction so it is all-or-nothing.
+//
+// Vaults hold a small number of secrets per tenant (plan-capped, plus a
+// handful of machine-managed entries), so a synchronous re-encrypt is cheap.
+// If a tenant ever holds enough secrets that this blocks the request, move it
+// to a River job.
+func (s *VaultService) RekeySchema(ctx context.Context, schemaName string) (int, error) {
+	target := s.provider.CurrentVersion()
+	selectSQL := `SELECT id, secret, nonce, key_version FROM ` + vaultTable(schemaName) +
+		` WHERE key_version <> $1 FOR UPDATE`
+	updateSQL := `UPDATE ` + vaultTable(schemaName) +
+		` SET secret = $2, nonce = $3, key_version = $4, updated_at = now() WHERE id = $1`
+
+	var rekeyed int
+	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, selectSQL, target)
+		if err != nil {
+			return fmt.Errorf("select secrets for rekey: %w", err)
+		}
+		type row struct {
+			id         string
+			ciphertext []byte
+			nonce      []byte
+			version    int16
+		}
+		var pending []row
+		for rows.Next() {
+			var rw row
+			if err := rows.Scan(&rw.id, &rw.ciphertext, &rw.nonce, &rw.version); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan secret for rekey: %w", err)
+			}
+			pending = append(pending, rw)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		for _, rw := range pending {
+			plaintext, err := s.open(ctx, schemaName, rw.ciphertext, rw.nonce, rw.version)
+			if err != nil {
+				return fmt.Errorf("decrypt secret %s (v%d) during rekey: %w", rw.id, rw.version, err)
+			}
+			newCT, newNonce, newVersion, err := s.seal(ctx, schemaName, plaintext)
+			if err != nil {
+				return fmt.Errorf("re-encrypt secret %s during rekey: %w", rw.id, err)
+			}
+			if _, err := tx.Exec(ctx, updateSQL, rw.id, newCT, newNonce, newVersion); err != nil {
+				return fmt.Errorf("update secret %s during rekey: %w", rw.id, err)
+			}
+			rekeyed++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return rekeyed, nil
 }
 
 // ── Raw helpers (no Secret struct, no description) ──
