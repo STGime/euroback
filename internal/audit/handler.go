@@ -41,3 +41,25 @@ func HandleList(svc *Service) http.HandlerFunc {
 		json.NewEncoder(w).Encode(result)
 	}
 }
+
+// HandleVerify walks the project's audit-log hash chain and reports whether
+// it is intact (Tier-1 #3 tamper-evidence).
+// GET /platform/projects/{id}/compliance/audit-log/verify
+func HandleVerify(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			http.Error(w, `{"error":"missing project id"}`, http.StatusBadRequest)
+			return
+		}
+
+		result, err := svc.Verify(r.Context(), projectID)
+		if err != nil {
+			http.Error(w, `{"error":"failed to verify audit log"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
