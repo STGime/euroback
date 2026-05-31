@@ -319,6 +319,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
 
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-log", audit.HandleList(auditSvc))
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/audit-log/verify", audit.HandleVerify(auditSvc))
 
 			// DSAR exports (tenant-level and per-user). Triggering an
 			// export pulls every row from every tenant table, so this
