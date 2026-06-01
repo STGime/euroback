@@ -112,6 +112,11 @@ func (s *Service) Log(ctx context.Context, projectID, actorID, actorEmail, actio
 	// under concurrent writes, serialize per-project with a transaction
 	// advisory lock; the hash itself is computed in SQL by
 	// public.audit_row_hash so it is byte-identical to Verify().
+	//
+	// Trade-off vs the previous single Exec: audited write latency is now
+	// lock-bound per project — a burst of audited operations on the same
+	// project serializes. Acceptable because audit writes are low-frequency
+	// (sensitive admin actions), not a hot path.
 	chainKey := projectID
 	if chainKey == "" {
 		chainKey = "__global__" // NULL-project rows share one chain
