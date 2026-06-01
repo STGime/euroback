@@ -16,11 +16,21 @@
 --     byte-identical logic. created_at is rendered at UTC so the hash does
 --     not depend on the session timezone.
 --
--- Tamper resistance: runtime roles (gateway, developer) lose UPDATE/DELETE —
--- they may only INSERT/SELECT. Only eurobase_migrator (deploy-only) retains
--- full rights, by necessity. The independent off-box WORM copy (signed
--- object-store dump) ships in the SIEM-export / retention PRs and is the
--- defence against an owner-level tamper.
+-- Tamper resistance: the REAL enforcement is on eurobase_gateway — the role
+-- the audit service actually connects as (router.go wires audit to the
+-- gateway pool). It loses UPDATE/DELETE and may only INSERT/SELECT.
+--
+-- The eurobase_developer revoke below is pure defence-in-depth, NOT the main
+-- guard: platform/developer transactions run `SET LOCAL ROLE
+-- eurobase_migrator` (see CLAUDE.md), so developer-path code executes with
+-- migrator privileges and never touches audit_log as eurobase_developer.
+-- migrator (deploy-only, table owner) necessarily retains full rights. So an
+-- owner/migrator-equivalent actor — and a compromised gateway forging NEW
+-- appends with attacker-chosen prev_hash/row_hash — are NOT caught by the
+-- in-DB chain. The independent off-box WORM copy (signed object-store dump,
+-- shipping in the SIEM-export / retention PRs #170/#171) is the defence
+-- against both. The in-DB chain catches modification, deletion, and
+-- reordering of existing rows.
 --
 -- No explicit BEGIN/COMMIT: golang-migrate wraps each .up.sql in its own tx.
 

@@ -44,19 +44,35 @@ and breaks the chain.
 Appends are serialized per project with a transaction advisory lock
 (`pg_advisory_xact_lock`) so the read-chain-head-then-insert step is atomic
 and never forks under concurrent writes (`internal/audit/service.go` `Log`).
-Audit writes are low-frequency, so the lock is not a hot path.
+Audit writes are low-frequency, so the lock is not a hot path — but note that
+audited write latency is now **lock-bound per project**: a burst of audited
+operations on the same project serializes on that lock.
 
 ### Append-only enforcement
 Migration 000058 runs `REVOKE UPDATE, DELETE ON public.audit_log` from
-`eurobase_gateway` and `eurobase_developer`. The runtime can only `INSERT`
-and `SELECT`. Only `eurobase_migrator` (deploy-only) keeps full rights, by
-necessity — schema changes need it.
+`eurobase_gateway`. The audit service connects as **gateway** (the gateway
+pool), so this is the enforcement that matters: the runtime can only `INSERT`
+and `SELECT`.
 
-> An owner-level actor (migrator) could still rewrite the whole forward chain.
-> The independent defence is the off-box **WORM dump** (signed, append-only
-> object-store export) shipping in the SIEM-export / retention work
-> (#170/#171) — once a hash is exported off-box, in-DB rewriting is detectable
-> against the external copy.
+The migration also revokes from `eurobase_developer`, but that is
+**defence-in-depth, not the main guard**: platform/developer transactions run
+`SET LOCAL ROLE eurobase_migrator` (see `CLAUDE.md`), so developer-path code
+executes with migrator privileges and never touches `audit_log` as
+`eurobase_developer`. `eurobase_migrator` (deploy-only, table owner) keeps
+full rights by necessity.
+
+### What the in-DB chain does and does NOT cover
+The chain catches **modification, deletion, and reordering** of existing rows.
+It does **not** catch, on its own:
+
+- A **migrator/owner-level** actor rewriting the entire forward chain.
+- A **compromised gateway forging new appends** — gateway retains `INSERT` and
+  could write rows with attacker-chosen `prev_hash`/`row_hash`/`seq`.
+
+The independent defence for both is the off-box **WORM dump** (signed,
+append-only object-store export) shipping in the SIEM-export / retention work
+(#170/#171): once hashes are exported off-box, in-DB rewriting or forgery is
+detectable against the external copy.
 
 ## Verifying
 
@@ -81,6 +97,10 @@ per row, checks (1) the stored `row_hash` matches a fresh recompute of the
 row's fields, and (2) the row's `prev_hash` matches the previous row's
 `row_hash`. The first failure is reported with the offending row id. An empty
 chain verifies as OK.
+
+> `Verify` walks the **entire** project chain in one pass (no pagination). On
+> a multi-year log this is a heavy interactive call; a bounded/streaming or
+> checkpointed variant is a likely future addition.
 
 ## Testing
 
