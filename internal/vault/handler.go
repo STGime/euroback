@@ -37,11 +37,45 @@ const (
 func Routes(svc *VaultService, pool *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", handlePlatformList(svc, pool))
+	r.Post("/rekey", handlePlatformRekey(svc, pool))
 	r.Get("/{name}", handlePlatformGet(svc, pool))
 	r.Post("/", handlePlatformSet(svc, pool))
 	r.Patch("/{name}", handlePlatformUpdate(svc, pool))
 	r.Delete("/{name}", handlePlatformDelete(svc, pool))
 	return r
+}
+
+// handlePlatformRekey re-encrypts every secret in the project's vault under
+// the current key version (Tier-1 #2 key rotation). Admin-only — the mount
+// in router.go already gates /vault behind RequireMinRole("admin").
+func handlePlatformRekey(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID, schemaName, err := resolveSchema(r, pool)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		rekeyed, err := svc.RekeySchema(r.Context(), schemaName)
+		if err != nil {
+			slog.Error("vault rekey failed", "error", err, "project_id", projectID)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("vault rekeyed", "project_id", projectID, "rekeyed", rekeyed)
+		// Rekey is schema-wide, not per-secret, so there's no single target
+		// name — record the count in metadata instead, keeping the entry
+		// self-describing.
+		if asvc := audit.FromContext(r.Context()); asvc != nil {
+			actorID, actorEmail := audit.ActorFromContext(r.Context())
+			asvc.Log(r.Context(), projectID, actorID, actorEmail, audit.ActionVaultRekeyed,
+				audit.WithMetadata(map[string]any{"rekeyed": rekeyed}),
+				audit.WithIP(r.RemoteAddr),
+			)
+		}
+		jsonResponse(w, map[string]any{"rekeyed": rekeyed}, http.StatusOK)
+	}
 }
 
 // resolveSchema looks up the schema_name for a project the authenticated user

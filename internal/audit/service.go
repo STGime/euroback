@@ -23,6 +23,7 @@ const (
 	ActionVaultSecretUpdated  = "vault.secret_updated"
 	ActionVaultSecretDeleted  = "vault.secret_deleted"
 	ActionVaultSecretAccessed = "vault.secret_accessed"
+	ActionVaultRekeyed        = "vault.rekeyed"
 	ActionOAuthSecretSet     = "oauth.secret_set"
 	ActionDataExported       = "data.exported"
 	ActionMemberInvited      = "member.invited"
