@@ -15,25 +15,25 @@ import (
 
 // Action constants used across the codebase.
 const (
-	ActionAuthConfigUpdated  = "auth_config.updated"
-	ActionAPIKeysRegenerated = "api_keys.regenerated"
-	ActionProjectCreated     = "project.created"
-	ActionProjectDeleted     = "project.deleted"
+	ActionAuthConfigUpdated   = "auth_config.updated"
+	ActionAPIKeysRegenerated  = "api_keys.regenerated"
+	ActionProjectCreated      = "project.created"
+	ActionProjectDeleted      = "project.deleted"
 	ActionVaultSecretSet      = "vault.secret_set"
 	ActionVaultSecretUpdated  = "vault.secret_updated"
 	ActionVaultSecretDeleted  = "vault.secret_deleted"
 	ActionVaultSecretAccessed = "vault.secret_accessed"
 	ActionVaultRekeyed        = "vault.rekeyed"
-	ActionOAuthSecretSet     = "oauth.secret_set"
-	ActionDataExported       = "data.exported"
-	ActionMemberInvited      = "member.invited"
-	ActionMemberRemoved      = "member.removed"
-	ActionMemberRoleChanged  = "member.role_changed"
-	ActionFunctionCreated    = "function.created"
-	ActionFunctionDeleted    = "function.deleted"
-	ActionAllowlistAdded     = "allowlist.added"
-	ActionAllowlistRemoved   = "allowlist.removed"
-	ActionAllowlistEmailed   = "allowlist.emailed"
+	ActionOAuthSecretSet      = "oauth.secret_set"
+	ActionDataExported        = "data.exported"
+	ActionMemberInvited       = "member.invited"
+	ActionMemberRemoved       = "member.removed"
+	ActionMemberRoleChanged   = "member.role_changed"
+	ActionFunctionCreated     = "function.created"
+	ActionFunctionDeleted     = "function.deleted"
+	ActionAllowlistAdded      = "allowlist.added"
+	ActionAllowlistRemoved    = "allowlist.removed"
+	ActionAllowlistEmailed    = "allowlist.emailed"
 	// Compliance / DSAR export lifecycle. Closes #100. Tenant +
 	// per-user exports run on the platform admin path; self-serve
 	// is an end-user-initiated export of their own data.
@@ -49,8 +49,8 @@ const (
 	// so operators can filter for MCP-origin traffic and notice
 	// unusual patterns (e.g. a Cursor session that queried
 	// `vault_secrets` before the policy gated it).
-	ActionMCPSQLExecuted          = "mcp.sql.executed"
-	ActionMCPSQLRejectedReadOnly  = "mcp.sql.rejected_write_in_readonly"
+	ActionMCPSQLExecuted         = "mcp.sql.executed"
+	ActionMCPSQLRejectedReadOnly = "mcp.sql.rejected_write_in_readonly"
 )
 
 // Entry represents a single audit log row.
@@ -106,11 +106,51 @@ func (s *Service) Log(ctx context.Context, projectID, actorID, actorEmail, actio
 		}
 	}
 
-	_, err := s.pool.Exec(ctx,
+	// The row is linked into a per-project hash chain (migration 000058).
+	// row_hash = SHA-256(prev_hash || canonical(row)), prev_hash = the
+	// current chain head's hash. To keep the read-head-then-append atomic
+	// under concurrent writes, serialize per-project with a transaction
+	// advisory lock; the hash itself is computed in SQL by
+	// public.audit_row_hash so it is byte-identical to Verify().
+	//
+	// Trade-off vs the previous single Exec: audited write latency is now
+	// lock-bound per project — a burst of audited operations on the same
+	// project serializes. Acceptable because audit writes are low-frequency
+	// (sensitive admin actions), not a hot path.
+	chainKey := projectID
+	if chainKey == "" {
+		chainKey = "__global__" // NULL-project rows share one chain
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		slog.Error("audit log write failed", "action", action, "project_id", projectID, "actor", actorEmail, "error", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, chainKey); err != nil {
+		slog.Error("audit log write failed (lock)", "action", action, "project_id", projectID, "error", err)
+		return
+	}
+
+	_, err = tx.Exec(ctx,
 		`INSERT INTO public.audit_log
-		   (project_id, actor_id, actor_email, action, target_type, target_id, metadata, ip_address)
-		 VALUES
-		   (NULLIF($1,'')::uuid, NULLIF($2,'')::uuid, $3, $4, $5, $6, $7, $8)`,
+		   (project_id, actor_id, actor_email, action, target_type, target_id, metadata, ip_address, created_at, prev_hash, row_hash)
+		 SELECT v.project_id, v.actor_id, v.actor_email, v.action, v.target_type, v.target_id, v.metadata, v.ip_address, v.created_at,
+		        p.h,
+		        public.audit_row_hash(p.h, v.project_id, v.actor_id, v.actor_email, v.action,
+		                              v.target_type, v.target_id, v.metadata, v.ip_address, v.created_at)
+		 FROM (
+		     SELECT NULLIF($1,'')::uuid AS project_id, NULLIF($2,'')::uuid AS actor_id,
+		            $3::text AS actor_email, $4::text AS action, $5::text AS target_type,
+		            $6::text AS target_id, $7::jsonb AS metadata, $8::text AS ip_address, now() AS created_at
+		 ) v
+		 LEFT JOIN LATERAL (
+		     SELECT row_hash AS h FROM public.audit_log
+		     WHERE project_id IS NOT DISTINCT FROM NULLIF($1,'')::uuid
+		     ORDER BY seq DESC LIMIT 1
+		 ) p ON true`,
 		projectID, actorID, actorEmail, action,
 		o.targetType, o.targetID, metaJSON, o.ipAddress,
 	)
@@ -121,6 +161,11 @@ func (s *Service) Log(ctx context.Context, projectID, actorID, actorEmail, actio
 			"actor", actorEmail,
 			"error", err,
 		)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("audit log write failed (commit)", "action", action, "project_id", projectID, "error", err)
 	}
 }
 
