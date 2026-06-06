@@ -13,6 +13,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// filterShape returns the column + operator of each filter, deliberately
+// DROPPING the filter value. Filter values are routinely personal data
+// (e.g. ?email=eq.john@example.com), so writing them into the append-only,
+// retained, WORM-exported access log would turn the compliance log into a
+// secondary PII store — the opposite of data minimisation. We log the query
+// shape (which columns were filtered on, how), never the predicate values.
+func filterShape(filters []Filter) []map[string]string {
+	shape := make([]map[string]string, 0, len(filters))
+	for _, f := range filters {
+		shape = append(shape, map[string]string{"column": f.Column, "op": f.Operator})
+	}
+	return shape
+}
+
 // recordRead emits a personal-data access-log event for a tenant-table read.
 // Fire-and-forget through the context recorder (a nil recorder is a safe
 // no-op), so it never affects the read's latency or outcome.
@@ -282,9 +296,10 @@ func handleSelectRows(engine *QueryEngine) http.HandlerFunc {
 		}
 
 		// GDPR access log: a tenant-table read happened. Record the query
-		// shape (not the row contents) so we know who read what, when.
+		// SHAPE only (columns + operators, never predicate values, which are
+		// themselves personal data) so we know who read what, when.
 		recordRead(r.Context(), tableName, map[string]interface{}{
-			"filters":  params.Filters,
+			"filters":  filterShape(params.Filters),
 			"limit":    params.Limit,
 			"offset":   params.Offset,
 			"returned": len(rows),

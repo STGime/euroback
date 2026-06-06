@@ -29,7 +29,12 @@ One row per personal-data **read**, **export**, or **download**:
 
 `target_keys` records the **query shape**, never the row *contents* — the log
 says what was accessed, not the personal data itself (which would defeat the
-purpose).
+purpose). Concretely, for list reads it stores only each filter's **column and
+operator**, never the predicate **value**: `?email=eq.john@example.com` logs
+`{"filters":[{"column":"email","op":"eq"}]}`. Filter values are themselves
+personal data, so writing them here would make the append-only, WORM-exported
+compliance log a secondary PII store. The by-id case keeps `{"id": …}` — a
+necessary "which record" pointer, not a content value.
 
 ### Hook points
 
@@ -67,6 +72,12 @@ purpose).
 Default is full coverage (sample every read) so compliance holds out of the
 box; the knob exists for projects where read volume makes 1:1 logging
 expensive.
+
+> **Caveat:** lowering `AUDIT_DATA_ACCESS_READ_SAMPLE` below `1.0` samples
+> *all* reads, including single-record `GET /v1/db/{table}/{id}` lookups — so a
+> targeted read of one data subject's record may not be logged. If you need a
+> guaranteed answer to "who read this person's record?", keep the sample at
+> `1.0`. Exports and downloads are always logged regardless.
 
 ## Storage: monthly partitions (migration 000059)
 

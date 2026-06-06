@@ -156,6 +156,9 @@ func (r *AccessRecorder) Close(ctx context.Context) {
 	go func() { r.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		if d := atomic.LoadInt64(&r.dropped); d > 0 {
+			slog.Warn("data access logger drained", "dropped_total", d)
+		}
 	case <-ctx.Done():
 		slog.Warn("data access logger drain timed out", "dropped_total", atomic.LoadInt64(&r.dropped))
 	}
