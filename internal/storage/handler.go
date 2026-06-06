@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/query"
@@ -18,6 +19,35 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// recordDownload emits a GDPR personal-data access-log event for a successful
+// storage download. Fire-and-forget via the context recorder (nil-safe).
+func recordDownload(r *http.Request, key string) {
+	rec := audit.AccessRecorderFromContext(r.Context())
+	if rec == nil {
+		return
+	}
+	var projectID, endUserID, role string
+	if eu, ok := auth.EndUserClaimsFromContext(r.Context()); ok && eu != nil {
+		projectID, endUserID, role = eu.ProjectID, eu.UserID, "authenticated"
+	} else if _, ok := auth.ClaimsFromContext(r.Context()); ok {
+		role = "platform"
+		if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil {
+			projectID = pc.ProjectID
+		}
+	} else if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil {
+		projectID, role = pc.ProjectID, audit.EffectiveRole(pc.KeyType, "")
+	}
+	rec.Record(audit.AccessEvent{
+		ProjectID:   projectID,
+		EndUserID:   endUserID,
+		ActorRole:   role,
+		Action:      audit.AccessActionDownload,
+		TargetTable: "storage_objects",
+		TargetKeys:  map[string]interface{}{"key": key},
+		IP:          audit.ClientIPFromContext(r.Context()),
+	})
+}
 
 // maxUploadSize is the gateway-enforced maximum for multipart uploads (50 MB).
 const maxUploadSize = 50 << 20 // 50 MB
@@ -317,6 +347,9 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer body.Close()
+
+	// GDPR access log: a personal-data object is being downloaded.
+	recordDownload(r, key)
 
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)

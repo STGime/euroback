@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,7 @@ import (
 	// image, which ships no /usr/share/zoneinfo (schedules API timezones).
 	_ "time/tzdata"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
@@ -382,8 +384,26 @@ func main() {
 		}
 	}()
 
+	// ── Personal-data access logger (Tier-1 GDPR #4) ──
+	// Async, sampled, batched writer to public.data_access_log. Reads on the
+	// gateway pool; never on the request critical path. Config:
+	//   AUDIT_DATA_ACCESS_ENABLED      "false" disables it entirely (default on)
+	//   AUDIT_DATA_ACCESS_READ_SAMPLE  P(log) for reads, 0..1 (default 1 = all)
+	accessCfg := audit.DefaultAccessRecorderConfig()
+	if os.Getenv("AUDIT_DATA_ACCESS_ENABLED") == "false" {
+		accessCfg.Enabled = false
+	}
+	if v := os.Getenv("AUDIT_DATA_ACCESS_READ_SAMPLE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			accessCfg.ReadSample = f
+		} else {
+			slog.Warn("ignoring invalid AUDIT_DATA_ACCESS_READ_SAMPLE", "value", v)
+		}
+	}
+	accessRecorder := audit.NewAccessRecorder(pool, accessCfg)
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
@@ -416,6 +436,9 @@ func main() {
 		slog.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)
 	}
+
+	// Flush buffered data-access-log events before closing the pool.
+	accessRecorder.Close(shutdownCtx)
 
 	pool.Close()
 	slog.Info("gateway shut down cleanly")

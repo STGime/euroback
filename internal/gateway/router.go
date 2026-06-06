@@ -20,10 +20,10 @@ import (
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/metrics"
 	"github.com/eurobase/euroback/internal/plans"
-	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
+	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
@@ -48,7 +48,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -151,7 +151,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		var platformRateCheck auth.AuthRateLimiter
 		if limiter != nil {
 			platformRateCheck = func(w http.ResponseWriter, r *http.Request, action, identifier string) bool {
-				limits := map[string]struct{ limit int; window time.Duration }{
+				limits := map[string]struct {
+					limit  int
+					window time.Duration
+				}{
 					"platform_signup":    {ratelimit.SignupLimit, ratelimit.SignupWindow},
 					"platform_forgot":    {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
 					"signin_fail":        {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
@@ -159,7 +162,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				}
 				cfg, ok := limits[action]
 				if !ok {
-					cfg = struct{ limit int; window time.Duration }{5, 15 * time.Minute}
+					cfg = struct {
+						limit  int
+						window time.Duration
+					}{5, 15 * time.Minute}
 				}
 				return ratelimit.CheckAuthRate(limiter, w, r.Context(), action, identifier, cfg.limit, cfg.window)
 			}
@@ -500,6 +506,20 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 	// ── SDK routes (API key authenticated) ──
 	r.Route("/v1", func(r chi.Router) {
+		// Personal-data access logging (Tier-1 GDPR #4). Stash the recorder and
+		// the resolved client IP in the request context so the db/storage/auth
+		// handlers below can record reads/exports/downloads without new
+		// constructor params. Runs before the auth middleware (which only
+		// populate project/end-user context) — both values here are available
+		// immediately; handlers read project/user from context at record time.
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx := audit.WithAccessRecorder(r.Context(), accessRecorder)
+				ctx = audit.WithClientIP(ctx, ratelimit.ClientIP(r))
+				next.ServeHTTP(w, r.WithContext(ctx))
+			})
+		})
+
 		// OAuth callbacks — no API key needed; project resolved via subdomain.
 		// These must be outside the apiKeyMw group because the OAuth provider
 		// redirects back without forwarding the apikey query parameter.

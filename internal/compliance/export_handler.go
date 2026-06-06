@@ -374,6 +374,20 @@ func HandleSelfServeExport(pool *pgxpool.Pool, s3 *storage.S3Client, auditSvc *a
 				audit.WithIP(r.RemoteAddr))
 		}
 
+		// GDPR access log: a bulk export of this user's personal data was
+		// requested. Always logged (not sampled) — exports touch everything.
+		if rec := audit.AccessRecorderFromContext(r.Context()); rec != nil {
+			rec.Record(audit.AccessEvent{
+				ProjectID:   pc.ProjectID,
+				EndUserID:   userID,
+				ActorRole:   "authenticated",
+				Action:      audit.AccessActionExport,
+				TargetTable: "*",
+				TargetKeys:  map[string]interface{}{"export_id": req.ID, "format": body.Format, "scope": "user"},
+				IP:          audit.ClientIPFromContext(r.Context()),
+			})
+		}
+
 		writeExportJSON(w, req, http.StatusAccepted)
 	}
 }
