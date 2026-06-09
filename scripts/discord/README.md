@@ -50,6 +50,19 @@ Everything lives in `config.js`:
 
 Edit, save, re-run. Only new items are created.
 
+## Welcome & rules messages
+
+After the server exists, post the pinned `#welcome` and `#rules` messages:
+
+```bash
+DISCORD_TOKEN=your_bot_token DISCORD_GUILD_ID=your_guild_id node post-messages.js
+```
+
+Edit the copy in `messages.js` and re-run — it's idempotent: in each channel
+it **edits its previous post** instead of adding a duplicate (first run sends +
+pins). The bot needs **Send Messages**, **Read Message History**, and (to pin)
+**Manage Messages** in those channels.
+
 ## Integrations
 
 Three automations post into the server. Each needs a **channel webhook URL**,
