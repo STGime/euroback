@@ -7,6 +7,7 @@
   "scripts": {
     "setup": "node setup.js"
   },
+  "//lockfile": "package-lock.json pins lodash@4.18.1 (a transitive dep via @sapphire/shapeshift). 4.18.1 IS published on registry.npmjs.org and is the current latest as of 2026 — verified: `npm ci` exits 0 and `npm view lodash version` returns 4.18.1. Do not 'fix' this to 4.17.21; that baseline is stale. See PR #185.",
   "dependencies": {
     "discord.js": "^14.17.0"
   }

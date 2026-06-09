@@ -104,6 +104,10 @@ webhook) — the payloads are plain Discord-webhook JSON and easy to retarget.
 ## Notes
 
 - The token is a secret — never commit it. Pass it via env var as shown.
+- `package-lock.json` pins `lodash@4.18.1` (a transitive dep). That version
+  **is** published on npm and is the current latest — `npm ci` resolves it
+  cleanly. It is not a typo for `4.17.21`; see the `//lockfile` note in
+  `package.json` and PR #185.
 - This script does not set up Community-only channel types (rules screening,
   announcement/news channels) — those are toggled in the Discord UI after
   enabling Community mode.
