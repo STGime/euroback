@@ -32,6 +32,20 @@ spec:
           ports:
             - containerPort: 3000
               protocol: TCP
+          env:
+            # Optional public Discord invite link. When set, the console shows a
+            # "Join Discord" link on the login page and in the sidebar. Read at
+            # runtime via $env/dynamic/public (adapter-node), so changing it only
+            # needs a console pod restart — no image rebuild. To set it:
+            #   kubectl -n eurobase patch configmap eurobase-config --type merge \
+            #     -p '{"data":{"discord_url":"https://discord.gg/XXXX"}}'
+            #   kubectl -n eurobase rollout restart deployment/console
+            - name: PUBLIC_DISCORD_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: eurobase-config
+                  key: discord_url
+                  optional: true
           resources:
             requests:
               cpu: "100m"

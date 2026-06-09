@@ -3,6 +3,9 @@
 	import { page } from '$app/stores';
 	import { user } from '$lib/stores.js';
 	import { api } from '$lib/api.js';
+	import { env } from '$env/dynamic/public';
+	import DiscordIcon from '$lib/DiscordIcon.svelte';
+	import { DISCORD_DISCLOSURE } from '$lib/discord';
 
 	let email = $state('');
 	let password = $state('');
@@ -295,6 +298,24 @@
 				<br />
 				No US CLOUD Act exposure. GDPR compliant by design.
 			</p>
+
+			{#if env.PUBLIC_DISCORD_URL}
+				<div class="mt-6 border-t border-gray-200 pt-6 text-center">
+					<a
+						href={env.PUBLIC_DISCORD_URL}
+						target="_blank"
+						rel="noopener noreferrer"
+						aria-describedby="discord-disclosure"
+						class="inline-flex items-center gap-2 text-sm font-medium text-eurobase-600 hover:text-eurobase-700"
+					>
+						<DiscordIcon />
+						Join our Discord community
+					</a>
+					<p id="discord-disclosure" class="mt-2 text-xs text-gray-400">
+						{DISCORD_DISCLOSURE}
+					</p>
+				</div>
+			{/if}
 		</div>
 	</div>
 </div>

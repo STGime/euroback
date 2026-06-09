@@ -5,6 +5,9 @@
 	import { user, logout } from '$lib/stores.js';
 	import { api } from '$lib/api.js';
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
+	import { env } from '$env/dynamic/public';
+	import DiscordIcon from '$lib/DiscordIcon.svelte';
+	import { DISCORD_DISCLOSURE } from '$lib/discord';
 
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
@@ -92,6 +95,18 @@
 
 			<!-- Sidebar footer -->
 			<div class="border-t border-gray-200 p-4 space-y-3">
+				{#if env.PUBLIC_DISCORD_URL}
+					<a
+						href={env.PUBLIC_DISCORD_URL}
+						target="_blank"
+						rel="noopener noreferrer"
+						title={DISCORD_DISCLOSURE}
+						class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors"
+					>
+						<DiscordIcon />
+						Community Discord
+					</a>
+				{/if}
 				<button
 					onclick={handleLogout}
 					class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors cursor-pointer"
