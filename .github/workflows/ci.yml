@@ -237,6 +237,9 @@ jobs:
           # reaching cluster-internal IPs.
           kubectl apply -f deploy/k8s/functions-networkpolicy.yaml
           kubectl apply -f deploy/k8s/mcp-server.yaml
+          # Health monitor → Discord #alerts. Reads DISCORD_ALERTS_WEBHOOK
+          # from eurobase-secrets (optional key); no-ops if it's unset.
+          kubectl apply -f deploy/k8s/health-monitor-cronjob.yaml
 
       - name: Run database migrations
         run: |
@@ -287,3 +290,35 @@ jobs:
           kubectl rollout status deployment/console -n eurobase --timeout=120s
           kubectl rollout status deployment/functions -n eurobase --timeout=120s
           kubectl rollout status deployment/mcp-server -n eurobase --timeout=120s
+
+      # ----------------------------------------------------------------------
+      # Discord #deploys notifications. Configure the channel webhook URL as
+      # the repo secret DISCORD_DEPLOY_WEBHOOK. Both steps no-op if it's unset.
+      # ----------------------------------------------------------------------
+      - name: Notify Discord — deploy succeeded
+        if: ${{ success() && env.WEBHOOK != '' }}
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+        run: |
+          payload=$(jq -n \
+            --arg title "✅ Deploy succeeded" \
+            --arg url "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
+            --arg desc "\`${GITHUB_SHA:0:7}\` deployed to production by ${{ github.actor }}." \
+            '{embeds: [{title: $title, url: $url, description: $desc, color: 3066993}]}')
+          # Never let a Discord hiccup flip a good deploy to failed (which would
+          # also trip the failure-notify step below). Warn, don't fail.
+          curl -fsS -X POST "$WEBHOOK" -H "Content-Type: application/json" -d "$payload" \
+            || echo "::warning::Discord deploy notification failed"
+
+      - name: Notify Discord — deploy failed
+        if: ${{ failure() && env.WEBHOOK != '' }}
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+        run: |
+          payload=$(jq -n \
+            --arg title "❌ Deploy failed" \
+            --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg desc "\`${GITHUB_SHA:0:7}\` by ${{ github.actor }} failed. [View run logs →](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            '{embeds: [{title: $title, url: $url, description: $desc, color: 15158332}]}')
+          curl -fsS -X POST "$WEBHOOK" -H "Content-Type: application/json" -d "$payload" \
+            || echo "::warning::Discord deploy notification failed"

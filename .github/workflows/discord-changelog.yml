@@ -1,0 +1,43 @@
+##############################################################################
+# Eurobase → Discord #changelog
+# Posts GitHub release notes to the Discord #changelog channel when a
+# release is published. Configure the channel webhook URL as the repo
+# secret DISCORD_CHANGELOG_WEBHOOK (Settings → Secrets and variables →
+# Actions). If the secret is unset, the job no-ops instead of failing.
+##############################################################################
+name: Discord changelog
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post release to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_CHANGELOG_WEBHOOK }}
+          REL_NAME: ${{ github.event.release.name || github.event.release.tag_name }}
+          REL_TAG: ${{ github.event.release.tag_name }}
+          REL_URL: ${{ github.event.release.html_url }}
+          REL_BODY: ${{ github.event.release.body }}
+          REPO: ${{ github.repository }}
+        if: ${{ env.WEBHOOK != '' }}
+        run: |
+          # Discord embed descriptions cap at 4096 chars — truncate long notes.
+          body="${REL_BODY:-_No release notes._}"
+          if [ "${#body}" -gt 4000 ]; then
+            body="${body:0:4000}…"$'\n\n'"[Full notes →](${REL_URL})"
+          fi
+          # Build JSON with jq so release-note markdown/quotes can't break it.
+          payload=$(jq -n \
+            --arg title "🚀 $REPO $REL_NAME" \
+            --arg url "$REL_URL" \
+            --arg desc "$body" \
+            --arg footer "$REL_TAG" \
+            '{embeds: [{title: $title, url: $url, description: $desc,
+                        color: 3066993, footer: {text: $footer}}]}')
+          curl -fsS -X POST "$WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$payload"

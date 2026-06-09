@@ -1,0 +1,93 @@
+##############################################################################
+# Eurobase health monitor → Discord #alerts
+# Polls the gateway /health endpoint on a schedule and posts to the Discord
+# #alerts channel when it's unreachable or returns non-200.
+#
+# Webhook URL is read from the `eurobase-secrets` Secret key
+# DISCORD_ALERTS_WEBHOOK (optional — if unset, the job logs and skips the
+# post, so adding this manifest never breaks a deploy on its own).
+#
+# Add the secret key alongside the others, e.g.:
+#   kubectl -n eurobase patch secret eurobase-secrets --type merge \
+#     -p '{"stringData":{"DISCORD_ALERTS_WEBHOOK":"https://discord.com/api/webhooks/..."}}'
+##############################################################################
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: health-monitor
+  namespace: eurobase
+  labels:
+    app: health-monitor
+    component: observability
+spec:
+  # Every 5 minutes. Widen (e.g. "*/15 * * * *") if alerts get noisy during
+  # a sustained outage — each failing run posts once.
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      # Don't retry the pod — the script handles its own retries and we don't
+      # want a backoff storm to multiply alerts.
+      backoffLimit: 0
+      activeDeadlineSeconds: 90
+      template:
+        metadata:
+          labels:
+            app: health-monitor
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: probe
+              image: curlimages/curl:8.11.1
+              resources:
+                requests:
+                  memory: "16Mi"
+                  cpu: "10m"
+                limits:
+                  memory: "32Mi"
+                  cpu: "50m"
+              env:
+                - name: HEALTH_URL
+                  value: "https://api.eurobase.app/health"
+                - name: DISCORD_ALERTS_WEBHOOK
+                  valueFrom:
+                    secretKeyRef:
+                      name: eurobase-secrets
+                      key: DISCORD_ALERTS_WEBHOOK
+                      optional: true
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -u
+                  # Probe up to 3 times before declaring an outage, so a single
+                  # transient blip doesn't page the channel.
+                  code=000
+                  for i in 1 2 3; do
+                    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" || echo 000)
+                    [ "$code" = "200" ] && break
+                    sleep 5
+                  done
+
+                  if [ "$code" = "200" ]; then
+                    echo "health OK ($HEALTH_URL)"
+                    exit 0
+                  fi
+
+                  echo "health DOWN: $HEALTH_URL returned $code"
+                  if [ -z "${DISCORD_ALERTS_WEBHOOK:-}" ]; then
+                    echo "DISCORD_ALERTS_WEBHOOK not set — skipping Discord post"
+                    exit 1
+                  fi
+
+                  desc="\`$HEALTH_URL\` returned **$code** after 3 attempts."
+                  payload=$(printf '{"embeds":[{"title":"%s","description":"%s","color":%s}]}' \
+                    "🔴 Eurobase health check failed" "$desc" "15158332")
+                  curl -fsS -X POST "$DISCORD_ALERTS_WEBHOOK" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" || echo "failed to post Discord alert"
+                  # Exit non-zero so the Job shows as failed for kubectl visibility.
+                  exit 1
