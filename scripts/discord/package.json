@@ -1,0 +1,13 @@
+{
+  "name": "eurobase-discord-setup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Idempotent setup script for the Eurobase community Discord server.",
+  "type": "commonjs",
+  "scripts": {
+    "setup": "node setup.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.17.0"
+  }
+}
