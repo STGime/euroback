@@ -305,7 +305,10 @@ jobs:
             --arg url "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}" \
             --arg desc "\`${GITHUB_SHA:0:7}\` deployed to production by ${{ github.actor }}." \
             '{embeds: [{title: $title, url: $url, description: $desc, color: 3066993}]}')
-          curl -fsS -X POST "$WEBHOOK" -H "Content-Type: application/json" -d "$payload"
+          # Never let a Discord hiccup flip a good deploy to failed (which would
+          # also trip the failure-notify step below). Warn, don't fail.
+          curl -fsS -X POST "$WEBHOOK" -H "Content-Type: application/json" -d "$payload" \
+            || echo "::warning::Discord deploy notification failed"
 
       - name: Notify Discord — deploy failed
         if: ${{ failure() && env.WEBHOOK != '' }}
@@ -317,4 +320,5 @@ jobs:
             --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --arg desc "\`${GITHUB_SHA:0:7}\` by ${{ github.actor }} failed. [View run logs →](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
             '{embeds: [{title: $title, url: $url, description: $desc, color: 15158332}]}')
-          curl -fsS -X POST "$WEBHOOK" -H "Content-Type: application/json" -d "$payload"
+          curl -fsS -X POST "$WEBHOOK" -H "Content-Type: application/json" -d "$payload" \
+            || echo "::warning::Discord deploy notification failed"

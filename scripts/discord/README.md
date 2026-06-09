@@ -89,6 +89,18 @@ single blip doesn't page). Change `HEALTH_URL` or the `schedule` in the
 manifest to adjust. Without the secret key, it still logs failures — it just
 doesn't post to Discord.
 
+## Sovereignty note
+
+Discord is a **US-based processor**, which sits outside Eurobase's EU-only
+infrastructure rule (`CLAUDE.md`). This is a **conscious, scoped exception**:
+only community content and **ops metadata** cross that boundary — deploy
+notifications (including the `github.actor` username of whoever pushed),
+release notes, and health/alert status. **No tenant data, end-user PII, or
+product data is sent to Discord.** The health monitor posts only a URL and an
+HTTP status code. If even ops-metadata egress is unacceptable, swap the
+notification sinks for an EU-hosted chat (e.g. a self-hosted Matrix/Mattermost
+webhook) — the payloads are plain Discord-webhook JSON and easy to retarget.
+
 ## Notes
 
 - The token is a secret — never commit it. Pass it via env var as shown.

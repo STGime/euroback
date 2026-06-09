@@ -16,6 +16,7 @@
 
 const {
   Client,
+  Events,
   GatewayIntentBits,
   ChannelType,
   PermissionFlagsBits,
@@ -127,10 +128,19 @@ async function ensureCategories(guild, roleMap) {
   }
 }
 
-client.once("clientReady", async () => {
+// Use the Events.ClientReady enum, not a string literal, so the handler name
+// always matches the installed discord.js version (the event was renamed from
+// "ready" to "clientReady" in v14.16; this resolves correctly on either).
+client.once(Events.ClientReady, async () => {
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
     console.log(`Setting up "${guild.name}"\n`);
+
+    // Populate the caches we match against, so re-runs reliably see existing
+    // roles/channels and stay idempotent even if the gateway READY hasn't
+    // backfilled them yet.
+    await guild.roles.fetch();
+    await guild.channels.fetch();
 
     console.log("Roles:");
     const roleMap = await ensureRoles(guild);
