@@ -266,6 +266,47 @@ Deno.test("user JS gets handler shape via exports.default", async () => {
   assertEquals(result.status, 202);
 });
 
+Deno.test("esbuild CommonJS output (export default) is detected (issue #189)", async () => {
+  // Literal shape of `esbuild --format=cjs` output for
+  // `export default async (req) => ...` — module.exports is REPLACED
+  // with a fresh object whose .default is a getter, so the plain
+  // exports.default check never sees it.
+  const result = await spawnAndInvoke({
+    userCode: `
+      var __defProp = Object.defineProperty;
+      var __export = (target, all) => {
+        for (var name in all)
+          __defProp(target, name, { get: all[name], enumerable: true });
+      };
+      var stdin_exports = {};
+      __export(stdin_exports, { default: () => stdin_default });
+      module.exports = stdin_exports;
+      var stdin_default = async (req, ctx) => {
+        return new Response("via esbuild cjs", { status: 203 });
+      };
+    `,
+  });
+  assert(result.ok, `expected detection of module.exports.default: ${result.error ?? ""}`);
+  assertEquals(result.status, 203);
+  assertEquals(result.body, "via esbuild cjs");
+});
+
+Deno.test("require() of a third-party module fails at load with a clear message (issue #189)", async () => {
+  // Third-party imports compile to require() calls; the bootstrap stub
+  // must reject them with an actionable error, not a ReferenceError.
+  const result = await spawnAndInvoke({
+    userCode: `
+      const { serve } = require("https://deno.land/std/http/server.ts");
+      globalThis.handler = async () => new Response("unreachable");
+    `,
+  });
+  assert(!result.ok);
+  assert(
+    String(result.error).includes("third-party imports are not supported"),
+    `expected the require-stub message, got: ${result.error}`,
+  );
+});
+
 Deno.test("ctx.db.sql proxies to the parent via RPC", async () => {
   let recordedQuery = "";
   let recordedParams: unknown[] = [];

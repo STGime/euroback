@@ -166,19 +166,20 @@
 		if (!newName.trim()) return;
 		creating = true;
 		try {
-			// Closes #117. The runner loads user code with `new Function(wrapped)()`,
-			// not as a module — so `import` / `export default` would fail on parse.
-			// Use `module.exports = async (req, ctx) => …` (or
-			// `globalThis.handler = …` / `exports.default = …`).
-			const defaultCode = `// Eurobase edge function.
+			// The gateway transpiles TS/ESM to runner-executable JS on deploy
+			// (esbuild, closes #189), so `export default` and TypeScript work.
+			// Third-party imports still don't — there is no module loader in
+			// the sandbox.
+			const defaultCode = `// Eurobase edge function — TypeScript or JavaScript.
 //
 // Runtime contract:
 //   • Export your handler with one of:
-//       module.exports = async (req, ctx) => { ... }   ← recommended
+//       export default async (req, ctx) => { ... }      ← recommended
+//       module.exports = async (req, ctx) => { ... }
 //       globalThis.handler = async (req, ctx) => { ... }
-//       exports.default   = async (req, ctx) => { ... }
-//   • No \`import\` / \`export default\` — the runner does not load
-//     user code as an ES module.
+//   • TypeScript is compiled on deploy (types stripped, not checked).
+//   • No third-party imports (\`import … from "https://…"\`, npm) —
+//     inline dependencies into the function file.
 //
 // Available on \`ctx\`:
 //   ctx.db.sql(query, params)              run SQL on your tenant schema
