@@ -38,3 +38,38 @@ export function tenantFuncRole(schemaName: string): string {
 export function quoteIdent(s: string): string {
   return '"' + s.replaceAll('"', '""') + '"';
 }
+
+// rlsContextStatements returns the per-transaction set_config statements
+// that mirror the gateway's RLS context (internal/query/engine.go,
+// applyRLSContext) so auth_uid() / is_service_role() behave identically
+// in edge functions and gateway REST (closes #188).
+//
+// With an end-user (gateway sets X-User-ID from verified claims, covered
+// by the HMAC signature) the function acts as that user: policies see
+// app.end_user_role='authenticated' and auth_uid() = the user. Without
+// one, function code is developer-authored server-side code, so it gets
+// the service branch — same as gateway secret-key traffic. The 'anon'
+// branch is deliberately not mirrored: anonymous *end-user* access only
+// makes sense for client-issued queries, not for tenant-deployed code.
+export function rlsContextStatements(
+  userId: string,
+): Array<{ sql: string; params: string[] }> {
+  if (userId) {
+    return [
+      {
+        sql: "SELECT set_config('app.end_user_id', $1, true)",
+        params: [userId],
+      },
+      {
+        sql: "SELECT set_config('app.end_user_role', 'authenticated', true)",
+        params: [],
+      },
+    ];
+  }
+  return [
+    {
+      sql: "SELECT set_config('app.end_user_role', 'service', true)",
+      params: [],
+    },
+  ];
+}

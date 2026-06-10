@@ -8,7 +8,7 @@
  * is NEVER exposed to the public internet. Only the Gateway can reach it.
  */
 
-import { quoteIdent, tenantFuncRole, validIdentRe } from "./role.ts";
+import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import type {
   ParentToWorker,
   SerializedRequest,
@@ -231,6 +231,12 @@ async function executeFunction(
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
       await tx.unsafe(setPathSQL);
+      // Mirror the gateway's RLS context so auth_uid() /
+      // is_service_role() behave the same in functions as in gateway
+      // REST — see rlsContextStatements in role.ts. Closes #188.
+      for (const stmt of rlsContextStatements(userId)) {
+        await tx.unsafe(stmt.sql, stmt.params);
+      }
       return await tx.unsafe(query, params);
     });
   }
