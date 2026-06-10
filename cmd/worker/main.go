@@ -9,6 +9,9 @@ import (
 	"syscall"
 
 	"time"
+	// Embed IANA tzdata so time.LoadLocation works in the alpine runtime
+	// image, which ships no /usr/share/zoneinfo (cron schedule timezones).
+	_ "time/tzdata"
 
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
