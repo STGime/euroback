@@ -9,6 +9,7 @@
  */
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
+import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
   SerializedRequest,
@@ -128,8 +129,11 @@ async function getDB() {
 
 // ── Load function code ──
 
-async function loadFunction(functionId: string): Promise<CachedFunction | null> {
-  const cached = getCached(functionId);
+async function loadFunction(functionId: string, version: string | null = null): Promise<CachedFunction | null> {
+  // Key by id+version so a redeploy is effective immediately instead of
+  // after TTL expiry — see cache_key.ts (closes #200).
+  const cacheKey = functionCacheKey(functionId, version);
+  const cached = getCached(cacheKey);
   if (cached) return cached;
 
   try {
@@ -150,7 +154,7 @@ async function loadFunction(functionId: string): Promise<CachedFunction | null> 
       env_vars: typeof row.env_vars === "string" ? JSON.parse(row.env_vars) : row.env_vars,
       cachedAt: Date.now(),
     };
-    setCache(functionId, fn);
+    setCache(cacheKey, fn);
     return fn;
   } catch (err) {
     console.error("Failed to load function:", err);
@@ -587,6 +591,7 @@ Deno.serve({ port: PORT }, async (req: Request): Promise<Response> => {
   // Function invocation.
   if (url.pathname === "/invoke") {
     const functionId = req.headers.get("X-Function-ID");
+    const functionVersion = req.headers.get("X-Function-Version");
     const requestId = req.headers.get("X-Request-ID") ?? crypto.randomUUID();
     const plan = req.headers.get("X-Plan") ?? "free";
 
@@ -615,7 +620,7 @@ Deno.serve({ port: PORT }, async (req: Request): Promise<Response> => {
     }
 
     // Load function code.
-    const fn = await loadFunction(functionId);
+    const fn = await loadFunction(functionId, functionVersion);
     if (!fn) {
       return jsonResponse({ error: "Function not found or disabled", requestId }, 404);
     }
