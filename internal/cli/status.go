@@ -31,34 +31,40 @@ func StatusCmd() *cobra.Command {
 				return err
 			}
 
-			var usage struct {
-				ProjectName string  `json:"project_name"`
-				ProjectSlug string  `json:"project_slug"`
-				Plan        string  `json:"plan"`
-				DbUsageMB   float64 `json:"db_usage_mb"`
-				DbLimitMB   float64 `json:"db_limit_mb"`
-				StorageMB   float64 `json:"storage_usage_mb"`
-				StorageMax  float64 `json:"storage_limit_mb"`
-				MAU         int     `json:"mau"`
-				MAULimit    int     `json:"mau_limit"`
+			// The endpoint (internal/plans/handler.go HandleGetUsage)
+			// returns {usage: {...}, limits: {...}} — the CLI previously
+			// expected a flat shape that matched nothing, so status
+			// printed `Project:  ()` with zeroed bars (issue #192).
+			var resp struct {
+				Usage struct {
+					DatabaseSizeMB float64 `json:"database_size_mb"`
+					StorageSizeMB  float64 `json:"storage_size_mb"`
+					MAUCount       int     `json:"mau_count"`
+				} `json:"usage"`
+				Limits struct {
+					Plan      string `json:"plan"`
+					DBSizeMB  int    `json:"db_size_mb"`
+					StorageMB int    `json:"storage_mb"`
+					MAULimit  int    `json:"mau_limit"`
+				} `json:"limits"`
 			}
-			if err := json.Unmarshal(data, &usage); err != nil {
+			if err := json.Unmarshal(data, &resp); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
 			}
 
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			if jsonOut {
-				PrintJSON(usage)
+				PrintJSON(resp)
 				return nil
 			}
 
-			fmt.Printf("%sProject:%s %s (%s)\n", colorBold, colorReset, usage.ProjectName, usage.ProjectSlug)
-			fmt.Printf("%sPlan:%s    %s\n", colorBold, colorReset, usage.Plan)
+			fmt.Printf("%sProject:%s %s\n", colorBold, colorReset, ProjectLabel(cfg))
+			fmt.Printf("%sPlan:%s    %s\n", colorBold, colorReset, resp.Limits.Plan)
 			fmt.Println()
 
-			printBar("Database", usage.DbUsageMB, usage.DbLimitMB, "MB")
-			printBar("Storage", usage.StorageMB, usage.StorageMax, "MB")
-			printBarInt("MAU", usage.MAU, usage.MAULimit)
+			printBar("Database", resp.Usage.DatabaseSizeMB, float64(resp.Limits.DBSizeMB), "MB")
+			printBar("Storage", resp.Usage.StorageSizeMB, float64(resp.Limits.StorageMB), "MB")
+			printBarInt("MAU", resp.Usage.MAUCount, resp.Limits.MAULimit)
 
 			return nil
 		},

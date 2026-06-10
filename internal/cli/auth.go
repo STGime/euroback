@@ -83,17 +83,16 @@ func LoginCmd() *cobra.Command {
 			cfg.Token = result.AccessToken
 			cfg.Email = email
 
-			// Try to fetch projects and auto-select if only one
+			// Fetch projects: auto-select a single-project account, and
+			// validate any previously stored active project against this
+			// account's list so a stale selection (other account, deleted
+			// project) can't silently receive deploys (issue #192).
 			client.Token = result.AccessToken
 			projectsData, err := client.Get("/v1/tenants")
 			if err == nil {
-				var projects []struct {
-					ID   string `json:"id"`
-					Slug string `json:"slug"`
-				}
-				if json.Unmarshal(projectsData, &projects) == nil && len(projects) == 1 {
-					cfg.ActiveProject = projects[0].ID
-					cfg.ProjectSlug = projects[0].Slug
+				var projects []ProjectRef
+				if json.Unmarshal(projectsData, &projects) == nil {
+					ReconcileActiveProject(cfg, projects)
 				}
 			}
 
@@ -103,7 +102,9 @@ func LoginCmd() *cobra.Command {
 
 			PrintSuccess(fmt.Sprintf("Logged in as %s", email))
 			if cfg.ActiveProject != "" {
-				PrintSuccess(fmt.Sprintf("Active project: %s", cfg.ProjectSlug))
+				PrintSuccess(fmt.Sprintf("Active project: %s", ProjectLabel(cfg)))
+			} else {
+				fmt.Println("No active project — run `eurobase switch <slug>` to select one.")
 			}
 			return nil
 		},
