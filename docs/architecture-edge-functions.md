@@ -96,13 +96,22 @@ deploy/k8s/functions.yaml     — K8s Deployment + Service
 deploy/docker/Dockerfile.fn   — Deno runtime container image
 ```
 
-**Runtime:** Deno 2.x (V8 isolates, built-in TypeScript, secure by default)
+**Runtime:** Deno 2.x (V8 isolates, secure by default)
 
 **Why Deno, not Node:**
 - `--allow-net`, `--allow-read` etc. provide granular permission control
-- Built-in TypeScript (no build step)
 - Web-standard APIs (Request, Response, fetch) — same DX as Supabase Edge Functions
 - V8 isolates are lighter than Node processes (~2MB vs ~30MB per context)
+
+**TypeScript:** compiled at deploy time, not at runtime (closes #189). The
+gateway runs esbuild (`internal/functions/transpile.go`) on every deploy:
+types are stripped (NOT type-checked) and ES-module syntax
+(`export default`) is rewritten to the CommonJS shape the sandboxed
+worker loader detects. `code` keeps the original source; `compiled_code`
+is what the runner executes. Compile errors fail the deploy with
+line/column diagnostics. Third-party imports (URL or npm) are not
+supported — the sandbox has no module loader; the worker's `require`
+stub rejects them with a clear error.
 
 ### 2.2 Request Flow
 

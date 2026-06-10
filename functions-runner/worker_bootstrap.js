@@ -3,8 +3,10 @@
 // Closes GHSA-7428-mvpp-rhr7 layer 2.
 //
 // This script is loaded by the runner's main thread into a
-// per-invocation Worker that has `permissions: 'none'`:
-//   - net: false → user JS cannot fetch, open sockets, or connect to Postgres
+// per-invocation Worker. Permissions (see server.ts, which is the
+// source of truth — closes #83):
+//   - net: TRUE → user JS may fetch external APIs; cluster-internal
+//     egress (Postgres, gateway) is blocked by the k8s NetworkPolicy
 //   - env: false → user JS cannot read DATABASE_URL_FUNCTION_RUNNER
 //   - read: false → user JS cannot read /proc, /etc, or any file
 //   - write/run/ffi: false → no escape via FS, subprocess, or native code
@@ -91,38 +93,50 @@
   //   globalThis.handler = (req, ctx) => ... (most common)
   //   module.exports = (req, ctx) => ... (CommonJS)
   //   exports.default = (req, ctx) => ... (CommonJS default)
-  //
-  // Cannot detect `export default` syntax — that requires loading the
-  // user code as a module, which `permissions: 'none'` disallows. The
-  // runner documents this; existing functions already use the
-  // globalThis-or-exports patterns.
+  //   module.exports.default = (req, ctx) => ... (esbuild CommonJS
+  //     output for `export default` — the gateway transpiles TS/ESM
+  //     source to this shape on deploy, closes #189. esbuild REPLACES
+  //     module.exports with a fresh object, so the plain exports.default
+  //     check above never sees it.)
   const HANDLER_DETECT = `;
     if (typeof handler === 'function') globalThis.__userHandler = handler;
     else if (typeof exports !== 'undefined' && typeof exports.default === 'function') globalThis.__userHandler = exports.default;
     else if (typeof exports !== 'undefined' && typeof exports === 'function') globalThis.__userHandler = exports;
     else if (typeof module !== 'undefined' && typeof module.exports === 'function') globalThis.__userHandler = module.exports;
+    else if (typeof module !== 'undefined' && module.exports && typeof module.exports.default === 'function') globalThis.__userHandler = module.exports.default;
   `;
 
   function loadUser(code) {
     // Both `module` and `exports` are pre-defined so CommonJS-shaped
     // user code doesn't ReferenceError. They're throwaway; the
     // detection suffix copies any handler into __userHandler.
+    //
+    // `require` is a stub that always throws: third-party imports
+    // compile to require() calls (the gateway transpiles ESM to
+    // CommonJS on deploy) but the worker has no module loader, so the
+    // stub turns them into one clear load-time error instead of an
+    // opaque ReferenceError.
     const wrapped = `
       "use strict";
       const module = { exports: {} };
       const exports = module.exports;
+      const require = (spec) => {
+        throw new Error(
+          'third-party imports are not supported in edge functions yet (tried to import "' + spec + '") — inline the dependency into the function file',
+        );
+      };
       ${code}
       ${HANDLER_DETECT}
     `;
     // Function constructor evaluates in the worker's global context.
-    // The worker has `permissions: 'none'`, so even though Function is
-    // available, any capability-requiring API throws or returns
-    // undefined.
+    // The worker's permission set (see server.ts) denies everything
+    // except net, so even though Function is available, any other
+    // capability-requiring API throws or returns undefined.
     new Function(wrapped)();
     userHandler = globalThis.__userHandler;
     if (typeof userHandler !== "function") {
       throw new Error(
-        "Function must export a default handler — assign to globalThis.handler, exports.default, or module.exports",
+        "Function must export a default handler — use `export default async (req, ctx) => …`, assign to globalThis.handler, or use exports.default / module.exports",
       );
     }
   }

@@ -121,17 +121,25 @@ func (s *Service) Create(ctx context.Context, projectID string, req CreateReques
 		return nil, fmt.Errorf("code is required")
 	}
 
+	// TS/ESM source is compiled to runner-executable JS at deploy time
+	// (closes #189). `code` keeps the original source for editing;
+	// `compiled_code` is what the runner loads.
+	compiled, err := Transpile(req.Code)
+	if err != nil {
+		return nil, err
+	}
+
 	verifyJWT := true
 	if req.VerifyJWT != nil {
 		verifyJWT = *req.VerifyJWT
 	}
 
 	var f EdgeFunction
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO edge_functions (project_id, name, code, verify_jwt)
-		 VALUES ($1, $2, $3, $4)
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO edge_functions (project_id, name, code, compiled_code, verify_jwt)
+		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, project_id, name, code, verify_jwt, status, version, created_at, updated_at`,
-		projectID, req.Name, req.Code, verifyJWT,
+		projectID, req.Name, req.Code, compiled, verifyJWT,
 	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create edge function: %w", err)
@@ -163,8 +171,17 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 	envVars := existing.EnvVars
 	bumpVersion := false
 
+	// Only recompile when new code arrives. Metadata-only updates
+	// (status toggle, env vars) must keep working even if the stored
+	// source predates the transpile step and would no longer compile.
+	var compiled *string
 	if req.Code != nil {
 		code = *req.Code
+		c, err := Transpile(code)
+		if err != nil {
+			return nil, err
+		}
+		compiled = &c
 		bumpVersion = true
 	}
 	if req.VerifyJWT != nil {
@@ -192,10 +209,11 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 	var f EdgeFunction
 	err = s.pool.QueryRow(ctx,
 		`UPDATE edge_functions
-		 SET code = $3, verify_jwt = $4, status = $5, env_vars = $6, version = $7, updated_at = now()
+		 SET code = $3, compiled_code = COALESCE($8, compiled_code),
+		     verify_jwt = $4, status = $5, env_vars = $6, version = $7, updated_at = now()
 		 WHERE project_id = $1 AND name = $2
 		 RETURNING id, project_id, name, code, verify_jwt, status, version, created_at, updated_at`,
-		projectID, name, code, verifyJWT, status, envVars, version,
+		projectID, name, code, verifyJWT, status, envVars, version, compiled,
 	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("update edge function: %w", err)
@@ -350,6 +368,14 @@ func (s *Service) Rollback(ctx context.Context, projectID, name string, version 
 		return nil, fmt.Errorf("version %d not found: %w", version, err)
 	}
 
+	// Versions store source only — recompile it so the runner gets a
+	// fresh artifact. Failing here (a legacy version that never
+	// compiled) aborts the rollback with the diagnostic.
+	compiled, err := Transpile(code)
+	if err != nil {
+		return nil, fmt.Errorf("version %d: %w", version, err)
+	}
+
 	// Save current code as a new version before rollback.
 	if err := s.SaveVersion(ctx, fn.ID, fn.Version, fn.Code); err != nil {
 		slog.Warn("failed to save current version before rollback", "error", err)
@@ -360,10 +386,10 @@ func (s *Service) Rollback(ctx context.Context, projectID, name string, version 
 	var updated EdgeFunction
 	err = s.pool.QueryRow(ctx,
 		`UPDATE edge_functions
-		 SET code = $3, version = $4, updated_at = now()
+		 SET code = $3, compiled_code = $5, version = $4, updated_at = now()
 		 WHERE project_id = $1 AND name = $2
 		 RETURNING id, project_id, name, code, verify_jwt, status, version, created_at, updated_at`,
-		projectID, name, code, newVersion,
+		projectID, name, code, newVersion, compiled,
 	).Scan(&updated.ID, &updated.ProjectID, &updated.Name, &updated.Code, &updated.VerifyJWT, &updated.Status, &updated.Version, &updated.CreatedAt, &updated.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("rollback edge function: %w", err)

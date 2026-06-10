@@ -134,8 +134,12 @@ async function loadFunction(functionId: string): Promise<CachedFunction | null> 
 
   try {
     const db = await getDB();
+    // compiled_code is the esbuild artifact the gateway produces on
+    // deploy (TS stripped, ESM -> CommonJS, closes #189). NULL means
+    // the function predates the transpile step — fall back to the raw
+    // source, which for those functions is plain JS by contract.
     const [row] = await db`
-      SELECT code, COALESCE(env_vars, '{}') as env_vars
+      SELECT COALESCE(compiled_code, code) AS code, COALESCE(env_vars, '{}') as env_vars
       FROM edge_functions
       WHERE id = ${functionId} AND status = 'active'
     `;
