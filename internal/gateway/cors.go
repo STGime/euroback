@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -49,6 +50,16 @@ func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 				// Not allowed by global or per-project. For preflight
 				// respond 204 with no CORS headers so the browser
 				// rejects the real request.
+				//
+				// One greppable line per rejection (issue #198):
+				// without it the only symptom is a missing response
+				// header, invisible outside browser devtools.
+				projectID := ""
+				if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil {
+					projectID = pc.ProjectID
+				}
+				slog.Warn("CORS: origin not allowlisted, browser will block the response",
+					"origin", origin, "project_id", projectID, "path", r.URL.Path)
 				if r.Method == http.MethodOptions {
 					w.WriteHeader(http.StatusNoContent)
 					return

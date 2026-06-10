@@ -109,3 +109,18 @@ func TestValidate_RejectsCORSOriginWithQueryOrFragment(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultAuthConfig_CORSMatchesRedirectURLs(t *testing.T) {
+	// Issue #198: the default redirect_urls and cors_origins must agree —
+	// an origin trusted for OAuth redirects must also be able to call the
+	// API from a browser, or the scaffold's own target origin is blocked.
+	cfg := DefaultAuthConfig()
+	for _, u := range cfg.RedirectURLs {
+		if !cfg.IsCORSOriginAllowed(u) {
+			t.Errorf("default redirect URL %q is not CORS-allowed by default", u)
+		}
+	}
+	if !cfg.IsCORSOriginAllowed("http://localhost:3000") {
+		t.Error("default config must CORS-allow http://localhost:3000")
+	}
+}
