@@ -111,7 +111,8 @@ worker loader detects. `code` keeps the original source; `compiled_code`
 is what the runner executes. Compile errors fail the deploy with
 line/column diagnostics. Third-party imports (URL or npm) are not
 supported — the sandbox has no module loader; the worker's `require`
-stub rejects them with a clear error.
+stub rejects them with a clear error. JSX/TSX is not supported either
+(the transform uses the plain TS loader).
 
 ### 2.2 Request Flow
 
