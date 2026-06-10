@@ -206,7 +206,8 @@ async function executeFunction(
   // Defence-in-depth: validate schema name shape before it reaches SQL.
   // The gateway already validates this, but the runner is on the cluster
   // network and a future misconfiguration could expose it more broadly
-  // (cf. PR 3c which adds HMAC verification of these headers).
+  // (these headers are HMAC-verified in authenticateRequest below; this
+  // shape check is the second layer).
   if (!validIdentRe.test(schemaName)) {
     return jsonResponse({ error: "invalid schema name", requestId }, 400);
   }
