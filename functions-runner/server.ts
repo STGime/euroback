@@ -8,7 +8,7 @@
  * is NEVER exposed to the public internet. Only the Gateway can reach it.
  */
 
-import { quoteIdent, tenantFuncRole, validIdentRe } from "./role.ts";
+import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import type {
   ParentToWorker,
   SerializedRequest,
@@ -206,7 +206,8 @@ async function executeFunction(
   // Defence-in-depth: validate schema name shape before it reaches SQL.
   // The gateway already validates this, but the runner is on the cluster
   // network and a future misconfiguration could expose it more broadly
-  // (cf. PR 3c which adds HMAC verification of these headers).
+  // (these headers are HMAC-verified in authenticateRequest below; this
+  // shape check is the second layer).
   if (!validIdentRe.test(schemaName)) {
     return jsonResponse({ error: "invalid schema name", requestId }, 400);
   }
@@ -231,6 +232,12 @@ async function executeFunction(
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
       await tx.unsafe(setPathSQL);
+      // Mirror the gateway's RLS context so auth_uid() /
+      // is_service_role() behave the same in functions as in gateway
+      // REST — see rlsContextStatements in role.ts. Closes #188.
+      for (const stmt of rlsContextStatements(userId)) {
+        await tx.unsafe(stmt.sql, stmt.params);
+      }
       return await tx.unsafe(query, params);
     });
   }
