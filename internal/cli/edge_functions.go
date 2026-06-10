@@ -154,11 +154,11 @@ func efDeployCmd() *cobra.Command {
 				if createErr != nil {
 					return createErr
 				}
-				PrintSuccess(fmt.Sprintf("Function %q created and deployed", args[0]))
+				PrintSuccess(fmt.Sprintf("Function %q created and deployed to %s", args[0], ProjectLabel(cfg)))
 				return nil
 			}
 
-			PrintSuccess(fmt.Sprintf("Function %q deployed", args[0]))
+			PrintSuccess(fmt.Sprintf("Function %q deployed to %s", args[0], ProjectLabel(cfg)))
 			return nil
 		},
 	}
@@ -226,7 +226,7 @@ func efDeleteCmd() *cobra.Command {
 				return err
 			}
 
-			PrintSuccess(fmt.Sprintf("Function %q deleted", args[0]))
+			PrintSuccess(fmt.Sprintf("Function %q deleted from %s", args[0], ProjectLabel(cfg)))
 			return nil
 		},
 	}

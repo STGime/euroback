@@ -188,3 +188,45 @@ func RequireProject(cfg *Config) error {
 	}
 	return nil
 }
+
+// ProjectLabel returns a human-readable identifier for the active project,
+// e.g. `predwell (0515e4e2-…)`, or just the ID when the slug is unknown.
+// Mutating commands print this so the target of a deploy/delete is always
+// visible (issue #192).
+func ProjectLabel(cfg *Config) string {
+	if cfg.ProjectSlug != "" {
+		return fmt.Sprintf("%s (%s)", cfg.ProjectSlug, cfg.ActiveProject)
+	}
+	return cfg.ActiveProject
+}
+
+// ProjectRef is the minimal identity of a project as returned by /v1/tenants.
+type ProjectRef struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+}
+
+// ReconcileActiveProject updates cfg's active project against the account's
+// project list at login time (issue #192). A single-project account is
+// auto-selected. Otherwise a previously stored selection is kept only if it
+// still exists in this account's list (healing a stale or missing slug);
+// a selection pointing at another account's or a deleted project is cleared
+// so later mutating commands fail fast instead of silently targeting it.
+func ReconcileActiveProject(cfg *Config, projects []ProjectRef) {
+	if len(projects) == 1 {
+		cfg.ActiveProject = projects[0].ID
+		cfg.ProjectSlug = projects[0].Slug
+		return
+	}
+	if cfg.ActiveProject == "" {
+		return
+	}
+	for _, p := range projects {
+		if p.ID == cfg.ActiveProject {
+			cfg.ProjectSlug = p.Slug
+			return
+		}
+	}
+	cfg.ActiveProject = ""
+	cfg.ProjectSlug = ""
+}
