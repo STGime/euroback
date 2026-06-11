@@ -1774,8 +1774,10 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Auth & Projects</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">login</td><td class="px-3 py-1 text-gray-500">Sign in with email and password</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">logout</td><td class="px-3 py-1 text-gray-500">Clear stored credentials</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">version</td><td class="px-3 py-1 text-gray-500">Print the CLI version</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">projects list</td><td class="px-3 py-1 text-gray-500">List all projects</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">projects create &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Create a new project</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">projects delete &lt;id&gt;</td><td class="px-3 py-1 text-gray-500">Delete a project (requires --confirm)</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">switch &lt;slug&gt;</td><td class="px-3 py-1 text-gray-500">Set active project</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">status</td><td class="px-3 py-1 text-gray-500">Show usage and plan info</td></tr>
 
@@ -1783,13 +1785,11 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db tables</td><td class="px-3 py-1 text-gray-500">List tables (excludes system tables)</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db schema [table]</td><td class="px-3 py-1 text-gray-500">Show columns and types</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db query "SQL"</td><td class="px-3 py-1 text-gray-500">Execute SQL and print results</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">db create-table &lt;name&gt; &lt;col:type&gt;...</td><td class="px-3 py-1 text-gray-500">Create a table with RLS preset</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">db add-column &lt;table&gt; &lt;col:type&gt;</td><td class="px-3 py-1 text-gray-500">Add a column</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">db drop-column &lt;table&gt; &lt;column&gt;</td><td class="px-3 py-1 text-gray-500">Drop a column</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">db drop-table &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Drop a table</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db dump</td><td class="px-3 py-1 text-gray-500">Export schema as text</td></tr>
-
-							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Migrations</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">migrations create &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Create migration files</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">migrations up</td><td class="px-3 py-1 text-gray-500">Apply pending migrations</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">migrations down</td><td class="px-3 py-1 text-gray-500">Roll back migrations</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">migrations status</td><td class="px-3 py-1 text-gray-500">Show current version</td></tr>
 
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Keys & Config</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">keys show</td><td class="px-3 py-1 text-gray-500">Display API keys</td></tr>
@@ -1806,22 +1806,32 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">vault set &lt;name&gt; &lt;value&gt;</td><td class="px-3 py-1 text-gray-500">Store a secret</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">vault delete &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Delete a secret</td></tr>
 
-							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Cron & Functions</td></tr>
+							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Edge Functions (serverless TypeScript/JavaScript)</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions list</td><td class="px-3 py-1 text-gray-500">List deployed edge functions</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions deploy &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Deploy from functions/&lt;name&gt;.ts (or --file); --no-verify-jwt for public functions</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions get &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Show details and source code</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions invoke &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Invoke with optional --data JSON body</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions logs &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">View invocation logs</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions delete &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Delete an edge function</td></tr>
+
+							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Cron & RPC Functions</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">cron list</td><td class="px-3 py-1 text-gray-500">List scheduled jobs</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">cron logs &lt;id&gt;</td><td class="px-3 py-1 text-gray-500">Show run history</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">functions list</td><td class="px-3 py-1 text-gray-500">List RPC functions</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">functions list</td><td class="px-3 py-1 text-gray-500">List RPC functions (Postgres)</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">functions create &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Create from file</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">functions delete &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Drop function</td></tr>
 
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Storage</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">storage ls [prefix]</td><td class="px-3 py-1 text-gray-500">List files</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">storage ls</td><td class="px-3 py-1 text-gray-500">List files</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">storage upload &lt;local&gt; &lt;key&gt;</td><td class="px-3 py-1 text-gray-500">Upload a file</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">storage download &lt;key&gt; &lt;local&gt;</td><td class="px-3 py-1 text-gray-500">Download a file</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">storage delete &lt;key&gt;</td><td class="px-3 py-1 text-gray-500">Delete a file</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">storage url &lt;key&gt;</td><td class="px-3 py-1 text-gray-500">Generate signed URL</td></tr>
 
-							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Testing</td></tr>
+							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Testing & Compliance</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">test [file-or-dir]</td><td class="px-3 py-1 text-gray-500">Run pgTAP database tests</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">compliance report</td><td class="px-3 py-1 text-gray-500">Generate the DPA / sub-processor report</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">compliance sub-processors</td><td class="px-3 py-1 text-gray-500">List active sub-processors</td></tr>
 						</tbody>
 					</table>
 				</div>
