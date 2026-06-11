@@ -1,49 +1,65 @@
--- Tenant migration containment (#190, PR #209 review): run tenant
--- migrations under a per-tenant, schema-scoped DDL role reached via a
--- dedicated low-privilege LOGIN role — never as eurobase_migrator.
+-- Tenant migration containment (#190, PR #209 review, v2): run each tenant
+-- migration under a PER-TENANT LOGIN role the gateway connects as directly
+-- — never as a shared role that can reach more than one tenant.
 --
--- WHY a regex validator can't be the boundary: migration SQL may contain
--- DO/function bodies and dynamic EXECUTE, which are unanalyzable; if the
--- executing role owns public.* and every tenant schema, a body escapes
--- containment. And SET LOCAL ROLE alone is not enough either — a body can
--- RESET ROLE back to the connection's login role, so that login role must
--- itself be harmless. This mirrors the eurobase_function_runner design
--- (NOINHERIT member of per-tenant roles, no public.* grants) exactly.
+-- v1 (a shared eurobase_ddl_runner that was a member of every
+-- tenant_<id>_ddl) was vulnerable to a cross-tenant pivot: a migration
+-- body could RESET ROLE back to the shared login role and then SET ROLE
+-- into another tenant's ddl role. Verified on Postgres 16. The only
+-- containment that holds against RESET ROLE in an arbitrary body is a
+-- session/login role that is a member of exactly one tenant — i.e. the
+-- per-tenant role itself is the login role. RESET ROLE then lands on that
+-- same role (a member of nothing), and SET ROLE into another tenant is
+-- denied by Postgres.
 --
--- Roles:
---   eurobase_ddl_runner  — LOGIN role the gateway's migration pool connects
---     as. NOINHERIT, no public.* table grants, member of every
---     tenant_<id>_ddl. RESET ROLE from a malicious body lands here with
---     zero ambient privileges. MUST be created in the Scaleway console
---     before this migration runs (like the other login roles) — the
---     migration only GRANTs.
---   tenant_<id>_ddl      — per-tenant, NOLOGIN. CREATE on its own schema,
---     USAGE+EXECUTE on the public RLS helpers, nothing else. Owns the
---     tenant's application tables. Created by provision_tenant_ddl_role.
+-- Per tenant: tenant_<id>_ddl — owns the tenant's application tables,
+-- CREATE on its own schema, USAGE+EXECUTE on the public RLS helpers,
+-- member of NOTHING. The gateway promotes it to LOGIN and sets a derived
+-- password per apply (migrator holds CREATEROLE + ADMIN OPTION on it), then
+-- opens a short-lived connection AS that role to run the migration.
 --
--- Ownership convergence so console DDL (runs as migrator) and migrations
--- (run as tenant_<id>_ddl) share one owner: migrator is granted membership
--- in each tenant_<id>_ddl (can ALTER/DROP app tables as a member of the
--- owner); ALTER DEFAULT PRIVILEGES grants DML on new tables to the gateway
--- and <schema>_func roles; existing application tables are reassigned from
--- migrator to the ddl role (platform system tables stay migrator-owned).
+-- Bookkeeping is forgery-proof and isolating: tenant roles have NO direct
+-- grant on public.tenant_migrations. Two SECURITY DEFINER helpers, bound
+-- to session_user (which a body cannot change without superuser), let a
+-- role read/write only its OWN project's history:
+--   public.tenant_migration_checksum(version) -> the role's recorded checksum
+--   public.record_tenant_migration(version,name,sql,checksum) -> insert for
+--     the role's own project.
 
--- ── 1. Verify the eurobase_ddl_runner LOGIN role exists ──
-DO $$
+-- ── 1. session_user-bound bookkeeping helpers ──
+-- session_user is tenant_<id>_ddl; the schema is that minus the _ddl suffix.
+CREATE OR REPLACE FUNCTION public.tenant_migration_checksum(p_version bigint)
+RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $tmc$
+DECLARE v_schema text; v_project uuid; v_cs text;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'eurobase_ddl_runner') THEN
-        RAISE EXCEPTION 'role eurobase_ddl_runner does not exist — create it via the Scaleway console first (CREATE ROLE eurobase_ddl_runner WITH LOGIN NOINHERIT)';
+    IF right(session_user, 4) <> '_ddl' THEN
+        RAISE EXCEPTION 'not a tenant ddl role: %', session_user;
     END IF;
-END$$;
+    v_schema := left(session_user, length(session_user) - 4);
+    SELECT id INTO v_project FROM public.projects WHERE schema_name = v_schema;
+    IF v_project IS NULL THEN RAISE EXCEPTION 'no project for schema %', v_schema; END IF;
+    SELECT checksum INTO v_cs FROM public.tenant_migrations
+     WHERE project_id = v_project AND version = p_version;
+    RETURN v_cs;
+END$tmc$;
+ALTER FUNCTION public.tenant_migration_checksum(bigint) OWNER TO eurobase_migrator;
+REVOKE ALL ON FUNCTION public.tenant_migration_checksum(bigint) FROM PUBLIC;
 
-GRANT CONNECT ON DATABASE eurobase TO eurobase_ddl_runner;
-GRANT USAGE ON SCHEMA public TO eurobase_ddl_runner;
--- Bookkeeping: the runner reads history (idempotency check) and records
--- the applied row, as itself, around the SET LOCAL ROLE tenant_<id>_ddl
--- that runs the user SQL.
-GRANT SELECT, INSERT ON public.tenant_migrations TO eurobase_ddl_runner;
-GRANT EXECUTE ON FUNCTION public.is_service_role() TO eurobase_ddl_runner;
-GRANT EXECUTE ON FUNCTION public.current_end_user_id() TO eurobase_ddl_runner;
+CREATE OR REPLACE FUNCTION public.record_tenant_migration(p_version bigint, p_name text, p_sql text, p_checksum text)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $rtm$
+DECLARE v_schema text; v_project uuid;
+BEGIN
+    IF right(session_user, 4) <> '_ddl' THEN
+        RAISE EXCEPTION 'not a tenant ddl role: %', session_user;
+    END IF;
+    v_schema := left(session_user, length(session_user) - 4);
+    SELECT id INTO v_project FROM public.projects WHERE schema_name = v_schema;
+    IF v_project IS NULL THEN RAISE EXCEPTION 'no project for schema %', v_schema; END IF;
+    INSERT INTO public.tenant_migrations (project_id, version, name, sql, checksum, applied_by)
+    VALUES (v_project, p_version, p_name, p_sql, p_checksum, session_user);
+END$rtm$;
+ALTER FUNCTION public.record_tenant_migration(bigint, text, text, text) OWNER TO eurobase_migrator;
+REVOKE ALL ON FUNCTION public.record_tenant_migration(bigint, text, text, text) FROM PUBLIC;
 
 -- ── 2. Per-tenant DDL role provisioning helper ──
 CREATE OR REPLACE FUNCTION public.provision_tenant_ddl_role(p_schema text)
@@ -61,6 +77,8 @@ DECLARE
         'storage_objects', 'vault_secrets'
     ];
 BEGIN
+    -- Created NOLOGIN; the gateway promotes to LOGIN + a derived password
+    -- per apply (migrator has ADMIN OPTION below, plus CREATEROLE).
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_ddl_role) THEN
         EXECUTE format('CREATE ROLE %I NOLOGIN', v_ddl_role);
     END IF;
@@ -72,11 +90,14 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.current_end_user_id() TO %I', v_ddl_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.is_internal_auth_path() TO %I', v_ddl_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.uuid_generate_v4() TO %I', v_ddl_role);
+    -- Bookkeeping only via the session_user-bound helpers — no direct grant
+    -- on public.tenant_migrations (so a body cannot forge/read other rows).
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.tenant_migration_checksum(bigint) TO %I', v_ddl_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.record_tenant_migration(bigint, text, text, text) TO %I', v_ddl_role);
 
-    -- Migrator manages ddl-owned objects (console DDL path) as a member of
-    -- the owner; the runner SET-ROLEs into it to apply migrations.
+    -- Migrator manages ddl-owned objects (console DDL) AND sets the role's
+    -- login password per apply (creator + CREATEROLE; no ADMIN OPTION needed).
     EXECUTE format('GRANT %I TO eurobase_migrator', v_ddl_role);
-    EXECUTE format('GRANT %I TO eurobase_ddl_runner', v_ddl_role);
 
     -- Tables the ddl role creates become usable at runtime.
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', v_ddl_role, p_schema);
@@ -85,8 +106,7 @@ BEGIN
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO %I', v_ddl_role, p_schema, v_func_role);
 
     -- Reassign existing APPLICATION tables (everything except platform
-    -- system tables) from migrator to the ddl role. Idempotent: only
-    -- touches still-migrator-owned tables.
+    -- system tables) from migrator to the ddl role. Idempotent.
     FOR v_tbl IN
         SELECT c.relname FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -344,11 +364,9 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.is_internal_auth_path() TO %I', v_func_role);
     EXECUTE format('GRANT %I TO eurobase_function_runner', v_func_role);
 
-    -- Per-tenant DDL role for tenant migrations (#190 / PR #209 fix).
+    -- Per-tenant DDL role for tenant migrations (#190 / PR #209).
     v_ddl_role := v_schema_name || '_ddl';
     PERFORM public.provision_tenant_ddl_role(v_schema_name);
-    -- todos is an application table — hand it to the ddl role so
-    -- migrations can manage it (system tables stay migrator-owned).
     EXECUTE format('ALTER TABLE %I.todos OWNER TO %I', v_schema_name, v_ddl_role);
 
     UPDATE public.projects SET schema_name = v_schema_name WHERE id = p_project_id;

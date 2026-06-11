@@ -23,6 +23,7 @@ package query
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -131,106 +132,163 @@ func MigrationChecksum(sql string) string {
 // with different SQL than the recorded application.
 var ErrMigrationChecksumMismatch = errors.New("this version was already applied with different sql — bump the version instead of editing an applied migration")
 
-// tenantDDLRole is the per-tenant schema-scoped DDL role name (migration
-// 000063): CREATE on its own schema only, no public.* table access, not a
-// member of eurobase_migrator.
+// tenantDDLRole is the per-tenant schema-scoped DDL LOGIN role name
+// (migration 000063): owns its own schema's application tables, member of
+// nothing, no public.* table access. The gateway connects AS this role to
+// run a migration, so RESET ROLE inside a body lands on the same role and
+// cannot pivot into another tenant.
 func tenantDDLRole(schemaName string) string { return schemaName + "_ddl" }
 
-// ApplyTenantMigration applies one versioned migration against the
-// project's tenant schema. Returns applied=false (and no error) when the
-// identical version+checksum was already applied — re-runs are no-ops.
+// MigrationExecutor runs tenant migrations under per-tenant LOGIN roles.
 //
-// runnerPool MUST connect as eurobase_ddl_runner — a low-privilege LOGIN
-// role (NOINHERIT member of the per-tenant ddl roles, no public.* grants).
-// Containment is by Postgres role privilege, NOT the validator:
-//   - bookkeeping (lock, history check, insert) runs as ddl_runner, which
-//     has SELECT/INSERT on public.tenant_migrations and nothing else;
-//   - user SQL runs under SET LOCAL ROLE tenant_<id>_ddl, which owns only
-//     its own schema — cross-schema and platform writes are denied even
-//     from inside a DO/function body or a dynamic EXECUTE;
-//   - a body that does RESET ROLE lands back on ddl_runner (the harmless
-//     session role), NOT on a migrator-inheriting role — which is exactly
-//     why this cannot run on the developer or gateway pool.
-// The validator stays as defense-in-depth and for clearer error messages.
+// adminPool connects as eurobase_developer (member of migrator) and is
+// used only to set the per-tenant role's login password (SET LOCAL ROLE
+// eurobase_migrator; ALTER ROLE …). baseConnConfig is a template parsed
+// from DATABASE_URL — each apply clones it, overrides User/Password to the
+// per-tenant ddl role, and opens a short-lived connection so the migration
+// runs as a role that can reach exactly one tenant. passwordSecret derives
+// each role's password (HMAC-SHA256, hex — injection-safe in the ALTER
+// ROLE literal). Nil/empty secret ⇒ Enabled()==false ⇒ the endpoint fails
+// closed; migrations never run on a privileged pool.
+type MigrationExecutor struct {
+	adminPool      *pgxpool.Pool
+	baseConnConfig *pgx.ConnConfig
+	passwordSecret []byte
+}
+
+// NewMigrationExecutor builds an executor. Returns a disabled executor
+// (Enabled()==false) when secret is empty or baseDSN can't be parsed.
+func NewMigrationExecutor(adminPool *pgxpool.Pool, baseDSN string, secret []byte) *MigrationExecutor {
+	e := &MigrationExecutor{adminPool: adminPool, passwordSecret: secret}
+	if len(secret) == 0 || baseDSN == "" {
+		return e
+	}
+	cfg, err := pgx.ParseConfig(baseDSN)
+	if err != nil {
+		return &MigrationExecutor{adminPool: adminPool} // disabled
+	}
+	e.baseConnConfig = cfg
+	return e
+}
+
+// Enabled reports whether tenant migrations can run (secret + base DSN +
+// admin pool all present).
+func (e *MigrationExecutor) Enabled() bool {
+	return e != nil && len(e.passwordSecret) > 0 && e.baseConnConfig != nil && e.adminPool != nil
+}
+
+// ddlRolePassword derives the per-tenant login password — HMAC-SHA256 of
+// the schema under the shared secret, hex-encoded (safe to interpolate
+// into an ALTER ROLE … PASSWORD literal).
+func (e *MigrationExecutor) ddlRolePassword(schemaName string) string {
+	mac := hmac.New(sha256.New, e.passwordSecret)
+	mac.Write([]byte("ddlpw:" + schemaName))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// Apply applies one versioned migration against the project's tenant
+// schema. Returns applied=false (no error) when the identical
+// version+checksum was already applied — re-runs are no-ops.
 //
-// One transaction: advisory-lock the project (serializes concurrent
-// applies), run the user SQL via the simple protocol (multi-statement
-// bodies are the point — the deliberate inverse of the cron-SQL
-// single-statement hardening, GHSA-fjjq-cqq9-q793), record bookkeeping.
-func ApplyTenantMigration(ctx context.Context, runnerPool *pgxpool.Pool, projectID, schemaName string, version int64, name, sqlText, appliedBy string) (applied bool, err error) {
+// Containment is by Postgres role privilege, not the validator. The
+// gateway promotes tenant_<id>_ddl to LOGIN with a derived password (via
+// the admin pool, as migrator), then opens a short-lived connection AS
+// that role. The role owns only its own schema and is a member of nothing,
+// so a body's UPDATE public.projects / tenant_other.* / RESET-ROLE pivot
+// all fail at the permission layer. Bookkeeping uses the session_user-
+// bound SECURITY DEFINER helpers (000063) — the role has no direct grant
+// on public.tenant_migrations, so a body can neither forge nor read other
+// projects' history. The validator stays as defense-in-depth.
+//
+// One transaction on the per-tenant connection: advisory-lock the project,
+// idempotency check, run the body via the simple protocol (multi-statement
+// is the point — the deliberate inverse of the cron-SQL single-statement
+// hardening, GHSA-fjjq-cqq9-q793), record via the helper.
+func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName string, version int64, name, sqlText string) (applied bool, err error) {
+	if !e.Enabled() {
+		return false, errors.New("tenant migrations are not enabled on this deployment")
+	}
 	if version <= 0 {
 		return false, errors.New("version must be a positive integer")
 	}
 	if !validIdentRe.MatchString(schemaName) {
-		return false, fmt.Errorf("invalid schema name")
+		return false, errors.New("invalid schema name")
 	}
 	if err := ValidateTenantMigrationSQL(sqlText); err != nil {
 		return false, err
 	}
 	checksum := MigrationChecksum(sqlText)
 	ddlRole := tenantDDLRole(schemaName)
+	password := e.ddlRolePassword(schemaName)
 
-	tx, err := runnerPool.Begin(ctx)
+	// Promote the per-tenant role to LOGIN with the derived password, as
+	// migrator. Idempotent; the password literal is hex so it's safe.
+	atx, err := e.adminPool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin transaction: %w", err)
+		return false, fmt.Errorf("begin admin tx: %w", err)
+	}
+	defer atx.Rollback(ctx) //nolint:errcheck
+	if _, err := atx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
+		return false, fmt.Errorf("set migrator role: %w", err)
+	}
+	if _, err := atx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'",
+		pgx.Identifier{ddlRole}.Sanitize(), password)); err != nil {
+		return false, fmt.Errorf("set ddl role password: %w", err)
+	}
+	if err := atx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit admin tx: %w", err)
+	}
+
+	// Open a short-lived connection AS the per-tenant ddl role.
+	cfg := e.baseConnConfig.Copy()
+	cfg.User = ddlRole
+	cfg.Password = password
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return false, fmt.Errorf("connect as %s: %w", ddlRole, err)
+	}
+	defer conn.Close(ctx)
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin migration tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Serialize concurrent applies per project for the duration of the
-	// transaction. Without this, two `migrations up` runs could each see
-	// version N as unapplied and race the user SQL.
+	// Serialize concurrent applies for this project.
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 190))", projectID); err != nil {
 		return false, fmt.Errorf("acquire migration lock: %w", err)
 	}
 
-	// Idempotency / tamper check against the recorded history (as ddl_runner).
-	var existing string
-	err = tx.QueryRow(ctx,
-		`SELECT checksum FROM public.tenant_migrations WHERE project_id = $1 AND version = $2`,
-		projectID, version,
-	).Scan(&existing)
-	switch {
-	case err == nil:
-		if existing == checksum {
+	// Idempotency / tamper check via the session_user-bound helper (the
+	// role has no direct SELECT on public.tenant_migrations).
+	var existing *string
+	if err := tx.QueryRow(ctx, "SELECT public.tenant_migration_checksum($1)", version).Scan(&existing); err != nil {
+		return false, fmt.Errorf("check migration history: %w", err)
+	}
+	if existing != nil {
+		if *existing == checksum {
 			return false, nil // already applied, identical — no-op
 		}
 		return false, ErrMigrationChecksumMismatch
-	case errors.Is(err, pgx.ErrNoRows):
-		// not applied yet — proceed
-	default:
-		return false, fmt.Errorf("check migration history: %w", err)
 	}
 
-	// Drop into the per-tenant DDL role and pin the execution context.
-	// search_path resolves unqualified names to the tenant schema;
-	// statement_timeout bounds runaway DDL.
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL ROLE %s", pgx.Identifier{ddlRole}.Sanitize())); err != nil {
-		return false, fmt.Errorf("set role %s: %w", ddlRole, err)
-	}
+	// Pin the execution context and run the body. current_user is already
+	// tenant_<id>_ddl (we connected as it), so no SET ROLE is needed —
+	// and a body's RESET ROLE lands right back here.
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", pgx.Identifier{schemaName}.Sanitize())); err != nil {
 		return false, fmt.Errorf("set search_path: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
 		return false, fmt.Errorf("set statement_timeout: %w", err)
 	}
-
-	// User SQL runs as tenant_<id>_ddl. Simple query protocol so the whole
-	// multi-statement body executes in this transaction.
-	if _, err := tx.Conn().PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
+	if _, err := conn.PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
 		return false, fmt.Errorf("migration failed: %w", err)
 	}
 
-	// Return to ddl_runner for bookkeeping, regardless of any role the body
-	// left set (it can only SET ROLE within tenant_<id>_ddl's memberships,
-	// none privileged; RESET lands on ddl_runner either way).
-	if _, err := tx.Exec(ctx, "RESET ROLE"); err != nil {
-		return false, fmt.Errorf("reset role: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO public.tenant_migrations (project_id, version, name, sql, checksum, applied_by)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		projectID, version, name, sqlText, checksum, appliedBy,
-	); err != nil {
+	// Record via the session_user-bound SECURITY DEFINER helper.
+	if _, err := tx.Exec(ctx, "SELECT public.record_tenant_migration($1, $2, $3, $4)",
+		version, name, sqlText, checksum); err != nil {
 		return false, fmt.Errorf("record migration: %w", err)
 	}
 

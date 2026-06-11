@@ -6,131 +6,101 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
 )
 
 // Integration tests for the tenant-migration containment model (#190 / PR
-// #209 review). These verify the Postgres-enforced boundary that the
-// regex validator cannot provide: SQL executed under tenant_<id>_ddl,
-// reached via the eurobase_ddl_runner login role, cannot touch public.*
-// platform tables, cannot reach other tenant schemas, and — critically —
-// cannot escalate by RESET ROLE (which lands on the privilege-less
-// runner role).
+// #209). Each migration runs under a PER-TENANT LOGIN role
+// (tenant_<id>_ddl, member of nothing) the gateway connects as directly,
+// so a body's RESET ROLE lands on that same harmless role and cannot pivot
+// into another tenant. These verify the Postgres-enforced boundary the
+// regex validator cannot provide.
 //
-// They skip cleanly when the ddl-runner role / migration 000063 isn't
-// present on the local DB. The migrate Job creates the roles in real
-// environments; CI runs them when a Postgres service is wired.
+// They skip unless a connection AS a tenant ddl role is provided:
+//
+//	TEST_DDL_ROLE_DSN  = postgres://tenant_<id>_ddl:<pw>@host/eurobase
+//	TEST_TENANT_SCHEMA = tenant_<id>
+//	TEST_OTHER_SCHEMA  = some other tenant_<id> (for the pivot test)
+//
+// The full battery is also reproduced standalone (no app deps) in
+// scripts/verify-tenant-migration-isolation.sh, which was run on
+// Postgres 16 to verify this design.
 
-const ddlRunnerRoleName = "eurobase_ddl_runner"
-
-func ddlRunnerPool(t *testing.T) *pgxpool.Pool {
+func ddlRoleConn(t *testing.T) (*pgx.Conn, string) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")
 	}
-	host := os.Getenv("TEST_PGHOST")
-	if host == "" {
-		host = "localhost:5433"
+	dsn := os.Getenv("TEST_DDL_ROLE_DSN")
+	schema := os.Getenv("TEST_TENANT_SCHEMA")
+	if dsn == "" || schema == "" {
+		t.Skip("set TEST_DDL_ROLE_DSN + TEST_TENANT_SCHEMA to run tenant-ddl-role integration tests")
 	}
-	connStr := "postgres://" + ddlRunnerRoleName + ":localdev@" + host + "/eurobase?sslmode=disable"
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, connStr)
+	conn, err := pgx.Connect(context.Background(), dsn)
 	if err != nil {
-		t.Skipf("cannot connect as %s (migration 000063 not applied locally): %v", ddlRunnerRoleName, err)
+		t.Skipf("cannot connect with TEST_DDL_ROLE_DSN: %v", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("cannot ping as %s: %v", ddlRunnerRoleName, err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	return conn, schema
 }
 
-// applyAs runs sqlText through the real apply flow's role discipline
-// (SET LOCAL ROLE tenant_<id>_ddl) on the ddl-runner pool and reports
-// whether it succeeded. Uses a rolled-back transaction so it leaves no
-// state — mirrors ApplyTenantMigration's role setup without the
-// bookkeeping.
-func applyAs(t *testing.T, pool *pgxpool.Pool, schema, sqlText string) error {
+// runBody executes sqlText as the connected tenant role with search_path
+// pinned, in a rolled-back tx (leaves no state).
+func runBody(t *testing.T, conn *pgx.Conn, schema, sqlText string) error {
 	t.Helper()
 	ctx := context.Background()
-	tx, err := pool.Begin(ctx)
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	if _, err := tx.Exec(ctx, `SET LOCAL ROLE "`+schema+`_ddl"`); err != nil {
-		t.Skipf("cannot SET ROLE %s_ddl (000063 not applied): %v", schema, err)
-	}
 	if _, err := tx.Exec(ctx, `SET LOCAL search_path TO "`+schema+`"`); err != nil {
 		return err
 	}
-	_, err = tx.Conn().PgConn().Exec(ctx, sqlText).ReadAll()
+	_, err = conn.PgConn().Exec(ctx, sqlText).ReadAll()
 	return err
 }
 
-// testSchema picks an existing tenant schema to test against, or skips.
-func testSchema(t *testing.T, pool *pgxpool.Pool) string {
-	t.Helper()
-	if s := os.Getenv("TEST_TENANT_SCHEMA"); s != "" {
-		return s
+func TestTenantDDLRole_CannotWritePlatformTables(t *testing.T) {
+	conn, schema := ddlRoleConn(t)
+	if err := runBody(t, conn, schema, "UPDATE public.projects SET plan='pro';"); err == nil {
+		t.Fatal("SECURITY: tenant ddl role wrote public.projects")
 	}
-	t.Skip("set TEST_TENANT_SCHEMA to an existing tenant schema to run ddl-role integration tests")
-	return ""
 }
 
-func TestTenantDDLRole_CannotWritePlatformTables(t *testing.T) {
-	pool := ddlRunnerPool(t)
-	schema := testSchema(t, pool)
-	err := applyAs(t, pool, schema, "UPDATE public.projects SET plan = 'pro';")
+func TestTenantDDLRole_PivotViaResetRoleDenied(t *testing.T) {
+	conn, schema := ddlRoleConn(t)
+	other := os.Getenv("TEST_OTHER_SCHEMA")
+	if other == "" {
+		t.Skip("set TEST_OTHER_SCHEMA for the cross-tenant pivot test")
+	}
+	// The exact PoC: RESET ROLE (→ the connected login role, member of
+	// nothing) then SET ROLE into another tenant's ddl role.
+	err := runBody(t, conn, schema,
+		`DO $$ BEGIN EXECUTE 'RESET ROLE'; EXECUTE 'SET ROLE "`+other+`_ddl"'; END $$;`)
 	if err == nil {
-		t.Fatal("SECURITY: tenant_<id>_ddl was able to UPDATE public.projects")
+		t.Fatal("SECURITY: pivoted into another tenant's ddl role via RESET ROLE")
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
 		t.Logf("denied (non-permission error also acceptable): %v", err)
 	}
 }
 
-func TestTenantDDLRole_CannotReachOtherTenantSchema(t *testing.T) {
-	pool := ddlRunnerPool(t)
-	schema := testSchema(t, pool)
-	// A schema name that almost certainly isn't the caller's.
-	err := applyAs(t, pool, schema, "SELECT 1 FROM tenant_0000_does_not_exist.users;")
-	if err == nil {
-		t.Fatal("SECURITY: reached a foreign tenant schema")
+func TestTenantDDLRole_CannotForgeOrReadBookkeeping(t *testing.T) {
+	conn, schema := ddlRoleConn(t)
+	if err := runBody(t, conn, schema,
+		`INSERT INTO public.tenant_migrations(project_id,version,sql,checksum) VALUES (gen_random_uuid(),1,'x','y');`); err == nil {
+		t.Fatal("SECURITY: tenant ddl role wrote public.tenant_migrations directly")
 	}
-}
-
-func TestTenantDDLRole_FunctionBodyBypassIsContained(t *testing.T) {
-	// The exact bypass the validator can't catch: payload in a DO body.
-	// The ROLE must contain it.
-	pool := ddlRunnerPool(t)
-	schema := testSchema(t, pool)
-	err := applyAs(t, pool, schema, `DO $$ BEGIN UPDATE public.projects SET plan='pro'; END $$;`)
-	if err == nil {
-		t.Fatal("SECURITY: function-body write to public.projects succeeded")
-	}
-}
-
-func TestTenantDDLRole_ResetRoleLandsHarmless(t *testing.T) {
-	// RESET ROLE inside the body must drop to eurobase_ddl_runner, which
-	// has no write on public.projects — not back to a migrator-inheriting
-	// role.
-	pool := ddlRunnerPool(t)
-	schema := testSchema(t, pool)
-	err := applyAs(t, pool, schema, `DO $$ BEGIN RESET ROLE; UPDATE public.projects SET plan='pro'; END $$;`)
-	if err == nil {
-		t.Fatal("SECURITY: RESET ROLE escalated and wrote public.projects")
+	if err := runBody(t, conn, schema, `SELECT count(*) FROM public.tenant_migrations;`); err == nil {
+		t.Fatal("SECURITY: tenant ddl role read public.tenant_migrations directly")
 	}
 }
 
 func TestTenantDDLRole_CanManageOwnSchema(t *testing.T) {
-	// Positive control: legitimate DDL in the tenant's own schema works.
-	pool := ddlRunnerPool(t)
-	schema := testSchema(t, pool)
-	err := applyAs(t, pool, schema,
-		`CREATE TABLE _eb_migration_probe (id int PRIMARY KEY, note text CHECK (note <> ''));`)
-	if err != nil {
+	conn, schema := ddlRoleConn(t)
+	if err := runBody(t, conn, schema,
+		`CREATE TABLE _eb_probe (id int PRIMARY KEY, note text CHECK (note <> ''));`); err != nil {
 		t.Fatalf("legitimate own-schema DDL was rejected: %v", err)
 	}
 }

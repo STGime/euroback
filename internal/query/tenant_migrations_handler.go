@@ -25,12 +25,12 @@ type ApplyMigrationRequest struct {
 //	POST /  — apply one versioned migration
 //
 // Mounted under the platform project routes with RequireMinRole
-// ("developer"). runnerPool MUST connect as eurobase_ddl_runner — the
-// low-privilege role migrations execute under (see ApplyTenantMigration).
-// readPool (gateway pool) serves history/lookups. When runnerPool is nil
-// (DATABASE_URL_DDL_RUNNER not configured) the apply endpoint fails closed
-// with 503 — migrations never silently fall back to a privileged role.
-func HandleTenantMigrations(runnerPool, readPool *pgxpool.Pool) http.Handler {
+// ("developer"). exec runs each migration under a per-tenant LOGIN role
+// (see MigrationExecutor). readPool (gateway pool) serves history/lookups.
+// When exec is not Enabled() (no DDL_PASSWORD_SECRET / base DSN) the apply
+// endpoint fails closed with 503 — migrations never run on a privileged
+// pool.
+func HandleTenantMigrations(exec *MigrationExecutor, readPool *pgxpool.Pool) http.Handler {
 	r := chi.NewRouter()
 
 	r.Get("/", func(w http.ResponseWriter, req *http.Request) {
@@ -55,9 +55,9 @@ func HandleTenantMigrations(runnerPool, readPool *pgxpool.Pool) http.Handler {
 			jsonError(w, "project ID is required", http.StatusBadRequest)
 			return
 		}
-		if runnerPool == nil {
+		if !exec.Enabled() {
 			// Fail closed: never run a migration on a privileged pool.
-			jsonError(w, "tenant migrations are not enabled on this deployment (DATABASE_URL_DDL_RUNNER not configured)", http.StatusServiceUnavailable)
+			jsonError(w, "tenant migrations are not enabled on this deployment (DDL_PASSWORD_SECRET not configured)", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -77,7 +77,7 @@ func HandleTenantMigrations(runnerPool, readPool *pgxpool.Pool) http.Handler {
 
 		actorID, actorEmail := audit.ActorFromContext(req.Context())
 
-		applied, err := ApplyTenantMigration(req.Context(), runnerPool, projectID, schemaName, body.Version, body.Name, body.SQL, actorEmail)
+		applied, err := exec.Apply(req.Context(), projectID, schemaName, body.Version, body.Name, body.SQL)
 		if err != nil {
 			status := http.StatusBadRequest
 			if errors.Is(err, ErrMigrationChecksumMismatch) {

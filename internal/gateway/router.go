@@ -47,7 +47,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, ddlRunnerPool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -287,13 +287,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, ddlRunnerPool *p
 			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
 			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
 			// Tenant-level versioned migrations (#190). Platform auth +
-			// developer role, but executed on the dedicated low-privilege
-			// ddlRunnerPool (eurobase_ddl_runner → SET LOCAL ROLE
-			// tenant_<id>_ddl), NOT the developer/migrator pool — see
-			// ApplyTenantMigration for why the session role must be
-			// harmless. Deliberately NOT on /v1: data-plane keys never run
-			// DDL. Fails closed (503) if ddlRunnerPool is unconfigured.
-			r.With(tenant.RequireMinRole("developer")).Mount("/migrations", query.HandleTenantMigrations(ddlRunnerPool, pool))
+			// developer role; each migration runs under a per-tenant LOGIN
+			// role the gateway connects as (see MigrationExecutor), so a
+			// malicious body can reach exactly one tenant. Deliberately NOT
+			// on /v1: data-plane keys never run DDL. Fails closed (503) when
+			// the executor isn't configured (no DDL_PASSWORD_SECRET).
+			r.With(tenant.RequireMinRole("developer")).Mount("/migrations", query.HandleTenantMigrations(migrationExec, pool))
 			r.With(tenant.RequireMinRole("developer")).Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
 			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc))

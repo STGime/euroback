@@ -1,13 +1,12 @@
 -- Reverts the per-tenant DDL role model. Restores provision_tenant to the
--- 000060 body and drops the helper. Per-tenant tenant_<id>_ddl roles and
+-- 000060 body and drops the helpers. Per-tenant tenant_<id>_ddl roles and
 -- the reassigned table ownership are intentionally left in place: dropping
 -- a role that owns tables would fail, and reassigning ownership back to
--- migrator on rollback is risky. The grants to eurobase_ddl_runner are
--- revoked so the login role is inert.
-
-REVOKE SELECT, INSERT ON public.tenant_migrations FROM eurobase_ddl_runner;
+-- migrator on rollback is risky.
 
 DROP FUNCTION IF EXISTS public.provision_tenant_ddl_role(text);
+DROP FUNCTION IF EXISTS public.record_tenant_migration(bigint, text, text, text);
+DROP FUNCTION IF EXISTS public.tenant_migration_checksum(bigint);
 
 -- Restore provision_tenant to the 000060 body (without the ddl-role call).
 CREATE OR REPLACE FUNCTION public.provision_tenant(
