@@ -107,14 +107,16 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.record_tenant_migration(bigint, text, text, text) TO %I', v_ddl_role);
 
     -- Migrator manages ddl-owned objects (console DDL) and sets the role's
-    -- login password per apply. The membership is granted WITH INHERIT TRUE
-    -- so the next statement works even though eurobase_migrator is NOINHERIT
-    -- in production: ALTER DEFAULT PRIVILEGES FOR ROLE <ddl> needs
-    -- has_privs_of_role (INHERIT-based) membership of <ddl>. Per-membership
-    -- INHERIT TRUE (PG16) overrides migrator's role-level NOINHERIT for just
-    -- this grant. (SET ROLE is not an option — it's forbidden inside a
-    -- SECURITY DEFINER function; plain membership fails the FOR ROLE check.)
-    EXECUTE format('GRANT %I TO eurobase_migrator WITH INHERIT TRUE', v_ddl_role);
+    -- login password per apply. Both membership options are granted
+    -- explicitly (PG16), because production's eurobase_migrator is NOINHERIT
+    -- and managed-PG defaults the unspecified option to FALSE:
+    --   INHERIT TRUE → ALTER DEFAULT PRIVILEGES FOR ROLE <ddl> below needs
+    --     has_privs_of_role (INHERIT-based) membership of <ddl>;
+    --   SET TRUE     → the ALTER TABLE … OWNER TO <ddl> reassign below needs
+    --     SET-ROLE-able membership of <ddl> (PG16 owner-reassign rule).
+    -- (SET ROLE itself is not an option — forbidden inside a SECURITY
+    -- DEFINER function. Plain membership without these fails both checks.)
+    EXECUTE format('GRANT %I TO eurobase_migrator WITH INHERIT TRUE, SET TRUE', v_ddl_role);
 
     -- Tables the ddl role creates become usable at runtime.
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', v_ddl_role, p_schema);

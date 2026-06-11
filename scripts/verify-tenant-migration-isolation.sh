@@ -134,7 +134,7 @@ BEGIN
   CREATE ROLE tenant_e_ddl NOLOGIN;
   EXECUTE 'CREATE SCHEMA tenant_e AUTHORIZATION eurobase_migrator';
   GRANT USAGE,CREATE ON SCHEMA tenant_e TO tenant_e_ddl;
-  GRANT tenant_e_ddl TO eurobase_migrator WITH INHERIT TRUE;
+  GRANT tenant_e_ddl TO eurobase_migrator WITH INHERIT TRUE, SET TRUE;
   ALTER DEFAULT PRIVILEGES FOR ROLE tenant_e_ddl IN SCHEMA tenant_e GRANT SELECT ON TABLES TO eurobase_gateway;
 END$$;
 ALTER FUNCTION prov_inherit() OWNER TO eurobase_migrator;
@@ -143,7 +143,14 @@ out="$(psql -tAc "SET ROLE eurobase_migrator; SELECT prov_plain();" 2>&1 || true
 echo "$out" | grep -qi "permission denied to change default privileges" \
   || fail "expected plain GRANT (no INHERIT) to be denied in SECURITY DEFINER under NOINHERIT migrator (got: $out)"
 psql -tAc "SET ROLE eurobase_migrator; SELECT prov_inherit();" >/dev/null 2>&1 \
-  || fail "WITH INHERIT TRUE + FOR ROLE failed inside SECURITY DEFINER under NOINHERIT migrator"
+  || fail "WITH INHERIT TRUE/SET TRUE + FOR ROLE failed inside SECURITY DEFINER under NOINHERIT migrator"
+# Assert migrator effectively has BOTH INHERIT and SET on the ddl role.
+# Managed Postgres defaults the unspecified GRANT option to FALSE (alpine
+# defaults it TRUE, which would hide a missing SET/INHERIT and let the
+# reassign pass locally while failing prod). Aggregate across membership
+# rows (CREATE ROLE by a CREATEROLE migrator auto-adds a second row).
+opts="$(psql -tAc "SELECT bool_or(inherit_option)||','||bool_or(set_option) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid JOIN pg_roles g ON g.oid=m.member WHERE r.rolname='tenant_e_ddl' AND g.rolname='eurobase_migrator';")"
+[ "$opts" = "true,true" ] || fail "migrator's membership in the ddl role must give INHERIT TRUE + SET TRUE (got: $opts) — ALTER DEFAULT PRIVILEGES needs INHERIT, owner-reassign needs SET"
 
 echo "10. promote/demote lifecycle (role NOLOGIN except during apply) ..."
 psql -tAc "SET ROLE eurobase_migrator; ALTER ROLE tenant_a_ddl WITH NOLOGIN;" >/dev/null
