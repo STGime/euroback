@@ -118,6 +118,18 @@ jobs:
     needs: [test-go, test-console, test-mcp, test-functions-runner]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Serialize deploys. Without this, back-to-back merges to main run
+    # concurrent deploys that race on the migrate Job (delete → apply hits
+    # "field is immutable" when another run recreates it in between) and
+    # last-writer-wins on Deployment images regardless of commit order.
+    # cancel-in-progress stays false — killing a deploy mid-kubectl could
+    # leave a half-applied rollout. GitHub keeps at most one run queued per
+    # group and supersedes older pending ones, which is correct here: every
+    # deploy ships the full repo state, so the newest queued commit subsumes
+    # the skipped ones.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
