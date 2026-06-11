@@ -1791,6 +1791,11 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db drop-table &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Drop a table</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db dump</td><td class="px-3 py-1 text-gray-500">Export schema as text</td></tr>
 
+							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Schema Migrations</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">migrations new &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Create the next numbered migration file in ./migrations</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">migrations up</td><td class="px-3 py-1 text-gray-500">Apply pending migrations to the active project (idempotent)</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">migrations status</td><td class="px-3 py-1 text-gray-500">Local files vs applied versions</td></tr>
+
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Keys & Config</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">keys show</td><td class="px-3 py-1 text-gray-500">Display API keys</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">keys regenerate</td><td class="px-3 py-1 text-gray-500">Rotate API keys</td></tr>
