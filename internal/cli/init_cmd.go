@@ -74,6 +74,18 @@ EUROBASE_PROJECT_ID=%s
 - No raw Postgres connection string is exposed — the platform enforces tenant isolation via RLS on the gateway
 - System tables (users, refresh_tokens, storage_objects, email_tokens, vault_secrets) are managed by the platform
 
+## Schema migrations
+- Versioned migrations live in migrations/<version>_<name>.sql (e.g. 0001_create_listings.sql)
+- Create the next file with: eurobase migrations new <name>
+- Apply pending migrations with: eurobase migrations up (idempotent — safe to re-run and to run in CI)
+- Check state with: eurobase migrations status
+- Each migration runs in ONE transaction inside this project's schema. Use unqualified
+  table names. RLS helpers public.is_service_role() and public.current_end_user_id()
+  are available for policies; public.uuid_generate_v4() for defaults.
+- Not allowed in migration SQL: referencing other schemas, GRANT/REVOKE, SET ROLE /
+  search_path, transaction control (COMMIT/BEGIN), SECURITY DEFINER, COPY,
+  CREATE EXTENSION. Never edit an already-applied migration — add a new version.
+
 ## Auth
 - Custom auth built in Go (email/password, magic links, OAuth)
 - Anon key for public client access
@@ -97,7 +109,8 @@ EUROBASE_PROJECT_ID=%s
 
 - Use EUROBASE_URL and EUROBASE_ANON_KEY from .env for client-side API calls
 - Use EUROBASE_SERVICE_KEY for server-side only
-- All data access goes through the Eurobase REST API or direct PostgreSQL
+- All data access goes through the Eurobase SDK or REST API (no direct PostgreSQL)
+- Schema changes via versioned files in migrations/ — apply with: eurobase migrations up
 - RLS is enforced — always set tenant context
 - EU-sovereign: no US cloud services
 `, conn.ProjectSlug, conn.APIURL, conn.ProjectID)

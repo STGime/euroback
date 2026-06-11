@@ -14,25 +14,15 @@ import (
 
 // LoginCmd returns the login command.
 func LoginCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Log in to Eurobase",
-		Long:  "Authenticate with your Eurobase account using email and password.",
+		Long: `Authenticate with your Eurobase account using email and password,
+or non-interactively with a Personal Access Token (Account → Tokens in
+the console) — the path for CI:
+
+  eurobase login --token "$EUROBASE_PAT"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			reader := bufio.NewReader(os.Stdin)
-
-			fmt.Print("Email: ")
-			email, _ := reader.ReadString('\n')
-			email = strings.TrimSpace(email)
-
-			fmt.Print("Password (input visible): ")
-			password, _ := reader.ReadString('\n')
-			password = strings.TrimSpace(password)
-
-			if email == "" || password == "" {
-				return fmt.Errorf("email and password are required")
-			}
-
 			cfg, err := LoadConfig()
 			if err != nil {
 				return err
@@ -45,6 +35,50 @@ func LoginCmd() *cobra.Command {
 			}
 			if cfg.APIURL == "" {
 				cfg.APIURL = DefaultAPIURL()
+			}
+
+			// Non-interactive PAT login (CI). The token is validated by
+			// listing projects — which also runs the active-project
+			// reconciliation (#192).
+			if token, _ := cmd.Flags().GetString("token"); token != "" {
+				cfg.Token = token
+				client := &APIClient{
+					BaseURL:    cfg.APIURL,
+					Token:      token,
+					httpClient: &http.Client{Timeout: 30 * time.Second},
+				}
+				projectsData, err := client.Get("/v1/tenants")
+				if err != nil {
+					return fmt.Errorf("token rejected: %w", err)
+				}
+				var projects []ProjectRef
+				if json.Unmarshal(projectsData, &projects) == nil {
+					ReconcileActiveProject(cfg, projects)
+				}
+				if err := SaveConfig(cfg); err != nil {
+					return err
+				}
+				PrintSuccess("Logged in with personal access token")
+				if cfg.ActiveProject != "" {
+					PrintSuccess(fmt.Sprintf("Active project: %s", ProjectLabel(cfg)))
+				} else {
+					fmt.Println("No active project — run `eurobase switch <slug>` to select one.")
+				}
+				return nil
+			}
+
+			reader := bufio.NewReader(os.Stdin)
+
+			fmt.Print("Email: ")
+			email, _ := reader.ReadString('\n')
+			email = strings.TrimSpace(email)
+
+			fmt.Print("Password (input visible): ")
+			password, _ := reader.ReadString('\n')
+			password = strings.TrimSpace(password)
+
+			if email == "" || password == "" {
+				return fmt.Errorf("email and password are required")
 			}
 
 			// Sign in using a temporary unauthenticated client
@@ -109,6 +143,8 @@ func LoginCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().String("token", "", "Log in non-interactively with a personal access token (CI)")
+	return cmd
 }
 
 // LogoutCmd returns the logout command.

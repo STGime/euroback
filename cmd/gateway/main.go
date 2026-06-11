@@ -25,6 +25,7 @@ import (
 	"github.com/eurobase/euroback/internal/gateway"
 	"github.com/eurobase/euroback/internal/metrics"
 	"github.com/eurobase/euroback/internal/plans"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/sms"
@@ -103,6 +104,19 @@ func main() {
 		slog.Info("developer database connection pool established")
 	} else {
 		slog.Warn("DATABASE_URL_DEVELOPER not set — platform routes will run on the gateway pool and will fail on tenant DDL until the developer role is configured")
+	}
+
+	// Tenant migrations executor (#190). Runs each migration under a
+	// per-tenant LOGIN role the gateway connects as: the developer pool
+	// (as migrator) sets the role's derived password, then a short-lived
+	// connection AS that role runs the SQL — so a malicious body can reach
+	// exactly one tenant. Disabled (endpoint 503) when DDL_PASSWORD_SECRET
+	// is unset; never falls back to a privileged pool. See migration 000063.
+	migrationExec := query.NewMigrationExecutor(developerPool, databaseURL, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
+	if migrationExec.Enabled() {
+		slog.Info("tenant migrations enabled")
+	} else {
+		slog.Warn("DDL_PASSWORD_SECRET not set — tenant migrations endpoint will return 503 until configured")
 	}
 
 	// ── Set up plan limits ──
@@ -369,7 +383,7 @@ func main() {
 	}()
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
