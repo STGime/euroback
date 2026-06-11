@@ -286,6 +286,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			// this flag, but it's only mounted on /data/sql and below.)
 			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
 			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
+			// Tenant-level versioned migrations (#190) — same trust plane
+			// as the schema DDL endpoints above: platform auth, developer
+			// role, migrator elevation on the developer pool. Deliberately
+			// NOT exposed on /v1: data-plane keys never run DDL.
+			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/migrations", query.HandleTenantMigrations(developerPool, pool))
 			r.With(tenant.RequireMinRole("developer")).Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
 			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc))

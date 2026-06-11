@@ -48,7 +48,9 @@ func main() {
 	root.AddCommand(cli.SwitchCmd())
 	root.AddCommand(cli.StatusCmd())
 	root.AddCommand(cli.DbCmd())
-	root.AddCommand(cli.MigrationsCmd())
+	// Tenant-level migrations (#190). The platform's own migration
+	// tooling lives under `eurobase admin migrations`.
+	root.AddCommand(cli.TenantMigrationsCmd())
 	root.AddCommand(cli.KeysCmd())
 	root.AddCommand(cli.LogsCmd())
 	root.AddCommand(cli.VaultCmd())

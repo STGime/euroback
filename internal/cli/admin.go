@@ -29,6 +29,9 @@ flag the gateway's admin endpoints check for.`,
 	cmd.AddCommand(adminGrantCmd())
 	cmd.AddCommand(adminRevokeCmd())
 	cmd.AddCommand(adminListCmd())
+	// Platform migrations moved here from the top level so the
+	// user-facing `eurobase migrations` serves tenant migrations (#190).
+	cmd.AddCommand(PlatformMigrationsCmd())
 	return cmd
 }
 

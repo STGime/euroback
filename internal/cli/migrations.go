@@ -12,12 +12,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// MigrationsCmd returns the parent "migrations" command.
-func MigrationsCmd() *cobra.Command {
+// PlatformMigrationsCmd returns the PLATFORM migrations command — runs
+// the platform's own migrations/ directory against a local/dev database.
+// This is a platform-development tool, not a tenant capability; it lives
+// under `eurobase admin migrations` so the user-facing `eurobase
+// migrations` name serves tenant migrations (#190, TenantMigrationsCmd).
+func PlatformMigrationsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "migrations",
-		Aliases: []string{"migrate"},
-		Short:   "Manage database migrations",
+		Use:   "migrations",
+		Short: "Platform migrations against a local/dev database (platform development only)",
 	}
 	cmd.AddCommand(migrationsCreateCmd())
 	cmd.AddCommand(migrationsUpCmd())
