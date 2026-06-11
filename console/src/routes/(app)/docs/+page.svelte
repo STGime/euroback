@@ -1746,6 +1746,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400">
 					<div>brew install stgime/tap/eurobase</div>
 					<div class="mt-1 text-gray-500"># or download a binary: github.com/STGime/homebrew-tap/releases</div>
+					<div class="mt-1 text-gray-500"># macOS manual download only: xattr -d com.apple.quarantine ./eurobase (not notarized; brew installs unaffected)</div>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Getting started</h3>

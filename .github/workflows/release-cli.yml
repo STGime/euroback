@@ -63,10 +63,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CLI_RELEASE_TOKEN }}
         run: |
+          # Idempotent: a re-run of the same tag (e.g. after a partial
+          # failure) replaces the existing release instead of erroring.
+          if gh release view "cli-v${VERSION}" --repo "$TAP_REPO" >/dev/null 2>&1; then
+            echo "release cli-v${VERSION} already exists on $TAP_REPO — replacing it"
+            gh release delete "cli-v${VERSION}" --repo "$TAP_REPO" --cleanup-tag --yes
+          fi
           gh release create "cli-v${VERSION}" \
             --repo "$TAP_REPO" \
             --title "Eurobase CLI v${VERSION}" \
-            --notes "Eurobase CLI v${VERSION}. Install: \`brew install stgime/tap/eurobase\` or download the binary for your platform below." \
+            --notes "Eurobase CLI v${VERSION}. Install: \`brew install stgime/tap/eurobase\` or download the binary for your platform below. (macOS, manual download only: run \`xattr -d com.apple.quarantine ./eurobase\` after extracting — the binaries are not notarized; Homebrew installs are unaffected.)" \
             dist/*.tar.gz "dist/eurobase_${VERSION}_checksums.txt"
 
       - name: Update Homebrew formula
