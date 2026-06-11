@@ -70,6 +70,13 @@ func DefaultAuthConfig() AuthConfig {
 		RequireEmailConfirmation: false,
 		SessionDuration:          "168h",
 		RedirectURLs:             []string{"http://localhost:3000"},
+		// Match RedirectURLs (issue #198): the scaffold targets a
+		// localhost:3000 browser app, and an origin trusted to receive
+		// OAuth redirects must also be CORS-allowed for API calls or
+		// every fresh browser app hits an opaque CORS wall. Remote
+		// sites cannot forge a localhost Origin header, so keeping
+		// this entry on production projects is not an exposure.
+		CORSOrigins: []string{"http://localhost:3000"},
 	}
 }
 

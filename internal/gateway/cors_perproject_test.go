@@ -140,3 +140,42 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+func TestCORS_FreshProjectWithEmptyAuthConfigAllowsLocalhost3000(t *testing.T) {
+	// Issue #198: a freshly-created project (empty/default auth_config)
+	// must be able to serve a localhost:3000 browser app out of the box —
+	// the scaffold and the default redirect_urls both target that origin.
+	cors := newPlatformGlobalCORS()
+	rr := httptest.NewRecorder()
+	handler := cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+
+	pc := &auth.ProjectContext{
+		ProjectID:  "p-fresh",
+		SchemaName: "tenant_fresh",
+		Slug:       "fresh",
+		AuthConfig: []byte("{}"), // never edited — ParseAuthConfig falls back to defaults
+	}
+	ctx := auth.ContextWithProject(context.Background(), pc)
+	handler.ServeHTTP(rr, makeReq(http.MethodOptions, "http://localhost:3000", ctx))
+
+	if rr.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Errorf("fresh project should CORS-allow localhost:3000 by default, got %q",
+			rr.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORS_StoredConfigWithoutCORSOriginsIsNotBackfilled(t *testing.T) {
+	// A project whose auth_config WAS edited (stored JSON, no cors_origins
+	// key) keeps its explicit empty list — the localhost default applies
+	// only to never-configured projects. Changing already-configured
+	// projects' CORS posture on upgrade would be a silent behaviour change.
+	cors := newPlatformGlobalCORS()
+	rr := httptest.NewRecorder()
+	handler := cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+
+	handler.ServeHTTP(rr, makeReq(http.MethodOptions, "http://localhost:3000", ctxWithProjectCORS()))
+
+	if rr.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("stored config without cors_origins should not gain localhost retroactively")
+	}
+}
