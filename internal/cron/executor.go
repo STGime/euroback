@@ -225,9 +225,10 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 
 	// Look up function row for X-Function-ID + verify it's active.
 	var fnID, fnStatus string
+	var fnVersion int
 	err := e.pool.QueryRow(ctx,
-		`SELECT id, status FROM edge_functions WHERE project_id = $1 AND name = $2`,
-		job.ProjectID, job.Action).Scan(&fnID, &fnStatus)
+		`SELECT id, status, version FROM edge_functions WHERE project_id = $1 AND name = $2`,
+		job.ProjectID, job.Action).Scan(&fnID, &fnStatus, &fnVersion)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return fmt.Errorf("function %q is not deployed", job.Action)
@@ -265,6 +266,9 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 	req.Header.Set("X-Schema-Name", job.SchemaName)
 	req.Header.Set("X-Function-Name", job.Action)
 	req.Header.Set("X-Function-ID", fnID)
+	// Runner cache key includes the version so redeploys take effect
+	// immediately (closes #200) — same as the gateway invoke path.
+	req.Header.Set("X-Function-Version", strconv.Itoa(fnVersion))
 	plan := job.Plan
 	if plan == "" {
 		plan = "free"

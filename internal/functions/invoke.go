@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
@@ -77,6 +78,12 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 		proxyReq.Header.Set("X-Schema-Name", projectCtx.SchemaName)
 		proxyReq.Header.Set("X-Function-Name", functionName)
 		proxyReq.Header.Set("X-Function-ID", fn.ID)
+		// The runner keys its code cache on id+version, so a redeploy
+		// (version bump) takes effect immediately instead of after the
+		// cache TTL (closes #200). Not HMAC-covered: a forged version
+		// can only cause a cache miss — code is always loaded from the
+		// DB by id.
+		proxyReq.Header.Set("X-Function-Version", strconv.Itoa(fn.Version))
 		proxyReq.Header.Set("X-Plan", projectCtx.Plan)
 		proxyReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 
