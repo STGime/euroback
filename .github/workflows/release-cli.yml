@@ -10,15 +10,15 @@
 #   1. Cross-compiles cmd/eurobase for darwin/linux × amd64/arm64 with the
 #      version + commit baked in via ldflags (`eurobase version`).
 #   2. Publishes a GitHub release with the four tarballs + checksums on the
-#      PUBLIC eurobase/homebrew-tap repo — the source repo is private, so
+#      PUBLIC STGime/homebrew-tap repo — the source repo is private, so
 #      assets must live somewhere users (and brew) can download without
 #      auth. The tap repo doubles as the release host.
 #   3. Regenerates Formula/eurobase.rb in the tap from the new checksums,
-#      so `brew install eurobase/tap/eurobase` (and `brew upgrade`) track
+#      so `brew install stgime/tap/eurobase` (and `brew upgrade`) track
 #      the release automatically.
 #
 # Required secret: CLI_RELEASE_TOKEN — a PAT with `repo` (contents: write)
-# access to eurobase/homebrew-tap. The default GITHUB_TOKEN is scoped to
+# access to STGime/homebrew-tap. The default GITHUB_TOKEN is scoped to
 # this repo and cannot publish there.
 ##############################################################################
 name: Release CLI
@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 env:
-  TAP_REPO: eurobase/homebrew-tap
+  TAP_REPO: STGime/homebrew-tap
 
 jobs:
   release:
@@ -66,7 +66,7 @@ jobs:
           gh release create "cli-v${VERSION}" \
             --repo "$TAP_REPO" \
             --title "Eurobase CLI v${VERSION}" \
-            --notes "Eurobase CLI v${VERSION}. Install: \`brew install eurobase/tap/eurobase\` or download the binary for your platform below." \
+            --notes "Eurobase CLI v${VERSION}. Install: \`brew install stgime/tap/eurobase\` or download the binary for your platform below." \
             dist/*.tar.gz "dist/eurobase_${VERSION}_checksums.txt"
 
       - name: Update Homebrew formula

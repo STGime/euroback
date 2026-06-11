@@ -1744,8 +1744,8 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 				<h3 class="text-lg font-semibold text-gray-900">Installation</h3>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400">
-					<div>brew install eurobase/tap/eurobase</div>
-					<div class="mt-1 text-gray-500"># or download a binary: github.com/eurobase/homebrew-tap/releases</div>
+					<div>brew install stgime/tap/eurobase</div>
+					<div class="mt-1 text-gray-500"># or download a binary: github.com/STGime/homebrew-tap/releases</div>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Getting started</h3>
