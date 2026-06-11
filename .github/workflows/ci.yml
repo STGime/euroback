@@ -123,17 +123,45 @@ jobs:
     # "field is immutable" when another run recreates it in between) and
     # last-writer-wins on Deployment images regardless of commit order.
     # cancel-in-progress stays false — killing a deploy mid-kubectl could
-    # leave a half-applied rollout. GitHub keeps at most one run queued per
-    # group and supersedes older pending ones, which is correct here: every
-    # deploy ships the full repo state, so the newest queued commit subsumes
-    # the skipped ones.
+    # leave a half-applied rollout.
+    #
+    # CAUTION (2026-06-11 merge train): GitHub supersedes the *previously
+    # pending* job when a new one enters the group, but entry order is when
+    # each run's deploy job gets scheduled (tests + runner availability),
+    # NOT commit order. With several rapid merges the newest commit's
+    # deploy can be the one cancelled, leaving an older commit to deploy
+    # last. The freshness guard below is the safety net: a deploy whose
+    # commit is no longer the tip of main skips itself instead of
+    # regressing production.
     concurrency:
       group: deploy-production
       cancel-in-progress: false
     steps:
+      # Freshness guard — runs AFTER the concurrency queue admits this job,
+      # so it sees any commits that landed while we waited. If main has
+      # moved on, every following step is skipped (the run ends green with
+      # a notice). If the newer commit's own run was cancelled by the
+      # concurrency group, nothing deploys it automatically — re-run that
+      # run's deploy job (`gh run rerun <id> --failed`); production stays
+      # on the previous good deploy until then.
+      - name: Check this commit is still the tip of main
+        id: fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)
+          if [ "$tip" = "$GITHUB_SHA" ]; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::main has moved to ${tip} — skipping deploy of ${GITHUB_SHA}. If the newer commit's run was cancelled by the concurrency group, re-run it: gh run rerun <run-id> --failed"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.fresh.outputs.stale != 'true'
 
       - name: Login to Scaleway Registry
+        if: steps.fresh.outputs.stale != 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -141,6 +169,7 @@ jobs:
           password: ${{ secrets.SCW_SECRET_KEY }}
 
       - name: Build and push gateway
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           docker build \
             -f deploy/docker/Dockerfile.gateway \
@@ -151,6 +180,7 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:latest
 
       - name: Build and push worker
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           docker build \
             -f deploy/docker/Dockerfile.worker \
@@ -161,6 +191,7 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:latest
 
       - name: Build and push console
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           docker build \
             -f deploy/docker/Dockerfile.console \
@@ -172,6 +203,7 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:latest
 
       - name: Build and push functions runner
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           docker build \
             -f deploy/docker/Dockerfile.fn \
@@ -182,6 +214,7 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/functions:latest
 
       - name: Build and push MCP server
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           docker build \
             -f mcp-server/Dockerfile \
@@ -192,6 +225,7 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:latest
 
       - name: Build and push migrations image
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           docker build \
             -f deploy/docker/Dockerfile.migrations \
@@ -202,9 +236,11 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/migrations:latest
 
       - name: Install kubectl
+        if: steps.fresh.outputs.stale != 'true'
         uses: azure/setup-kubectl@v4
 
       - name: Install Scaleway CLI and get kubeconfig
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           curl -sL -o /usr/local/bin/scw https://github.com/scaleway/scaleway-cli/releases/download/v2.53.0/scaleway-cli_2.53.0_linux_amd64
           chmod +x /usr/local/bin/scw
@@ -220,6 +256,7 @@ jobs:
           SCW_DEFAULT_ZONE: fr-par-1
 
       - name: Apply K8s manifests (security, ingress, functions, MCP server)
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           # CVE-2026-31431 (Copy Fail) and CVE-2026-46333 (ssh-keysign-pwn)
           # mitigations must land before any pod restart so newly scheduled
@@ -254,6 +291,7 @@ jobs:
           kubectl apply -f deploy/k8s/health-monitor-cronjob.yaml
 
       - name: Run database migrations
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           # Job specs are largely immutable — delete any prior instance so
           # this deploy's image gets picked up. --ignore-not-found covers the
@@ -272,6 +310,7 @@ jobs:
             || (kubectl -n eurobase logs job/migrate --tail=200; exit 1)
 
       - name: Deploy to Kapsule
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           kubectl set image deployment/gateway \
             gateway=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:${{ github.sha }} \
@@ -290,6 +329,7 @@ jobs:
             -n eurobase
 
       - name: Verify rollout
+        if: steps.fresh.outputs.stale != 'true'
         run: |
           # In-cluster Redis goes first so rate-limiting + realtime fan-out
           # connect cleanly on gateway startup. Failure here is non-blocking
@@ -308,7 +348,7 @@ jobs:
       # the repo secret DISCORD_DEPLOY_WEBHOOK. Both steps no-op if it's unset.
       # ----------------------------------------------------------------------
       - name: Notify Discord — deploy succeeded
-        if: ${{ success() && env.WEBHOOK != '' }}
+        if: ${{ success() && steps.fresh.outputs.stale != 'true' && env.WEBHOOK != '' }}
         env:
           WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
         run: |
