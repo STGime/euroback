@@ -87,7 +87,24 @@ as_role tenant_a_ddl pw_a -tAc "SELECT public.record_tenant_migration(1,'init','
 got=$(psql -tAc "SELECT project_id FROM public.tenant_migrations WHERE applied_by='tenant_a_ddl';")
 [ "$got" = "11111111-1111-1111-1111-111111111111" ] || fail "bookkeeping not bound to session_user (got $got)"
 
-echo "8. promote/demote lifecycle (role NOLOGIN except during apply) ..."
+echo "8. GRANT CONNECT as a NON-owner migrator is a silent no-op the verify catches ..."
+# tenant_c exercises the prod path: migrator (not db owner) grants CONNECT.
+psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+SET ROLE eurobase_migrator;
+CREATE ROLE tenant_c_ddl NOLOGIN PASSWORD 'pw_c';
+RESET ROLE;
+SQL
+# As a non-owner migrator the GRANT no-ops; has_database_privilege stays false.
+psql -tAc "SET ROLE eurobase_migrator; GRANT CONNECT ON DATABASE eurobase TO tenant_c_ddl;" >/dev/null 2>&1 || true
+[ "$(psql -tAc "SELECT has_database_privilege('tenant_c_ddl','eurobase','CONNECT');")" = "f" ] \
+  || fail "expected non-owner GRANT CONNECT to no-op (verify would not catch the trap)"
+# The ops fix (migrator owns the DB) makes the grant take — what the apply path needs.
+psql -tAc "ALTER DATABASE eurobase OWNER TO eurobase_migrator;" >/dev/null
+psql -tAc "SET ROLE eurobase_migrator; GRANT CONNECT ON DATABASE eurobase TO tenant_c_ddl;" >/dev/null
+[ "$(psql -tAc "SELECT has_database_privilege('tenant_c_ddl','eurobase','CONNECT');")" = "t" ] \
+  || fail "db-owner migrator could not grant CONNECT"
+
+echo "9. promote/demote lifecycle (role NOLOGIN except during apply) ..."
 psql -tAc "SET ROLE eurobase_migrator; ALTER ROLE tenant_a_ddl WITH NOLOGIN;" >/dev/null
 out="$(as_role tenant_a_ddl pw_a -tAc 'SELECT 1;' 2>&1 || true)"
 echo "$out" | grep -qi "not permitted to log in\|role .* is not permitted" || fail "demoted role still able to log in: $out"

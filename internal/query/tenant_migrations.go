@@ -189,6 +189,14 @@ func (e *MigrationExecutor) ddlRolePassword(schemaName string) string {
 // setRoleLogin promotes (login=true, sets the password) or demotes
 // (login=false, NOLOGIN) the per-tenant ddl role, run as migrator via the
 // admin pool. ddlRole is a validated identifier; password is hex.
+//
+// On promote it also (re)grants CONNECT and verifies it actually took:
+// GRANT CONNECT ON DATABASE as a non-owner migrator is a silent no-op
+// (WARNING, not error), so if PUBLIC's CONNECT is revoked and migrator
+// doesn't own the DB the role can't connect. has_database_privilege is
+// true iff the role can connect (via the grant OR PUBLIC), so it's the
+// authoritative check — fail loud here rather than with an opaque
+// "permission denied for database" at connect time.
 func (e *MigrationExecutor) setRoleLogin(ctx context.Context, ddlRole, password string, login bool) error {
 	tx, err := e.adminPool.Begin(ctx)
 	if err != nil {
@@ -198,14 +206,27 @@ func (e *MigrationExecutor) setRoleLogin(ctx context.Context, ddlRole, password 
 	if _, err := tx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
 		return fmt.Errorf("set migrator role: %w", err)
 	}
-	var stmt string
-	if login {
-		stmt = fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", pgx.Identifier{ddlRole}.Sanitize(), password)
-	} else {
-		stmt = fmt.Sprintf("ALTER ROLE %s WITH NOLOGIN", pgx.Identifier{ddlRole}.Sanitize())
+	if !login {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH NOLOGIN", pgx.Identifier{ddlRole}.Sanitize())); err != nil {
+			return fmt.Errorf("demote ddl role: %w", err)
+		}
+		return tx.Commit(ctx)
 	}
-	if _, err := tx.Exec(ctx, stmt); err != nil {
-		return fmt.Errorf("alter ddl role login: %w", err)
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", pgx.Identifier{ddlRole}.Sanitize(), password)); err != nil {
+		return fmt.Errorf("promote ddl role: %w", err)
+	}
+	db := e.baseConnConfig.Database
+	if _, err := tx.Exec(ctx, fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s",
+		pgx.Identifier{db}.Sanitize(), pgx.Identifier{ddlRole}.Sanitize())); err != nil {
+		return fmt.Errorf("grant connect: %w", err)
+	}
+	var canConnect bool
+	if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", ddlRole, db).Scan(&canConnect); err != nil {
+		return fmt.Errorf("verify connect privilege: %w", err)
+	}
+	if !canConnect {
+		return fmt.Errorf("tenant migrations misconfigured: role %q has no CONNECT on database %q and eurobase_migrator could not grant it — make eurobase_migrator the owner of the %q database (or grant it CONNECT … WITH GRANT OPTION) via the bootstrap owner", ddlRole, db, db)
 	}
 	return tx.Commit(ctx)
 }

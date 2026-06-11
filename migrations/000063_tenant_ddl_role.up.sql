@@ -84,9 +84,14 @@ BEGIN
     END IF;
 
     -- The gateway connects AS this role to run migrations, so it needs
-    -- CONNECT (PUBLIC's default CONNECT is revoked on this database, and
-    -- every other login role is granted it explicitly). Without this every
-    -- apply fails at connect time with "permission denied for database".
+    -- CONNECT (PUBLIC's default CONNECT is revoked on this database; every
+    -- other login role is granted it explicitly). Best-effort here: if
+    -- eurobase_migrator does not own the database this GRANT is a silent
+    -- no-op (a WARNING, not an error), so the AUTHORITATIVE check is at
+    -- apply time — MigrationExecutor re-grants and verifies CONNECT with
+    -- has_database_privilege and fails loud if migrator can't grant it.
+    -- (Ops: make eurobase_migrator own the eurobase database, or grant it
+    -- CONNECT … WITH GRANT OPTION, for tenant migrations to work.)
     EXECUTE 'GRANT CONNECT ON DATABASE eurobase TO ' || quote_ident(v_ddl_role);
 
     -- Own-schema DDL only; public = helper execution, never table access.
