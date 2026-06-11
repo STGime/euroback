@@ -22,7 +22,10 @@ psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- prod-like: PUBLIC has no default CONNECT, so login roles need it granted.
 REVOKE CONNECT ON DATABASE eurobase FROM PUBLIC;
-CREATE ROLE eurobase_migrator CREATEROLE;
+-- NOINHERIT mirrors production migrator: ALTER DEFAULT PRIVILEGES FOR ROLE
+-- <ddl> would fail under it (has_privs_of_role check) — provision must use
+-- SET ROLE <ddl> + alter-own-defaults instead.
+CREATE ROLE eurobase_migrator CREATEROLE NOINHERIT;
 CREATE ROLE eurobase_gateway LOGIN PASSWORD 'pw';
 GRANT CONNECT ON DATABASE eurobase TO eurobase_gateway;
 CREATE TABLE public.projects (id uuid primary key, schema_name text, plan text default 'free');
@@ -104,7 +107,20 @@ psql -tAc "SET ROLE eurobase_migrator; GRANT CONNECT ON DATABASE eurobase TO ten
 [ "$(psql -tAc "SELECT has_database_privilege('tenant_c_ddl','eurobase','CONNECT');")" = "t" ] \
   || fail "db-owner migrator could not grant CONNECT"
 
-echo "9. promote/demote lifecycle (role NOLOGIN except during apply) ..."
+echo "9. ALTER DEFAULT PRIVILEGES via SET ROLE works under NOINHERIT migrator ..."
+# The FOR ROLE form fails under NOINHERIT; the SET ROLE form (what 000063
+# uses) succeeds. Run the failing form to document, then the fix.
+out="$(psql -tAc "SET ROLE eurobase_migrator; ALTER DEFAULT PRIVILEGES FOR ROLE tenant_a_ddl IN SCHEMA tenant_a GRANT SELECT ON TABLES TO eurobase_gateway;" 2>&1 || true)"
+echo "$out" | grep -qi "permission denied to change default privileges" \
+  || fail "expected FOR ROLE form to be denied under NOINHERIT migrator (got: $out)"
+psql -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<'SQL' || fail "SET ROLE alter-own-defaults failed under NOINHERIT migrator"
+SET ROLE eurobase_migrator;
+SET ROLE tenant_a_ddl;
+ALTER DEFAULT PRIVILEGES IN SCHEMA tenant_a GRANT SELECT ON TABLES TO eurobase_gateway;
+RESET ROLE;
+SQL
+
+echo "10. promote/demote lifecycle (role NOLOGIN except during apply) ..."
 psql -tAc "SET ROLE eurobase_migrator; ALTER ROLE tenant_a_ddl WITH NOLOGIN;" >/dev/null
 out="$(as_role tenant_a_ddl pw_a -tAc 'SELECT 1;' 2>&1 || true)"
 echo "$out" | grep -qi "not permitted to log in\|role .* is not permitted" || fail "demoted role still able to log in: $out"
