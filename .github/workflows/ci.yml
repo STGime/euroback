@@ -144,6 +144,13 @@ jobs:
       # concurrency group, nothing deploys it automatically — re-run that
       # run's deploy job (`gh run rerun <id> --failed`); production stays
       # on the previous good deploy until then.
+      #
+      # NOTE for future edits: every step added to this job MUST carry
+      #   if: steps.fresh.outputs.stale != 'true'
+      # A job-level gate (separate freshness job) would NOT work — it
+      # would run before this job enters the concurrency queue, missing
+      # commits that land during a 5-10 min wait behind another deploy.
+      # The per-step condition is the price of checking post-admission.
       - name: Check this commit is still the tip of main
         id: fresh
         env:
@@ -154,8 +161,26 @@ jobs:
             echo "stale=false" >> "$GITHUB_OUTPUT"
           else
             echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "tip=$tip" >> "$GITHUB_OUTPUT"
             echo "::notice::main has moved to ${tip} — skipping deploy of ${GITHUB_SHA}. If the newer commit's run was cancelled by the concurrency group, re-run it: gh run rerun <run-id> --failed"
           fi
+
+      # A skipped stale run ends green, so without this ping nobody
+      # notices when the tip itself ended up undeployed (its run
+      # cancelled by the concurrency group while older runs skipped).
+      - name: Notify Discord — stale deploy skipped
+        if: ${{ steps.fresh.outputs.stale == 'true' && env.WEBHOOK != '' }}
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+          TIP: ${{ steps.fresh.outputs.tip }}
+        run: |
+          payload=$(jq -n \
+            --arg title "⏭️ Deploy skipped (stale commit)" \
+            --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg desc "\`${GITHUB_SHA:0:7}\` was no longer the tip of main (now \`${TIP:0:7}\`) — deploy skipped. Check that the tip's own run deployed; if it was cancelled, rerun it: \`gh run rerun <id> --failed\`" \
+            '{embeds: [{title: $title, url: $url, description: $desc, color: 15105570}]}')
+          curl -fsS -X POST "$WEBHOOK" -H "Content-Type: application/json" -d "$payload" \
+            || echo "::warning::Discord stale-skip notification failed"
 
       - uses: actions/checkout@v4
         if: steps.fresh.outputs.stale != 'true'
