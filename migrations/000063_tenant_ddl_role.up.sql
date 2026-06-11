@@ -83,6 +83,12 @@ BEGIN
         EXECUTE format('CREATE ROLE %I NOLOGIN', v_ddl_role);
     END IF;
 
+    -- The gateway connects AS this role to run migrations, so it needs
+    -- CONNECT (PUBLIC's default CONNECT is revoked on this database, and
+    -- every other login role is granted it explicitly). Without this every
+    -- apply fails at connect time with "permission denied for database".
+    EXECUTE 'GRANT CONNECT ON DATABASE eurobase TO ' || quote_ident(v_ddl_role);
+
     -- Own-schema DDL only; public = helper execution, never table access.
     EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO %I', p_schema, v_ddl_role);
     EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_ddl_role);

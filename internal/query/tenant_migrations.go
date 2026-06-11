@@ -186,6 +186,30 @@ func (e *MigrationExecutor) ddlRolePassword(schemaName string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// setRoleLogin promotes (login=true, sets the password) or demotes
+// (login=false, NOLOGIN) the per-tenant ddl role, run as migrator via the
+// admin pool. ddlRole is a validated identifier; password is hex.
+func (e *MigrationExecutor) setRoleLogin(ctx context.Context, ddlRole, password string, login bool) error {
+	tx, err := e.adminPool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin admin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
+		return fmt.Errorf("set migrator role: %w", err)
+	}
+	var stmt string
+	if login {
+		stmt = fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", pgx.Identifier{ddlRole}.Sanitize(), password)
+	} else {
+		stmt = fmt.Sprintf("ALTER ROLE %s WITH NOLOGIN", pgx.Identifier{ddlRole}.Sanitize())
+	}
+	if _, err := tx.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("alter ddl role login: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // Apply applies one versioned migration against the project's tenant
 // schema. Returns applied=false (no error) when the identical
 // version+checksum was already applied — re-runs are no-ops.
@@ -221,32 +245,35 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	ddlRole := tenantDDLRole(schemaName)
 	password := e.ddlRolePassword(schemaName)
 
-	// Promote the per-tenant role to LOGIN with the derived password, as
-	// migrator. Idempotent; the password literal is hex so it's safe.
-	atx, err := e.adminPool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin admin tx: %w", err)
-	}
-	defer atx.Rollback(ctx) //nolint:errcheck
-	if _, err := atx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
-		return false, fmt.Errorf("set migrator role: %w", err)
-	}
-	if _, err := atx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'",
-		pgx.Identifier{ddlRole}.Sanitize(), password)); err != nil {
-		return false, fmt.Errorf("set ddl role password: %w", err)
-	}
-	if err := atx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit admin tx: %w", err)
-	}
-
-	// Open a short-lived connection AS the per-tenant ddl role.
+	// Promote the per-tenant role to LOGIN with the derived password, run
+	// the migration, then demote it back to NOLOGIN. Keeping the role
+	// NOLOGIN except during an active apply means a leaked DDL_PASSWORD_SECRET
+	// (or a derived password that leaked into the DB log via the ALTER ROLE
+	// statement) can't be used to log in outside the brief apply window.
 	cfg := e.baseConnConfig.Copy()
 	cfg.User = ddlRole
 	cfg.Password = password
-	conn, err := pgx.ConnectConfig(ctx, cfg)
-	if err != nil {
-		return false, fmt.Errorf("connect as %s: %w", ddlRole, err)
+
+	var conn *pgx.Conn
+	// One retry covers the race where a concurrent apply for the same tenant
+	// demoted the role to NOLOGIN between our promote and connect.
+	for attempt := 0; attempt < 2; attempt++ {
+		if err = e.setRoleLogin(ctx, ddlRole, password, true); err != nil {
+			return false, err
+		}
+		conn, err = pgx.ConnectConfig(ctx, cfg)
+		if err == nil {
+			break
+		}
+		if attempt == 1 {
+			return false, fmt.Errorf("connect as %s: %w", ddlRole, err)
+		}
 	}
+	// Demote back to NOLOGIN on the way out (best-effort; uses the parent
+	// ctx so a cancelled request still attempts the lockdown).
+	defer func() {
+		_ = e.setRoleLogin(context.WithoutCancel(ctx), ddlRole, "", false)
+	}()
 	defer conn.Close(ctx)
 
 	tx, err := conn.Begin(ctx)

@@ -20,8 +20,11 @@ as_role() { local role="$1" pw="$2"; shift 2; PGPASSWORD="$pw" docker exec -i "$
 
 psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- prod-like: PUBLIC has no default CONNECT, so login roles need it granted.
+REVOKE CONNECT ON DATABASE eurobase FROM PUBLIC;
 CREATE ROLE eurobase_migrator CREATEROLE;
 CREATE ROLE eurobase_gateway LOGIN PASSWORD 'pw';
+GRANT CONNECT ON DATABASE eurobase TO eurobase_gateway;
 CREATE TABLE public.projects (id uuid primary key, schema_name text, plan text default 'free');
 CREATE TABLE public.tenant_migrations (id uuid primary key default gen_random_uuid(), project_id uuid, version bigint, name text default '', sql text, checksum text, applied_by text, applied_at timestamptz default now(), unique(project_id, version));
 ALTER TABLE public.projects OWNER TO eurobase_migrator;
@@ -46,6 +49,9 @@ ALTER FUNCTION public.record_tenant_migration(bigint,text,text,text) OWNER TO eu
 REVOKE ALL ON FUNCTION public.record_tenant_migration(bigint,text,text,text) FROM PUBLIC;
 
 -- per-tenant LOGIN ddl roles, member of NOTHING (the key property).
+-- Created AS migrator (like provision_tenant_ddl_role, a SECURITY DEFINER
+-- owned by migrator) so migrator holds admin and can promote/demote them.
+SET ROLE eurobase_migrator;
 CREATE ROLE tenant_a_ddl LOGIN PASSWORD 'pw_a';
 CREATE ROLE tenant_b_ddl LOGIN PASSWORD 'pw_b';
 GRANT USAGE,CREATE ON SCHEMA tenant_a TO tenant_a_ddl;
@@ -53,6 +59,10 @@ GRANT USAGE,CREATE ON SCHEMA tenant_b TO tenant_b_ddl;
 GRANT tenant_a_ddl TO eurobase_migrator; GRANT tenant_b_ddl TO eurobase_migrator;
 ALTER TABLE tenant_b.secrets OWNER TO tenant_b_ddl;
 GRANT EXECUTE ON FUNCTION public.record_tenant_migration(bigint,text,text,text) TO tenant_a_ddl, tenant_b_ddl;
+RESET ROLE;
+-- GRANT CONNECT is required (PUBLIC connect revoked above); in prod the
+-- migrate job (migrator) does this, here as superuser to skip db-ownership.
+GRANT CONNECT ON DATABASE eurobase TO tenant_a_ddl, tenant_b_ddl;
 SQL
 
 fail() { echo "FAIL: $1"; exit 1; }
@@ -76,6 +86,13 @@ echo "7. bookkeeping bound to session_user (forgery-proof) ..."
 as_role tenant_a_ddl pw_a -tAc "SELECT public.record_tenant_migration(1,'init','s','c');" >/dev/null
 got=$(psql -tAc "SELECT project_id FROM public.tenant_migrations WHERE applied_by='tenant_a_ddl';")
 [ "$got" = "11111111-1111-1111-1111-111111111111" ] || fail "bookkeeping not bound to session_user (got $got)"
+
+echo "8. promote/demote lifecycle (role NOLOGIN except during apply) ..."
+psql -tAc "SET ROLE eurobase_migrator; ALTER ROLE tenant_a_ddl WITH NOLOGIN;" >/dev/null
+out="$(as_role tenant_a_ddl pw_a -tAc 'SELECT 1;' 2>&1 || true)"
+echo "$out" | grep -qi "not permitted to log in\|role .* is not permitted" || fail "demoted role still able to log in: $out"
+psql -tAc "SET ROLE eurobase_migrator; ALTER ROLE tenant_a_ddl WITH LOGIN PASSWORD 'pw_a';" >/dev/null
+[ "$(as_role tenant_a_ddl pw_a -tAc 'SELECT 1;' 2>&1)" = "1" ] || fail "re-promoted role cannot log in"
 
 echo
 echo "ALL CHECKS PASSED — tenant migrations are isolated to one tenant."
