@@ -53,8 +53,11 @@ export type ParentToWorker =
   // RPC result for `db.sql`. Mirrors the call's `id` so async handlers
   // route to the right Promise.
   | { type: "db.sql.result"; id: string; rows?: unknown; error?: string }
-  // RPC result for `vault.get`.
-  | { type: "vault.get.result"; id: string; value: string | null }
+  // RPC result for `vault.get`. `error` is set for platform-side
+  // failures (key unconfigured, lookup/decrypt failure, #201) and makes
+  // the worker's RPC layer throw; a missing secret is value: null with
+  // no error.
+  | { type: "vault.get.result"; id: string; value: string | null; error?: string }
   // RPC results for `ctx.storage.*` (closes #85).
   | { type: "storage.upload.result"; id: string; key?: string; size?: number; error?: string }
   | { type: "storage.signed_url.result"; id: string; url?: string; expiresAt?: string; error?: string }
