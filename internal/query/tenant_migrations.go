@@ -131,15 +131,33 @@ func MigrationChecksum(sql string) string {
 // with different SQL than the recorded application.
 var ErrMigrationChecksumMismatch = errors.New("this version was already applied with different sql — bump the version instead of editing an applied migration")
 
+// tenantDDLRole is the per-tenant schema-scoped DDL role name (migration
+// 000063): CREATE on its own schema only, no public.* table access, not a
+// member of eurobase_migrator.
+func tenantDDLRole(schemaName string) string { return schemaName + "_ddl" }
+
 // ApplyTenantMigration applies one versioned migration against the
 // project's tenant schema. Returns applied=false (and no error) when the
 // identical version+checksum was already applied — re-runs are no-ops.
 //
-// The whole operation is one transaction on the developer pool:
-// advisory-lock the project (serializes concurrent applies), pin role +
-// search_path, run the user SQL via the simple protocol (multi-statement
-// bodies are the point of a migration), record the bookkeeping row.
-func ApplyTenantMigration(ctx context.Context, pool *pgxpool.Pool, projectID, schemaName string, version int64, name, sqlText, appliedBy string) (applied bool, err error) {
+// runnerPool MUST connect as eurobase_ddl_runner — a low-privilege LOGIN
+// role (NOINHERIT member of the per-tenant ddl roles, no public.* grants).
+// Containment is by Postgres role privilege, NOT the validator:
+//   - bookkeeping (lock, history check, insert) runs as ddl_runner, which
+//     has SELECT/INSERT on public.tenant_migrations and nothing else;
+//   - user SQL runs under SET LOCAL ROLE tenant_<id>_ddl, which owns only
+//     its own schema — cross-schema and platform writes are denied even
+//     from inside a DO/function body or a dynamic EXECUTE;
+//   - a body that does RESET ROLE lands back on ddl_runner (the harmless
+//     session role), NOT on a migrator-inheriting role — which is exactly
+//     why this cannot run on the developer or gateway pool.
+// The validator stays as defense-in-depth and for clearer error messages.
+//
+// One transaction: advisory-lock the project (serializes concurrent
+// applies), run the user SQL via the simple protocol (multi-statement
+// bodies are the point — the deliberate inverse of the cron-SQL
+// single-statement hardening, GHSA-fjjq-cqq9-q793), record bookkeeping.
+func ApplyTenantMigration(ctx context.Context, runnerPool *pgxpool.Pool, projectID, schemaName string, version int64, name, sqlText, appliedBy string) (applied bool, err error) {
 	if version <= 0 {
 		return false, errors.New("version must be a positive integer")
 	}
@@ -150,16 +168,13 @@ func ApplyTenantMigration(ctx context.Context, pool *pgxpool.Pool, projectID, sc
 		return false, err
 	}
 	checksum := MigrationChecksum(sqlText)
+	ddlRole := tenantDDLRole(schemaName)
 
-	tx, err := pool.Begin(ctx)
+	tx, err := runnerPool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-
-	if err := applyDeveloperRole(ctx, tx); err != nil {
-		return false, err
-	}
 
 	// Serialize concurrent applies per project for the duration of the
 	// transaction. Without this, two `migrations up` runs could each see
@@ -168,7 +183,7 @@ func ApplyTenantMigration(ctx context.Context, pool *pgxpool.Pool, projectID, sc
 		return false, fmt.Errorf("acquire migration lock: %w", err)
 	}
 
-	// Idempotency / tamper check against the recorded history.
+	// Idempotency / tamper check against the recorded history (as ddl_runner).
 	var existing string
 	err = tx.QueryRow(ctx,
 		`SELECT checksum FROM public.tenant_migrations WHERE project_id = $1 AND version = $2`,
@@ -186,9 +201,12 @@ func ApplyTenantMigration(ctx context.Context, pool *pgxpool.Pool, projectID, sc
 		return false, fmt.Errorf("check migration history: %w", err)
 	}
 
-	// Pin the execution context for the user SQL. search_path makes
-	// unqualified names resolve to the tenant schema only; the timeout
-	// bounds runaway DDL.
+	// Drop into the per-tenant DDL role and pin the execution context.
+	// search_path resolves unqualified names to the tenant schema;
+	// statement_timeout bounds runaway DDL.
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL ROLE %s", pgx.Identifier{ddlRole}.Sanitize())); err != nil {
+		return false, fmt.Errorf("set role %s: %w", ddlRole, err)
+	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", pgx.Identifier{schemaName}.Sanitize())); err != nil {
 		return false, fmt.Errorf("set search_path: %w", err)
 	}
@@ -196,15 +214,18 @@ func ApplyTenantMigration(ctx context.Context, pool *pgxpool.Pool, projectID, sc
 		return false, fmt.Errorf("set statement_timeout: %w", err)
 	}
 
-	// Simple query protocol: runs every statement in the body, inside
-	// this transaction. This is the deliberate inverse of the cron-SQL
-	// hardening (GHSA-fjjq-cqq9-q793) — multi-statement bodies are the
-	// point of a migration, and containment comes from the pinned role/
-	// search_path plus the validator, not from single-statement mode.
+	// User SQL runs as tenant_<id>_ddl. Simple query protocol so the whole
+	// multi-statement body executes in this transaction.
 	if _, err := tx.Conn().PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
 		return false, fmt.Errorf("migration failed: %w", err)
 	}
 
+	// Return to ddl_runner for bookkeeping, regardless of any role the body
+	// left set (it can only SET ROLE within tenant_<id>_ddl's memberships,
+	// none privileged; RESET lands on ddl_runner either way).
+	if _, err := tx.Exec(ctx, "RESET ROLE"); err != nil {
+		return false, fmt.Errorf("reset role: %w", err)
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO public.tenant_migrations (project_id, version, name, sql, checksum, applied_by)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,

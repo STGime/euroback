@@ -1959,7 +1959,7 @@ CREATE POLICY listings_owner ON listings
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What migration SQL can't do (and why)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Migrations run with your project's developer credentials (PAT or console session) — <strong>never with API keys</strong>: a leaked server key must not be able to alter your schema. Inside the SQL, the platform rejects the operations that would reach outside your project:
+					Migrations run with your project's developer credentials (PAT or console session) — <strong>never with API keys</strong>: a leaked server key must not be able to alter your schema. Each migration executes under a database role scoped to <em>only your project's schema</em>, so it physically cannot read or write another project or the platform's own tables — that boundary is enforced by Postgres, not just by validation. On top of that, the platform rejects operations that try to reach outside your project before they run:
 				</p>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li>References to other schemas (<code class="bg-gray-100 rounded px-1">public.*</code>, <code class="bg-gray-100 rounded px-1">pg_catalog</code>, other tenants). Exception: the RLS helpers <code class="bg-gray-100 rounded px-1">public.is_service_role()</code>, <code class="bg-gray-100 rounded px-1">public.current_end_user_id()</code>, and <code class="bg-gray-100 rounded px-1">public.uuid_generate_v4()</code>.</li>

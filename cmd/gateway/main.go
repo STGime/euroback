@@ -105,6 +105,25 @@ func main() {
 		slog.Warn("DATABASE_URL_DEVELOPER not set — platform routes will run on the gateway pool and will fail on tenant DDL until the developer role is configured")
 	}
 
+	// Optional DDL-runner pool for tenant migrations (#190). Connects as
+	// eurobase_ddl_runner — a low-privilege login role that SET LOCAL
+	// ROLEs into the per-tenant tenant_<id>_ddl role to run migrations.
+	// If unset, the migrations endpoint fails closed (503): migrations
+	// must never fall back to a privileged pool. See migration 000063.
+	ddlRunnerDatabaseURL := os.Getenv("DATABASE_URL_DDL_RUNNER")
+	var ddlRunnerPool *pgxpool.Pool
+	if ddlRunnerDatabaseURL != "" {
+		ddlRunnerPool, err = db.NewPool(ctx, ddlRunnerDatabaseURL)
+		if err != nil {
+			slog.Error("failed to connect with DATABASE_URL_DDL_RUNNER", "error", err)
+			os.Exit(1)
+		}
+		defer ddlRunnerPool.Close()
+		slog.Info("ddl-runner database connection pool established")
+	} else {
+		slog.Warn("DATABASE_URL_DDL_RUNNER not set — tenant migrations endpoint will return 503 until the ddl-runner role is configured")
+	}
+
 	// ── Set up plan limits ──
 	limitsSvc := plans.NewLimitsService(pool)
 	slog.Info("plan limits service initialized")
@@ -369,7 +388,7 @@ func main() {
 	}()
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, devMode)
+	r := gateway.NewRouter(pool, developerPool, ddlRunnerPool, platformAuth, platformAuthSvc, limiter, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{

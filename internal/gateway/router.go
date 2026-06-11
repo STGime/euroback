@@ -47,7 +47,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, ddlRunnerPool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -286,11 +286,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, platformAuth *au
 			// this flag, but it's only mounted on /data/sql and below.)
 			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
 			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
-			// Tenant-level versioned migrations (#190) — same trust plane
-			// as the schema DDL endpoints above: platform auth, developer
-			// role, migrator elevation on the developer pool. Deliberately
-			// NOT exposed on /v1: data-plane keys never run DDL.
-			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/migrations", query.HandleTenantMigrations(developerPool, pool))
+			// Tenant-level versioned migrations (#190). Platform auth +
+			// developer role, but executed on the dedicated low-privilege
+			// ddlRunnerPool (eurobase_ddl_runner → SET LOCAL ROLE
+			// tenant_<id>_ddl), NOT the developer/migrator pool — see
+			// ApplyTenantMigration for why the session role must be
+			// harmless. Deliberately NOT on /v1: data-plane keys never run
+			// DDL. Fails closed (503) if ddlRunnerPool is unconfigured.
+			r.With(tenant.RequireMinRole("developer")).Mount("/migrations", query.HandleTenantMigrations(ddlRunnerPool, pool))
 			r.With(tenant.RequireMinRole("developer")).Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
 			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc))

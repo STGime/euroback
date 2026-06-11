@@ -215,6 +215,25 @@ func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName 
 			return fmt.Errorf("create table: %w", err)
 		}
 
+		// Ownership convergence (#190 / migration 000063): hand the new
+		// table to the per-tenant DDL role so tenant migrations can ALTER
+		// it later. The console path runs as eurobase_migrator, a member of
+		// the ddl role, so ALTER OWNER succeeds. Wrapped in a savepoint so
+		// a missing ddl role (pre-000063 / local dev) degrades to a
+		// migrator-owned table instead of aborting the whole create.
+		ownSQL := fmt.Sprintf("ALTER TABLE %s OWNER TO %s", qt, quoteIdent(schemaName+"_ddl"))
+		if _, err := tx.Exec(ctx, "SAVEPOINT own_ddl"); err == nil {
+			if _, err := tx.Exec(ctx, ownSQL); err != nil {
+				slog.Warn("ownership convergence skipped (tenant ddl role unavailable)",
+					"schema", schemaName, "table", tableName, "error", err)
+				if _, rbErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT own_ddl"); rbErr != nil {
+					return fmt.Errorf("rollback ownership savepoint: %w", rbErr)
+				}
+			} else {
+				_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT own_ddl")
+			}
+		}
+
 		rlsSQL := fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", qt)
 		if _, err := tx.Exec(ctx, rlsSQL); err != nil {
 			return fmt.Errorf("enable RLS: %w", err)
