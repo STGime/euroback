@@ -107,18 +107,43 @@ psql -tAc "SET ROLE eurobase_migrator; GRANT CONNECT ON DATABASE eurobase TO ten
 [ "$(psql -tAc "SELECT has_database_privilege('tenant_c_ddl','eurobase','CONNECT');")" = "t" ] \
   || fail "db-owner migrator could not grant CONNECT"
 
-echo "9. ALTER DEFAULT PRIVILEGES via SET ROLE works under NOINHERIT migrator ..."
-# The FOR ROLE form fails under NOINHERIT; the SET ROLE form (what 000063
-# uses) succeeds. Run the failing form to document, then the fix.
-out="$(psql -tAc "SET ROLE eurobase_migrator; ALTER DEFAULT PRIVILEGES FOR ROLE tenant_a_ddl IN SCHEMA tenant_a GRANT SELECT ON TABLES TO eurobase_gateway;" 2>&1 || true)"
-echo "$out" | grep -qi "permission denied to change default privileges" \
-  || fail "expected FOR ROLE form to be denied under NOINHERIT migrator (got: $out)"
-psql -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<'SQL' || fail "SET ROLE alter-own-defaults failed under NOINHERIT migrator"
-SET ROLE eurobase_migrator;
-SET ROLE tenant_a_ddl;
-ALTER DEFAULT PRIVILEGES IN SCHEMA tenant_a GRANT SELECT ON TABLES TO eurobase_gateway;
-RESET ROLE;
+echo "9. ALTER DEFAULT PRIVILEGES inside a SECURITY DEFINER, NOINHERIT migrator (the prod path) ..."
+# Faithful to provision_tenant_ddl_role: a SECURITY DEFINER func owned by the
+# NOINHERIT migrator that grants the ddl role to migrator and runs
+# ALTER DEFAULT PRIVILEGES FOR ROLE <ddl>. Two pitfalls this guards:
+#   - SET ROLE is forbidden inside SECURITY DEFINER (so the "SET ROLE then
+#     alter own defaults" approach fails here);
+#   - plain GRANT (no INHERIT) fails the FOR ROLE has_privs check under a
+#     NOINHERIT migrator.
+# Only GRANT ... WITH INHERIT TRUE + FOR ROLE works — assert exactly that.
+psql -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<'SQL'
+CREATE SCHEMA tenant_d AUTHORIZATION eurobase_migrator;
+CREATE ROLE tenant_d_func NOLOGIN;
+-- negative control: plain GRANT (no INHERIT) must fail the FOR ROLE check
+CREATE FUNCTION prov_plain() RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  CREATE ROLE tenant_d_ddl NOLOGIN;
+  GRANT USAGE,CREATE ON SCHEMA tenant_d TO tenant_d_ddl;
+  GRANT tenant_d_ddl TO eurobase_migrator;          -- plain, no INHERIT
+  ALTER DEFAULT PRIVILEGES FOR ROLE tenant_d_ddl IN SCHEMA tenant_d GRANT SELECT ON TABLES TO eurobase_gateway;
+END$$;
+ALTER FUNCTION prov_plain() OWNER TO eurobase_migrator;
+-- the fix: WITH INHERIT TRUE
+CREATE FUNCTION prov_inherit() RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  CREATE ROLE tenant_e_ddl NOLOGIN;
+  EXECUTE 'CREATE SCHEMA tenant_e AUTHORIZATION eurobase_migrator';
+  GRANT USAGE,CREATE ON SCHEMA tenant_e TO tenant_e_ddl;
+  GRANT tenant_e_ddl TO eurobase_migrator WITH INHERIT TRUE;
+  ALTER DEFAULT PRIVILEGES FOR ROLE tenant_e_ddl IN SCHEMA tenant_e GRANT SELECT ON TABLES TO eurobase_gateway;
+END$$;
+ALTER FUNCTION prov_inherit() OWNER TO eurobase_migrator;
 SQL
+out="$(psql -tAc "SET ROLE eurobase_migrator; SELECT prov_plain();" 2>&1 || true)"
+echo "$out" | grep -qi "permission denied to change default privileges" \
+  || fail "expected plain GRANT (no INHERIT) to be denied in SECURITY DEFINER under NOINHERIT migrator (got: $out)"
+psql -tAc "SET ROLE eurobase_migrator; SELECT prov_inherit();" >/dev/null 2>&1 \
+  || fail "WITH INHERIT TRUE + FOR ROLE failed inside SECURITY DEFINER under NOINHERIT migrator"
 
 echo "10. promote/demote lifecycle (role NOLOGIN except during apply) ..."
 psql -tAc "SET ROLE eurobase_migrator; ALTER ROLE tenant_a_ddl WITH NOLOGIN;" >/dev/null

@@ -106,25 +106,21 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.tenant_migration_checksum(bigint) TO %I', v_ddl_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.record_tenant_migration(bigint, text, text, text) TO %I', v_ddl_role);
 
-    -- Migrator manages ddl-owned objects (console DDL) AND sets the role's
-    -- login password per apply (creator + CREATEROLE; no ADMIN OPTION needed).
-    EXECUTE format('GRANT %I TO eurobase_migrator', v_ddl_role);
+    -- Migrator manages ddl-owned objects (console DDL) and sets the role's
+    -- login password per apply. The membership is granted WITH INHERIT TRUE
+    -- so the next statement works even though eurobase_migrator is NOINHERIT
+    -- in production: ALTER DEFAULT PRIVILEGES FOR ROLE <ddl> needs
+    -- has_privs_of_role (INHERIT-based) membership of <ddl>. Per-membership
+    -- INHERIT TRUE (PG16) overrides migrator's role-level NOINHERIT for just
+    -- this grant. (SET ROLE is not an option — it's forbidden inside a
+    -- SECURITY DEFINER function; plain membership fails the FOR ROLE check.)
+    EXECUTE format('GRANT %I TO eurobase_migrator WITH INHERIT TRUE', v_ddl_role);
 
-    -- Tables the ddl role creates become usable at runtime. Done while
-    -- SET ROLE'd to the ddl role (altering its OWN default privileges)
-    -- rather than `ALTER DEFAULT PRIVILEGES FOR ROLE <ddl>` as migrator:
-    -- the FOR ROLE form requires has_privs_of_role (INHERIT-based)
-    -- membership, and eurobase_migrator is NOINHERIT in production, so it
-    -- fails with "permission denied to change default privileges". A role
-    -- altering its own defaults is always permitted. SET ROLE works because
-    -- migrator is a member of the ddl role WITH SET (default), independent
-    -- of INHERIT.
-    EXECUTE format('SET ROLE %I', v_ddl_role);
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', p_schema);
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO eurobase_gateway', p_schema);
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', p_schema, v_func_role);
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO %I', p_schema, v_func_role);
-    RESET ROLE;
+    -- Tables the ddl role creates become usable at runtime.
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', v_ddl_role, p_schema);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO eurobase_gateway', v_ddl_role, p_schema);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', v_ddl_role, p_schema, v_func_role);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO %I', v_ddl_role, p_schema, v_func_role);
 
     -- Reassign existing APPLICATION tables (everything except platform
     -- system tables) from migrator to the ddl role. Idempotent.
