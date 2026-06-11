@@ -440,20 +440,29 @@ async function runUserHandlerInWorker(opts: {
         }
         case "vault.get.call": {
           // Closes #79: read the encrypted blob via the SECURITY DEFINER
-          // helper public.vault_get_for_runner (added by migration 000049)
-          // and decrypt locally with VAULT_ENCRYPTION_KEY. Failure modes
-          // (missing secret, no encryption key, decrypt failure) all
-          // resolve to null so the worker contract stays `string | null`.
-          resolveVaultSecret(db, projectId, msg.name)
-            .then((value) => {
+          // helper public.vault_get_for_runner (migration 000049,
+          // key_version added in 000061) and decrypt locally with the
+          // key for the version the secret was sealed with (#201).
+          // Missing secret → null; platform-side failures (no key,
+          // lookup/decrypt failure) → error, which the worker's RPC
+          // layer surfaces to user code as a thrown Error so "secret
+          // missing" and "vault broken" are distinguishable.
+          resolveVaultSecret(db, projectId, schemaName, msg.name)
+            .then((result) => {
               if (settled) return;
-              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value };
+              if ("error" in result) {
+                logCapture.warn(`vault.get(${JSON.stringify(msg.name)}) failed: ${result.error}`);
+                const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null, error: result.error };
+                worker.postMessage(reply);
+                return;
+              }
+              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: result.value };
               worker.postMessage(reply);
             })
             .catch((err) => {
               if (settled) return;
               console.error(`[fn:${projectId}] vault.get failed`, err);
-              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null };
+              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null, error: "vault unavailable: internal error" };
               worker.postMessage(reply);
             });
           break;

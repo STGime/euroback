@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"testing"
 )
 
@@ -114,5 +115,34 @@ func TestSealOpen_RoundTripAndIsolation(t *testing.T) {
 
 	if _, err := decryptWith(keyB, ct, nonce); err == nil {
 		t.Error("tenant B's key decrypted tenant A's ciphertext — separation broken")
+	}
+}
+
+// Cross-language vector pinned in BOTH this Go suite and the Deno runner
+// suite (functions-runner/vault_test.ts, issue #201). The runner
+// re-implements this derivation with WebCrypto HKDF; if either side
+// drifts, its CI job fails. Do not change the vector without changing
+// both files.
+func TestHKDFProvider_CrossLanguageVector(t *testing.T) {
+	p := newHKDFKeyProvider(testMaster())
+	key, err := p.DeriveKey(context.Background(), "tenant_11111111_2222_3333_4444_555555555555", 1)
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	want, _ := base64.StdEncoding.DecodeString("RF884Rlm9sIYlm8ig2EQzav21+5drtmIg+vEujfkG54=")
+	if !bytes.Equal(key, want) {
+		t.Errorf("derived key = %s, want %s — runner vault.ts pins this exact vector",
+			base64.StdEncoding.EncodeToString(key), base64.StdEncoding.EncodeToString(want))
+	}
+
+	// And the sealed fixture the Deno test decrypts: same key, fixed nonce.
+	nonce := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	sealed, _ := base64.StdEncoding.DecodeString("OYT3J2/GBpxo9TmQF9/BYzfodt28C63W91q7+g19CVRVFcSXTA==")
+	got, err := decryptWith(key, sealed, nonce)
+	if err != nil {
+		t.Fatalf("decryptWith fixture: %v", err)
+	}
+	if got != "mistral_api_key_value" {
+		t.Errorf("fixture plaintext = %q, want %q", got, "mistral_api_key_value")
 	}
 }
