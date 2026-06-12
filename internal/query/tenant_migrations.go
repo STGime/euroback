@@ -51,14 +51,23 @@ const maxMigrationSQLBytes = 512 * 1024
 
 // publicHelperAllowRe matches the public.* helper functions that tenant
 // SQL legitimately references — RLS policy presets are built from
-// public.is_service_role() / public.current_end_user_id(), table
-// defaults use public.uuid_generate_v4(), and the sensitive-table
-// policies use public.is_internal_auth_path(). These are blanked before
-// the forbidden-schema scan so the general `public.` ban doesn't reject
-// every realistic RLS policy.
+// public.is_service_role() / public.current_end_user_id(), and the
+// sensitive-table policies use public.is_internal_auth_path(). These are
+// blanked before the forbidden-schema scan so the general `public.` ban
+// doesn't reject every realistic RLS policy.
+//
+// public.uuid_generate_v4 is deliberately NOT here: it's owned by the
+// Scaleway bootstrap superadmin (not eurobase_migrator), so the per-tenant
+// _ddl role can't be granted EXECUTE on it and a migration using it would
+// fail at apply with an opaque "permission denied for function". It's
+// rejected up front with a pointer to core gen_random_uuid() instead.
 var publicHelperAllowRe = regexp.MustCompile(
-	`(?i)\bpublic\s*\.\s*(is_service_role|current_end_user_id|is_internal_auth_path|uuid_generate_v4)\b`,
+	`(?i)\bpublic\s*\.\s*(is_service_role|current_end_user_id|is_internal_auth_path)\b`,
 )
+
+// uuidGenerateV4Re matches public.uuid_generate_v4() / uuid_generate_v4()
+// so the channel can reject it with an actionable message (see above).
+var uuidGenerateV4Re = regexp.MustCompile(`(?i)\b(public\s*\.\s*)?uuid_generate_v4\s*\(`)
 
 // forbiddenMigSchemaRe rejects qualified references to schemas a tenant
 // migration must not reach: the platform's public schema, catalogs, and
@@ -106,6 +115,12 @@ func ValidateTenantMigrationSQL(sql string) error {
 	}
 
 	stripped := stripSQLLiterals(trimmed)
+	// uuid_generate_v4 (uuid-ossp) is owned by the Scaleway bootstrap
+	// superadmin and ungrantable to the per-tenant _ddl role — reject it
+	// early with a fix rather than let it fail opaquely at apply.
+	if uuidGenerateV4Re.MatchString(stripped) {
+		return errors.New("uuid_generate_v4() is not available to tenant migrations — use the built-in gen_random_uuid() instead")
+	}
 	// Blank the allowlisted public helpers, then scan for any remaining
 	// qualified reference to a forbidden schema.
 	scanned := publicHelperAllowRe.ReplaceAllString(stripped, "ALLOWED_HELPER")
