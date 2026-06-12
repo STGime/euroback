@@ -228,6 +228,25 @@ func (e *MigrationExecutor) setRoleLogin(ctx context.Context, ddlRole, password 
 	if !canConnect {
 		return fmt.Errorf("tenant migrations misconfigured: role %q has no CONNECT on database %q and eurobase_migrator could not grant it — make eurobase_migrator the owner of the %q database (or grant it CONNECT … WITH GRANT OPTION) via the bootstrap owner", ddlRole, db, db)
 	}
+
+	// Self-heal USAGE ON SCHEMA public (#217). The role needs it to resolve
+	// the bookkeeping helpers (public.tenant_migration_checksum /
+	// record_tenant_migration) and the RLS helpers a migration's policies
+	// reference. Same silent-no-op trap as CONNECT: if eurobase_migrator
+	// lacks USAGE … WITH GRANT OPTION on schema public the grant does
+	// nothing, so verify with has_schema_privilege and fail loud. (The
+	// privileged public functions are revoked from PUBLIC in migration
+	// 000064, so holding schema USAGE does not expose them.)
+	if _, err := tx.Exec(ctx, fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %s", pgx.Identifier{ddlRole}.Sanitize())); err != nil {
+		return fmt.Errorf("grant schema usage: %w", err)
+	}
+	var canUsePublic bool
+	if err := tx.QueryRow(ctx, "SELECT has_schema_privilege($1, 'public', 'USAGE')", ddlRole).Scan(&canUsePublic); err != nil {
+		return fmt.Errorf("verify schema usage: %w", err)
+	}
+	if !canUsePublic {
+		return fmt.Errorf("tenant migrations misconfigured: role %q has no USAGE on schema public and eurobase_migrator could not grant it — ask Scaleway to run GRANT USAGE ON SCHEMA public TO eurobase_migrator WITH GRANT OPTION (see #217)", ddlRole)
+	}
 	return tx.Commit(ctx)
 }
 
