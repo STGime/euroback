@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -61,16 +62,46 @@ func isGatewayControlHeader(lower string) bool {
 // copyForwardableHeaders copies the caller's request headers that are safe
 // to forward to the runner into dst (#214) — everything except hop-by-hop
 // headers, platform auth credentials, and the gateway control namespace.
+// Also drops any header named in the request's Connection header (RFC 7230
+// §6.1 — those are connection-specific and a proxy must not forward them).
 func copyForwardableHeaders(dst, src http.Header) {
+	connectionTokens := map[string]bool{}
+	for _, c := range src.Values("Connection") {
+		for _, tok := range strings.Split(c, ",") {
+			if t := strings.ToLower(strings.TrimSpace(tok)); t != "" {
+				connectionTokens[t] = true
+			}
+		}
+	}
 	for name, values := range src {
 		lower := strings.ToLower(name)
-		if unforwardableHeaders[lower] || isGatewayControlHeader(lower) {
+		if unforwardableHeaders[lower] || isGatewayControlHeader(lower) || connectionTokens[lower] {
 			continue
 		}
 		for _, v := range values {
 			dst.Add(name, v)
 		}
 	}
+}
+
+// forwardableQuery returns the caller's query string with auth-bearing
+// params removed, so a secret key passed as ?apikey=… (accepted by the
+// API-key middleware, internal/auth/apikey_middleware.go) does not leak
+// into the function's req.url (#214). Mirrors the header strip. Returns ""
+// when nothing remains. Note: re-encoding re-sorts the params, which is
+// fine for searchParams consumers.
+func forwardableQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		// Unparseable query — forward nothing rather than risk leaking a
+		// param the gateway consumes.
+		return ""
+	}
+	q.Del("apikey")
+	return q.Encode()
 }
 
 // HandleInvoke proxies a function invocation to the Function Runner service.
@@ -126,11 +157,12 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 			return
 		}
 
-		// Proxy request to the Function Runner. Preserve the original query
-		// string so functions can read new URL(req.url).searchParams (#214).
+		// Proxy request to the Function Runner. Preserve the query string so
+		// functions can read new URL(req.url).searchParams (#214), minus
+		// auth-bearing params (?apikey=) that the gateway consumes.
 		target := runnerURL + "/invoke"
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
+		if q := forwardableQuery(r.URL.RawQuery); q != "" {
+			target += "?" + q
 		}
 		proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 		if err != nil {

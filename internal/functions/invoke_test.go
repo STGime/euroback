@@ -2,6 +2,7 @@ package functions
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,41 @@ func TestCopyForwardableHeaders_ForwardsCustomStripsControlAndAuth(t *testing.T)
 	for _, h := range stripped {
 		if dst.Get(h) != "" {
 			t.Errorf("SECURITY/PROTOCOL: %s must NOT be forwarded, but got %q", h, dst.Get(h))
+		}
+	}
+}
+
+func TestCopyForwardableHeaders_HonorsConnectionHeader(t *testing.T) {
+	// RFC 7230 §6.1: headers named in Connection are connection-specific
+	// and must not be forwarded by a proxy.
+	src := http.Header{}
+	src.Set("Connection", "X-Hop-Custom, close")
+	src.Set("X-Hop-Custom", "should-not-forward")
+	src.Set("X-Keep", "ok")
+	dst := http.Header{}
+	copyForwardableHeaders(dst, src)
+	if dst.Get("X-Hop-Custom") != "" {
+		t.Error("header named in Connection must be dropped")
+	}
+	if dst.Get("X-Keep") != "ok" {
+		t.Error("unrelated custom header should still forward")
+	}
+}
+
+func TestForwardableQuery_StripsApikey(t *testing.T) {
+	cases := map[string]struct{ in, wantContains, wantAbsent string }{
+		"apikey only":      {"apikey=eb_sk_live_secret", "", "apikey"},
+		"apikey + others":  {"token=t&apikey=eb_sk_live_secret&foo=bar", "token=t", "apikey"},
+		"no apikey":        {"key=feedkey&foo=bar", "key=feedkey", "apikey"},
+		"empty":            {"", "", "apikey"},
+	}
+	for name, c := range cases {
+		got := forwardableQuery(c.in)
+		if c.wantContains != "" && !strings.Contains(got, c.wantContains) {
+			t.Errorf("%s: expected %q in %q", name, c.wantContains, got)
+		}
+		if strings.Contains(got, c.wantAbsent) {
+			t.Errorf("%s: SECURITY: %q (apikey) must not appear in forwarded query %q", name, c.wantAbsent, got)
 		}
 	}
 }
