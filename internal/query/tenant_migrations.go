@@ -228,6 +228,30 @@ func (e *MigrationExecutor) setRoleLogin(ctx context.Context, ddlRole, password 
 	if !canConnect {
 		return fmt.Errorf("tenant migrations misconfigured: role %q has no CONNECT on database %q and eurobase_migrator could not grant it — make eurobase_migrator the owner of the %q database (or grant it CONNECT … WITH GRANT OPTION) via the bootstrap owner", ddlRole, db, db)
 	}
+
+	// (Re)grant USAGE ON SCHEMA public and verify it took — same silent-no-op
+	// hazard as CONNECT. On Scaleway, schema public is owned by
+	// pg_database_owner (_rdb_superadmin), so eurobase_migrator can grant
+	// USAGE only once the bootstrap owner has granted it USAGE … WITH GRANT
+	// OPTION; otherwise the GRANT is a WARNING-not-error no-op. The _ddl role
+	// needs USAGE to resolve the apply path's ad-hoc public.* references
+	// (public.tenant_migration_checksum / record_tenant_migration bookkeeping,
+	// and CREATE POLICY … public.is_service_role() in migration bodies) —
+	// EXECUTE on those functions is not enough, schema USAGE is checked at
+	// name-resolution time. has_schema_privilege is the authoritative check;
+	// fail loud here rather than with an opaque "permission denied for schema
+	// public" once we're connected as the role.
+	if _, err := tx.Exec(ctx, fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %s",
+		pgx.Identifier{ddlRole}.Sanitize())); err != nil {
+		return fmt.Errorf("grant public usage: %w", err)
+	}
+	var hasPublicUsage bool
+	if err := tx.QueryRow(ctx, "SELECT has_schema_privilege($1, 'public', 'USAGE')", ddlRole).Scan(&hasPublicUsage); err != nil {
+		return fmt.Errorf("verify public usage: %w", err)
+	}
+	if !hasPublicUsage {
+		return fmt.Errorf("tenant migrations misconfigured: role %q has no USAGE on schema public and eurobase_migrator could not grant it — grant eurobase_migrator USAGE ON SCHEMA public … WITH GRANT OPTION via the bootstrap owner", ddlRole)
+	}
 	return tx.Commit(ctx)
 }
 

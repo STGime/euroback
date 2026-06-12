@@ -95,7 +95,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n    \"name\": \"todos\",\n    \"columns\": [\n        {\n            \"name\": \"id\",\n            \"type\": \"uuid\",\n            \"nullable\": false,\n            \"default_value\": \"public.uuid_generate_v4()\",\n            \"is_primary_key\": true\n        },\n        {\n            \"name\": \"title\",\n            \"type\": \"text\",\n            \"nullable\": false\n        },\n        {\n            \"name\": \"done\",\n            \"type\": \"boolean\",\n            \"nullable\": false,\n            \"default_value\": \"false\"\n        },\n        {\n            \"name\": \"created_at\",\n            \"type\": \"timestamptz\",\n            \"nullable\": false,\n            \"default_value\": \"now()\"\n        }\n    ]\n}"
+							"raw": "{\n    \"name\": \"todos\",\n    \"columns\": [\n        {\n            \"name\": \"id\",\n            \"type\": \"uuid\",\n            \"nullable\": false,\n            \"default_value\": \"gen_random_uuid()\",\n            \"is_primary_key\": true\n        },\n        {\n            \"name\": \"title\",\n            \"type\": \"text\",\n            \"nullable\": false\n        },\n        {\n            \"name\": \"done\",\n            \"type\": \"boolean\",\n            \"nullable\": false,\n            \"default_value\": \"false\"\n        },\n        {\n            \"name\": \"created_at\",\n            \"type\": \"timestamptz\",\n            \"nullable\": false,\n            \"default_value\": \"now()\"\n        }\n    ]\n}"
 						},
 						"url": {
 							"raw": "{{base_url}}/platform/projects/{{project_id}}/schema/tables",

@@ -1,0 +1,31 @@
+-- Lockdown for the tenant-migration channel (#217).
+--
+-- provision_tenant_ddl_role(text) was created in 000063 without an explicit
+-- ACL, so it inherited Postgres's default EXECUTE -> PUBLIC. That is inert
+-- only while the per-tenant _ddl/_func roles cannot resolve names in schema
+-- public. The tenant-migration channel grants the _ddl roles USAGE ON SCHEMA
+-- public (so the apply path's ad-hoc public.* calls resolve) — and the
+-- moment a tenant role has that USAGE, PUBLIC EXECUTE would let a migration
+-- body (e.g. a DO $$…$$ block the validator can't inspect) or edge-function
+-- SQL call this migrator-owned SECURITY DEFINER function and re-provision an
+-- arbitrary _ddl role. It is only ever invoked in migrator context (directly
+-- in migrations, or internally by provision_tenant, which runs as its
+-- definer = migrator), so revoking PUBLIC EXECUTE costs nothing.
+--
+-- A full sweep (#217) confirmed this is the ONLY PUBLIC-executable privileged
+-- secdef function in public: provision_tenant / deprovision_tenant /
+-- vault_get_for_runner already carry explicit, tenant-excluding ACLs, and
+-- record_tenant_migration / tenant_migration_checksum are session_user-bound
+-- (a tenant can only touch its own project's history).
+REVOKE EXECUTE ON FUNCTION public.provision_tenant_ddl_role(text) FROM PUBLIC;
+
+-- Recurrence prevention is by CONVENTION, not a default-privileges guard: the
+-- obvious belt-and-suspenders —
+--   ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA public
+--     REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC
+-- — was tested against PostgreSQL 16 and does NOT suppress PUBLIC EXECUTE on
+-- new migrator-created functions (the pg_default_acl behaviour differs for a
+-- non-bootstrap owner role), so it is deliberately omitted rather than shipped
+-- as a no-op. Instead: every new SECURITY DEFINER / helper function in public
+-- MUST `REVOKE EXECUTE … FROM PUBLIC` (or GRANT only to the roles that need
+-- it) in its own migration. See CLAUDE.md.

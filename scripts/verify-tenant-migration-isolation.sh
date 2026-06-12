@@ -159,5 +159,26 @@ echo "$out" | grep -qi "not permitted to log in\|role .* is not permitted" || fa
 psql -tAc "SET ROLE eurobase_migrator; ALTER ROLE tenant_a_ddl WITH LOGIN PASSWORD 'pw_a';" >/dev/null
 [ "$(as_role tenant_a_ddl pw_a -tAc 'SELECT 1;' 2>&1)" = "1" ] || fail "re-promoted role cannot log in"
 
+echo "11. lockdown (000064): a PUBLIC-EXECUTE secdef helper in public is not tenant-callable after REVOKE ..."
+# Footgun: a migrator-owned SECURITY DEFINER function in public with the
+# default EXECUTE->PUBLIC ACL — exactly provision_tenant_ddl_role's original
+# (NULL-ACL) state — is reachable by any tenant _ddl role once it has USAGE on
+# public (which the migration channel grants). Reproduce it, then assert the
+# 000064 targeted REVOKE closes it.
+psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+GRANT USAGE ON SCHEMA public TO tenant_a_ddl;   -- the channel's grant
+CREATE FUNCTION public.priv_helper() RETURNS text LANGUAGE sql SECURITY DEFINER AS $$ SELECT 'ran-as-'||current_user $$;
+ALTER FUNCTION public.priv_helper() OWNER TO eurobase_migrator;
+SQL
+[ "$(as_role tenant_a_ddl pw_a -tAc 'SELECT public.priv_helper();' 2>&1)" = "ran-as-eurobase_migrator" ] \
+  || fail "footgun not reproduced: a PUBLIC-EXECUTE secdef helper should be tenant-callable before lockdown"
+# 000064 lockdown: the targeted REVOKE (recurrence prevention is by convention —
+# the ALTER DEFAULT PRIVILEGES guard was tested and is a no-op on PG16; see the
+# migration). Assert the tenant can no longer reach the function.
+psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+REVOKE EXECUTE ON FUNCTION public.priv_helper() FROM PUBLIC;
+SQL
+must_deny lockdown as_role tenant_a_ddl pw_a -tAc "SELECT public.priv_helper();"
+
 echo
 echo "ALL CHECKS PASSED — tenant migrations are isolated to one tenant."
