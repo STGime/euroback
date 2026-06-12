@@ -1483,6 +1483,17 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Function Structure</h3>
 				<p class="text-sm text-gray-700">Write TypeScript or JavaScript and export your handler with <code>export default</code> (or <code>module.exports</code>). The runner passes <code>req</code> (a <code>Request</code>) and <code>ctx</code> (context). Code is compiled on deploy — types are stripped, not checked.</p>
 				<p class="text-sm text-amber-700 bg-amber-50 border-l-4 border-amber-400 px-3 py-2 mt-2 rounded"><strong>Heads-up:</strong> third-party imports (<code>import … from "https://…"</code> or npm packages) are not supported yet — inline dependencies into the function file.</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Reading the request (webhooks & APIs)</h3>
+				<p class="text-sm text-gray-700">Your function receives the full incoming request, so it can act as a webhook receiver or small HTTP API:</p>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1 mt-2">
+					<li><strong>Query string</strong> — <code>new URL(req.url).searchParams.get('token')</code></li>
+					<li><strong>Custom headers</strong> — <code>req.headers.get('X-Signature')</code>, <code>X-Api-Key</code>, <code>X-Webhook-Id</code>, etc. are forwarded as sent.</li>
+					<li><strong>Body</strong> — <code>await req.json()</code> / <code>req.text()</code>; <code>Content-Type</code> is preserved.</li>
+				</ul>
+				<p class="text-sm text-gray-700 mt-2">Two header families are <em>not</em> forwarded: the platform's own auth (<code>Authorization</code>, <code>apikey</code>, <code>Cookie</code> — these authenticate your call to Eurobase), and Eurobase's internal <code>X-Eurobase-*</code> / <code>X-Project-*</code> / <code>X-Function-*</code> / <code>X-User-*</code> headers. For end-user identity on a <code>verify_jwt</code> function, use <code>ctx.user</code> instead. Put a partner's auth token in any other custom header (e.g. <code>X-Api-Key</code>) or the query string.</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Example handler</h3>
 				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto whitespace-pre">module.exports = async (req, ctx) =&gt; {"{"}{"\n"}  // Parse the incoming request{"\n"}  const {"{"} orderId {"}"} = await req.json();{"\n"}{"\n"}  // Query the database (scoped to your project){"\n"}  const {"{"} rows {"}"} = await ctx.db.sql({"\n"}    "SELECT * FROM orders WHERE id = $1",{"\n"}    [orderId]{"\n"}  );{"\n"}  const order = rows[0];{"\n"}{"\n"}  // Read a secret from Vault{"\n"}  const apiKey = await ctx.vault.get("PAYMENT_API_KEY");{"\n"}{"\n"}  // Call an external API{"\n"}  const payment = await fetch("https://api.mollie.com/v2/payments", {"{"}{"\n"}    method: "POST",{"\n"}    headers: {"{"} Authorization: `Bearer ${"{"} apiKey {"}"}` {"}"},{"\n"}    body: JSON.stringify({"{"} amount: order.total {"}"}){"\n"}  {"}"});{"\n"}{"\n"}  // Return a response{"\n"}  return new Response(JSON.stringify({"{"} status: "ok" {"}"}), {"{"}{"\n"}    status: 200,{"\n"}    headers: {"{"} "Content-Type": "application/json" {"}"},{"\n"}  {"}"});{"\n"}{"}"};</pre>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Context API</h3>

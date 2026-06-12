@@ -5,12 +5,73 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// unforwardableHeaders are caller request headers the gateway must NOT
+// forward to the runner (#214): hop-by-hop headers, the platform's auth
+// credentials (consumed by the gateway, not the function), and Host/
+// Content-Length (managed by the HTTP client). The gateway's own control
+// headers (X-Eurobase-*, X-Project-*, X-Function-*, X-Schema-Name, X-Plan,
+// X-User-*, X-Request-ID) are denied via isGatewayControlHeader so a caller
+// can't spoof a signed identity value — those are set by the gateway after
+// copying and are covered by the HMAC signature.
+var unforwardableHeaders = map[string]bool{
+	"connection":          true,
+	"keep-alive":          true,
+	"proxy-authenticate":  true,
+	"proxy-authorization": true,
+	"te":                  true,
+	"trailer":             true,
+	"transfer-encoding":   true,
+	"upgrade":             true,
+	"host":                true,
+	"content-length":      true,
+	// Platform auth — these authenticate the caller to Eurobase and must
+	// not leak to user function code.
+	"authorization": true,
+	"apikey":        true,
+	"cookie":        true,
+}
+
+// isGatewayControlHeader reports whether a header is part of the
+// gateway→runner control namespace that the gateway sets itself (and that
+// the HMAC signature covers). A caller-supplied value must never be
+// forwarded, or it could override a signed identity header / break
+// verification (e.g. a forwarded X-Request-ID is signed empty by the
+// gateway).
+func isGatewayControlHeader(lower string) bool {
+	if strings.HasPrefix(lower, "x-eurobase-") {
+		return true
+	}
+	switch lower {
+	case "x-project-id", "x-project-slug", "x-schema-name", "x-plan",
+		"x-function-id", "x-function-name", "x-function-version",
+		"x-user-id", "x-user-email", "x-request-id":
+		return true
+	}
+	return false
+}
+
+// copyForwardableHeaders copies the caller's request headers that are safe
+// to forward to the runner into dst (#214) — everything except hop-by-hop
+// headers, platform auth credentials, and the gateway control namespace.
+func copyForwardableHeaders(dst, src http.Header) {
+	for name, values := range src {
+		lower := strings.ToLower(name)
+		if unforwardableHeaders[lower] || isGatewayControlHeader(lower) {
+			continue
+		}
+		for _, v := range values {
+			dst.Add(name, v)
+		}
+	}
+}
 
 // HandleInvoke proxies a function invocation to the Function Runner service.
 // If no runner is configured, it returns 501 Not Implemented.
@@ -65,15 +126,26 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 			return
 		}
 
-		// Proxy request to the Function Runner.
-		proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, runnerURL+"/invoke", r.Body)
+		// Proxy request to the Function Runner. Preserve the original query
+		// string so functions can read new URL(req.url).searchParams (#214).
+		target := runnerURL + "/invoke"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 		if err != nil {
 			slog.Error("failed to create proxy request", "error", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 
-		// Pass context as headers.
+		// Forward the caller's request headers so functions can read custom
+		// headers — webhooks/APIs auth and route via X-Signature, X-Api-Key,
+		// X-Webhook-*, etc. (#214). Skips hop-by-hop, platform auth, and the
+		// gateway control namespace (set below; the HMAC covers it).
+		copyForwardableHeaders(proxyReq.Header, r.Header)
+
+		// Pass context as headers (set AFTER copying so they always win).
 		proxyReq.Header.Set("X-Project-ID", projectCtx.ProjectID)
 		proxyReq.Header.Set("X-Schema-Name", projectCtx.SchemaName)
 		proxyReq.Header.Set("X-Function-Name", functionName)
@@ -85,7 +157,7 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 		// DB by id.
 		proxyReq.Header.Set("X-Function-Version", strconv.Itoa(fn.Version))
 		proxyReq.Header.Set("X-Plan", projectCtx.Plan)
-		proxyReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+		// Content-Type is already forwarded by copyForwardableHeaders above.
 
 		if claims, ok := auth.EndUserClaimsFromContext(r.Context()); ok && claims != nil {
 			proxyReq.Header.Set("X-User-ID", claims.UserID)
