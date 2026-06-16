@@ -121,7 +121,7 @@ func validateDefault(def string) error {
 	if isSimpleLiteral(trimmed) {
 		return nil
 	}
-	return fmt.Errorf("unsupported default value %q — use a literal or a known function like now(), uuid_generate_v4()", def)
+	return fmt.Errorf("unsupported default value %q — use a literal or a known function like now(), gen_random_uuid()", def)
 }
 
 // isSimpleLiteral checks if a string is a simple SQL literal (number or quoted string).
