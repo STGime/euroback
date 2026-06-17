@@ -42,6 +42,17 @@ const (
 	ActionExportCompleted     = "compliance.export.completed"
 	ActionExportFailed        = "compliance.export.failed"
 
+	// Breach register lifecycle — Closes #172. Every write to
+	// public.breach_register also emits an audit_log entry so a tampered
+	// register can be cross-checked against the chained audit log.
+	ActionBreachOpened             = "breach.opened"
+	ActionBreachUpdated            = "breach.updated"
+	ActionBreachNotifiedCustomers  = "breach.notified_customers"
+	ActionBreachNotifiedAuthority  = "breach.notified_authority"
+	ActionBreachNotifiedSubjects   = "breach.notified_subjects"
+	ActionBreachClosed             = "breach.closed"
+	ActionBreachSubjectsIdentified = "breach.subjects_identified"
+
 	// MCP server lifecycle — Closes #165. The platform SQL handler
 	// can be called either from the console (full access) or via
 	// the MCP server's runSQL tool (read-only by default). The

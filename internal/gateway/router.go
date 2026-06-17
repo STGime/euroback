@@ -12,6 +12,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/breach"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/email"
@@ -338,6 +339,31 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/user-export", compliance.HandleRequestUserExport(exportSvc))
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports", compliance.HandleListExports(exportSvc))
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports/{exportId}", compliance.HandleGetExport(exportSvc))
+
+			// Breach register (Tier-1 #4, closes #172). Append-only by
+			// migration 000065. Admin-only because the register names
+			// affected subjects and triggers customer/authority comms.
+			// DPO_EMAIL drives the "point of contact" in templates;
+			// defaults to dpo@eurobase.app if unset.
+			dpoEmail := os.Getenv("DPO_EMAIL")
+			if dpoEmail == "" {
+				dpoEmail = "dpo@eurobase.app"
+			}
+			var breachMailer breach.Mailer
+			if emailService != nil {
+				breachMailer = &breach.MailerAdapter{Svc: emailService}
+			}
+			breachSvc := breach.NewService(pool, auditSvc, metricsReg)
+			breachH := &breach.Handler{Svc: breachSvc, Pool: pool, Mailer: breachMailer, DPOEmail: dpoEmail}
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/breaches", breachH.HandleList())
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/breaches", breachH.HandleOpen())
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/breaches/{incidentId}", breachH.HandleGet())
+			r.With(tenant.RequireMinRole("admin")).Patch("/compliance/breaches/{incidentId}", breachH.HandleUpdate())
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/breaches/{incidentId}/close", breachH.HandleClose())
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/breaches/{incidentId}/subjects", breachH.HandleSubjects())
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/breaches/{incidentId}/notify-customers", breachH.HandleNotifyCustomers())
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/breaches/{incidentId}/authority-form", breachH.HandleAuthorityForm())
+			r.With(tenant.RequireMinRole("admin")).Get("/compliance/breaches/{incidentId}/sla", breachH.HandleSLAStatus())
 
 			// Team members (invite, remove, change role).
 			var sendEmailFn func(ctx context.Context, to, subject, html string) error
