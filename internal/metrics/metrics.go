@@ -34,6 +34,16 @@ type Registry struct {
 	panicsTotal      prometheus.Counter
 	buildInfo        *prometheus.GaugeVec
 	ExportsTotal     *prometheus.CounterVec
+
+	// Tier-1 #4 (issue #172) — breach register MTTD/MTTR. Histograms so
+	// dashboards can show distribution; counters labelled by terminal
+	// status so closed-vs-no_action splits are visible. Buckets are
+	// chosen for the DPA SLAs (24h customers, 72h authority): finer
+	// resolution under 24h, coarser above 72h.
+	breachOpenedTotal *prometheus.CounterVec
+	breachClosedTotal *prometheus.CounterVec
+	breachMTTD        prometheus.Histogram
+	breachMTTR        prometheus.Histogram
 }
 
 // New creates and registers all gateway metrics.
@@ -57,9 +67,41 @@ func New(buildVersion string) *Registry {
 	)
 	reg.MustRegister(exportsTotal)
 
+	breachOpenedTotal := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "eurobase_breach_opened_total",
+			Help: "Total personal-data breach incidents opened (GDPR Art. 33 register).",
+		},
+		[]string{},
+	)
+	breachClosedTotal := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "eurobase_breach_closed_total",
+			Help: "Total personal-data breach incidents closed, labelled by terminal status (closed vs no_action).",
+		},
+		[]string{"status"},
+	)
+	// Buckets: 5m, 30m, 1h, 4h, 12h, 24h (DPA §10), 48h, 72h (Art. 33), 7d, 30d.
+	breachBuckets := []float64{300, 1800, 3600, 14400, 43200, 86400, 172800, 259200, 604800, 2592000}
+	breachMTTD := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "eurobase_breach_mttd_seconds",
+		Help:    "Personal-data breach mean-time-to-detect: seconds from occurred_at to awareness_at.",
+		Buckets: breachBuckets,
+	})
+	breachMTTR := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "eurobase_breach_mttr_seconds",
+		Help:    "Personal-data breach mean-time-to-resolve: seconds from awareness_at to resolved_at.",
+		Buckets: breachBuckets,
+	})
+	reg.MustRegister(breachOpenedTotal, breachClosedTotal, breachMTTD, breachMTTR)
+
 	r := &Registry{
-		reg:          reg,
-		ExportsTotal: exportsTotal,
+		reg:               reg,
+		ExportsTotal:      exportsTotal,
+		breachOpenedTotal: breachOpenedTotal,
+		breachClosedTotal: breachClosedTotal,
+		breachMTTD:        breachMTTD,
+		breachMTTR:        breachMTTR,
 		requestsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "eurobase_http_requests_total",
@@ -124,6 +166,28 @@ func (r *Registry) Handler() http.Handler {
 // IncPanic increments the panic counter. Call this from your recover middleware.
 func (r *Registry) IncPanic() {
 	r.panicsTotal.Inc()
+}
+
+// IncBreachOpened increments the breach-opened counter. Called from
+// internal/breach.Service.Open. Implements the breach.Metrics interface.
+func (r *Registry) IncBreachOpened() {
+	r.breachOpenedTotal.WithLabelValues().Inc()
+}
+
+// IncBreachClosed increments the breach-closed counter for a terminal
+// status ("closed" or "no_action").
+func (r *Registry) IncBreachClosed(status string) {
+	r.breachClosedTotal.WithLabelValues(status).Inc()
+}
+
+// ObserveBreachMTTD records a mean-time-to-detect sample in seconds.
+func (r *Registry) ObserveBreachMTTD(seconds float64) {
+	r.breachMTTD.Observe(seconds)
+}
+
+// ObserveBreachMTTR records a mean-time-to-resolve sample in seconds.
+func (r *Registry) ObserveBreachMTTR(seconds float64) {
+	r.breachMTTR.Observe(seconds)
 }
 
 // Middleware records request count, latency, and in-flight count for every
