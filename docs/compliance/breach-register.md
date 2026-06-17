@@ -63,7 +63,7 @@ All routes are platform-authenticated and admin-gated. Mounted under
 | PATCH | `/breaches/{incidentId}` | Write a new snapshot with partial changes applied. |
 | POST | `/breaches/{incidentId}/close` | Terminal `closed` or `no_action`; computes MTTR. |
 | POST | `/breaches/{incidentId}/subjects` | Identify the end-users in scope (count + capped sample IDs). |
-| POST | `/breaches/{incidentId}/notify-customers` | Render + BCC the customer email; records the dispatch. |
+| POST | `/breaches/{incidentId}/notify-customers` | Render + BCC the customer email to the project's owner + admin team members; records the dispatch. Optional `extra_recipients` adds DPO-supplied controller contacts. |
 | POST | `/breaches/{incidentId}/authority-form` | Render the SA paste-in. `{"filed": true}` records the SA filing. |
 | GET | `/breaches/{incidentId}/sla` | Current state of the 24h / 72h clocks. |
 

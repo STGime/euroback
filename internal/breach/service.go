@@ -187,8 +187,14 @@ func (s *Service) Open(ctx context.Context, in OpenInput, actorID, actorEmail st
 // Update writes a new snapshot row for an incident with the requested
 // changes applied. Status may transition forward only via this call;
 // terminal transitions (closed / no_action) go through Close().
-func (s *Service) Update(ctx context.Context, incidentID string, in UpdateInput, actorID, actorEmail string) (*Entry, error) {
-	latest, err := s.Latest(ctx, incidentID)
+//
+// projectID scopes the lookup at the SQL layer (PR #219 review). An empty
+// projectID is treated as "platform-only" and only matches incidents with
+// NULL project_id; this is a platform-admin code path and the per-project
+// route forbids it. A tenant admin of project A reaching for project B's
+// {incidentId} returns "incident not found".
+func (s *Service) Update(ctx context.Context, projectID, incidentID string, in UpdateInput, actorID, actorEmail string) (*Entry, error) {
+	latest, err := s.Latest(ctx, projectID, incidentID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,8 +258,9 @@ func (s *Service) Update(ctx context.Context, incidentID string, in UpdateInput,
 
 // MarkNotification stamps either the customer or authority notification on
 // a new register row. `kind` is "customers", "authority", or "subjects".
-func (s *Service) MarkNotification(ctx context.Context, incidentID, kind, leadSA, note, actorID, actorEmail string) (*Entry, error) {
-	latest, err := s.Latest(ctx, incidentID)
+// projectID scopes the incident lookup — see Update for the rationale.
+func (s *Service) MarkNotification(ctx context.Context, projectID, incidentID, kind, leadSA, note, actorID, actorEmail string) (*Entry, error) {
+	latest, err := s.Latest(ctx, projectID, incidentID)
 	if err != nil {
 		return nil, err
 	}
@@ -303,11 +310,12 @@ func (s *Service) MarkNotification(ctx context.Context, incidentID, kind, leadSA
 
 // Close writes a terminal row. `terminalStatus` must be "closed" or
 // "no_action". MTTR is computed from awareness_at → resolved_at (now).
-func (s *Service) Close(ctx context.Context, incidentID, terminalStatus, note, actorID, actorEmail string) (*Entry, error) {
+// projectID scopes the incident lookup — see Update for the rationale.
+func (s *Service) Close(ctx context.Context, projectID, incidentID, terminalStatus, note, actorID, actorEmail string) (*Entry, error) {
 	if terminalStatus != StatusClosed && terminalStatus != StatusNoAction {
 		return nil, fmt.Errorf("terminal status must be 'closed' or 'no_action'")
 	}
-	latest, err := s.Latest(ctx, incidentID)
+	latest, err := s.Latest(ctx, projectID, incidentID)
 	if err != nil {
 		return nil, err
 	}
@@ -346,13 +354,16 @@ func (s *Service) Close(ctx context.Context, incidentID, terminalStatus, note, a
 }
 
 // Latest returns the most recent snapshot row for an incident, or nil if
-// the incident does not exist.
-func (s *Service) Latest(ctx context.Context, incidentID string) (*Entry, error) {
-	const q = `SELECT ` + entryCols + `
-	             FROM public.breach_register
-	            WHERE incident_id = $1
-	         ORDER BY seq DESC LIMIT 1`
-	row := s.pool.QueryRow(ctx, q, incidentID)
+// the incident does not exist or is not visible at the caller's scope.
+//
+// projectID == "" matches only platform-only incidents (project_id IS NULL).
+// projectID == "<uuid>" matches only incidents owned by that project. This
+// is the SQL-layer guard against the cross-tenant IDOR called out in the
+// PR #219 review — a handler that forgets to pass projectID still gets
+// `incident not found` for any incident that doesn't sit in the NULL bucket.
+func (s *Service) Latest(ctx context.Context, projectID, incidentID string) (*Entry, error) {
+	q, args := scopedSelect(entryCols, projectID, incidentID, "seq DESC LIMIT 1")
+	row := s.pool.QueryRow(ctx, q, args...)
 	e, err := scanEntry(row)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -360,18 +371,31 @@ func (s *Service) Latest(ctx context.Context, incidentID string) (*Entry, error)
 	return e, err
 }
 
-// History returns every row written for an incident, oldest first.
-func (s *Service) History(ctx context.Context, incidentID string) ([]Entry, error) {
-	const q = `SELECT ` + entryCols + `
-	             FROM public.breach_register
-	            WHERE incident_id = $1
-	         ORDER BY seq ASC`
-	rows, err := s.pool.Query(ctx, q, incidentID)
+// History returns every row written for an incident, oldest first. Scope
+// rules match Latest — cross-tenant lookups return an empty slice.
+func (s *Service) History(ctx context.Context, projectID, incidentID string) ([]Entry, error) {
+	q, args := scopedSelect(entryCols, projectID, incidentID, "seq ASC")
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanEntries(rows)
+}
+
+// scopedSelect builds the project-scoped lookup SQL shared by Latest and
+// History. Pulled out so the IDOR guard is one fragment, not three.
+func scopedSelect(cols, projectID, incidentID, orderBy string) (string, []interface{}) {
+	if projectID == "" {
+		return `SELECT ` + cols + `
+		          FROM public.breach_register
+		         WHERE incident_id = $1 AND project_id IS NULL
+		      ORDER BY ` + orderBy, []interface{}{incidentID}
+	}
+	return `SELECT ` + cols + `
+	          FROM public.breach_register
+	         WHERE incident_id = $1 AND project_id = $2
+	      ORDER BY ` + orderBy, []interface{}{incidentID, projectID}
 }
 
 // ListLatest returns the latest snapshot per incident, optionally scoped to

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
@@ -71,14 +72,16 @@ func (h *Handler) HandleList() http.HandlerFunc {
 	}
 }
 
-// HandleOpen creates a new incident.
+// HandleOpen creates a new incident scoped to the URL project.
 // POST /platform/projects/{id}/compliance/breaches
 //
-// The project_id in the URL is the scope check (the auth middleware already
-// verified the caller has admin on it); if the breach truly affects the
-// platform side, the handler also accepts `affects_platform: true` and a
-// nil project_id payload — but we always anchor at least the URL project so
-// every call has a tenant context for RBAC.
+// PR #219 review: this route always anchors the incident at the URL
+// `{id}` regardless of what the body asks for. `affects_platform` is a
+// tag (true if the incident bleeds into platform infrastructure too),
+// not a scope override — a tenant admin can't open a `project_id=NULL`
+// incident that would then be reachable from any other project.
+// Platform-only incidents are opened by platform admins through a
+// future platform-admin endpoint, not here.
 func (h *Handler) HandleOpen() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
@@ -93,10 +96,8 @@ func (h *Handler) HandleOpen() http.HandlerFunc {
 			writeError(w, "invalid json body", http.StatusBadRequest)
 			return
 		}
-		if in.ProjectID == nil && !in.AffectsPlatform {
-			pid := projectID
-			in.ProjectID = &pid
-		}
+		pid := projectID
+		in.ProjectID = &pid
 
 		entry, err := h.Svc.Open(r.Context(), in, claims.Subject, claims.Email)
 		if err != nil {
@@ -108,12 +109,14 @@ func (h *Handler) HandleOpen() http.HandlerFunc {
 	}
 }
 
-// HandleGet returns the full append-only history for one incident.
+// HandleGet returns the full append-only history for one incident, scoped
+// to the URL project — cross-tenant lookups return 404 (PR #219 review).
 // GET /platform/projects/{id}/compliance/breaches/{incidentId}
 func (h *Handler) HandleGet() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		incidentID := chi.URLParam(r, "incidentId")
-		hist, err := h.Svc.History(r.Context(), incidentID)
+		hist, err := h.Svc.History(r.Context(), projectID, incidentID)
 		if err != nil {
 			slog.Error("breach history failed", "incident_id", incidentID, "error", err)
 			writeError(w, "failed to load incident", http.StatusInternalServerError)
@@ -134,6 +137,7 @@ func (h *Handler) HandleGet() http.HandlerFunc {
 // PATCH /platform/projects/{id}/compliance/breaches/{incidentId}
 func (h *Handler) HandleUpdate() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		incidentID := chi.URLParam(r, "incidentId")
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		if claims == nil {
@@ -146,7 +150,7 @@ func (h *Handler) HandleUpdate() http.HandlerFunc {
 			writeError(w, "invalid json body", http.StatusBadRequest)
 			return
 		}
-		entry, err := h.Svc.Update(r.Context(), incidentID, in, claims.Subject, claims.Email)
+		entry, err := h.Svc.Update(r.Context(), projectID, incidentID, in, claims.Subject, claims.Email)
 		if err != nil {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -159,6 +163,7 @@ func (h *Handler) HandleUpdate() http.HandlerFunc {
 // POST /platform/projects/{id}/compliance/breaches/{incidentId}/close
 func (h *Handler) HandleClose() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		incidentID := chi.URLParam(r, "incidentId")
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		if claims == nil {
@@ -177,7 +182,7 @@ func (h *Handler) HandleClose() http.HandlerFunc {
 		if body.Status == "" {
 			body.Status = StatusClosed
 		}
-		entry, err := h.Svc.Close(r.Context(), incidentID, body.Status, body.Note, claims.Subject, claims.Email)
+		entry, err := h.Svc.Close(r.Context(), projectID, incidentID, body.Status, body.Note, claims.Subject, claims.Email)
 		if err != nil {
 			writeError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -229,11 +234,15 @@ func (h *Handler) HandleSubjects() http.HandlerFunc {
 }
 
 // HandleNotifyCustomers renders the customer-notification email and sends
-// it via BCC to the supplied recipients (typically: the project's billing
-// contact + the controller's data-protection contact, supplied by the DPO).
+// it via BCC to the project's known controller contacts. Recipients are
+// resolved server-side from the project's owner + admin team members
+// (PR #219 review — caller-supplied recipients are no longer accepted to
+// prevent an admin from BCC'ing an official-looking breach notice to
+// arbitrary addresses from platform email infra).
 // POST /platform/projects/{id}/compliance/breaches/{incidentId}/notify-customers
 func (h *Handler) HandleNotifyCustomers() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		incidentID := chi.URLParam(r, "incidentId")
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		if claims == nil {
@@ -242,15 +251,25 @@ func (h *Handler) HandleNotifyCustomers() http.HandlerFunc {
 		}
 
 		var body struct {
-			Recipients []string `json:"recipients"`
-			Note       string   `json:"note"`
-			Preview    bool     `json:"preview"`
+			ExtraRecipients []string `json:"extra_recipients"`
+			Note            string   `json:"note"`
+			Preview         bool     `json:"preview"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, "invalid json body", http.StatusBadRequest)
 			return
 		}
-		latest, err := h.Svc.Latest(r.Context(), incidentID)
+		recipients, err := h.resolveCustomerRecipients(r.Context(), projectID, body.ExtraRecipients)
+		if err != nil {
+			slog.Error("breach customer recipient resolve failed", "project_id", projectID, "error", err)
+			writeError(w, "failed to resolve recipients", http.StatusInternalServerError)
+			return
+		}
+		if len(recipients) == 0 {
+			writeError(w, "project has no controller contacts on file", http.StatusBadRequest)
+			return
+		}
+		latest, err := h.Svc.Latest(r.Context(), projectID, incidentID)
 		if err != nil || latest == nil {
 			writeError(w, "incident not found", http.StatusNotFound)
 			return
@@ -262,9 +281,10 @@ func (h *Handler) HandleNotifyCustomers() http.HandlerFunc {
 		}
 		if body.Preview {
 			writeJSON(w, map[string]interface{}{
-				"subject":   subject,
-				"html":      html,
-				"recipient_count": len(body.Recipients),
+				"subject":         subject,
+				"html":            html,
+				"recipient_count": len(recipients),
+				"recipients":      recipients,
 			}, http.StatusOK)
 			return
 		}
@@ -272,12 +292,12 @@ func (h *Handler) HandleNotifyCustomers() http.HandlerFunc {
 			writeError(w, "email service not configured", http.StatusServiceUnavailable)
 			return
 		}
-		res, err := h.Mailer.SendBulkBCC(r.Context(), body.Recipients, subject, html)
+		res, err := h.Mailer.SendBulkBCC(r.Context(), recipients, subject, html)
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		entry, err := h.Svc.MarkNotification(r.Context(), incidentID, "customers", "", body.Note, claims.Subject, claims.Email)
+		entry, err := h.Svc.MarkNotification(r.Context(), projectID, incidentID, "customers", "", body.Note, claims.Subject, claims.Email)
 		if err != nil {
 			writeError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -290,11 +310,77 @@ func (h *Handler) HandleNotifyCustomers() http.HandlerFunc {
 	}
 }
 
+// resolveCustomerRecipients returns the email addresses that should
+// receive the breach notice for a project: every owner + admin team
+// member. Optional `extra` addresses (DPO-supplied controller DPO
+// contacts that aren't already team members) are unioned in only if
+// they parse as a plausible email address. Duplicates are de-duped.
+// PR #219 review: replaces caller-supplied recipients so an admin
+// can't BCC arbitrary addresses from platform email infra.
+func (h *Handler) resolveCustomerRecipients(ctx context.Context, projectID string, extra []string) ([]string, error) {
+	rows, err := h.Pool.Query(ctx, `
+		SELECT DISTINCT lower(u.email)
+		  FROM public.project_members pm
+		  JOIN public.platform_users u ON u.id = pm.user_id
+		 WHERE pm.project_id = $1 AND pm.role IN ('owner','admin')`,
+		projectID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	var out []string
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		if e != "" && !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, e := range extra {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if isPlausibleEmail(e) && !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// isPlausibleEmail is a deliberately-cheap sanity check; it is not RFC-5322
+// compliant. The downstream TEM client rejects malformed addresses with a
+// 4xx, this just keeps the BCC list short and predictable.
+func isPlausibleEmail(s string) bool {
+	if len(s) < 5 || len(s) > 254 {
+		return false
+	}
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at == len(s)-1 || strings.Count(s, "@") != 1 {
+		return false
+	}
+	if strings.ContainsAny(s, " \t\n\r,;<>\"'()") {
+		return false
+	}
+	if !strings.Contains(s[at+1:], ".") {
+		return false
+	}
+	return true
+}
+
 // HandleAuthorityForm returns the Markdown paste-in for the supervisory
 // authority and (optionally) records that the SA was notified.
 // POST /platform/projects/{id}/compliance/breaches/{incidentId}/authority-form
 func (h *Handler) HandleAuthorityForm() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		incidentID := chi.URLParam(r, "incidentId")
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		if claims == nil {
@@ -303,14 +389,14 @@ func (h *Handler) HandleAuthorityForm() http.HandlerFunc {
 		}
 
 		var body struct {
-			Filed   bool   `json:"filed"`
-			LeadSA  string `json:"lead_sa"`
-			Note    string `json:"note"`
+			Filed  bool   `json:"filed"`
+			LeadSA string `json:"lead_sa"`
+			Note   string `json:"note"`
 		}
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 		}
-		latest, err := h.Svc.Latest(r.Context(), incidentID)
+		latest, err := h.Svc.Latest(r.Context(), projectID, incidentID)
 		if err != nil || latest == nil {
 			writeError(w, "incident not found", http.StatusNotFound)
 			return
@@ -322,7 +408,7 @@ func (h *Handler) HandleAuthorityForm() http.HandlerFunc {
 		}
 		var entry *Entry
 		if body.Filed {
-			entry, err = h.Svc.MarkNotification(r.Context(), incidentID, "authority", body.LeadSA, body.Note, claims.Subject, claims.Email)
+			entry, err = h.Svc.MarkNotification(r.Context(), projectID, incidentID, "authority", body.LeadSA, body.Note, claims.Subject, claims.Email)
 			if err != nil {
 				writeError(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -340,8 +426,9 @@ func (h *Handler) HandleAuthorityForm() http.HandlerFunc {
 // GET /platform/projects/{id}/compliance/breaches/{incidentId}/sla
 func (h *Handler) HandleSLAStatus() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		incidentID := chi.URLParam(r, "incidentId")
-		latest, err := h.Svc.Latest(r.Context(), incidentID)
+		latest, err := h.Svc.Latest(r.Context(), projectID, incidentID)
 		if err != nil || latest == nil {
 			writeError(w, "incident not found", http.StatusNotFound)
 			return
