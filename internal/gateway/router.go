@@ -387,7 +387,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("owner")).Patch("/members/{userId}", tenant.HandleChangeRole(pool))
 
 			// Edge Functions (serverless compute management).
-			fnSvc := functions.NewService(pool)
+			fnSvc := functions.NewService(pool, vaultSvc)
 			fnTrigSvc := functions.NewTriggerService(pool)
 			r.Route("/functions", func(r chi.Router) {
 				// Reads → viewer; mutations → developer (closes #50).
@@ -631,7 +631,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		}
 
 		// Edge Functions invocation (API key + optional end-user JWT).
-		sdkFnSvc := functions.NewService(pool)
+		sdkFnSvc := functions.NewService(pool, vaultSvc)
 		r.Route("/functions", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
 			r.Use(endUserMw.Handler)

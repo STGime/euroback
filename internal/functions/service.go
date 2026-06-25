@@ -3,11 +3,13 @@ package functions
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"time"
 
+	"github.com/eurobase/euroback/internal/vault"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -40,11 +42,97 @@ type EdgeFunctionLog struct {
 // Service provides CRUD operations for edge functions.
 type Service struct {
 	pool *pgxpool.Pool
+
+	// vault is used to seal env_vars at rest with the per-tenant HKDF key
+	// (closes #206). nil is a valid value — the gateway boots without
+	// VAULT_ENCRYPTION_KEY in dev — in which case env_vars are written
+	// to the legacy plaintext column and a one-line warning is logged on
+	// each Create/Update that would otherwise have sealed them.
+	vault *vault.VaultService
 }
 
-// NewService creates a new edge functions service.
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool}
+// NewService creates a new edge functions service. vaultSvc may be nil in
+// dev configurations where VAULT_ENCRYPTION_KEY is not set; production
+// always wires a configured *vault.VaultService.
+func NewService(pool *pgxpool.Pool, vaultSvc *vault.VaultService) *Service {
+	return &Service{pool: pool, vault: vaultSvc}
+}
+
+// schemaNameFor resolves project_id → schema_name. The vault HKDF salt is
+// the tenant's schema name (mirrors the runner side in
+// functions-runner/vault.ts), so seal/open both need this lookup.
+//
+// One extra SELECT per sealed Get/GetByID/Update. The runner avoids it by
+// JOINing projects in its loadFunction query. If this shows up in trace
+// sampling, swap to a small in-process cache (schema_name is immutable
+// per project, so invalidation is trivial).
+func (s *Service) schemaNameFor(ctx context.Context, projectID string) (string, error) {
+	var schemaName string
+	err := s.pool.QueryRow(ctx,
+		`SELECT schema_name FROM public.projects WHERE id = $1`, projectID,
+	).Scan(&schemaName)
+	if err != nil {
+		return "", fmt.Errorf("resolve schema_name for project %s: %w", projectID, err)
+	}
+	return schemaName, nil
+}
+
+// sealEnvVars turns a {K:V} map into the sealed (blob, nonce, key_version)
+// trio stored on edge_functions. Returns all-nil for an empty map or a
+// nil-vault Service — both make the caller write nothing to the sealed
+// columns (and clear the legacy column on update).
+func (s *Service) sealEnvVars(ctx context.Context, projectID string, envVars map[string]string) (blob, nonce []byte, version int16, err error) {
+	if len(envVars) == 0 {
+		return nil, nil, 0, nil
+	}
+	if s.vault == nil || !s.vault.Configured() {
+		// Honest fall-through: vault not configured → legacy plaintext
+		// write. Logged loudly so an operator who expected encryption
+		// at rest (the documented contract) gets a single warning per
+		// write rather than silent plaintext.
+		slog.Warn("edge function env_vars stored plaintext: VAULT_ENCRYPTION_KEY not configured",
+			"project_id", projectID, "var_count", len(envVars))
+		return nil, nil, 0, nil
+	}
+	schemaName, err := s.schemaNameFor(ctx, projectID)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	jsonBytes, err := json.Marshal(envVars)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("marshal env_vars: %w", err)
+	}
+	return s.vault.SealForTenant(ctx, schemaName, string(jsonBytes))
+}
+
+// resolveEnvVars implements the read-path contract documented in migration
+// 000067: prefer sealed columns; if absent, fall back to the legacy
+// plaintext column; if both absent, empty map. Decryption failure is
+// surfaced (so a wrong/missing key after rotation is visible, not silently
+// swapped for {}).
+func (s *Service) resolveEnvVars(ctx context.Context, projectID string, blob, nonce []byte, version int16, legacy map[string]string) (map[string]string, error) {
+	if len(blob) > 0 {
+		if s.vault == nil || !s.vault.Configured() {
+			return nil, fmt.Errorf("env_vars sealed but vault not configured — VAULT_ENCRYPTION_KEY missing")
+		}
+		schemaName, err := s.schemaNameFor(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		plaintext, err := s.vault.OpenForTenant(ctx, schemaName, blob, nonce, version)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt env_vars (key_version %d): %w", version, err)
+		}
+		var out map[string]string
+		if err := json.Unmarshal([]byte(plaintext), &out); err != nil {
+			return nil, fmt.Errorf("unmarshal decrypted env_vars: %w", err)
+		}
+		return out, nil
+	}
+	if legacy != nil {
+		return legacy, nil
+	}
+	return map[string]string{}, nil
 }
 
 var validFnName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
@@ -79,13 +167,24 @@ func (s *Service) List(ctx context.Context, projectID string) ([]EdgeFunction, e
 // Get returns a single edge function by name, including code.
 func (s *Service) Get(ctx context.Context, projectID, name string) (*EdgeFunction, error) {
 	var f EdgeFunction
+	var legacy map[string]string
+	var blob, nonce []byte
+	var version int16
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, project_id, name, code, verify_jwt, COALESCE(env_vars, '{}'), status, version, created_at, updated_at
+		`SELECT id, project_id, name, code, verify_jwt,
+		        env_vars, env_vars_blob, env_vars_nonce, env_vars_key_version,
+		        status, version, created_at, updated_at
 		 FROM edge_functions
 		 WHERE project_id = $1 AND name = $2`, projectID, name,
-	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.EnvVars, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
+	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT,
+		&legacy, &blob, &nonce, &version,
+		&f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get edge function %q: %w", name, err)
+	}
+	f.EnvVars, err = s.resolveEnvVars(ctx, f.ProjectID, blob, nonce, version, legacy)
+	if err != nil {
+		return nil, err
 	}
 	return &f, nil
 }
@@ -93,13 +192,24 @@ func (s *Service) Get(ctx context.Context, projectID, name string) (*EdgeFunctio
 // GetByID returns a single edge function by ID, including code.
 func (s *Service) GetByID(ctx context.Context, id string) (*EdgeFunction, error) {
 	var f EdgeFunction
+	var legacy map[string]string
+	var blob, nonce []byte
+	var version int16
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, project_id, name, code, verify_jwt, COALESCE(env_vars, '{}'), status, version, created_at, updated_at
+		`SELECT id, project_id, name, code, verify_jwt,
+		        env_vars, env_vars_blob, env_vars_nonce, env_vars_key_version,
+		        status, version, created_at, updated_at
 		 FROM edge_functions
 		 WHERE id = $1`, id,
-	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.EnvVars, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
+	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT,
+		&legacy, &blob, &nonce, &version,
+		&f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get edge function by id: %w", err)
+	}
+	f.EnvVars, err = s.resolveEnvVars(ctx, f.ProjectID, blob, nonce, version, legacy)
+	if err != nil {
+		return nil, err
 	}
 	return &f, nil
 }
@@ -206,21 +316,54 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 		version++
 	}
 
+	// Seal env_vars at rest with the per-tenant vault key (#206). The
+	// legacy env_vars JSONB column is cleared on every Update so that a
+	// row that was sealed never re-leaks plaintext (lazy migration —
+	// see migration 000067 header).
+	blob, nonce, keyVersion, err := s.sealEnvVars(ctx, projectID, envVars)
+	if err != nil {
+		return nil, err
+	}
+	var legacyEnvVars any
+	if blob == nil && len(envVars) > 0 {
+		// Vault disabled and we have values → write through the legacy
+		// column to preserve current behavior. sealEnvVars already
+		// logged the warning.
+		legacyEnvVars = envVars
+	}
+
 	var f EdgeFunction
 	err = s.pool.QueryRow(ctx,
 		`UPDATE edge_functions
-		 SET code = $3, compiled_code = COALESCE($8, compiled_code),
-		     verify_jwt = $4, status = $5, env_vars = $6, version = $7, updated_at = now()
+		 SET code = $3, compiled_code = COALESCE($10, compiled_code),
+		     verify_jwt = $4, status = $5,
+		     env_vars = $6, env_vars_blob = $7, env_vars_nonce = $8, env_vars_key_version = $9,
+		     version = $11, updated_at = now()
 		 WHERE project_id = $1 AND name = $2
 		 RETURNING id, project_id, name, code, verify_jwt, status, version, created_at, updated_at`,
-		projectID, name, code, verifyJWT, status, envVars, version, compiled,
+		projectID, name, code, verifyJWT, status,
+		legacyEnvVars, blob, nonce, nullIfZero(keyVersion),
+		compiled, version,
 	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("update edge function: %w", err)
 	}
+	f.EnvVars = envVars
 
 	slog.Info("edge function updated", "project_id", projectID, "name", name, "version", version)
 	return &f, nil
+}
+
+// nullIfZero returns a *int16 so that an empty-env_vars Update writes SQL
+// NULL into env_vars_key_version (satisfying the
+// edge_functions_env_vars_sealed_consistent CHECK constraint, which
+// requires all three sealed columns to be NULL together or NOT NULL
+// together).
+func nullIfZero(v int16) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 // Delete removes an edge function.
