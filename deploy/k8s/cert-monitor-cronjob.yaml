@@ -62,7 +62,17 @@ spec:
               # alpine has openssl + curl in the base layers; no apk add
               # needed for what we use (`openssl s_client`, `openssl
               # x509 -checkend`, `curl`).
-              image: alpine:3.20
+              #
+              # Pinned by digest — supply-chain hygiene, mirrors the
+              # #116 precedent: any image with a Secret mounted
+              # (DISCORD_ALERTS_WEBHOOK from eurobase-secrets, below)
+              # is in scope, even when the container isn't privileged.
+              # Tag kept alongside for human readability; the digest is
+              # what k8s actually resolves. Bump procedure:
+              #   crane manifest --platform linux/amd64 alpine:3.20 \
+              #     | sha256sum
+              # update both the tag (for the reader) and the digest.
+              image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
               resources:
                 requests:
                   memory: "32Mi"
