@@ -146,13 +146,61 @@ spec:
             class: nginx
 ---
 ##############################################################################
-# cert-manager ClusterIssuer for Let's Encrypt (DNS-01 — wildcards)
+# cert-manager ClusterIssuer for Let's Encrypt (DNS-01 — Cloudflare)
 #
-# Requires the Scaleway DNS cert-manager webhook to be installed:
-#   https://github.com/scaleway/cert-manager-webhook-scaleway
+# Active issuer for *.eurobase.app while the apex zone is on Cloudflare
+# DNS. Uses cert-manager's native Cloudflare DNS-01 solver — no extra
+# webhook chart required.
 #
-# And a secret named "scaleway-credentials" in the cert-manager namespace
-# with SCW_ACCESS_KEY and SCW_SECRET_KEY.
+# Secret prerequisite: `cloudflare-api-token` in the cert-manager
+# namespace, with key `api-token` whose value is a Cloudflare API token
+# scoped to **Zone → DNS → Edit** on the `eurobase.app` zone only
+# (not the global API key, not the account-wide DNS Edit). Without that
+# scope the DNS-01 challenge will silently 403 on the TXT write.
+#
+# Sovereignty note (CLAUDE.md): Cloudflare is on the "no US cloud
+# services" list. This issuer is a deliberate temporary exception until
+# the apex `eurobase.app` zone migrates to Scaleway DNS, at which point
+# the Scaleway issuer below (kept as a placeholder) becomes the active
+# one and this block is removed. Tracked in docs/runbooks/
+# tls-cert-expiry.md.
+##############################################################################
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod-dns-cloudflare
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: infra@eurobase.app
+    privateKeySecretRef:
+      name: letsencrypt-prod-dns-cf-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+        selector:
+          dnsZones:
+            - eurobase.app
+---
+##############################################################################
+# cert-manager ClusterIssuer for Let's Encrypt (DNS-01 — Scaleway, placeholder)
+#
+# **Not currently in use.** Kept declared so that migrating the apex
+# eurobase.app DNS zone from Cloudflare to Scaleway becomes a one-line
+# `issuerRef` swap on the `eurobase-wildcard` Certificate below, not a
+# manifest rewrite. See docs/runbooks/tls-cert-expiry.md for the
+# precedent that motivates the explicit-not-default issuer model.
+#
+# Requires the Scaleway DNS cert-manager webhook
+# (https://github.com/scaleway/cert-manager-webhook-scaleway, deployed
+# via the `cert-manager-webhook-scaleway` Helm release in the
+# cert-manager namespace) AND a secret `scaleway-credentials` with
+# SCW_ACCESS_KEY / SCW_SECRET_KEY scoped to DNS-write on the eurobase.app
+# zone. Both already exist in production after the 2026-06-24 incident,
+# so this issuer is dormant-but-ready.
 ##############################################################################
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -179,6 +227,13 @@ spec:
 ---
 ##############################################################################
 # Wildcard certificate for *.eurobase.app (DNS-01 validated)
+#
+# `issuerRef.name` MUST be one of `letsencrypt-prod-dns-cloudflare` (the
+# active Cloudflare-DNS issuer) or `letsencrypt-prod-dns` (the dormant
+# Scaleway-DNS issuer that becomes active once the apex zone migrates).
+# Naming the issuer explicitly here rather than relying on a "default"
+# is the lesson from 2026-06-24: a `Certificate` pointed at a
+# non-matching solver fails for 30 days before customer impact.
 ##############################################################################
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -188,7 +243,7 @@ metadata:
 spec:
   secretName: eurobase-wildcard-tls
   issuerRef:
-    name: letsencrypt-prod-dns
+    name: letsencrypt-prod-dns-cloudflare
     kind: ClusterIssuer
   dnsNames:
     - "*.eurobase.app"

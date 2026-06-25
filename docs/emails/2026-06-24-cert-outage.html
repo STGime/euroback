@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eurobase — apology for today's TLS outage</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#b91c1c; padding:24px 32px;">
+              <p style="margin:0; font-size:20px; font-weight:700; color:#ffffff;">Eurobase</p>
+              <p style="margin:4px 0 0; font-size:13px; color:#fecaca;">Incident notice &middot; June 24, 2026</p>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:28px 32px 8px;">
+              <p style="margin:0 0 14px; font-size:16px; line-height:1.6; color:#111827;">Hi,</p>
+              <p style="margin:0 0 14px; font-size:15px; line-height:1.6; color:#374151;">
+                Sorry — the TLS certificate for <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">*.eurobase.app</code> expired earlier today. Your project's API endpoint (and every other tenant subdomain on the wildcard) refused TLS handshakes for roughly <strong>50 minutes</strong>, from <strong>11:11 to ~12:00 UTC</strong>.
+              </p>
+              <p style="margin:0 0 14px; font-size:15px; line-height:1.6; color:#374151;">
+                If your app showed a connection or "couldn't load" error during that window, that's why. No data was lost; nothing on your side needs fixing. Once the new certificate was issued, traffic resumed automatically.
+              </p>
+
+              <h3 style="margin:20px 0 6px; font-size:15px; color:#1d4ed8;">What happened</h3>
+              <p style="margin:0 0 14px; font-size:14px; line-height:1.6; color:#374151;">
+                Auto-renewal of the wildcard certificate had been silently failing for the past month against a misconfigured DNS solver — and we weren't alerting on the failure. So instead of the renewal landing quietly at day 60, the cert ran out the clock.
+              </p>
+
+              <h3 style="margin:20px 0 6px; font-size:15px; color:#1d4ed8;">What we're doing so it can't happen again</h3>
+              <ul style="margin:0 0 14px 18px; padding:0; font-size:14px; line-height:1.7; color:#374151;">
+                <li>The renewal path is fixed — the new cert is valid through <strong>September 22</strong> and will renew on its own.</li>
+                <li>Adding an hourly in-cluster certificate-expiry check that pages our on-call to Discord if anything is &lt; 14 days from expiry. The next outage of this shape is one we hear about in advance, not at 11:11.</li>
+                <li>Shipping a TLS-expiry runbook so the next responder doesn't have to retrace the diagnosis.</li>
+              </ul>
+
+              <p style="margin:14px 0 0; font-size:14px; line-height:1.6; color:#374151;">
+                Beta or not, your customers' app showing an error is on us. Thanks for your patience today, and reply to this email if you saw any tail-end weirdness we should look at.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Sign-off -->
+          <tr>
+            <td style="padding:8px 32px 28px;">
+              <p style="margin:0 0 4px; font-size:15px; line-height:1.6; color:#374151;">— Stefan</p>
+              <p style="margin:0; font-size:13px; color:#6b7280;">Eurobase</p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#f9fafb; padding:16px 32px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0; font-size:12px; line-height:1.6; color:#9ca3af;">
+                Eurobase — the EU-sovereign backend platform. All your data stays on European infrastructure in France.<br>
+                You're receiving this because you're part of the Eurobase beta.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
