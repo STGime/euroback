@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/oauth"
 	"github.com/eurobase/euroback/internal/ratelimit"
@@ -182,6 +183,19 @@ func HandleGetUser(svc *AuthService) http.HandlerFunc {
 				writeJSON(w, map[string]string{"error": "internal server error"}, http.StatusInternalServerError)
 			}
 			return
+		}
+
+		// GDPR access log: an end-user read their own profile.
+		if rec := audit.AccessRecorderFromContext(r.Context()); rec != nil {
+			rec.Record(audit.AccessEvent{
+				ProjectID:   pc.ProjectID,
+				EndUserID:   claims.UserID,
+				ActorRole:   "authenticated",
+				Action:      audit.AccessActionRead,
+				TargetTable: "users",
+				TargetKeys:  map[string]interface{}{"id": claims.UserID},
+				IP:          audit.ClientIPFromContext(r.Context()),
+			})
 		}
 
 		writeJSON(w, user, http.StatusOK)

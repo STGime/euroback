@@ -1,15 +1,51 @@
 package query
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// filterShape returns the column + operator of each filter, deliberately
+// DROPPING the filter value. Filter values are routinely personal data
+// (e.g. ?email=eq.john@example.com), so writing them into the append-only,
+// retained, WORM-exported access log would turn the compliance log into a
+// secondary PII store — the opposite of data minimisation. We log the query
+// shape (which columns were filtered on, how), never the predicate values.
+func filterShape(filters []Filter) []map[string]string {
+	shape := make([]map[string]string, 0, len(filters))
+	for _, f := range filters {
+		shape = append(shape, map[string]string{"column": f.Column, "op": f.Operator})
+	}
+	return shape
+}
+
+// recordRead emits a personal-data access-log event for a tenant-table read.
+// Fire-and-forget through the context recorder (a nil recorder is a safe
+// no-op), so it never affects the read's latency or outcome.
+func recordRead(ctx context.Context, table string, keys map[string]interface{}) {
+	rec := audit.AccessRecorderFromContext(ctx)
+	if rec == nil {
+		return
+	}
+	endUserID := EndUserIDFromContext(ctx)
+	rec.Record(audit.AccessEvent{
+		ProjectID:   ProjectIDFromContext(ctx),
+		EndUserID:   endUserID,
+		ActorRole:   audit.EffectiveRole(KeyTypeFromContext(ctx), endUserID),
+		Action:      audit.AccessActionRead,
+		TargetTable: table,
+		TargetKeys:  keys,
+		IP:          audit.ClientIPFromContext(ctx),
+	})
+}
 
 // jsonError writes a JSON error response with the given status code.
 func jsonError(w http.ResponseWriter, msg string, status int) {
@@ -259,6 +295,16 @@ func handleSelectRows(engine *QueryEngine) http.HandlerFunc {
 			"count": totalCount,
 		}
 
+		// GDPR access log: a tenant-table read happened. Record the query
+		// SHAPE only (columns + operators, never predicate values, which are
+		// themselves personal data) so we know who read what, when.
+		recordRead(r.Context(), tableName, map[string]interface{}{
+			"filters":  filterShape(params.Filters),
+			"limit":    params.Limit,
+			"offset":   params.Offset,
+			"returned": len(rows),
+		})
+
 		slog.Debug("select query complete", "schema", schema, "table", tableName, "rows", len(rows), "total", totalCount)
 		jsonResponse(w, resp, http.StatusOK)
 	}
@@ -302,6 +348,9 @@ func handleSelectRowByID(engine *QueryEngine) http.HandlerFunc {
 			jsonError(w, "row not found", http.StatusNotFound)
 			return
 		}
+
+		// GDPR access log: a specific personal-data row was read.
+		recordRead(r.Context(), tableName, map[string]interface{}{"id": rowID})
 
 		jsonResponse(w, rows[0], http.StatusOK)
 	}

@@ -63,3 +63,4 @@ deploy/create-secrets.sh
 # Test artifacts
 test_*.sh
 test_report_*.md
+scripts/discord/node_modules/
