@@ -60,9 +60,12 @@ func NewService(pool *pgxpool.Pool, vaultSvc *vault.VaultService) *Service {
 
 // schemaNameFor resolves project_id → schema_name. The vault HKDF salt is
 // the tenant's schema name (mirrors the runner side in
-// functions-runner/vault.ts), so seal/open both need this lookup. Cached
-// briefly per (projectID) — schema_name is immutable per project, so a
-// small in-process cache is safe.
+// functions-runner/vault.ts), so seal/open both need this lookup.
+//
+// One extra SELECT per sealed Get/GetByID/Update. The runner avoids it by
+// JOINing projects in its loadFunction query. If this shows up in trace
+// sampling, swap to a small in-process cache (schema_name is immutable
+// per project, so invalidation is trivial).
 func (s *Service) schemaNameFor(ctx context.Context, projectID string) (string, error) {
 	var schemaName string
 	err := s.pool.QueryRow(ctx,
