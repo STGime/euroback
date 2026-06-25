@@ -1,0 +1,172 @@
+##############################################################################
+# Eurobase TLS-cert monitor → Discord #alerts
+#
+# Hourly probe of the live TLS handshake on each documented host. Cert
+# < 14 days → Discord warning. Already expired (or host unreachable) →
+# Discord @everyone. Same exit-code scheme as scripts/ops/cert-status.sh
+# (which this CronJob is the in-cluster sibling of):
+#   0 → quiet success; 1 → WARN post; 2 → CRITICAL post.
+#
+# Why an in-cluster CronJob rather than just cert-manager events:
+#   The June 24 outage (issue: cert silently failed to renew for 30 days
+#   while cert-manager's `Issuing` condition stayed True) showed that
+#   trusting any single piece of the renewal pipeline is wrong. This
+#   check probes the *served* certificate end-to-end — it catches:
+#     * renewal failure (what bit us in June)
+#     * Secret renewed but ingress controller didn't pick it up
+#     * DNS pointed at the wrong cluster (cert is fresh somewhere else)
+#   None of those would be caught by a cert-manager-internal alert.
+#
+# Webhook URL is read from the `eurobase-secrets` Secret key
+# DISCORD_ALERTS_WEBHOOK (optional — if unset, the job logs to its pod
+# logs and exits non-zero so the failed-Job count still moves; adding
+# this manifest never breaks a deploy on its own).
+#
+# Add the secret key alongside the others, e.g.:
+#   kubectl -n eurobase patch secret eurobase-secrets --type merge \
+#     -p '{"stringData":{"DISCORD_ALERTS_WEBHOOK":"https://discord.com/api/webhooks/..."}}'
+##############################################################################
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tls-cert-monitor
+  namespace: eurobase
+  labels:
+    app: tls-cert-monitor
+    component: observability
+spec:
+  # Hourly. The certificate world moves in days, not minutes — the 1h
+  # cadence is "see the warning before the next maintenance window"
+  # without paging on every blip. Widen to "0 */2 * * *" if alerts get
+  # noisy; do NOT tighten below 1h or you'll burn budget on a slow-
+  # moving signal.
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      # No retry — the script handles its own per-host fan-out; a Job
+      # retry would multiply the same alert. Mirrors health-monitor.
+      backoffLimit: 0
+      activeDeadlineSeconds: 180
+      template:
+        metadata:
+          labels:
+            app: tls-cert-monitor
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: probe
+              # alpine has openssl + curl in the base layers; no apk add
+              # needed for what we use (`openssl s_client`, `openssl
+              # x509 -checkend`, `curl`).
+              #
+              # Pinned by digest — supply-chain hygiene, mirrors the
+              # #116 precedent: any image with a Secret mounted
+              # (DISCORD_ALERTS_WEBHOOK from eurobase-secrets, below)
+              # is in scope, even when the container isn't privileged.
+              # Tag kept alongside for human readability; the digest is
+              # what k8s actually resolves. Bump procedure:
+              #   crane manifest --platform linux/amd64 alpine:3.20 \
+              #     | sha256sum
+              # update both the tag (for the reader) and the digest.
+              image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+              resources:
+                requests:
+                  memory: "32Mi"
+                  cpu: "10m"
+                limits:
+                  memory: "64Mi"
+                  cpu: "100m"
+              env:
+                - name: WARN_DAYS
+                  value: "14"
+                # Hosts to probe — newline-separated. Bump in lockstep
+                # with scripts/ops/cert-status.sh's DEFAULT_HOSTS. Two
+                # canary tenants on the wildcard catch renewal failures
+                # that affect *.eurobase.app even if the apex hosts
+                # have their own cert.
+                - name: HOSTS
+                  value: |
+                    api.eurobase.app
+                    console.eurobase.app
+                    mcp.eurobase.app
+                    newtek2.eurobase.app
+                    livestylist.eurobase.app
+                - name: DISCORD_ALERTS_WEBHOOK
+                  valueFrom:
+                    secretKeyRef:
+                      name: eurobase-secrets
+                      key: DISCORD_ALERTS_WEBHOOK
+                      optional: true
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -u
+                  WARN_SECS=$((WARN_DAYS * 86400))
+                  worst=0
+                  report=""
+
+                  for host in $HOSTS; do
+                    [ -z "$host" ] && continue
+                    cert=$(echo | openssl s_client -servername "$host" \
+                             -connect "$host:443" -showcerts 2>/dev/null \
+                           | openssl x509 2>/dev/null)
+                    if [ -z "$cert" ]; then
+                      report="${report}CRITICAL  ${host}  unreachable / no certificate served
+                  "
+                      [ "$worst" -lt 2 ] && worst=2
+                      continue
+                    fi
+                    not_after=$(printf '%s' "$cert" | openssl x509 -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
+                    if ! printf '%s' "$cert" | openssl x509 -noout -checkend 0 >/dev/null 2>&1; then
+                      report="${report}CRITICAL  ${host}  EXPIRED  (notAfter=${not_after})
+                  "
+                      [ "$worst" -lt 2 ] && worst=2
+                    elif ! printf '%s' "$cert" | openssl x509 -noout -checkend "$WARN_SECS" >/dev/null 2>&1; then
+                      report="${report}WARN      ${host}  expires within ${WARN_DAYS}d  (notAfter=${not_after})
+                  "
+                      [ "$worst" -lt 1 ] && worst=1
+                    else
+                      report="${report}OK        ${host}  (notAfter=${not_after})
+                  "
+                    fi
+                  done
+
+                  echo "$report"
+
+                  if [ "$worst" = "0" ]; then
+                    exit 0
+                  fi
+
+                  if [ -z "${DISCORD_ALERTS_WEBHOOK:-}" ]; then
+                    echo "DISCORD_ALERTS_WEBHOOK not set — skipping Discord post"
+                    exit "$worst"
+                  fi
+
+                  if [ "$worst" = "2" ]; then
+                    title="🚨 Eurobase TLS — expired or unreachable"
+                    color="15158332"   # red
+                    mention="@everyone "
+                  else
+                    title="⚠️ Eurobase TLS — certificate expiring soon"
+                    color="16753920"   # amber
+                    mention=""
+                  fi
+
+                  # Discord embed description has a hard 4096-char cap;
+                  # the report is at most a few hundred bytes per host so
+                  # this is plenty, but truncate to be safe.
+                  desc=$(printf '%s' "$report" | head -c 3500)
+                  payload=$(printf '{"content":"%s","embeds":[{"title":"%s","description":"\`\`\`\n%s\n\`\`\`","color":%s}]}' \
+                    "$mention" "$title" "$desc" "$color")
+                  curl -fsS -X POST "$DISCORD_ALERTS_WEBHOOK" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" || echo "failed to post Discord alert"
+
+                  # Exit non-zero so failedJobsHistoryLimit captures the
+                  # alert in kubectl visibility even when Discord eats it.
+                  exit "$worst"
