@@ -1,4 +1,4 @@
--- 000059_data_access_log.up.sql
+-- 000066_data_access_log.up.sql
 --
 -- Tier-1 GDPR #4 (Art. 30 records of processing / Art. 32 — every access to
 -- personal data is logged). public.audit_log records sensitive *admin/platform*

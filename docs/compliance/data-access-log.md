@@ -79,7 +79,7 @@ expensive.
 > guaranteed answer to "who read this person's record?", keep the sample at
 > `1.0`. Exports and downloads are always logged regardless.
 
-## Storage: monthly partitions (migration 000059)
+## Storage: monthly partitions (migration 000066)
 
 `data_access_log` is **range-partitioned by month** on `created_at`:
 

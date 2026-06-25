@@ -5,7 +5,7 @@ package audit
 // public.audit_log records sensitive *admin* actions. It does NOT record who
 // *read* tenant personal data over the SDK. AccessRecorder fills that gap by
 // writing one row per personal-data read / export / download to
-// public.data_access_log (migration 000059).
+// public.data_access_log (migration 000066).
 //
 // Design constraints:
 //   - MUST NOT block the request path. The /v1/db read path is hot; an audit
