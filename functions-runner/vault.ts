@@ -100,6 +100,36 @@ async function getAesKey(
   return key;
 }
 
+// openSealed decrypts a sealed (blob, nonce, version) trio for the given
+// tenant schema. Same KDF + AEAD pipeline as resolveVaultSecret — split
+// out so the env_vars decrypt path on edge_functions (#206) can reuse it
+// without duplicating the HKDF/AES-GCM ceremony.
+//
+// Throws on misconfiguration (missing key, derivation failure, wrong key)
+// — caller decides whether that should fail the load or fall back to an
+// empty map. The runner's loadFunction promotes any throw here into a
+// loud server log and returns the function with empty env, so a
+// misconfigured pod doesn't silently expose plaintext via the legacy
+// column.
+export async function openSealed(
+  schemaName: string,
+  blob: Uint8Array,
+  nonce: Uint8Array,
+  keyVersion: number,
+): Promise<string> {
+  const master = getMasterRaw();
+  if (!master) {
+    throw new Error("VAULT_ENCRYPTION_KEY missing — cannot decrypt sealed value");
+  }
+  const key = await getAesKey(master, schemaName, keyVersion);
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: nonce },
+    key,
+    blob,
+  );
+  return new TextDecoder().decode(plain);
+}
+
 // resolveVaultSecret returns { value } for found/not-found secrets and
 // { error } for platform-side failures (no key configured, lookup failed,
 // wrong key / decryption failed). Not-found stays a plain null value —

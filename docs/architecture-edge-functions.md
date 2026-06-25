@@ -144,7 +144,20 @@ CREATE TABLE public.edge_functions (
     entrypoint      TEXT NOT NULL DEFAULT 'handler',  -- exported function name
     verify_jwt      BOOLEAN NOT NULL DEFAULT true,    -- require end-user JWT
     import_map      JSONB,                  -- optional Deno import map
-    env_vars        JSONB,                  -- encrypted at rest (vault key)
+    -- env vars at rest (#206):
+    --   New writes seal the JSON({K:V}) blob with the per-tenant
+    --   HKDF-derived AES-256-GCM key (same KDF as vault_secrets, see
+    --   internal/vault/keyprovider.go). The trio below is all-or-nothing
+    --   per row (CHECK constraint). Legacy `env_vars JSONB` is plaintext
+    --   and is lazy-migrated: any Update of a row seals the values into
+    --   env_vars_blob and NULLs the legacy column. Once the legacy
+    --   column is NULL everywhere it can be dropped in a follow-up
+    --   migration. The runner prefers sealed; falls back to legacy
+    --   while it's still populated.
+    env_vars              JSONB,            -- DEPRECATED: legacy plaintext (lazy-migrated)
+    env_vars_blob         BYTEA,            -- AES-256-GCM ciphertext of JSON({K:V})
+    env_vars_nonce        BYTEA,            -- AEAD nonce (12 bytes)
+    env_vars_key_version  SMALLINT,         -- key version used to seal (HKDF info: "eurobase-vault-v<n>")
     status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
     version         INTEGER NOT NULL DEFAULT 1,
     created_at      TIMESTAMPTZ DEFAULT now(),

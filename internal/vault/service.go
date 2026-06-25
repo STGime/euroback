@@ -92,6 +92,27 @@ func (s *VaultService) open(ctx context.Context, schemaName string, ciphertext, 
 	return decryptWith(key, ciphertext, nonce)
 }
 
+// SealForTenant is the exported seal — same KDF / AEAD scheme as the
+// vault_secrets row pipeline, exposed so other packages that need to
+// store a per-tenant sealed blob (#206: edge_functions.env_vars) can do
+// it without reimplementing the crypto.
+//
+// schemaName is the HKDF salt (must equal the tenant's `projects.schema_name`
+// — same value used by `functions-runner/vault.ts`); plaintext is the
+// raw bytes-as-string to seal. The returned key version must be stored
+// next to the ciphertext + nonce so a future Open can find the right
+// derived key after rotation.
+func (s *VaultService) SealForTenant(ctx context.Context, schemaName, plaintext string) (ciphertext, nonce []byte, version int16, err error) {
+	return s.seal(ctx, schemaName, plaintext)
+}
+
+// OpenForTenant is the exported open — mirror of SealForTenant. Returns
+// a clear plaintext-vs-key-mismatch error so callers can surface
+// "rotation didn't reach this row" cleanly.
+func (s *VaultService) OpenForTenant(ctx context.Context, schemaName string, ciphertext, nonce []byte, version int16) (string, error) {
+	return s.open(ctx, schemaName, ciphertext, nonce, version)
+}
+
 // encryptWith seals plaintext under a 32-byte AES-256-GCM key.
 func encryptWith(key []byte, plaintext string) (ciphertext, nonce []byte, err error) {
 	block, err := aes.NewCipher(key)

@@ -17,7 +17,7 @@ import type {
   WorkerToParent,
 } from "./bridge.ts";
 import { newVerifier, type Verifier } from "./hmac.ts";
-import { resolveVaultSecret } from "./vault.ts";
+import { openSealed, resolveVaultSecret } from "./vault.ts";
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
@@ -142,16 +142,32 @@ async function loadFunction(functionId: string, version: string | null = null): 
     // deploy (TS stripped, ESM -> CommonJS, closes #189). NULL means
     // the function predates the transpile step — fall back to the raw
     // source, which for those functions is plain JS by contract.
+    //
+    // env_vars at rest (#206): the legacy `env_vars` JSONB is plaintext
+    // and being phased out; new writes land in (env_vars_blob,
+    // env_vars_nonce, env_vars_key_version) sealed with the per-tenant
+    // HKDF-derived AES-256-GCM key. We JOIN projects to get
+    // schema_name (the HKDF salt — same one functions-runner/vault.ts
+    // already uses for ctx.vault.get).
     const [row] = await db`
-      SELECT COALESCE(compiled_code, code) AS code, COALESCE(env_vars, '{}') as env_vars
-      FROM edge_functions
-      WHERE id = ${functionId} AND status = 'active'
+      SELECT
+        COALESCE(ef.compiled_code, ef.code) AS code,
+        ef.env_vars              AS env_vars_legacy,
+        ef.env_vars_blob,
+        ef.env_vars_nonce,
+        ef.env_vars_key_version,
+        p.schema_name
+      FROM edge_functions ef
+      JOIN public.projects p ON p.id = ef.project_id
+      WHERE ef.id = ${functionId} AND ef.status = 'active'
     `;
     if (!row) return null;
 
+    const env = await resolveEnvVars(row);
+
     const fn: CachedFunction = {
       code: row.code,
-      env_vars: typeof row.env_vars === "string" ? JSON.parse(row.env_vars) : row.env_vars,
+      env_vars: env,
       cachedAt: Date.now(),
     };
     setCache(cacheKey, fn);
@@ -160,6 +176,49 @@ async function loadFunction(functionId: string, version: string | null = null): 
     console.error("Failed to load function:", err);
     return null;
   }
+}
+
+// resolveEnvVars implements the read-path documented in migration 000067:
+// sealed columns take precedence; legacy plaintext is the lazy-migration
+// fallback; both absent is the empty map.
+//
+// A decryption failure is loudly logged and downgraded to an empty map.
+// We deliberately do NOT fall through to legacy plaintext here — a
+// developer who set env vars and saw them sealed shouldn't see them
+// silently disappear and we shouldn't paper over a key-mismatch by
+// reading the column we promised was deprecated.
+async function resolveEnvVars(row: {
+  env_vars_legacy: unknown;
+  env_vars_blob: Uint8Array | null;
+  env_vars_nonce: Uint8Array | null;
+  env_vars_key_version: number | null;
+  schema_name: string;
+}): Promise<Record<string, string>> {
+  const { env_vars_blob: blob, env_vars_nonce: nonce, env_vars_key_version: keyVer, schema_name: schemaName } = row;
+
+  if (blob && nonce && keyVer != null) {
+    try {
+      const plaintext = await openSealed(schemaName, blob, nonce, keyVer);
+      return JSON.parse(plaintext);
+    } catch (err) {
+      console.error(
+        "[fn] env_vars decrypt failed — running with empty env until key is healed",
+        err instanceof Error ? err.message : err,
+      );
+      return {};
+    }
+  }
+
+  const legacy = row.env_vars_legacy;
+  if (legacy == null) return {};
+  if (typeof legacy === "string") {
+    try {
+      return JSON.parse(legacy) as Record<string, string>;
+    } catch {
+      return {};
+    }
+  }
+  return legacy as Record<string, string>;
 }
 
 // ── Log capture with truncation ──
