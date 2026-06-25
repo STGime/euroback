@@ -7,7 +7,10 @@
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
+	import BlueskyIcon from '$lib/BlueskyIcon.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
+
+	const BLUESKY_URL = 'https://bsky.app/profile/eurobasebaas.bsky.social';
 
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
@@ -107,6 +110,15 @@
 						Community Discord
 					</a>
 				{/if}
+				<a
+					href={BLUESKY_URL}
+					target="_blank"
+					rel="noopener noreferrer"
+					class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors"
+				>
+					<BlueskyIcon />
+					Follow on Bluesky
+				</a>
 				<button
 					onclick={handleLogout}
 					class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors cursor-pointer"
