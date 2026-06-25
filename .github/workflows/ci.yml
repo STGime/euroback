@@ -283,12 +283,15 @@ jobs:
       - name: Apply K8s manifests (security, ingress, functions, MCP server)
         if: steps.fresh.outputs.stale != 'true'
         run: |
-          # CVE-2026-31431 (Copy Fail) and CVE-2026-46333 (ssh-keysign-pwn)
-          # mitigations must land before any pod restart so newly scheduled
-          # pods can't briefly run on a node with algif_aead loaded or
-          # unprivileged ptrace enabled.
+          # CVE-2026-31431 (Copy Fail), CVE-2026-46333 (ssh-keysign-pwn),
+          # and CVE-2026-43284 (Dirty Frag) mitigations must land before any
+          # pod restart so newly scheduled pods can't briefly run on a node
+          # with algif_aead loaded, unprivileged ptrace enabled, or
+          # esp4 / esp6 / rxrpc loaded. All three DaemonSets also self-apply
+          # to autoscaler-brought-up nodes between rotations.
           kubectl apply -f deploy/k8s/security/disable-algif-aead.yaml
           kubectl apply -f deploy/k8s/security/disable-ptrace.yaml
+          kubectl apply -f deploy/k8s/security/disable-dirty-frag.yaml
           # In-cluster Redis replaces managed RED1-micro to cut the
           # beta-stage bill (~€59/mo). Apply before the gateway/worker
           # rollout so REDIS_URL=redis://redis.eurobase.svc.cluster.local
