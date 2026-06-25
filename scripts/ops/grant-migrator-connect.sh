@@ -11,6 +11,17 @@
 # read hidden and passed via a short-lived Secret, never put on the command
 # line or into shell history.
 #
+# Assumes the operator has Secret-create/delete rights in the `eurobase`
+# namespace (used for the short-lived PG* envFrom Secret and for the Job
+# itself). Both are deleted by the EXIT trap below.
+#
+# The verification at the end is **gating**: a non-owner running `GRANT … WITH
+# GRANT OPTION` against a Scaleway-owned DB returns a Postgres WARNING (not an
+# error), so `ON_ERROR_STOP=1` would still exit 0 and a phase-only success
+# check would print ✅ on a silent no-op (the same pattern that bit #217). The
+# Job's second `-c` is a `DO $$ … RAISE EXCEPTION $$;` block that flips the
+# Job to phase=Failed if the privilege didn't actually take.
+#
 # Usage: ./scripts/ops/grant-migrator-connect.sh [admin-user]   (default: eurobase)
 set -euo pipefail
 
@@ -68,7 +79,14 @@ spec:
         - name: grant
           image: ${IMG}
           imagePullPolicy: Always
-          command: ["sh","-c","psql -v ON_ERROR_STOP=1 -c 'GRANT CONNECT ON DATABASE eurobase TO eurobase_migrator WITH GRANT OPTION;' && psql -tAc \"SELECT 'migrator_canconnectgrant=' || has_database_privilege('eurobase_migrator','eurobase','CONNECT WITH GRANT OPTION');\""]
+          command:
+            - sh
+            - -c
+            - |
+              psql -v ON_ERROR_STOP=1 \
+                -c "GRANT CONNECT ON DATABASE eurobase TO eurobase_migrator WITH GRANT OPTION;" \
+                -c "SELECT 'migrator_canconnectgrant=' || has_database_privilege('eurobase_migrator','eurobase','CONNECT WITH GRANT OPTION');" \
+                -c "DO \$\$ BEGIN IF NOT has_database_privilege('eurobase_migrator','eurobase','CONNECT WITH GRANT OPTION') THEN RAISE EXCEPTION 'grant did not take — the DB is owned by _rdb_superadmin, ask Scaleway support or run as _rdb_superadmin'; END IF; END \$\$;"
           envFrom:
             - secretRef: { name: ${TMP_SECRET} }
 YAML
@@ -83,12 +101,18 @@ kubectl -n "$NS" logs job/${JOB} 2>&1 || true
 phase=$(kubectl -n "$NS" get pods -l job-name=${JOB} -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
 echo
 if [ "$phase" = "Succeeded" ]; then
+  # Job phase=Succeeded is meaningful: the DO-block assertion above makes the
+  # Job fail if the privilege didn't actually take, even though Postgres would
+  # only WARN on a silent-no-op grant by a non-owner.
   echo "✅ Granted. eurobase_migrator can now forward CONNECT to per-tenant ddl roles."
   echo "   Tenant migrations are fully enabled — the gateway grants each tenant's"
   echo "   CONNECT on first 'eurobase migrations up'. No redeploy needed."
 else
-  echo "⚠️  The grant did not succeed (phase=${phase}). If it says 'permission denied',"
-  echo "   the '${ADMIN_USER}' user isn't the DB owner / lacks rights — you may need to"
-  echo "   run it as _rdb_superadmin via the Scaleway console, or transfer DB ownership."
+  echo "⚠️  The grant did not succeed (phase=${phase}). See the Job output above."
+  echo "   - 'permission denied' → the '${ADMIN_USER}' user isn't the DB owner."
+  echo "   - 'grant did not take' → the GRANT ran without error but the privilege"
+  echo "     didn't land (the DB is owned by _rdb_superadmin and silently ignores"
+  echo "     non-owner grants). Open a Scaleway support ticket asking them to run"
+  echo "     the GRANT as _rdb_superadmin (see docs/runbooks/tenant-migrations.md)."
   exit 1
 fi
