@@ -30,12 +30,23 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 			return
 		}
 
-		// Rate limit signups by IP: 5/hour.
-		if ratelimit.CheckAuthRate(rl, w, r.Context(), "signup", ratelimit.ClientIP(r), ratelimit.SignupLimit, ratelimit.SignupWindow) {
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		// Per-project per-IP volume gate covering signup. Same knob as
+		// the signin handler below — overridable via the Rate Limits
+		// page (#229). The per-account anti-brute-force gates (e.g.
+		// the signin-failure counter keyed by email, the platform-wide
+		// resend-verify rate limit) are a separate axis and stay at
+		// platform defaults — a project loosening this knob does not
+		// loosen those.
+		//
+		// XFF caveat: see the signin handler below — until #228 lands
+		// the `trust_proxy` enforcement, this gate trusts the
+		// leftmost X-Forwarded-For unconditionally.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
-
-		config := tenant.ParseAuthConfig(pc.AuthConfig)
 
 		var req SignUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -73,6 +84,24 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		}
 
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		// Per-project per-IP volume gate covering both signup and
+		// signin (#225 — same Supabase knob applies to both). The
+		// per-email signin-failure counter below is a separate axis
+		// at platform-wide defaults: brute-force per account stays
+		// gated even if a project loosens the per-IP knob.
+		//
+		// XFF caveat: ratelimit.ClientIP currently trusts the leftmost
+		// X-Forwarded-For unconditionally — an attacker rotating XFF
+		// gets a fresh counter per request unless the ingress
+		// overwrites (not appends) the header. The per-project
+		// `trust_proxy` knob is the intended fix and lands in #228;
+		// until then this gate relies on the nginx-ingress XFF
+		// rewrite for prod traffic.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+			return
+		}
 
 		var req SignInRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

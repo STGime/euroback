@@ -26,6 +26,10 @@ const (
 // CheckAuthRate checks the rate limit for an auth action and writes a 429
 // response if exceeded. Returns true if the request should be blocked.
 // If the limiter is nil (Redis not configured), always allows.
+//
+// Platform-wide identifier-keyed action (forgot-password, magic-link,
+// resend-verify, phone OTP, signin-fail). Per-project knobs use
+// CheckAuthRateForProject instead.
 func CheckAuthRate(limiter *RateLimiter, w http.ResponseWriter, ctx context.Context, action, identifier string, limit int, window time.Duration) bool {
 	if limiter == nil {
 		return false
@@ -67,6 +71,56 @@ func RecordSigninFailure(limiter *RateLimiter, ctx context.Context, email string
 func CheckSigninFailRate(limiter *RateLimiter, w http.ResponseWriter, ctx context.Context, email string) bool {
 	return CheckAuthRate(limiter, w, ctx, "signin_fail", email, SigninFailLimit, SigninFailWindow)
 }
+
+// CheckAuthRateForProject is the per-project sibling of CheckAuthRate. The
+// caller supplies the action's (limit, window) — typically resolved from
+// the project's AuthConfig.EffectiveRateLimits() — and the projectID
+// becomes part of the Redis key so two tenants never share a counter.
+//
+// Same fail-open behaviour as the platform helper: when the limiter is
+// nil (Redis not configured, dev), every request is allowed.
+//
+// The identifier is the per-call dimension (usually an IP, sometimes an
+// email/phone). The key shape is:
+//
+//	auth:{action}:project:{projectID}:{identifier}
+//
+// distinct from the platform-keyed
+//
+//	auth:{action}:{identifier}
+//
+// so legacy and per-project counters can coexist during the rollout
+// window without aliasing each other.
+func CheckAuthRateForProject(limiter *RateLimiter, w http.ResponseWriter, ctx context.Context, action, projectID, identifier string, limit int, window time.Duration) bool {
+	if limiter == nil {
+		return false
+	}
+
+	key := fmt.Sprintf("auth:%s:project:%s:%s", action, projectID, identifier)
+	allowed, info, _ := limiter.Allow(ctx, key, limit, window)
+	if !allowed {
+		resetTime := time.Unix(info.ResetAt, 0)
+		retryAfter := time.Until(resetTime).Seconds()
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
+		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", info.Limit))
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", info.ResetAt))
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintf(w, `{"error":"too many requests, try again in %.0f seconds"}`, retryAfter)
+		return true
+	}
+	return false
+}
+
+// FiveMinutes is the canonical window used by the per-IP knobs on the
+// Rate Limits page (signup+signin, token refresh, token verification).
+// Centralised so a future change to the contract is one constant, not a
+// search-and-replace across handlers.
+const FiveMinutes = 5 * time.Minute
 
 // ClientIP extracts the client IP from a request, preferring X-Forwarded-For.
 func ClientIP(r *http.Request) string {
