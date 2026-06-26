@@ -94,44 +94,105 @@ type RateLimits struct {
 	SMSPerHour int `json:"sms_per_hour,omitempty"`
 
 	// TrustProxy controls whether the per-project rate limiter keys off
-	// the leftmost X-Forwarded-For entry (true) or the TCP peer (false,
-	// default — XFF can be forged when not behind a controlled hop).
-	// Enforced by ratelimit.ClientIPForProject (#228). The deployment
-	// trade-off: a project running purely behind a controlled ingress
-	// (nginx-ingress in Eurobase prod) gets per-end-user accuracy by
-	// opting in; a project reached without a trusted intermediate hop
-	// stays safe at the default.
-	TrustProxy bool `json:"trust_proxy,omitempty"`
+	// the leftmost X-Forwarded-For entry (true) or the TCP peer (false).
+	// Enforced by ratelimit.ClientIPForProject (#228).
+	//
+	// *bool, not bool, so we can tell "user explicitly set false" apart
+	// from "field absent → use platform default". With a plain bool,
+	// any project that ever saved a RateLimits sub-object without a
+	// trust_proxy field would lock in `false` regardless of what the
+	// platform default later said. The pointer keeps the override
+	// honest — nil means "I haven't decided; pick the platform's
+	// answer". EffectiveRateLimits guarantees the pointer is non-nil
+	// in its return value, so callers can dereference safely.
+	//
+	// ── Why the Eurobase default is true (and Supabase ships false) ──
+	//
+	// The same word "trust_proxy" means different things in different
+	// deployments. The relevant question for any rate limiter is:
+	// "where does the identifier you're keying on actually come from?"
+	//
+	// In Eurobase prod, every request lands on the gateway via
+	// nginx-ingress. nginx-ingress's default policy (which we ship — no
+	// `use-forwarded-headers` override in deploy/k8s/ingress.yaml)
+	// **overwrites X-Forwarded-For on every request** with the IP of
+	// the previous TCP hop. So:
+	//   * XFF, as the gateway sees it, is the *real client IP* (browser
+	//     or customer backend), written by an infrastructure layer the
+	//     attacker cannot forge through.
+	//   * The Go TCP peer (`r.RemoteAddr`) is the *nginx pod IP* — the
+	//     same value for every single request in the cluster.
+	//
+	// Set TrustProxy=true → key on the real client IP. Project A's
+	// 100 worldwide users each get their own counter; the
+	// `signup_signin_per_5min_per_ip: 8` default reads as "any one
+	// end-user can attempt 8 signups per 5 min", which is the
+	// number's intended meaning.
+	//
+	// Set TrustProxy=false → key on the TCP peer = nginx pod IP. All
+	// 100 of Project A's users share one counter, because Go sees the
+	// same RemoteAddr for all of them. The same 8-per-5min budget
+	// now means "Project A, combined across every user on Earth, gets
+	// 8 signups per 5 minutes". A small office trying to onboard a
+	// team would self-DoS in 30 seconds.
+	//
+	// Supabase ships `false` as their default because their architecture
+	// has clients that may set forged XFF that the platform never
+	// rewrites — there, trusting XFF would let an attacker rotate it
+	// and bypass the limiter. The same default in Eurobase is the
+	// opposite of safe: it discards the only IP signal that exists
+	// (the ingress-rewritten XFF) and falls back to a value (nginx pod
+	// IP) that's identical for everyone. We use `true` because we
+	// trust nginx-ingress's XFF rewrite, which we configured.
+	//
+	// A project whose traffic does NOT come via the platform ingress
+	// (an unusual setup — a pre-prod tenant on a non-standard route, a
+	// customer-side proxy that adds an extra forwarded hop the ingress
+	// then appends to) can flip this knob to false explicitly. The
+	// console UI in #229 will surface the choice with the same
+	// trade-off written out, so opting out is informed.
+	TrustProxy *bool `json:"trust_proxy,omitempty"`
 }
 
 // DefaultRateLimits returns the platform-wide defaults applied when a
 // project hasn't overridden a knob.
 //
-// Most numbers mirror Supabase's published defaults. The exception is
-// SignupSigninPer5MinPerIP: Supabase ships 30 (≈360/hour), but in
-// Eurobase that ceiling is only safe once the compensating EmailsPerHour
-// cap is actually enforced — and email/SMS enforcement is scheduled for
-// #227, not this PR. An interim default of 8 (≈96/hour) is the
-// middle ground: ~20× more usable than the legacy 5/hour gate (a shared
-// NAT'd office IP no longer trips on the second user), but ~3.6× tighter
-// blast radius than 360/hour until the email cap closes the
-// amplification path. Bump to 30 in #227 when EmailsPerHour starts
-// rejecting over-quota sends.
+// Most numbers mirror Supabase's published defaults. Two deliberate
+// divergences:
+//
+//   * SignupSigninPer5MinPerIP = 8 (not 30): held at the interim
+//     ~96/h floor while EmailsPerHour enforcement is parked behind
+//     the BYO-SMTP feature in #235. Bumps to 30 when that lands.
+//
+//   * TrustProxy = true (Supabase ships false): in Eurobase's
+//     nginx-ingress deployment the IP source is upside-down compared
+//     to Supabase's architecture. See the TrustProxy field comment
+//     for the full mechanics; the short version is that `false`
+//     here makes every project share one counter across all its
+//     end users (nginx pod IP) while `true` keys on the real
+//     client IP that ingress writes. The shipped default matches
+//     the deployment.
 func DefaultRateLimits() RateLimits {
+	trueVal := true
 	return RateLimits{
 		SignupSigninPer5MinPerIP:      8,
 		TokenRefreshPer5MinPerIP:      150,
 		TokenVerificationPer5MinPerIP: 30,
 		EmailsPerHour:                 2,
 		SMSPerHour:                    30,
-		TrustProxy:                    false,
+		TrustProxy:                    &trueVal,
 	}
 }
 
 // EffectiveRateLimits returns the merged knobs: each zero-valued override
 // in the project's stored config is filled from DefaultRateLimits. Safe to
-// call on a config whose RateLimits field is nil. The result is a value
-// (not a pointer) so callers can read fields without nil-checking.
+// call on a config whose RateLimits field is nil.
+//
+// The returned value is guaranteed to have all int fields non-zero AND
+// TrustProxy non-nil, so callers can read every field without nil checks.
+// (TrustProxy is *bool in the storage shape so we can distinguish
+// "explicit false" from "field absent"; the merge below collapses that
+// distinction so the consumer never has to.)
 func (c *AuthConfig) EffectiveRateLimits() RateLimits {
 	defaults := DefaultRateLimits()
 	if c == nil || c.RateLimits == nil {
@@ -153,8 +214,9 @@ func (c *AuthConfig) EffectiveRateLimits() RateLimits {
 	if out.SMSPerHour == 0 {
 		out.SMSPerHour = defaults.SMSPerHour
 	}
-	// TrustProxy is a deliberate-set-only knob: an absent / false value
-	// means "do not trust forwarded headers". No default merge.
+	if out.TrustProxy == nil {
+		out.TrustProxy = defaults.TrustProxy
+	}
 	return out
 }
 

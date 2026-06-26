@@ -41,11 +41,11 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// loosen those.
 		//
 		// The IP source honours auth_config.rate_limits.trust_proxy
-		// (#228): TCP peer by default, leftmost X-Forwarded-For when
-		// the project explicitly opts in. See ClientIPForProject for
-		// the trade-off.
+		// (#228). Eurobase default is true (the nginx-ingress rewrite
+		// makes XFF the real client IP); see ClientIPForProject for
+		// why we diverge from Supabase's false default here.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -93,9 +93,11 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// gated even if a project loosens the per-IP knob.
 		//
 		// IP source honours auth_config.rate_limits.trust_proxy
-		// (#228) — false = TCP peer, true = leftmost X-Forwarded-For.
+		// (#228) — default true: leftmost X-Forwarded-For (the value
+		// nginx-ingress writes, real client IP). false flips to TCP
+		// peer for projects on a non-standard path.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -155,7 +157,7 @@ func HandleRefresh(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Han
 		// clients refresh proactively; tighten via the Rate Limits
 		// page. IP source honours trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_refresh", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenRefreshPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_refresh", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenRefreshPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -302,7 +304,7 @@ func HandleResetPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) ht
 		// tightens reset, and one IP can't burn through the bucket via
 		// /reset-password while the other verify endpoints stay open.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -354,7 +356,7 @@ func HandleVerifyEmail(svc *AuthService, limiter ...*ratelimit.RateLimiter) http
 		// IP source honours trust_proxy (#228).
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -439,7 +441,7 @@ func HandleSignInWithMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimit
 		// for the brute-force rationale. IP source honours
 		// trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -775,7 +777,7 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		// (PhoneOTPLimit) gates the SEND side, not the verify.
 		// IP source honours trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 

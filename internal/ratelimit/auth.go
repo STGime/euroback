@@ -142,28 +142,40 @@ func ClientIP(r *http.Request) string {
 }
 
 // ClientIPForProject is the per-project sibling that honours
-// auth_config.rate_limits.trust_proxy (#228):
+// auth_config.rate_limits.trust_proxy (#228).
 //
-//   - trustProxy=true  → behaves like ClientIP (read leftmost
-//     X-Forwarded-For; fall back to TCP peer if XFF is absent).
-//     Use this when the platform sits behind an edge or ingress that
-//     OVERWRITES XFF on every request (the prod nginx-ingress default
-//     in this deployment), or when the project is willing to trust the
-//     full XFF chain.
+// ── Mechanics ──
 //
-//   - trustProxy=false → use the TCP peer only, ignoring any
-//     X-Forwarded-For header. Defends against XFF rotation by a caller
-//     when the gateway is reached without a controlled intermediate
-//     hop. The trade-off is that in deployments where every request
-//     IS pre-aggregated through one hop (nginx-ingress, a CDN), the
-//     TCP peer is the hop's IP for every request — every caller shares
-//     one counter. The project owner is the one in a position to
-//     judge whether that's the right thing for their tenant.
+//   - trustProxy=true  → leftmost X-Forwarded-For (fall back to TCP
+//     peer if XFF is absent). Use when an upstream layer rewrites or
+//     authoritatively writes XFF on every request — nginx-ingress's
+//     default (no `use-forwarded-headers` override) does exactly
+//     that, so in this deployment XFF is the real client IP.
 //
-// Default in DefaultRateLimits is `false` (matches Supabase's published
-// safe default). A project running purely behind nginx-ingress should
-// set it to true once they understand the trade-off; the runbook in
-// #230 explains the decision.
+//   - trustProxy=false → TCP peer only; XFF is ignored entirely.
+//     Use when the gateway is reached without a trusted hop in front
+//     of it and you can't trust caller-supplied headers.
+//
+// ── Why true is the Eurobase default (Supabase ships false) ──
+//
+// In our nginx-ingress deployment, RemoteAddr is the nginx pod IP for
+// every single request. Picking trustProxy=false would key every
+// project's per-IP counter on that one IP — every end user of the
+// project would share one counter, so the documented per-IP budget
+// becomes a total project budget. With the SignupSigninPer5MinPerIP
+// default of 8, a 9-person office team can't all sign up in the same
+// 5 minutes.
+//
+// With trustProxy=true, XFF is the real client IP (nginx wrote it,
+// nothing upstream can forge it through), and each end-user IP gets
+// its own counter — which is what the published "per-IP" knob is
+// meant to mean. So flipping the default to true is what matches the
+// numbers a project owner sees on the Rate Limits page.
+//
+// Projects whose traffic comes through a non-standard path (a
+// customer-side proxy that adds an extra hop the ingress then appends
+// to, a private route that bypasses ingress) can flip this knob to
+// false explicitly; the console will surface the trade-off.
 func ClientIPForProject(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
