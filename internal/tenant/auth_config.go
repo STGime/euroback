@@ -50,6 +50,101 @@ type AuthConfig struct {
 	// of this setting; this list is purely additive for tenant-owned
 	// browser apps. Empty list = same as default (platform origins only).
 	CORSOrigins []string `json:"cors_origins,omitempty"`
+
+	// RateLimits is the per-project override block for the Supabase-style
+	// Rate Limits page (#224). Pointer (and `omitempty`) so an absent
+	// sub-object reads as "use defaults" rather than "all zeros". Each
+	// knob inside is also optional — zero means "use the default for
+	// this knob only", so a project can override only the values it
+	// cares about. See DefaultRateLimits and EffectiveRateLimits below.
+	RateLimits *RateLimits `json:"rate_limits,omitempty"`
+}
+
+// RateLimits is the per-project overrides surface for the Rate Limits page
+// (#224 umbrella). Every field is a "zero means default" override — see
+// EffectiveRateLimits for the merge.
+//
+// The platform also enforces per-identifier anti-brute-force counters
+// (signin failures, forgot-password, magic-link, resend-verify, phone
+// OTP) at platform-wide defaults; those are NOT exposed here because the
+// Supabase Rate Limits page deliberately doesn't surface them — they're
+// security floors, not knobs.
+type RateLimits struct {
+	// SignupSigninPer5MinPerIP gates the per-IP request volume on
+	// /v1/auth/signup and /v1/auth/signin together. The per-email
+	// signin-failure counter is a separate axis (anti-brute-force, not
+	// surfaced) and continues to apply.
+	SignupSigninPer5MinPerIP int `json:"signup_signin_per_5min_per_ip,omitempty"`
+
+	// TokenRefreshPer5MinPerIP gates POST /v1/auth/refresh per IP.
+	// Wired in #226.
+	TokenRefreshPer5MinPerIP int `json:"token_refresh_per_5min_per_ip,omitempty"`
+
+	// TokenVerificationPer5MinPerIP gates the OTP verify + magic-link
+	// verify endpoints per IP. Wired in #226.
+	TokenVerificationPer5MinPerIP int `json:"token_verification_per_5min_per_ip,omitempty"`
+
+	// EmailsPerHour caps platform-side outbound emails per project per
+	// rolling hour, regardless of trigger (verification, password reset,
+	// magic link, raw). Wired in #227.
+	EmailsPerHour int `json:"emails_per_hour,omitempty"`
+
+	// SMSPerHour caps platform-side outbound SMS per project per
+	// rolling hour. Wired in #227.
+	SMSPerHour int `json:"sms_per_hour,omitempty"`
+
+	// TrustProxy controls whether the per-project rate limiter keys off
+	// the leftmost X-Forwarded-For entry (true) or the TCP peer (false,
+	// default — XFF can be forged when not behind a controlled hop).
+	// Wired in #228. Pointer-equivalent semantics on a bool are clunky
+	// in JSON, so we treat `false` as the safe default — a project that
+	// wants to flip it sets it to `true` explicitly.
+	TrustProxy bool `json:"trust_proxy,omitempty"`
+}
+
+// DefaultRateLimits returns the platform-wide defaults applied when a
+// project hasn't overridden a knob. Numbers mirror Supabase's published
+// defaults; per-platform tightening can happen per project via the
+// console.
+func DefaultRateLimits() RateLimits {
+	return RateLimits{
+		SignupSigninPer5MinPerIP:      30,
+		TokenRefreshPer5MinPerIP:      150,
+		TokenVerificationPer5MinPerIP: 30,
+		EmailsPerHour:                 2,
+		SMSPerHour:                    30,
+		TrustProxy:                    false,
+	}
+}
+
+// EffectiveRateLimits returns the merged knobs: each zero-valued override
+// in the project's stored config is filled from DefaultRateLimits. Safe to
+// call on a config whose RateLimits field is nil. The result is a value
+// (not a pointer) so callers can read fields without nil-checking.
+func (c *AuthConfig) EffectiveRateLimits() RateLimits {
+	defaults := DefaultRateLimits()
+	if c == nil || c.RateLimits == nil {
+		return defaults
+	}
+	out := *c.RateLimits
+	if out.SignupSigninPer5MinPerIP == 0 {
+		out.SignupSigninPer5MinPerIP = defaults.SignupSigninPer5MinPerIP
+	}
+	if out.TokenRefreshPer5MinPerIP == 0 {
+		out.TokenRefreshPer5MinPerIP = defaults.TokenRefreshPer5MinPerIP
+	}
+	if out.TokenVerificationPer5MinPerIP == 0 {
+		out.TokenVerificationPer5MinPerIP = defaults.TokenVerificationPer5MinPerIP
+	}
+	if out.EmailsPerHour == 0 {
+		out.EmailsPerHour = defaults.EmailsPerHour
+	}
+	if out.SMSPerHour == 0 {
+		out.SMSPerHour = defaults.SMSPerHour
+	}
+	// TrustProxy is a deliberate-set-only knob: an absent / false value
+	// means "do not trust forwarded headers". No default merge.
+	return out
 }
 
 // allowedSessionDurations is the set of valid session duration values.

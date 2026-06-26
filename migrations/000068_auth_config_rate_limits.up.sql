@@ -1,0 +1,41 @@
+-- 000068_auth_config_rate_limits.up.sql
+--
+-- #225 (umbrella #224): foundation for per-project Rate Limits — the page in
+-- the console that mirrors Supabase's auth Rate Limits surface.
+--
+-- This migration is intentionally COMMENT-ONLY. The store column
+-- `public.projects.auth_config JSONB` already exists and is the established
+-- per-project config home (cors_origins, OAuth providers, session duration,
+-- etc.). We extend its shape with a new optional sub-object — no DDL needed:
+--
+--   auth_config = {
+--     ...existing fields...
+--     "rate_limits": {
+--       "signup_signin_per_5min_per_ip": 30,    -- per IP, per 5 minutes
+--       "token_refresh_per_5min_per_ip": 150,   -- per IP, per 5 minutes  (#226)
+--       "token_verification_per_5min_per_ip": 30,  -- per IP, per 5 min   (#226)
+--       "emails_per_hour": 2,                   -- per project             (#227)
+--       "sms_per_hour": 30,                     -- per project             (#227)
+--       "trust_proxy": false                    -- IP forwarding toggle    (#228)
+--     }
+--   }
+--
+-- Defaults live as Go constants in internal/tenant/auth_config.go
+-- (`DefaultRateLimits`). An absent sub-object — or any absent knob inside
+-- it — means "use the default". This sidesteps a backfill: existing rows
+-- simply read the default until their owner opens the console and saves.
+--
+-- The limit-checking code path (internal/ratelimit/auth.go
+-- `CheckAuthRateForProject`) composes the Redis key as
+--   auth:{action}:project:{projectID}:{identifier}
+-- so two tenants never share a counter. The legacy
+--   auth:{action}:{identifier}
+-- key shape lives on for per-email/per-phone anti-brute-force gates
+-- (forgot-password, magic-link, resend-verify, phone OTP) — those aren't
+-- governed by the Supabase Rate Limits page and stay on platform-wide
+-- defaults.
+--
+-- No SQL operations to run. This file exists so the umbrella series has a
+-- numbered migration anchor and so `eurobase migrations up` records that the
+-- shape change happened, even though the storage column is unchanged.
+SELECT 1 WHERE FALSE;  -- no-op to satisfy migration runners that require a statement.
