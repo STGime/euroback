@@ -290,7 +290,11 @@ func HandleForgotPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 }
 
 // HandleResetPassword returns an HTTP handler for POST /v1/auth/reset-password.
-func HandleResetPassword(svc *AuthService) http.HandlerFunc {
+func HandleResetPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -299,6 +303,17 @@ func HandleResetPassword(svc *AuthService) http.HandlerFunc {
 		}
 
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		// Per-project per-IP gate — shares the token_verify knob with
+		// the other verify endpoints. Low risk here (the reset token is
+		// high-entropy hex from rand.Read, not enumerable) — added for
+		// consistency so a project that tightens token_verify also
+		// tightens reset, and one IP can't burn through the bucket via
+		// /reset-password while the other verify endpoints stay open.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+			return
+		}
 
 		var req struct {
 			Token    string `json:"token"`
@@ -333,10 +348,18 @@ func HandleVerifyEmail(svc *AuthService, limiter ...*ratelimit.RateLimiter) http
 		}
 
 		// Per-project per-IP gate on token-verification endpoints
-		// (#226 — closes the OTP/magic-link brute-force gap: a
-		// 6-digit OTP is otherwise enumerable within 5 minutes
-		// because the verify step is currently unrate-limited).
-		// Same knob shared with /signin-magic-link and /phone/verify.
+		// (#226 — defense in depth on top of the per-token controls
+		// each underlying flow has). Same knob shared with
+		// /signin-magic-link, /phone/verify, and /reset-password.
+		//
+		// For email-verify, magic-link, and reset-password the token
+		// is high-entropy hex from rand.Read — practically
+		// unguessable, so the per-IP gate is purely volume control.
+		// For phone OTP (6-digit code) the picture is different and
+		// the residual risk is not closed by an IP-keyed limit alone:
+		// see the security issue tracking the VerifyOTP code-only
+		// match + missing per-token attempt counter.
+		//
 		// XFF caveat: trust_proxy enforcement lands in #228.
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 		rlCfg := config.EffectiveRateLimits()
@@ -748,9 +771,16 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		}
 
 		// Per-project per-IP gate — shares the token_verify knob with
-		// the email and magic-link verify endpoints. A 6-digit OTP is
-		// enumerable in 5 min without this; the per-phone OTP-issue
-		// limit (PhoneOTPLimit) gates the SEND side, not the verify.
+		// the email and magic-link verify endpoints. This NARROWS but
+		// does not CLOSE phone-OTP brute force: the underlying
+		// VerifyOTP SQL matches the 6-digit code tenant-wide
+		// (`WHERE token_hash = sha256(code)`) with no per-token
+		// attempt counter, so a forged XFF or a modest botnet can
+		// still chip away at the 10^6 code space. The proper fix is
+		// tracked as a separate P1 security issue: bind verify to the
+		// phone (`WHERE phone = $1 AND token_hash = $2`) + a
+		// per-token attempt counter. The per-phone OTP-issue limit
+		// (PhoneOTPLimit) gates the SEND side, not the verify.
 		// XFF caveat tracked in #228.
 		rlCfg := config.EffectiveRateLimits()
 		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {

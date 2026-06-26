@@ -534,7 +534,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc, limiter))
 			r.Post("/signout", enduser.HandleSignOut(endUserAuthSvc))
 			r.Post("/forgot-password", enduser.HandleForgotPassword(endUserAuthSvc, limiter))
-			r.Post("/reset-password", enduser.HandleResetPassword(endUserAuthSvc))
+			r.Post("/reset-password", enduser.HandleResetPassword(endUserAuthSvc, limiter))
 			r.Post("/verify-email", enduser.HandleVerifyEmail(endUserAuthSvc, limiter))
 			r.Post("/resend-verification", enduser.HandleResendVerification(endUserAuthSvc, limiter))
 			r.Post("/request-magic-link", enduser.HandleRequestMagicLink(endUserAuthSvc, limiter))
