@@ -138,7 +138,11 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 }
 
 // HandleRefresh returns an HTTP handler for POST /v1/auth/refresh.
-func HandleRefresh(svc *AuthService) http.HandlerFunc {
+func HandleRefresh(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -147,6 +151,22 @@ func HandleRefresh(svc *AuthService) http.HandlerFunc {
 		}
 
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		// Per-project per-IP gate on the refresh endpoint (#226 —
+		// closes the burst-guard gap that #56's reuse-detection
+		// can't cover before a stolen token is family-revoked).
+		// Default 150 per 5 min — generous because legitimate SDK
+		// clients refresh proactively; tighten via the Rate Limits
+		// page.
+		//
+		// XFF caveat: ratelimit.ClientIP trusts the leftmost
+		// X-Forwarded-For unconditionally; the per-project
+		// trust_proxy knob enforcement lands in #228. Prod traffic
+		// relies on the nginx-ingress XFF rewrite in the meantime.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_refresh", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenRefreshPer5MinPerIP, ratelimit.FiveMinutes) {
+			return
+		}
 
 		var req RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -300,11 +320,27 @@ func HandleResetPassword(svc *AuthService) http.HandlerFunc {
 }
 
 // HandleVerifyEmail returns an HTTP handler for POST /v1/auth/verify-email.
-func HandleVerifyEmail(svc *AuthService) http.HandlerFunc {
+func HandleVerifyEmail(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
 			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+			return
+		}
+
+		// Per-project per-IP gate on token-verification endpoints
+		// (#226 — closes the OTP/magic-link brute-force gap: a
+		// 6-digit OTP is otherwise enumerable within 5 minutes
+		// because the verify step is currently unrate-limited).
+		// Same knob shared with /signin-magic-link and /phone/verify.
+		// XFF caveat: trust_proxy enforcement lands in #228.
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -370,7 +406,11 @@ func HandleRequestMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimiter)
 }
 
 // HandleSignInWithMagicLink returns an HTTP handler for POST /v1/auth/signin-magic-link.
-func HandleSignInWithMagicLink(svc *AuthService) http.HandlerFunc {
+func HandleSignInWithMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -379,6 +419,14 @@ func HandleSignInWithMagicLink(svc *AuthService) http.HandlerFunc {
 		}
 
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		// Per-project per-IP gate — shares the token_verify knob with
+		// the email and phone OTP verify endpoints. See HandleVerifyEmail
+		// for the brute-force rationale; XFF caveat tracked in #228.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+			return
+		}
 
 		var req struct {
 			Token string `json:"token"`
@@ -681,7 +729,11 @@ func HandleSendPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) htt
 }
 
 // HandleVerifyPhoneOTP returns an HTTP handler for POST /v1/auth/phone/verify.
-func HandleVerifyPhoneOTP(svc *AuthService) http.HandlerFunc {
+func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	var rl *ratelimit.RateLimiter
+	if len(limiter) > 0 {
+		rl = limiter[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok {
@@ -692,6 +744,16 @@ func HandleVerifyPhoneOTP(svc *AuthService) http.HandlerFunc {
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 		if !config.IsPhoneAuthEnabled() {
 			writeJSON(w, map[string]string{"error": "phone authentication is not enabled"}, http.StatusBadRequest)
+			return
+		}
+
+		// Per-project per-IP gate — shares the token_verify knob with
+		// the email and magic-link verify endpoints. A 6-digit OTP is
+		// enumerable in 5 min without this; the per-phone OTP-issue
+		// limit (PhoneOTPLimit) gates the SEND side, not the verify.
+		// XFF caveat tracked in #228.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 

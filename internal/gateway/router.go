@@ -531,17 +531,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Use(apiKeyMw.Handler)
 			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc, limiter))
 			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc, limiter))
-			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc))
+			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc, limiter))
 			r.Post("/signout", enduser.HandleSignOut(endUserAuthSvc))
 			r.Post("/forgot-password", enduser.HandleForgotPassword(endUserAuthSvc, limiter))
 			r.Post("/reset-password", enduser.HandleResetPassword(endUserAuthSvc))
-			r.Post("/verify-email", enduser.HandleVerifyEmail(endUserAuthSvc))
+			r.Post("/verify-email", enduser.HandleVerifyEmail(endUserAuthSvc, limiter))
 			r.Post("/resend-verification", enduser.HandleResendVerification(endUserAuthSvc, limiter))
 			r.Post("/request-magic-link", enduser.HandleRequestMagicLink(endUserAuthSvc, limiter))
-			r.Post("/signin-magic-link", enduser.HandleSignInWithMagicLink(endUserAuthSvc))
+			r.Post("/signin-magic-link", enduser.HandleSignInWithMagicLink(endUserAuthSvc, limiter))
 			r.Get("/oauth/{provider}", enduser.HandleOAuthRedirect(endUserAuthSvc))
 			r.Post("/phone/send-otp", enduser.HandleSendPhoneOTP(endUserAuthSvc, limiter))
-			r.Post("/phone/verify", enduser.HandleVerifyPhoneOTP(endUserAuthSvc))
+			r.Post("/phone/verify", enduser.HandleVerifyPhoneOTP(endUserAuthSvc, limiter))
 
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {
