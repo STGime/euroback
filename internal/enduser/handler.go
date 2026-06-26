@@ -40,11 +40,12 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// platform defaults — a project loosening this knob does not
 		// loosen those.
 		//
-		// XFF caveat: see the signin handler below — until #228 lands
-		// the `trust_proxy` enforcement, this gate trusts the
-		// leftmost X-Forwarded-For unconditionally.
+		// The IP source honours auth_config.rate_limits.trust_proxy
+		// (#228): TCP peer by default, leftmost X-Forwarded-For when
+		// the project explicitly opts in. See ClientIPForProject for
+		// the trade-off.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -91,15 +92,10 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// at platform-wide defaults: brute-force per account stays
 		// gated even if a project loosens the per-IP knob.
 		//
-		// XFF caveat: ratelimit.ClientIP currently trusts the leftmost
-		// X-Forwarded-For unconditionally — an attacker rotating XFF
-		// gets a fresh counter per request unless the ingress
-		// overwrites (not appends) the header. The per-project
-		// `trust_proxy` knob is the intended fix and lands in #228;
-		// until then this gate relies on the nginx-ingress XFF
-		// rewrite for prod traffic.
+		// IP source honours auth_config.rate_limits.trust_proxy
+		// (#228) — false = TCP peer, true = leftmost X-Forwarded-For.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -157,14 +153,9 @@ func HandleRefresh(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Han
 		// can't cover before a stolen token is family-revoked).
 		// Default 150 per 5 min — generous because legitimate SDK
 		// clients refresh proactively; tighten via the Rate Limits
-		// page.
-		//
-		// XFF caveat: ratelimit.ClientIP trusts the leftmost
-		// X-Forwarded-For unconditionally; the per-project
-		// trust_proxy knob enforcement lands in #228. Prod traffic
-		// relies on the nginx-ingress XFF rewrite in the meantime.
+		// page. IP source honours trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_refresh", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenRefreshPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_refresh", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenRefreshPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -311,7 +302,7 @@ func HandleResetPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) ht
 		// tightens reset, and one IP can't burn through the bucket via
 		// /reset-password while the other verify endpoints stay open.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -360,10 +351,10 @@ func HandleVerifyEmail(svc *AuthService, limiter ...*ratelimit.RateLimiter) http
 		// see the security issue tracking the VerifyOTP code-only
 		// match + missing per-token attempt counter.
 		//
-		// XFF caveat: trust_proxy enforcement lands in #228.
+		// IP source honours trust_proxy (#228).
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -445,9 +436,10 @@ func HandleSignInWithMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimit
 
 		// Per-project per-IP gate — shares the token_verify knob with
 		// the email and phone OTP verify endpoints. See HandleVerifyEmail
-		// for the brute-force rationale; XFF caveat tracked in #228.
+		// for the brute-force rationale. IP source honours
+		// trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -781,9 +773,9 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		// phone (`WHERE phone = $1 AND token_hash = $2`) + a
 		// per-token attempt counter. The per-phone OTP-issue limit
 		// (PhoneOTPLimit) gates the SEND side, not the verify.
-		// XFF caveat tracked in #228.
+		// IP source honours trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 

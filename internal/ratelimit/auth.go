@@ -123,6 +123,11 @@ func CheckAuthRateForProject(limiter *RateLimiter, w http.ResponseWriter, ctx co
 const FiveMinutes = 5 * time.Minute
 
 // ClientIP extracts the client IP from a request, preferring X-Forwarded-For.
+//
+// This is the legacy / platform-wide helper — it ALWAYS trusts the
+// leftmost X-Forwarded-For entry. Per-project gates should use
+// ClientIPForProject instead, which honours the project's `trust_proxy`
+// knob (#228).
 func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		// First IP in the chain is the client.
@@ -133,7 +138,50 @@ func ClientIP(r *http.Request) string {
 		}
 		return xff
 	}
-	// Strip port from RemoteAddr.
+	return remoteAddrNoPort(r)
+}
+
+// ClientIPForProject is the per-project sibling that honours
+// auth_config.rate_limits.trust_proxy (#228):
+//
+//   - trustProxy=true  → behaves like ClientIP (read leftmost
+//     X-Forwarded-For; fall back to TCP peer if XFF is absent).
+//     Use this when the platform sits behind an edge or ingress that
+//     OVERWRITES XFF on every request (the prod nginx-ingress default
+//     in this deployment), or when the project is willing to trust the
+//     full XFF chain.
+//
+//   - trustProxy=false → use the TCP peer only, ignoring any
+//     X-Forwarded-For header. Defends against XFF rotation by a caller
+//     when the gateway is reached without a controlled intermediate
+//     hop. The trade-off is that in deployments where every request
+//     IS pre-aggregated through one hop (nginx-ingress, a CDN), the
+//     TCP peer is the hop's IP for every request — every caller shares
+//     one counter. The project owner is the one in a position to
+//     judge whether that's the right thing for their tenant.
+//
+// Default in DefaultRateLimits is `false` (matches Supabase's published
+// safe default). A project running purely behind nginx-ingress should
+// set it to true once they understand the trade-off; the runbook in
+// #230 explains the decision.
+func ClientIPForProject(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			for i := 0; i < len(xff); i++ {
+				if xff[i] == ',' {
+					return xff[:i]
+				}
+			}
+			return xff
+		}
+	}
+	return remoteAddrNoPort(r)
+}
+
+// remoteAddrNoPort returns r.RemoteAddr with any trailing ":port" stripped.
+// Stable across both helpers so changes to address parsing (e.g. IPv6
+// brackets) land in one place.
+func remoteAddrNoPort(r *http.Request) string {
 	addr := r.RemoteAddr
 	for i := len(addr) - 1; i >= 0; i-- {
 		if addr[i] == ':' {

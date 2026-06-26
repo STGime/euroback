@@ -96,9 +96,11 @@ type RateLimits struct {
 	// TrustProxy controls whether the per-project rate limiter keys off
 	// the leftmost X-Forwarded-For entry (true) or the TCP peer (false,
 	// default — XFF can be forged when not behind a controlled hop).
-	// Wired in #228. Pointer-equivalent semantics on a bool are clunky
-	// in JSON, so we treat `false` as the safe default — a project that
-	// wants to flip it sets it to `true` explicitly.
+	// Enforced by ratelimit.ClientIPForProject (#228). The deployment
+	// trade-off: a project running purely behind a controlled ingress
+	// (nginx-ingress in Eurobase prod) gets per-end-user accuracy by
+	// opting in; a project reached without a trusted intermediate hop
+	// stays safe at the default.
 	TrustProxy bool `json:"trust_proxy,omitempty"`
 }
 
