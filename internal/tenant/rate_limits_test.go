@@ -95,11 +95,13 @@ func TestDefaultRateLimits_Numbers(t *testing.T) {
 	// they shift, the doc table needs to shift with them.
 	d := DefaultRateLimits()
 	expect := map[string]int{
-		"signup_signin_per_5min_per_ip":     30,
-		"token_refresh_per_5min_per_ip":     150,
+		// Interim 8 (≈96/h) until #227 wires up EmailsPerHour
+		// enforcement; bumps to 30 (≈360/h, Supabase parity) then.
+		"signup_signin_per_5min_per_ip":      8,
+		"token_refresh_per_5min_per_ip":      150,
 		"token_verification_per_5min_per_ip": 30,
-		"emails_per_hour":                   2,
-		"sms_per_hour":                      30,
+		"emails_per_hour":                    2,
+		"sms_per_hour":                       30,
 	}
 	got := map[string]int{
 		"signup_signin_per_5min_per_ip":     d.SignupSigninPer5MinPerIP,

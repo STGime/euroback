@@ -32,13 +32,17 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 
-		// Per-project per-IP volume gate covering signup. Default 30
-		// requests / 5 min / IP — overridable via the Rate Limits page
-		// (#229). The per-account anti-brute-force gates (e.g. the
-		// signin-failure counter keyed by email, the platform-wide
+		// Per-project per-IP volume gate covering signup. Same knob as
+		// the signin handler below — overridable via the Rate Limits
+		// page (#229). The per-account anti-brute-force gates (e.g.
+		// the signin-failure counter keyed by email, the platform-wide
 		// resend-verify rate limit) are a separate axis and stay at
 		// platform defaults — a project loosening this knob does not
 		// loosen those.
+		//
+		// XFF caveat: see the signin handler below — until #228 lands
+		// the `trust_proxy` enforcement, this gate trusts the
+		// leftmost X-Forwarded-For unconditionally.
 		rlCfg := config.EffectiveRateLimits()
 		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
@@ -86,8 +90,16 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// per-email signin-failure counter below is a separate axis
 		// at platform-wide defaults: brute-force per account stays
 		// gated even if a project loosens the per-IP knob.
-		rl_signin := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIP(r), rl_signin.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+		//
+		// XFF caveat: ratelimit.ClientIP currently trusts the leftmost
+		// X-Forwarded-For unconditionally — an attacker rotating XFF
+		// gets a fresh counter per request unless the ingress
+		// overwrites (not appends) the header. The per-project
+		// `trust_proxy` knob is the intended fix and lands in #228;
+		// until then this gate relies on the nginx-ingress XFF
+		// rewrite for prod traffic.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIP(r), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 

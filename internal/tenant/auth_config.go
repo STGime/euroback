@@ -103,12 +103,21 @@ type RateLimits struct {
 }
 
 // DefaultRateLimits returns the platform-wide defaults applied when a
-// project hasn't overridden a knob. Numbers mirror Supabase's published
-// defaults; per-platform tightening can happen per project via the
-// console.
+// project hasn't overridden a knob.
+//
+// Most numbers mirror Supabase's published defaults. The exception is
+// SignupSigninPer5MinPerIP: Supabase ships 30 (≈360/hour), but in
+// Eurobase that ceiling is only safe once the compensating EmailsPerHour
+// cap is actually enforced — and email/SMS enforcement is scheduled for
+// #227, not this PR. An interim default of 8 (≈96/hour) is the
+// middle ground: ~20× more usable than the legacy 5/hour gate (a shared
+// NAT'd office IP no longer trips on the second user), but ~3.6× tighter
+// blast radius than 360/hour until the email cap closes the
+// amplification path. Bump to 30 in #227 when EmailsPerHour starts
+// rejecting over-quota sends.
 func DefaultRateLimits() RateLimits {
 	return RateLimits{
-		SignupSigninPer5MinPerIP:      30,
+		SignupSigninPer5MinPerIP:      8,
 		TokenRefreshPer5MinPerIP:      150,
 		TokenVerificationPer5MinPerIP: 30,
 		EmailsPerHour:                 2,
