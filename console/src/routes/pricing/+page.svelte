@@ -198,6 +198,14 @@
 		<div class="mx-auto max-w-5xl px-6 py-12 text-center">
 			<h2 class="text-2xl font-semibold text-gray-900">Made in Berlin. Hosted in France.</h2>
 			<p class="mt-3 text-sm text-gray-600 max-w-2xl mx-auto">All Eurobase data lives in EU jurisdiction (Scaleway, France). GDPR by design — DPA report, sub-processor list, and DSAR self-serve user export are built in. <a href="/docs" class="text-eurobase-600 hover:text-eurobase-700 underline">Read the docs</a>.</p>
+			<div class="mt-6 flex items-center justify-center gap-4 text-sm">
+				<a href="https://bsky.app/profile/eurobasebaas.bsky.social" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-gray-600 hover:text-eurobase-700 transition-colors">
+					<svg class="h-4 w-4" viewBox="0 0 600 530" fill="currentColor" aria-hidden="true">
+						<path d="M135.72 44.03C202.216 93.951 273.74 195.17 300 249.49c26.262-54.316 97.782-155.54 164.28-205.46C512.26 8.009 590-19.862 590 68.825c0 17.712-10.155 148.79-16.111 170.07-20.703 73.984-96.144 92.854-163.25 81.433 117.3 19.964 147.14 86.092 82.697 152.22-122.39 125.59-175.91-31.511-189.63-71.766-2.514-7.38-3.69-10.832-3.708-7.896-.017-2.936-1.193.516-3.707 7.896-13.714 40.255-67.233 197.36-189.63 71.766-64.444-66.128-34.605-132.26 82.697-152.22-67.108 11.421-142.55-7.45-163.25-81.433C20.156 217.613 10 86.535 10 68.825c0-88.687 77.742-60.816 125.72-24.795z"/>
+					</svg>
+					Follow on Bluesky
+				</a>
+			</div>
 		</div>
 	</section>
 </div>
