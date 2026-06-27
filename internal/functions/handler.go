@@ -2,18 +2,41 @@ package functions
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 )
 
 func jsonError(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// writeGetError maps a Service.Get error to the right HTTP shape. Before
+// this, every error was masked as 404 "function not found" — which hid
+// real failures (vault decryption errors after the #206 sealed env_vars
+// migration, schema lookup failures, transient pool errors) behind a
+// lie. The user-visible symptom was: "Function not found" appearing on
+// every function in the console even though they all existed in the DB.
+//
+// Strategy: a true row-miss is a 404 with the original short message;
+// anything else surfaces as 500 with the underlying error string so the
+// operator can see what's actually wrong (e.g. "decrypt env_vars
+// (key_version 1): …"). The original error is also slog'd for ops.
+func writeGetError(w http.ResponseWriter, projectID, name string, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		slog.Info("get edge function: not found", "project_id", projectID, "name", name)
+		jsonError(w, "function not found", http.StatusNotFound)
+		return
+	}
+	slog.Error("get edge function failed", "project_id", projectID, "name", name, "error", err)
+	jsonError(w, err.Error(), http.StatusInternalServerError)
 }
 
 // HandleList returns all edge functions for a project.
@@ -40,8 +63,7 @@ func HandleGet(svc *Service) http.HandlerFunc {
 
 		fn, err := svc.Get(r.Context(), projectID, name)
 		if err != nil {
-			slog.Error("get edge function failed", "project_id", projectID, "name", name, "error", err)
-			jsonError(w, "function not found", http.StatusNotFound)
+			writeGetError(w, projectID, name, err)
 			return
 		}
 
@@ -135,7 +157,7 @@ func HandleListTriggers(svc *Service, trigSvc *TriggerService) http.HandlerFunc 
 
 		fn, err := svc.Get(r.Context(), projectID, name)
 		if err != nil {
-			jsonError(w, "function not found", http.StatusNotFound)
+			writeGetError(w, projectID, name, err)
 			return
 		}
 
@@ -159,7 +181,7 @@ func HandleCreateTrigger(svc *Service, trigSvc *TriggerService) http.HandlerFunc
 
 		fn, err := svc.Get(r.Context(), projectID, name)
 		if err != nil {
-			jsonError(w, "function not found", http.StatusNotFound)
+			writeGetError(w, projectID, name, err)
 			return
 		}
 
