@@ -94,42 +94,115 @@ type RateLimits struct {
 	SMSPerHour int `json:"sms_per_hour,omitempty"`
 
 	// TrustProxy controls whether the per-project rate limiter keys off
-	// the leftmost X-Forwarded-For entry (true) or the TCP peer (false,
-	// default — XFF can be forged when not behind a controlled hop).
-	// Wired in #228. Pointer-equivalent semantics on a bool are clunky
-	// in JSON, so we treat `false` as the safe default — a project that
-	// wants to flip it sets it to `true` explicitly.
-	TrustProxy bool `json:"trust_proxy,omitempty"`
+	// the leftmost X-Forwarded-For entry (true) or the TCP peer (false).
+	// Enforced by ratelimit.ClientIPForProject (#228).
+	//
+	// *bool, not bool, so we can tell "user explicitly set false" apart
+	// from "field absent → use platform default". With a plain bool,
+	// any project that ever saved a RateLimits sub-object without a
+	// trust_proxy field would lock in `false` regardless of what the
+	// platform default later said. The pointer keeps the override
+	// honest — nil means "I haven't decided; pick the platform's
+	// answer". EffectiveRateLimits guarantees the pointer is non-nil
+	// in its return value, so callers can dereference safely.
+	//
+	// ── The two-direction trade-off ──
+	//
+	// The choice between `true` and `false` here trades one failure
+	// mode for the opposite one — the right answer depends on the
+	// deployment, and "safe by default" depends on which side you're
+	// most worried about.
+	//
+	// TrustProxy = true (key on leftmost XFF):
+	//   * Correct only if **exactly one trusted hop authoritatively
+	//     overwrites XFF with the real client IP**. nginx-ingress with
+	//     `use-forwarded-headers: false` does exactly that.
+	//   * Gives true per-end-user keying — the published
+	//     "per-IP" knob means what the UI says.
+	//   * Failure mode: if the chain APPENDS to XFF (typical with
+	//     `use-forwarded-headers: true`, sometimes needed to recover
+	//     the client IP through a load balancer), leftmost-XFF is
+	//     client-controlled. An attacker rotating the header bypasses
+	//     every per-IP gate.
+	//
+	// TrustProxy = false (key on TCP peer):
+	//   * Safe under any XFF configuration — no infra assumption.
+	//   * Failure mode: in deployments that pre-aggregate behind a
+	//     controlled hop (every Eurobase prod request comes through
+	//     one nginx pod), `r.RemoteAddr` is the same value for every
+	//     request. The "per-IP" gate effectively becomes per-project
+	//     total — a 9-person office team can't all sign up in the
+	//     same hour.
+	//
+	// ── Why the Eurobase default is false (for now) ──
+	//
+	// The default-true correctness depends on the Scaleway LB ↔
+	// nginx-ingress XFF behavior — none of which is declared in this
+	// repo (the Ingress YAML only sets ssl-redirect and proxy-body-
+	// size; there's no controller ConfigMap or LB-side proxy-protocol
+	// annotation). Until that's verified empirically in prod, shipping
+	// `true` as the default would lean on an assumption we haven't
+	// confirmed: if a future operator (or a never-noticed current
+	// config) flips `use-forwarded-headers: true`, every per-IP gate
+	// becomes a header-rotation bypass without anything in code
+	// changing.
+	//
+	// So we ship `false`, accept the per-project-total degradation,
+	// and track the proper flip in a follow-up: verify what XFF the
+	// gateway actually receives, document the required ingress + LB
+	// config as a hard precondition, then re-default to true. The
+	// long-term hardening is a trusted-hop-count / known-proxy-CIDR
+	// strategy that's robust to both extra hops and header forgery;
+	// the same follow-up covers that.
+	//
+	// Projects that know their deployment trusts XFF can opt in today
+	// by setting `"trust_proxy": true` in auth_config; the console UI
+	// in #229 will surface this choice with the same trade-off
+	// written out.
+	TrustProxy *bool `json:"trust_proxy,omitempty"`
 }
 
 // DefaultRateLimits returns the platform-wide defaults applied when a
 // project hasn't overridden a knob.
 //
-// Most numbers mirror Supabase's published defaults. The exception is
-// SignupSigninPer5MinPerIP: Supabase ships 30 (≈360/hour), but in
-// Eurobase that ceiling is only safe once the compensating EmailsPerHour
-// cap is actually enforced — and email/SMS enforcement is scheduled for
-// #227, not this PR. An interim default of 8 (≈96/hour) is the
-// middle ground: ~20× more usable than the legacy 5/hour gate (a shared
-// NAT'd office IP no longer trips on the second user), but ~3.6× tighter
-// blast radius than 360/hour until the email cap closes the
-// amplification path. Bump to 30 in #227 when EmailsPerHour starts
-// rejecting over-quota sends.
+// Most numbers mirror Supabase's published defaults. One deliberate
+// divergence:
+//
+//   * SignupSigninPer5MinPerIP = 8 (not 30): held at the interim
+//     ~96/h floor while EmailsPerHour enforcement is parked behind
+//     the BYO-SMTP feature in #235. Bumps to 30 when that lands.
+//
+// TrustProxy ships as false (Supabase parity, safe-by-default). In
+// Eurobase's deployment a true default would key off the nginx-ingress
+// XFF rewrite — and *if* `use-forwarded-headers: true` is set anywhere
+// in the Scaleway-LB → nginx chain, leftmost XFF becomes
+// client-controlled and every per-IP gate becomes header-rotation-
+// bypassable. A separate follow-up issue tracks empirically verifying
+// the chain's XFF behavior in prod; once confirmed safe, the default
+// can flip via the console (or this constant). Project owners who know
+// their deployment trusts XFF can opt in today — see the TrustProxy
+// field comment for the precondition.
 func DefaultRateLimits() RateLimits {
+	falseVal := false
 	return RateLimits{
 		SignupSigninPer5MinPerIP:      8,
 		TokenRefreshPer5MinPerIP:      150,
 		TokenVerificationPer5MinPerIP: 30,
 		EmailsPerHour:                 2,
 		SMSPerHour:                    30,
-		TrustProxy:                    false,
+		TrustProxy:                    &falseVal,
 	}
 }
 
 // EffectiveRateLimits returns the merged knobs: each zero-valued override
 // in the project's stored config is filled from DefaultRateLimits. Safe to
-// call on a config whose RateLimits field is nil. The result is a value
-// (not a pointer) so callers can read fields without nil-checking.
+// call on a config whose RateLimits field is nil.
+//
+// The returned value is guaranteed to have all int fields non-zero AND
+// TrustProxy non-nil, so callers can read every field without nil checks.
+// (TrustProxy is *bool in the storage shape so we can distinguish
+// "explicit false" from "field absent"; the merge below collapses that
+// distinction so the consumer never has to.)
 func (c *AuthConfig) EffectiveRateLimits() RateLimits {
 	defaults := DefaultRateLimits()
 	if c == nil || c.RateLimits == nil {
@@ -151,8 +224,9 @@ func (c *AuthConfig) EffectiveRateLimits() RateLimits {
 	if out.SMSPerHour == 0 {
 		out.SMSPerHour = defaults.SMSPerHour
 	}
-	// TrustProxy is a deliberate-set-only knob: an absent / false value
-	// means "do not trust forwarded headers". No default merge.
+	if out.TrustProxy == nil {
+		out.TrustProxy = defaults.TrustProxy
+	}
 	return out
 }
 

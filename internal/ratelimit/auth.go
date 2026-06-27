@@ -123,17 +123,88 @@ func CheckAuthRateForProject(limiter *RateLimiter, w http.ResponseWriter, ctx co
 const FiveMinutes = 5 * time.Minute
 
 // ClientIP extracts the client IP from a request, preferring X-Forwarded-For.
+//
+// This is the legacy / platform-wide helper — it ALWAYS trusts the
+// leftmost X-Forwarded-For entry. Per-project gates should use
+// ClientIPForProject instead, which honours the project's `trust_proxy`
+// knob (#228).
 func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// First IP in the chain is the client.
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
+		return leftmostXFF(xff)
 	}
-	// Strip port from RemoteAddr.
+	return remoteAddrNoPort(r)
+}
+
+// ClientIPForProject is the per-project sibling that honours
+// auth_config.rate_limits.trust_proxy (#228).
+//
+//   - trustProxy=true  → leftmost X-Forwarded-For (fall back to TCP
+//     peer if XFF is absent). Correct only when exactly one trusted
+//     hop authoritatively overwrites XFF with the real client IP
+//     (nginx-ingress with `use-forwarded-headers: false` is the
+//     canonical example). If anything in the chain APPENDS to XFF
+//     instead of overwriting, leftmost-XFF becomes client-controlled
+//     and the per-IP gate becomes header-rotation-bypassable.
+//
+//   - trustProxy=false → TCP peer only; XFF is ignored entirely.
+//     Safe under any XFF configuration. The cost is that when the
+//     gateway sits behind one shared hop (every request in Eurobase
+//     prod arrives through one nginx pod), `r.RemoteAddr` is the
+//     same value for every request — the per-IP gate effectively
+//     becomes per-project total.
+//
+// The Eurobase default is `false` for safety until the Scaleway LB ↔
+// nginx-ingress XFF behavior is verified empirically (follow-up issue
+// tracks the verification + the trusted-hop-count hardening that's
+// robust to both modes). Project owners who know their deployment
+// trusts XFF can opt in today; the field comment in
+// internal/tenant/auth_config.go walks through the full decision.
+func ClientIPForProject(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return leftmostXFF(xff)
+		}
+	}
+	return remoteAddrNoPort(r)
+}
+
+// leftmostXFF returns the first entry of an X-Forwarded-For header,
+// trimming any whitespace a comma-and-space separator would have left
+// in. `"203.0.113.7, 10.0.0.5"` → `"203.0.113.7"`; a single-entry
+// header is returned verbatim (also trimmed). Stable across ClientIP
+// and ClientIPForProject so the extractor lives in one place.
+func leftmostXFF(xff string) string {
+	if i := indexByte(xff, ','); i >= 0 {
+		return trimSpace(xff[:i])
+	}
+	return trimSpace(xff)
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func trimSpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
+}
+
+// remoteAddrNoPort returns r.RemoteAddr with any trailing ":port" stripped.
+// Stable across both helpers so changes to address parsing (e.g. IPv6
+// brackets) land in one place.
+func remoteAddrNoPort(r *http.Request) string {
 	addr := r.RemoteAddr
 	for i := len(addr) - 1; i >= 0; i-- {
 		if addr[i] == ':' {

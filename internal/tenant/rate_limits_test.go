@@ -14,11 +14,32 @@ import "testing"
 //     "back to default", not "block everything".
 //   * trust_proxy is deliberate-set-only: false stays false, never
 //     promoted to a default
+// rateLimitsEqual compares two RateLimits values field-by-field. Direct
+// `==` doesn't work since `TrustProxy *bool` is now a pointer; two
+// equal-valued pointers from separate DefaultRateLimits() calls have
+// different addresses.
+func rateLimitsEqual(a, b RateLimits) bool {
+	if a.SignupSigninPer5MinPerIP != b.SignupSigninPer5MinPerIP ||
+		a.TokenRefreshPer5MinPerIP != b.TokenRefreshPer5MinPerIP ||
+		a.TokenVerificationPer5MinPerIP != b.TokenVerificationPer5MinPerIP ||
+		a.EmailsPerHour != b.EmailsPerHour ||
+		a.SMSPerHour != b.SMSPerHour {
+		return false
+	}
+	if (a.TrustProxy == nil) != (b.TrustProxy == nil) {
+		return false
+	}
+	if a.TrustProxy != nil && *a.TrustProxy != *b.TrustProxy {
+		return false
+	}
+	return true
+}
+
 func TestEffectiveRateLimits_NilConfig(t *testing.T) {
 	var c *AuthConfig
 	got := c.EffectiveRateLimits()
 	want := DefaultRateLimits()
-	if got != want {
+	if !rateLimitsEqual(got, want) {
 		t.Fatalf("nil receiver should give DefaultRateLimits, got %+v want %+v", got, want)
 	}
 }
@@ -27,7 +48,7 @@ func TestEffectiveRateLimits_NilRateLimits(t *testing.T) {
 	c := &AuthConfig{}
 	got := c.EffectiveRateLimits()
 	want := DefaultRateLimits()
-	if got != want {
+	if !rateLimitsEqual(got, want) {
 		t.Fatalf("nil RateLimits should give defaults, got %+v want %+v", got, want)
 	}
 }
@@ -71,21 +92,38 @@ func TestEffectiveRateLimits_ZeroMeansDefault(t *testing.T) {
 	}
 }
 
-func TestEffectiveRateLimits_TrustProxyStaysOptIn(t *testing.T) {
-	// TrustProxy is NOT default-merged: an absent / false value means
-	// "do not trust X-Forwarded-For". Promoting it to a default would
-	// be a privacy/security regression for projects without an edge.
+func TestEffectiveRateLimits_TrustProxyDefaultsAndOverrides(t *testing.T) {
+	// TrustProxy is *bool so we can distinguish "absent" from
+	// "explicit false". Four behaviours the per-project gates rely on:
+	//
+	//   1. Nil RateLimits → default false (safe-by-default Supabase
+	//      parity; the verification-pending follow-up tracks flipping
+	//      this once the Scaleway LB ↔ nginx XFF chain is confirmed).
+	//   2. Empty RateLimits, no trust_proxy field → same default.
+	//   3. Explicit false in storage → false (no surprise).
+	//   4. Explicit true in storage → true (project opted in after
+	//      confirming the ingress trusts XFF).
+	falsePtr := false
+	truePtr := true
+
 	cNil := &AuthConfig{}
-	if cNil.EffectiveRateLimits().TrustProxy {
-		t.Error("TrustProxy must default to false on nil RateLimits")
+	if got := cNil.EffectiveRateLimits().TrustProxy; got == nil || *got {
+		t.Errorf("TrustProxy must default to false on nil RateLimits, got %v", got)
 	}
-	cExplicitFalse := &AuthConfig{RateLimits: &RateLimits{TrustProxy: false}}
-	if cExplicitFalse.EffectiveRateLimits().TrustProxy {
-		t.Error("explicit TrustProxy=false must stay false (not promoted)")
+
+	cAbsentField := &AuthConfig{RateLimits: &RateLimits{}}
+	if got := cAbsentField.EffectiveRateLimits().TrustProxy; got == nil || *got {
+		t.Errorf("TrustProxy must default to false when the field is absent, got %v", got)
 	}
-	cTrue := &AuthConfig{RateLimits: &RateLimits{TrustProxy: true}}
-	if !cTrue.EffectiveRateLimits().TrustProxy {
-		t.Error("explicit TrustProxy=true must pass through")
+
+	cExplicitFalse := &AuthConfig{RateLimits: &RateLimits{TrustProxy: &falsePtr}}
+	if got := cExplicitFalse.EffectiveRateLimits().TrustProxy; got == nil || *got {
+		t.Errorf("explicit TrustProxy=false must stay false, got %v", got)
+	}
+
+	cExplicitTrue := &AuthConfig{RateLimits: &RateLimits{TrustProxy: &truePtr}}
+	if got := cExplicitTrue.EffectiveRateLimits().TrustProxy; got == nil || !*got {
+		t.Errorf("explicit TrustProxy=true must pass through, got %v", got)
 	}
 }
 
@@ -115,8 +153,8 @@ func TestDefaultRateLimits_Numbers(t *testing.T) {
 			t.Errorf("default %s: got %d, want %d", k, got[k], want)
 		}
 	}
-	if d.TrustProxy {
-		t.Error("default TrustProxy must be false (safe default)")
+	if d.TrustProxy == nil || *d.TrustProxy {
+		t.Errorf("default TrustProxy must be false (Supabase parity, safe-by-default), got %v", d.TrustProxy)
 	}
 }
 
@@ -146,8 +184,8 @@ func TestParseAuthConfig_RateLimitsRoundTrip(t *testing.T) {
 	if eff.EmailsPerHour != 3 {
 		t.Errorf("EmailsPerHour: got %d, want 3", eff.EmailsPerHour)
 	}
-	if !eff.TrustProxy {
-		t.Error("TrustProxy: got false, want true")
+	if eff.TrustProxy == nil || !*eff.TrustProxy {
+		t.Errorf("TrustProxy: want true (explicit override), got %v", eff.TrustProxy)
 	}
 	// Unspecified knob falls back to default.
 	if eff.SMSPerHour != DefaultRateLimits().SMSPerHour {
