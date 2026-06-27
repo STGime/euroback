@@ -166,6 +166,13 @@ func main() {
 	}()
 	slog.Info("cron executor started (60s interval)")
 
+	// ── Audit retention worker (#171) ──
+	// Daily housekeeping: roll forward data_access_log monthly
+	// partitions, drop ones past the retention horizon, optionally
+	// prune audit_log row tails. Tuned via env vars; see
+	// internal/workers/audit_retention.go.
+	workers.StartAuditRetention(ctx, pool)
+
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

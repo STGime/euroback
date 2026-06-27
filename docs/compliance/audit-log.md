@@ -102,6 +102,16 @@ chain verifies as OK.
 > a multi-year log this is a heavy interactive call; a bounded/streaming or
 > checkpointed variant is a likely future addition.
 
+### Verify after retention pruning
+
+When retention pruning is enabled (see below), the oldest rows of a project's
+chain are deleted. Verify reads
+`public.audit_log_chain_checkpoints.last_row_hash` for the project and seeds
+its initial `prev` from that value, so the first **surviving** row's
+`prev_hash` still links correctly. Operationally this means: in-DB Verify
+keeps working without false positives across pruning events, and the full
+pre-prune history is still verifiable against the off-box WORM dump (#170).
+
 ## Testing
 
 `internal/audit/verifier_test.go` (integration, runs in CI `test-go`):
@@ -109,7 +119,85 @@ appends entries, verifies clean, then mutates and deletes rows directly in the
 DB and asserts `Verify` flags both — the content-tamper and the
 linkage-break paths.
 
-## Retention & export
-1-year retention and the vendor-neutral SIEM export (webhook / syslog / signed
-object dump) are documented in
-[`audit-export.md`](./audit-export.md) once those PRs land (#170, #171).
+## Retention (#171)
+
+Two streams, two strategies — picked to match each stream's volume and the
+GDPR Art. 30 baseline ("≥1 year").
+
+| Stream                | Default | Mechanism                                        |
+| --------------------- | ------- | ------------------------------------------------ |
+| `audit_log`           | never   | Per-project row prune, leaves chain checkpoint   |
+| `data_access_log`     | 13 mo   | Drop whole monthly partitions past the horizon   |
+| Future partitions     | 12 mo   | Rolling pre-create so writes never hit `DEFAULT` |
+
+The retention worker (`internal/workers/audit_retention.go`) runs **once at
+startup + every 24 h**. Each tick calls three migrator-owned `SECURITY
+DEFINER` helpers added in migration 000070:
+
+- `public.ensure_future_data_access_log_partitions(months_ahead)` —
+  idempotent rolling pre-create.
+- `public.drop_old_data_access_log_partitions(cutoff_months)` —
+  detaches + drops monthly partitions whose covered month ends on or before
+  `today - cutoff_months`. Returns the list of dropped names.
+- `public.prune_audit_log(cutoff_days)` — per project, deletes rows older
+  than the cutoff, **never the chain head** (always preserves the
+  highest-`seq` row), and upserts the chain checkpoint.
+
+### Config
+
+Environment variables read once at worker startup
+(`internal/workers/audit_retention.go`):
+
+```
+AUDIT_LOG_RETENTION_DAYS            default 0   (never prune in DB)
+DATA_ACCESS_LOG_RETENTION_MONTHS    default 13  (1 year + 1 buffer month)
+DATA_ACCESS_LOG_FUTURE_MONTHS_AHEAD default 12  (rolling pre-create)
+```
+
+`AUDIT_LOG_RETENTION_DAYS=0` is the safe default — `audit_log` is
+low-volume and the WORM dump is the long-term archive, so there's no
+operational reason to prune in DB unless a specific data-minimisation rule
+applies. Operators can flip to any positive number; chain integrity is
+preserved by the checkpoint.
+
+### Why partition-drop, not row-DELETE, for `data_access_log`
+
+`data_access_log` is high-volume and partitioned by month (000066). Dropping
+a partition is a single metadata operation; a giant `DELETE FROM ... WHERE
+created_at < ...` would generate bloat and pressure autovacuum. The
+worker's job is therefore "detach + drop" old partitions, not row delete.
+
+## WORM object archive (long-term)
+
+The in-DB tables hold the **hot** window (above). For long-term, off-box
+retention — the Art. 30 records-of-processing baseline plus the
+tamper-evidence defence against a migrator-level actor described above —
+the canonical store is the **signed object dump** in PR #170 (SIEM export):
+a regularly-emitted, signed `.jsonl` per project / per day pushed to an
+object-store bucket configured for immutability.
+
+The bucket policy is owned by ops, not the application code. When the
+bucket is provisioned (#170), it must be configured as follows on
+Scaleway Object Storage (fr-par):
+
+```
+Bucket:        eurobase-audit-archive
+Region:        fr-par
+Object Lock:   enabled (Compliance mode)
+Retention:     7 years per object (GDPR Art. 30 + national rules)
+Versioning:    enabled
+Lifecycle:     no Expiration rule (compliance mode would block it anyway)
+ACL:           private, no public access
+```
+
+`Compliance mode` is the strict variant: no role — including the bucket
+owner — can shorten a retained object's lock before its retention date.
+That is the property that makes the dump count as the off-box
+tamper-evident copy referred to above and in the migration-058 / 070
+headers.
+
+The application path that emits the dump is intentionally separated from
+the bucket policy: the worker only writes; the lifecycle/lock guarantees
+sit with Scaleway. A reviewer of an in-DB chain break can fetch the
+matching day's dump from the bucket and walk the same hash chain
+externally to identify the divergence point.
