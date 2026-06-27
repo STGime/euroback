@@ -106,81 +106,91 @@ type RateLimits struct {
 	// answer". EffectiveRateLimits guarantees the pointer is non-nil
 	// in its return value, so callers can dereference safely.
 	//
-	// ── Why the Eurobase default is true (and Supabase ships false) ──
+	// ── The two-direction trade-off ──
 	//
-	// The same word "trust_proxy" means different things in different
-	// deployments. The relevant question for any rate limiter is:
-	// "where does the identifier you're keying on actually come from?"
+	// The choice between `true` and `false` here trades one failure
+	// mode for the opposite one — the right answer depends on the
+	// deployment, and "safe by default" depends on which side you're
+	// most worried about.
 	//
-	// In Eurobase prod, every request lands on the gateway via
-	// nginx-ingress. nginx-ingress's default policy (which we ship — no
-	// `use-forwarded-headers` override in deploy/k8s/ingress.yaml)
-	// **overwrites X-Forwarded-For on every request** with the IP of
-	// the previous TCP hop. So:
-	//   * XFF, as the gateway sees it, is the *real client IP* (browser
-	//     or customer backend), written by an infrastructure layer the
-	//     attacker cannot forge through.
-	//   * The Go TCP peer (`r.RemoteAddr`) is the *nginx pod IP* — the
-	//     same value for every single request in the cluster.
+	// TrustProxy = true (key on leftmost XFF):
+	//   * Correct only if **exactly one trusted hop authoritatively
+	//     overwrites XFF with the real client IP**. nginx-ingress with
+	//     `use-forwarded-headers: false` does exactly that.
+	//   * Gives true per-end-user keying — the published
+	//     "per-IP" knob means what the UI says.
+	//   * Failure mode: if the chain APPENDS to XFF (typical with
+	//     `use-forwarded-headers: true`, sometimes needed to recover
+	//     the client IP through a load balancer), leftmost-XFF is
+	//     client-controlled. An attacker rotating the header bypasses
+	//     every per-IP gate.
 	//
-	// Set TrustProxy=true → key on the real client IP. Project A's
-	// 100 worldwide users each get their own counter; the
-	// `signup_signin_per_5min_per_ip: 8` default reads as "any one
-	// end-user can attempt 8 signups per 5 min", which is the
-	// number's intended meaning.
+	// TrustProxy = false (key on TCP peer):
+	//   * Safe under any XFF configuration — no infra assumption.
+	//   * Failure mode: in deployments that pre-aggregate behind a
+	//     controlled hop (every Eurobase prod request comes through
+	//     one nginx pod), `r.RemoteAddr` is the same value for every
+	//     request. The "per-IP" gate effectively becomes per-project
+	//     total — a 9-person office team can't all sign up in the
+	//     same hour.
 	//
-	// Set TrustProxy=false → key on the TCP peer = nginx pod IP. All
-	// 100 of Project A's users share one counter, because Go sees the
-	// same RemoteAddr for all of them. The same 8-per-5min budget
-	// now means "Project A, combined across every user on Earth, gets
-	// 8 signups per 5 minutes". A small office trying to onboard a
-	// team would self-DoS in 30 seconds.
+	// ── Why the Eurobase default is false (for now) ──
 	//
-	// Supabase ships `false` as their default because their architecture
-	// has clients that may set forged XFF that the platform never
-	// rewrites — there, trusting XFF would let an attacker rotate it
-	// and bypass the limiter. The same default in Eurobase is the
-	// opposite of safe: it discards the only IP signal that exists
-	// (the ingress-rewritten XFF) and falls back to a value (nginx pod
-	// IP) that's identical for everyone. We use `true` because we
-	// trust nginx-ingress's XFF rewrite, which we configured.
+	// The default-true correctness depends on the Scaleway LB ↔
+	// nginx-ingress XFF behavior — none of which is declared in this
+	// repo (the Ingress YAML only sets ssl-redirect and proxy-body-
+	// size; there's no controller ConfigMap or LB-side proxy-protocol
+	// annotation). Until that's verified empirically in prod, shipping
+	// `true` as the default would lean on an assumption we haven't
+	// confirmed: if a future operator (or a never-noticed current
+	// config) flips `use-forwarded-headers: true`, every per-IP gate
+	// becomes a header-rotation bypass without anything in code
+	// changing.
 	//
-	// A project whose traffic does NOT come via the platform ingress
-	// (an unusual setup — a pre-prod tenant on a non-standard route, a
-	// customer-side proxy that adds an extra forwarded hop the ingress
-	// then appends to) can flip this knob to false explicitly. The
-	// console UI in #229 will surface the choice with the same
-	// trade-off written out, so opting out is informed.
+	// So we ship `false`, accept the per-project-total degradation,
+	// and track the proper flip in a follow-up: verify what XFF the
+	// gateway actually receives, document the required ingress + LB
+	// config as a hard precondition, then re-default to true. The
+	// long-term hardening is a trusted-hop-count / known-proxy-CIDR
+	// strategy that's robust to both extra hops and header forgery;
+	// the same follow-up covers that.
+	//
+	// Projects that know their deployment trusts XFF can opt in today
+	// by setting `"trust_proxy": true` in auth_config; the console UI
+	// in #229 will surface this choice with the same trade-off
+	// written out.
 	TrustProxy *bool `json:"trust_proxy,omitempty"`
 }
 
 // DefaultRateLimits returns the platform-wide defaults applied when a
 // project hasn't overridden a knob.
 //
-// Most numbers mirror Supabase's published defaults. Two deliberate
-// divergences:
+// Most numbers mirror Supabase's published defaults. One deliberate
+// divergence:
 //
 //   * SignupSigninPer5MinPerIP = 8 (not 30): held at the interim
 //     ~96/h floor while EmailsPerHour enforcement is parked behind
 //     the BYO-SMTP feature in #235. Bumps to 30 when that lands.
 //
-//   * TrustProxy = true (Supabase ships false): in Eurobase's
-//     nginx-ingress deployment the IP source is upside-down compared
-//     to Supabase's architecture. See the TrustProxy field comment
-//     for the full mechanics; the short version is that `false`
-//     here makes every project share one counter across all its
-//     end users (nginx pod IP) while `true` keys on the real
-//     client IP that ingress writes. The shipped default matches
-//     the deployment.
+// TrustProxy ships as false (Supabase parity, safe-by-default). In
+// Eurobase's deployment a true default would key off the nginx-ingress
+// XFF rewrite — and *if* `use-forwarded-headers: true` is set anywhere
+// in the Scaleway-LB → nginx chain, leftmost XFF becomes
+// client-controlled and every per-IP gate becomes header-rotation-
+// bypassable. A separate follow-up issue tracks empirically verifying
+// the chain's XFF behavior in prod; once confirmed safe, the default
+// can flip via the console (or this constant). Project owners who know
+// their deployment trusts XFF can opt in today — see the TrustProxy
+// field comment for the precondition.
 func DefaultRateLimits() RateLimits {
-	trueVal := true
+	falseVal := false
 	return RateLimits{
 		SignupSigninPer5MinPerIP:      8,
 		TokenRefreshPer5MinPerIP:      150,
 		TokenVerificationPer5MinPerIP: 30,
 		EmailsPerHour:                 2,
 		SMSPerHour:                    30,
-		TrustProxy:                    &trueVal,
+		TrustProxy:                    &falseVal,
 	}
 }
 

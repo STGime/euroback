@@ -73,6 +73,35 @@ func TestClientIPForProject_SingleXFFEntry(t *testing.T) {
 	}
 }
 
+// Leftmost-XFF must come back without the leading whitespace a
+// comma-and-space separator would have introduced. A "203.0.113.7,
+// 10.0.0.5" header read with no trim would key on " 203.0.113.7" and
+// "203.0.113.7" as separate counters; the trim collapses them. #237
+// review minor.
+func TestClientIPForProject_LeftmostXFFTrimsSpace(t *testing.T) {
+	cases := []struct {
+		name string
+		xff  string
+		want string
+	}{
+		{"no space, multiple entries", "203.0.113.7,10.0.0.5", "203.0.113.7"},
+		{"comma + space, multiple entries", "203.0.113.7, 10.0.0.5", "203.0.113.7"},
+		{"leading space single entry", "  198.51.100.1", "198.51.100.1"},
+		{"trailing space single entry", "198.51.100.1  ", "198.51.100.1"},
+		{"comma + tab", "203.0.113.7,\t10.0.0.5", "203.0.113.7"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/", nil)
+			r.RemoteAddr = "10.0.0.5:54321"
+			r.Header.Set("X-Forwarded-For", c.xff)
+			if got := ClientIPForProject(r, true); got != c.want {
+				t.Errorf("XFF %q → got %q, want %q", c.xff, got, c.want)
+			}
+		})
+	}
+}
+
 // Snapshot the legacy ClientIP behaviour — confirms #228 doesn't
 // regress the platform-wide helper (still used in router.go for the
 // audit log's client IP and for legacy auth helpers).

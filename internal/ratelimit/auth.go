@@ -130,13 +130,7 @@ const FiveMinutes = 5 * time.Minute
 // knob (#228).
 func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// First IP in the chain is the client.
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
+		return leftmostXFF(xff)
 	}
 	return remoteAddrNoPort(r)
 }
@@ -144,50 +138,67 @@ func ClientIP(r *http.Request) string {
 // ClientIPForProject is the per-project sibling that honours
 // auth_config.rate_limits.trust_proxy (#228).
 //
-// ── Mechanics ──
-//
 //   - trustProxy=true  → leftmost X-Forwarded-For (fall back to TCP
-//     peer if XFF is absent). Use when an upstream layer rewrites or
-//     authoritatively writes XFF on every request — nginx-ingress's
-//     default (no `use-forwarded-headers` override) does exactly
-//     that, so in this deployment XFF is the real client IP.
+//     peer if XFF is absent). Correct only when exactly one trusted
+//     hop authoritatively overwrites XFF with the real client IP
+//     (nginx-ingress with `use-forwarded-headers: false` is the
+//     canonical example). If anything in the chain APPENDS to XFF
+//     instead of overwriting, leftmost-XFF becomes client-controlled
+//     and the per-IP gate becomes header-rotation-bypassable.
 //
 //   - trustProxy=false → TCP peer only; XFF is ignored entirely.
-//     Use when the gateway is reached without a trusted hop in front
-//     of it and you can't trust caller-supplied headers.
+//     Safe under any XFF configuration. The cost is that when the
+//     gateway sits behind one shared hop (every request in Eurobase
+//     prod arrives through one nginx pod), `r.RemoteAddr` is the
+//     same value for every request — the per-IP gate effectively
+//     becomes per-project total.
 //
-// ── Why true is the Eurobase default (Supabase ships false) ──
-//
-// In our nginx-ingress deployment, RemoteAddr is the nginx pod IP for
-// every single request. Picking trustProxy=false would key every
-// project's per-IP counter on that one IP — every end user of the
-// project would share one counter, so the documented per-IP budget
-// becomes a total project budget. With the SignupSigninPer5MinPerIP
-// default of 8, a 9-person office team can't all sign up in the same
-// 5 minutes.
-//
-// With trustProxy=true, XFF is the real client IP (nginx wrote it,
-// nothing upstream can forge it through), and each end-user IP gets
-// its own counter — which is what the published "per-IP" knob is
-// meant to mean. So flipping the default to true is what matches the
-// numbers a project owner sees on the Rate Limits page.
-//
-// Projects whose traffic comes through a non-standard path (a
-// customer-side proxy that adds an extra hop the ingress then appends
-// to, a private route that bypasses ingress) can flip this knob to
-// false explicitly; the console will surface the trade-off.
+// The Eurobase default is `false` for safety until the Scaleway LB ↔
+// nginx-ingress XFF behavior is verified empirically (follow-up issue
+// tracks the verification + the trusted-hop-count hardening that's
+// robust to both modes). Project owners who know their deployment
+// trusts XFF can opt in today; the field comment in
+// internal/tenant/auth_config.go walks through the full decision.
 func ClientIPForProject(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			for i := 0; i < len(xff); i++ {
-				if xff[i] == ',' {
-					return xff[:i]
-				}
-			}
-			return xff
+			return leftmostXFF(xff)
 		}
 	}
 	return remoteAddrNoPort(r)
+}
+
+// leftmostXFF returns the first entry of an X-Forwarded-For header,
+// trimming any whitespace a comma-and-space separator would have left
+// in. `"203.0.113.7, 10.0.0.5"` → `"203.0.113.7"`; a single-entry
+// header is returned verbatim (also trimmed). Stable across ClientIP
+// and ClientIPForProject so the extractor lives in one place.
+func leftmostXFF(xff string) string {
+	if i := indexByte(xff, ','); i >= 0 {
+		return trimSpace(xff[:i])
+	}
+	return trimSpace(xff)
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func trimSpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
 }
 
 // remoteAddrNoPort returns r.RemoteAddr with any trailing ":port" stripped.

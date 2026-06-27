@@ -41,9 +41,11 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// loosen those.
 		//
 		// The IP source honours auth_config.rate_limits.trust_proxy
-		// (#228). Eurobase default is true (the nginx-ingress rewrite
-		// makes XFF the real client IP); see ClientIPForProject for
-		// why we diverge from Supabase's false default here.
+		// (#228). Default false (Supabase parity, safe under any XFF
+		// config); project owners who know their ingress overwrites
+		// XFF can opt in to true for true per-end-user keying. See
+		// the field doc in internal/tenant/auth_config.go for the
+		// trade-off.
 		rlCfg := config.EffectiveRateLimits()
 		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
@@ -93,9 +95,10 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// gated even if a project loosens the per-IP knob.
 		//
 		// IP source honours auth_config.rate_limits.trust_proxy
-		// (#228) — default true: leftmost X-Forwarded-For (the value
-		// nginx-ingress writes, real client IP). false flips to TCP
-		// peer for projects on a non-standard path.
+		// (#228) — default false (TCP peer, safe under any XFF
+		// config). See ClientIPForProject for the trade-off; the
+		// follow-up issue tracks flipping the default once XFF
+		// behavior is verified empirically.
 		rlCfg := config.EffectiveRateLimits()
 		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return

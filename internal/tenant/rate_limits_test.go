@@ -94,28 +94,31 @@ func TestEffectiveRateLimits_ZeroMeansDefault(t *testing.T) {
 
 func TestEffectiveRateLimits_TrustProxyDefaultsAndOverrides(t *testing.T) {
 	// TrustProxy is *bool so we can distinguish "absent" from
-	// "explicit false". Three behaviours the per-project gates rely on:
+	// "explicit false". Four behaviours the per-project gates rely on:
 	//
-	//   1. Nil RateLimits → default true (Eurobase ingress-aware
-	//      default; see the field doc for why we diverge from Supabase).
-	//   2. Explicit false in storage → false (project opted out).
-	//   3. Explicit true in storage → true.
+	//   1. Nil RateLimits → default false (safe-by-default Supabase
+	//      parity; the verification-pending follow-up tracks flipping
+	//      this once the Scaleway LB ↔ nginx XFF chain is confirmed).
+	//   2. Empty RateLimits, no trust_proxy field → same default.
+	//   3. Explicit false in storage → false (no surprise).
+	//   4. Explicit true in storage → true (project opted in after
+	//      confirming the ingress trusts XFF).
 	falsePtr := false
 	truePtr := true
 
 	cNil := &AuthConfig{}
-	if got := cNil.EffectiveRateLimits().TrustProxy; got == nil || !*got {
-		t.Errorf("TrustProxy must default to true on nil RateLimits, got %v", got)
+	if got := cNil.EffectiveRateLimits().TrustProxy; got == nil || *got {
+		t.Errorf("TrustProxy must default to false on nil RateLimits, got %v", got)
 	}
 
 	cAbsentField := &AuthConfig{RateLimits: &RateLimits{}}
-	if got := cAbsentField.EffectiveRateLimits().TrustProxy; got == nil || !*got {
-		t.Errorf("TrustProxy must default to true when the field is absent, got %v", got)
+	if got := cAbsentField.EffectiveRateLimits().TrustProxy; got == nil || *got {
+		t.Errorf("TrustProxy must default to false when the field is absent, got %v", got)
 	}
 
 	cExplicitFalse := &AuthConfig{RateLimits: &RateLimits{TrustProxy: &falsePtr}}
 	if got := cExplicitFalse.EffectiveRateLimits().TrustProxy; got == nil || *got {
-		t.Errorf("explicit TrustProxy=false must stay false (override), got %v", got)
+		t.Errorf("explicit TrustProxy=false must stay false, got %v", got)
 	}
 
 	cExplicitTrue := &AuthConfig{RateLimits: &RateLimits{TrustProxy: &truePtr}}
@@ -150,8 +153,8 @@ func TestDefaultRateLimits_Numbers(t *testing.T) {
 			t.Errorf("default %s: got %d, want %d", k, got[k], want)
 		}
 	}
-	if d.TrustProxy == nil || !*d.TrustProxy {
-		t.Errorf("default TrustProxy must be true (Eurobase ingress-aware default), got %v", d.TrustProxy)
+	if d.TrustProxy == nil || *d.TrustProxy {
+		t.Errorf("default TrustProxy must be false (Supabase parity, safe-by-default), got %v", d.TrustProxy)
 	}
 }
 
