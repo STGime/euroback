@@ -37,7 +37,38 @@ export interface AuthConfig {
 	/** Browser origins (scheme://host[:port]) that may call this project's API.
 	 * Platform origins (eurobase.app, *.eurobase.app) are always allowed; this list is additive. */
 	cors_origins?: string[];
+	/** Per-project Rate Limits sub-object (#224 umbrella). Absent / null
+	 * means "use platform defaults". Each numeric field follows
+	 * zero-means-default on the backend (RateLimits.EffectiveRateLimits
+	 * merge), so the client can send 0 OR omit a field to reset that knob. */
+	rate_limits?: RateLimits;
 }
+
+/** Per-project rate-limit overrides. Numeric zeros / absent fields fall
+ * back to platform defaults on the backend. `trust_proxy` is *bool on
+ * the server so explicit `false` and "absent" are distinct (absent →
+ * use the platform default). */
+export interface RateLimits {
+	signup_signin_per_5min_per_ip?: number;
+	token_refresh_per_5min_per_ip?: number;
+	token_verification_per_5min_per_ip?: number;
+	emails_per_hour?: number;
+	sms_per_hour?: number;
+	trust_proxy?: boolean;
+}
+
+/** Platform-side defaults for the Rate Limits surface. Kept here so the
+ * console can show placeholder values that match the backend's
+ * `DefaultRateLimits()` without an extra API round-trip. If the backend
+ * defaults shift, update both sides in lock-step. */
+export const DEFAULT_RATE_LIMITS = {
+	signup_signin_per_5min_per_ip: 8,
+	token_refresh_per_5min_per_ip: 150,
+	token_verification_per_5min_per_ip: 30,
+	emails_per_hour: 2,
+	sms_per_hour: 30,
+	trust_proxy: false
+} as const;
 
 export interface PlatformProfile {
 	id: string;
