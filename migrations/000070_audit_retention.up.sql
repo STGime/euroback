@@ -85,6 +85,14 @@ GRANT SELECT ON public.audit_log_chain_checkpoints TO eurobase_gateway;
 -- `pg_advisory_xact_lock(hashtext(project_id))` on the same key shape).
 --
 -- Returns total rows deleted across all projects.
+--
+-- Multi-pod safety. Two worker pods that enter this function at the same
+-- time DO race on the head-snapshot SELECT below — but the per-chain
+-- advisory lock taken inside the loop body serializes them, AND we re-do
+-- the "find newest prunable row" probe under the lock, so pod 2 just sees
+-- v_last_seq IS NULL after pod 1 finished and CONTINUEs. Safe today and
+-- under HPA. The cross-project `drop_old_data_access_log_partitions` is
+-- not similarly safe — see its header comment.
 CREATE OR REPLACE FUNCTION public.prune_audit_log(cutoff_days int)
 RETURNS bigint
 LANGUAGE plpgsql
@@ -110,6 +118,15 @@ BEGIN
     -- (newest seq) of each project, and only ever delete rows with
     -- seq < the head's seq. A chain whose head itself is older than
     -- cutoff is left alone — the chain never gets pruned entirely.
+    --
+    -- NOTE on the head_seq subselect: r.head_seq is sampled BEFORE the
+    -- advisory lock is acquired, so it may be stale by the time the loop
+    -- body runs (a writer could have appended a newer head). That is
+    -- safe: a stale (older) head_seq only causes us to UNDER-prune
+    -- (`seq < stale_head` excludes more rows than `seq < real_head`),
+    -- never to delete the actual current head. Do NOT hoist the lock to
+    -- cover the outer SELECT — that would serialize prune across all
+    -- chains and is unnecessary.
     FOR r IN
         SELECT
             COALESCE(project_id::text, '__global__') AS chain_key,
@@ -120,7 +137,8 @@ BEGIN
         GROUP BY project_id
     LOOP
         v_chainkey := r.chain_key;
-        -- Serialize against concurrent appends on the same chain.
+        -- Serialize against concurrent appends on the same chain AND
+        -- against another worker pod also pruning the same chain.
         PERFORM pg_advisory_xact_lock(hashtext(v_chainkey));
 
         -- Find the newest row we're about to delete (highest seq < head
@@ -177,6 +195,22 @@ GRANT  EXECUTE ON FUNCTION public.prune_audit_log(int) TO eurobase_gateway;
 -- `data_access_log_YYYYMM`; we walk pg_class for that pattern and parse
 -- the month out of the name. That's deterministic since every partition
 -- we create goes through that helper.
+--
+-- Multi-pod safety. Without coordination, two pods could enumerate
+-- pg_inherits, both attempt DETACH on the same partition name, and the
+-- loser's error aborts the whole function (the per-iteration EXECUTE has
+-- no savepoint, so subsequent drops in the same call are skipped and
+-- v_dropped is lost). We acquire a single advisory xact lock at function
+-- entry to serialize cross-pod calls — pod 2 blocks behind pod 1, runs
+-- against post-drop state, finds nothing to drop, returns empty. The
+-- lock is held for the duration of the tx (the function's caller commit),
+-- which is fine because retention is a daily housekeeping pass — there
+-- is no hot path waiting on this.
+--
+-- Mis-named partitions (operator created `data_access_log_2026_q1` etc.)
+-- don't match the regex and are silently skipped. Surface that as a
+-- WARNING so an operator notices in logs rather than discovering at the
+-- 13-month horizon that nothing was ever pruned.
 CREATE OR REPLACE FUNCTION public.drop_old_data_access_log_partitions(cutoff_months int)
 RETURNS text[]
 LANGUAGE plpgsql
@@ -184,18 +218,38 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-    v_cutoff_month date;
-    v_dropped      text[] := ARRAY[]::text[];
-    r              RECORD;
-    v_part_month   date;
+    v_cutoff_month  date;
+    v_dropped       text[] := ARRAY[]::text[];
+    r               RECORD;
+    v_part_month    date;
+    v_unrecognized  int := 0;
 BEGIN
     IF cutoff_months IS NULL OR cutoff_months <= 0 THEN
         RETURN v_dropped;
     END IF;
+
+    -- Cross-pod serialization (see header). hashtext() of a fixed string
+    -- gives a stable int4 lock key.
+    PERFORM pg_advisory_xact_lock(hashtext('data_access_log_retention'));
+
     -- Drop partitions whose covered month ends on or before the cutoff.
     -- Example: cutoff_months=13 + today=2027-03-15 → cutoff_month=2026-02-01;
     -- partitions for 2026-01 or earlier are dropped.
     v_cutoff_month := (date_trunc('month', now()) - make_interval(months => cutoff_months))::date;
+
+    -- Count partitions that DON'T match the YYYYMM convention so an
+    -- operator notices manual partitions accumulating outside the
+    -- retention sweep.
+    SELECT count(*) INTO v_unrecognized
+    FROM   pg_inherits i
+    JOIN   pg_class c    ON c.oid = i.inhrelid
+    JOIN   pg_class pc   ON pc.oid = i.inhparent
+    WHERE  pc.relname = 'data_access_log'
+      AND  c.relname <> 'data_access_log_default'
+      AND  c.relname !~ '^data_access_log_[0-9]{6}$';
+    IF v_unrecognized > 0 THEN
+        RAISE WARNING 'data_access_log retention: % partition(s) skipped — name not in data_access_log_YYYYMM form', v_unrecognized;
+    END IF;
 
     FOR r IN
         SELECT c.relname AS name

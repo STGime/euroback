@@ -124,11 +124,11 @@ linkage-break paths.
 Two streams, two strategies — picked to match each stream's volume and the
 GDPR Art. 30 baseline ("≥1 year").
 
-| Stream                | Default | Mechanism                                        |
-| --------------------- | ------- | ------------------------------------------------ |
-| `audit_log`           | never   | Per-project row prune, leaves chain checkpoint   |
-| `data_access_log`     | 13 mo   | Drop whole monthly partitions past the horizon   |
-| Future partitions     | 12 mo   | Rolling pre-create so writes never hit `DEFAULT` |
+| Task                          | Default     | Mechanism                                        |
+| ----------------------------- | ----------- | ------------------------------------------------ |
+| `audit_log` row prune         | never       | Per-project row prune, leaves chain checkpoint   |
+| `data_access_log` partitions  | drop > 13 mo| Drop whole monthly partitions past the horizon   |
+| Forward partition pre-create  | 12 mo ahead | Rolling pre-create so writes never hit `DEFAULT` |
 
 The retention worker (`internal/workers/audit_retention.go`) runs **once at
 startup + every 24 h**. Each tick calls three migrator-owned `SECURITY
@@ -183,12 +183,15 @@ Scaleway Object Storage (fr-par):
 ```
 Bucket:        eurobase-audit-archive
 Region:        fr-par
+Versioning:    enabled       ← MUST be enabled BEFORE Object Lock
 Object Lock:   enabled (Compliance mode)
 Retention:     7 years per object (GDPR Art. 30 + national rules)
-Versioning:    enabled
 Lifecycle:     no Expiration rule (compliance mode would block it anyway)
 ACL:           private, no public access
 ```
+
+> Order matters: Scaleway requires bucket Versioning to be enabled
+> **before** Object Lock can be turned on. Provision in that order.
 
 `Compliance mode` is the strict variant: no role — including the bucket
 owner — can shorten a retained object's lock before its retention date.

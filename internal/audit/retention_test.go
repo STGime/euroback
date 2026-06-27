@@ -1,5 +1,14 @@
 package audit
 
+// Skip-pattern note: several tests below back-date rows via direct UPDATE
+// to exercise the cutoff path. The runtime gateway role has UPDATE
+// revoked on `public.audit_log` (migration 000058), so under that role
+// the UPDATE fails and the test t.Skipf's out — by design. CI's `test-go`
+// stage connects as `eurobase_api` (test role) which retains UPDATE, so
+// the assertions run. If the test role ever loses UPDATE, the tests
+// silently skip and the assertions stop running — flag this in the CI
+// runbook so a green test-go matrix can't hide a regression.
+
 import (
 	"context"
 	"testing"
