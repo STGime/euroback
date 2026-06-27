@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	import { api, type AuthConfig, type EmailTemplate } from '$lib/api.js';
+	import { api, DEFAULT_RATE_LIMITS, type AuthConfig, type EmailTemplate, type RateLimits } from '$lib/api.js';
 
 	const projectCtx: { id: string; project: import('$lib/api.js').Project | null; updateProject: (p: import('$lib/api.js').Project) => void } = getContext('projectId');
 
 	// Tab state
-	let activeTab = $state<'settings' | 'templates'>('settings');
+	let activeTab = $state<'settings' | 'templates' | 'rate_limits'>('settings');
 
 	// Email status
 	let emailConfigured = $state<boolean | null>(null);
@@ -83,6 +83,105 @@
 	let saveMessage = $state('');
 	let saveError = $state('');
 
+	// ---- Rate Limits tab state (#229, umbrella #224) ----
+	//
+	// The five numeric knobs are kept as strings so an empty input maps
+	// cleanly to "use platform default" — saving an empty value omits
+	// the field from the payload, and the backend's
+	// EffectiveRateLimits merge fills in the default. Placeholder text
+	// shows the current default so the form is self-explanatory.
+	//
+	// trust_proxy is a plain bool toggle; saving always persists an
+	// explicit value (the project owner has "chosen" once they touch
+	// the page). A future "Reset to defaults" button could clear the
+	// override; out of scope for #229.
+	let rlEmailsPerHour = $state('');
+	let rlSmsPerHour = $state('');
+	let rlTokenRefresh = $state('');
+	let rlTokenVerify = $state('');
+	let rlSignupSignin = $state('');
+	let rlTrustProxy = $state<boolean>(DEFAULT_RATE_LIMITS.trust_proxy);
+	// `rlTrustProxyTouched` distinguishes "the user clicked the toggle
+	// this session" from "the toggle reflects the saved value". Numeric
+	// fields use empty-string-means-default as their "absent" signal; a
+	// bool toggle has no equivalent representation, so we use a sidecar
+	// flag. Without it, every save would persist an explicit `false`
+	// for trust_proxy — silently opting the project out of any future
+	// platform-default flip (the *bool semantic in #237 / #238 exists
+	// specifically to distinguish "absent → use default" from "explicit
+	// false → stay false even if the default changes").
+	let rlTrustProxyTouched = $state(false);
+	let rlSaving = $state(false);
+	let rlSaveMessage = $state('');
+	let rlSaveError = $state('');
+
+	function hydrateRateLimits(rl: RateLimits | undefined) {
+		rlEmailsPerHour = rl?.emails_per_hour ? String(rl.emails_per_hour) : '';
+		rlSmsPerHour = rl?.sms_per_hour ? String(rl.sms_per_hour) : '';
+		rlTokenRefresh = rl?.token_refresh_per_5min_per_ip ? String(rl.token_refresh_per_5min_per_ip) : '';
+		rlTokenVerify = rl?.token_verification_per_5min_per_ip ? String(rl.token_verification_per_5min_per_ip) : '';
+		rlSignupSignin = rl?.signup_signin_per_5min_per_ip ? String(rl.signup_signin_per_5min_per_ip) : '';
+		// trust_proxy: undefined → platform default; explicit value → use it.
+		rlTrustProxy = rl?.trust_proxy ?? DEFAULT_RATE_LIMITS.trust_proxy;
+		// Reset on hydrate (initial load + post-save reload). The
+		// project's persisted choice is now what the toggle reflects;
+		// the next save should NOT pin trust_proxy unless the user
+		// clicks again.
+		rlTrustProxyTouched = false;
+	}
+
+	function parseIntOrUndef(s: string): number | undefined {
+		const t = s.trim();
+		if (!t) return undefined;
+		const n = parseInt(t, 10);
+		if (Number.isNaN(n) || n < 0) return undefined;
+		return n;
+	}
+
+	async function handleSaveRateLimits() {
+		rlSaving = true;
+		rlSaveMessage = '';
+		rlSaveError = '';
+		try {
+			const rl: RateLimits = {
+				signup_signin_per_5min_per_ip: parseIntOrUndef(rlSignupSignin),
+				token_refresh_per_5min_per_ip: parseIntOrUndef(rlTokenRefresh),
+				token_verification_per_5min_per_ip: parseIntOrUndef(rlTokenVerify),
+				emails_per_hour: parseIntOrUndef(rlEmailsPerHour),
+				sms_per_hour: parseIntOrUndef(rlSmsPerHour)
+			};
+			// Only persist trust_proxy when the user explicitly touched
+			// the toggle. Otherwise leave it absent so the backend's
+			// *bool merge picks up the platform default — including any
+			// future #238 default flip. A no-op save must not silently
+			// pin an explicit `false`.
+			if (rlTrustProxyTouched) {
+				rl.trust_proxy = rlTrustProxy;
+			}
+
+			// Merge the rate_limits sub-object into the existing
+			// auth_config so we don't blow away other fields (providers,
+			// CORS, etc). The backend PATCH replaces auth_config wholesale,
+			// so we have to send the full struct.
+			const existing = projectCtx.project?.auth_config;
+			if (!existing) {
+				throw new Error('Auth config not loaded yet — wait for the project to finish loading.');
+			}
+			const merged: AuthConfig = { ...existing, rate_limits: rl };
+			const updated = await api.updateProject(projectCtx.id, { auth_config: merged });
+			if (updated) {
+				projectCtx.updateProject(updated);
+				hydrateRateLimits(updated.auth_config?.rate_limits);
+			}
+			rlSaveMessage = 'Rate limits saved.';
+			setTimeout(() => { rlSaveMessage = ''; }, 3000);
+		} catch (err) {
+			rlSaveError = err instanceof Error ? err.message : 'Failed to save';
+		} finally {
+			rlSaving = false;
+		}
+	}
+
 	const sessionOptions = [
 		{ value: '1h', label: '1 hour' },
 		{ value: '24h', label: '24 hours' },
@@ -141,6 +240,8 @@
 				microsoftClientSecret = '';
 				microsoftSecretDirty = false;
 			}
+
+			hydrateRateLimits(projectCtx.project?.auth_config?.rate_limits);
 		}
 	});
 
@@ -406,18 +507,24 @@
 			>
 				Email Templates
 			</button>
+			<button
+				onclick={() => activeTab = 'rate_limits'}
+				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeTab === 'rate_limits' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
+			>
+				Rate Limits
+			</button>
 		</nav>
 	</div>
 
-	{#if saveMessage || templateMessage}
+	{#if saveMessage || templateMessage || rlSaveMessage}
 		<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-700">
-			{saveMessage || templateMessage}
+			{saveMessage || templateMessage || rlSaveMessage}
 		</div>
 	{/if}
 
-	{#if saveError || templateError}
+	{#if saveError || templateError || rlSaveError}
 		<div class="mt-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
-			{saveError || templateError}
+			{saveError || templateError || rlSaveError}
 		</div>
 	{/if}
 
@@ -1067,6 +1174,183 @@
 					</div>
 				{/each}
 			{/if}
+		</div>
+	{/if}
+
+	<!-- Rate Limits Tab (#229 / umbrella #224) -->
+	{#if activeTab === 'rate_limits'}
+		<div class="mt-6 space-y-6 max-w-2xl">
+			<div>
+				<h3 class="text-sm font-semibold text-gray-900">Rate Limits</h3>
+				<p class="mt-1 text-xs text-gray-500">
+					Safeguard against bursts of incoming traffic to prevent abuse and protect your project's email/SMS budget. Empty fields use the platform default shown in the placeholder.
+				</p>
+			</div>
+
+			<!-- Rate limit fields, modeled on the Supabase Rate Limits page -->
+			<div class="rounded-lg border border-gray-200 bg-white divide-y divide-gray-200">
+
+				<!-- Emails / hour -->
+				<div class="flex items-start gap-4 p-4">
+					<div class="flex-1">
+						<label for="rl-emails" class="text-sm font-medium text-gray-900">Rate limit for sending emails</label>
+						<p class="mt-0.5 text-xs text-gray-500">
+							Number of emails (verification, password reset, magic link) that can be sent per hour from your project.
+							<span class="block mt-0.5 text-amber-700">Note: enforcement is parked behind the BYO-SMTP feature (#235); the field saves but isn't applied yet.</span>
+						</p>
+					</div>
+					<div class="flex items-center gap-2 shrink-0">
+						<input
+							id="rl-emails"
+							type="number"
+							min="0"
+							bind:value={rlEmailsPerHour}
+							placeholder={String(DEFAULT_RATE_LIMITS.emails_per_hour)}
+							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
+						/>
+						<span class="text-xs text-gray-500">emails/h</span>
+					</div>
+				</div>
+
+				<!-- SMS / hour -->
+				<div class="flex items-start gap-4 p-4">
+					<div class="flex-1">
+						<label for="rl-sms" class="text-sm font-medium text-gray-900">Rate limit for sending SMS messages</label>
+						<p class="mt-0.5 text-xs text-gray-500">
+							Number of SMS one-time codes that can be sent per hour from your project. Over-quota sends are silently skipped server-side; the operator log shows the cap-hit.
+						</p>
+					</div>
+					<div class="flex items-center gap-2 shrink-0">
+						<input
+							id="rl-sms"
+							type="number"
+							min="0"
+							bind:value={rlSmsPerHour}
+							placeholder={String(DEFAULT_RATE_LIMITS.sms_per_hour)}
+							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
+						/>
+						<span class="text-xs text-gray-500">sms/h</span>
+					</div>
+				</div>
+
+				<!-- Token refresh / 5 min / IP -->
+				<div class="flex items-start gap-4 p-4">
+					<div class="flex-1">
+						<label for="rl-refresh" class="text-sm font-medium text-gray-900">Rate limit for token refreshes</label>
+						<p class="mt-0.5 text-xs text-gray-500">
+							Number of <code class="text-[11px] bg-gray-100 px-1 rounded">/v1/auth/refresh</code> calls allowed in a 5-minute interval per IP address. Higher because legitimate SDK clients refresh proactively.
+						</p>
+						{#if rlTokenRefresh}
+							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenRefresh, 10) * 12} requests/hour</p>
+						{/if}
+					</div>
+					<div class="flex items-center gap-2 shrink-0">
+						<input
+							id="rl-refresh"
+							type="number"
+							min="0"
+							bind:value={rlTokenRefresh}
+							placeholder={String(DEFAULT_RATE_LIMITS.token_refresh_per_5min_per_ip)}
+							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
+						/>
+						<span class="text-xs text-gray-500">/5 min</span>
+					</div>
+				</div>
+
+				<!-- Token verification / 5 min / IP -->
+				<div class="flex items-start gap-4 p-4">
+					<div class="flex-1">
+						<label for="rl-verify" class="text-sm font-medium text-gray-900">Rate limit for token verifications</label>
+						<p class="mt-0.5 text-xs text-gray-500">
+							Number of OTP, magic-link, and email-verify attempts allowed in a 5-minute interval per IP. Throttles brute-force against 6-digit phone OTPs.
+						</p>
+						{#if rlTokenVerify}
+							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenVerify, 10) * 12} requests/hour</p>
+						{/if}
+					</div>
+					<div class="flex items-center gap-2 shrink-0">
+						<input
+							id="rl-verify"
+							type="number"
+							min="0"
+							bind:value={rlTokenVerify}
+							placeholder={String(DEFAULT_RATE_LIMITS.token_verification_per_5min_per_ip)}
+							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
+						/>
+						<span class="text-xs text-gray-500">/5 min</span>
+					</div>
+				</div>
+
+				<!-- Sign-up + sign-in / 5 min / IP -->
+				<div class="flex items-start gap-4 p-4">
+					<div class="flex-1">
+						<label for="rl-signup" class="text-sm font-medium text-gray-900">Rate limit for sign-ups and sign-ins</label>
+						<p class="mt-0.5 text-xs text-gray-500">
+							Combined volume cap on signup and signin requests per IP, per 5 minutes. The per-account brute-force counter (signin failures by email) is a separate axis at platform defaults.
+						</p>
+						{#if rlSignupSignin}
+							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlSignupSignin, 10) * 12} requests/hour</p>
+						{/if}
+					</div>
+					<div class="flex items-center gap-2 shrink-0">
+						<input
+							id="rl-signup"
+							type="number"
+							min="0"
+							bind:value={rlSignupSignin}
+							placeholder={String(DEFAULT_RATE_LIMITS.signup_signin_per_5min_per_ip)}
+							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
+						/>
+						<span class="text-xs text-gray-500">/5 min</span>
+					</div>
+				</div>
+
+			</div>
+
+			<!-- IP Address Forwarding -->
+			<div>
+				<h3 class="text-sm font-semibold text-gray-900">IP Address Forwarding</h3>
+				<p class="mt-1 text-xs text-gray-500">Control how the rate limiter determines the source IP address.</p>
+			</div>
+
+			<div class="rounded-lg border border-gray-200 bg-white p-4">
+				<div class="flex items-start gap-4">
+					<div class="flex-1">
+						<label for="rl-trust-proxy" class="text-sm font-medium text-gray-900">Trust X-Forwarded-For</label>
+						<p class="mt-0.5 text-xs text-gray-500">
+							When <strong>on</strong>, the limiter keys on the leftmost <code class="text-[11px] bg-gray-100 px-1 rounded">X-Forwarded-For</code> entry (the real client IP). Only safe when exactly one trusted hop in front of the gateway authoritatively overwrites that header.
+						</p>
+						<p class="mt-0.5 text-xs text-gray-500">
+							When <strong>off</strong> (default), the limiter keys on the TCP peer — safe under any header forgery, but in deployments behind one shared ingress the counter collapses to a per-project total.
+						</p>
+						<p class="mt-1 text-[11px] text-amber-700">
+							Eurobase ships <strong>off</strong> by default until the Scaleway LB / nginx-ingress XFF chain is verified end-to-end (#238).
+						</p>
+					</div>
+					<div class="shrink-0 pt-1">
+						<button
+							id="rl-trust-proxy"
+							onclick={() => { rlTrustProxy = !rlTrustProxy; rlTrustProxyTouched = true; }}
+							role="switch"
+							aria-checked={rlTrustProxy}
+							class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {rlTrustProxy ? 'bg-eurobase-600' : 'bg-gray-300'}"
+						>
+							<span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform {rlTrustProxy ? 'translate-x-6' : 'translate-x-1'}"></span>
+						</button>
+					</div>
+				</div>
+			</div>
+
+			<div class="flex justify-end">
+				<button
+					type="button"
+					onclick={handleSaveRateLimits}
+					disabled={rlSaving}
+					class="rounded-md bg-eurobase-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-eurobase-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+				>
+					{rlSaving ? 'Saving…' : 'Save changes'}
+				</button>
+			</div>
 		</div>
 	{/if}
 </div>
