@@ -1,0 +1,35 @@
+-- 000069_rate_limits_hourly_quota_keys.up.sql
+--
+-- #227 / #234 (umbrella #224): document the per-project hourly quota
+-- counter shape used by the SMS send path. Comment-only — the storage
+-- backing is Redis (the existing sliding-window limiter), not SQL.
+--
+-- The counter keyspace for the SMS send quota is:
+--
+--   quota:sms:project:{projectID}            (window: 1h fixed,
+--                                              TTL-managed by Redis)
+--
+-- Distinct from #225's per-action / per-identifier auth keyspace:
+--
+--   auth:{action}:project:{projectID}:{identifier}
+--
+-- so the two never alias. Checked in
+-- internal/enduser/auth_service.go (`checkSMSQuota`) before any
+-- SMS service call; over-quota silently skips the send and emits a
+-- slog.Warn — the 200 response shape is preserved to avoid leaking
+-- "phone is in the system" via a 429 (the existing code path already
+-- returns 200 for unknown phones).
+--
+-- The numeric limit comes from `auth_config.rate_limits.sms_per_hour`
+-- (defined in 000068), falling back to `DefaultRateLimits().SMSPerHour`
+-- when absent or zero. One Redis op per send-attempt — INCR + EXPIRE
+-- via the existing Lua script in internal/ratelimit/limiter.go.
+--
+-- Email quota enforcement is intentionally NOT wired by this migration.
+-- The `emails_per_hour` knob exists in auth_config and the helper
+-- (CheckProjectHourlyQuota) supports an `email` action, but the
+-- platform's single-shared-SMTP model makes a hard per-project default
+-- (Supabase ships 2/hour, which silently breaks confirmation flows for
+-- any project >2 signups/h with no escape hatch). Enforcement returns
+-- once BYO-SMTP / paid TEM add-on lands.
+SELECT 1 WHERE FALSE;  -- no-op; the entry exists so the version table records the shape change.

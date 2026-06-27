@@ -15,6 +15,7 @@ import (
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/oauth"
+	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/golang-jwt/jwt/v5"
@@ -56,6 +57,12 @@ type AuthService struct {
 	emailService *email.EmailService
 	smsService   *sms.Service
 	oauthSecrets OAuthSecretLookup
+
+	// rateLimiter (#227) gates per-project hourly send quotas on email
+	// and SMS paths. Nil-safe: a missing limiter means quota checks
+	// fail open (same fail-open contract as the auth limiter — a Redis
+	// outage shouldn't take auth offline). Set via SetRateLimiter.
+	rateLimiter *ratelimit.RateLimiter
 }
 
 // NewAuthService creates a new end-user auth service.
@@ -71,6 +78,34 @@ func (s *AuthService) SetEmailService(svc *email.EmailService) {
 // SetSMSService sets the SMS service for sending phone OTP codes.
 func (s *AuthService) SetSMSService(svc *sms.Service) {
 	s.smsService = svc
+}
+
+// SetRateLimiter wires in the Redis-backed limiter used for per-project
+// hourly quotas on email and SMS sends (#227). Without it, every
+// `checkEmailQuota` / `checkSMSQuota` call fails open — the contract
+// matches the auth limiter so dev environments without Redis stay
+// functional.
+func (s *AuthService) SetRateLimiter(rl *ratelimit.RateLimiter) {
+	s.rateLimiter = rl
+}
+
+// checkSMSQuota gates a per-project SMS send on the hourly cap from
+// auth_config.rate_limits.sms_per_hour. Returns nil if the send may
+// proceed; returns ratelimit.ErrQuotaExceeded when the project is over
+// its hourly cap. Same fail-open contract as the auth limiter (nil
+// limiter / Redis hiccup → allow).
+//
+// Email side is NOT yet enforced — per the #234 review, the platform's
+// single-shared-SMTP model means an aggressive per-project email cap
+// breaks legitimate signup flows with no BYO-SMTP escape hatch. The
+// EmailsPerHour knob still exists in the config struct so the UI can
+// surface it once BYO-SMTP lands; until then the quota helper is wired
+// only for SMS, where projects bring their own per-tenant GatewayAPI
+// budget via configuration.
+func (s *AuthService) checkSMSQuota(ctx context.Context, projectID string, cfg tenant.AuthConfig) error {
+	limits := cfg.EffectiveRateLimits()
+	_, err := ratelimit.CheckProjectHourlyQuota(s.rateLimiter, ctx, "sms", projectID, limits.SMSPerHour)
+	return err
 }
 
 // SetOAuthSecretLookup wires in a function that resolves encrypted OAuth
@@ -843,7 +878,7 @@ func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projec
 }
 
 // SendPhoneOTP finds or creates a user by phone number and sends an OTP code.
-func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, phone string) error {
+func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, phone string, config tenant.AuthConfig) error {
 	if s.smsService == nil {
 		return fmt.Errorf("sms not available: SMS provider not configured")
 	}
@@ -880,7 +915,18 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, phone string
 		return err
 	}
 
-	return s.smsService.SendOTP(ctx, schemaName, userID, phone)
+	// #227: per-project hourly SMS cap. Silent skip — the user attempt
+	// returns 200 as if the OTP was sent; the WARN log is the
+	// operator's signal that the project hit its SMS cap. (Surfacing
+	// 429 to the caller would reveal whether their phone is in the
+	// system, since unknown phones already return 200.)
+	if err := s.checkSMSQuota(ctx, projectID, config); err != nil {
+		slog.Warn("phone otp skipped: project hourly SMS quota exceeded",
+			"project_id", projectID, "user_id", userID)
+		return nil
+	}
+
+	return s.smsService.SendOTP(ctx, projectID, schemaName, userID, phone)
 }
 
 // VerifyPhoneOTP verifies a phone OTP code and returns an auth session.

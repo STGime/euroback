@@ -129,6 +129,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	if smsService != nil {
 		endUserAuthSvc.SetSMSService(smsService)
 	}
+	if limiter != nil {
+		// #227: wires the per-project hourly email + SMS quota checks
+		// into the AuthService send paths. Nil is fine (dev without
+		// Redis) — quotas just fail open.
+		endUserAuthSvc.SetRateLimiter(limiter)
+	}
 	// OAuth client_secrets live in the vault — route sign-in through the
 	// tenant service for decryption. Without this, SignInWithOAuth returns
 	// a clear error.

@@ -738,7 +738,7 @@ func HandleSendPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) htt
 			return
 		}
 
-		if err := svc.SendPhoneOTP(r.Context(), pc.SchemaName, req.Phone); err != nil {
+		if err := svc.SendPhoneOTP(r.Context(), pc.SchemaName, pc.ProjectID, req.Phone, config); err != nil {
 			slog.Warn("send phone otp failed", "error", err)
 			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
