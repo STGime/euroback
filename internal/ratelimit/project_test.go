@@ -63,7 +63,7 @@ func TestKnobs_AtTheLimit(t *testing.T) {
 			projB := "projB-" + tc.name + "-" + suffix
 
 			// N requests must pass on projA.
-			for i := 0; i < tc.limit; i++ {
+			for i := range tc.limit {
 				w := httptest.NewRecorder()
 				if CheckAuthRateForProject(rl, w, context.Background(), tc.action, projA, tc.identifier, tc.limit, tc.window) {
 					t.Fatalf("request %d/%d unexpectedly blocked", i+1, tc.limit)
@@ -111,7 +111,7 @@ func TestKnob_WindowExpiry(t *testing.T) {
 	const window = 1100 * time.Millisecond // > 1s so the underlying TTL rounds correctly
 
 	// Hit the cap.
-	for i := 0; i < limit; i++ {
+	for range limit {
 		w := httptest.NewRecorder()
 		if CheckAuthRateForProject(rl, w, context.Background(), "signup_signin", proj, "ip", limit, window) {
 			t.Fatalf("first request unexpectedly blocked")
@@ -150,7 +150,7 @@ func TestKnob_PerProjectOverrideTakesEffect(t *testing.T) {
 	ip := "ip"
 
 	// At limit=5, 3 requests pass.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		w := httptest.NewRecorder()
 		if CheckAuthRateForProject(rl, w, context.Background(), "signup_signin", proj, ip, 5, 10*time.Second) {
 			t.Fatalf("request %d/5 unexpectedly blocked", i+1)
@@ -183,7 +183,7 @@ func TestTrustProxy_ChangesCounterIdentifier(t *testing.T) {
 	// Two requests with TCP peer "10.0.0.5" and XFF "1.2.3.4". With
 	// trust_proxy=false, both key on "10.0.0.5" (the TCP peer).
 	r := helperRequest("10.0.0.5:54321", "1.2.3.4")
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		w := httptest.NewRecorder()
 		id := ClientIPForProject(r, false)
 		if id != "10.0.0.5" {
