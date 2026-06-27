@@ -101,6 +101,16 @@
 	let rlTokenVerify = $state('');
 	let rlSignupSignin = $state('');
 	let rlTrustProxy = $state<boolean>(DEFAULT_RATE_LIMITS.trust_proxy);
+	// `rlTrustProxyTouched` distinguishes "the user clicked the toggle
+	// this session" from "the toggle reflects the saved value". Numeric
+	// fields use empty-string-means-default as their "absent" signal; a
+	// bool toggle has no equivalent representation, so we use a sidecar
+	// flag. Without it, every save would persist an explicit `false`
+	// for trust_proxy — silently opting the project out of any future
+	// platform-default flip (the *bool semantic in #237 / #238 exists
+	// specifically to distinguish "absent → use default" from "explicit
+	// false → stay false even if the default changes").
+	let rlTrustProxyTouched = $state(false);
 	let rlSaving = $state(false);
 	let rlSaveMessage = $state('');
 	let rlSaveError = $state('');
@@ -111,8 +121,13 @@
 		rlTokenRefresh = rl?.token_refresh_per_5min_per_ip ? String(rl.token_refresh_per_5min_per_ip) : '';
 		rlTokenVerify = rl?.token_verification_per_5min_per_ip ? String(rl.token_verification_per_5min_per_ip) : '';
 		rlSignupSignin = rl?.signup_signin_per_5min_per_ip ? String(rl.signup_signin_per_5min_per_ip) : '';
-		// trust_proxy: undefined => default; explicit value => use it.
+		// trust_proxy: undefined → platform default; explicit value → use it.
 		rlTrustProxy = rl?.trust_proxy ?? DEFAULT_RATE_LIMITS.trust_proxy;
+		// Reset on hydrate (initial load + post-save reload). The
+		// project's persisted choice is now what the toggle reflects;
+		// the next save should NOT pin trust_proxy unless the user
+		// clicks again.
+		rlTrustProxyTouched = false;
 	}
 
 	function parseIntOrUndef(s: string): number | undefined {
@@ -133,9 +148,16 @@
 				token_refresh_per_5min_per_ip: parseIntOrUndef(rlTokenRefresh),
 				token_verification_per_5min_per_ip: parseIntOrUndef(rlTokenVerify),
 				emails_per_hour: parseIntOrUndef(rlEmailsPerHour),
-				sms_per_hour: parseIntOrUndef(rlSmsPerHour),
-				trust_proxy: rlTrustProxy
+				sms_per_hour: parseIntOrUndef(rlSmsPerHour)
 			};
+			// Only persist trust_proxy when the user explicitly touched
+			// the toggle. Otherwise leave it absent so the backend's
+			// *bool merge picks up the platform default — including any
+			// future #238 default flip. A no-op save must not silently
+			// pin an explicit `false`.
+			if (rlTrustProxyTouched) {
+				rl.trust_proxy = rlTrustProxy;
+			}
 
 			// Merge the rate_limits sub-object into the existing
 			// auth_config so we don't blow away other fields (providers,
@@ -1308,7 +1330,7 @@
 					<div class="shrink-0 pt-1">
 						<button
 							id="rl-trust-proxy"
-							onclick={() => rlTrustProxy = !rlTrustProxy}
+							onclick={() => { rlTrustProxy = !rlTrustProxy; rlTrustProxyTouched = true; }}
 							role="switch"
 							aria-checked={rlTrustProxy}
 							class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {rlTrustProxy ? 'bg-eurobase-600' : 'bg-gray-300'}"
