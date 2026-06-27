@@ -3,8 +3,17 @@ package audit
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
+
+// isNoRows is a tiny helper so the Verify path doesn't drag pgx symbols
+// into every error-shape check site.
+func isNoRows(err error) bool {
+	return errors.Is(err, pgx.ErrNoRows)
+}
 
 // VerifyResult is the outcome of walking a project's audit-log hash chain.
 type VerifyResult struct {
@@ -26,7 +35,33 @@ type VerifyResult struct {
 // Either failure is reported with the offending row id. An empty chain (no
 // rows) verifies as OK. The recompute happens in SQL via the same
 // public.audit_row_hash function used on insert, so the comparison is exact.
+//
+// Retention pruning (#171): if the retention worker has pruned the oldest
+// rows for this project, a checkpoint row in `audit_log_chain_checkpoints`
+// records the row_hash of the last pruned row. Verify seeds its initial
+// `prev` from that hash so the first surviving row's `prev_hash` still
+// links correctly. Without the checkpoint we'd flag the surviving prefix
+// as a chain break — but it's the off-box WORM dump (#170) that holds the
+// pruned prefix, so the in-DB chain stays continuous from the checkpoint
+// forward.
 func (s *Service) Verify(ctx context.Context, projectID string) (*VerifyResult, error) {
+	// Seed prev from the retention checkpoint if one exists. NULL-project
+	// chains use the all-zero UUID by convention (see migration 000070).
+	var prev []byte
+	var ckErr error
+	if projectID == "" {
+		ckErr = s.pool.QueryRow(ctx,
+			`SELECT last_row_hash FROM public.audit_log_chain_checkpoints
+			 WHERE project_id = '00000000-0000-0000-0000-000000000000'::uuid`).Scan(&prev)
+	} else {
+		ckErr = s.pool.QueryRow(ctx,
+			`SELECT last_row_hash FROM public.audit_log_chain_checkpoints
+			 WHERE project_id = NULLIF($1,'')::uuid`, projectID).Scan(&prev)
+	}
+	if ckErr != nil && !isNoRows(ckErr) {
+		return nil, fmt.Errorf("read retention checkpoint: %w", ckErr)
+	}
+
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, prev_hash, row_hash,
 		        public.audit_row_hash(prev_hash, project_id, actor_id, actor_email, action,
@@ -41,7 +76,6 @@ func (s *Service) Verify(ctx context.Context, projectID string) (*VerifyResult, 
 	}
 	defer rows.Close()
 
-	var prev []byte // previous row's row_hash; nil before the first row
 	checked := 0
 	for rows.Next() {
 		var id string

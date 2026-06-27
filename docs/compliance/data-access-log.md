@@ -83,14 +83,24 @@ expensive.
 
 `data_access_log` is **range-partitioned by month** on `created_at`:
 
-- The retention job (#171) can **drop an old month's partition** instead of a
-  giant `DELETE` — cheap, lock-light data minimisation.
+- The retention worker (#171, migration 000070, runs daily in
+  `cmd/worker`) **drops an old month's partition** via
+  `public.drop_old_data_access_log_partitions(cutoff_months)` — single
+  metadata operation, no `DELETE`/autovacuum churn.
 - Queries that filter on `created_at` prune to a few partitions.
 - `public.ensure_data_access_log_partition(month)` creates a month's partition
-  idempotently (used by the pre-create loop and the rolling job in #171).
-- A **`DEFAULT` partition** guarantees inserts never fail on a missing month;
-  rows simply land in default and can be redistributed later.
-- The migration pre-creates the current month + the next 11.
+  idempotently. The retention worker calls
+  `public.ensure_future_data_access_log_partitions(months_ahead)` each
+  tick to keep the next 12 months pre-created — writes never land in
+  `DEFAULT` once the worker has run.
+- A **`DEFAULT` partition** is the safety net for the small window between
+  worker ticks (or while the worker is down) — rows still get a home and
+  can be redistributed later.
+- The migration pre-creates the current month + the next 11; the worker
+  takes over from there.
+- Default retention: **13 months** (= 1 year + 1 buffer month), tunable via
+  `DATA_ACCESS_LOG_RETENTION_MONTHS`. The off-box signed object dump (#170)
+  is the long-term archive past this horizon.
 
 ## Append-only (defence-in-depth)
 
