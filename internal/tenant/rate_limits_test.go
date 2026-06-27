@@ -133,8 +133,10 @@ func TestDefaultRateLimits_Numbers(t *testing.T) {
 	// they shift, the doc table needs to shift with them.
 	d := DefaultRateLimits()
 	expect := map[string]int{
-		// Interim 8 (≈96/h) until #227 wires up EmailsPerHour
-		// enforcement; bumps to 30 (≈360/h, Supabase parity) then.
+		// Held at 8 (≈96/h) under the #234 review — the email cap
+		// that would have bounded amplification at 360/h is deferred
+		// until BYO-SMTP exists. Bump back to 30 (Supabase parity)
+		// then.
 		"signup_signin_per_5min_per_ip":      8,
 		"token_refresh_per_5min_per_ip":      150,
 		"token_verification_per_5min_per_ip": 30,

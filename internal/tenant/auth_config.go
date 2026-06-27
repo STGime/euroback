@@ -165,8 +165,8 @@ type RateLimits struct {
 // DefaultRateLimits returns the platform-wide defaults applied when a
 // project hasn't overridden a knob.
 //
-// Most numbers mirror Supabase's published defaults. One deliberate
-// divergence:
+// Most numbers mirror Supabase's published defaults. Two deliberate
+// divergences:
 //
 //   * SignupSigninPer5MinPerIP = 8 (not 30): held at the interim
 //     ~96/h floor while EmailsPerHour enforcement is parked behind
@@ -182,6 +182,11 @@ type RateLimits struct {
 // can flip via the console (or this constant). Project owners who know
 // their deployment trusts XFF can opt in today — see the TrustProxy
 // field comment for the precondition.
+//
+// SMSPerHour IS enforced — projects bring their own GatewayAPI budget
+// via configuration so a per-project cap is a real safeguard, not a
+// self-DoS. EmailsPerHour exists for UI surfacing but has no code
+// path consuming it today; #235 unblocks email enforcement.
 func DefaultRateLimits() RateLimits {
 	falseVal := false
 	return RateLimits{

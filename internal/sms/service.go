@@ -35,7 +35,15 @@ func (s *Service) Configured() bool {
 }
 
 // SendOTP generates a 6-digit code, stores the hash, and sends it via SMS.
-func (s *Service) SendOTP(ctx context.Context, schemaName, userID, phone string) error {
+//
+// projectID is threaded through (#227) so future per-project metrics
+// and quota enforcement on the SMS path can key off it. The current
+// quota check lives in the AuthService caller — same call site that
+// has the project's rate-limit config — but having projectID here
+// means a future refactor can move the check down without another
+// signature break.
+func (s *Service) SendOTP(ctx context.Context, projectID, schemaName, userID, phone string) error {
+	_ = projectID // reserved for per-project metrics / quota in a follow-up
 	code, err := generateOTPCode()
 	if err != nil {
 		return fmt.Errorf("generate otp: %w", err)
