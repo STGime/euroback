@@ -165,11 +165,19 @@ func (s *Service) List(ctx context.Context, projectID string) ([]EdgeFunction, e
 }
 
 // Get returns a single edge function by name, including code.
+//
+// Scan dest note: env_vars_key_version is intentionally NULL for rows
+// that aren't sealed (empty env_vars or legacy plaintext path — see the
+// all-or-nothing CHECK in migration 000067 + the nullIfZero adapter in
+// Update). The dest must be a pointer or a sql.Null* type; a plain
+// `int16` panics with `cannot scan NULL into *int16` for the common
+// "no env vars" case. Surfaced by PR #242 once the handler stopped
+// masking it as 404.
 func (s *Service) Get(ctx context.Context, projectID, name string) (*EdgeFunction, error) {
 	var f EdgeFunction
 	var legacy map[string]string
 	var blob, nonce []byte
-	var version int16
+	var version *int16
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, project_id, name, code, verify_jwt,
 		        env_vars, env_vars_blob, env_vars_nonce, env_vars_key_version,
@@ -182,7 +190,7 @@ func (s *Service) Get(ctx context.Context, projectID, name string) (*EdgeFunctio
 	if err != nil {
 		return nil, fmt.Errorf("get edge function %q: %w", name, err)
 	}
-	f.EnvVars, err = s.resolveEnvVars(ctx, f.ProjectID, blob, nonce, version, legacy)
+	f.EnvVars, err = s.resolveEnvVars(ctx, f.ProjectID, blob, nonce, derefInt16(version), legacy)
 	if err != nil {
 		return nil, err
 	}
@@ -190,11 +198,12 @@ func (s *Service) Get(ctx context.Context, projectID, name string) (*EdgeFunctio
 }
 
 // GetByID returns a single edge function by ID, including code.
+// See Get's docstring for the nullable env_vars_key_version contract.
 func (s *Service) GetByID(ctx context.Context, id string) (*EdgeFunction, error) {
 	var f EdgeFunction
 	var legacy map[string]string
 	var blob, nonce []byte
-	var version int16
+	var version *int16
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, project_id, name, code, verify_jwt,
 		        env_vars, env_vars_blob, env_vars_nonce, env_vars_key_version,
@@ -207,11 +216,21 @@ func (s *Service) GetByID(ctx context.Context, id string) (*EdgeFunction, error)
 	if err != nil {
 		return nil, fmt.Errorf("get edge function by id: %w", err)
 	}
-	f.EnvVars, err = s.resolveEnvVars(ctx, f.ProjectID, blob, nonce, version, legacy)
+	f.EnvVars, err = s.resolveEnvVars(ctx, f.ProjectID, blob, nonce, derefInt16(version), legacy)
 	if err != nil {
 		return nil, err
 	}
 	return &f, nil
+}
+
+// derefInt16 turns a nullable scan dest into the int16 resolveEnvVars
+// expects. NULL → 0, which is the same shape the legacy / empty-env
+// paths produce on write (see env_vars_test.go TestNullIfZero).
+func derefInt16(p *int16) int16 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // CreateRequest is the payload for creating an edge function.

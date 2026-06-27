@@ -95,6 +95,22 @@ func TestNullIfZero(t *testing.T) {
 	}
 }
 
+// TestDerefInt16 pins the read-side counterpart to nullIfZero. The Get
+// queries scan env_vars_key_version into *int16 because the column is
+// nullable (intentionally, for the legacy + empty-env paths). The
+// previous code used a plain `int16` dest and crashed on every function
+// without sealed env_vars with `cannot scan NULL into *int16` — which
+// the old handler then masked as "function not found" (fixed in #242).
+func TestDerefInt16(t *testing.T) {
+	if derefInt16(nil) != 0 {
+		t.Fatal("nil should map to 0 (matches nullIfZero(0))")
+	}
+	v := int16(3)
+	if got := derefInt16(&v); got != 3 {
+		t.Fatalf("non-nil should pass through, got %d", got)
+	}
+}
+
 // mustNewVaultService constructs a VaultService with a throwaway 32-byte
 // master, enough to exercise the seal/open contract end-to-end inside a
 // test that doesn't touch the DB.
