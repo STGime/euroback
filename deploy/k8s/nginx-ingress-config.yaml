@@ -1,0 +1,70 @@
+##############################################################################
+# nginx-ingress controller ConfigMap — Tier-1 GDPR #1 (#173)
+#
+# Enforces the TLS 1.3 floor and HSTS at the ingress controller level. These
+# settings cannot be set per-Ingress — `ssl-protocols` is a listener-level
+# directive and `hsts-*` is read by the controller once per reload. So the
+# canonical place is the controller's ConfigMap.
+#
+# How to wire this in
+# ===================
+# The nginx-ingress controller reads its config from a ConfigMap named via
+# its `--configmap` flag, defaulted to `<namespace>/nginx-configuration` by
+# the upstream chart and `ingress-nginx/ingress-nginx-controller` by the
+# kubernetes-sigs chart. Eurobase runs the ingress-nginx chart, so apply
+# this ConfigMap into the `ingress-nginx` namespace, NOT `eurobase`:
+#
+#   kubectl apply -n ingress-nginx -f deploy/k8s/nginx-ingress-config.yaml
+#
+# The controller picks the change up within ~10s without a pod restart.
+# Verify with:
+#
+#   testssl.sh --protocols api.eurobase.app
+#
+# All TLS 1.0/1.1/1.2 lines must read "not offered" (or "client-side"). HSTS
+# can be confirmed with:
+#
+#   curl -sI https://api.eurobase.app | grep -i strict-transport-security
+#
+# Sovereignty / certification context
+# ===================================
+# TLS 1.3 only + HSTS preload is what Schrems II–era audits (C5, SecNumCloud)
+# and most enterprise vendor questionnaires require as the floor. Older
+# protocols on the wire are an automatic finding. Pinning the floor in the
+# repo (rather than at install time) makes the policy reviewable.
+##############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/instance: ingress-nginx
+data:
+  # ── TLS 1.3 floor ────────────────────────────────────────────────────
+  # The default is "TLSv1.2 TLSv1.3" — dropping TLSv1.2 is the policy
+  # change. nginx-ingress refuses to set this to anything below TLSv1.2,
+  # so the floor cannot accidentally regress to TLS 1.0/1.1.
+  ssl-protocols: "TLSv1.3"
+  ssl-prefer-server-ciphers: "true"
+
+  # ── HSTS ────────────────────────────────────────────────────────────
+  # 1 year max-age + includeSubDomains + preload is the requirement for
+  # the HSTS preload list (hstspreload.org). Preload eligibility is what
+  # gets us "no first-visit downgrade" in browsers that ship the list.
+  hsts: "true"
+  hsts-max-age: "31536000"           # 1 year, in seconds
+  hsts-include-subdomains: "true"
+  hsts-preload: "true"
+
+  # ── Defence-in-depth ────────────────────────────────────────────────
+  # Block plaintext entirely. Without this, a misconfigured Ingress that
+  # forgets the per-resource ssl-redirect annotation could serve over
+  # HTTP, which the C5 control catalogue flags.
+  force-ssl-redirect: "true"
+
+  # OCSP stapling on. Improves handshake latency AND prevents the
+  # browser-side OCSP fetch leaking the visited host to the CA (a
+  # GDPR-relevant side channel highlighted by EDPS guidance).
+  enable-ocsp: "true"

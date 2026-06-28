@@ -334,7 +334,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 
 			// Compliance (DPA report, sub-processor registry, DSAR exports).
-			complianceSvc := compliance.NewComplianceService(pool)
+			//
+			// Closes #173: the DPA report's data-flow encryption flags
+			// now derive from RESIDENCY_REGION / ENCRYPTION_AT_REST /
+			// TLS_MIN env vars, not from hardcoded `true`. Defaults
+			// match production today, so a missing env var still
+			// renders the report shipped configuration — not "unknown".
+			residencyCfg := compliance.LoadResidencyConfigFromEnv()
+			complianceSvc := compliance.NewComplianceService(pool, residencyCfg)
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/dpa-report", compliance.HandleDPAReport(complianceSvc))
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/sub-processors", compliance.HandleSubProcessors(complianceSvc))
 

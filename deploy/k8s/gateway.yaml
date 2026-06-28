@@ -80,6 +80,18 @@ spec:
                 configMapKeyRef:
                   name: eurobase-config
                   key: environment
+            # Closes #173 (Tier-1 GDPR #1, data residency). These three
+            # values feed the DPA report's `data_flow` section. Defaults
+            # baked into the binary already match production, so the
+            # explicit values here are an operator attestation rather
+            # than a code requirement — see docs/compliance/data-
+            # residency.md for the contract.
+            - name: RESIDENCY_REGION
+              value: "France (Scaleway DC-PAR1 / DC-PAR2)"
+            - name: ENCRYPTION_AT_REST
+              value: "true"
+            - name: TLS_MIN
+              value: "TLS 1.3"
       imagePullSecrets:
         - name: scw-registry
 ---

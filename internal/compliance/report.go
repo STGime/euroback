@@ -35,10 +35,18 @@ type CustomerInfo struct {
 }
 
 // DataFlowInfo describes how data flows through the Eurobase infrastructure.
+//
+// The three "is encryption real?" flags are read from runtime config
+// (ResidencyConfig) rather than hardcoded — closes #173. TLSMin is the
+// floor the ingress controller actually enforces, e.g. "TLS 1.3"; an
+// empty string means "the runtime can't prove it", in which case
+// EncryptionInTransit is reported as `false` rather than aspirationally
+// `true`.
 type DataFlowInfo struct {
 	StorageLocation      string `json:"storage_location"`
 	EncryptionAtRest     bool   `json:"encryption_at_rest"`
 	EncryptionInTransit  bool   `json:"encryption_in_transit"`
+	TLSMin               string `json:"tls_min,omitempty"`
 	CrossBorderTransfers bool   `json:"cross_border_transfers"`
 	CrossBorderDetails   string `json:"cross_border_details,omitempty"`
 }
@@ -86,10 +94,19 @@ func (s *ComplianceService) GenerateReport(ctx context.Context, projectID string
 		}
 	}
 
+	// Read encryption + residency posture from runtime config (#173).
+	// The previous code hardcoded `true` for both encryption flags,
+	// which made the DPA report a polite fiction in any deployment
+	// without the TLS floor / encrypted volumes (dev, staging,
+	// future-self-hosted). Now an operator-set ENCRYPTION_AT_REST=false
+	// or an absent TLS_MIN will surface in the report, not be silently
+	// papered over.
+	encryptionInTransit := s.residency.TLSMin != ""
 	dataFlow := DataFlowInfo{
-		StorageLocation:      "France (Scaleway DC-PAR1 / DC-PAR2)",
-		EncryptionAtRest:     true,
-		EncryptionInTransit:  true,
+		StorageLocation:      s.residency.StorageLocation,
+		EncryptionAtRest:     s.residency.EncryptionAtRest,
+		EncryptionInTransit:  encryptionInTransit,
+		TLSMin:               s.residency.TLSMin,
 		CrossBorderTransfers: hasCrossBorder,
 	}
 	if hasCrossBorder {

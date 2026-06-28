@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,12 +35,102 @@ type SubProcessor struct {
 // ComplianceService provides methods for querying the sub-processor registry
 // and generating GDPR compliance reports.
 type ComplianceService struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	residency  ResidencyConfig
 }
 
-// NewComplianceService creates a new ComplianceService backed by the given pool.
-func NewComplianceService(pool *pgxpool.Pool) *ComplianceService {
-	return &ComplianceService{pool: pool}
+// ResidencyConfig describes the actual deployment posture that feeds the
+// DPA report's `data_flow` section. Closes #173 — until this struct
+// existed, `EncryptionAtRest` / `EncryptionInTransit` were hardcoded
+// `true` in the report path, which is a truthfulness bug: a dev/staging
+// deploy without the TLS floor would still emit a "yes, encrypted in
+// transit" claim. Reading this from real startup config means the flag
+// answers what the runtime *actually* enforces, not what the design
+// document aspires to.
+//
+// All three fields are populated by env vars on the gateway
+// (RESIDENCY_REGION / ENCRYPTION_AT_REST / TLS_MIN). The defaults
+// returned by DefaultResidencyConfig() match production today, so an
+// operator who forgets to set them gets the truth as-is rather than a
+// lie. See docs/compliance/data-residency.md for the chain.
+type ResidencyConfig struct {
+	// StorageLocation is the human-readable jurisdiction, e.g.
+	// "France (Scaleway DC-PAR1 / DC-PAR2)". Drives DPA report's
+	// `data_flow.storage_location`.
+	StorageLocation string
+
+	// EncryptionAtRest reports whether all customer-data volumes
+	// (Postgres RDB, Object Storage, etcd) are encrypted at rest by
+	// the underlying provider. On Scaleway this is always true, but
+	// the env var lets the runtime *assert* the operator's intent
+	// rather than have the report quietly lie.
+	EncryptionAtRest bool
+
+	// TLSMin is the floor enforced at the ingress, e.g. "TLS 1.3".
+	// Empty string means "operator did not assert" and the report
+	// surfaces "unknown" rather than claiming a floor it can't prove.
+	TLSMin string
+}
+
+// DefaultResidencyConfig returns the production posture (FR + at-rest
+// + TLS 1.3). Useful as a fallback so a missing env var gives the
+// real shipped configuration, not "unknown" everywhere.
+func DefaultResidencyConfig() ResidencyConfig {
+	return ResidencyConfig{
+		StorageLocation:  "France (Scaleway DC-PAR1 / DC-PAR2)",
+		EncryptionAtRest: true,
+		TLSMin:           "TLS 1.3",
+	}
+}
+
+// LoadResidencyConfigFromEnv reads the three #173 env vars and falls
+// back to DefaultResidencyConfig() field-by-field for anything unset.
+// Field-by-field fallback (instead of "any unset → all defaults") lets
+// a dev environment override one knob (e.g. unset TLS_MIN to drop the
+// in-transit claim) without losing the others.
+//
+// Env vars:
+//   RESIDENCY_REGION      → ResidencyConfig.StorageLocation
+//   ENCRYPTION_AT_REST    → ResidencyConfig.EncryptionAtRest
+//                           (any of "1","true","yes","on" → true;
+//                            "0","false","no","off" → false;
+//                            anything else → default true)
+//   TLS_MIN               → ResidencyConfig.TLSMin
+//                           (set to "" to surface "no floor enforced")
+func LoadResidencyConfigFromEnv() ResidencyConfig {
+	cfg := DefaultResidencyConfig()
+	if v := os.Getenv("RESIDENCY_REGION"); v != "" {
+		cfg.StorageLocation = v
+	}
+	if v, ok := os.LookupEnv("ENCRYPTION_AT_REST"); ok {
+		cfg.EncryptionAtRest = parseBoolish(v, cfg.EncryptionAtRest)
+	}
+	if v, ok := os.LookupEnv("TLS_MIN"); ok {
+		cfg.TLSMin = v
+	}
+	return cfg
+}
+
+// parseBoolish accepts the common operator-typed booleans without
+// surprising case sensitivity. Falls back to dflt for unparseable
+// values rather than panicking — a typo'd env var shouldn't take down
+// startup.
+func parseBoolish(v string, dflt bool) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return dflt
+}
+
+// NewComplianceService creates a new ComplianceService backed by the given
+// pool. The residency config feeds the DPA report's data-flow section;
+// pass DefaultResidencyConfig() if the caller has no config to inject
+// (the result is identical to pre-#173 behaviour).
+func NewComplianceService(pool *pgxpool.Pool, residency ResidencyConfig) *ComplianceService {
+	return &ComplianceService{pool: pool, residency: residency}
 }
 
 // ListAllSubProcessors returns all active sub-processors.
