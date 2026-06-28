@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -30,6 +31,14 @@ type EmailService struct {
 	client     *EmailClient
 	pool       *pgxpool.Pool
 	consoleURL string
+
+	// senderSvc, when set, is consulted on every project-scoped send.
+	// If the project has a verified BYO-SMTP sender, the send routes
+	// through that custom SMTP and skips the platform TEM + the
+	// platform EmailsPerHour quota (#235 Part 1). nil — or
+	// ErrNotConfigured on the lookup — both fall back to the platform
+	// path unchanged.
+	senderSvc *SenderService
 }
 
 // NewEmailService creates a new email service.
@@ -39,6 +48,47 @@ func NewEmailService(client *EmailClient, pool *pgxpool.Pool, consoleURL string)
 		pool:       pool,
 		consoleURL: strings.TrimRight(consoleURL, "/"),
 	}
+}
+
+// WithSenderService wires the per-project BYO-SMTP service (#235 Part
+// 1). The argument may be nil — in that case the EmailService stays on
+// the platform-sender-only path, identical to pre-#235 behaviour.
+func (s *EmailService) WithSenderService(svc *SenderService) *EmailService {
+	s.senderSvc = svc
+	return s
+}
+
+// sendProjectScoped is the central dispatcher for "send email for
+// project X". If the project has a verified custom SMTP sender,
+// the send goes through that path; otherwise it falls back to the
+// platform TEM client.
+//
+// Why a single dispatcher: every Send* helper above (Verification,
+// PasswordReset, MagicLink) used to call s.client.Send directly. With
+// BYO-SMTP we want one place that knows about the project routing
+// decision, so the routing rule lives here, not duplicated five
+// times. Each helper now passes projectID along with the rendered
+// subject + body.
+//
+// On per-project send failure (e.g. provider auth failed), we
+// surface the error rather than silently falling back to the
+// platform sender — the failure is what the operator needs to fix,
+// not a hidden retry that hides the problem.
+func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, subject, htmlBody string) error {
+	if s.senderSvc != nil && projectID != "" {
+		sender, err := s.senderSvc.LoadForSend(ctx, projectID)
+		switch {
+		case err == nil:
+			// Verified custom sender — use it.
+			return sendViaCustomSMTP(ctx, sender, to, subject, htmlBody)
+		case errors.Is(err, ErrNotConfigured), errors.Is(err, ErrSenderNotVerified):
+			// Fall through to platform send.
+		default:
+			slog.Warn("project email sender lookup failed, falling back to platform",
+				"project_id", projectID, "error", err)
+		}
+	}
+	return s.client.Send(ctx, to, subject, htmlBody)
 }
 
 // Configured returns whether TEM credentials are set.
@@ -100,7 +150,7 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 		return fmt.Errorf("render verification email: %w", err)
 	}
 
-	return s.client.Send(ctx, userEmail, subject, body)
+	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
 }
 
 // SendPasswordResetEmail sends a password reset link to the end-user.
@@ -138,7 +188,7 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 		return fmt.Errorf("render password reset email: %w", err)
 	}
 
-	return s.client.Send(ctx, userEmail, subject, body)
+	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
 }
 
 // SendMagicLinkEmail sends a magic link sign-in email to the end-user.
@@ -176,7 +226,7 @@ func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projec
 		return fmt.Errorf("render magic link email: %w", err)
 	}
 
-	return s.client.Send(ctx, userEmail, subject, body)
+	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
 }
 
 // SendPlatformPasswordResetEmail sends a password reset email for console users.
@@ -206,6 +256,9 @@ func (s *EmailService) SendPlatformPasswordResetEmail(ctx context.Context, userI
 		return fmt.Errorf("render platform reset email: %w", err)
 	}
 
+	// Platform-level email (console user, no tenant). Never routes
+	// through a project's BYO-SMTP — that sender belongs to a tenant
+	// and platform mail should always come from us.
 	return s.client.Send(ctx, userEmail, subject, body)
 }
 

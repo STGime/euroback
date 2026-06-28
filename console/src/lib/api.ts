@@ -70,6 +70,47 @@ export const DEFAULT_RATE_LIMITS = {
 	trust_proxy: false
 } as const;
 
+/** Per-project custom SMTP sender (#235 Part 1). Returned from
+ * `GET /platform/projects/{id}/email-sender`; null on the wire (404)
+ * when no sender is configured — the client converts that to a
+ * Promise<null> in `getProjectEmailSender`.
+ *
+ * `password` is never returned — it's sealed server-side and only
+ * decrypted in the send path. `has_password` tells the UI whether
+ * sealed bytes exist so an "Edit" flow can leave the password input
+ * blank without losing the saved one. */
+export interface ProjectEmailSender {
+	project_id: string;
+	host: string;
+	port: number;
+	username?: string;
+	from_email: string;
+	from_name?: string;
+	encryption: 'starttls' | 'tls' | 'none';
+	has_password: boolean;
+	verified_at?: string;
+	last_error?: string;
+	last_error_at?: string;
+	created_at: string;
+	updated_at: string;
+	/** Set by the backend when the host matches a known US provider —
+	 * surfaced to the operator as an advisory, not a hard block. */
+	sovereignty_warning?: string;
+}
+
+/** Payload for PUT /platform/projects/{id}/email-sender. Empty password
+ * on an existing sender keeps the stored sealed bytes — the operator
+ * can edit other fields without re-typing the secret. */
+export interface ProjectEmailSenderUpsert {
+	host: string;
+	port: number;
+	username: string;
+	from_email: string;
+	from_name: string;
+	encryption: 'starttls' | 'tls' | 'none';
+	password: string;
+}
+
 export interface PlatformProfile {
 	id: string;
 	email: string;
@@ -433,6 +474,41 @@ export class EurobaseAPI {
 		return this.fetch<Project>(`/v1/tenants/${projectId}`, {
 			method: 'PATCH',
 			body: JSON.stringify(data)
+		});
+	}
+
+	// ── BYO custom SMTP (#235 Part 1) ─────────────────────────────────
+	// The password is sealed at rest with the per-tenant HKDF key; the
+	// backend never returns it on read. has_password indicates whether
+	// the sealed trio is present. An empty password on PUT preserves
+	// the existing one so the operator can edit other fields without
+	// re-typing the secret.
+
+	async getProjectEmailSender(projectId: string): Promise<ProjectEmailSender | null> {
+		try {
+			return await this.fetch<ProjectEmailSender>(`/platform/projects/${projectId}/email-sender`);
+		} catch (err: any) {
+			// 404 → no sender configured (this is the normal initial state).
+			if (err?.status === 404) return null;
+			throw err;
+		}
+	}
+
+	async upsertProjectEmailSender(projectId: string, data: ProjectEmailSenderUpsert): Promise<ProjectEmailSender> {
+		return this.fetch<ProjectEmailSender>(`/platform/projects/${projectId}/email-sender`, {
+			method: 'PUT',
+			body: JSON.stringify(data)
+		});
+	}
+
+	async deleteProjectEmailSender(projectId: string): Promise<void> {
+		await this.fetch(`/platform/projects/${projectId}/email-sender`, { method: 'DELETE' });
+	}
+
+	async testProjectEmailSender(projectId: string, to: string): Promise<{ status: string; to: string }> {
+		return this.fetch<{ status: string; to: string }>(`/platform/projects/${projectId}/email-sender/test`, {
+			method: 'POST',
+			body: JSON.stringify({ to })
 		});
 	}
 

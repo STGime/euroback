@@ -328,6 +328,23 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.With(tenant.RequireMinRole("developer")).Post("/email-templates/{type}/test", tmplHandler.HandleTest())
 			}
 
+			// Per-project BYO custom SMTP sender (#235 Part 1). Admin-
+			// only because the password is platform-trust-equivalent
+			// to a bank account number — a viewer must not see the
+			// has_password flag, let alone send a test through it.
+			// The send-path consults this via emailService.senderSvc,
+			// wired in main.go's NewEmailService chain.
+			if vaultSvc != nil && vaultSvc.Configured() {
+				senderSvc := email.NewSenderService(pool, vaultSvc)
+				if emailService != nil {
+					emailService.WithSenderService(senderSvc)
+				}
+				r.With(tenant.RequireMinRole("admin")).Get("/email-sender", email.HandleGetSender(senderSvc))
+				r.With(tenant.RequireMinRole("admin")).Put("/email-sender", email.HandlePutSender(senderSvc))
+				r.With(tenant.RequireMinRole("admin")).Delete("/email-sender", email.HandleDeleteSender(senderSvc))
+				r.With(tenant.RequireMinRole("admin")).Post("/email-sender/test", email.HandleTestSender(senderSvc))
+			}
+
 			// Vault (encrypted secrets storage) — platform-authenticated.
 			if vaultSvc != nil && vaultSvc.Configured() {
 				r.With(tenant.RequireMinRole("admin")).Mount("/vault", vault.Routes(vaultSvc, pool))
