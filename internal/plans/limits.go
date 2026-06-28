@@ -25,6 +25,14 @@ type PlanLimits struct {
 	LogRetentionDays  int    `json:"log_retention_days"`
 	CustomTemplates   bool   `json:"custom_templates"`
 	EdgeFunctionLimit int    `json:"edge_function_limit"`
+
+	// DSARConsoleUI gates the one-click Compliance → Data Export
+	// console tab (#251, part of #248). NOT a gate on the underlying
+	// API endpoints — DSAR is a legal obligation and the export
+	// endpoints stay callable on every tier; the console flow is the
+	// upsell. Free = false, Pro = true. See migration 000072 +
+	// docs/compliance/dsar-soft-gate.md.
+	DSARConsoleUI bool `json:"dsar_console_ui"`
 }
 
 // LimitsService provides plan limit lookups with in-memory caching.
@@ -57,12 +65,14 @@ func (s *LimitsService) GetLimits(ctx context.Context, plan string) (*PlanLimits
 	err := s.pool.QueryRow(ctx,
 		`SELECT plan, db_size_mb, storage_mb, bandwidth_mb, mau_limit,
 		        rate_limit_rps, ws_connections, upload_size_mb, webhook_limit,
-		        project_limit, log_retention_days, custom_templates, edge_function_limit
+		        project_limit, log_retention_days, custom_templates, edge_function_limit,
+		        dsar_console_ui
 		 FROM plan_limits WHERE plan = $1`, plan,
 	).Scan(
 		&l.Plan, &l.DBSizeMB, &l.StorageMB, &l.BandwidthMB, &l.MAULimit,
 		&l.RateLimitRPS, &l.WSConnections, &l.UploadSizeMB, &l.WebhookLimit,
 		&l.ProjectLimit, &l.LogRetentionDays, &l.CustomTemplates, &l.EdgeFunctionLimit,
+		&l.DSARConsoleUI,
 	)
 	if err != nil {
 		slog.Error("failed to load plan limits", "plan", plan, "error", err)

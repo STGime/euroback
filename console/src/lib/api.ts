@@ -1458,6 +1458,11 @@ export interface PlanLimits {
 	log_retention_days: number;
 	custom_templates: boolean;
 	edge_function_limit: number;
+	/** Soft-gate (#251 / umbrella #248): when false, the console
+	 * hides the Compliance → Data Export tab content and shows an
+	 * upgrade card. The underlying API endpoints stay callable —
+	 * this is purely a console-render gate. Free = false, Pro = true. */
+	dsar_console_ui: boolean;
 }
 
 export interface ProjectUsage {
