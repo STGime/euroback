@@ -822,7 +822,7 @@ const {'{'} data, error {'}'} = await eb.auth.handleOAuthCallback()
 				<ol class="text-sm text-gray-700 space-y-2 ml-4 list-decimal">
 					<li>Open <strong>Auth &rarr; Rate Limits</strong>.</li>
 					<li>For each knob, leave blank to keep the platform default, or enter your value. The placeholder text shows what the default is.</li>
-					<li>(Optional) Toggle <strong>Trust Proxy</strong> if your app is behind a CDN/proxy. Only do this if you know your edge stack rewrites <code class="bg-gray-100 border border-gray-200 rounded px-1">X-Forwarded-For</code> &mdash; otherwise an attacker can spoof the IP and dodge the limit.</li>
+					<li>(Optional) Toggle <strong>IP Address Forwarding</strong> if your app is behind a CDN/proxy. Only do this if you know your edge stack rewrites <code class="bg-gray-100 border border-gray-200 rounded px-1">X-Forwarded-For</code> &mdash; otherwise an attacker can spoof the IP and dodge the limit.</li>
 					<li>Hit <strong>Save changes</strong>. The new limits apply within a few seconds &mdash; no redeploy needed.</li>
 				</ol>
 
@@ -929,10 +929,10 @@ try {'{'}
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Sovereignty advisory</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Eurobase itself runs entirely on EU-sovereign infrastructure (Scaleway, France). If you configure a US-based SMTP provider (SendGrid, Mailgun, Postmark, Amazon SES, Mandrill, SparkPost), the console shows an amber advisory: your auth email content will leave the EU jurisdiction even though the rest of your project doesn't.
+					Eurobase itself runs entirely on EU-sovereign infrastructure (Scaleway, France). If you configure a US-based SMTP provider (SendGrid, Mailgun, Postmark, Amazon SES, Mandrill, SparkPost, SMTP.com), the console shows an amber advisory: your auth email content will leave the EU jurisdiction even though the rest of your project doesn't.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					This is your call &mdash; it's not a block. EU-based alternatives worth knowing: Scaleway TEM, Brevo (FR), Mailjet (FR), Mailtrap EU.
+					This is your call &mdash; it's not a block. EU-based alternatives worth knowing: Scaleway TEM, Brevo (FR), Mailjet (EU), Mailtrap EU.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What stays on the platform sender</h3>
@@ -1005,7 +1005,7 @@ try {'{'}
 			</div>
 		</section>
 
-		<!-- ======================= 8. EXPLORING THE API ======================= -->
+		<!-- ======================= 10. EXPLORING THE API ======================= -->
 		<section id="api" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">10. Exploring the API</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to see every API endpoint available for the LexVault tables.</p>
@@ -1061,7 +1061,7 @@ curl -X DELETE https://lexvault.eurobase.app/api/v1/db/clients?eq.id=some-uuid \
 			</div>
 		</section>
 
-		<!-- ======================= 9. WEBHOOKS ======================= -->
+		<!-- ======================= 11. WEBHOOKS ======================= -->
 		<section id="webhooks" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">11. Webhooks</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants LexVault to be notified whenever a new client record is created.</p>
@@ -1147,7 +1147,7 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 			</div>
 		</section>
 
-		<!-- ======================= 10. ROW-LEVEL SECURITY ======================= -->
+		<!-- ======================= 12. ROW-LEVEL SECURITY ======================= -->
 		<section id="rls" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Row-Level Security (RLS)</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs each law firm employee to only see their own cases.</p>
@@ -1306,7 +1306,7 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 			</div>
 		</section>
 
-		<!-- ======================= 11. VAULT ======================= -->
+		<!-- ======================= 13. VAULT ======================= -->
 		<section id="vault" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Vault (Encrypted Secrets)</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to store API keys for Mollie payments and Twilio SMS securely.</p>
@@ -1396,7 +1396,7 @@ await eb.vault.delete('old_key')</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 12. SCHEDULED JOBS ======================= -->
+		<!-- ======================= 14. SCHEDULED JOBS ======================= -->
 		<section id="cron" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Scheduled Jobs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to clean up expired sessions and send weekly reports automatically.</p>
@@ -1571,7 +1571,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 13. EDGE FUNCTIONS ======================= -->
+		<!-- ======================= 15. EDGE FUNCTIONS ======================= -->
 		<section id="edge-functions" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">15. Edge Functions</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to process a payment webhook and update an order — this requires custom server-side logic beyond SQL.</p>
@@ -1752,7 +1752,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 14. MONITORING WITH LOGS ======================= -->
+		<!-- ======================= 16. MONITORING WITH LOGS ======================= -->
 		<section id="logs" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">16. Monitoring with Logs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex notices slow responses and wants to investigate API traffic.</p>
@@ -1792,7 +1792,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 15. COMPLIANCE & AUDIT LOG ======================= -->
+		<!-- ======================= 17. COMPLIANCE & AUDIT LOG ======================= -->
 		<section id="compliance" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">17. Compliance & Audit Log</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex's client asks for proof that their data stays in the EU and a trail of who changed what.</p>
@@ -1843,7 +1843,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 16. PROJECT SETTINGS ======================= -->
+		<!-- ======================= 18. PROJECT SETTINGS ======================= -->
 		<section id="settings" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">18. Project Settings</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to rotate an API key after an intern accidentally committed it.</p>
@@ -1881,7 +1881,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 17. TEAM COLLABORATION ======================= -->
+		<!-- ======================= 19. TEAM COLLABORATION ======================= -->
 		<section id="team" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">19. Team Collaboration</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to give a colleague access to the project without sharing API keys.</p>
@@ -1936,7 +1936,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 18. CLI TOOL ======================= -->
+		<!-- ======================= 20. CLI TOOL ======================= -->
 		<section id="cli" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">20. CLI Tool</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to manage projects, run queries, and test RLS policies from the terminal.</p>
@@ -2104,7 +2104,7 @@ ROLLBACK;</pre>
 		</section>
 
 
-		<!-- ======================= 19. SCHEMA MIGRATIONS ======================= -->
+		<!-- ======================= 21. SCHEMA MIGRATIONS ======================= -->
 		<section id="migrations" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">21. Schema Migrations</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants schema changes that are versioned, reviewable, and repeatable across environments.</p>
@@ -2191,7 +2191,7 @@ CREATE POLICY listings_owner ON listings
 			</div>
 		</section>
 
-		<!-- ======================= 16. CONNECTING YOUR IDE ======================= -->
+		<!-- ======================= 22. CONNECTING YOUR IDE ======================= -->
 		<section id="connect" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">22. Connecting Your IDE</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI coding assistant to understand the LexVault schema.</p>
@@ -2248,14 +2248,14 @@ CREATE POLICY listings_owner ON listings
 			</div>
 		</section>
 
-		<!-- ======================= 20. MCP SERVER ======================= -->
+		<!-- ======================= 23. MCP SERVER ======================= -->
 		<section id="mcp" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">23. MCP Server</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI assistant to actually <em>do things</em> in LexVault &mdash; list users, run a SELECT, rotate a Vault secret &mdash; not just read schema docs.</p>
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The configs in <button onclick={() => scrollTo('connect')} class="text-eurobase-600 hover:underline cursor-pointer">section 19</button> teach an AI assistant <em>about</em> your project. The MCP server lets it <em>operate</em> on your project. Eurobase ships a hosted <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Model Context Protocol</a> server at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">https://mcp.eurobase.app/mcp</code> that exposes the platform API as tool calls.
+					The configs in <button onclick={() => scrollTo('connect')} class="text-eurobase-600 hover:underline cursor-pointer">section 22</button> teach an AI assistant <em>about</em> your project. The MCP server lets it <em>operate</em> on your project. Eurobase ships a hosted <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Model Context Protocol</a> server at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">https://mcp.eurobase.app/mcp</code> that exposes the platform API as tool calls.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900">What it can do</h3>
@@ -2317,7 +2317,7 @@ claude mcp add --transport http eurobase https://mcp.eurobase.app/mcp \
 			</div>
 		</section>
 
-		<!-- ======================= 21. YOUR ACCOUNT ======================= -->
+		<!-- ======================= 24. YOUR ACCOUNT ======================= -->
 		<section id="account" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">24. Your Account</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
