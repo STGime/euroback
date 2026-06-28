@@ -161,9 +161,10 @@ func (s *SenderService) LoadForSend(ctx context.Context, projectID string) (*Pro
 		passwordBlob, nonce []byte
 		// `*int16` so the scan accepts NULL (the no-password case).
 		// The all-or-nothing CHECK guarantees non-NULL whenever
-		// password_blob is non-NULL — so when we go to decrypt we
-		// can deref safely (and a deref of a nil pointer in that
-		// branch would be a CHECK violation, not a silent zero).
+		// password_blob is non-NULL; the decrypt branch below
+		// explicitly asserts that to convert a hypothetical row-
+		// corruption (manual SQL, future migration bug) into a loud
+		// error rather than a silent decrypt-against-the-wrong-key.
 		passwordKeyVersion *int16
 	)
 	out.ProjectID = projectID
