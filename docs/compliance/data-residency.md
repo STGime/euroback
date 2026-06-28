@@ -160,7 +160,7 @@ escape is to host it on a different apex zone (e.g.
 ## Encryption-at-rest on Scaleway
 
 See the table above. The `deploy/terraform/main.tf` resource tags
-include `encryption-at-rest:luks-aes256xts` / `sse-s3-aes256` /
+include `encryption-at-rest:aes-256-xts` / `sse-s3-aes256` /
 `etcd-encryption:scaleway-managed` so a `terraform state list` walk
 gives an at-a-glance audit. The Scaleway provider does NOT expose
 encryption as a queryable attribute (because it's non-toggleable), so
