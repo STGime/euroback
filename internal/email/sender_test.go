@@ -23,6 +23,9 @@ func TestSovereigntyWarningFor(t *testing.T) {
 		{"smtp.postmarkapp.com", true, "Postmark"},
 		{"email-smtp.us-west-2.amazonaws.com", true, "Amazon SES"},
 		{"smtp.sparkpostmail.com", true, "SparkPost"},
+		// Added in PR #245 review.
+		{"smtp.mandrillapp.com", true, "Mandrill"},
+		{"send.smtp.com", true, "SMTP.com"},
 
 		// EU / unknown providers — no warning.
 		{"smtp.scaleway.com", false, ""},

@@ -157,9 +157,14 @@ func (s *SenderService) LoadConfig(ctx context.Context, projectID string) (*Proj
 // is to fail loudly at setup, not silently at first signup).
 func (s *SenderService) LoadForSend(ctx context.Context, projectID string) (*ProjectSender, error) {
 	var (
-		out                   ProjectSender
-		passwordBlob, nonce   []byte
-		passwordKeyVersion    *int16
+		out                 ProjectSender
+		passwordBlob, nonce []byte
+		// `*int16` so the scan accepts NULL (the no-password case).
+		// The all-or-nothing CHECK guarantees non-NULL whenever
+		// password_blob is non-NULL — so when we go to decrypt we
+		// can deref safely (and a deref of a nil pointer in that
+		// branch would be a CHECK violation, not a silent zero).
+		passwordKeyVersion *int16
 	)
 	out.ProjectID = projectID
 	err := s.pool.QueryRow(ctx,
@@ -187,6 +192,14 @@ func (s *SenderService) LoadForSend(ctx context.Context, projectID string) (*Pro
 		return &out, ErrSenderNotVerified
 	}
 	if len(passwordBlob) > 0 {
+		// The CHECK constraint guarantees passwordKeyVersion is
+		// non-NULL whenever passwordBlob is non-NULL. If we somehow
+		// see nil here, the row is corrupt — fail loud rather than
+		// silently using key version 0 and decrypting against the
+		// wrong key.
+		if passwordKeyVersion == nil {
+			return nil, fmt.Errorf("project_email_senders row has sealed blob but NULL key_version (CHECK violation) for project %s", projectID)
+		}
 		schemaName, err := s.schemaName(ctx, projectID)
 		if err != nil {
 			return nil, err
@@ -194,7 +207,7 @@ func (s *SenderService) LoadForSend(ctx context.Context, projectID string) (*Pro
 		if s.vault == nil || !s.vault.Configured() {
 			return nil, fmt.Errorf("project has sealed SMTP password but vault not configured")
 		}
-		plaintext, err := s.vault.OpenForTenant(ctx, schemaName, passwordBlob, nonce, derefInt16(passwordKeyVersion))
+		plaintext, err := s.vault.OpenForTenant(ctx, schemaName, passwordBlob, nonce, *passwordKeyVersion)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt SMTP password: %w", err)
 		}
@@ -236,16 +249,19 @@ func (s *SenderService) Upsert(ctx context.Context, projectID string, req Upsert
 		preservePassword = true
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin upsert: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	// Single-statement INSERT … ON CONFLICT … DO UPDATE is atomic in
+	// Postgres — no manual BEGIN/COMMIT needed. The all-or-nothing
+	// CHECK guarantees the sealed trio can't tear under concurrent
+	// edits. "Last writer wins" on the other fields is acceptable for
+	// a 2-admin race (a 409-with-retry shape isn't worth the round-
+	// trip; the console reloads on save so the second admin sees the
+	// merged state immediately).
+	var err error
 
 	if preservePassword {
 		// UPSERT keeping existing sealed columns. INSERT path writes
 		// NULL trio (no password) — the all-or-nothing CHECK is fine.
-		_, err = tx.Exec(ctx,
+		_, err = s.pool.Exec(ctx,
 			`INSERT INTO public.project_email_senders
 			 (project_id, host, port, username, from_email, from_name, encryption,
 			  verified_at, last_error, last_error_at)
@@ -263,7 +279,7 @@ func (s *SenderService) Upsert(ctx context.Context, projectID string, req Upsert
 			projectID, req.Host, req.Port, req.Username, req.FromEmail, req.FromName, string(req.Encryption),
 		)
 	} else {
-		_, err = tx.Exec(ctx,
+		_, err = s.pool.Exec(ctx,
 			`INSERT INTO public.project_email_senders
 			 (project_id, host, port, username, from_email, from_name, encryption,
 			  password_blob, password_nonce, password_key_version,
@@ -288,9 +304,6 @@ func (s *SenderService) Upsert(ctx context.Context, projectID string, req Upsert
 	}
 	if err != nil {
 		return nil, fmt.Errorf("upsert project email sender: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit upsert: %w", err)
 	}
 	return s.LoadConfig(ctx, projectID)
 }
@@ -319,10 +332,20 @@ func (s *SenderService) MarkVerified(ctx context.Context, projectID string) erro
 // MarkFailed records a test-send failure on the sender row. Surfaced
 // in the console so an operator can see exactly what the SMTP server
 // said without re-running the test.
+//
+// Crucially: a failed test does NOT reset verified_at. The contract is
+// "once verified, only a config change de-verifies" — a transient
+// provider blip during a manual test must not silently flip the
+// project back to the platform sender behind the operator's back. The
+// only de-verifiers are Upsert (config change → clears verified_at,
+// last_error, last_error_at) and Delete (full clear). A test failure
+// records the error so the operator sees it; the auth path keeps
+// using the last-known-good config until either a successful retry
+// or a config change.
 func (s *SenderService) MarkFailed(ctx context.Context, projectID string, errMsg string) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE public.project_email_senders
-		 SET last_error = $2, last_error_at = now(), verified_at = NULL
+		 SET last_error = $2, last_error_at = now()
 		 WHERE project_id = $1`, projectID, errMsg)
 	return err
 }
@@ -336,13 +359,6 @@ func (s *SenderService) schemaName(ctx context.Context, projectID string) (strin
 		return "", fmt.Errorf("resolve schema_name for project %s: %w", projectID, err)
 	}
 	return schemaName, nil
-}
-
-func derefInt16(p *int16) int16 {
-	if p == nil {
-		return 0
-	}
-	return *p
 }
 
 // validateUpsert is the shape-check for an incoming UpsertRequest.
@@ -391,6 +407,10 @@ func sovereigntyWarningFor(host string) string {
 		{"postmarkapp.com", "Postmark (US)"},
 		{"amazonaws.com", "Amazon SES (US)"},
 		{"sparkpostmail.com", "SparkPost (US)"},
+		// Cheap wins from #245 review — common US providers not in
+		// the original obvious-case list.
+		{"mandrillapp.com", "Mandrill (Mailchimp, US)"},
+		{"smtp.com", "SMTP.com (US)"},
 	}
 	for _, p := range usProviders {
 		if strings.HasSuffix(h, p.match) {

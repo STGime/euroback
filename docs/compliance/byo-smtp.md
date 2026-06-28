@@ -48,10 +48,14 @@ All routes are admin-only. Console UI: project Auth page → **SMTP** tab.
    link) start routing through the custom SMTP instead of the platform
    TEM client.
 5. If the test fails after a previous success, the auth path keeps
-   using the *last verified* config (`verified_at` is only reset on
-   config change, not on test failure) — so a transient provider
-   outage doesn't accidentally regress the project to the platform
-   sender.
+   using the *last verified* config — `verified_at` is reset only
+   by a config change (Upsert) or by Disconnect (Delete). A test
+   failure records `last_error` + `last_error_at` for the operator
+   to see, but does NOT silently flip the project back to the
+   platform sender. A transient provider blip during a manual test
+   would otherwise cause an invisible reputation switch on the
+   next signup, which is exactly what the verify-first flow is
+   supposed to prevent (see review #1 on PR #245).
 
 ## What routes through the custom SMTP
 
@@ -80,6 +84,13 @@ infra alerts, beta-allowlist invites) stays on the platform path.
 - `none` — plaintext, no upgrade. Surfaced in the UI with a "don't
   use this over the internet" advisory; useful only for an internal
   relay on a private network.
+
+> **Important:** Go's stdlib `smtp.PlainAuth` refuses to send
+> credentials over a plaintext connection (except to `localhost`).
+> So `encryption=none` + a non-empty username/password will fail at
+> auth time with a clear error from stdlib (`unencrypted connection`),
+> not silently leak the password on the wire. Use `none` only for an
+> internal relay that needs no auth (rare).
 
 ## Sealed-at-rest contract
 

@@ -25,10 +25,12 @@ package email
 //
 // Timeout
 // =======
-// 15s end-to-end (dial + auth + send + quit). Longer than the TEM
-// client's 10s because some upstream providers do greylist-style
-// delays on first contact; we don't want a healthy provider to fail
-// because we cut the connection at 10.
+// Two layers: the dialer's own connect timeout (10s) plus a
+// post-dial deadline of 15s applied to the connection for the rest
+// of the conversation (greeting + STARTTLS + auth + DATA + quit).
+// Total worst-case ~25s, but the post-dial budget starts fresh after
+// the connect — so a slow handshake from a healthy provider doesn't
+// blow up because the dial ate most of the budget (review #15).
 
 import (
 	"context"
@@ -40,9 +42,14 @@ import (
 	"time"
 )
 
-// customSMTPTimeout is the dial + handshake + send + quit budget. See
-// the package header for why it's longer than the TEM client.
-const customSMTPTimeout = 15 * time.Second
+// customSMTPDialTimeout caps the TCP dial. Separate from the
+// post-dial budget so a slow handshake doesn't get charged the dial
+// time (review #15).
+const customSMTPDialTimeout = 10 * time.Second
+
+// customSMTPPostDialBudget is the deadline applied to the conn after
+// it's open, covering greeting + STARTTLS + auth + DATA + quit.
+const customSMTPPostDialBudget = 15 * time.Second
 
 // sendViaCustomSMTP dials the configured provider, authenticates, and
 // sends a single HTML message. The sender's plaintext password must
@@ -57,7 +64,7 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 	}
 	addr := net.JoinHostPort(sender.Host, fmt.Sprintf("%d", sender.Port))
 
-	dialer := &net.Dialer{Timeout: customSMTPTimeout}
+	dialer := &net.Dialer{Timeout: customSMTPDialTimeout}
 
 	var (
 		conn net.Conn
@@ -77,9 +84,11 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 	}
 	defer conn.Close()
 
-	// Deadline covers the whole conversation.
-	deadline := time.Now().Add(customSMTPTimeout)
-	_ = conn.SetDeadline(deadline)
+	// Post-dial deadline covers greeting + STARTTLS + auth + DATA +
+	// quit. Computed AFTER the dial completes so a slow handshake
+	// from a healthy provider doesn't get clipped because the dial
+	// ate most of the budget.
+	_ = conn.SetDeadline(time.Now().Add(customSMTPPostDialBudget))
 
 	client, err := smtp.NewClient(conn, sender.Host)
 	if err != nil {
