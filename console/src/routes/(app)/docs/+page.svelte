@@ -22,7 +22,7 @@
 		{ id: 'cron', label: '14. Scheduled Jobs' },
 		{ id: 'edge-functions', label: '15. Edge Functions' },
 		{ id: 'logs', label: '16. Monitoring with Logs' },
-		{ id: 'compliance', label: '17. Compliance & Audit Log' },
+		{ id: 'compliance', label: '17. Compliance, Audit Log & DSAR' },
 		{ id: 'settings', label: '18. Project Settings' },
 		{ id: 'team', label: '19. Team Collaboration' },
 		{ id: 'cli', label: '20. CLI Tool' },
@@ -1787,20 +1787,27 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 			<div class="mt-6 text-right">
 				<button onclick={() => scrollTo('compliance')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
-					Next: Compliance &amp; Audit Log &rarr;
+					Next: Compliance, Audit Log &amp; DSAR &rarr;
 				</button>
 			</div>
 		</section>
 
 		<!-- ======================= 17. COMPLIANCE & AUDIT LOG ======================= -->
 		<section id="compliance" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">17. Compliance & Audit Log</h2>
-			<p class="text-sm italic text-gray-500 mb-4">Alex's client asks for proof that their data stays in the EU and a trail of who changed what.</p>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">17. Compliance, Audit Log &amp; DSAR</h2>
+			<p class="text-sm italic text-gray-500 mb-4">Alex's client asks for proof that their data stays in the EU and a trail of who changed what — and a user emails LexVault asking "what do you have on me?" Both answered without leaving the console.</p>
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The Compliance page has three tabs: <strong>DPA Report</strong>, <strong>Audit Log</strong>, and <strong>Data Export</strong>. Together they give you the documentation, evidence, and DSAR tooling you need for GDPR compliance reviews, security audits, and customer due diligence.
+					The Compliance page has three tabs: <strong>DPA Report</strong>, <strong>Audit Log</strong>, and <strong>Data Export</strong>. Together they cover the three things a GDPR auditor (or your customer's legal team) actually asks for: the Article 30 records-of-processing report, the tamper-evident trail of who changed what, and one-click <strong>DSAR</strong> exports for both the "tell me everything about me" (Article 15) and the "give me my data so I can leave" (Article 20) shapes.
 				</p>
+
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50 px-4 py-3">
+					<p class="text-xs font-semibold text-eurobase-900 mb-1">What is a DSAR?</p>
+					<p class="text-xs text-eurobase-900 leading-relaxed">
+						A <strong>Data Subject Access Request</strong> is the legal mechanism a user or a regulator uses to ask "what personal data do you hold on me?" (Article 15) or "give me my data in a portable format so I can move to a competitor" (Article 20). The controller (you) has a 30-day deadline to comply. Most teams build the export pipeline ad-hoc the first time one lands &mdash; Eurobase ships it as a one-click console flow + an API endpoint so you don't write the SQL each time.
+					</p>
+				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900">DPA Report</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
@@ -1835,9 +1842,9 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 					</p>
 				</div>
 
-				<h3 class="text-lg font-semibold text-gray-900 mt-6">Data Export (DSAR)</h3>
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Data Export &mdash; one-click DSAR</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The Data Export tab handles the two GDPR Data Subject Access Request shapes auditors and end-users actually ask for. Both run in the background and produce a downloadable zip; the download link expires after 7 days, and all the bytes stay on EU infrastructure (Scaleway fr-par) the whole way.
+					The Data Export tab handles both DSAR shapes regulators and end-users actually ask for: Article 15 (single user, "tell me everything you have on me") and Article 20 (full project, "give me the data so I can leave"). Both run in the background and produce a downloadable zip; the download link expires after 7 days, and all the bytes stay on EU infrastructure (Scaleway fr-par) the whole way. Nothing to wire up, no SQL to write &mdash; the deadline is statutory, the tooling shouldn't be the bottleneck.
 				</p>
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-3">Full Project Export &mdash; Article 20 (data portability)</h4>
