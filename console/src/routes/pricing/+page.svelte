@@ -70,9 +70,15 @@
 		{ category: 'Sovereignty & compliance' },
 		{ label: 'EU-hosted infrastructure (Scaleway, France)', free: true, pro: true },
 		{ label: 'GDPR by design', free: true, pro: true },
-		{ label: 'DPA report (PDF)', free: true, pro: true },
-		{ label: 'DSAR self-serve user export', free: true, pro: true },
+		{ label: 'DPA report (Article 30)', free: true, pro: true },
 		{ label: 'Audit log', free: true, pro: true },
+		// DSAR is the differentiator: the API is open to everyone (legal-
+		// obligation respect — a free-tier tenant on a statutory 30-day
+		// deadline must still be able to comply by scripting their own
+		// export). The one-click console flow is Pro: that's what saves
+		// the customer a day per request and is the actual upsell story.
+		{ label: 'DSAR API (Article 15 + 20 export endpoints)', free: 'API', pro: 'API' },
+		{ label: 'DSAR console — one-click export', free: false, pro: true },
 	]);
 </script>
 
@@ -142,6 +148,7 @@
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.edge_function_limit ?? 25} edge functions, unlimited cron &amp; webhooks</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.log_retention_days ?? 30}-day log retention, custom email templates</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>EU-hosted, GDPR-by-design</span></li>
+					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span><strong>One-click DSAR exports</strong> (Article 15 + 20) — audit-trailed, EU-only</span></li>
 				</ul>
 			</div>
 		</div>
@@ -197,7 +204,7 @@
 	<section class="border-t border-gray-200 bg-white">
 		<div class="mx-auto max-w-5xl px-6 py-12 text-center">
 			<h2 class="text-2xl font-semibold text-gray-900">Made in Berlin. Hosted in France.</h2>
-			<p class="mt-3 text-sm text-gray-600 max-w-2xl mx-auto">All Eurobase data lives in EU jurisdiction (Scaleway, France). GDPR by design — DPA report, sub-processor list, and DSAR self-serve user export are built in. <a href="/docs" class="text-eurobase-600 hover:text-eurobase-700 underline">Read the docs</a>.</p>
+			<p class="mt-3 text-sm text-gray-600 max-w-2xl mx-auto">All Eurobase data lives in EU jurisdiction (Scaleway, France). GDPR by design — DPA report (Article 30), sub-processor list, audit log, and DSAR exports (Article 15 + 20) are built in. <a href="/docs#compliance" class="text-eurobase-600 hover:text-eurobase-700 underline">Read the docs</a>.</p>
 			<div class="mt-6 flex items-center justify-center gap-4 text-sm">
 				<a href="https://bsky.app/profile/eurobasebaas.bsky.social" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-gray-600 hover:text-eurobase-700 transition-colors">
 					<svg class="h-4 w-4" viewBox="0 0 600 530" fill="currentColor" aria-hidden="true">
