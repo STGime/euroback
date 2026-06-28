@@ -1847,7 +1847,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-3">Single-User Export &mdash; Article 15 (subject access request)</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Search by email or paste a user UUID; the export contains only that user's auth record and every row in your tenant tables that references their <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">user_id</code>. Rate-limited to one export per user per 24 hours so a runaway script (or a hostile actor with a leaked admin token) can't exfil the user table one row at a time.
+					Search by email or paste a user UUID; the export contains only that user's auth record and every row in your tenant tables that references their <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">user_id</code>. Rate-limited to one export per <em>data subject</em> per 24 hours (so any admin calling for that user is gated by the same window) &mdash; this stops a runaway script or a hostile actor with a leaked admin token from exfiltrating the user table one row at a time.
 				</p>
 
 				<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 mt-3">
