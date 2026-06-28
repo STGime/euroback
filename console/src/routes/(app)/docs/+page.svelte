@@ -1799,7 +1799,7 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The Compliance page has two tabs: <strong>DPA Report</strong> and <strong>Audit Log</strong>. Together they give you the documentation you need for GDPR compliance reviews, security audits, and customer due diligence.
+					The Compliance page has three tabs: <strong>DPA Report</strong>, <strong>Audit Log</strong>, and <strong>Data Export</strong>. Together they give you the documentation, evidence, and DSAR tooling you need for GDPR compliance reviews, security audits, and customer due diligence.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900">DPA Report</h3>
@@ -1832,6 +1832,28 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 					</svg>
 					<p class="text-sm text-blue-800">
 						Audit log entries cannot be edited or deleted. They are append-only and stored in the platform database, separate from your project's tenant schema.
+					</p>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Data Export (DSAR)</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The Data Export tab handles the two GDPR Data Subject Access Request shapes auditors and end-users actually ask for. Both run in the background and produce a downloadable zip; the download link expires after 7 days, and all the bytes stay on EU infrastructure (Scaleway fr-par) the whole way.
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-3">Full Project Export &mdash; Article 20 (data portability)</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Exports every row of every table in your tenant schema, plus the auth user records, storage object manifest, and audit log, as a single zip. Pick <strong>JSON</strong> for round-trippable structure or <strong>CSV</strong> for spreadsheets. Use this when a customer hands you "we're leaving, give us our data" or when a regulator asks for a full snapshot.
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-3">Single-User Export &mdash; Article 15 (subject access request)</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Search by email or paste a user UUID; the export contains only that user's auth record and every row in your tenant tables that references their <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">user_id</code>. Rate-limited to one export per user per 24 hours so a runaway script (or a hostile actor with a leaked admin token) can't exfil the user table one row at a time.
+				</p>
+
+				<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 mt-3">
+					<p class="text-xs font-semibold text-gray-700 mb-1.5">What the audit log records</p>
+					<p class="text-xs text-gray-600 leading-relaxed">
+						Every export request, completion, and failure is recorded in the Audit Log with the actor's email + IP. So the trail of who exported what, when, and why is always there for the next compliance review &mdash; even after the export bytes themselves expire.
 					</p>
 				</div>
 			</div>
