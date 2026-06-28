@@ -8,6 +8,27 @@
 	// Tab state
 	let activeTab = $state<'dpa' | 'audit' | 'export'>('dpa');
 
+	// #251 soft-gate state. The Data Export tab is rendered for
+	// every tier (so a free-tier admin can still see the value),
+	// but its body switches to an "Upgrade to Pro" card when
+	// dsar_console_ui is false. The API endpoints stay callable
+	// regardless — DSAR is a legal obligation, gating the API
+	// would mean "pay to comply with the law" for a free tier on
+	// a statutory deadline. See docs/compliance/dsar-soft-gate.md.
+	let dsarConsoleEnabled = $state(true);
+	async function loadDsarGate() {
+		try {
+			const usage = await api.getUsage(projectId);
+			dsarConsoleEnabled = usage.limits?.dsar_console_ui ?? true;
+		} catch {
+			// If the limits lookup fails for any reason, fail OPEN —
+			// better to show the tab than block a paying customer
+			// from running an export because the plan endpoint is
+			// flaky. The API endpoints are the source of truth.
+			dsarConsoleEnabled = true;
+		}
+	}
+
 	// DPA Report
 	let report: DPAReport | null = $state(null);
 	let loading = $state(true);
@@ -24,6 +45,7 @@
 
 	onMount(() => {
 		loadReport();
+		loadDsarGate();
 		// Stop the export poll loop when the page unmounts.
 		return () => {
 			if (pollTimer !== null) {
@@ -642,6 +664,50 @@
 {/if}
 
 {#if activeTab === 'export'}
+{#if !dsarConsoleEnabled}
+	<!--
+		Soft-gate (#251). Free-tier projects see this card instead of
+		the export controls. The DSAR API endpoints stay public — a
+		determined free-tier admin can still meet the statutory
+		deadline by scripting their own export against the docs. The
+		console flow is the upsell.
+	-->
+	<div class="rounded-lg border-2 border-eurobase-200 bg-eurobase-50/30 p-6 space-y-4">
+		<div class="flex items-start gap-3">
+			<svg class="h-6 w-6 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z" />
+			</svg>
+			<div class="flex-1">
+				<h2 class="text-lg font-semibold text-gray-900">One-click DSAR exports — Pro</h2>
+				<p class="mt-1 text-sm text-gray-600 leading-relaxed">
+					When a user emails "what do you have on me?" (Article 15) or a customer leaves and asks for their data (Article 20), Pro turns the answer into one click. Audit-trailed, EU-only, no SQL to write each time.
+				</p>
+			</div>
+		</div>
+
+		<ul class="text-sm text-gray-700 space-y-1.5 ml-9">
+			<li class="flex gap-2"><span class="text-eurobase-600">✓</span><span>Full project export (Article 20) — every table, JSON or CSV, one zip</span></li>
+			<li class="flex gap-2"><span class="text-eurobase-600">✓</span><span>Single-user export (Article 15) — search by email, exports only their rows</span></li>
+			<li class="flex gap-2"><span class="text-eurobase-600">✓</span><span>Every request + completion + failure recorded in your Audit Log</span></li>
+			<li class="flex gap-2"><span class="text-eurobase-600">✓</span><span>All bytes stay on Scaleway fr-par — zero CLOUD Act exposure</span></li>
+		</ul>
+
+		<div class="flex items-center gap-3 pt-2">
+			<a
+				href="/pricing"
+				class="cursor-pointer inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
+			>
+				Upgrade to Pro
+				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" /></svg>
+			</a>
+			<a href="/docs#compliance" class="text-sm text-eurobase-700 hover:text-eurobase-800 underline">Or use the API on Free</a>
+		</div>
+
+		<p class="text-[11px] text-gray-500 mt-2 ml-9">
+			On the Free tier, the DSAR API endpoints (<code class="rounded bg-white border border-gray-200 px-1.5 py-0.5 font-mono text-[10px]">POST /platform/projects/{'{'}id{'}'}/compliance/exports</code>) stay callable — Eurobase will not gate a legal obligation behind a paywall. Pro saves you from writing the script.
+		</p>
+	</div>
+{:else}
 	<div class="space-y-6">
 		<div class="flex items-center justify-between">
 			<div>
@@ -826,5 +892,6 @@
 			{/if}
 		</div>
 	</div>
+{/if}
 {/if}
 </div>

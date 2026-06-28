@@ -65,7 +65,8 @@ func HandleGetPlans(svc *LimitsService) http.HandlerFunc {
 		rows, err := svc.pool.Query(r.Context(),
 			`SELECT plan, db_size_mb, storage_mb, bandwidth_mb, mau_limit,
 			        rate_limit_rps, ws_connections, upload_size_mb, webhook_limit,
-			        project_limit, log_retention_days, custom_templates, edge_function_limit
+			        project_limit, log_retention_days, custom_templates, edge_function_limit,
+			        dsar_console_ui
 			 FROM plan_limits ORDER BY plan`)
 		if err != nil {
 			slog.Error("get plans: query failed", "error", err)
@@ -81,6 +82,7 @@ func HandleGetPlans(svc *LimitsService) http.HandlerFunc {
 				&l.Plan, &l.DBSizeMB, &l.StorageMB, &l.BandwidthMB, &l.MAULimit,
 				&l.RateLimitRPS, &l.WSConnections, &l.UploadSizeMB, &l.WebhookLimit,
 				&l.ProjectLimit, &l.LogRetentionDays, &l.CustomTemplates, &l.EdgeFunctionLimit,
+				&l.DSARConsoleUI,
 			); err != nil {
 				slog.Error("get plans: scan failed", "error", err)
 				jsonError(w, "internal server error", http.StatusInternalServerError)
