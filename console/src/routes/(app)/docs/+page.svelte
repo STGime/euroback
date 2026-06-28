@@ -12,22 +12,24 @@
 		{ id: 'database', label: '4. Building the Database' },
 		{ id: 'storage', label: '5. File Storage' },
 		{ id: 'auth', label: '6. Authentication Setup' },
-		{ id: 'users', label: '7. Managing End Users' },
-		{ id: 'api', label: '8. Exploring the API' },
-		{ id: 'webhooks', label: '9. Webhooks' },
-		{ id: 'rls', label: '10. Row-Level Security' },
-		{ id: 'vault', label: '11. Vault (Secrets)' },
-		{ id: 'cron', label: '12. Scheduled Jobs' },
-		{ id: 'edge-functions', label: '13. Edge Functions' },
-		{ id: 'logs', label: '14. Monitoring with Logs' },
-		{ id: 'compliance', label: '15. Compliance & Audit Log' },
-		{ id: 'settings', label: '16. Project Settings' },
-		{ id: 'team', label: '17. Team Collaboration' },
-		{ id: 'cli', label: '18. CLI Tool' },
-		{ id: 'migrations', label: '19. Schema Migrations' },
-		{ id: 'connect', label: '20. Connecting Your IDE' },
-		{ id: 'mcp', label: '21. MCP Server' },
-		{ id: 'account', label: '22. Your Account' },
+		{ id: 'rate-limits', label: '7. Rate Limits' },
+		{ id: 'custom-smtp', label: '8. Custom SMTP' },
+		{ id: 'users', label: '9. Managing End Users' },
+		{ id: 'api', label: '10. Exploring the API' },
+		{ id: 'webhooks', label: '11. Webhooks' },
+		{ id: 'rls', label: '12. Row-Level Security' },
+		{ id: 'vault', label: '13. Vault (Secrets)' },
+		{ id: 'cron', label: '14. Scheduled Jobs' },
+		{ id: 'edge-functions', label: '15. Edge Functions' },
+		{ id: 'logs', label: '16. Monitoring with Logs' },
+		{ id: 'compliance', label: '17. Compliance & Audit Log' },
+		{ id: 'settings', label: '18. Project Settings' },
+		{ id: 'team', label: '19. Team Collaboration' },
+		{ id: 'cli', label: '20. CLI Tool' },
+		{ id: 'migrations', label: '21. Schema Migrations' },
+		{ id: 'connect', label: '22. Connecting Your IDE' },
+		{ id: 'mcp', label: '23. MCP Server' },
+		{ id: 'account', label: '24. Your Account' },
 		{ id: 'next', label: "What's Next" }
 	];
 
@@ -762,15 +764,205 @@ const {'{'} data, error {'}'} = await eb.auth.handleOAuthCallback()
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('users')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
-					Next: Managing End Users &rarr;
+				<button onclick={() => scrollTo('rate-limits')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Rate Limits &rarr;
 				</button>
 			</div>
 		</section>
 
-		<!-- ======================= 7. MANAGING END USERS ======================= -->
+		<!-- ======================= 7. RATE LIMITS ======================= -->
+		<section id="rate-limits" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">7. Rate Limits</h2>
+			<p class="text-sm italic text-gray-500 mb-4">LexVault is about to launch publicly. Alex wants safeguards so a runaway script can't burn through the project's email budget or hammer the auth endpoints.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Rate limits cap the volume of auth-related requests your project will accept per time window. They protect against credential stuffing, runaway scripts, and accidental self-DoS &mdash; without you having to write any middleware.
+				</p>
+
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Every Eurobase project gets a sane platform-wide default. You only need to touch this page if you want to tighten or loosen a specific knob.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900">Where to find it</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					In the console: <strong>Auth &rarr; Rate Limits</strong> tab. The page mirrors the same five knobs Supabase users will recognise, plus an "IP Address Forwarding" toggle for projects behind a CDN.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">The six knobs</h3>
+				<ul class="text-sm text-gray-700 space-y-2 ml-4 list-disc">
+					<li>
+						<strong>Signup / sign-in rate</strong> &mdash; how many <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/signup</code> + <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/signin</code> requests per 5-minute window per IP. <span class="text-gray-500">Default: 8 per 5 min.</span>
+					</li>
+					<li>
+						<strong>Token refresh rate</strong> &mdash; how many <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/refresh</code> calls per 5 min per IP. Higher than the others because legitimate SDK clients refresh proactively. <span class="text-gray-500">Default: 150 per 5 min (~ 1800/hour).</span>
+					</li>
+					<li>
+						<strong>Token verification rate</strong> &mdash; how many OTP / magic-link verify calls per 5 min per IP. <span class="text-gray-500">Default: 30 per 5 min.</span>
+					</li>
+					<li>
+						<strong>Emails per hour</strong> &mdash; cap on outbound auth emails (verification, password reset, magic link) the project sends through the platform sender per rolling hour. <span class="text-gray-500">Default: 2/hour.</span> When you bring your own SMTP (next chapter), sends through your provider are not counted against this cap.
+					</li>
+					<li>
+						<strong>SMS per hour</strong> &mdash; cap on outbound auth SMS (phone OTP) per rolling hour. <span class="text-gray-500">Default: 30/hour.</span>
+					</li>
+					<li>
+						<strong>IP Address Forwarding (Trust Proxy)</strong> &mdash; when on, the rate limiter uses the leftmost <code class="bg-gray-100 border border-gray-200 rounded px-1">X-Forwarded-For</code> entry as the client IP instead of the TCP peer. Turn this on if your app sits behind a CDN or reverse proxy that you control; leave it off otherwise. <span class="text-gray-500">Default: off.</span>
+					</li>
+				</ul>
+
+				<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+					<p class="text-xs font-semibold text-gray-700 mb-1.5">Zero means default, not zero</p>
+					<p class="text-xs text-gray-600 leading-relaxed">
+						Saving an empty input or a literal <code class="bg-white border border-gray-200 rounded px-1">0</code> resets that knob to the platform default. The form is designed so you can't accidentally lock yourself out by typing <code class="bg-white border border-gray-200 rounded px-1">0</code> in "emails per hour" and then waiting a week wondering why signups aren't arriving.
+					</p>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Setting them up</h3>
+				<ol class="text-sm text-gray-700 space-y-2 ml-4 list-decimal">
+					<li>Open <strong>Auth &rarr; Rate Limits</strong>.</li>
+					<li>For each knob, leave blank to keep the platform default, or enter your value. The placeholder text shows what the default is.</li>
+					<li>(Optional) Toggle <strong>IP Address Forwarding</strong> if your app is behind a CDN/proxy. Only do this if you know your edge stack rewrites <code class="bg-gray-100 border border-gray-200 rounded px-1">X-Forwarded-For</code> &mdash; otherwise an attacker can spoof the IP and dodge the limit.</li>
+					<li>Hit <strong>Save changes</strong>. The new limits apply within a few seconds &mdash; no redeploy needed.</li>
+				</ol>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">What an over-quota response looks like</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					When a project exceeds a per-IP rate, the SDK receives <strong>HTTP 429 Too Many Requests</strong> with a <code class="bg-gray-100 border border-gray-200 rounded px-1">Retry-After</code> header naming the number of seconds the client should wait. Your app can surface a friendly message; the limit window slides, so retrying after the indicated delay succeeds.
+				</p>
+
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-3">
+					<button
+						onclick={() => copyCode("// SDK example: handle 429 cleanly\ntry {\n  await eb.auth.signIn({ email, password })\n} catch (err) {\n  if (err.status === 429) {\n    const retryAfter = parseInt(err.headers['retry-after'] || '60', 10)\n    showToast(`Too many attempts. Try again in ${retryAfter}s.`)\n    return\n  }\n  throw err\n}", 'sdk-429')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'sdk-429' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>// SDK example: handle 429 cleanly
+try {'{'}
+  await eb.auth.signIn({'{'} email, password {'}'})
+{'}'} catch (err) {'{'}
+  if (err.status === 429) {'{'}
+    const retryAfter = parseInt(err.headers['retry-after'] || '60', 10)
+    showToast(`Too many attempts. Try again in $&#123;retryAfter&#125;s.`)
+    return
+  {'}'}
+  throw err
+{'}'}</pre>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Tuning guidance</h3>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Just launched, small audience.</strong> Leave the defaults &mdash; they're set for a project receiving up to a few thousand signups/day.</li>
+					<li><strong>Growing fast, lots of token refreshes.</strong> Raise the token-refresh knob if you see legitimate 429s. The default (~1800/hour/IP) handles most SDK clients, but if your app refreshes more aggressively, double or triple it.</li>
+					<li><strong>Phone-first product (SMS OTP).</strong> Raise SMS/hour to your provider quota. The default is conservative so an accidental script doesn't bleed your GatewayAPI budget.</li>
+					<li><strong>Outgrowing the platform email cap.</strong> See the next chapter (Custom SMTP) &mdash; bringing your own SMTP provider removes the platform "emails per hour" cap entirely for sends through your provider.</li>
+				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">What rate limits don't do</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					These knobs only cap <strong>auth-flow</strong> traffic. They do not gate your SDK reads/writes against the database or storage &mdash; those are governed by your plan's request budget (Settings &rarr; Usage). For application-level rate limiting on your own endpoints, build it into your edge functions or your app middleware.
+				</p>
+
+				<div class="mt-6 text-right">
+					<button onclick={() => scrollTo('custom-smtp')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+						Next: Custom SMTP &rarr;
+					</button>
+				</div>
+			</div>
+		</section>
+
+		<!-- ======================= 8. CUSTOM SMTP ======================= -->
+		<section id="custom-smtp" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">8. Custom SMTP</h2>
+			<p class="text-sm italic text-gray-500 mb-4">LexVault grows past the platform email cap. Alex's signups start hitting the 2-emails-per-hour ceiling. He plugs in the firm's own SMTP provider and the ceiling disappears.</p>
+
+			<div class="space-y-4">
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Every Eurobase project starts on the shared platform email sender (Scaleway TEM, EU-sovereign, but capped per project). When you outgrow that cap, or want emails to come from your own domain with your own sender reputation, you can bring your own SMTP provider.
+				</p>
+
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Once configured and verified, all auth emails for your project (verification, password reset, magic link) route through your SMTP instead of the platform sender. The platform "emails per hour" cap no longer applies to your sends &mdash; you're now bounded by your provider's own limits.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900">Where to find it</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					In the console: <strong>Auth &rarr; SMTP</strong> tab. Only project admins can configure this &mdash; members with the "developer" or "viewer" role can't see the credentials.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">What you'll need from your provider</h3>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Host</strong> &mdash; the SMTP server hostname (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp-relay.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">in.mailjet.com</code>).</li>
+					<li><strong>Port</strong> &mdash; usually 587 (STARTTLS) or 465 (TLS). Check your provider's docs.</li>
+					<li><strong>Username + Password</strong> &mdash; the SMTP credentials from your provider. Often the username is an API key identifier and the "password" is the secret half.</li>
+					<li><strong>From address</strong> &mdash; the email address auth messages will come from (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">noreply@yourdomain.com</code>). Must be a domain you've verified with your provider.</li>
+					<li><strong>From name</strong> &mdash; optional display name (e.g. "LexVault").</li>
+					<li><strong>Encryption</strong> &mdash; pick STARTTLS for port 587 (most common), TLS for port 465, or None only for an internal relay on a private network.</li>
+				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Setting it up</h3>
+				<ol class="text-sm text-gray-700 space-y-2 ml-4 list-decimal">
+					<li>Open <strong>Auth &rarr; SMTP</strong>.</li>
+					<li>Fill in the form with the details above. Hit <strong>Save</strong>. The password is encrypted at rest with your project's per-tenant key &mdash; we never store or transmit it in plaintext after this point, and the API never returns it.</li>
+					<li>You'll see an amber <strong>Not verified</strong> badge. Until you verify by sending a test, the project keeps using the platform sender. This is intentional &mdash; we'd rather fail loudly at setup than silently at first signup.</li>
+					<li>Type an address you can check (your own works) into <strong>Send test</strong>, hit the button. Within seconds you should receive a small "your custom SMTP is wired up correctly" message.</li>
+					<li>The badge flips to a green <strong>Verified</strong>. From this point onward your project's auth emails route through your provider.</li>
+				</ol>
+
+				<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 flex gap-3">
+					<svg class="h-5 w-5 text-emerald-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+					</svg>
+					<p class="text-sm text-emerald-800">
+						<strong>Edit without retyping.</strong> When you change a non-secret field (host, port, from address, ...) you can leave the password blank to keep the saved one. The placeholder switches to &bullet;&bullet;&bullet;&bullet; so you know there's a stored password being preserved.
+					</p>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">If the test fails</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The console shows the exact error your provider returned &mdash; auth failed, TLS failed, recipient rejected, etc. Fix the config and re-test.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<strong>If you were already verified and a test starts failing,</strong> the project keeps using the last-known-good config until either a successful retest or a config change. A transient blip from your provider doesn't silently regress your project to the platform sender behind your back.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Sovereignty advisory</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Eurobase itself runs entirely on EU-sovereign infrastructure (Scaleway, France). If you configure a US-based SMTP provider (SendGrid, Mailgun, Postmark, Amazon SES, Mandrill, SparkPost, SMTP.com), the console shows an amber advisory: your auth email content will leave the EU jurisdiction even though the rest of your project doesn't.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					This is your call &mdash; it's not a block. EU-based alternatives worth knowing: Scaleway TEM, Brevo (FR), Mailjet (EU), Mailtrap EU.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">What stays on the platform sender</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Custom SMTP routes <strong>your project's auth emails</strong> (verification, password reset, magic link). It does not route:
+				</p>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc mt-2">
+					<li>Console password resets to <strong>you</strong> (the Eurobase account owner) &mdash; those are platform-level and always come from us.</li>
+					<li>Broadcast emails sent via the superadmin announcement tool.</li>
+				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Everything that represents <em>your tenant</em> goes through your sender; everything that represents <em>us</em> stays on the platform sender. The rule is simple and the routing is automatic &mdash; you don't need to do anything special.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Disconnecting</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Hit <strong>Disconnect</strong> at any time to fall back to the platform sender. The sealed password is wiped from our database. You can re-add later with fresh credentials.
+				</p>
+
+				<div class="mt-6 text-right">
+					<button onclick={() => scrollTo('users')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+						Next: Managing End Users &rarr;
+					</button>
+				</div>
+			</div>
+		</section>
+
+		<!-- ======================= 9. MANAGING END USERS ======================= -->
 		<section id="users" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">7. Managing End Users</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">9. Managing End Users</h2>
 			<p class="text-sm italic text-gray-500 mb-4">A law firm onboards new employees. Alex needs to manage their accounts.</p>
 
 			<div class="space-y-4">
@@ -813,9 +1005,9 @@ const {'{'} data, error {'}'} = await eb.auth.handleOAuthCallback()
 			</div>
 		</section>
 
-		<!-- ======================= 8. EXPLORING THE API ======================= -->
+		<!-- ======================= 10. EXPLORING THE API ======================= -->
 		<section id="api" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">8. Exploring the API</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">10. Exploring the API</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to see every API endpoint available for the LexVault tables.</p>
 
 			<div class="space-y-4">
@@ -869,9 +1061,9 @@ curl -X DELETE https://lexvault.eurobase.app/api/v1/db/clients?eq.id=some-uuid \
 			</div>
 		</section>
 
-		<!-- ======================= 9. WEBHOOKS ======================= -->
+		<!-- ======================= 11. WEBHOOKS ======================= -->
 		<section id="webhooks" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">9. Webhooks</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">11. Webhooks</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants LexVault to be notified whenever a new client record is created.</p>
 
 			<div class="space-y-4">
@@ -955,9 +1147,9 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 			</div>
 		</section>
 
-		<!-- ======================= 10. ROW-LEVEL SECURITY ======================= -->
+		<!-- ======================= 12. ROW-LEVEL SECURITY ======================= -->
 		<section id="rls" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">10. Row-Level Security (RLS)</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Row-Level Security (RLS)</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs each law firm employee to only see their own cases.</p>
 
 			<div class="space-y-4">
@@ -1114,9 +1306,9 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 			</div>
 		</section>
 
-		<!-- ======================= 11. VAULT ======================= -->
+		<!-- ======================= 13. VAULT ======================= -->
 		<section id="vault" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">11. Vault (Encrypted Secrets)</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Vault (Encrypted Secrets)</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to store API keys for Mollie payments and Twilio SMS securely.</p>
 
 			<div class="space-y-4">
@@ -1204,9 +1396,9 @@ await eb.vault.delete('old_key')</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 12. SCHEDULED JOBS ======================= -->
+		<!-- ======================= 14. SCHEDULED JOBS ======================= -->
 		<section id="cron" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Scheduled Jobs</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Scheduled Jobs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to clean up expired sessions and send weekly reports automatically.</p>
 
 			<div class="space-y-4">
@@ -1379,9 +1571,9 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 13. EDGE FUNCTIONS ======================= -->
+		<!-- ======================= 15. EDGE FUNCTIONS ======================= -->
 		<section id="edge-functions" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">13. Edge Functions</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">15. Edge Functions</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to process a payment webhook and update an order — this requires custom server-side logic beyond SQL.</p>
 
 			<div class="space-y-4">
@@ -1560,9 +1752,9 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 14. MONITORING WITH LOGS ======================= -->
+		<!-- ======================= 16. MONITORING WITH LOGS ======================= -->
 		<section id="logs" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Monitoring with Logs</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">16. Monitoring with Logs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex notices slow responses and wants to investigate API traffic.</p>
 
 			<div class="space-y-4">
@@ -1600,9 +1792,9 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 15. COMPLIANCE & AUDIT LOG ======================= -->
+		<!-- ======================= 17. COMPLIANCE & AUDIT LOG ======================= -->
 		<section id="compliance" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">15. Compliance & Audit Log</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">17. Compliance & Audit Log</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex's client asks for proof that their data stays in the EU and a trail of who changed what.</p>
 
 			<div class="space-y-4">
@@ -1651,9 +1843,9 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 16. PROJECT SETTINGS ======================= -->
+		<!-- ======================= 18. PROJECT SETTINGS ======================= -->
 		<section id="settings" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">16. Project Settings</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">18. Project Settings</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to rotate an API key after an intern accidentally committed it.</p>
 
 			<div class="space-y-4">
@@ -1689,9 +1881,9 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 17. TEAM COLLABORATION ======================= -->
+		<!-- ======================= 19. TEAM COLLABORATION ======================= -->
 		<section id="team" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">17. Team Collaboration</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">19. Team Collaboration</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to give a colleague access to the project without sharing API keys.</p>
 
 			<div class="space-y-4">
@@ -1744,9 +1936,9 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 		</section>
 
-		<!-- ======================= 18. CLI TOOL ======================= -->
+		<!-- ======================= 20. CLI TOOL ======================= -->
 		<section id="cli" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">18. CLI Tool</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">20. CLI Tool</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to manage projects, run queries, and test RLS policies from the terminal.</p>
 
 			<div class="space-y-4">
@@ -1912,9 +2104,9 @@ ROLLBACK;</pre>
 		</section>
 
 
-		<!-- ======================= 19. SCHEMA MIGRATIONS ======================= -->
+		<!-- ======================= 21. SCHEMA MIGRATIONS ======================= -->
 		<section id="migrations" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">19. Schema Migrations</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">21. Schema Migrations</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants schema changes that are versioned, reviewable, and repeatable across environments.</p>
 
 			<div class="space-y-4">
@@ -1999,9 +2191,9 @@ CREATE POLICY listings_owner ON listings
 			</div>
 		</section>
 
-		<!-- ======================= 16. CONNECTING YOUR IDE ======================= -->
+		<!-- ======================= 22. CONNECTING YOUR IDE ======================= -->
 		<section id="connect" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">20. Connecting Your IDE</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">22. Connecting Your IDE</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI coding assistant to understand the LexVault schema.</p>
 
 			<div class="space-y-4">
@@ -2056,14 +2248,14 @@ CREATE POLICY listings_owner ON listings
 			</div>
 		</section>
 
-		<!-- ======================= 20. MCP SERVER ======================= -->
+		<!-- ======================= 23. MCP SERVER ======================= -->
 		<section id="mcp" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">21. MCP Server</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">23. MCP Server</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI assistant to actually <em>do things</em> in LexVault &mdash; list users, run a SELECT, rotate a Vault secret &mdash; not just read schema docs.</p>
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The configs in <button onclick={() => scrollTo('connect')} class="text-eurobase-600 hover:underline cursor-pointer">section 19</button> teach an AI assistant <em>about</em> your project. The MCP server lets it <em>operate</em> on your project. Eurobase ships a hosted <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Model Context Protocol</a> server at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">https://mcp.eurobase.app/mcp</code> that exposes the platform API as tool calls.
+					The configs in <button onclick={() => scrollTo('connect')} class="text-eurobase-600 hover:underline cursor-pointer">section 22</button> teach an AI assistant <em>about</em> your project. The MCP server lets it <em>operate</em> on your project. Eurobase ships a hosted <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Model Context Protocol</a> server at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">https://mcp.eurobase.app/mcp</code> that exposes the platform API as tool calls.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900">What it can do</h3>
@@ -2125,9 +2317,9 @@ claude mcp add --transport http eurobase https://mcp.eurobase.app/mcp \
 			</div>
 		</section>
 
-		<!-- ======================= 21. YOUR ACCOUNT ======================= -->
+		<!-- ======================= 24. YOUR ACCOUNT ======================= -->
 		<section id="account" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">22. Your Account</h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">24. Your Account</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
 
 			<div class="space-y-4">
