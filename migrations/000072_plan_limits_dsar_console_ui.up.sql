@@ -16,6 +16,25 @@
 --   free → false (API only; build your own export pipeline)
 --   pro  → true  (one-click flow)
 --
+-- ── ROLLOUT CAVEAT (from #255 review) ──
+-- The gateway's plans.LimitsService caches *PlanLimits values for
+-- process lifetime, keyed by plan name. A gateway pod that warmed
+-- the "pro" cache entry BEFORE this migration ran will keep
+-- returning a struct whose DSARConsoleUI is the Go zero-value
+-- (false) — because the previous SELECT didn't include the new
+-- column. Result: Pro tenants see the upgrade card until the pod
+-- restarts.
+--
+-- Normal CI flow is safe: the migrate Job runs immediately before
+-- the gateway Deployment rolls, so the cache is cycled on the
+-- same change. **The danger window is a migration-only roll**
+-- (a manual `migrate up` or a hotfix that touches only the
+-- migrations dir). In that case: `kubectl rollout restart
+-- deploy/gateway` after applying this migration. The same caveat
+-- applies to every plan_limits schema change going back to 000026;
+-- this one just happens to gate a customer-visible feature.
+-- See docs/compliance/dsar-soft-gate.md for the full runbook.
+--
 -- No explicit BEGIN/COMMIT: golang-migrate wraps each .up.sql in its own tx.
 
 ALTER TABLE public.plan_limits

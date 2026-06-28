@@ -15,16 +15,25 @@
 	// regardless — DSAR is a legal obligation, gating the API
 	// would mean "pay to comply with the law" for a free tier on
 	// a statutory deadline. See docs/compliance/dsar-soft-gate.md.
-	let dsarConsoleEnabled = $state(true);
+	//
+	// Initialised to `null` (review #255 low-item): if we defaulted
+	// to `true`, a free-tier user who taps "Data Export" before
+	// loadDsarGate resolves would briefly see the export controls
+	// flash through — effectively previewing the gated feature.
+	// The null state renders a small skeleton instead.
+	let dsarConsoleEnabled = $state<boolean | null>(null);
 	async function loadDsarGate() {
 		try {
 			const usage = await api.getUsage(projectId);
 			dsarConsoleEnabled = usage.limits?.dsar_console_ui ?? true;
-		} catch {
+		} catch (err) {
 			// If the limits lookup fails for any reason, fail OPEN —
 			// better to show the tab than block a paying customer
 			// from running an export because the plan endpoint is
 			// flaky. The API endpoints are the source of truth.
+			// Logged so SRE notices recurring usage-endpoint
+			// failures (review #255 low-item).
+			console.warn('dsar gate failed open: usage lookup error', err);
 			dsarConsoleEnabled = true;
 		}
 	}
@@ -664,7 +673,16 @@
 {/if}
 
 {#if activeTab === 'export'}
-{#if !dsarConsoleEnabled}
+{#if dsarConsoleEnabled === null}
+	<!-- Loading the soft-gate state. Brief skeleton so the gated
+	     export controls don't flash through on free tier (review
+	     #255 low-item). -->
+	<div class="space-y-4">
+		<div class="h-7 w-48 rounded bg-gray-100 animate-pulse"></div>
+		<div class="h-4 w-80 rounded bg-gray-100 animate-pulse"></div>
+		<div class="h-32 rounded-lg border border-gray-200 bg-gray-50 animate-pulse"></div>
+	</div>
+{:else if !dsarConsoleEnabled}
 	<!--
 		Soft-gate (#251). Free-tier projects see this card instead of
 		the export controls. The DSAR API endpoints stay public — a

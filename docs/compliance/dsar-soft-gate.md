@@ -77,6 +77,39 @@ lifetime, so a deploy cycles it; pre-deploy, the project owner can
 hit refresh after the plan switch to see the new state immediately
 (the page calls `getUsage` on mount, not cached).
 
+## Operator runbook — applying migration 000072 to an existing fleet
+
+⚠ **One-time caveat caught in the #255 review.** `LimitsService`
+caches `*PlanLimits` for process lifetime, keyed by plan name. A
+gateway pod that warmed the `"pro"` cache entry BEFORE migration
+000072 ran will keep returning a struct whose `DSARConsoleUI` is
+the Go zero-value (`false`) — because the previous SQL didn't
+include the new column. **Result: Pro tenants see the upgrade card
+until the pod restarts.**
+
+The normal CI flow is safe: the `migrate` Job in
+`deploy/k8s/migrate-job.yaml` runs immediately before the gateway
+Deployment rolls, so the cache is cycled by the same release.
+
+**The danger window is a migration-only roll** — a manual
+`migrate up`, a hotfix that touches only `migrations/`, or any
+deploy where the gateway image SHA didn't change. In that case:
+
+```bash
+kubectl -n eurobase rollout restart deploy/gateway
+```
+
+after the migration has applied. The same caveat technically
+applies to every `plan_limits` schema change going back to
+migration 000026 (`edge_function_limit`); this one is just the
+first where the cache miss produces a customer-visible regression
+(a paying Pro customer who sees the upgrade card) rather than a
+silent zero-default.
+
+A future change to make `LimitsService` cache shorter-TTL or
+listen for `LISTEN/NOTIFY` on `plan_limits` is the proper fix.
+Tracked as a follow-up out of scope for #251.
+
 ## Related
 
 - #248 — Umbrella: DSAR as Pro differentiator
