@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	import { api, DEFAULT_RATE_LIMITS, type AuthConfig, type EmailTemplate, type RateLimits } from '$lib/api.js';
+	import { api, DEFAULT_RATE_LIMITS, type AuthConfig, type EmailTemplate, type ProjectEmailSender, type RateLimits } from '$lib/api.js';
 
 	const projectCtx: { id: string; project: import('$lib/api.js').Project | null; updateProject: (p: import('$lib/api.js').Project) => void } = getContext('projectId');
 
 	// Tab state
-	let activeTab = $state<'settings' | 'templates' | 'rate_limits'>('settings');
+	let activeTab = $state<'settings' | 'templates' | 'rate_limits' | 'smtp'>('settings');
 
 	// Email status
 	let emailConfigured = $state<boolean | null>(null);
@@ -114,6 +114,129 @@
 	let rlSaving = $state(false);
 	let rlSaveMessage = $state('');
 	let rlSaveError = $state('');
+
+	// ---- SMTP tab state (#235 Part 1, BYO custom SMTP) ----
+	//
+	// We keep `existing` separate from the form state so the
+	// form bind:value can mutate freely without losing the
+	// "what's saved" view (verified_at, last_error, has_password
+	// indicator). hydrateSmtp populates both on load.
+	//
+	// `smtpPassword` is treated specially:
+	//   - blank + existing.has_password → backend preserves the
+	//     stored sealed bytes (no re-prompt needed for edits)
+	//   - blank + no existing password   → sealed columns stay NULL
+	//   - non-blank                       → backend re-seals
+	let smtpLoading = $state(true);
+	let smtpExisting = $state<ProjectEmailSender | null>(null);
+	let smtpHost = $state('');
+	let smtpPort = $state('587');
+	let smtpUsername = $state('');
+	let smtpFromEmail = $state('');
+	let smtpFromName = $state('');
+	let smtpEncryption = $state<'starttls' | 'tls' | 'none'>('starttls');
+	let smtpPassword = $state('');
+	let smtpSaving = $state(false);
+	let smtpSaveMessage = $state('');
+	let smtpSaveError = $state('');
+	let smtpTestTo = $state('');
+	let smtpTesting = $state(false);
+	let smtpTestError = $state('');
+	let smtpTestMessage = $state('');
+
+	async function loadSmtp() {
+		smtpLoading = true;
+		smtpSaveError = '';
+		smtpTestError = '';
+		try {
+			const s = await api.getProjectEmailSender(projectCtx.id);
+			hydrateSmtp(s);
+		} catch (err) {
+			smtpSaveError = err instanceof Error ? err.message : 'Failed to load SMTP config';
+		} finally {
+			smtpLoading = false;
+		}
+	}
+
+	function hydrateSmtp(s: ProjectEmailSender | null) {
+		smtpExisting = s;
+		smtpHost = s?.host ?? '';
+		smtpPort = s ? String(s.port) : '587';
+		smtpUsername = s?.username ?? '';
+		smtpFromEmail = s?.from_email ?? '';
+		smtpFromName = s?.from_name ?? '';
+		smtpEncryption = s?.encryption ?? 'starttls';
+		smtpPassword = '';
+		// Default the test-to field to the from_email so a single
+		// click verifies the round-trip without further typing.
+		smtpTestTo = s?.from_email ?? '';
+	}
+
+	async function handleSaveSmtp() {
+		smtpSaving = true;
+		smtpSaveError = '';
+		smtpSaveMessage = '';
+		try {
+			const portNum = parseInt(smtpPort, 10);
+			if (Number.isNaN(portNum)) {
+				smtpSaveError = 'Port must be a number';
+				return;
+			}
+			const updated = await api.upsertProjectEmailSender(projectCtx.id, {
+				host: smtpHost.trim(),
+				port: portNum,
+				username: smtpUsername.trim(),
+				from_email: smtpFromEmail.trim(),
+				from_name: smtpFromName.trim(),
+				encryption: smtpEncryption,
+				password: smtpPassword
+			});
+			hydrateSmtp(updated);
+			smtpSaveMessage = 'SMTP saved. Run a test send to verify before the project will use it.';
+		} catch (err) {
+			smtpSaveError = err instanceof Error ? err.message : 'Failed to save SMTP config';
+		} finally {
+			smtpSaving = false;
+		}
+	}
+
+	async function handleDeleteSmtp() {
+		if (!confirm('Disconnect custom SMTP? The project will fall back to the platform sender.')) return;
+		smtpSaving = true;
+		smtpSaveError = '';
+		smtpSaveMessage = '';
+		try {
+			await api.deleteProjectEmailSender(projectCtx.id);
+			hydrateSmtp(null);
+			smtpSaveMessage = 'Custom SMTP disconnected — using platform sender.';
+		} catch (err) {
+			smtpSaveError = err instanceof Error ? err.message : 'Failed to disconnect SMTP';
+		} finally {
+			smtpSaving = false;
+		}
+	}
+
+	async function handleTestSmtp() {
+		smtpTesting = true;
+		smtpTestError = '';
+		smtpTestMessage = '';
+		try {
+			await api.testProjectEmailSender(projectCtx.id, smtpTestTo);
+			smtpTestMessage = `Test email delivered to ${smtpTestTo}. Sender is now marked verified — auth emails will start routing through it.`;
+			// Refresh existing so verified_at + cleared last_error reflect.
+			const s = await api.getProjectEmailSender(projectCtx.id);
+			smtpExisting = s;
+		} catch (err) {
+			smtpTestError = err instanceof Error ? err.message : 'Test send failed';
+			// Refresh so the new last_error / last_error_at are visible.
+			try {
+				const s = await api.getProjectEmailSender(projectCtx.id);
+				smtpExisting = s;
+			} catch { /* ignore secondary fetch error */ }
+		} finally {
+			smtpTesting = false;
+		}
+	}
 
 	function hydrateRateLimits(rl: RateLimits | undefined) {
 		rlEmailsPerHour = rl?.emails_per_hour ? String(rl.emails_per_hour) : '';
@@ -512,6 +635,12 @@
 				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeTab === 'rate_limits' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
 			>
 				Rate Limits
+			</button>
+			<button
+				onclick={() => { activeTab = 'smtp'; loadSmtp(); }}
+				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeTab === 'smtp' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
+			>
+				SMTP
 			</button>
 		</nav>
 	</div>
@@ -1351,6 +1480,157 @@
 					{rlSaving ? 'Saving…' : 'Save changes'}
 				</button>
 			</div>
+		</div>
+	{/if}
+
+	<!-- SMTP Tab (#235 Part 1, BYO custom SMTP) -->
+	{#if activeTab === 'smtp'}
+		<div class="mt-6 space-y-6 max-w-2xl">
+			<div>
+				<h3 class="text-sm font-semibold text-gray-900">Custom SMTP sender</h3>
+				<p class="mt-1 text-xs text-gray-500">
+					Bring your own SMTP provider for auth emails (verification, password reset, magic link). When configured + verified, this project's emails route through your provider instead of the shared Eurobase sender — useful for higher deliverability and owning your sender reputation. Leave blank to keep using the platform sender.
+				</p>
+			</div>
+
+			{#if smtpLoading}
+				<div class="text-sm text-gray-500">Loading…</div>
+			{:else}
+				{#if smtpExisting}
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-xs space-y-1.5">
+						<div class="flex items-center gap-2">
+							{#if smtpExisting.verified_at}
+								<span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5 font-medium">
+									<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+									Verified
+								</span>
+								<span class="text-gray-500">Last verified {new Date(smtpExisting.verified_at).toLocaleString()}</span>
+							{:else}
+								<span class="inline-flex items-center gap-1.5 rounded-full bg-amber-100 text-amber-800 px-2 py-0.5 font-medium">
+									<span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+									Not verified
+								</span>
+								<span class="text-gray-500">Run a test send below — the project keeps using the platform sender until then.</span>
+							{/if}
+						</div>
+						{#if smtpExisting.last_error}
+							<div class="text-red-700 mt-1">
+								<span class="font-medium">Last error:</span> {smtpExisting.last_error}
+								{#if smtpExisting.last_error_at}
+									<span class="text-gray-500">· {new Date(smtpExisting.last_error_at).toLocaleString()}</span>
+								{/if}
+							</div>
+						{/if}
+						{#if smtpExisting.sovereignty_warning}
+							<div class="text-amber-800 mt-1">⚠ {smtpExisting.sovereignty_warning}</div>
+						{/if}
+					</div>
+				{/if}
+
+				<div class="rounded-lg border border-gray-200 bg-white divide-y divide-gray-200">
+					<div class="p-4 space-y-3">
+						<div class="grid grid-cols-3 gap-3">
+							<div class="col-span-2">
+								<label for="smtp-host" class="block text-xs font-medium text-gray-700 mb-1">Host</label>
+								<input id="smtp-host" type="text" bind:value={smtpHost} placeholder="smtp.example.com"
+									class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+							</div>
+							<div>
+								<label for="smtp-port" class="block text-xs font-medium text-gray-700 mb-1">Port</label>
+								<input id="smtp-port" type="number" min="1" max="65535" bind:value={smtpPort} placeholder="587"
+									class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+							</div>
+						</div>
+						<div>
+							<label for="smtp-encryption" class="block text-xs font-medium text-gray-700 mb-1">Encryption</label>
+							<select id="smtp-encryption" bind:value={smtpEncryption}
+								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600">
+								<option value="starttls">STARTTLS (port 587, recommended)</option>
+								<option value="tls">TLS / SMTPS (port 465)</option>
+								<option value="none">None — plaintext (do not use over the internet)</option>
+							</select>
+						</div>
+					</div>
+
+					<div class="p-4 space-y-3">
+						<div>
+							<label for="smtp-username" class="block text-xs font-medium text-gray-700 mb-1">Username</label>
+							<input id="smtp-username" type="text" bind:value={smtpUsername} placeholder="apikey or you@example.com"
+								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+						</div>
+						<div>
+							<label for="smtp-password" class="block text-xs font-medium text-gray-700 mb-1">
+								Password
+								{#if smtpExisting?.has_password}
+									<span class="text-gray-400 font-normal">(leave blank to keep the saved one)</span>
+								{/if}
+							</label>
+							<input id="smtp-password" type="password" bind:value={smtpPassword} placeholder={smtpExisting?.has_password ? '••••••••' : 'SMTP password'}
+								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+							<p class="mt-1 text-[11px] text-gray-500">Stored encrypted at rest with your project's per-tenant key. Never returned by the API after save.</p>
+						</div>
+					</div>
+
+					<div class="p-4 space-y-3">
+						<div>
+							<label for="smtp-from-email" class="block text-xs font-medium text-gray-700 mb-1">From address</label>
+							<input id="smtp-from-email" type="email" bind:value={smtpFromEmail} placeholder="noreply@yourdomain.com"
+								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+						</div>
+						<div>
+							<label for="smtp-from-name" class="block text-xs font-medium text-gray-700 mb-1">From name <span class="text-gray-400 font-normal">(optional)</span></label>
+							<input id="smtp-from-name" type="text" bind:value={smtpFromName} placeholder="Your Product"
+								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+						</div>
+					</div>
+				</div>
+
+				<div class="flex items-center justify-between gap-3">
+					{#if smtpExisting}
+						<button type="button" onclick={handleDeleteSmtp} disabled={smtpSaving}
+							class="rounded-md px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors">
+							Disconnect
+						</button>
+					{:else}
+						<div></div>
+					{/if}
+					<button type="button" onclick={handleSaveSmtp} disabled={smtpSaving}
+						class="rounded-md bg-eurobase-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-eurobase-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+						{smtpSaving ? 'Saving…' : 'Save'}
+					</button>
+				</div>
+
+				<!-- Test send -->
+				{#if smtpExisting}
+					<div class="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+						<div>
+							<h4 class="text-sm font-semibold text-gray-900">Send test</h4>
+							<p class="mt-1 text-xs text-gray-500">A successful test marks the sender verified. Until then auth emails fall back to the platform sender.</p>
+						</div>
+						<div class="flex gap-2">
+							<input type="email" bind:value={smtpTestTo} placeholder="you@example.com"
+								class="flex-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+							<button type="button" onclick={handleTestSmtp} disabled={smtpTesting || !smtpTestTo}
+								class="rounded-md border border-gray-300 px-4 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors">
+								{smtpTesting ? 'Sending…' : 'Send test'}
+							</button>
+						</div>
+						{#if smtpTestMessage}
+							<div class="rounded-md bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-700">{smtpTestMessage}</div>
+						{/if}
+						{#if smtpTestError}
+							<div class="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">{smtpTestError}</div>
+						{/if}
+					</div>
+				{/if}
+
+				{#if smtpSaveMessage}
+					<div class="rounded-md bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">{smtpSaveMessage}</div>
+				{/if}
+				{#if smtpSaveError}
+					<div class="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{smtpSaveError}</div>
+				{/if}
+			{/if}
 		</div>
 	{/if}
 </div>
