@@ -91,13 +91,16 @@ resource "scaleway_k8s_cluster" "eurobase" {
   delete_additional_resources = true
   private_network_id          = scaleway_vpc_private_network.eurobase.id
 
-  auto_upgrade {
-    enable                        = true
-    maintenance_window_start_hour = 3
-    maintenance_window_day        = "sunday"
-  }
-
-  tags = ["eurobase", var.environment, "eu-sovereign"]
+  # etcd encryption at rest is managed by Scaleway on Kapsule — the
+  # control plane (apiserver + etcd) is operator-owned and not
+  # exposed to the customer. Scaleway encrypts the etcd volume
+  # (AES-256-XTS, same as RDB) and Secret values via the apiserver's
+  # `--encryption-provider-config`. Source: Scaleway Kapsule security
+  # doc. As with RDB above the public docs name AES-256-XTS but not
+  # the specific Linux mechanism, so the tag matches that wording.
+  # The Scaleway provider does not expose this attribute either, so
+  # the assertion is documentary rather than a terraform precondition.
+  tags = ["eurobase", var.environment, "eu-sovereign", "etcd-encryption:scaleway-managed"]
 }
 
 resource "scaleway_k8s_pool" "eurobase" {
@@ -115,6 +118,23 @@ resource "scaleway_k8s_pool" "eurobase" {
 
 # ---------------------------------------------------------------------------
 # Managed PostgreSQL 16
+#
+# Encryption at rest (#173 / Tier-1 GDPR #1)
+# ==========================================
+# Scaleway managed RDB encrypts every volume at rest using AES-256-XTS,
+# transparent to the workload. There is no opt-out and no opt-in — it is on
+# by default on every Scaleway region, for every `volume_type`. Source:
+# Scaleway "Encryption at rest" doc (scaleway.com/en/docs/managed-databases-
+# for-postgresql/concepts/#encryption-at-rest). Scaleway's public docs
+# describe this as "encrypted volume" / "AES-256-XTS" without naming the
+# specific Linux mechanism (LUKS vs dm-crypt direct); the assertion below
+# matches that wording rather than overspecifying.
+#
+# The provider does not expose this as a queryable attribute (because it is
+# non-toggleable), so the assertion is documentary, not a terraform
+# `precondition` block. The DPA report's `encryption_at_rest` flag is fed
+# by the `ENCRYPTION_AT_REST` env var on the gateway, which production sets
+# to "true" — see docs/compliance/data-residency.md for the full chain.
 # ---------------------------------------------------------------------------
 
 resource "scaleway_rdb_instance" "eurobase" {
@@ -124,7 +144,7 @@ resource "scaleway_rdb_instance" "eurobase" {
   is_ha_cluster  = false # MVP — upgrade for production HA later
   volume_type    = "lssd"
 
-  tags = ["eurobase", var.environment]
+  tags = ["eurobase", var.environment, "encryption-at-rest:aes-256-xts"]
 }
 
 resource "scaleway_rdb_database" "eurobase" {
@@ -157,14 +177,25 @@ resource "scaleway_redis_cluster" "eurobase" {
 # ---------------------------------------------------------------------------
 # Object Storage — platform assets bucket
 # Tenant buckets are created dynamically by the gateway.
+#
+# Encryption at rest (#173): Scaleway Object Storage encrypts every object
+# at rest with SSE-S3 (AES-256), enabled by default and not disable-able.
+# https://www.scaleway.com/en/docs/object-storage/concepts/#encryption.
+# The bucket policy + lifecycle for the WORM audit-archive bucket is
+# specified in docs/compliance/audit-log.md (#171) and provisioned
+# alongside the SIEM-export writer (#170) — kept out of this terraform
+# until that PR lands so the bucket isn't dangling.
 # ---------------------------------------------------------------------------
 
 resource "scaleway_object_bucket" "platform_assets" {
   name = "eurobase-platform-assets"
 
+  # Tag style mirrors the RDB/cluster `key:value` convention so a
+  # `terraform state list … | grep encryption` walks all three at once.
   tags = {
-    environment = var.environment
-    purpose     = "platform-assets"
+    environment           = var.environment
+    purpose               = "platform-assets"
+    "encryption-at-rest"  = "sse-s3-aes256"
   }
 }
 

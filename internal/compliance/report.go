@@ -35,10 +35,18 @@ type CustomerInfo struct {
 }
 
 // DataFlowInfo describes how data flows through the Eurobase infrastructure.
+//
+// The three "is encryption real?" flags are read from runtime config
+// (ResidencyConfig) rather than hardcoded — closes #173. TLSMin is the
+// floor the ingress controller actually enforces, e.g. "TLS 1.3"; an
+// empty string means "the runtime can't prove it", in which case
+// EncryptionInTransit is reported as `false` rather than aspirationally
+// `true`.
 type DataFlowInfo struct {
 	StorageLocation      string `json:"storage_location"`
 	EncryptionAtRest     bool   `json:"encryption_at_rest"`
 	EncryptionInTransit  bool   `json:"encryption_in_transit"`
+	TLSMin               string `json:"tls_min,omitempty"`
 	CrossBorderTransfers bool   `json:"cross_border_transfers"`
 	CrossBorderDetails   string `json:"cross_border_details,omitempty"`
 }
@@ -86,12 +94,16 @@ func (s *ComplianceService) GenerateReport(ctx context.Context, projectID string
 		}
 	}
 
-	dataFlow := DataFlowInfo{
-		StorageLocation:      "France (Scaleway DC-PAR1 / DC-PAR2)",
-		EncryptionAtRest:     true,
-		EncryptionInTransit:  true,
-		CrossBorderTransfers: hasCrossBorder,
-	}
+	// Read encryption + residency posture from runtime config (#173).
+	// The previous code hardcoded `true` for both encryption flags,
+	// which made the DPA report a polite fiction in any deployment
+	// without the TLS floor / encrypted volumes (dev, staging,
+	// future-self-hosted). Now an operator-set ENCRYPTION_AT_REST=false
+	// or an absent TLS_MIN will surface in the report, not be silently
+	// papered over. The whole DataFlowInfo build sits behind
+	// BuildDataFlowInfo so a unit test can exercise the truthfulness
+	// wire-up without needing a live DB.
+	dataFlow := BuildDataFlowInfo(s.residency, hasCrossBorder)
 	if hasCrossBorder {
 		dataFlow.CrossBorderDetails = "Cross-border transfers occur for optional OAuth providers only: " + strings.Join(crossBorderProviders, "; ")
 	}
@@ -148,6 +160,25 @@ func (s *ComplianceService) GenerateReport(ctx context.Context, projectID string
 	}
 
 	return report, nil
+}
+
+// BuildDataFlowInfo composes the report's data_flow section from the
+// runtime ResidencyConfig + a cross-border-transfer signal. Pulled out
+// of GenerateReport so the #173 truthfulness invariant
+// (encryption_in_transit ⇔ TLSMin populated) can be exercised end-to-end
+// without a database — see report_test.go::TestBuildDataFlowInfo_Truthful.
+//
+// The crossBorder flag is computed by the caller from the active
+// sub-processor list (any non-EU processor = true). Passing it in
+// rather than recomputing keeps this function pure.
+func BuildDataFlowInfo(residency ResidencyConfig, crossBorder bool) DataFlowInfo {
+	return DataFlowInfo{
+		StorageLocation:      residency.StorageLocation,
+		EncryptionAtRest:     residency.EncryptionAtRest,
+		EncryptionInTransit:  residency.TLSMin != "",
+		TLSMin:               residency.TLSMin,
+		CrossBorderTransfers: crossBorder,
+	}
 }
 
 // buildProcessingActivities returns the standard set of GDPR Article 30

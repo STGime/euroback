@@ -7,7 +7,13 @@ metadata:
   name: eurobase-ingress
   namespace: eurobase
   annotations:
+    # Closes #173 (Tier-1 GDPR #1). The controller-level floor +
+    # HSTS lives in deploy/k8s/nginx-ingress-config.yaml; these
+    # per-Ingress annotations are defence-in-depth so a future
+    # operator who points the controller at a different ConfigMap
+    # still gets the redirect.
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
   ingressClassName: nginx
