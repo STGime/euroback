@@ -100,15 +100,10 @@ func (s *ComplianceService) GenerateReport(ctx context.Context, projectID string
 	// without the TLS floor / encrypted volumes (dev, staging,
 	// future-self-hosted). Now an operator-set ENCRYPTION_AT_REST=false
 	// or an absent TLS_MIN will surface in the report, not be silently
-	// papered over.
-	encryptionInTransit := s.residency.TLSMin != ""
-	dataFlow := DataFlowInfo{
-		StorageLocation:      s.residency.StorageLocation,
-		EncryptionAtRest:     s.residency.EncryptionAtRest,
-		EncryptionInTransit:  encryptionInTransit,
-		TLSMin:               s.residency.TLSMin,
-		CrossBorderTransfers: hasCrossBorder,
-	}
+	// papered over. The whole DataFlowInfo build sits behind
+	// BuildDataFlowInfo so a unit test can exercise the truthfulness
+	// wire-up without needing a live DB.
+	dataFlow := BuildDataFlowInfo(s.residency, hasCrossBorder)
 	if hasCrossBorder {
 		dataFlow.CrossBorderDetails = "Cross-border transfers occur for optional OAuth providers only: " + strings.Join(crossBorderProviders, "; ")
 	}
@@ -165,6 +160,25 @@ func (s *ComplianceService) GenerateReport(ctx context.Context, projectID string
 	}
 
 	return report, nil
+}
+
+// BuildDataFlowInfo composes the report's data_flow section from the
+// runtime ResidencyConfig + a cross-border-transfer signal. Pulled out
+// of GenerateReport so the #173 truthfulness invariant
+// (encryption_in_transit ⇔ TLSMin populated) can be exercised end-to-end
+// without a database — see report_test.go::TestBuildDataFlowInfo_Truthful.
+//
+// The crossBorder flag is computed by the caller from the active
+// sub-processor list (any non-EU processor = true). Passing it in
+// rather than recomputing keeps this function pure.
+func BuildDataFlowInfo(residency ResidencyConfig, crossBorder bool) DataFlowInfo {
+	return DataFlowInfo{
+		StorageLocation:      residency.StorageLocation,
+		EncryptionAtRest:     residency.EncryptionAtRest,
+		EncryptionInTransit:  residency.TLSMin != "",
+		TLSMin:               residency.TLSMin,
+		CrossBorderTransfers: crossBorder,
+	}
 }
 
 // buildProcessingActivities returns the standard set of GDPR Article 30

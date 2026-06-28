@@ -41,10 +41,18 @@ yes":
 
 | Volume        | Encryption                        | Source                                  |
 | ------------- | --------------------------------- | --------------------------------------- |
-| Postgres RDB  | LUKS + AES-256-XTS, on every node | Scaleway managed-DB docs                |
+| Postgres RDB  | AES-256-XTS volume encryption (Scaleway-managed) | Scaleway managed-DB docs |
 | Object Storage| SSE-S3 (AES-256), every object    | Scaleway Object Storage docs            |
-| Kapsule etcd  | LUKS + AES-256-XTS + Secret encryption-provider-config | Scaleway Kapsule docs |
+| Kapsule etcd  | AES-256-XTS volume + Secret encryption-provider-config (Scaleway-managed control plane) | Scaleway Kapsule docs |
 | Redis         | Same managed-volume encryption    | Scaleway Managed Redis docs             |
+
+> **Wording note.** Scaleway's public docs describe these volumes as
+> "encrypted at rest" with the AES-256-XTS suite, without naming the
+> specific Linux mechanism (LUKS vs dm-crypt direct vs in-kernel). The
+> table above mirrors that wording exactly — overspecifying to "LUKS"
+> would be an audit hazard if Scaleway's internals differ. If you need
+> a tighter assertion (e.g. for a Schrems II TIA), request the
+> mechanism in writing from Scaleway support and update the table.
 
 These are non-toggleable on Scaleway, so the env var serves as an
 **operator attestation**: the person deploying confirms they understand
@@ -64,6 +72,23 @@ If `TLS_MIN=""` (empty), the DPA report's `encryption_in_transit` flag
 flips to **false** rather than stay aspirationally `true`. This is the
 single change that converts "the report says we're encrypted in transit"
 from a polite fiction in dev/staging to a runtime-grounded fact.
+
+## Sovereignty exception — DNS (Cloudflare)
+
+CLAUDE.md states the sovereignty rule: "No US cloud services permitted
+(AWS, GCP, Azure, Cloudflare, Stripe, Vercel)". DNS for `eurobase.app`
+is **currently delegated to Cloudflare**, a US provider, as a temporary
+operational measure: the apex zone has not yet been migrated to
+Scaleway DNS. The cert-manager DNS-01 issuer in `deploy/k8s/ingress.yaml`
+uses the Cloudflare resolver path for the same reason. The migration is
+tracked in **#223**; the runbook for the swap is
+`docs/runbooks/tls-cert-expiry.md`.
+
+This exception is disclosed here so that the DPA report's sovereignty
+posture can be reviewed in full. DNS metadata (zone queries, TXT writes
+for ACME) flows through Cloudflare today; **no application data,
+customer personal data, or backups** flow through Cloudflare. The
+exception will close when #223 lands.
 
 ## Enforcement chain
 
@@ -103,6 +128,34 @@ testssl.sh --protocols api.eurobase.app
 # HSTS header present + 1y max-age + preload
 curl -sI https://api.eurobase.app | grep -i strict-transport-security
 ```
+
+### HSTS lock-in (read before adding a subdomain)
+
+`hsts-include-subdomains: "true"` + `hsts-preload: "true"` is a strong
+one-way commitment: every current and future subdomain of
+`eurobase.app` MUST serve HTTPS. A browser that has ever loaded
+`api.eurobase.app` will refuse plaintext on **any** subdomain for the
+HSTS lifetime (1 year, renewed on every visit).
+
+Practical consequences:
+
+- A marketing landing on `try.eurobase.app` cannot be HTTP-only.
+- A status page, a Discord redirect, a temporary debug endpoint —
+  none of them can serve plaintext.
+- A misconfigured cert on any future subdomain breaks the browser
+  trust path for that visit.
+- We are **not** on the [HSTS preload list](https://hstspreload.org)
+  today; we're just sending the header. Actually getting on the
+  list requires explicit submission (the apex zone must also serve
+  HSTS with `includeSubDomains` + `preload`, which today it does
+  through the wildcard ingress). The header is preload-eligible,
+  but absent submission no first-visit downgrade protection
+  exists. Submitting to the list is a tracked follow-up.
+
+Before adding a new subdomain, confirm the ingress will terminate TLS
+for it. If you need an HTTP-only subdomain for any reason, the only
+escape is to host it on a different apex zone (e.g.
+`status.eurobase.dev`).
 
 ## Encryption-at-rest on Scaleway
 

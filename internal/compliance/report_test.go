@@ -79,6 +79,31 @@ func TestLoadResidencyConfigFromEnv(t *testing.T) {
 			t.Error("typo should fall back to default true, got false")
 		}
 	})
+
+	// Closes review #3 on #244: an out-of-allowlist TLS_MIN must NOT
+	// pass through as-is. Otherwise the DPA report could emit a
+	// truthful-shaped lie like `encryption_in_transit: true,
+	// tls_min: "garbage"`, which is harder to spot in an audit than
+	// a missing value.
+	t.Run("garbage TLS_MIN normalises to empty", func(t *testing.T) {
+		os.Setenv("TLS_MIN", "TLSv1.3")  // close-but-wrong format
+		defer os.Unsetenv("TLS_MIN")
+		got := LoadResidencyConfigFromEnv()
+		if got.TLSMin != "" {
+			t.Errorf("garbage TLS_MIN should normalise to empty, got %q", got.TLSMin)
+		}
+	})
+
+	t.Run("allowlisted TLS_MIN values pass through", func(t *testing.T) {
+		for _, v := range []string{"TLS 1.2", "TLS 1.3"} {
+			os.Setenv("TLS_MIN", v)
+			got := LoadResidencyConfigFromEnv()
+			if got.TLSMin != v {
+				t.Errorf("TLS_MIN=%q normalised to %q, want passthrough", v, got.TLSMin)
+			}
+			os.Unsetenv("TLS_MIN")
+		}
+	})
 }
 
 // TestParseBoolish documents the accepted spellings so future operators
@@ -113,31 +138,69 @@ func TestParseBoolish(t *testing.T) {
 	}
 }
 
-// TestEncryptionInTransit_TiedToTLSMin documents the contract that #173
-// hinges on: the DPA report's `encryption_in_transit` flag MUST flip to
-// false when no TLS floor is asserted. The previous hardcoded `true`
-// allowed dev/staging deploys without HTTPS termination to still claim
-// in-transit encryption — exactly the kind of "polite fiction" a Schrems
-// II audit catches. This test isn't strictly necessary to ship the fix
-// (the implementation is a one-liner) but the assertion is what auditors
-// can grep for to confirm the truthfulness invariant holds.
-func TestEncryptionInTransit_TiedToTLSMin(t *testing.T) {
-	// The check in report.go is `encryptionInTransit := s.residency.TLSMin != ""`,
-	// so the contract is: TLSMin populated → true; empty → false. We
-	// can't run GenerateReport without a DB, but the invariant is a
-	// pure function of TLSMin, so a direct repro is sufficient.
+// TestBuildDataFlowInfo_Truthful pins the #173 truthfulness invariant
+// end-to-end through the actual production code path. Pre-refactor we
+// re-stated the boolean derivation in the test, which would have
+// silently passed if a future change put back `EncryptionInTransit:
+// true` hardcoded in GenerateReport. Now we call the same
+// BuildDataFlowInfo the report path uses, so a regression there fails
+// here.
+//
+// The contract: encryption_in_transit ⇔ TLSMin is in the closed
+// allowlist (covered by LoadResidencyConfigFromEnv normalisation), and
+// tls_min round-trips into the report verbatim.
+func TestBuildDataFlowInfo_Truthful(t *testing.T) {
 	cases := []struct {
-		tlsMin string
-		want   bool
+		name    string
+		cfg     ResidencyConfig
+		cross   bool
+		wantInT bool
+		wantMin string
 	}{
-		{"TLS 1.3", true},
-		{"TLS 1.2", true},
-		{"", false},
+		{
+			name:    "production: FR + at-rest + TLS 1.3",
+			cfg:     DefaultResidencyConfig(),
+			wantInT: true,
+			wantMin: "TLS 1.3",
+		},
+		{
+			name:    "dev with no TLS floor → in_transit false",
+			cfg:     ResidencyConfig{StorageLocation: "dev", EncryptionAtRest: false, TLSMin: ""},
+			wantInT: false,
+			wantMin: "",
+		},
+		{
+			name:    "TLS 1.2 floor still counts as in-transit encryption",
+			cfg:     ResidencyConfig{StorageLocation: "FR", EncryptionAtRest: true, TLSMin: "TLS 1.2"},
+			wantInT: true,
+			wantMin: "TLS 1.2",
+		},
+		{
+			name:    "cross-border flag forwards through",
+			cfg:     DefaultResidencyConfig(),
+			cross:   true,
+			wantInT: true,
+			wantMin: "TLS 1.3",
+		},
 	}
 	for _, c := range cases {
-		got := c.tlsMin != ""
-		if got != c.want {
-			t.Errorf("TLSMin=%q → encryption_in_transit %v, want %v", c.tlsMin, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			got := BuildDataFlowInfo(c.cfg, c.cross)
+			if got.EncryptionInTransit != c.wantInT {
+				t.Errorf("EncryptionInTransit=%v, want %v", got.EncryptionInTransit, c.wantInT)
+			}
+			if got.TLSMin != c.wantMin {
+				t.Errorf("TLSMin=%q, want %q", got.TLSMin, c.wantMin)
+			}
+			if got.EncryptionAtRest != c.cfg.EncryptionAtRest {
+				t.Errorf("EncryptionAtRest=%v, want %v (passthrough)", got.EncryptionAtRest, c.cfg.EncryptionAtRest)
+			}
+			if got.StorageLocation != c.cfg.StorageLocation {
+				t.Errorf("StorageLocation=%q, want %q (passthrough)", got.StorageLocation, c.cfg.StorageLocation)
+			}
+			if got.CrossBorderTransfers != c.cross {
+				t.Errorf("CrossBorderTransfers=%v, want %v", got.CrossBorderTransfers, c.cross)
+			}
+		})
 	}
 }

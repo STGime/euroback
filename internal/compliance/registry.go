@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -94,35 +95,87 @@ func DefaultResidencyConfig() ResidencyConfig {
 //   ENCRYPTION_AT_REST    → ResidencyConfig.EncryptionAtRest
 //                           (any of "1","true","yes","on" → true;
 //                            "0","false","no","off" → false;
-//                            anything else → default true)
+//                            anything else → default true with WARN)
 //   TLS_MIN               → ResidencyConfig.TLSMin
-//                           (set to "" to surface "no floor enforced")
+//                           (only "TLS 1.2" / "TLS 1.3" pass through;
+//                            other non-empty values are normalised to
+//                            "" with a WARN so a typo can't emit a
+//                            truthful-shaped lie like
+//                            `encryption_in_transit: true, tls_min: "garbage"`)
+//
+// Each missing env var is logged at WARN so an auditor can grep the
+// startup log and confirm what value was applied (default vs explicit).
 func LoadResidencyConfigFromEnv() ResidencyConfig {
 	cfg := DefaultResidencyConfig()
 	if v := os.Getenv("RESIDENCY_REGION"); v != "" {
 		cfg.StorageLocation = v
+	} else {
+		slog.Warn("residency: RESIDENCY_REGION not set, using default", "default", cfg.StorageLocation)
 	}
 	if v, ok := os.LookupEnv("ENCRYPTION_AT_REST"); ok {
-		cfg.EncryptionAtRest = parseBoolish(v, cfg.EncryptionAtRest)
+		parsed, recognised := parseBoolStrict(v)
+		if !recognised {
+			slog.Warn("residency: ENCRYPTION_AT_REST value unrecognised, using default", "raw", v, "default", cfg.EncryptionAtRest)
+		} else {
+			cfg.EncryptionAtRest = parsed
+		}
+	} else {
+		slog.Warn("residency: ENCRYPTION_AT_REST not set, using default", "default", cfg.EncryptionAtRest)
 	}
 	if v, ok := os.LookupEnv("TLS_MIN"); ok {
-		cfg.TLSMin = v
+		cfg.TLSMin = normaliseTLSMin(v)
+	} else {
+		slog.Warn("residency: TLS_MIN not set, using default", "default", cfg.TLSMin)
 	}
 	return cfg
+}
+
+// allowedTLSMins is the closed set the report can truthfully emit.
+// Adding "TLS 1.4" here in the future is the only change needed when
+// the standard lands.
+var allowedTLSMins = map[string]struct{}{
+	"":        {}, // operator explicitly cleared the floor
+	"TLS 1.2": {},
+	"TLS 1.3": {},
+}
+
+// normaliseTLSMin clamps the env-var value to the closed allowlist.
+// An unrecognised value becomes "" with a logged warning so the DPA
+// report surfaces `encryption_in_transit: false, tls_min: omitted`
+// rather than embedding the operator's typo as a truthful-looking
+// claim.
+func normaliseTLSMin(raw string) string {
+	if _, ok := allowedTLSMins[raw]; ok {
+		return raw
+	}
+	slog.Warn("residency: TLS_MIN value not in allowlist, dropping to empty", "raw", raw, "allowed", []string{"", "TLS 1.2", "TLS 1.3"})
+	return ""
 }
 
 // parseBoolish accepts the common operator-typed booleans without
 // surprising case sensitivity. Falls back to dflt for unparseable
 // values rather than panicking — a typo'd env var shouldn't take down
-// startup.
+// startup. Retained for legacy callers; new callers should prefer
+// parseBoolStrict which surfaces "did I recognise this?" so the call
+// site can log a warning.
 func parseBoolish(v string, dflt bool) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
+	if got, ok := parseBoolStrict(v); ok {
+		return got
 	}
 	return dflt
+}
+
+// parseBoolStrict is parseBoolish with the recognition signal exposed.
+// Returns (value, true) for accepted spellings and (false, false) for
+// everything else, so a caller can log the typo without burying it.
+func parseBoolStrict(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	return false, false
 }
 
 // NewComplianceService creates a new ComplianceService backed by the given
