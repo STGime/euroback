@@ -116,7 +116,15 @@ func (s *EmailService) SendRaw(ctx context.Context, to, subject, htmlBody string
 }
 
 // SendVerificationEmail sends an email verification link to the end-user.
-func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+//
+// #258: redirectURL is the tenant-owned URL resolved by the caller
+// (per-request override → auth_config default). It MUST be non-empty
+// and already validated against the tenant's redirect_urls allowlist —
+// this function trusts it. The link becomes `{redirectURL}?token=X`
+// (or `&token=X` if the URL already has a query string), so a tenant
+// can point at either `https://app.example.com/verify` or
+// `https://app.example.com/callback?flow=verify`.
+func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -139,7 +147,7 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := fmt.Sprintf("%s/verify-email?token=%s&project_id=%s", s.consoleURL, rawToken, projectID)
+	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("verification", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: projectName,
@@ -154,7 +162,8 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 }
 
 // SendPasswordResetEmail sends a password reset link to the end-user.
-func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+// See SendVerificationEmail for the redirectURL contract.
+func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -177,7 +186,7 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := fmt.Sprintf("%s/reset-password?token=%s&project_id=%s", s.consoleURL, rawToken, projectID)
+	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("password_reset", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: projectName,
@@ -192,7 +201,8 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 }
 
 // SendMagicLinkEmail sends a magic link sign-in email to the end-user.
-func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+// See SendVerificationEmail for the redirectURL contract.
+func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -215,7 +225,7 @@ func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projec
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := fmt.Sprintf("%s/magic-link?token=%s&project_id=%s", s.consoleURL, rawToken, projectID)
+	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("magic_link", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: projectName,
@@ -344,4 +354,19 @@ func hashSHA256(input string) string {
 
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// appendTokenQuery appends `token=<raw>` to a redirect URL, using `?`
+// or `&` depending on whether the URL already has a query string.
+// Kept naïve on purpose: we don't url.Parse the whole thing because
+// the redirect URL is already validated by the caller (URL-in-allowlist
+// check on the AuthConfig side), and net/url percent-encoding could
+// alter the tenant's URL in ways the tenant didn't expect. The token
+// is hex (already safe in a URL).
+func appendTokenQuery(redirectURL, rawToken string) string {
+	sep := "?"
+	if strings.Contains(redirectURL, "?") {
+		sep = "&"
+	}
+	return redirectURL + sep + "token=" + rawToken
 }

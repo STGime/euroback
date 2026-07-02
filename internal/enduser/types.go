@@ -5,8 +5,16 @@ import "time"
 // SignUpRequest is the JSON body for end-user sign-up.
 type SignUpRequest struct {
 	Email    string                 `json:"email"`
-	Password string                `json:"password"`
+	Password string                 `json:"password"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+
+	// EmailRedirectTo overrides auth_config.email_verification_url
+	// for this signup only (#258, part of #257). Must be a member of
+	// auth_config.redirect_urls or the signup fails 400. Empty →
+	// resolver falls back to auth_config.email_verification_url and
+	// eventually 400 if that's also empty and email confirmation is
+	// required.
+	EmailRedirectTo string `json:"email_redirect_to,omitempty"`
 }
 
 // SignInRequest is the JSON body for end-user sign-in.
