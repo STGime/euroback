@@ -58,6 +58,31 @@ type AuthConfig struct {
 	// this knob only", so a project can override only the values it
 	// cares about. See DefaultRateLimits and EffectiveRateLimits below.
 	RateLimits *RateLimits `json:"rate_limits,omitempty"`
+
+	// ── Email-flow redirect URLs (#258, part of #257) ──
+	//
+	// These three URLs point at the TENANT'S OWN APP — not Eurobase's
+	// console. The verification/reset/magic-link email carries a
+	// `?token=...` query parameter to whichever of these is
+	// configured; the tenant's app reads the token and calls the SDK's
+	// `verifyEmail(token)` / `resetPassword(token, newPassword)` /
+	// `signInWithMagicLink(token)`.
+	//
+	// Each URL MUST be a member of RedirectURLs (the existing per-project
+	// URL allowlist); the platform rejects PATCH / signup calls that
+	// reference a URL not on that list, same shape as the Supabase
+	// site_url / additional_redirect_urls contract.
+	//
+	// Backend resolution order (per SDK call, e.g. signUp):
+	//   1. per-request `email_redirect_to` in the SDK call, or
+	//   2. this per-project default, or
+	//   3. 400 with a clear "configure email_verification_url" error.
+	// The previously-shipped default of `{consoleURL}/verify-email` is
+	// no longer used — that route never existed and the flow was
+	// broken. See #257 for the investigation.
+	EmailVerificationURL string `json:"email_verification_url,omitempty"`
+	PasswordResetURL     string `json:"password_reset_url,omitempty"`
+	MagicLinkURL         string `json:"magic_link_url,omitempty"`
 }
 
 // RateLimits is the per-project overrides surface for the Rate Limits page
@@ -280,6 +305,26 @@ func (c *AuthConfig) Validate() error {
 		}
 	}
 
+	// Each configured email-flow URL (#258) must be a member of
+	// RedirectURLs. Same shape Supabase ships with `site_url` +
+	// `additional_redirect_urls`; keeps the tenant from accidentally
+	// pointing an email link at a host their own app doesn't own.
+	for _, entry := range []struct {
+		field string
+		value string
+	}{
+		{"email_verification_url", c.EmailVerificationURL},
+		{"password_reset_url", c.PasswordResetURL},
+		{"magic_link_url", c.MagicLinkURL},
+	} {
+		if entry.value == "" {
+			continue
+		}
+		if !c.isInRedirectAllowlist(entry.value) {
+			return fmt.Errorf("%s must be in redirect_urls: %s", entry.field, entry.value)
+		}
+	}
+
 	for _, raw := range c.CORSOrigins {
 		// CORS origin format: scheme://host[:port], no path. Browsers
 		// send the Origin header in this exact shape; mismatches don't
@@ -335,6 +380,115 @@ func (c *AuthConfig) SessionDurationSeconds() int {
 		return 3600 // fallback to 1 hour
 	}
 	return int(d.Seconds())
+}
+
+// EmailFlow enumerates the three email-flow redirects (#258). Kept as
+// typed constants rather than a raw string so the resolver call sites
+// can't drift out of sync with the AuthConfig fields.
+type EmailFlow string
+
+const (
+	EmailFlowVerification  EmailFlow = "verification"
+	EmailFlowPasswordReset EmailFlow = "password_reset"
+	EmailFlowMagicLink     EmailFlow = "magic_link"
+)
+
+// ResolveEmailRedirect returns the URL the email-flow link should
+// point at, following the #258 resolution order:
+//
+//  1. Per-request override (from the SDK signup/reset/magic-link call).
+//     Must be in RedirectURLs — pass "" if the caller didn't specify.
+//  2. Per-project default (auth_config.email_*_url).
+//  3. Empty string + `ok=false` → the caller MUST reject the request
+//     (400 with a clear "configure email_verification_url" error).
+//
+// The previously-shipped `{consoleURL}/verify-email` default is gone —
+// it 404'd anyway and pretending it worked was the whole reason #257
+// exists. See docs/compliance/tenant-email-flows.md (#261) for the
+// full contract.
+func (c *AuthConfig) ResolveEmailRedirect(flow EmailFlow, perRequest string) (string, bool) {
+	if perRequest != "" {
+		if !c.isInRedirectAllowlist(perRequest) {
+			return "", false
+		}
+		return perRequest, true
+	}
+	var def string
+	switch flow {
+	case EmailFlowVerification:
+		def = c.EmailVerificationURL
+	case EmailFlowPasswordReset:
+		def = c.PasswordResetURL
+	case EmailFlowMagicLink:
+		def = c.MagicLinkURL
+	}
+	if def == "" {
+		return "", false
+	}
+	return def, true
+}
+
+// isInRedirectAllowlist reports whether the given URL is a member of
+// RedirectURLs. Match rules (RFC 3986 §3.2.2 / §3.1):
+//
+//   - Scheme + host are compared case-insensitive (RFC-correct: browsers
+//     routinely lowercase both, a tenant that stores
+//     "https://App.Example.com/verify" and calls with the lowercased
+//     variant should still match).
+//   - Path, query, and fragment are compared case-sensitive (RFC-correct
+//     for path; conservative for query/fragment — no upside to being
+//     permissive there, downside is a well-known open-redirect vector).
+//   - Whitespace trimmed on both sides.
+//
+// Anything that fails to parse as a URL falls back to plain
+// case-insensitive string compare (post-trim) so tenants with e.g.
+// custom schemes like "myapp://verify" still work.
+//
+// The strict-path rule is deliberate: a fuzzy host-match / path-prefix
+// check is the canonical open-redirect pattern. Same shape Supabase
+// runs against additional_redirect_urls.
+func (c *AuthConfig) isInRedirectAllowlist(candidate string) bool {
+	candidate = strings.TrimSpace(candidate)
+	for _, u := range c.RedirectURLs {
+		if urlsMatch(strings.TrimSpace(u), candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// urlsMatch is the RFC-aware equality check used by the allowlist.
+// Split out so the tests can exercise it without going through an
+// AuthConfig struct.
+func urlsMatch(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil || ua.Scheme == "" || ub.Scheme == "" {
+		// One side isn't a parseable URL — fall back to a plain
+		// case-insensitive compare so custom-scheme tenants (e.g.
+		// "myapp://verify") aren't spuriously refused.
+		return strings.EqualFold(a, b)
+	}
+	if !strings.EqualFold(ua.Scheme, ub.Scheme) {
+		return false
+	}
+	if !strings.EqualFold(ua.Host, ub.Host) {
+		return false
+	}
+	// Path / query / fragment: case-sensitive.
+	if ua.EscapedPath() != ub.EscapedPath() {
+		return false
+	}
+	if ua.RawQuery != ub.RawQuery {
+		return false
+	}
+	if ua.Fragment != ub.Fragment {
+		return false
+	}
+	return true
 }
 
 // IsEmailPasswordEnabled returns whether the email_password provider is enabled.

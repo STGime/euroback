@@ -32,6 +32,33 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 
+		var req SignUpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+
+		// #258 fail-loud pre-check runs BEFORE the rate limiter so a
+		// tenant with a broken email-confirmation config doesn't burn
+		// their own signup budget on requests we know we're going to
+		// 400 anyway. If we consumed the limiter first, a project
+		// owner whose SDK integration is stuck on the broken config
+		// could lock out real end-users the moment the config gets
+		// fixed. The resolver is cheap (map lookup + string compare
+		// against redirect_urls), safe to run before the limiter.
+		if config.RequireEmailConfirmation {
+			if _, ok := config.ResolveEmailRedirect(tenant.EmailFlowVerification, req.EmailRedirectTo); !ok {
+				var msg string
+				if req.EmailRedirectTo != "" {
+					msg = "email_redirect_to must be listed in redirect_urls"
+				} else {
+					msg = "email confirmation is enabled but auth_config.email_verification_url is not configured (see docs/compliance/tenant-email-flows.md)"
+				}
+				writeJSON(w, map[string]string{"error": msg}, http.StatusBadRequest)
+				return
+			}
+		}
+
 		// Per-project per-IP volume gate covering signup. Same knob as
 		// the signin handler below — overridable via the Rate Limits
 		// page (#229). The per-account anti-brute-force gates (e.g.
@@ -51,18 +78,12 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 			return
 		}
 
-		var req SignUpRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
-			return
-		}
-
 		resp, err := svc.SignUp(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req)
 		if err != nil {
 			slog.Warn("end-user signup failed", "error", err, "project_id", pc.ProjectID)
 			status := http.StatusInternalServerError
 			msg := err.Error()
-			if msg == "email is required" || strings.HasPrefix(msg, "password must be at least") || msg == "email already registered" || msg == "email/password authentication is disabled" {
+			if msg == "email is required" || strings.HasPrefix(msg, "password must be at least") || msg == "email already registered" || msg == "email/password authentication is disabled" || strings.HasPrefix(msg, "email confirmation is enabled") || strings.HasPrefix(msg, "email_redirect_to must be listed") {
 				status = http.StatusBadRequest
 			}
 			writeJSON(w, map[string]string{"error": msg}, status)
@@ -261,12 +282,15 @@ func HandleForgotPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		}
 
 		var req struct {
-			Email string `json:"email"`
+			Email           string `json:"email"`
+			EmailRedirectTo string `json:"email_redirect_to,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
 			return
 		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
 
 		// Rate limit: 3 per email per 15 min.
 		email := strings.ToLower(strings.TrimSpace(req.Email))
@@ -278,7 +302,7 @@ func HandleForgotPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		var projectName string
 		_ = svc.pool.QueryRow(r.Context(), `SELECT name FROM projects WHERE id = $1`, pc.ProjectID).Scan(&projectName)
 
-		_ = svc.ForgotPassword(r.Context(), pc.SchemaName, pc.ProjectID, projectName, req.Email)
+		_ = svc.ForgotPassword(r.Context(), pc.SchemaName, pc.ProjectID, projectName, req.Email, config, req.EmailRedirectTo)
 
 		// Always return 200 to prevent email enumeration.
 		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
@@ -397,7 +421,8 @@ func HandleRequestMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimiter)
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 
 		var req struct {
-			Email string `json:"email"`
+			Email           string `json:"email"`
+			EmailRedirectTo string `json:"email_redirect_to,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
@@ -414,7 +439,7 @@ func HandleRequestMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimiter)
 		var projectName string
 		_ = svc.pool.QueryRow(r.Context(), `SELECT name FROM projects WHERE id = $1`, pc.ProjectID).Scan(&projectName)
 
-		err := svc.RequestMagicLink(r.Context(), pc.SchemaName, pc.ProjectID, projectName, config, req.Email)
+		err := svc.RequestMagicLink(r.Context(), pc.SchemaName, pc.ProjectID, projectName, config, req.Email, req.EmailRedirectTo)
 		if err != nil {
 			slog.Warn("request-magic-link failed", "error", err, "project_id", pc.ProjectID)
 		}
@@ -481,12 +506,15 @@ func HandleResendVerification(svc *AuthService, limiter ...*ratelimit.RateLimite
 		}
 
 		var req struct {
-			Email string `json:"email"`
+			Email           string `json:"email"`
+			EmailRedirectTo string `json:"email_redirect_to,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
 			return
 		}
+
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
 
 		// Rate limit: 1 per email per 5 min.
 		email := strings.ToLower(strings.TrimSpace(req.Email))
@@ -497,7 +525,7 @@ func HandleResendVerification(svc *AuthService, limiter ...*ratelimit.RateLimite
 		var projectName string
 		_ = svc.pool.QueryRow(r.Context(), `SELECT name FROM projects WHERE id = $1`, pc.ProjectID).Scan(&projectName)
 
-		_ = svc.ResendVerification(r.Context(), pc.SchemaName, pc.ProjectID, projectName, req.Email)
+		_ = svc.ResendVerification(r.Context(), pc.SchemaName, pc.ProjectID, projectName, req.Email, config, req.EmailRedirectTo)
 
 		writeJSON(w, map[string]string{"status": "ok"}, http.StatusOK)
 	}

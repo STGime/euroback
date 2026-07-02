@@ -116,7 +116,15 @@ func (s *EmailService) SendRaw(ctx context.Context, to, subject, htmlBody string
 }
 
 // SendVerificationEmail sends an email verification link to the end-user.
-func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+//
+// #258: redirectURL is the tenant-owned URL resolved by the caller
+// (per-request override → auth_config default). It MUST be non-empty
+// and already validated against the tenant's redirect_urls allowlist —
+// this function trusts it. The link becomes `{redirectURL}?token=X`
+// (or `&token=X` if the URL already has a query string), so a tenant
+// can point at either `https://app.example.com/verify` or
+// `https://app.example.com/callback?flow=verify`.
+func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -139,7 +147,7 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := fmt.Sprintf("%s/verify-email?token=%s&project_id=%s", s.consoleURL, rawToken, projectID)
+	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("verification", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: projectName,
@@ -154,7 +162,8 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 }
 
 // SendPasswordResetEmail sends a password reset link to the end-user.
-func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+// See SendVerificationEmail for the redirectURL contract.
+func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -177,7 +186,7 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := fmt.Sprintf("%s/reset-password?token=%s&project_id=%s", s.consoleURL, rawToken, projectID)
+	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("password_reset", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: projectName,
@@ -192,7 +201,8 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 }
 
 // SendMagicLinkEmail sends a magic link sign-in email to the end-user.
-func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+// See SendVerificationEmail for the redirectURL contract.
+func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -215,7 +225,7 @@ func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projec
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := fmt.Sprintf("%s/magic-link?token=%s&project_id=%s", s.consoleURL, rawToken, projectID)
+	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("magic_link", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: projectName,
@@ -344,4 +354,39 @@ func hashSHA256(input string) string {
 
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// appendTokenQuery appends `token=<raw>` as a query parameter to the
+// tenant's redirect URL, respecting an existing query string AND an
+// existing fragment.
+//
+// The fragment split is the tricky part. If the tenant configures
+// `https://app.example.com/#/verify` (a hash-router SPA — Vue's
+// createWebHashHistory, React Router's HashRouter, Angular's
+// HashLocationStrategy), a naïve `url + "?token=X"` produces
+// `https://app.example.com/#/verify?token=X`. Per WHATWG URL,
+// everything after `#` is the fragment; the browser doesn't parse
+// `?token=X` as a query param, and the tenant's
+// `new URL(location).searchParams.get('token')` returns null. The
+// user sees "invalid token" and every hash-router SPA is silently
+// broken. Fix: split on the first `#`, insert `?token=X` (or
+// `&token=X`) before it, re-attach the fragment.
+//
+// We deliberately do NOT round-trip through net/url — the redirect
+// URL is already validated by the caller (URL-in-allowlist check on
+// the AuthConfig side), and net/url percent-encoding would alter the
+// tenant's URL in ways the tenant didn't expect. The token is hex
+// (see generateToken above; always [0-9a-f]) and safe in a URL as-is.
+func appendTokenQuery(redirectURL, rawToken string) string {
+	// Split on the first `#` so any fragment stays at the end.
+	base, frag, hasFrag := strings.Cut(redirectURL, "#")
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	base += sep + "token=" + rawToken
+	if hasFrag {
+		return base + "#" + frag
+	}
+	return base
 }

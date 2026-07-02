@@ -132,6 +132,26 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 		return nil, fmt.Errorf("password must be at least %d characters", config.PasswordMinLength)
 	}
 
+	// Resolve the verification redirect URL BEFORE creating the user
+	// (#258). This makes signup fail loud + atomic when
+	// require_email_confirmation is on but no redirect URL is
+	// configured — better than creating an orphaned unconfirmed user
+	// who can never get a verify email that lands anywhere useful.
+	// The resolver checks the per-request override first, then falls
+	// back to auth_config.email_verification_url. Either MUST be in
+	// redirect_urls; the resolver enforces that.
+	var verifyRedirectURL string
+	if config.RequireEmailConfirmation {
+		var ok bool
+		verifyRedirectURL, ok = config.ResolveEmailRedirect(tenant.EmailFlowVerification, req.EmailRedirectTo)
+		if !ok {
+			if req.EmailRedirectTo != "" {
+				return nil, fmt.Errorf("email_redirect_to must be listed in redirect_urls")
+			}
+			return nil, fmt.Errorf("email confirmation is enabled but auth_config.email_verification_url is not configured (see docs/compliance/tenant-email-flows.md)")
+		}
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
@@ -170,8 +190,11 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 	slog.Info("end-user signed up", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
 	// If email confirmation is required and an email service is available, send verification email.
+	// verifyRedirectURL is guaranteed non-empty here because the resolver
+	// above returned early if RequireEmailConfirmation && the URL couldn't
+	// be resolved.
 	if config.RequireEmailConfirmation && s.emailService != nil {
-		if err := s.emailService.SendVerificationEmail(ctx, projectID, "", schemaName, user.ID, user.EmailString()); err != nil {
+		if err := s.emailService.SendVerificationEmail(ctx, projectID, "", schemaName, user.ID, user.EmailString(), verifyRedirectURL); err != nil {
 			slog.Error("failed to send verification email", "error", err, "user_id", user.ID)
 		}
 	}
@@ -468,7 +491,15 @@ func quoteIdent(name string) string {
 
 // ForgotPassword initiates a password reset for an end-user.
 // Always returns nil to prevent email enumeration.
-func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID, projectName, emailAddr string) error {
+//
+// #258: config + emailRedirectTo added so the reset email can point at
+// the tenant's own /reset-password page. Same resolver contract as
+// SignUp — per-request → auth_config default → soft-fail (log + return
+// nil) if neither is configured. Soft-fail chosen here rather than
+// hard-fail because ForgotPassword must NEVER enumerate; a 400 for
+// "reset URL not configured" would leak the fact that a project has
+// no reset URL.
+func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID, projectName, emailAddr string, config tenant.AuthConfig, emailRedirectTo string) error {
 	if s.emailService == nil {
 		slog.Warn("forgot-password: email service not configured")
 		return nil
@@ -486,7 +517,22 @@ func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID,
 		return nil
 	}
 
-	if err := s.emailService.SendPasswordResetEmail(ctx, projectID, projectName, schemaName, userID, emailAddr); err != nil {
+	redirectURL, ok := config.ResolveEmailRedirect(tenant.EmailFlowPasswordReset, emailRedirectTo)
+	if !ok {
+		// Soft-fail: log and return nil. See docstring — a hard fail
+		// would leak enumeration. Log the per-request override
+		// separately so a tenant with a typo in their SDK's
+		// emailRedirectTo can find it in their own log drain
+		// (review #4 — silent DX debugging nightmare otherwise).
+		if emailRedirectTo != "" {
+			slog.Warn("forgot-password: per_request_redirect_rejected", "project_id", projectID, "value", emailRedirectTo)
+		} else {
+			slog.Warn("forgot-password: no reset URL configured", "project_id", projectID)
+		}
+		return nil
+	}
+
+	if err := s.emailService.SendPasswordResetEmail(ctx, projectID, projectName, schemaName, userID, emailAddr, redirectURL); err != nil {
 		slog.Error("failed to send password reset email", "error", err, "user_id", userID)
 	}
 	return nil
@@ -555,7 +601,10 @@ func (s *AuthService) VerifyEmail(ctx context.Context, schemaName, rawToken stri
 
 // RequestMagicLink sends a magic link email for passwordless sign-in.
 // Always returns nil to prevent email enumeration.
-func (s *AuthService) RequestMagicLink(ctx context.Context, schemaName, projectID, projectName string, config tenant.AuthConfig, emailAddr string) error {
+//
+// #258: emailRedirectTo added. Same soft-fail contract as ForgotPassword
+// — a hard "no URL configured" error would leak enumeration.
+func (s *AuthService) RequestMagicLink(ctx context.Context, schemaName, projectID, projectName string, config tenant.AuthConfig, emailAddr, emailRedirectTo string) error {
 	if !config.IsMagicLinkEnabled() {
 		return fmt.Errorf("magic link authentication is disabled")
 	}
@@ -577,7 +626,17 @@ func (s *AuthService) RequestMagicLink(ctx context.Context, schemaName, projectI
 		return nil
 	}
 
-	if err := s.emailService.SendMagicLinkEmail(ctx, projectID, projectName, schemaName, userID, emailAddr); err != nil {
+	redirectURL, ok := config.ResolveEmailRedirect(tenant.EmailFlowMagicLink, emailRedirectTo)
+	if !ok {
+		if emailRedirectTo != "" {
+			slog.Warn("request-magic-link: per_request_redirect_rejected", "project_id", projectID, "value", emailRedirectTo)
+		} else {
+			slog.Warn("request-magic-link: no magic-link URL configured", "project_id", projectID)
+		}
+		return nil
+	}
+
+	if err := s.emailService.SendMagicLinkEmail(ctx, projectID, projectName, schemaName, userID, emailAddr, redirectURL); err != nil {
 		slog.Error("failed to send magic link email", "error", err, "user_id", userID)
 	}
 	return nil
@@ -849,7 +908,10 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 }
 
 // ResendVerification resends the verification email to an end-user.
-func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projectID, projectName, emailAddr string) error {
+//
+// #258: config + emailRedirectTo added. Same soft-fail contract as
+// ForgotPassword / RequestMagicLink — must not enumerate.
+func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projectID, projectName, emailAddr string, config tenant.AuthConfig, emailRedirectTo string) error {
 	if s.emailService == nil {
 		slog.Warn("resend-verification: email service not configured")
 		return nil
@@ -871,7 +933,17 @@ func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projec
 		return nil // already confirmed
 	}
 
-	if err := s.emailService.SendVerificationEmail(ctx, projectID, projectName, schemaName, userID, emailAddr); err != nil {
+	redirectURL, ok := config.ResolveEmailRedirect(tenant.EmailFlowVerification, emailRedirectTo)
+	if !ok {
+		if emailRedirectTo != "" {
+			slog.Warn("resend-verification: per_request_redirect_rejected", "project_id", projectID, "value", emailRedirectTo)
+		} else {
+			slog.Warn("resend-verification: no verification URL configured", "project_id", projectID)
+		}
+		return nil
+	}
+
+	if err := s.emailService.SendVerificationEmail(ctx, projectID, projectName, schemaName, userID, emailAddr, redirectURL); err != nil {
 		slog.Error("failed to resend verification email", "error", err, "user_id", userID)
 	}
 	return nil
