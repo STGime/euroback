@@ -31,6 +31,28 @@ export interface SignUpCredentials {
   email: string
   password: string
   metadata?: Record<string, any>
+  /**
+   * URL the verification email links to (query parameter `token` is
+   * appended by the backend). Overrides
+   * `auth_config.email_verification_url` for this signup only.
+   *
+   * MUST be a member of the project's `redirect_urls` allowlist or
+   * the signup will 400 with a clear error. When omitted, the backend
+   * falls back to the per-project default; when neither is set and
+   * `require_email_confirmation` is on, the signup 400s with a
+   * "configure email_verification_url" hint.
+   *
+   * See tenant docs, chapter 6 → "Email confirmation — end-to-end"
+   * (#261).
+   */
+  emailRedirectTo?: string
+}
+
+/** Optional payload accepted by forgotPassword / requestMagicLink /
+ * resendVerification for the per-request redirect override. */
+export interface EmailRedirectOptions {
+  /** See SignUpCredentials.emailRedirectTo — same contract. */
+  emailRedirectTo?: string
 }
 
 export interface SignInCredentials {
@@ -82,9 +104,26 @@ export class AuthClient {
     this.restoreSession()
   }
 
-  /** Sign up a new end-user with email + password. */
+  /**
+   * Sign up a new end-user with email + password.
+   *
+   * If the project has `require_email_confirmation = true`, the user
+   * is created with `email_confirmed_at = NULL` and a verification
+   * email is sent to the tenant-configured URL (or the
+   * `emailRedirectTo` override). Your app must have a route at that
+   * URL that reads the `token` query param and calls
+   * `eb.auth.verifyEmail(token)` to confirm the address.
+   */
   async signUp(credentials: SignUpCredentials): Promise<{ data: AuthSession | null; error: string | null }> {
-    const result = await this.http.post('/v1/auth/signup', credentials)
+    // Map camelCase → snake_case for the wire format so the SDK
+    // reads idiomatic JS but the backend keeps its existing schema.
+    const body: Record<string, any> = {
+      email: credentials.email,
+      password: credentials.password,
+    }
+    if (credentials.metadata !== undefined) body.metadata = credentials.metadata
+    if (credentials.emailRedirectTo !== undefined) body.email_redirect_to = credentials.emailRedirectTo
+    const result = await this.http.post('/v1/auth/signup', body)
     if (result.error) {
       return { data: null, error: result.error }
     }
@@ -134,9 +173,23 @@ export class AuthClient {
     return { data: result, error: null }
   }
 
-  /** Request a magic link email for passwordless sign-in. */
-  async requestMagicLink(email: string): Promise<{ error: string | null }> {
-    const result = await this.http.post('/v1/auth/request-magic-link', { email })
+  /**
+   * Request a magic link email for passwordless sign-in.
+   *
+   * The email links to the tenant-configured `magic_link_url` (or
+   * the `emailRedirectTo` override) with a `token` query parameter
+   * appended. Your app should read that token and call
+   * `signInWithMagicLink(token)` to complete sign-in.
+   *
+   * Always returns `error: null` — the endpoint intentionally never
+   * enumerates. Bad configuration surfaces in your log drain
+   * (`per_request_redirect_rejected` if you passed a URL not in
+   * `redirect_urls`), not as an API response.
+   */
+  async requestMagicLink(email: string, options?: EmailRedirectOptions): Promise<{ error: string | null }> {
+    const body: Record<string, any> = { email }
+    if (options?.emailRedirectTo !== undefined) body.email_redirect_to = options.emailRedirectTo
+    const result = await this.http.post('/v1/auth/request-magic-link', body)
     if (result.error) {
       return { error: result.error }
     }
@@ -152,6 +205,93 @@ export class AuthClient {
     this.setSession(result)
     this.emit('SIGNED_IN', result)
     return { data: result, error: null }
+  }
+
+  /**
+   * Confirm an end-user's email address using a token from a
+   * verification email. Call this from the page you configured as
+   * `email_verification_url` (or `emailRedirectTo`), after reading
+   * the `token` query parameter.
+   *
+   * @example
+   * ```ts
+   * const params = new URL(location.href).searchParams
+   * const token = params.get('token')
+   * if (token) {
+   *   const { error } = await eb.auth.verifyEmail(token)
+   * }
+   * ```
+   */
+  async verifyEmail(token: string): Promise<{ error: string | null }> {
+    const result = await this.http.post('/v1/auth/verify-email', { token })
+    if (result.error) {
+      return { error: result.error }
+    }
+    return { error: null }
+  }
+
+  /**
+   * Trigger a password-reset email. Same redirect-URL contract as
+   * `signUp`: sends the user to the tenant-configured
+   * `password_reset_url` (or `emailRedirectTo` override) with a
+   * `token` query parameter.
+   *
+   * Always returns `error: null` to prevent email enumeration —
+   * whether the address is registered or not, the API responds
+   * identically.
+   */
+  async forgotPassword(email: string, options?: EmailRedirectOptions): Promise<{ error: string | null }> {
+    const body: Record<string, any> = { email }
+    if (options?.emailRedirectTo !== undefined) body.email_redirect_to = options.emailRedirectTo
+    const result = await this.http.post('/v1/auth/forgot-password', body)
+    if (result.error) {
+      return { error: result.error }
+    }
+    return { error: null }
+  }
+
+  /**
+   * Complete a password reset using a token from a reset email.
+   * Call this from the page you configured as `password_reset_url`
+   * (or `emailRedirectTo`), after reading the `token` query
+   * parameter and collecting the user's new password.
+   *
+   * @example
+   * ```ts
+   * const params = new URL(location.href).searchParams
+   * const token = params.get('token')
+   * if (token) {
+   *   const { error } = await eb.auth.resetPassword(token, newPassword)
+   * }
+   * ```
+   */
+  async resetPassword(token: string, newPassword: string): Promise<{ error: string | null }> {
+    const result = await this.http.post('/v1/auth/reset-password', {
+      token,
+      new_password: newPassword,
+    })
+    if (result.error) {
+      return { error: result.error }
+    }
+    return { error: null }
+  }
+
+  /**
+   * Resend the verification email to an unconfirmed user. Rate
+   * limited per email; already-confirmed users silently no-op. Same
+   * redirect-URL contract as `signUp`.
+   *
+   * Always returns `error: null` — the endpoint intentionally never
+   * enumerates.
+   */
+  async resendVerification(email: string, options?: EmailRedirectOptions): Promise<{ error: string | null }> {
+    const body: Record<string, any> = { email }
+    if (options?.emailRedirectTo !== undefined) body.email_redirect_to = options.emailRedirectTo
+    const result = await this.http.post('/v1/auth/resend-verification', body)
+    if (result.error) {
+      return { error: result.error }
+    }
+    return { error: null }
   }
 
   /**
