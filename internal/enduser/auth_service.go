@@ -520,8 +520,15 @@ func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID,
 	redirectURL, ok := config.ResolveEmailRedirect(tenant.EmailFlowPasswordReset, emailRedirectTo)
 	if !ok {
 		// Soft-fail: log and return nil. See docstring — a hard fail
-		// would leak enumeration.
-		slog.Warn("forgot-password: no reset URL configured", "project_id", projectID)
+		// would leak enumeration. Log the per-request override
+		// separately so a tenant with a typo in their SDK's
+		// emailRedirectTo can find it in their own log drain
+		// (review #4 — silent DX debugging nightmare otherwise).
+		if emailRedirectTo != "" {
+			slog.Warn("forgot-password: per_request_redirect_rejected", "project_id", projectID, "value", emailRedirectTo)
+		} else {
+			slog.Warn("forgot-password: no reset URL configured", "project_id", projectID)
+		}
 		return nil
 	}
 
@@ -621,7 +628,11 @@ func (s *AuthService) RequestMagicLink(ctx context.Context, schemaName, projectI
 
 	redirectURL, ok := config.ResolveEmailRedirect(tenant.EmailFlowMagicLink, emailRedirectTo)
 	if !ok {
-		slog.Warn("request-magic-link: no magic-link URL configured", "project_id", projectID)
+		if emailRedirectTo != "" {
+			slog.Warn("request-magic-link: per_request_redirect_rejected", "project_id", projectID, "value", emailRedirectTo)
+		} else {
+			slog.Warn("request-magic-link: no magic-link URL configured", "project_id", projectID)
+		}
 		return nil
 	}
 
@@ -924,7 +935,11 @@ func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projec
 
 	redirectURL, ok := config.ResolveEmailRedirect(tenant.EmailFlowVerification, emailRedirectTo)
 	if !ok {
-		slog.Warn("resend-verification: no verification URL configured", "project_id", projectID)
+		if emailRedirectTo != "" {
+			slog.Warn("resend-verification: per_request_redirect_rejected", "project_id", projectID, "value", emailRedirectTo)
+		} else {
+			slog.Warn("resend-verification: no verification URL configured", "project_id", projectID)
+		}
 		return nil
 	}
 

@@ -95,6 +95,80 @@ func TestValidate_RejectsRedirectURLNotInAllowlist(t *testing.T) {
 	}
 }
 
+// TestUrlsMatch_CaseInsensitiveSchemeAndHost pins the RFC 3986 §3.2.2
+// contract that browsers already follow: a tenant that stores
+// "https://App.Example.com/verify" and calls with the lowercased
+// variant should match. Was a ship-blocker on the #262 review.
+func TestUrlsMatch_CaseInsensitiveSchemeAndHost(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		// Case-insensitive scheme + host.
+		{"https://App.Example.com/verify", "https://app.example.com/verify", true},
+		{"HTTPS://app.example.com/verify", "https://app.example.com/verify", true},
+		// Case-sensitive path — a genuine path mismatch stays a
+		// mismatch even under the case-insensitive host rule.
+		{"https://app.example.com/Verify", "https://app.example.com/verify", false},
+		// Different hosts — not a match.
+		{"https://evil.example.com/verify", "https://app.example.com/verify", false},
+		// Different schemes — not a match (open-redirect defence).
+		{"http://app.example.com/verify", "https://app.example.com/verify", false},
+		// Query preserved case-sensitive.
+		{"https://app.example.com/verify?flow=A", "https://app.example.com/verify?flow=a", false},
+		// Fragments preserved case-sensitive.
+		{"https://app.example.com/#/Verify", "https://app.example.com/#/verify", false},
+		// Custom scheme (myapp://) — fallback plain-string compare
+		// still works.
+		{"myapp://verify", "myapp://verify", true},
+		{"myapp://verify", "MYAPP://verify", true},
+	}
+	for _, c := range cases {
+		if got := urlsMatch(c.a, c.b); got != c.want {
+			t.Errorf("urlsMatch(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// TestIsInRedirectAllowlist_CaseInsensitiveHost exercises the
+// integration between AuthConfig.isInRedirectAllowlist and urlsMatch
+// end-to-end.
+func TestIsInRedirectAllowlist_CaseInsensitiveHost(t *testing.T) {
+	cfg := AuthConfig{
+		RedirectURLs: []string{"https://App.Example.com/verify"},
+	}
+	// Lowercased host must match — the whole point.
+	if !cfg.isInRedirectAllowlist("https://app.example.com/verify") {
+		t.Error("lowercase host should match stored mixed-case host")
+	}
+	// Extra whitespace on either side — trimmed.
+	if !cfg.isInRedirectAllowlist("  https://app.example.com/verify  ") {
+		t.Error("trimmed whitespace should match")
+	}
+	// Different path must NOT match.
+	if cfg.isInRedirectAllowlist("https://app.example.com/other") {
+		t.Error("different path must not match — open-redirect defence")
+	}
+}
+
+// TestValidate_AcceptsRedirectURLInAllowlist pins the happy path so a
+// future change to Validate can't accidentally break tenants who
+// configured everything correctly. Suggested by review #262.
+func TestValidate_AcceptsRedirectURLInAllowlist(t *testing.T) {
+	cfg := AuthConfig{
+		Providers:            map[string]ProviderConfig{"email_password": {Enabled: true}},
+		PasswordMinLength:    8,
+		SessionDuration:      "168h",
+		RedirectURLs:         []string{"https://app.example.com/verify", "https://app.example.com/reset", "https://app.example.com/magic"},
+		EmailVerificationURL: "https://app.example.com/verify",
+		PasswordResetURL:     "https://app.example.com/reset",
+		MagicLinkURL:         "https://app.example.com/magic",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate rejected a well-formed config: %v", err)
+	}
+}
+
 func TestValidate_EmptyURLsAllowedByValidate(t *testing.T) {
 	// Validate is the "does the config parse cleanly?" check, not the
 	// "is email confirmation actually usable?" check. A tenant may

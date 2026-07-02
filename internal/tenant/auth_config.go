@@ -429,20 +429,66 @@ func (c *AuthConfig) ResolveEmailRedirect(flow EmailFlow, perRequest string) (st
 }
 
 // isInRedirectAllowlist reports whether the given URL is a member of
-// RedirectURLs. Exact string match (post-trim) — a tenant that lists
-// "https://app.example.com/verify" must reference exactly that value;
-// query strings and fragments are compared as-is. Rationale: the same
-// check Supabase runs against additional_redirect_urls, and a fuzzy
-// check (host-match / path-prefix) is a well-known open-redirect
-// pattern.
+// RedirectURLs. Match rules (RFC 3986 §3.2.2 / §3.1):
+//
+//   - Scheme + host are compared case-insensitive (RFC-correct: browsers
+//     routinely lowercase both, a tenant that stores
+//     "https://App.Example.com/verify" and calls with the lowercased
+//     variant should still match).
+//   - Path, query, and fragment are compared case-sensitive (RFC-correct
+//     for path; conservative for query/fragment — no upside to being
+//     permissive there, downside is a well-known open-redirect vector).
+//   - Whitespace trimmed on both sides.
+//
+// Anything that fails to parse as a URL falls back to plain
+// case-insensitive string compare (post-trim) so tenants with e.g.
+// custom schemes like "myapp://verify" still work.
+//
+// The strict-path rule is deliberate: a fuzzy host-match / path-prefix
+// check is the canonical open-redirect pattern. Same shape Supabase
+// runs against additional_redirect_urls.
 func (c *AuthConfig) isInRedirectAllowlist(candidate string) bool {
 	candidate = strings.TrimSpace(candidate)
 	for _, u := range c.RedirectURLs {
-		if strings.TrimSpace(u) == candidate {
+		if urlsMatch(strings.TrimSpace(u), candidate) {
 			return true
 		}
 	}
 	return false
+}
+
+// urlsMatch is the RFC-aware equality check used by the allowlist.
+// Split out so the tests can exercise it without going through an
+// AuthConfig struct.
+func urlsMatch(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil || ua.Scheme == "" || ub.Scheme == "" {
+		// One side isn't a parseable URL — fall back to a plain
+		// case-insensitive compare so custom-scheme tenants (e.g.
+		// "myapp://verify") aren't spuriously refused.
+		return strings.EqualFold(a, b)
+	}
+	if !strings.EqualFold(ua.Scheme, ub.Scheme) {
+		return false
+	}
+	if !strings.EqualFold(ua.Host, ub.Host) {
+		return false
+	}
+	// Path / query / fragment: case-sensitive.
+	if ua.EscapedPath() != ub.EscapedPath() {
+		return false
+	}
+	if ua.RawQuery != ub.RawQuery {
+		return false
+	}
+	if ua.Fragment != ub.Fragment {
+		return false
+	}
+	return true
 }
 
 // IsEmailPasswordEnabled returns whether the email_password provider is enabled.

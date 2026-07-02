@@ -356,17 +356,37 @@ func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// appendTokenQuery appends `token=<raw>` to a redirect URL, using `?`
-// or `&` depending on whether the URL already has a query string.
-// Kept naïve on purpose: we don't url.Parse the whole thing because
-// the redirect URL is already validated by the caller (URL-in-allowlist
-// check on the AuthConfig side), and net/url percent-encoding could
-// alter the tenant's URL in ways the tenant didn't expect. The token
-// is hex (already safe in a URL).
+// appendTokenQuery appends `token=<raw>` as a query parameter to the
+// tenant's redirect URL, respecting an existing query string AND an
+// existing fragment.
+//
+// The fragment split is the tricky part. If the tenant configures
+// `https://app.example.com/#/verify` (a hash-router SPA — Vue's
+// createWebHashHistory, React Router's HashRouter, Angular's
+// HashLocationStrategy), a naïve `url + "?token=X"` produces
+// `https://app.example.com/#/verify?token=X`. Per WHATWG URL,
+// everything after `#` is the fragment; the browser doesn't parse
+// `?token=X` as a query param, and the tenant's
+// `new URL(location).searchParams.get('token')` returns null. The
+// user sees "invalid token" and every hash-router SPA is silently
+// broken. Fix: split on the first `#`, insert `?token=X` (or
+// `&token=X`) before it, re-attach the fragment.
+//
+// We deliberately do NOT round-trip through net/url — the redirect
+// URL is already validated by the caller (URL-in-allowlist check on
+// the AuthConfig side), and net/url percent-encoding would alter the
+// tenant's URL in ways the tenant didn't expect. The token is hex
+// (see generateToken above; always [0-9a-f]) and safe in a URL as-is.
 func appendTokenQuery(redirectURL, rawToken string) string {
+	// Split on the first `#` so any fragment stays at the end.
+	base, frag, hasFrag := strings.Cut(redirectURL, "#")
 	sep := "?"
-	if strings.Contains(redirectURL, "?") {
+	if strings.Contains(base, "?") {
 		sep = "&"
 	}
-	return redirectURL + sep + "token=" + rawToken
+	base += sep + "token=" + rawToken
+	if hasFrag {
+		return base + "#" + frag
+	}
+	return base
 }
