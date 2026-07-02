@@ -51,6 +51,11 @@
 	let sessionDuration = $state('168h');
 	let redirectUrls = $state('http://localhost:3000');
 	let corsOrigins = $state('');
+	// #260 email-flow redirect URLs (part of #257). Each must be a member
+	// of the redirect_urls list above or the backend rejects PATCH.
+	let emailVerificationUrl = $state('');
+	let passwordResetUrl = $state('');
+	let magicLinkUrl = $state('');
 	let googleEnabled = $state(false);
 	let googleClientId = $state('');
 	let googleClientSecret = $state('');
@@ -323,6 +328,9 @@
 			sessionDuration = cfg.session_duration;
 			redirectUrls = cfg.redirect_urls.join('\n');
 			corsOrigins = (cfg.cors_origins ?? []).join('\n');
+			emailVerificationUrl = projectCtx.project?.auth_config?.email_verification_url ?? '';
+			passwordResetUrl = projectCtx.project?.auth_config?.password_reset_url ?? '';
+			magicLinkUrl = projectCtx.project?.auth_config?.magic_link_url ?? '';
 
 			const oauthCfg = projectCtx.project?.auth_config?.oauth_providers;
 			if (oauthCfg?.google) {
@@ -373,6 +381,39 @@
 		saveMessage = '';
 		saveError = '';
 		try {
+			// #260 client-side gate. The backend runs the same allowlist
+			// check and rejects the PATCH with a clear error; catching
+			// it here just spares the round-trip and gives an inline
+			// message next to the offending field.
+			const redirectList = redirectUrls.split('\n').map(u => u.trim()).filter(Boolean);
+			const inAllowlist = (u: string) => !u || redirectList.includes(u);
+			const evuTrim = emailVerificationUrl.trim();
+			const pruTrim = passwordResetUrl.trim();
+			const mluTrim = magicLinkUrl.trim();
+			if (!inAllowlist(evuTrim)) {
+				saveError = 'Email verification URL must appear in the redirect URLs list above.';
+				saving = false;
+				return;
+			}
+			if (!inAllowlist(pruTrim)) {
+				saveError = 'Password reset URL must appear in the redirect URLs list above.';
+				saving = false;
+				return;
+			}
+			if (!inAllowlist(mluTrim)) {
+				saveError = 'Magic link URL must appear in the redirect URLs list above.';
+				saving = false;
+				return;
+			}
+			// Extra guard: if the user turned on email confirmation but
+			// hasn't set a verification URL, the backend will 400 on the
+			// first signup with `require_email_confirmation=true`. Fail
+			// loud in the UI so the operator knows.
+			if (requireEmailConfirmation && !evuTrim) {
+				saveError = 'Email verification is enabled but no verification URL is configured. Set one below or turn off "require email confirmation".';
+				saving = false;
+				return;
+			}
 			// Only send client_secret when the user actually typed a new value —
 			// otherwise the backend leaves whatever is already in the vault alone.
 			const googleProvider: Record<string, any> = {
@@ -430,6 +471,15 @@
 				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean),
 				cors_origins: corsOrigins.split('\n').map(u => u.trim()).filter(Boolean)
 			};
+			// #260 email-flow URLs. Trimmed; empty string sent as `undefined`
+			// so the backend receives "field absent" and stores NULL — matches
+			// the "no default configured" resolver branch on the backend.
+			const evu = emailVerificationUrl.trim();
+			const pru = passwordResetUrl.trim();
+			const mlu = magicLinkUrl.trim();
+			if (evu) config.email_verification_url = evu;
+			if (pru) config.password_reset_url = pru;
+			if (mlu) config.magic_link_url = mlu;
 			const updated = await api.updateProject(projectCtx.id, { auth_config: config });
 
 			// Update the project context so navigation within the same project
@@ -1153,6 +1203,55 @@
 							placeholder="http://localhost:3000&#10;https://app.example.com"
 							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 						></textarea>
+					</div>
+
+					<!-- Email-flow redirect URLs (#260, part of #257) -->
+					<div class="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+						<h3 class="text-sm font-semibold text-gray-900">Email-flow redirect URLs</h3>
+						<p class="mt-1 text-xs text-gray-500">
+							Where the verification / password-reset / magic-link emails send your users. Each URL must appear in the <strong>Allowed redirect URLs</strong> list above (same allowlist). Your app reads the <code class="bg-white border border-gray-200 rounded px-1">?token=...</code> query parameter and calls the matching SDK method (<code class="bg-white border border-gray-200 rounded px-1">eb.auth.verifyEmail</code>, <code class="bg-white border border-gray-200 rounded px-1">eb.auth.resetPassword</code>, <code class="bg-white border border-gray-200 rounded px-1">eb.auth.signInWithMagicLink</code>). Leave blank if you're not using that flow.
+						</p>
+
+						<div class="mt-3 space-y-3">
+							<div>
+								<label for="verify-url" class="block text-xs font-medium text-gray-700">Email verification URL {#if requireEmailConfirmation}<span class="text-red-600">*</span>{/if}</label>
+								<input
+									id="verify-url"
+									type="url"
+									bind:value={emailVerificationUrl}
+									placeholder="https://yourapp.example/verify"
+									class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+								/>
+								{#if requireEmailConfirmation && !emailVerificationUrl.trim()}
+									<p class="mt-1 text-xs text-red-600">Required — email confirmation is enabled above.</p>
+								{/if}
+							</div>
+
+							<div>
+								<label for="reset-url" class="block text-xs font-medium text-gray-700">Password reset URL</label>
+								<input
+									id="reset-url"
+									type="url"
+									bind:value={passwordResetUrl}
+									placeholder="https://yourapp.example/reset-password"
+									class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+								/>
+							</div>
+
+							<div>
+								<label for="magic-url" class="block text-xs font-medium text-gray-700">Magic link URL {#if magicLinkEnabled}<span class="text-amber-600">*</span>{/if}</label>
+								<input
+									id="magic-url"
+									type="url"
+									bind:value={magicLinkUrl}
+									placeholder="https://yourapp.example/magic-link"
+									class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+								/>
+								{#if magicLinkEnabled && !magicLinkUrl.trim()}
+									<p class="mt-1 text-xs text-amber-600">Recommended — magic link auth is enabled but requests will silently no-op until this is set.</p>
+								{/if}
+							</div>
+						</div>
 					</div>
 				</div>
 			</div>

@@ -42,6 +42,15 @@ export interface AuthConfig {
 	 * zero-means-default on the backend (RateLimits.EffectiveRateLimits
 	 * merge), so the client can send 0 OR omit a field to reset that knob. */
 	rate_limits?: RateLimits;
+	/** URL the verification email links to (#258, part of #257). Must
+	 * be a member of `redirect_urls` above or the backend rejects
+	 * PATCH. The tenant's page reads the `?token=...` query param and
+	 * calls `eb.auth.verifyEmail(token)` to confirm. */
+	email_verification_url?: string;
+	/** URL the password-reset email links to. Same allowlist rule. */
+	password_reset_url?: string;
+	/** URL the magic-link email links to. Same allowlist rule. */
+	magic_link_url?: string;
 }
 
 /** Per-project rate-limit overrides. Numeric zeros / absent fields fall
