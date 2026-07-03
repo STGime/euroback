@@ -376,44 +376,74 @@
 		}
 	});
 
+	/** Case-insensitive scheme+host, case-sensitive path/query/fragment
+	 * — mirrors the backend's `urlsMatch` in internal/tenant/auth_config.go
+	 * so the frontend doesn't reject URLs the backend would accept
+	 * (e.g. a redirect list containing `https://App.Example.com/verify`
+	 * matched against `https://app.example.com/verify`). Falls back to
+	 * case-insensitive plain compare when either side won't parse
+	 * (custom-scheme tenants like `myapp://verify`).
+	 */
+	function urlInAllowlist(candidate: string, list: string[]): boolean {
+		const cTrim = candidate.trim();
+		for (const raw of list) {
+			const listTrim = raw.trim();
+			if (cTrim === listTrim) return true;
+			try {
+				const a = new URL(cTrim);
+				const b = new URL(listTrim);
+				if (a.protocol.toLowerCase() !== b.protocol.toLowerCase()) continue;
+				if (a.host.toLowerCase() !== b.host.toLowerCase()) continue;
+				if (a.pathname !== b.pathname) continue;
+				if (a.search !== b.search) continue;
+				if (a.hash !== b.hash) continue;
+				return true;
+			} catch {
+				// One side isn't a parseable URL — fall back to plain
+				// case-insensitive compare so custom-scheme tenants
+				// still work.
+				if (cTrim.toLowerCase() === listTrim.toLowerCase()) return true;
+			}
+		}
+		return false;
+	}
+
 	async function handleSave() {
-		saving = true;
 		saveMessage = '';
 		saveError = '';
+
+		// #260 client-side gate — runs BEFORE `saving = true` so a
+		// rejection doesn't flash the button spinner (review nit).
+		// The backend runs the same check; catching it here spares
+		// the round-trip and puts the error next to the offending
+		// field.
+		const redirectList = redirectUrls.split('\n').map(u => u.trim()).filter(Boolean);
+		const inAllowlist = (u: string) => !u || urlInAllowlist(u, redirectList);
+		const evuTrim = emailVerificationUrl.trim();
+		const pruTrim = passwordResetUrl.trim();
+		const mluTrim = magicLinkUrl.trim();
+		if (!inAllowlist(evuTrim)) {
+			saveError = 'Email verification URL must appear in the redirect URLs list above.';
+			return;
+		}
+		if (!inAllowlist(pruTrim)) {
+			saveError = 'Password reset URL must appear in the redirect URLs list above.';
+			return;
+		}
+		if (!inAllowlist(mluTrim)) {
+			saveError = 'Magic link URL must appear in the redirect URLs list above.';
+			return;
+		}
+		// Extra guard: if the user turned on email confirmation but
+		// hasn't set a verification URL, the backend will 400 on the
+		// first signup. Fail loud in the UI so the operator knows.
+		if (requireEmailConfirmation && !evuTrim) {
+			saveError = 'Email verification is enabled but no verification URL is configured. Set one below or turn off "require email confirmation".';
+			return;
+		}
+
+		saving = true;
 		try {
-			// #260 client-side gate. The backend runs the same allowlist
-			// check and rejects the PATCH with a clear error; catching
-			// it here just spares the round-trip and gives an inline
-			// message next to the offending field.
-			const redirectList = redirectUrls.split('\n').map(u => u.trim()).filter(Boolean);
-			const inAllowlist = (u: string) => !u || redirectList.includes(u);
-			const evuTrim = emailVerificationUrl.trim();
-			const pruTrim = passwordResetUrl.trim();
-			const mluTrim = magicLinkUrl.trim();
-			if (!inAllowlist(evuTrim)) {
-				saveError = 'Email verification URL must appear in the redirect URLs list above.';
-				saving = false;
-				return;
-			}
-			if (!inAllowlist(pruTrim)) {
-				saveError = 'Password reset URL must appear in the redirect URLs list above.';
-				saving = false;
-				return;
-			}
-			if (!inAllowlist(mluTrim)) {
-				saveError = 'Magic link URL must appear in the redirect URLs list above.';
-				saving = false;
-				return;
-			}
-			// Extra guard: if the user turned on email confirmation but
-			// hasn't set a verification URL, the backend will 400 on the
-			// first signup with `require_email_confirmation=true`. Fail
-			// loud in the UI so the operator knows.
-			if (requireEmailConfirmation && !evuTrim) {
-				saveError = 'Email verification is enabled but no verification URL is configured. Set one below or turn off "require email confirmation".';
-				saving = false;
-				return;
-			}
 			// Only send client_secret when the user actually typed a new value —
 			// otherwise the backend leaves whatever is already in the vault alone.
 			const googleProvider: Record<string, any> = {
