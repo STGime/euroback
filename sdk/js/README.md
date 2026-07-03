@@ -54,6 +54,27 @@ const { data: session, error } = eb.auth.handleOAuthCallback()
 await eb.auth.requestMagicLink('user@example.com')
 await eb.auth.signInWithMagicLink(token)
 
+// Email confirmation & password reset (requires per-project redirect
+// URLs configured on auth_config — see docs). The `emailRedirectTo`
+// option is optional; when omitted, the project default is used.
+await eb.auth.signUp({
+  email: 'user@example.com',
+  password: 'securepassword',
+  emailRedirectTo: 'https://myapp.com/verify',
+})
+// On your /verify page — after reading the token from ?token=...:
+await eb.auth.verifyEmail(token)
+
+// Forgot / reset password:
+await eb.auth.forgotPassword('user@example.com', {
+  emailRedirectTo: 'https://myapp.com/reset',
+})
+// On your /reset page:
+await eb.auth.resetPassword(token, newPassword)
+
+// Resend the verification email:
+await eb.auth.resendVerification('user@example.com')
+
 // Get current user (from server)
 const { data: user } = await eb.auth.getUser()
 

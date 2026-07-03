@@ -2,6 +2,20 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.0 — 2026-07-03
+
+### Added — end-user email flows (part of umbrella #257)
+
+- **`eb.auth.verifyEmail(token)`** — confirms a user's email address using a token from the verification email. Call this from the page you configure as `email_verification_url`.
+- **`eb.auth.forgotPassword(email, options?)`** — triggers a password-reset email. Always returns `error: null` (no enumeration).
+- **`eb.auth.resetPassword(token, newPassword)`** — completes the reset using a token from the reset email.
+- **`eb.auth.resendVerification(email, options?)`** — resends the verification email to an unconfirmed user.
+- **`emailRedirectTo` option** on `signUp`, `requestMagicLink`, `forgotPassword`, `resendVerification`. Overrides the per-project `auth_config.{email_verification_url, password_reset_url, magic_link_url}` for a single call. Must be in `redirect_urls` allowlist — same defence Supabase runs on `additional_redirect_urls`.
+
+### Fixed
+
+- Backend (see PR #262) — verification / reset / magic-link emails now link to a **tenant-owned URL** instead of the broken `console.eurobase.app/verify-email` route that 404'd. Any tenant that had `require_email_confirmation` enabled had a broken signup; this release + the accompanying backend fix closes that. See tenant docs chapter 6 → "Email confirmation — end-to-end" (#261) for the setup guide.
+
 ## 0.4.0 — 2026-05-17
 
 ### Added
