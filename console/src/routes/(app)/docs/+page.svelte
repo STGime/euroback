@@ -577,6 +577,116 @@ await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 					</p>
 				</div>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Email confirmation &mdash; end-to-end</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					When you enable <strong>Email confirmation</strong>, signups aren't complete until the user clicks a link in the verification email. Same shape for password reset and magic-link sign-in. All three flows follow the same three-step pattern:
+				</p>
+				<ol class="mt-2 text-sm text-gray-700 space-y-1.5 ml-4 list-decimal">
+					<li>User signs up / requests a reset / requests a magic link via the SDK.</li>
+					<li>Eurobase sends an email with a link to <strong>a page on your app</strong> (not Eurobase's console) with a <code class="bg-gray-100 border border-gray-200 rounded px-1">?token=...</code> query parameter.</li>
+					<li>Your page reads the token from the query string and calls the corresponding SDK method to complete the flow.</li>
+				</ol>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Configure the URLs</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					In <strong>Auth &rarr; Settings &rarr; Email-flow redirect URLs</strong>, set the three URLs your app will host:
+				</p>
+				<ul class="mt-1 text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Email verification URL</strong> &mdash; e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">https://yourapp.example/verify</code>. Required when "Require email confirmation" is on.</li>
+					<li><strong>Password reset URL</strong> &mdash; e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">https://yourapp.example/reset-password</code>.</li>
+					<li><strong>Magic link URL</strong> &mdash; e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">https://yourapp.example/magic-link</code>.</li>
+				</ul>
+				<p class="mt-2 text-sm text-gray-700 leading-relaxed">
+					Each URL <strong>must appear</strong> in the <strong>Allowed redirect URLs</strong> list above (same allowlist). The console blocks Save inline if a URL isn't allowed; the backend rejects the update for the same reason. This is the standard <em>open-redirect defence</em> &mdash; without it, an attacker could put your project's URL in a phishing email and land users on their own page. Add both your dev and prod URLs to the redirect list before configuring the three fields.
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">The verify-email page (copy-paste starter)</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					This is the minimum &mdash; a static HTML file works. Adapt to your framework (Next.js page, SvelteKit route, Vue component &mdash; same three lines of logic).
+				</p>
+
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-3">
+					<button
+						onclick={() => copyCode("<!-- verify.html — the page Eurobase's verification email links to.\n     Deploy at whichever URL you configured as email_verification_url. -->\n<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>Verifying your email…</title>\n</head>\n<body>\n  <h1 id=\"status\">Verifying…</h1>\n  <script type=\"module\">\n    import { createClient } from 'https://cdn.jsdelivr.net/npm/@eurobase/sdk/+esm'\n    const eb = createClient({\n      url: 'https://your-project.eurobase.app',\n      apiKey: 'eb_pk_YOUR_PUBLIC_KEY',\n    })\n    const token = new URL(location.href).searchParams.get('token')\n    const status = document.getElementById('status')\n    if (!token) {\n      status.textContent = 'Missing verification token in the URL.'\n    } else {\n      const { error } = await eb.auth.verifyEmail(token)\n      if (error) {\n        status.textContent = 'Verification failed: ' + error\n      } else {\n        status.textContent = 'Verified! You can now sign in.'\n        setTimeout(() => location.href = '/login', 2000)\n      }\n    }\n  </script>\n</body>\n</html>", 'verify-page')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'verify-page' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>&lt;!-- verify.html --&gt;
+&lt;!DOCTYPE html&gt;
+&lt;html lang="en"&gt;
+&lt;head&gt;&lt;title&gt;Verifying your email…&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+  &lt;h1 id="status"&gt;Verifying…&lt;/h1&gt;
+  &lt;script type="module"&gt;
+    import {'{'} createClient {'}'} from 'https://cdn.jsdelivr.net/npm/@eurobase/sdk/+esm'
+    const eb = createClient({'{'}
+      url: 'https://your-project.eurobase.app',
+      apiKey: 'eb_pk_YOUR_PUBLIC_KEY',
+    {'}'})
+    const token = new URL(location.href).searchParams.get('token')
+    const status = document.getElementById('status')
+    if (!token) {'{'}
+      status.textContent = 'Missing verification token in the URL.'
+    {'}'} else {'{'}
+      const {'{'} error {'}'} = await eb.auth.verifyEmail(token)
+      status.textContent = error ? 'Verification failed: ' + error : 'Verified!'
+    {'}'}
+  &lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;</pre>
+				</div>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Password reset page</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Same shape, but you collect a new password from the user first, then call <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.resetPassword(token, newPassword)</code>. Trigger the email with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.forgotPassword(email)</code>.
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Magic link page</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Same shape. Trigger with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.requestMagicLink(email)</code>; complete with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.signInWithMagicLink(token)</code>. On success the user is signed in and you can redirect to your app's home page.
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Per-request override (multi-tenant apps)</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					If you serve multiple environments or subdomains from one project, pass <code class="bg-gray-100 border border-gray-200 rounded px-1">emailRedirectTo</code> on the SDK call to override the default for that user:
+				</p>
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<button
+						onclick={() => copyCode("await eb.auth.signUp({\n  email: 'user@example.com',\n  password: 'SecurePass123!',\n  emailRedirectTo: 'https://staging.yourapp.example/verify',\n})", 'sdk-redirect-override')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'sdk-redirect-override' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>await eb.auth.signUp({'{'}
+  email: 'user@example.com',
+  password: 'SecurePass123!',
+  emailRedirectTo: 'https://staging.yourapp.example/verify',
+{'}'})</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					The per-request URL must still be in your <strong>Allowed redirect URLs</strong> list, or the signup returns 400 (same open-redirect defence).
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Migrating from the broken default</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					If your project had <strong>Require email confirmation</strong> enabled before July 2026, signups were silently broken &mdash; the email linked to a Eurobase-hosted URL that never existed. If any users were created with an unconfirmed email in that window, run this SQL from the SQL Runner to check who's affected:
+				</p>
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<button
+						onclick={() => copyCode("SELECT id, email, created_at FROM users\nWHERE email_confirmed_at IS NULL\nORDER BY created_at ASC;", 'sql-unconfirmed')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'sql-unconfirmed' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>SELECT id, email, created_at FROM users
+WHERE email_confirmed_at IS NULL
+ORDER BY created_at ASC;</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					After you configure the three redirect URLs, those users can request a fresh verification email with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.resendVerification(email)</code> from a "verify your email" prompt in your app.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">SDK auth flow</h3>
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
