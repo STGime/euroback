@@ -132,16 +132,22 @@ const eb = createClient({ url: URL_BASE, apiKey: 'eb_pk_test' })
   assert.equal(captured.body.token, 'opaque-hex-token')
 }
 
-// ── resetPassword: hits POST /v1/auth/reset-password with token + new_password ──
+// ── resetPassword: hits POST /v1/auth/reset-password with { token, password } ──
+// The fact-check review of PR #263 caught that the backend handler at
+// internal/enduser/handler.go:338-341 decodes into
+// `struct { Token string; Password string }` — literally `password`,
+// NOT `new_password`. The previous test locked in the wrong shape;
+// this one locks in the corrected one.
 {
   reset({ status: 200, body: { status: 'ok' } })
   const { error } = await eb.auth.resetPassword('opaque-hex-token', 'NewPass123!')
   assert.equal(error, null)
   assert.equal(captured.url, `${URL_BASE}/v1/auth/reset-password`)
   assert.equal(captured.body.token, 'opaque-hex-token')
-  // Snake case — the backend expects new_password, not newPassword.
-  assert.equal(captured.body.new_password, 'NewPass123!',
-    'resetPassword did not send new_password (backend expects snake_case)')
+  assert.equal(captured.body.password, 'NewPass123!',
+    'resetPassword did not send `password` (backend expects that literal field name)')
+  assert.equal(captured.body.new_password, undefined,
+    'resetPassword still sending `new_password` — backend ignores it, reset will fail silently')
   assert.equal(captured.body.newPassword, undefined,
     'resetPassword leaked camelCase newPassword on the wire')
 }

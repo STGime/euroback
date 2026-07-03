@@ -266,9 +266,14 @@ export class AuthClient {
    * ```
    */
   async resetPassword(token: string, newPassword: string): Promise<{ error: string | null }> {
+    // Backend handler at /v1/auth/reset-password expects the field
+    // literally named `password` (not `new_password`). The SDK
+    // parameter stays `newPassword` for JS ergonomics — reserved
+    // words are fine as identifiers but `password` alone reads as
+    // "the user's current password", which resetPassword is not.
     const result = await this.http.post('/v1/auth/reset-password', {
       token,
-      new_password: newPassword,
+      password: newPassword,
     })
     if (result.error) {
       return { error: result.error }
