@@ -568,15 +568,6 @@ await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 					<li><strong>CORS origins</strong> &mdash; browser origins (scheme://host[:port]) allowed to call this project's API. Add your dev and production app origins. Eurobase platform origins (<code class="bg-gray-100 border border-gray-200 rounded px-1">*.eurobase.app</code>) are always allowed.</li>
 				</ul>
 
-				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">
-					<svg class="h-5 w-5 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-					</svg>
-					<p class="text-sm text-amber-800">
-						<strong>Email confirmation</strong> requires a transactional email provider (Scaleway TEM). Until TEM is configured for your project, email-dependent features like signup verification, password reset, and email change will not be available.
-					</p>
-				</div>
-
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Email confirmation &mdash; end-to-end</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					When you enable <strong>Email confirmation</strong>, signups aren't complete until the user clicks a link in the verification email. Same shape for password reset and magic-link sign-in. All three flows follow the same three-step pattern:
