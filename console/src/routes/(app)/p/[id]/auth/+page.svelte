@@ -444,6 +444,39 @@
 
 		saving = true;
 		try {
+			// #260 client-side gate. The backend runs the same allowlist
+			// check and rejects the PATCH with a clear error; catching
+			// it here just spares the round-trip and gives an inline
+			// message next to the offending field.
+			const redirectList = redirectUrls.split('\n').map(u => u.trim()).filter(Boolean);
+			const inAllowlist = (u: string) => !u || redirectList.includes(u);
+			const evuTrim = emailVerificationUrl.trim();
+			const pruTrim = passwordResetUrl.trim();
+			const mluTrim = magicLinkUrl.trim();
+			if (!inAllowlist(evuTrim)) {
+				saveError = 'Email verification URL must appear in the redirect URLs list above.';
+				saving = false;
+				return;
+			}
+			if (!inAllowlist(pruTrim)) {
+				saveError = 'Password reset URL must appear in the redirect URLs list above.';
+				saving = false;
+				return;
+			}
+			if (!inAllowlist(mluTrim)) {
+				saveError = 'Magic link URL must appear in the redirect URLs list above.';
+				saving = false;
+				return;
+			}
+			// Extra guard: if the user turned on email confirmation but
+			// hasn't set a verification URL, the backend will 400 on the
+			// first signup with `require_email_confirmation=true`. Fail
+			// loud in the UI so the operator knows.
+			if (requireEmailConfirmation && !evuTrim) {
+				saveError = 'Email verification is enabled but no verification URL is configured. Set one below or turn off "require email confirmation".';
+				saving = false;
+				return;
+			}
 			// Only send client_secret when the user actually typed a new value —
 			// otherwise the backend leaves whatever is already in the vault alone.
 			const googleProvider: Record<string, any> = {
