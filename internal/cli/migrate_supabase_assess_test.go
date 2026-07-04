@@ -169,7 +169,7 @@ func TestFormatBytes(t *testing.T) {
 func TestWriteReport_ShapeAndOrdering(t *testing.T) {
 	r := &report{
 		sourceURL:   "postgres://user:***@db.example.com/postgres",
-		targetHint:  "run `eurobase migrate supabase schema` next",
+		targetHint:  "run `eurobase import supabase schema` next",
 		generatedAt: time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC),
 		tables:      []item{{name: "public.orders", grade: gradeOK, note: "1.2M rows"}},
 		policies:    []item{{name: "public.orders :: owner_select", grade: gradeOK, note: "standard auth.uid()"}},
@@ -215,7 +215,7 @@ func TestWriteReport_ShapeAndOrdering(t *testing.T) {
 		lastIdx = idx
 	}
 	// Next-step footer
-	if !strings.Contains(out, "eurobase migrate supabase schema") {
+	if !strings.Contains(out, "eurobase import supabase schema") {
 		t.Errorf("next-step hint missing from footer")
 	}
 }
