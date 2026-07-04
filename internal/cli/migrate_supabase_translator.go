@@ -38,35 +38,32 @@ type translationResult struct {
 
 // Translate rewrites a Supabase pg_dump schema-only body for Eurobase.
 //
-// It processes the input line-by-line (comments handled per line) and
-// applies regex-based rewrites. Kept regex-based on purpose: a full
-// SQL parser would be an order of magnitude more code and would still
-// miss the same edge cases that generate the warnings list. Six
-// rewrites cover:
+// Two passes:
 //
-//  1. Strip `SET search_path = …` — Eurobase's executor pins this per
-//     tenant. Leaving it in would set the wrong search_path.
-//  2. Strip `CREATE SCHEMA public;` — schema is already provisioned.
-//  3. Rewrite `REFERENCES auth.users(id)` → `REFERENCES users(id)`.
-//  4. Rewrite `auth.uid()` → `auth_uid()` (Eurobase's per-tenant helper).
-//  5. Rewrite `auth.role()` → a CASE that preserves the "service_role
-//     vs authenticated" distinction using Eurobase's helpers.
-//  6. Rewrite `storage.objects` → `storage_objects`.
-//  7. Wrap every policy USING(...) / WITH CHECK(...) in
-//     `public.is_service_role() OR (...)` so service-key writes keep
-//     working after the move.
+//  1. Line-by-line — strips no-op meta lines (SET, CREATE SCHEMA
+//     public, …) and applies atom rewrites (auth.uid → auth_uid, etc).
+//     `public.<table>` qualifiers stripped in the six statement-head
+//     contexts (CREATE TABLE, ALTER TABLE, REFERENCES, ON, CREATE
+//     INDEX … ON, etc.) so DDL lands in the tenant schema.
+//
+//  2. Statement-level — splits the output on `;` outside string
+//     literals and wraps every CREATE POLICY body in
+//     `public.is_service_role() OR (...)`. Two-pass matters because
+//     pg_dump pretty-prints long policy bodies across multiple lines;
+//     wrapping at line-level would silently miss those (review B2 on
+//     PR #274 flagged this as a ship-blocker).
 //
 // Warns (not rewrites) — the tenant must review:
 //   - Any use of `auth.jwt() ->> …` on a project-specific claim.
-//   - `auth.email()` — Eurobase's `auth_email()` exists but the
-//     policy body is worth eyeballing.
-//   - Any non-public / non-storage schema qualifier (extensions in
-//     custom schemas, foreign-data wrappers, etc.).
+//   - Any non-public / non-storage schema qualifier that we don't
+//     already rewrite (extensions in custom schemas, foreign-data
+//     wrappers, etc.).
 func Translate(input string) translationResult {
 	res := translationResult{rewrites: map[string]int{}}
 
-	var out strings.Builder
-	out.Grow(len(input))
+	// ── Pass 1: line-by-line ────────────────────────────────────────
+	var pass1 strings.Builder
+	pass1.Grow(len(input))
 	lines := strings.Split(input, "\n")
 	for i, line := range lines {
 		lineNum := i + 1
@@ -75,20 +72,78 @@ func Translate(input string) translationResult {
 			res.rewrites[name] += changed[name]
 		}
 		res.warnings = append(res.warnings, warns...)
-		if rewritten == "" && strings.TrimSpace(line) == "" {
-			out.WriteString("\n")
-			continue
-		}
 		if rewritten == skipLineSentinel {
 			continue
 		}
-		out.WriteString(rewritten)
+		pass1.WriteString(rewritten)
 		if i < len(lines)-1 {
-			out.WriteString("\n")
+			pass1.WriteString("\n")
 		}
 	}
-	res.sql = out.String()
+
+	// ── Pass 2: statement-level policy wrap ─────────────────────────
+	intermediate := pass1.String()
+	final, wraps := wrapPoliciesInStatements(intermediate)
+	if wraps > 0 {
+		res.rewrites["rewrite:policy body OR'd with is_service_role()"] += wraps
+	}
+	res.sql = final
 	return res
+}
+
+// wrapPoliciesInStatements handles the multi-line policy case (B2).
+// Splits the input on `;` outside string literals; for each statement
+// that starts with CREATE POLICY, wraps every USING/WITH CHECK body.
+// Non-policy statements pass through unchanged.
+func wrapPoliciesInStatements(sql string) (string, int) {
+	var out strings.Builder
+	out.Grow(len(sql))
+	total := 0
+	i := 0
+	for i < len(sql) {
+		start := i
+		// Advance past one statement (up to and including the `;`
+		// that terminates it — or EOF).
+		end := findStatementEnd(sql, start)
+		stmt := sql[start:end]
+		trimmed := strings.TrimLeft(stmt, " \t\n\r")
+		if reCreatePolicyMulti.MatchString(trimmed) {
+			wrapped, n := wrapPolicyBody(stmt)
+			out.WriteString(wrapped)
+			total += n
+		} else {
+			out.WriteString(stmt)
+		}
+		i = end
+	}
+	return out.String(), total
+}
+
+// findStatementEnd returns the index one past the terminating `;` of
+// the statement starting at `start`, respecting single-quoted string
+// literals + doubled-quote escapes. On EOF, returns len(sql).
+func findStatementEnd(sql string, start int) int {
+	inString := false
+	for i := start; i < len(sql); i++ {
+		c := sql[i]
+		if inString {
+			if c == '\'' {
+				if i+1 < len(sql) && sql[i+1] == '\'' {
+					i++
+					continue
+				}
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inString = true
+		case ';':
+			return i + 1
+		}
+	}
+	return len(sql)
 }
 
 // skipLineSentinel is returned by translateLine when the whole line
@@ -106,8 +161,15 @@ func translateLine(line string, lineNum int) (string, map[string]int, []translat
 
 	// Drop-line rules — evaluated first because there's no point
 	// rewriting a line we're about to throw away.
-	if reSetSearchPath.MatchString(trimmed) {
-		fired["strip:SET search_path"]++
+	//
+	// Any `SET <ident> = …` in the pg_dump preamble is stripped:
+	// the Eurobase migration executor's session already has the
+	// correct search_path pinned + row_security enforced, and stray
+	// SET default_table_access_method / SET row_security /
+	// SET transaction_read_only would either fail or silently
+	// disable enforcement for the tx. Review M6 flagged this.
+	if reSetAny.MatchString(trimmed) {
+		fired["strip:SET <preamble>"]++
 		return skipLineSentinel, fired, warns
 	}
 	if reCreateSchemaPublic.MatchString(trimmed) {
@@ -146,6 +208,28 @@ func translateLine(line string, lineNum int) (string, map[string]int, []translat
 	if n := countAndReplace(&out, reAuthEmail, "auth_email()"); n > 0 {
 		fired["rewrite:auth.email() → auth_email()"] += n
 	}
+	// H4: Supabase's pg_dump emits `extensions.uuid_generate_v4()`;
+	// Eurobase's tenant Postgres exposes it as `public.uuid_generate_v4()`.
+	// Same for `extensions.gen_random_uuid()` → the built-in
+	// `gen_random_uuid()`.
+	if n := countAndReplace(&out, reExtensionsUUID, "public.uuid_generate_v4()"); n > 0 {
+		fired["rewrite:extensions.uuid_generate_v4() → public.uuid_generate_v4()"] += n
+	}
+	if n := countAndReplace(&out, reExtensionsGenRandomUUID, "gen_random_uuid()"); n > 0 {
+		fired["rewrite:extensions.gen_random_uuid() → gen_random_uuid()"] += n
+	}
+	// B1: Strip `public.` schema qualifier from table references in
+	// the specific DDL / policy / FK contexts where pg_dump emits it.
+	// The Eurobase executor pins `SET search_path TO <tenant>` — an
+	// explicit `public.` would send the object to `public` (which
+	// the per-tenant _ddl role can't create in). We keep `public.`
+	// on function calls (e.g. `public.uuid_generate_v4()`) because
+	// those live in Eurobase's public schema and must stay
+	// qualified. Regex-anchored on statement heads (not
+	// blanket-strip) so functions and quoted strings are safe.
+	if n := countAndReplacePublicQualifier(&out); n > 0 {
+		fired["rewrite:public.<table> → <table>"] += n
+	}
 
 	// Warnings — the tenant needs to eyeball these.
 	if reAuthJWT.MatchString(out) {
@@ -162,14 +246,9 @@ func translateLine(line string, lineNum int) (string, map[string]int, []translat
 		})
 	}
 
-	// Policy-body wrapping — done AFTER the atom rewrites so the
-	// wrapped body already has Eurobase-shape function calls.
-	if reCreatePolicy.MatchString(out) {
-		if wrapped, n := wrapPolicyBody(out); n > 0 {
-			out = wrapped
-			fired["rewrite:policy body OR'd with is_service_role()"] += n
-		}
-	}
+	// Note: policy-body wrapping runs at statement level (Pass 2), not
+	// here. pg_dump pretty-prints long policy bodies across multiple
+	// lines, so per-line wrap silently misses them (#274 review B2).
 
 	return out, fired, warns
 }
@@ -284,7 +363,15 @@ func findMatchingParen(s string, openIdx int) int {
 // ── regex table ──────────────────────────────────────────────────────
 
 var (
-	reSetSearchPath      = regexp.MustCompile(`(?i)^\s*SET\s+search_path\s*=`)
+	// `SET <ident> = …` — pg_dump's preamble is a run of these
+	// (`SET statement_timeout`, `SET client_encoding`,
+	// `SET search_path`, `SET row_security`, `SET
+	// default_table_access_method`, …). All get stripped: the
+	// Eurobase migration executor's session already has the correct
+	// search_path pinned + row_security enforced, and stray SETs
+	// would either fail on the migrator role or silently disable
+	// enforcement for the tx. (#274 review M6.)
+	reSetAny             = regexp.MustCompile(`(?i)^\s*SET\s+\w+`)
 	reCreateSchemaPublic = regexp.MustCompile(`(?i)^\s*CREATE\s+SCHEMA\s+(IF\s+NOT\s+EXISTS\s+)?public\b`)
 	reAlterSchemaOwner   = regexp.MustCompile(`(?i)^\s*ALTER\s+SCHEMA\s+\w+\s+OWNER\s+TO`)
 	reCommentOnSchema    = regexp.MustCompile(`(?i)^\s*COMMENT\s+ON\s+SCHEMA\b`)
@@ -306,15 +393,60 @@ var (
 	// `storage.objects` as a table reference.
 	reStorageObjects = regexp.MustCompile(`\bstorage\.objects\b`)
 
-	// `CREATE POLICY` — used to gate the wrapPolicyBody call.
-	reCreatePolicy = regexp.MustCompile(`(?i)\bCREATE\s+POLICY\b`)
+	// `extensions.uuid_generate_v4()` / `.gen_random_uuid()` — Supabase
+	// installs the uuid-ossp/pgcrypto helpers into the `extensions`
+	// schema; Eurobase exposes them at `public.uuid_generate_v4()` and
+	// as the built-in `gen_random_uuid()`. (#274 review H4.)
+	reExtensionsUUID          = regexp.MustCompile(`\bextensions\.uuid_generate_v4\s*\(\s*\)`)
+	reExtensionsGenRandomUUID = regexp.MustCompile(`\bextensions\.gen_random_uuid\s*\(\s*\)`)
+
+	// `CREATE POLICY` at statement head — used by Pass 2 to decide
+	// which statements to run through wrapPolicyBody.
+	reCreatePolicyMulti = regexp.MustCompile(`(?i)^\s*CREATE\s+POLICY\b`)
+
+	// `<DDL keyword> public.` — used by countAndReplacePublicQualifier.
+	// We strip `public.` only after keywords that unambiguously precede
+	// a table/sequence/view/trigger name in pg_dump's output:
+	//
+	//   TABLE / INTO / FROM / UPDATE / REFERENCES / ON / SEQUENCE
+	//   / VIEW / TRIGGER / OWNED BY
+	//
+	// Plus optional `ONLY` or `IF NOT EXISTS` modifiers between the
+	// keyword and the qualifier. This gate is deliberately narrower
+	// than "any `public.<ident>`" — a blanket strip would corrupt
+	// function calls (`public.uuid_generate_v4()`), string literals
+	// (`'public.foo'::regclass`), and USING-clause operator classes.
+	rePublicQualifierContext = regexp.MustCompile(
+		`(?i)(\b(?:TABLE|INTO|FROM|UPDATE|REFERENCES|ON|SEQUENCE|VIEW|TRIGGER|OWNED\s+BY)\s+(?:ONLY\s+|IF\s+NOT\s+EXISTS\s+)?)public\.`,
+	)
 
 	// Any qualified reference to a schema that ISN'T public / auth /
 	// storage / pg_catalog / information_schema / tenant (the ones
 	// we've already handled or intentionally left alone). Best-effort
-	// warning — this regex will false-positive on things like
-	// `extensions.uuid_generate_v4()` which we've already migrated in
-	// spirit. That's fine; false-positives cost the tenant a look, a
-	// false-negative would cost them a broken migration.
-	reCustomSchemaRef = regexp.MustCompile(`\b(?:extensions|graphql|graphql_public|realtime|vault|net|cron|supabase_functions|_supabase|pgmq_public)\.\w+`)
+	// warning — false-positives cost the tenant a look, a false-
+	// negative would cost them a broken migration. `extensions` is not
+	// in this list because we rewrite the common helpers on that
+	// schema; anything else on `extensions` gets flagged by the
+	// broader "custom schema" catch below.
+	reCustomSchemaRef = regexp.MustCompile(`\b(?:graphql|graphql_public|realtime|vault|net|cron|supabase_functions|_supabase|pgmq_public)\.\w+`)
 )
+
+// countAndReplacePublicQualifier strips `public.` from table/sequence
+// references while leaving `public.<func>()` calls, string literals,
+// and USING-clause operator classes intact. pg_dump emits `CREATE
+// TABLE public.orders`, `REFERENCES public.users(id)`, `ALTER TABLE
+// ONLY public.orders`, etc.; Eurobase's tenant migrator pins
+// `search_path` to the tenant schema, so an explicit `public.`
+// qualifier lands the object in `public` (which the per-tenant `_ddl`
+// role can't create in). We keep `public.uuid_generate_v4()` and
+// `public.is_service_role()` intact — those are function calls in
+// Eurobase's public schema and must stay qualified. Gated on the
+// preceding DDL keyword (see rePublicQualifierContext). (#274 B1.)
+func countAndReplacePublicQualifier(s *string) int {
+	matches := rePublicQualifierContext.FindAllStringIndex(*s, -1)
+	if len(matches) == 0 {
+		return 0
+	}
+	*s = rePublicQualifierContext.ReplaceAllString(*s, "$1")
+	return len(matches)
+}

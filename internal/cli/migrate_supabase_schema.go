@@ -16,6 +16,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -94,7 +95,7 @@ the file path or --output - to write to stdout.`,
 				// the tenant sees the real reason (auth failed,
 				// SSL required, etc.).
 				var exitErr *exec.ExitError
-				if asExit(err, &exitErr) {
+				if errors.As(err, &exitErr) {
 					return fmt.Errorf("pg_dump failed: %s", strings.TrimSpace(string(exitErr.Stderr)))
 				}
 				return fmt.Errorf("pg_dump failed: %w", err)
@@ -162,18 +163,3 @@ the file path or --output - to write to stdout.`,
 	return cmd
 }
 
-// asExit is a tiny wrapper around errors.As for *exec.ExitError so the
-// call site reads as `if asExit(err, &exitErr) { … }` — matches Go's
-// idiomatic errors.As pattern without dragging the import into every
-// caller.
-func asExit(err error, target **exec.ExitError) bool {
-	if err == nil {
-		return false
-	}
-	e, ok := err.(*exec.ExitError)
-	if !ok {
-		return false
-	}
-	*target = e
-	return true
-}

@@ -197,7 +197,10 @@ func TestTranslate_WarnsOnAuthJWT(t *testing.T) {
 }
 
 func TestTranslate_WarnsOnCustomSchemas(t *testing.T) {
-	in := `CREATE FUNCTION my_call() RETURNS void AS $$ SELECT extensions.uuid_generate_v4(); $$ LANGUAGE sql;`
+	// `net.http_post` is Supabase's pg_net extension — no Eurobase
+	// equivalent, so the translator should flag it (unlike
+	// `extensions.uuid_generate_v4()`, which we rewrite outright).
+	in := `SELECT net.http_post('https://example.com', '{}'::jsonb);`
 	res := Translate(in)
 	found := false
 	for _, w := range res.warnings {
@@ -207,6 +210,102 @@ func TestTranslate_WarnsOnCustomSchemas(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected custom-schema warning; got %+v", res.warnings)
+	}
+}
+
+// #274 review H4: `extensions.uuid_generate_v4()` gets rewritten to
+// Eurobase's `public.uuid_generate_v4()` outright (not warned about).
+// `extensions.gen_random_uuid()` → bare `gen_random_uuid()`.
+func TestTranslate_ExtensionsUUIDRewrite(t *testing.T) {
+	in := `CREATE TABLE orders (
+    id uuid DEFAULT extensions.uuid_generate_v4() NOT NULL,
+    ref uuid DEFAULT extensions.gen_random_uuid() NOT NULL
+);`
+	got := Translate(in).sql
+	if !strings.Contains(got, "public.uuid_generate_v4()") {
+		t.Errorf("extensions.uuid_generate_v4() not rewritten to public.uuid_generate_v4():\n%s", got)
+	}
+	if strings.Contains(got, "extensions.uuid_generate_v4") {
+		t.Errorf("original extensions.uuid_generate_v4() survived:\n%s", got)
+	}
+	if !strings.Contains(got, "DEFAULT gen_random_uuid()") {
+		t.Errorf("extensions.gen_random_uuid() not rewritten to gen_random_uuid():\n%s", got)
+	}
+	if strings.Contains(got, "extensions.gen_random_uuid") {
+		t.Errorf("original extensions.gen_random_uuid() survived:\n%s", got)
+	}
+}
+
+// #274 review B1: `public.<table>` must be stripped so the object lands
+// in the tenant schema (the executor pins `search_path`). Function
+// calls stay qualified — `public.uuid_generate_v4()` and
+// `public.is_service_role()` are Eurobase helpers.
+func TestTranslate_StripsPublicQualifier(t *testing.T) {
+	in := `CREATE TABLE public.orders (id uuid PRIMARY KEY);
+ALTER TABLE ONLY public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
+ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
+CREATE INDEX orders_user_idx ON public.orders (user_id);
+CREATE POLICY p ON public.orders FOR SELECT USING (true);
+ALTER TABLE ONLY public.line_items ADD CONSTRAINT fk FOREIGN KEY (order_id) REFERENCES public.orders(id);`
+	got := Translate(in).sql
+	if strings.Contains(got, "public.orders") {
+		t.Errorf("public.orders qualifier survived:\n%s", got)
+	}
+	if strings.Contains(got, "public.line_items") {
+		t.Errorf("public.line_items qualifier survived:\n%s", got)
+	}
+	// The bare-identifier forms must be present.
+	for _, want := range []string{
+		"CREATE TABLE orders",
+		"ALTER TABLE ONLY orders",
+		"ALTER TABLE orders ENABLE",
+		"CREATE INDEX orders_user_idx ON orders",
+		"CREATE POLICY p ON orders",
+		"REFERENCES orders(id)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output:\n%s", want, got)
+		}
+	}
+}
+
+// Function calls on public.* must NOT get their `public.` stripped —
+// they refer to Eurobase's helper functions.
+func TestTranslate_KeepsPublicOnFunctionCalls(t *testing.T) {
+	in := `CREATE TABLE orders (
+    id uuid DEFAULT public.uuid_generate_v4() NOT NULL
+);
+CREATE POLICY p ON orders FOR SELECT USING (public.is_service_role() OR (user_id = auth_uid()));`
+	got := Translate(in).sql
+	if !strings.Contains(got, "public.uuid_generate_v4()") {
+		t.Errorf("public.uuid_generate_v4() (function call) got stripped:\n%s", got)
+	}
+	if !strings.Contains(got, "public.is_service_role()") {
+		t.Errorf("public.is_service_role() (function call) got stripped:\n%s", got)
+	}
+}
+
+// #274 review B2: pg_dump pretty-prints long policy bodies across
+// multiple lines. Line-by-line wrap missed those; statement-level
+// wrap must handle them.
+func TestTranslate_WrapsMultiLinePolicyBody(t *testing.T) {
+	in := `CREATE POLICY owner_select ON orders
+    FOR SELECT
+    TO authenticated
+    USING (
+        (user_id = auth.uid())
+        AND (status = 'open')
+    );`
+	got := Translate(in).sql
+	if !strings.Contains(got, "public.is_service_role() OR (") {
+		t.Errorf("multi-line policy body not wrapped:\n%s", got)
+	}
+	// Both original body clauses must be inside the wrap.
+	if !strings.Contains(got, "user_id = auth_uid()") {
+		t.Errorf("policy body content lost:\n%s", got)
+	}
+	if !strings.Contains(got, "status = 'open'") {
+		t.Errorf("policy body content lost:\n%s", got)
 	}
 }
 
@@ -271,22 +370,33 @@ CREATE POLICY owner_delete ON public.orders FOR DELETE USING ((user_id = auth.ui
 	if strings.Contains(got, "SET search_path") {
 		t.Errorf("SET search_path survived:\n%s", got)
 	}
+	// Any preamble `SET <ident>` (statement_timeout, lock_timeout, …)
+	// must be stripped — #274 review M6.
+	if strings.Contains(got, "SET statement_timeout") {
+		t.Errorf("SET statement_timeout survived (M6):\n%s", got)
+	}
+	if strings.Contains(got, "SET client_encoding") {
+		t.Errorf("SET client_encoding survived (M6):\n%s", got)
+	}
 	if strings.Contains(got, "auth.users") {
 		t.Errorf("auth.users survived:\n%s", got)
 	}
 	if strings.Contains(got, "auth.uid()") {
 		t.Errorf("auth.uid() survived:\n%s", got)
 	}
-	// Real DDL survives.
-	if !strings.Contains(got, "CREATE TABLE public.orders") {
+	// Real DDL survives — but WITHOUT the `public.` qualifier
+	// (#274 review B1).
+	if !strings.Contains(got, "CREATE TABLE orders") {
 		t.Errorf("CREATE TABLE dropped:\n%s", got)
+	}
+	if strings.Contains(got, "public.orders") {
+		t.Errorf("public.orders qualifier survived (B1):\n%s", got)
 	}
 	if !strings.Contains(got, "ADD CONSTRAINT orders_pkey") {
 		t.Errorf("PK constraint dropped:\n%s", got)
 	}
-	// Every policy wrapped (5 USING + 1 WITH CHECK on the UPDATE line
-	// wait — 3 USING (select/update/delete) + 2 WITH CHECK (insert +
-	// update) = 5 total).
+	// Every policy wrapped: 3 USING (select/update/delete) + 2 WITH CHECK
+	// (insert + update) = 5 total.
 	got5 := strings.Count(got, "public.is_service_role() OR")
 	if got5 != 5 {
 		t.Errorf("expected 5 policy wraps, got %d:\n%s", got5, got)
