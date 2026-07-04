@@ -402,3 +402,168 @@ CREATE POLICY owner_delete ON public.orders FOR DELETE USING ((user_id = auth.ui
 		t.Errorf("expected 5 policy wraps, got %d:\n%s", got5, got)
 	}
 }
+
+// ── #274 re-review fixes: tokenizer safety, JOIN/IF EXISTS, dollar-quotes ─
+
+// TestTranslate_LeavesStringLiteralsAlone pins re-review S2/H1: atom
+// rewrites and public-qualifier stripping MUST NOT touch content inside
+// single-quoted string literals. A COMMENT/RAISE with `public.orders`
+// as text must survive unchanged.
+func TestTranslate_LeavesStringLiteralsAlone(t *testing.T) {
+	in := `COMMENT ON TABLE orders IS 'legacy of public.orders in the supabase project — auth.uid() gated';
+INSERT INTO events (msg) VALUES ('table public.orders was updated by auth.uid()');`
+	got := Translate(in).sql
+	if !strings.Contains(got, "'legacy of public.orders in the supabase project — auth.uid() gated'") {
+		t.Errorf("COMMENT body was rewritten inside a string literal:\n%s", got)
+	}
+	if !strings.Contains(got, "'table public.orders was updated by auth.uid()'") {
+		t.Errorf("INSERT literal was rewritten inside a string literal:\n%s", got)
+	}
+}
+
+// TestTranslate_LeavesDollarQuotedBodiesAlone pins re-review S1/S2:
+// content inside a `$$…$$` or `$tag$…$tag$` block MUST pass through
+// unchanged. Statement splitting must not stop at a `;` inside the body.
+func TestTranslate_LeavesDollarQuotedBodiesAlone(t *testing.T) {
+	in := `CREATE FUNCTION notify_change() RETURNS trigger AS $$
+BEGIN
+    PERFORM 1;
+    RAISE NOTICE 'auth.uid() = %', auth.uid();
+    PERFORM 2;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TABLE orders (id uuid PRIMARY KEY);`
+	got := Translate(in).sql
+
+	// Body content must be untouched — including the `auth.uid()` inside
+	// the RAISE NOTICE string literal.
+	if !strings.Contains(got, "'auth.uid() = %'") {
+		t.Errorf("string literal inside dollar-quote body was rewritten:\n%s", got)
+	}
+	// The dollar-quote body's `;` must NOT split the statement — the
+	// CREATE TABLE that follows must land intact.
+	if !strings.Contains(got, "CREATE TABLE orders (id uuid PRIMARY KEY);") {
+		t.Errorf("dollar-quote body's `;` split the statement:\n%s", got)
+	}
+	// The full function-body sequence should still be present in one
+	// piece (all four PERFORM/RAISE lines).
+	for _, want := range []string{
+		"PERFORM 1;",
+		"PERFORM 2;",
+		"RETURN NEW;",
+		"$$ LANGUAGE plpgsql;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dollar-quote body content lost (%q):\n%s", want, got)
+		}
+	}
+	// The dollar-quoted function-call auth.uid() outside the string
+	// literal — is that inside the body? Yes: `PERFORM auth.uid()`? No,
+	// the input has `auth.uid()` bare in `RAISE NOTICE 'auth.uid() = %', auth.uid()`.
+	// The bare one is inside the dollar-quote body → also untouched.
+	// So the rewritten output must still contain `auth.uid()` verbatim.
+	if !strings.Contains(got, "auth.uid()") {
+		t.Errorf("bare auth.uid() inside dollar-quote body was rewritten:\n%s", got)
+	}
+}
+
+// TestTranslate_LeavesLineCommentsAlone pins re-review S2: `--` line
+// comments are literals; content inside must survive.
+func TestTranslate_LeavesLineCommentsAlone(t *testing.T) {
+	in := `-- migrate public.orders from supabase; uses auth.uid() heavily
+CREATE TABLE orders (id uuid PRIMARY KEY);`
+	got := Translate(in).sql
+	if !strings.Contains(got, "-- migrate public.orders from supabase; uses auth.uid() heavily") {
+		t.Errorf("line comment body was rewritten:\n%s", got)
+	}
+}
+
+// TestTranslate_LeavesBlockCommentsAlone pins re-review S2: `/* */`
+// block comments are literals. Also covers the split-across-lines case.
+func TestTranslate_LeavesBlockCommentsAlone(t *testing.T) {
+	in := `/* pinned: public.orders reference is intentional
+   until the RLS rewrite for auth.uid() ships */
+CREATE TABLE orders (id uuid PRIMARY KEY);`
+	got := Translate(in).sql
+	if !strings.Contains(got, "public.orders reference is intentional") {
+		t.Errorf("block comment body was rewritten:\n%s", got)
+	}
+	if !strings.Contains(got, "auth.uid() ships") {
+		t.Errorf("block comment continuation was rewritten:\n%s", got)
+	}
+}
+
+// TestTranslate_StripsJoinAndIfExists pins re-review H2 and H3.
+// pg_dump emits `CREATE VIEW public.v AS SELECT … JOIN public.other …`
+// and, with --clean, `DROP TABLE IF EXISTS public.orders`. Both must
+// have their `public.` stripped.
+func TestTranslate_StripsJoinAndIfExists(t *testing.T) {
+	in := `CREATE VIEW v AS SELECT o.id FROM orders o JOIN public.line_items li ON li.order_id = o.id;
+DROP TABLE IF EXISTS public.orders;
+ALTER TABLE IF EXISTS public.orders ADD COLUMN foo text;`
+	got := Translate(in).sql
+	if strings.Contains(got, "public.line_items") {
+		t.Errorf("JOIN public.line_items not stripped (H2):\n%s", got)
+	}
+	if !strings.Contains(got, "JOIN line_items") {
+		t.Errorf("JOIN <name> missing after strip:\n%s", got)
+	}
+	if strings.Contains(got, "DROP TABLE IF EXISTS public.orders") {
+		t.Errorf("DROP TABLE IF EXISTS public.orders not stripped (H3):\n%s", got)
+	}
+	if strings.Contains(got, "ALTER TABLE IF EXISTS public.orders") {
+		t.Errorf("ALTER TABLE IF EXISTS public.orders not stripped (H3):\n%s", got)
+	}
+}
+
+// TestTranslate_PrettyPrintedMultiLinePolicy pins re-review M3 —
+// pg_dump's real multi-line policy shape (USING on its own line,
+// body indented, closing paren on its own line).
+func TestTranslate_PrettyPrintedMultiLinePolicy(t *testing.T) {
+	in := `CREATE POLICY owner_select ON public.orders
+    AS PERMISSIVE
+    FOR SELECT
+    TO authenticated
+    USING (
+        (user_id = auth.uid())
+        AND (org_id = current_setting('app.org_id')::uuid)
+    );`
+	got := Translate(in).sql
+	// Body wrapped despite spanning six lines.
+	if !strings.Contains(got, "public.is_service_role() OR (") {
+		t.Errorf("multi-line pretty-printed policy body not wrapped:\n%s", got)
+	}
+	// public. qualifier stripped from the table name.
+	if strings.Contains(got, "public.orders") {
+		t.Errorf("public.orders survived on multi-line policy:\n%s", got)
+	}
+	// Body content preserved.
+	for _, want := range []string{
+		"user_id = auth_uid()",
+		"current_setting('app.org_id')::uuid",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("policy body content lost (%q):\n%s", want, got)
+		}
+	}
+}
+
+// TestTranslate_StripsSetWithStringArg confirms `SET client_encoding =
+// 'UTF8';` — where the line has both a keyword-prefix in code AND a
+// tail literal — still strips cleanly. Regression pin for the
+// `headIsCode` gate in translatePass1.
+func TestTranslate_StripsSetWithStringArg(t *testing.T) {
+	in := `SET client_encoding = 'UTF8';
+CREATE TABLE orders (id uuid PRIMARY KEY);`
+	got := Translate(in).sql
+	if strings.Contains(got, "'UTF8'") {
+		t.Errorf("SET line's trailing literal orphaned:\n%s", got)
+	}
+	if strings.Contains(got, "SET client_encoding") {
+		t.Errorf("SET client_encoding not stripped:\n%s", got)
+	}
+	if !strings.Contains(got, "CREATE TABLE orders") {
+		t.Errorf("CREATE TABLE dropped:\n%s", got)
+	}
+}
