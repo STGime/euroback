@@ -62,6 +62,10 @@ func main() {
 	root.AddCommand(cli.TestCmd())
 	root.AddCommand(cli.ComplianceCmd())
 	root.AddCommand(cli.AdminCmd())
+	// Import path from other backends (#267). Currently: Supabase.
+	// Named `import`, not `migrate`, because `migrations` already
+	// aliases to `migrate` for DDL migrations.
+	root.AddCommand(cli.ImportCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
