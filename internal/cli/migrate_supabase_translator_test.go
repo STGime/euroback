@@ -458,13 +458,135 @@ CREATE TABLE orders (id uuid PRIMARY KEY);`
 			t.Errorf("dollar-quote body content lost (%q):\n%s", want, got)
 		}
 	}
-	// The dollar-quoted function-call auth.uid() outside the string
-	// literal — is that inside the body? Yes: `PERFORM auth.uid()`? No,
-	// the input has `auth.uid()` bare in `RAISE NOTICE 'auth.uid() = %', auth.uid()`.
-	// The bare one is inside the dollar-quote body → also untouched.
-	// So the rewritten output must still contain `auth.uid()` verbatim.
+	// #274 re-review M-c: the input's dollar-quote body contains
+	// `auth.uid()` in TWO positions — inside the RAISE NOTICE string
+	// literal AND bare after the comma. Both live inside the
+	// dollar-quote and must survive verbatim. A `strings.Contains`
+	// check would tautologically match the substring inside the string
+	// literal even if the bare one got rewritten — count instead.
+	if got, want := strings.Count(got, "auth.uid()"), 2; got != want {
+		t.Errorf("expected auth.uid() to survive in %d places inside dollar-quote body, got %d occurrences", want, got)
+	}
+	if strings.Contains(got, "auth_uid()") {
+		t.Errorf("auth.uid() inside dollar-quote body was rewritten to auth_uid():\n%s", got)
+	}
+}
+
+// TestTranslate_LeavesEStringLiteralsAlone pins re-review H-a: the
+// `E'…'` prefix marks a Postgres escape-string literal in which `\'`
+// is a two-byte escape (NOT a string terminator). Without escape
+// awareness, the tokenizer false-closes at `\'` and Pass 1 rewrites
+// `public.orders` in the "tail" that's actually still inside the
+// string. pg_dump emits E-strings whenever a string contains a
+// backslash, so this is a real corruption path.
+func TestTranslate_LeavesEStringLiteralsAlone(t *testing.T) {
+	in := `INSERT INTO events (msg) VALUES (E'a\'b public.orders auth.uid()');
+INSERT INTO events (msg) VALUES (e'trailing \\ backslash public.orders');`
+	got := Translate(in).sql
+
+	// Full E-string body must be preserved byte-for-byte.
+	if !strings.Contains(got, `E'a\'b public.orders auth.uid()'`) {
+		t.Errorf("uppercase E-string rewritten inside body:\n%s", got)
+	}
+	if !strings.Contains(got, `e'trailing \\ backslash public.orders'`) {
+		t.Errorf("lowercase e-string rewritten inside body:\n%s", got)
+	}
+	// The `public.orders` inside the strings must NOT have been
+	// stripped by the qualifier rewrite (which is context-gated but
+	// wouldn't fire on `INTO events` anyway — the safety net is that
+	// the whole body is a literal).
+	if !strings.Contains(got, "public.orders") {
+		t.Errorf("public.orders inside E-string got stripped — tokenizer false-closed at the escape:\n%s", got)
+	}
+	// auth.uid() inside the E-string must NOT be rewritten.
 	if !strings.Contains(got, "auth.uid()") {
-		t.Errorf("bare auth.uid() inside dollar-quote body was rewritten:\n%s", got)
+		t.Errorf("auth.uid() inside E-string was rewritten:\n%s", got)
+	}
+}
+
+// TestTranslate_EStringMustBeAdjacent confirms the E-string detection
+// requires the `E`/`e` to be immediately before the `'` with no
+// whitespace and no preceding ident char. `someE'foo'` is `someE`
+// (identifier) + `'foo'` (normal string), NOT an E-string.
+func TestTranslate_EStringMustBeAdjacent(t *testing.T) {
+	// `SOMEE` here is an identifier ending in E; `'foo'` is a plain
+	// single-quoted string. If we misdetected it as an E-string, the
+	// tokenizer would consume `E` as part of the literal.
+	in := `SELECT someE'foo';`
+	got := Translate(in).sql
+	if !strings.Contains(got, "someE'foo'") {
+		t.Errorf("E-string detector fired on ident-adjacent E:\n%s", got)
+	}
+}
+
+// TestTranslate_UnterminatedLiteralWarns pins re-review M-b: an
+// unterminated string / dollar-quote / block-comment must surface as
+// a warning so the tenant knows the output is likely to fail at apply.
+func TestTranslate_UnterminatedLiteralWarns(t *testing.T) {
+	// Truncated dump: opens a dollar-quote body but the file ends
+	// before the closing tag.
+	in := `CREATE FUNCTION broken() RETURNS void AS $$
+BEGIN
+    PERFORM 1;
+`
+	res := Translate(in)
+	found := false
+	for _, w := range res.warnings {
+		if strings.Contains(strings.ToLower(w.note), "unterminated") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an unterminated-literal warning; got %+v", res.warnings)
+	}
+}
+
+func TestTranslate_UnterminatedSingleQuoteWarns(t *testing.T) {
+	in := `INSERT INTO events VALUES ('hello world`
+	res := Translate(in)
+	found := false
+	for _, w := range res.warnings {
+		if strings.Contains(strings.ToLower(w.note), "unterminated") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an unterminated-string warning; got %+v", res.warnings)
+	}
+}
+
+func TestTranslate_UnterminatedBlockCommentWarns(t *testing.T) {
+	in := `/* comment that never closes
+CREATE TABLE orders (id uuid);`
+	res := Translate(in)
+	found := false
+	for _, w := range res.warnings {
+		if strings.Contains(strings.ToLower(w.note), "unterminated") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an unterminated-block-comment warning; got %+v", res.warnings)
+	}
+}
+
+// TestTranslate_WellFormedInputHasNoUnterminatedWarning is the
+// symmetric guard — a clean pg_dump body must NOT trip the
+// unterminated warning (false-positive would train tenants to ignore
+// it).
+func TestTranslate_WellFormedInputHasNoUnterminatedWarning(t *testing.T) {
+	in := `CREATE FUNCTION foo() RETURNS void AS $$ BEGIN NULL; END; $$ LANGUAGE plpgsql;
+CREATE TABLE orders (id uuid PRIMARY KEY);
+-- comment through end of line
+INSERT INTO events VALUES ('regular string', E'escaped\'string');`
+	res := Translate(in)
+	for _, w := range res.warnings {
+		if strings.Contains(strings.ToLower(w.note), "unterminated") {
+			t.Errorf("false-positive unterminated warning on clean input: %q", w.note)
+		}
 	}
 }
 

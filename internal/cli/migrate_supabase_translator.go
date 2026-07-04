@@ -69,7 +69,18 @@ func Translate(input string) translationResult {
 	// Tokenizer view: byte i is code iff mask[i]. Used by Pass 1 to
 	// avoid rewriting inside literals; Pass 2 re-tokenizes since it
 	// walks statements rather than lines.
-	mask := buildCodeMask(input)
+	mask, unterminated := buildCodeMask(input)
+	if unterminated {
+		// A truncated pg_dump or a malformed hand-authored file will
+		// hit EOF inside a string / dollar-quote / block-comment. The
+		// tokenizer's fallback (treat the tail as one literal) protects
+		// against silent atom-rewrites, but the tenant needs to know
+		// the output is likely to fail at apply time.
+		res.warnings = append(res.warnings, translationWarning{
+			line: 0,
+			note: "input contains an unterminated string / dollar-quote / block-comment — the SQL is truncated or malformed; the emitted file will likely fail at apply time",
+		})
+	}
 
 	// ── Pass 1: source-line by source-line ──
 	pass1 := translatePass1(input, mask, &res)
@@ -276,7 +287,7 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 // `CREATE FUNCTION foo() AS $$ … PERFORM 1; PERFORM 2; … $$` at the
 // first inner `;`.
 func wrapPoliciesInStatements(sql string) (string, int) {
-	segments := splitCodeAndLiterals(sql)
+	segments, _ := splitCodeAndLiterals(sql)
 	var out strings.Builder
 	out.Grow(len(sql))
 	var stmt strings.Builder
@@ -372,7 +383,7 @@ func wrapPolicyBody(stmt string) (string, int) {
 // `USING (col = 'foo(bar)')` or one that contains an inline block
 // comment `/* (unused) */` won't corrupt the walker.
 func findMatchingParen(s string, openIdx int) int {
-	segments := splitCodeAndLiterals(s[openIdx:])
+	segments, _ := splitCodeAndLiterals(s[openIdx:])
 	depth := 0
 	offset := openIdx
 	for _, seg := range segments {
@@ -405,22 +416,33 @@ type segment struct {
 	code bool
 }
 
-// splitCodeAndLiterals walks a Postgres SQL string and returns segments,
-// each either code or a single literal. Handles:
+// splitCodeAndLiterals walks a Postgres SQL string and returns
+// segments, each either code or a single literal, along with a bool
+// that's true if the tokenizer hit EOF while still inside a literal
+// (an unterminated string / dollar-quote / block-comment). Handles:
 //
 //   - Single-quoted strings: `'foo''bar'` (doubled `''` is an escape).
+//   - Escape-string literals: `E'foo\'bar\n'` — the `E`/`e` prefix
+//     honors backslash escapes (`\'`, `\\`, `\n`, `\t`, etc.). Without
+//     this, `E'a\'b public.orders'` would false-close at the `\'` and
+//     Pass 1 would rewrite `public.orders` in the tail. pg_dump emits
+//     E-strings whenever a string contains a backslash, so this is a
+//     real (not theoretical) corruption path — #274 re-review H-a.
 //   - Dollar-quoted strings: `$$…$$` or `$tag$…$tag$` (per PG spec, the
 //     tag identifier must start with a letter or underscore — a bare
 //     `$1` is a parameter placeholder, not an opener).
 //   - Line comments: `-- …` up to but not including the newline.
-//   - Block comments: `/* … */` (nested per the Postgres SQL dialect).
+//   - Block comments: `/* … */` — Postgres allows nesting, unlike
+//     the SQL standard (see PG docs §4.1.5).
 //   - Double-quoted identifiers: `"foo""bar"` (also treated as literal
 //     so a hostile identifier like `"public.orders"` doesn't invite
 //     the atom rewrites to touch it).
 //
-// This is the safety net for the #274 re-review's S1/S2/H1 findings.
-func splitCodeAndLiterals(sql string) []segment {
+// This is the safety net for the #274 re-review's S1/S2/H1/H-a
+// findings.
+func splitCodeAndLiterals(sql string) ([]segment, bool) {
 	var out []segment
+	unterminated := false
 	n := len(sql)
 	codeStart := 0
 	flushCode := func(upto int) {
@@ -437,8 +459,10 @@ func splitCodeAndLiterals(sql string) []segment {
 			flushCode(i)
 			nl := strings.IndexByte(sql[i:], '\n')
 			if nl == -1 {
+				// Line comment through EOF is well-formed (no newline
+				// required); don't flag as unterminated.
 				out = append(out, segment{sql[i:], false})
-				return out
+				return out, unterminated
 			}
 			out = append(out, segment{sql[i : i+nl], false})
 			i += nl
@@ -464,6 +488,9 @@ func splitCodeAndLiterals(sql string) []segment {
 					i++
 				}
 			}
+			if depth > 0 {
+				unterminated = true
+			}
 			out = append(out, segment{sql[start:i], false})
 			codeStart = i
 			continue
@@ -478,9 +505,11 @@ func splitCodeAndLiterals(sql string) []segment {
 				closeRel := strings.Index(sql[bodyStart:], tag)
 				if closeRel == -1 {
 					// Unterminated — treat rest as literal so we
-					// don't accidentally rewrite half of it.
+					// don't accidentally rewrite half of it, and
+					// flag so Translate can warn.
+					unterminated = true
 					out = append(out, segment{sql[start:], false})
-					return out
+					return out, unterminated
 				}
 				i = bodyStart + closeRel + tagLen
 				out = append(out, segment{sql[start:i], false})
@@ -489,11 +518,56 @@ func splitCodeAndLiterals(sql string) []segment {
 			}
 		}
 
-		// single-quoted string
+		// E'…' / e'…' escape-string literal. Detect by looking back:
+		// the `'` at position i is an E-string opener iff the byte
+		// immediately before is `E`/`e` AND the byte before that is
+		// not part of an identifier (start-of-input or a non-ident
+		// char). Adjacent — Postgres does not allow whitespace between
+		// the prefix and the `'`.
+		if c == '\'' && i >= 1 && (sql[i-1] == 'E' || sql[i-1] == 'e') &&
+			(i == 1 || !isTagChar(sql[i-2])) {
+			flushCode(i - 1)
+			start := i - 1
+			i++ // past the '
+			terminated := false
+			for i < n {
+				if sql[i] == '\\' {
+					// Two-byte escape (backslash + any char).
+					if i+1 < n {
+						i += 2
+						continue
+					}
+					// Trailing backslash — treat as single byte.
+					i++
+					continue
+				}
+				if sql[i] == '\'' {
+					if i+1 < n && sql[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					terminated = true
+					break
+				}
+				i++
+			}
+			if !terminated {
+				unterminated = true
+			}
+			out = append(out, segment{sql[start:i], false})
+			codeStart = i
+			continue
+		}
+
+		// single-quoted string (no backslash escape processing —
+		// standard_conforming_strings=on is the modern default and
+		// pg_dump respects it).
 		if c == '\'' {
 			flushCode(i)
 			start := i
 			i++
+			terminated := false
 			for i < n {
 				if sql[i] == '\'' {
 					if i+1 < n && sql[i+1] == '\'' {
@@ -501,9 +575,13 @@ func splitCodeAndLiterals(sql string) []segment {
 						continue
 					}
 					i++
+					terminated = true
 					break
 				}
 				i++
+			}
+			if !terminated {
+				unterminated = true
 			}
 			out = append(out, segment{sql[start:i], false})
 			codeStart = i
@@ -515,6 +593,7 @@ func splitCodeAndLiterals(sql string) []segment {
 			flushCode(i)
 			start := i
 			i++
+			terminated := false
 			for i < n {
 				if sql[i] == '"' {
 					if i+1 < n && sql[i+1] == '"' {
@@ -522,9 +601,13 @@ func splitCodeAndLiterals(sql string) []segment {
 						continue
 					}
 					i++
+					terminated = true
 					break
 				}
 				i++
+			}
+			if !terminated {
+				unterminated = true
 			}
 			out = append(out, segment{sql[start:i], false})
 			codeStart = i
@@ -534,15 +617,16 @@ func splitCodeAndLiterals(sql string) []segment {
 		i++
 	}
 	flushCode(n)
-	return out
+	return out, unterminated
 }
 
 // buildCodeMask returns a per-byte true/false view of `sql`: mask[i] is
-// true iff position i is inside a code segment. Lets Pass 1 quickly
-// answer "is this line entirely code?" without re-tokenizing.
-func buildCodeMask(sql string) []bool {
+// true iff position i is inside a code segment. Also returns a bool
+// that's true if the tokenizer hit EOF inside a literal — surfaced by
+// Translate as a warning so the tenant knows their input was truncated.
+func buildCodeMask(sql string) ([]bool, bool) {
 	mask := make([]bool, len(sql))
-	segments := splitCodeAndLiterals(sql)
+	segments, unterminated := splitCodeAndLiterals(sql)
 	offset := 0
 	for _, seg := range segments {
 		for j := 0; j < len(seg.text); j++ {
@@ -550,7 +634,7 @@ func buildCodeMask(sql string) []bool {
 		}
 		offset += len(seg.text)
 	}
-	return mask
+	return mask, unterminated
 }
 
 // parseDollarTag detects a valid dollar-quote opener at sql[i]. Returns
