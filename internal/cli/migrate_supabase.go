@@ -70,6 +70,7 @@ Everything except "assess" WRITES to the target Eurobase project. Run
 into an empty project unless you're comfortable overwriting.`,
 	}
 	cmd.AddCommand(importSupabaseAssessCmd())
-	// Placeholder subcommands land in follow-up PRs #269-#272.
+	cmd.AddCommand(importSupabaseSchemaCmd())
+	// Placeholder subcommands land in follow-up PRs #270-#272.
 	return cmd
 }
