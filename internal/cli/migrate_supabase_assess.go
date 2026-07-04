@@ -1,6 +1,6 @@
 package cli
 
-// #268 (part of #267): `eurobase migrate supabase assess` — read-only
+// #268 (part of #267): `eurobase import supabase assess` — read-only
 // reconnaissance of a Supabase project. Enumerates tables, RLS, auth
 // users, storage buckets, functions, extensions, and grades each item:
 //
@@ -19,14 +19,17 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
 )
 
@@ -61,10 +64,7 @@ type report struct {
 }
 
 func importSupabaseAssessCmd() *cobra.Command {
-	var (
-		outputPath string
-		dryRun     bool
-	)
+	var outputPath string
 	cmd := &cobra.Command{
 		Use:   "assess",
 		Short: "Read-only compat report against a Supabase project",
@@ -81,10 +81,10 @@ The report grades every item:
   ⚠  needs review — will migrate but the tenant should confirm
   ❌ blocker     — Eurobase can't support this today
 
-Output: ./supabase-migration-report.md (or --output <path>).`,
+Output: ./supabase-migration-report-<UTC-timestamp>.md by default so a
+rerun doesn't overwrite the previous report. Pass --output to override
+(use '-' for stdout).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_ = dryRun // read-only already; the flag exists for paranoid tenants.
-
 			dbURL := os.Getenv("SUPABASE_DB_URL")
 			if dbURL == "" {
 				return fmt.Errorf("SUPABASE_DB_URL is required (postgres:// URL of the Supabase project)")
@@ -106,7 +106,7 @@ Output: ./supabase-migration-report.md (or --output <path>).`,
 
 			r := &report{
 				sourceURL:   redactURL(dbURL),
-				targetHint:  "(run `eurobase migrate supabase schema` next after reviewing this report)",
+				targetHint:  "(run `eurobase import supabase schema` next after reviewing this report)",
 				generatedAt: time.Now().UTC(),
 			}
 
@@ -150,7 +150,11 @@ Output: ./supabase-migration-report.md (or --output <path>).`,
 
 			path := outputPath
 			if path == "" {
-				path = "./supabase-migration-report.md"
+				// Timestamped default so a rerun after a partial
+				// migration doesn't clobber the previous report
+				// (review #268 M3). Format is stable and sortable.
+				path = fmt.Sprintf("./supabase-migration-report-%s.md",
+					r.generatedAt.Format("2006-01-02T15-04-05Z"))
 			}
 			var out io.Writer
 			if path == "-" {
@@ -175,8 +179,7 @@ Output: ./supabase-migration-report.md (or --output <path>).`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Report output path (default ./supabase-migration-report.md; use '-' for stdout)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "No-op; assess is already read-only")
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Report output path (default ./supabase-migration-report-<UTC-timestamp>.md; use '-' for stdout)")
 	return cmd
 }
 
@@ -233,9 +236,15 @@ func assessPolicies(ctx context.Context, conn *pgx.Conn, r *report) error {
 		ORDER BY on_table, polname
 	`)
 	if err != nil {
-		// The join to pg_tables can fail on some Supabase versions;
-		// try the simpler shape.
-		return assessPoliciesSimple(ctx, conn, r)
+		// Fall back to the pg_policies view only when the failure is
+		// a permission/definition problem — anything else (context
+		// cancelled, network drop, syntax error introduced by a
+		// future edit) is a real error and must surface. This was
+		// the #268 review's H2 finding.
+		if isFallbackWorthy(err) {
+			return assessPoliciesSimple(ctx, conn, r)
+		}
+		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -315,14 +324,18 @@ func gradePolicy(usingClause, withCheck *string) (string, string) {
 func assessAuthUsers(ctx context.Context, conn *pgx.Conn, r *report) error {
 	var count int64
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM auth.users`).Scan(&count); err != nil {
-		// A project without auth.users (rare — turned off?) — just
-		// skip this section cleanly.
-		r.authUsers = append(r.authUsers, item{
-			name:  "auth.users",
-			grade: gradeWarn,
-			note:  "table not accessible or missing (unusual; expected on any GoTrue-enabled project)",
-		})
-		return nil
+		// Only treat this as "table missing" for schema/table/
+		// privilege errors — a network drop or context cancel is
+		// a real failure and must surface (review #268 H3).
+		if isMissingObjectError(err) {
+			r.authUsers = append(r.authUsers, item{
+				name:  "auth.users",
+				grade: gradeWarn,
+				note:  "table not accessible or missing (unusual; expected on any GoTrue-enabled project)",
+			})
+			return nil
+		}
+		return fmt.Errorf("query auth.users: %w", err)
 	}
 	r.authUsers = append(r.authUsers, item{
 		name:  "auth.users",
@@ -349,23 +362,62 @@ func assessAuthUsers(ctx context.Context, conn *pgx.Conn, r *report) error {
 		providers = append(providers, p)
 	}
 	sort.Strings(providers)
+	// Three tiers (#268 review M1):
+	//   supported          — Eurobase ships this provider today
+	//   knownSupabaseOnly  — Supabase ships it, we don't; users have
+	//                        to re-federate via a supported provider
+	//                        (⚠ not ❌ — most tenants know their
+	//                        options and can re-federate cleanly)
+	//   anything else      — unknown provider name, worth flagging
+	//                        for a manual look
 	supported := map[string]bool{
-		"email": true, "phone": true, // GoTrue treats email/phone as providers
-		"google": true, "github": true, "linkedin": true, "linkedin_oidc": true,
-		"apple": true, "azure": true, "microsoft": true,
+		"email":         true, // GoTrue records email/phone as pseudo-providers
+		"phone":         true,
+		"google":        true,
+		"github":        true,
+		"linkedin":      true, // legacy provider name; Supabase kept it around
+		"linkedin_oidc": true, // Supabase's post-2024 LinkedIn provider — NOT a typo
+		"apple":         true,
+		"azure":         true,
+		"microsoft":     true,
+	}
+	knownSupabaseOnly := map[string]bool{
+		"facebook":   true,
+		"twitter":    true,
+		"discord":    true,
+		"gitlab":     true,
+		"bitbucket":  true,
+		"slack":      true,
+		"slack_oidc": true,
+		"spotify":    true,
+		"twitch":     true,
+		"notion":     true,
+		"figma":      true,
+		"kakao":      true,
+		"keycloak":   true,
+		"workos":     true,
+		"zoom":       true,
+		"fly":        true,
 	}
 	for _, p := range providers {
-		if supported[p] {
+		switch {
+		case supported[p]:
 			r.authUsers = append(r.authUsers, item{
 				name:  fmt.Sprintf("auth provider: %s", p),
 				grade: gradeOK,
 				note:  "Eurobase supports this provider natively",
 			})
-		} else {
+		case knownSupabaseOnly[p]:
 			r.authUsers = append(r.authUsers, item{
 				name:  fmt.Sprintf("auth provider: %s", p),
-				grade: gradeBlocker,
-				note:  "Eurobase does not currently support this provider — affected users must re-auth via a supported provider",
+				grade: gradeWarn,
+				note:  "Supabase supports this but Eurobase does not yet — affected users re-federate via a supported provider on next sign-in",
+			})
+		default:
+			r.authUsers = append(r.authUsers, item{
+				name:  fmt.Sprintf("auth provider: %s", p),
+				grade: gradeWarn,
+				note:  "unknown provider name — verify what this is before proceeding",
 			})
 		}
 	}
@@ -385,7 +437,7 @@ func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
 	supported := map[string]bool{
 		"pg_stat_statements": true,
 		"pgcrypto":           true,
-		"uuid-ossp":          true,
+		"uuid-ossp":          true, // legacy; gen_random_uuid() from pgcrypto is preferred
 		"pg_trgm":            true,
 		"unaccent":           true,
 		"btree_gin":          true,
@@ -394,7 +446,11 @@ func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
 		"hstore":             true,
 		"tablefunc":          true,
 	}
-	// Extensions we specifically don't support and can't migrate as-is.
+	// Extensions we specifically don't support and can't migrate
+	// as-is. Note about `vector`: Supabase ships pgvector as default,
+	// and it's the single most common reason people can't move to a
+	// backend that lacks it. We flag it as a blocker (not a warn) so
+	// the report can't be misread as "vector is fine".
 	blockers := map[string]string{
 		"pg_graphql":     "Eurobase does not offer GraphQL over Postgres; rewrite callers to use the SDK",
 		"pg_net":         "Eurobase does not expose pg_net; use an edge function to call HTTP from SQL",
@@ -402,8 +458,23 @@ func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
 		"pg_jsonschema":  "not available; validate JSON in application code or edge functions",
 		"pgjwt":          "Eurobase issues its own JWTs; direct usage inside SQL not supported",
 		"pgsodium":       "not available; use the vault or edge functions for cryptography",
-		"vector":         "pgvector-style vector similarity search not enabled by default; contact support if needed",
+		"supabase_vault": "Supabase-proprietary vault schema; use `eurobase vault` for the equivalent",
+		"vector":         "pgvector-style vector similarity search not currently enabled by default — contact support before migrating a project that depends on it",
 		"http":           "pg http extension not available for the same reason as pg_net",
+		"plv8":           "V8 procedural language not available on Eurobase's Postgres",
+		"timescaledb":    "TimescaleDB not enabled; needs support conversation before migration",
+		"wrappers":       "Foreign-data-wrapper framework (used by supabase_vault etc.) not available",
+	}
+	// Supabase ships these; we don't lose data by migrating without
+	// them, but we also don't provide equivalent functionality
+	// out-of-the-box. Warn so the tenant knows to redesign around
+	// the gap.
+	warns := map[string]string{
+		"pgaudit":    "Postgres audit logging — Eurobase's audit_log covers admin actions but does not replay pgaudit output",
+		"pg_tle":     "trusted-language extensions framework — not available; move any TLE-installed extensions to app code",
+		"pgmq":       "Postgres message queue — reproduce with an application queue or edge-function poller",
+		"pg_repack":  "online table rewriter — not needed on Eurobase (managed vacuum), but check any dependent scripts",
+		"postgis":    "PostGIS is not enabled by default — contact support if you rely on it; migration is feasible but manual",
 	}
 	for rows.Next() {
 		var ext string
@@ -414,8 +485,18 @@ func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
 			r.extensions = append(r.extensions, item{name: ext, grade: gradeBlocker, note: reason})
 			continue
 		}
+		if reason, isWarn := warns[ext]; isWarn {
+			r.extensions = append(r.extensions, item{name: ext, grade: gradeWarn, note: reason})
+			continue
+		}
 		if supported[ext] {
-			r.extensions = append(r.extensions, item{name: ext, grade: gradeOK, note: "supported on Eurobase's Postgres"})
+			note := "supported on Eurobase's Postgres"
+			// Small nudge for the deprecated uuid-ossp on top of the
+			// support note.
+			if ext == "uuid-ossp" {
+				note = "supported, but gen_random_uuid() from pgcrypto is preferred over uuid-ossp for new columns"
+			}
+			r.extensions = append(r.extensions, item{name: ext, grade: gradeOK, note: note})
 			continue
 		}
 		r.extensions = append(r.extensions, item{
@@ -438,7 +519,7 @@ func writeReport(w io.Writer, r *report) error {
 		fmt.Fprintf(buf, "## %s Blockers — %d found\n\n", gradeBlocker, len(r.blockers))
 		fmt.Fprintf(buf, "Address these before running the migration steps. They are things Eurobase can't do today.\n\n")
 		for _, it := range r.blockers {
-			fmt.Fprintf(buf, "- **%s** — %s\n", it.name, it.note)
+			fmt.Fprintf(buf, "- **%s** — %s\n", mdEscape(it.name), mdEscape(it.note))
 		}
 		fmt.Fprintf(buf, "\n")
 	} else {
@@ -465,7 +546,7 @@ func writeSection(buf *strings.Builder, title string, items []item) {
 		return
 	}
 	for _, it := range items {
-		fmt.Fprintf(buf, "- %s **%s** — %s\n", it.grade, it.name, it.note)
+		fmt.Fprintf(buf, "- %s **%s** — %s\n", it.grade, mdEscape(it.name), mdEscape(it.note))
 	}
 	fmt.Fprintf(buf, "\n")
 }
@@ -497,24 +578,99 @@ func formatBytes(n int64) string {
 }
 
 // redactURL strips the password from a postgres:// URL so it's safe to
-// embed in the report. Best-effort: unusual URL shapes fall back to
-// showing everything up to the first '?' with a `[…]` marker on the
-// auth portion.
-func redactURL(u string) string {
-	// postgres://user:PASS@host:port/dbname?…
-	if !strings.HasPrefix(u, "postgres://") && !strings.HasPrefix(u, "postgresql://") {
-		return u
+// embed in the report. Uses net/url so a properly percent-encoded
+// password (the only kind libpq accepts) round-trips cleanly no matter
+// where the literal `@` characters land. See #268 review L1.
+func redactURL(raw string) string {
+	if !strings.HasPrefix(raw, "postgres://") && !strings.HasPrefix(raw, "postgresql://") {
+		return raw
 	}
-	slashslash := strings.Index(u, "://")
-	rest := u[slashslash+3:]
-	at := strings.Index(rest, "@")
-	if at == -1 {
-		return u // no auth portion
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
 	}
-	authPart := rest[:at]
-	colon := strings.Index(authPart, ":")
-	if colon == -1 {
-		return u // no password
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		return raw
 	}
-	return u[:slashslash+3] + authPart[:colon] + ":***@" + rest[at+1:]
+	// url.UserPassword percent-encodes the sentinel because `*` is
+	// reserved in userinfo. Use a URL-safe sentinel then swap it back
+	// to the visually-obvious `***` in the final string. This keeps
+	// the report readable without relying on tenants recognising
+	// `%2A%2A%2A`.
+	const safeSentinel = "REDACTED"
+	u.User = url.UserPassword(u.User.Username(), safeSentinel)
+	return strings.Replace(u.String(), ":"+safeSentinel+"@", ":***@", 1)
+}
+
+// mdEscape returns a Markdown-safe rendering of a name that may
+// contain characters with formatting meaning (backticks, asterisks,
+// underscores, brackets, angle brackets, pipes) or control chars.
+// Postgres identifiers are legal up to 63 bytes with pretty much any
+// content, so a table named `orders**\n\n# Fake Section` would
+// otherwise inject fake structure into the report we're about to hand
+// the tenant. Review #268 H1.
+//
+// Escape strategy: backslash-escape the six Markdown metacharacters
+// tenants are most likely to hit; replace newlines with a visible
+// literal `↩`; drop any other control chars. NBSP and unicode
+// direction overrides are kept as-is (they render fine in every
+// Markdown viewer I could name; we're mostly defending against
+// structural injection, not perfect fidelity).
+func mdEscape(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '`', '*', '_', '[', ']', '<', '>', '|', '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case '\n', '\r':
+			b.WriteString("↩")
+		default:
+			if r < 0x20 && r != '\t' {
+				continue // drop other control chars silently
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// isFallbackWorthy reports whether an error from the primary
+// assessPolicies query is one the fallback (pg_policies view) might
+// handle. Only permission / undefined-object errors qualify —
+// otherwise the caller must surface the real failure. Review #268 H2.
+func isFallbackWorthy(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "42501", // insufficient_privilege
+		"42883",   // undefined_function (e.g. pg_get_expr signature diff)
+		"42P01":   // undefined_table
+		return true
+	}
+	return false
+}
+
+// isMissingObjectError reports whether an error can be attributed to
+// a missing schema/table/privilege on the target object. Used by
+// enumerators (assessAuthUsers) to distinguish "this project doesn't
+// have auth.users, skip the section" from "the connection died".
+func isMissingObjectError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "3F000", // schema not found
+		"42P01",   // undefined_table
+		"42501":   // insufficient_privilege (safe to treat as "missing" for reporting purposes)
+		return true
+	}
+	return false
 }

@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // #268: pure-logic helpers get pinned so future changes to the grader
@@ -214,6 +217,89 @@ func TestWriteReport_ShapeAndOrdering(t *testing.T) {
 	// Next-step footer
 	if !strings.Contains(out, "eurobase migrate supabase schema") {
 		t.Errorf("next-step hint missing from footer")
+	}
+}
+
+// TestMdEscape pins the H1 review fix — a hostile table/policy name
+// can't inject structural Markdown into the report.
+func TestMdEscape(t *testing.T) {
+	cases := map[string]string{
+		"orders":                    "orders",
+		"table with `backticks`":    `table with \` + "`" + `backticks\` + "`",
+		"**bold_stuff**":            `\*\*bold\_stuff\*\*`,
+		"[link](/path)":             `\[link\](/path)`,
+		"<script>":                  `\<script\>`,
+		"a|b|c":                     `a\|b\|c`,
+		"line1\nline2":              "line1↩line2",
+		"line1\rline2":              "line1↩line2",
+		"backslash\\path":           `backslash\\path`,
+		"":                          "",
+		"has\x00null":               "hasnull", // control chars dropped
+		"has\ttab":                  "has\ttab", // tab preserved
+	}
+	for in, want := range cases {
+		if got := mdEscape(in); got != want {
+			t.Errorf("mdEscape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestMdEscape_HostileTableName demonstrates the concrete injection
+// vector the review flagged.
+func TestMdEscape_HostileTableName(t *testing.T) {
+	// A table named `orders**\n\n# Fake Section` would otherwise
+	// render into the report as valid Markdown and inject a fake
+	// H1. Escaped, it stays a single list item.
+	got := mdEscape("orders**\n\n# Fake Section")
+	if strings.Contains(got, "\n") {
+		t.Errorf("mdEscape leaked newlines: %q", got)
+	}
+	if strings.HasPrefix(strings.TrimSpace(got), "#") {
+		t.Errorf("mdEscape allowed heading injection: %q", got)
+	}
+}
+
+// TestIsFallbackWorthy pins the H2 review fix — only permission /
+// undefined-object errors trigger the pg_policies fallback.
+func TestIsFallbackWorthy(t *testing.T) {
+	pgErr := func(code string) error { return &pgconn.PgError{Code: code} }
+	cases := map[string]struct {
+		in   error
+		want bool
+	}{
+		"non-pg error":            {errors.New("network dropped"), false},
+		"context cancelled":       {errors.New("context canceled"), false},
+		"insufficient_privilege":  {pgErr("42501"), true},
+		"undefined_function":      {pgErr("42883"), true},
+		"undefined_table":         {pgErr("42P01"), true},
+		"syntax_error (surface!)": {pgErr("42601"), false},
+		"nil":                     {nil, false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := isFallbackWorthy(c.in); got != c.want {
+				t.Errorf("isFallbackWorthy(%v) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestIsMissingObjectError pins the H3 review fix — a network drop
+// during assessAuthUsers must surface as a real error, not be
+// mis-diagnosed as "table missing".
+func TestIsMissingObjectError(t *testing.T) {
+	pgErr := func(code string) error { return &pgconn.PgError{Code: code} }
+	if isMissingObjectError(errors.New("connection reset")) {
+		t.Error("network error must not be treated as missing-object")
+	}
+	if !isMissingObjectError(pgErr("42P01")) {
+		t.Error("undefined_table must be treated as missing-object")
+	}
+	if !isMissingObjectError(pgErr("3F000")) {
+		t.Error("schema-not-found must be treated as missing-object")
+	}
+	if isMissingObjectError(pgErr("42601")) { // syntax error
+		t.Error("syntax_error must surface, not be mis-diagnosed")
 	}
 }
 

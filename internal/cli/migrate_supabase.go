@@ -1,6 +1,6 @@
 // Package cli — Supabase → Eurobase migration path (#267).
 //
-// This file is the parent command tree for `eurobase migrate supabase …`.
+// This file is the parent command tree for `eurobase import supabase …`.
 // Each subcommand (assess, schema, data, storage, functions) lives in its
 // own file so the top-level surface stays scannable.
 //
