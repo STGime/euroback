@@ -83,11 +83,11 @@ command:
 
   - Reports every source bucket individually.
   - Prints one ` + "`rclone sync`" + ` command per bucket, targeting
-    ` + "`eurobase_dst:/<bucket-name>/`" + ` — the tenant gets the same
+    ` + "`eurobase_dst:<bucket-name>/`" + ` — the tenant gets the same
     prefix layout once multi-bucket lands.
 
-Pass --bucket <name> to filter to a single source bucket. --hide-rclone
-suppresses the rclone commands (report only).`,
+Pass --bucket <name> to filter to a single source bucket. Pass
+--rclone=false to suppress the rclone commands (report only).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbURL := os.Getenv("SUPABASE_DB_URL")
 			if dbURL == "" {
@@ -118,16 +118,22 @@ suppresses the rclone commands (report only).`,
 				return nil
 			}
 			if targetBucket != "" {
-				filtered := buckets[:0]
+				// Snapshot the full name list BEFORE filtering — the
+				// "not found" error path needs to list what IS
+				// available, and reusing the same backing array via
+				// `buckets[:0]` would leave the join walking an empty
+				// slice. (#276 review ship-blocker.)
+				available := joinBucketNames(buckets)
+				filtered := make([]supabaseBucket, 0, 1)
 				for _, b := range buckets {
 					if b.name == targetBucket {
 						filtered = append(filtered, b)
 					}
 				}
-				buckets = filtered
-				if len(buckets) == 0 {
-					return fmt.Errorf("bucket %q not found on source (available: %s)", targetBucket, joinBucketNames(buckets))
+				if len(filtered) == 0 {
+					return fmt.Errorf("bucket %q not found on source (available: %s)", targetBucket, available)
 				}
+				buckets = filtered
 			}
 
 			report, err := buildStorageReport(ctx, conn, buckets, showRclone)
@@ -229,36 +235,19 @@ func buildStorageReport(ctx context.Context, conn *pgx.Conn, buckets []supabaseB
 
 	// Per-bucket rows.
 	for _, b := range buckets {
-		fmt.Fprintf(&out, "## Bucket: `%s`\n\n", mdEscape(b.name))
-		visibility := "private"
-		if b.public {
-			visibility = "public"
-		}
-		fmt.Fprintf(&out, "- Visibility: %s\n", visibility)
-		fmt.Fprintf(&out, "- Objects: %s\n", formatCount(b.objectCount))
-		fmt.Fprintf(&out, "- Size:    %s\n", formatBytes(b.totalBytes))
-		if b.fileSizeLimit != nil && *b.fileSizeLimit > 0 {
-			fmt.Fprintf(&out, "- File size limit: %s per object\n", formatBytes(*b.fileSizeLimit))
-		}
-		if len(b.allowedMimeTypes) > 0 {
-			fmt.Fprintf(&out, "- Allowed MIME types: `%s`\n", strings.Join(b.allowedMimeTypes, "`, `"))
-		}
-		fmt.Fprintln(&out)
-		if showRclone {
-			fmt.Fprintf(&out, "```\n%s\n```\n\n", rcloneCommandFor(b))
-		}
+		out.WriteString(renderBucketSection(b, showRclone))
 	}
 
 	// Footer: rclone setup + next-step hints.
 	fmt.Fprintln(&out, "## Prerequisites")
 	fmt.Fprintln(&out, "")
-	fmt.Fprintln(&out, "1. Install `rclone` (`brew install rclone` / `apt install rclone`).")
+	fmt.Fprintln(&out, "1. Install `rclone` (`brew install rclone` / `apt install rclone` / `apk add rclone`, or https://rclone.org/downloads/).")
 	fmt.Fprintln(&out, "2. Configure two remotes with `rclone config`:")
 	fmt.Fprintln(&out, "   - `supabase_src` → the Supabase project's S3-compatible endpoint")
 	fmt.Fprintln(&out, "     (`https://<project>.supabase.co/storage/v1/s3`).")
 	fmt.Fprintln(&out, "   - `eurobase_dst` → the Eurobase project's Scaleway bucket")
 	fmt.Fprintln(&out, "     (`https://s3.fr-par.scw.cloud`; credentials from the Eurobase console).")
-	fmt.Fprintln(&out, "3. Run the commands above; each is idempotent (`rclone sync` skips objects already at the destination with the same size + checksum).")
+	fmt.Fprintln(&out, "3. Run the commands above; each is idempotent — `--checksum` forces rclone to compare content hashes, not mtimes (Supabase's S3 shim frequently reports epoch mtimes, which would otherwise trigger a full re-copy on rerun).")
 	fmt.Fprintln(&out, "")
 	fmt.Fprintln(&out, "## Multi-bucket note")
 	fmt.Fprintln(&out, "")
@@ -270,16 +259,106 @@ func buildStorageReport(ctx context.Context, conn *pgx.Conn, buckets []supabaseB
 	return out.String(), nil
 }
 
-// rcloneCommandFor returns the rclone invocation for one bucket. Uses
-// --progress so the tenant sees a live meter, and --transfers 8 as a
-// reasonable default for parallel object copies.
+// renderBucketSection returns the Markdown block for one bucket:
+// header + facts + (optional) rclone command. Extracted from
+// buildStorageReport so tests can exercise the rendering without a
+// live Postgres connection.
+//
+// All tenant-controlled strings (bucket name, MIME types) run through
+// mdEscape so a hostile source can't inject structural Markdown into
+// the report (#276 review M — same class as the H1 injection guard
+// pinned by #268 `assess`).
+func renderBucketSection(b supabaseBucket, showRclone bool) string {
+	var out strings.Builder
+	// Bucket name goes into a bold header, not backticks — a hostile
+	// bucket name with an embedded backtick can't inject structural
+	// Markdown once passed through mdEscape.
+	fmt.Fprintf(&out, "## Bucket: **%s**\n\n", mdEscape(b.name))
+	visibility := "private"
+	if b.public {
+		visibility = "public"
+	}
+	fmt.Fprintf(&out, "- Visibility: %s\n", visibility)
+	fmt.Fprintf(&out, "- Objects: %s\n", formatCount(b.objectCount))
+	fmt.Fprintf(&out, "- Size:    %s\n", formatBytes(b.totalBytes))
+	if b.fileSizeLimit != nil && *b.fileSizeLimit > 0 {
+		fmt.Fprintf(&out, "- File size limit: %s per object\n", formatBytes(*b.fileSizeLimit))
+	}
+	if len(b.allowedMimeTypes) > 0 {
+		// Escape each MIME type — the tenant controls this list on
+		// the source and a backtick in an item would otherwise
+		// break the surrounding content span.
+		escaped := make([]string, len(b.allowedMimeTypes))
+		for i, m := range b.allowedMimeTypes {
+			escaped[i] = mdEscape(m)
+		}
+		fmt.Fprintf(&out, "- Allowed MIME types: %s\n", strings.Join(escaped, ", "))
+	}
+	// Warn (in the report itself) when a bucket has objects but zero
+	// total bytes — happens on older Supabase projects where
+	// `metadata->>'size'` wasn't populated yet. Object count is
+	// accurate; the byte total is uninformative.
+	if b.objectCount > 0 && b.totalBytes == 0 {
+		fmt.Fprintln(&out, "- **Note:** total-bytes shows 0 because `metadata.size` wasn't populated on this project's storage.objects. The rclone sync copies every object regardless — it only affects this summary.")
+	}
+	fmt.Fprintln(&out)
+	if showRclone {
+		fmt.Fprintf(&out, "```\n%s\n```\n\n", rcloneCommandFor(b))
+	}
+	return out.String()
+}
+
+// rcloneCommandFor returns the rclone invocation for one bucket.
+//
+// Flags:
+//   - --checksum: forces size+checksum comparison instead of mtime.
+//     Supabase's S3 shim frequently reports epoch mtimes, so without
+//     this, rerunning `sync` re-copies every object silently (#276
+//     review H — mtime-based reruns weren't actually idempotent).
+//   - --progress: live meter — copies can take minutes on a decent
+//     project.
+//   - --transfers 8: parallel object copies — a sane default for a
+//     home connection.
+//
+// The source + destination remotes are addressed as `<remote>:<bucket>/`
+// (no leading `/`; the trailing `/` is the standard rclone convention
+// for "sync the whole bucket root"). This matches the layout Eurobase's
+// future multi-bucket support will consume — no re-sync needed once
+// that ships (#276 review H — code / doc alignment).
+//
+// If the bucket name contains characters that would break a shell
+// argument or the surrounding Markdown code fence (newlines, backticks,
+// quotes, control chars), we refuse to emit the command and return a
+// comment instead. Real Supabase bucket names are restricted to
+// `[a-zA-Z0-9-_.]`, so this only fires on a compromised source.
 func rcloneCommandFor(b supabaseBucket) string {
+	if !isSafeBucketName(b.name) {
+		return "# skipped — bucket name contains characters that are invalid for shell / Markdown embedding"
+	}
 	return fmt.Sprintf(
-		"rclone sync --progress --transfers 8 \\\n"+
-			"  supabase_src:%s \\\n"+
-			"  eurobase_dst:%s",
+		"rclone sync --checksum --progress --transfers 8 \\\n"+
+			"  supabase_src:%s/ \\\n"+
+			"  eurobase_dst:%s/",
 		b.name, b.name,
 	)
+}
+
+// isSafeBucketName returns true if the name is safe to embed in a
+// shell command inside a Markdown code fence. Rejects newlines,
+// backticks, quotes, backslashes, `$`, and any control char.
+func isSafeBucketName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r < 0x20, r == 0x7f: // control chars incl. \n, \r, tab
+			return false
+		case r == '`' || r == '"' || r == '\'' || r == '\\' || r == '$':
+			return false
+		}
+	}
+	return true
 }
 
 type storageTotal struct {
