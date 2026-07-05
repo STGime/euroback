@@ -71,6 +71,7 @@ into an empty project unless you're comfortable overwriting.`,
 	}
 	cmd.AddCommand(importSupabaseAssessCmd())
 	cmd.AddCommand(importSupabaseSchemaCmd())
-	// Placeholder subcommands land in follow-up PRs #270-#272.
+	cmd.AddCommand(importSupabaseDataCmd())
+	// Placeholder subcommands land in follow-up PRs #271-#272.
 	return cmd
 }
