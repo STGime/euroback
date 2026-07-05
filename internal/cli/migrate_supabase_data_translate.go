@@ -26,6 +26,7 @@ package cli
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -58,14 +59,16 @@ type fkEdge struct {
 
 // sortTablesByFK returns the input tables in topological order —
 // parents (referenced tables) before children (referencing tables).
-// Cycles are broken by keeping the CURRENT input order for the
-// nodes involved in the cycle (Postgres accepts self-referential
-// and mutually-referential inserts as long as they're in the same
-// transaction with FKs deferrable — we emit the caveat).
+// Returns an error listing the cycle members when a real FK cycle is
+// present, because emitting a wrong order would silently apply-time-
+// fail on FK violations. Self-references are tolerated (Postgres
+// accepts them within a single-statement multi-row INSERT if the
+// rows are consistent).
 //
 // Deterministic: given the same inputs, always returns the same
-// order. Sort is stable within an FK level.
-func sortTablesByFK(tables []tableRef, edges []fkEdge) []tableRef {
+// order. Sort is stable within an FK level via lexicographic
+// tiebreak. (#275 review H #7.)
+func sortTablesByFK(tables []tableRef, edges []fkEdge) ([]tableRef, error) {
 	byName := make(map[string]tableRef, len(tables))
 	names := make([]string, 0, len(tables))
 	for _, t := range tables {
@@ -108,18 +111,20 @@ func sortTablesByFK(tables []tableRef, edges []fkEdge) []tableRef {
 			}
 		}
 		if len(ready) == 0 {
-			// Cycle — emit the remaining nodes in name order and
-			// stop so we don't spin. Postgres accepts these if FKs
-			// are deferrable or if data is consistent.
+			// A real FK cycle among two or more tables — the tenant
+			// must resolve it themselves (either DEFERRABLE the
+			// constraints on the target project, or migrate one side
+			// with rows only after both have been imported). We fail
+			// LOUD rather than emit a wrong order that silently blows
+			// up at apply time.
+			var stuck []string
 			for _, n := range names {
 				if indeg[n] < 0 {
 					continue
 				}
-				out = append(out, byName[n])
-				indeg[n] = -1
-				remaining--
+				stuck = append(stuck, n)
 			}
-			break
+			return nil, fmt.Errorf("FK cycle among tables %v — resolve on Supabase (DEFERRABLE or drop one side) and rerun", stuck)
 		}
 		sort.Strings(ready)
 		for _, n := range ready {
@@ -131,7 +136,7 @@ func sortTablesByFK(tables []tableRef, edges []fkEdge) []tableRef {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // supabaseUser is the projected shape we read from Supabase's
@@ -213,16 +218,15 @@ func translateAuthUser(u supabaseUser) (eurobaseUserRow, []string) {
 		notes = append(notes, "no password on source — user must sign in via OAuth to establish local password")
 	}
 
-	// Metadata: Supabase's `raw_user_meta_data` (JSONB) is where
-	// display_name, avatar_url, etc. get stashed by clients. Eurobase
-	// exposes a `metadata` column with the same purpose. Direct
-	// passthrough — clients that already read `user.user_metadata`
-	// on Supabase will find the same JSON under Eurobase's
-	// `user.metadata`.
-	metadata := u.RawUserMetaData
-	if metadata == "" || metadata == "null" {
-		metadata = "{}"
-	}
+	// Metadata: Supabase's `raw_user_meta_data` is where clients stash
+	// display_name / avatar_url; `raw_app_meta_data` is where the
+	// server (and app code) stashes provider / providers / role /
+	// tenant-membership hints. Eurobase collapses both into a single
+	// `metadata` JSONB. We merge them, putting user-meta at the top
+	// level (existing app code reads it there) and nesting app-meta
+	// under an `app_metadata` key so nothing is lost. (#275 review
+	// H #6 — raw_app_meta_data was previously discarded silently.)
+	metadata := mergeUserAndAppMetadata(u.RawUserMetaData, u.RawAppMetaData)
 
 	// updated_at defaults to created_at when the source didn't record
 	// one (Supabase started stamping it later in its schema history).
@@ -294,6 +298,14 @@ func sqlLiteral(v interface{}) string {
 			s = "{}"
 		}
 		return "'" + strings.ReplaceAll(s, "'", "''") + "'::jsonb"
+	case typedLiteral:
+		// Typed literal — the CLI casts numeric/interval/inet/etc.
+		// columns to text in the SELECT so pgx returns them as
+		// strings; we re-emit as `'value'::type` so Postgres re-
+		// parses. Without this, sqlLiteral's default fallback would
+		// `%v`-print a pgtype wrapper into a Go-struct dump. (#275
+		// review ship-blocker #3/#4.)
+		return "'" + strings.ReplaceAll(t.value, "'", "''") + "'::" + t.pgType
 	case string:
 		return "'" + strings.ReplaceAll(t, "'", "''") + "'"
 	case *string:
@@ -440,3 +452,67 @@ func identityRowAsValues(i eurobaseIdentityRow) []interface{} {
 type jsonbValue string
 
 func jsonbLiteral(s string) jsonbValue { return jsonbValue(s) }
+
+// typedLiteral carries a text-cast source value + its target Postgres
+// type so sqlLiteral can emit `'value'::type`. Used by wrapValue in
+// migrate_supabase_data.go for column types the CLI cast to text at
+// SELECT time (jsonb / numeric / interval / inet / array types) —
+// without this wrapper, pgx would return the raw pgtype struct and
+// sqlLiteral's fallback would `%v`-print it into an unparseable
+// blob. (#275 review ship-blocker #3/#4.)
+type typedLiteral struct {
+	value  string
+	pgType string
+}
+
+// mergeUserAndAppMetadata combines Supabase's `raw_user_meta_data`
+// (client-writable) and `raw_app_meta_data` (server-writable) into the
+// single JSONB payload Eurobase stores as `users.metadata`. User-meta
+// stays at the top level so existing app code that reads
+// `user.metadata.display_name` keeps working; app-meta nests under
+// `app_metadata` so provider / role / tenant-hint fields aren't lost.
+//
+// Non-JSON or invalid input is normalised to `{}`. If both are empty,
+// the result is `{}`. If either is non-empty but not a JSON object
+// (e.g. Supabase stored a bare scalar in it — unusual but possible),
+// it gets nested under `_source` so nothing gets silently dropped.
+func mergeUserAndAppMetadata(userMeta, appMeta string) string {
+	merged := map[string]interface{}{}
+
+	userObj, userOk := parseJSONObject(userMeta)
+	if userOk {
+		for k, v := range userObj {
+			merged[k] = v
+		}
+	} else if userMeta != "" && userMeta != "null" && userMeta != "{}" {
+		merged["_user_metadata_source"] = json.RawMessage(userMeta)
+	}
+
+	if appMeta != "" && appMeta != "null" && appMeta != "{}" {
+		if appObj, ok := parseJSONObject(appMeta); ok {
+			merged["app_metadata"] = appObj
+		} else {
+			merged["app_metadata"] = json.RawMessage(appMeta)
+		}
+	}
+
+	if len(merged) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(merged)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+func parseJSONObject(s string) (map[string]interface{}, bool) {
+	if s == "" || s == "null" {
+		return nil, false
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil, false
+	}
+	return out, true
+}

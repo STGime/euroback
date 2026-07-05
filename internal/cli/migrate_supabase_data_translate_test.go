@@ -91,7 +91,10 @@ func TestSortTablesByFK_ParentBeforeChild(t *testing.T) {
 		{from: "orders", to: "users"},
 		{from: "line_items", to: "orders"},
 	}
-	got := sortTablesByFK(tables, edges)
+	got, err := sortTablesByFK(tables, edges)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	names := make([]string, len(got))
 	for i, t := range got {
 		names[i] = t.name
@@ -114,7 +117,10 @@ func TestSortTablesByFK_DeterministicWhenIndependent(t *testing.T) {
 		{name: "widgets"}, {name: "gadgets"}, {name: "sprockets"},
 	}
 	// No edges — order should be lexicographic.
-	got := sortTablesByFK(tables, nil)
+	got, err := sortTablesByFK(tables, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := []string{"gadgets", "sprockets", "widgets"}
 	for i, tr := range got {
 		if tr.name != want[i] {
@@ -129,32 +135,35 @@ func TestSortTablesByFK_SelfReferenceHandled(t *testing.T) {
 	// Self-reference must NOT prevent the table from being emitted.
 	tables := []tableRef{{name: "employees"}}
 	edges := []fkEdge{{from: "employees", to: "employees"}}
-	got := sortTablesByFK(tables, edges)
+	got, err := sortTablesByFK(tables, edges)
+	if err != nil {
+		t.Fatalf("self-ref should not error: %v", err)
+	}
 	if len(got) != 1 || got[0].name != "employees" {
 		t.Errorf("self-reference blocked topology sort: %v", got)
 	}
 }
 
-func TestSortTablesByFK_CycleBreaks(t *testing.T) {
-	// Mutual FK — a and b reference each other. The topology sort
-	// must not spin; it emits the cycle in some order and moves on.
+// #275 review H #7: a real FK cycle must error loudly rather than
+// silently emit a wrong order — otherwise the emitted INSERTs
+// apply-time fail on FK violation with no path back except re-run.
+func TestSortTablesByFK_CycleErrors(t *testing.T) {
 	tables := []tableRef{{name: "a"}, {name: "b"}, {name: "c"}}
 	edges := []fkEdge{
 		{from: "a", to: "b"},
 		{from: "b", to: "a"},
 	}
-	got := sortTablesByFK(tables, edges)
-	if len(got) != 3 {
-		t.Errorf("cycle-breaker dropped tables: got %d, want 3", len(got))
+	_, err := sortTablesByFK(tables, edges)
+	if err == nil {
+		t.Fatal("expected an error on FK cycle, got nil")
 	}
-	seen := map[string]bool{}
-	for _, tr := range got {
-		seen[tr.name] = true
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error should mention the cycle: %v", err)
 	}
-	for _, want := range []string{"a", "b", "c"} {
-		if !seen[want] {
-			t.Errorf("table %q missing from cycle output", want)
-		}
+	// The cycle members should be named so the tenant knows what to
+	// fix on Supabase.
+	if !strings.Contains(err.Error(), "a") || !strings.Contains(err.Error(), "b") {
+		t.Errorf("error should name cycle members: %v", err)
 	}
 }
 
@@ -166,7 +175,10 @@ func TestSortTablesByFK_EdgesToUnknownTablesIgnored(t *testing.T) {
 		{from: "orders", to: "auth_users"},
 		{from: "orphan", to: "nowhere"},
 	}
-	got := sortTablesByFK(tables, edges)
+	got, err := sortTablesByFK(tables, edges)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(got) != 1 || got[0].name != "orders" {
 		t.Errorf("unknown-table edges corrupted sort: %v", got)
 	}
@@ -367,6 +379,109 @@ func TestUserRowAsValues_ColumnOrderMatchesAuthUserColumns(t *testing.T) {
 	}
 	if _, ok := vals[metaIdx].(jsonbValue); !ok {
 		t.Errorf("metadata slot must be jsonbValue, got %T", vals[metaIdx])
+	}
+}
+
+// ── #275 review fixes ────────────────────────────────────────────────
+
+// TestSQLLiteral_TypedLiteralEmitsCast pins ship-blocker #3/#4:
+// numeric / interval / inet columns come across as strings (the CLI
+// casts them to text at SELECT time) and must emit as
+// `'value'::type` so Postgres re-parses on insert. Without this,
+// silent apply-time failure ("column is of type numeric but
+// expression is of type text").
+func TestSQLLiteral_TypedLiteralEmitsCast(t *testing.T) {
+	cases := []struct {
+		v    typedLiteral
+		want string
+	}{
+		{typedLiteral{value: "123.45", pgType: "numeric"}, `'123.45'::numeric`},
+		{typedLiteral{value: "1 day", pgType: "interval"}, `'1 day'::interval`},
+		{typedLiteral{value: "10.0.0.0/24", pgType: "cidr"}, `'10.0.0.0/24'::cidr`},
+		{typedLiteral{value: "{1,2,3}", pgType: "integer[]"}, `'{1,2,3}'::integer[]`},
+		// Hostile value with a `'` — must double-escape.
+		{typedLiteral{value: "it's", pgType: "text"}, `'it''s'::text`},
+	}
+	for _, c := range cases {
+		if got := sqlLiteral(c.v); got != c.want {
+			t.Errorf("sqlLiteral(%+v) = %q, want %q", c.v, got, c.want)
+		}
+	}
+}
+
+// TestMergeUserAndAppMetadata_KeepsUserAtTopLevel pins H #6:
+// raw_app_meta_data used to be silently discarded. Now it nests
+// under `app_metadata` so provider / role / tenant hints survive.
+func TestMergeUserAndAppMetadata_KeepsUserAtTopLevel(t *testing.T) {
+	got := mergeUserAndAppMetadata(
+		`{"display_name":"alice","avatar_url":"https://x/a.png"}`,
+		`{"provider":"google","providers":["google"],"role":"admin"}`,
+	)
+	// User-meta stays at the top level (existing app code keeps working).
+	if !strings.Contains(got, `"display_name":"alice"`) {
+		t.Errorf("user_metadata display_name lost: %s", got)
+	}
+	// App-meta nests under app_metadata (no field silently dropped).
+	if !strings.Contains(got, `"app_metadata":`) {
+		t.Errorf("app_metadata key missing: %s", got)
+	}
+	if !strings.Contains(got, `"role":"admin"`) {
+		t.Errorf("app_metadata contents lost: %s", got)
+	}
+}
+
+func TestMergeUserAndAppMetadata_EmptyInputs(t *testing.T) {
+	cases := []struct {
+		user, app string
+		want      string
+	}{
+		{"", "", "{}"},
+		{"null", "null", "{}"},
+		{"{}", "{}", "{}"},
+		{`{"k":"v"}`, "", `{"k":"v"}`},
+		{"", `{"provider":"google"}`, `{"app_metadata":{"provider":"google"}}`},
+	}
+	for _, c := range cases {
+		got := mergeUserAndAppMetadata(c.user, c.app)
+		if got != c.want {
+			t.Errorf("merge(%q,%q) = %q, want %q", c.user, c.app, got, c.want)
+		}
+	}
+}
+
+func TestMergeUserAndAppMetadata_NonObjectPreserved(t *testing.T) {
+	// If Supabase stored a scalar/array in metadata (odd but happens),
+	// nest under `_user_metadata_source` so we don't silently drop it.
+	got := mergeUserAndAppMetadata(`["a","b"]`, `{"role":"admin"}`)
+	if !strings.Contains(got, `_user_metadata_source`) {
+		t.Errorf("non-object user_metadata dropped: %s", got)
+	}
+	if !strings.Contains(got, `"role":"admin"`) {
+		t.Errorf("app_metadata lost when user_metadata was non-object: %s", got)
+	}
+}
+
+// TestTranslateAuthUser_MergesAppMetadata is the end-to-end pin —
+// translate must produce metadata that includes both user + app
+// meta (H #6).
+func TestTranslateAuthUser_MergesAppMetadata(t *testing.T) {
+	email := "a@x"
+	in := supabaseUser{
+		ID:              "u1",
+		Email:           &email,
+		RawUserMetaData: `{"display_name":"alice"}`,
+		RawAppMetaData:  `{"provider":"google","providers":["google"]}`,
+		CreatedAt:       time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	got, _ := translateAuthUser(in)
+	if !strings.Contains(got.Metadata, `"display_name":"alice"`) {
+		t.Errorf("user meta discarded: %s", got.Metadata)
+	}
+	if !strings.Contains(got.Metadata, `"app_metadata"`) {
+		t.Errorf("app meta discarded (regression on H #6): %s", got.Metadata)
+	}
+	if !strings.Contains(got.Metadata, `"provider":"google"`) {
+		t.Errorf("app_metadata contents lost: %s", got.Metadata)
 	}
 }
 
