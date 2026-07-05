@@ -313,6 +313,40 @@ var castToTextTypes = map[string]bool{
 	"time with time zone":         true,
 	"timestamp without time zone": true, // timestamptz stays native (time.Time)
 	"money":                       true,
+	// Range + multirange types (PG14+ multiranges). pgx returns
+	// pgtype.Range wrappers that %v-print into unusable Go structs.
+	"int4range":       true,
+	"int8range":       true,
+	"numrange":        true,
+	"tsrange":         true,
+	"tstzrange":       true,
+	"daterange":       true,
+	"int4multirange":  true,
+	"int8multirange":  true,
+	"nummultirange":   true,
+	"tsmultirange":    true,
+	"tstzmultirange":  true,
+	"datemultirange":  true,
+	// Bit strings — pgx pgtype.Bits wrapper.
+	"bit":        true,
+	"bit varying": true,
+	// Extension-shipped types Supabase templates use.
+	"hstore":  true, // pg_hstore
+	"ltree":   true, // ltree extension
+	"lquery":  true,
+	"ltxtquery": true,
+	"citext":  true, // citext extension
+	"pg_lsn":  true, // wal position
+	// Full-text search dictionaries + regconfig (rare but pg_dump can
+	// emit them in templates).
+	"regconfig":     true,
+	"regprocedure":  true,
+	"regoper":       true,
+	"regoperator":   true,
+	"regclass":      true,
+	"regtype":       true,
+	"regrole":       true,
+	"regnamespace":  true,
 }
 
 // selectExpr for one column — casts troublesome types to text so
@@ -371,7 +405,12 @@ func wrapValue(c columnInfo, v interface{}) interface{} {
 		}
 	case "numeric", "money", "interval", "inet", "cidr", "macaddr", "macaddr8",
 		"tsvector", "tsquery", "box", "circle", "line", "lseg",
-		"path", "point", "polygon", "date":
+		"path", "point", "polygon", "date",
+		"int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange",
+		"int4multirange", "int8multirange", "nummultirange", "tsmultirange", "tstzmultirange", "datemultirange",
+		"bit", "bit varying",
+		"hstore", "ltree", "lquery", "ltxtquery", "citext", "pg_lsn",
+		"regconfig", "regprocedure", "regoper", "regoperator", "regclass", "regtype", "regrole", "regnamespace":
 		if s, ok := v.(string); ok {
 			return typedLiteral{value: s, pgType: baseType}
 		}
@@ -511,6 +550,7 @@ func emitOneTable(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter, ta
 	}
 
 	var batch [][]interface{}
+	var batchBytes int
 	var total int64
 	flushBatch := func() error {
 		if len(batch) == 0 {
@@ -522,6 +562,7 @@ func emitOneTable(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter, ta
 			return err
 		}
 		batch = batch[:0]
+		batchBytes = 0
 		return nil
 	}
 	for rows.Next() {
@@ -533,12 +574,18 @@ func emitOneTable(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter, ta
 		for i, v := range vals {
 			row[i] = wrapValue(cols[i], coerceValue(v))
 		}
-		batch = append(batch, row)
-		if len(batch) >= dataBatchSize {
+		rowBytes := estimateRowBytes(row)
+		// Flush BEFORE appending if adding this row would tip us over
+		// either ceiling. The row-count cap is a fallback for pathological
+		// tiny-row cases; the byte cap is the real endpoint-shape guard
+		// (#275 round-2 ship-blocker #1).
+		if len(batch) > 0 && (len(batch) >= dataBatchSize || batchBytes+rowBytes > maxBatchBytes) {
 			if err := flushBatch(); err != nil {
 				return total, err
 			}
 		}
+		batch = append(batch, row)
+		batchBytes += rowBytes
 		total++
 	}
 	if err := rows.Err(); err != nil {
@@ -599,6 +646,7 @@ func emitAuthData(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter) (i
 		return 0, 0, nil, fmt.Errorf("read auth.users: %w", err)
 	}
 	var userBatch [][]interface{}
+	var userBytes int
 	flushUserBatch := func() error {
 		if len(userBatch) == 0 {
 			return nil
@@ -609,17 +657,21 @@ func emitAuthData(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter) (i
 			return err
 		}
 		userBatch = userBatch[:0]
+		userBytes = 0
 		return nil
 	}
 	for _, u := range users {
 		row, rowNotes := translateAuthUser(u)
 		notes = append(notes, prefixNotes(u.ID, rowNotes)...)
-		userBatch = append(userBatch, userRowAsValues(row))
-		if len(userBatch) >= dataBatchSize {
+		vals := userRowAsValues(row)
+		rowBytes := estimateRowBytes(vals)
+		if len(userBatch) > 0 && (len(userBatch) >= dataBatchSize || userBytes+rowBytes > maxBatchBytes) {
 			if err := flushUserBatch(); err != nil {
 				return int64(len(users)), 0, notes, err
 			}
 		}
+		userBatch = append(userBatch, vals)
+		userBytes += rowBytes
 	}
 	if err := flushUserBatch(); err != nil {
 		return int64(len(users)), 0, notes, err
@@ -639,6 +691,7 @@ func emitAuthData(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter) (i
 		identities = nil
 	}
 	var identBatch [][]interface{}
+	var identBytes int
 	flushIdentBatch := func() error {
 		if len(identBatch) == 0 {
 			return nil
@@ -649,16 +702,20 @@ func emitAuthData(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter) (i
 			return err
 		}
 		identBatch = identBatch[:0]
+		identBytes = 0
 		return nil
 	}
 	for _, i := range identities {
 		row := translateAuthIdentity(i)
-		identBatch = append(identBatch, identityRowAsValues(row))
-		if len(identBatch) >= dataBatchSize {
+		vals := identityRowAsValues(row)
+		rowBytes := estimateRowBytes(vals)
+		if len(identBatch) > 0 && (len(identBatch) >= dataBatchSize || identBytes+rowBytes > maxBatchBytes) {
 			if err := flushIdentBatch(); err != nil {
 				return int64(len(users)), int64(len(identities)), notes, err
 			}
 		}
+		identBatch = append(identBatch, vals)
+		identBytes += rowBytes
 	}
 	if err := flushIdentBatch(); err != nil {
 		return int64(len(users)), int64(len(identities)), notes, err

@@ -33,11 +33,85 @@ import (
 	"time"
 )
 
-// dataBatchSize is the number of rows we pack into one multi-row
-// INSERT. Postgres's parser handles 10k+ per statement without issue,
-// but 1000 keeps individual failed batches small enough that the
-// tenant can eyeball the retry.
+// dataBatchSize is the row-count ceiling per multi-row INSERT. Kept
+// as an upper bound alongside `maxBatchBytes` — whichever fires first
+// closes the batch. A too-large ceiling risks batches that Postgres's
+// parser tolerates but that hit the endpoint's body cap; too-small
+// hurts ingest throughput.
 const dataBatchSize = 1000
+
+// maxBatchBytes is the SIZE ceiling per multi-row INSERT. The tenant-
+// migrations endpoint rejects bodies over 512 KiB
+// (`internal/query/tenant_migrations.go:50`); a single INSERT that
+// crosses it kills the whole file. 350 KiB leaves headroom for the
+// per-file header (~250 B), the writer's rotation slack, and other
+// statements the same file may pack alongside this one. (#275 round-2
+// review ship-blocker #1 — row-count-only batching overshot on wide
+// tables where 1000 rows ≥ 500 KiB.)
+const maxBatchBytes = 350 * 1024
+
+// estimateValueBytes returns a conservative upper bound on how many
+// bytes `v` will occupy once sqlLiteral emits it. Used by the emitter
+// to close a batch before it grows past maxBatchBytes, without having
+// to render the row twice.
+//
+// It's an ESTIMATE (fast, no allocation) — the caller should hold a
+// bit of headroom so a bad estimate can't tip us over the cap. The
+// literal cases are ordered by likelihood of appearing in Supabase
+// row data.
+func estimateValueBytes(v interface{}) int {
+	if v == nil {
+		return 4
+	}
+	switch t := v.(type) {
+	case jsonbValue:
+		return len(t) + 12 // '' + ::jsonb
+	case typedLiteral:
+		return len(t.value) + len(t.pgType) + 6 // '' + ::
+	case string:
+		// Assume up to ~25% of chars might be `'` needing doubling
+		// (worst-realistic case for JSON-ish payloads).
+		return len(t) + len(t)/4 + 2
+	case *string:
+		if t == nil {
+			return 4
+		}
+		return len(*t) + len(*t)/4 + 2
+	case time.Time:
+		return 45 // RFC3339Nano + ::timestamptz + slack
+	case *time.Time:
+		if t == nil {
+			return 4
+		}
+		return 45
+	case bool:
+		return 5
+	case int, int32, int64:
+		return 22
+	case float32, float64:
+		return 32
+	case []byte:
+		return len(t)*2 + 12 // hex + '\x + '::bytea
+	default:
+		return 96
+	}
+}
+
+// estimateRowBytes returns a conservative upper bound on how many
+// bytes the row will occupy in a multi-row INSERT VALUES tuple.
+// Used by emitOneTable / emitAuthData to size-gate the batch. The
+// estimate is intentionally biased HIGH — an under-estimate would
+// tip a batch over the endpoint's 512 KiB cap, an over-estimate
+// merely flushes a little sooner.
+func estimateRowBytes(row []interface{}) int {
+	// Fixed per-row overhead: `  (` + `)` + `,\n` + a few bytes slack.
+	n := 12
+	for _, v := range row {
+		// Per-column separator `, ` plus the value.
+		n += 2 + estimateValueBytes(v)
+	}
+	return n
+}
 
 // tableRef describes one Supabase public-schema table for the row
 // migration. `columns` is the ordered list of columns to include (we
@@ -111,20 +185,19 @@ func sortTablesByFK(tables []tableRef, edges []fkEdge) ([]tableRef, error) {
 			}
 		}
 		if len(ready) == 0 {
-			// A real FK cycle among two or more tables — the tenant
-			// must resolve it themselves (either DEFERRABLE the
-			// constraints on the target project, or migrate one side
-			// with rows only after both have been imported). We fail
-			// LOUD rather than emit a wrong order that silently blows
-			// up at apply time.
-			var stuck []string
-			for _, n := range names {
-				if indeg[n] < 0 {
-					continue
-				}
-				stuck = append(stuck, n)
-			}
-			return nil, fmt.Errorf("FK cycle among tables %v — resolve on Supabase (DEFERRABLE or drop one side) and rerun", stuck)
+			// A real FK cycle among two or more tables — fail LOUD
+			// rather than emit a wrong order that silently blows up
+			// at apply time. Identify the actual cycle members (the
+			// strongly-connected component) rather than "everything
+			// with unresolved deps" — in a shape like `a↔b, c→b`,
+			// `c` is stuck but not IN the cycle, and the error
+			// message shouldn't mislead the tenant. (#275 round-2
+			// review H #2.)
+			//
+			// Build the sub-graph of unresolved nodes only, then run
+			// Tarjan's SCC on it.
+			cycle := findCycleMembers(indeg, deps, names)
+			return nil, fmt.Errorf("FK cycle among tables %v — resolve on Supabase (DEFERRABLE the constraint or drop one side) and rerun", cycle)
 		}
 		sort.Strings(ready)
 		for _, n := range ready {
@@ -137,6 +210,113 @@ func sortTablesByFK(tables []tableRef, edges []fkEdge) ([]tableRef, error) {
 		}
 	}
 	return out, nil
+}
+
+// findCycleMembers returns the tables that participate in an actual
+// FK cycle among the still-unresolved nodes (indeg > 0). Uses
+// Tarjan's SCC algorithm on the sub-graph of unresolved nodes,
+// then returns the union of every SCC of size > 1. Downstream nodes
+// that merely wait for a cycle to resolve (a `c→b` where `a↔b`)
+// aren't returned — they're victims, not perpetrators.
+//
+// Returns members in name order for deterministic error messages.
+func findCycleMembers(indeg map[string]int, deps map[string][]string, allNames []string) []string {
+	// Unresolved set — nodes still waiting for a parent.
+	unresolved := map[string]bool{}
+	for _, n := range allNames {
+		if v, ok := indeg[n]; ok && v > 0 {
+			unresolved[n] = true
+		}
+	}
+
+	// Adjacency: parent p → children c where BOTH are unresolved.
+	adj := map[string][]string{}
+	for parent, children := range deps {
+		if !unresolved[parent] {
+			continue
+		}
+		for _, c := range children {
+			if unresolved[c] {
+				adj[parent] = append(adj[parent], c)
+			}
+		}
+	}
+
+	// Tarjan's SCC state.
+	var (
+		index    int
+		stack    []string
+		onStack  = map[string]bool{}
+		idx      = map[string]int{}
+		lowlink  = map[string]int{}
+		cycleSet = map[string]bool{}
+	)
+	var strongconnect func(v string)
+	strongconnect = func(v string) {
+		idx[v] = index
+		lowlink[v] = index
+		index++
+		stack = append(stack, v)
+		onStack[v] = true
+		for _, w := range adj[v] {
+			if _, seen := idx[w]; !seen {
+				strongconnect(w)
+				if lowlink[w] < lowlink[v] {
+					lowlink[v] = lowlink[w]
+				}
+			} else if onStack[w] {
+				if idx[w] < lowlink[v] {
+					lowlink[v] = idx[w]
+				}
+			}
+		}
+		if lowlink[v] == idx[v] {
+			// Pop stack down to v — that's one SCC.
+			var component []string
+			for {
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				onStack[top] = false
+				component = append(component, top)
+				if top == v {
+					break
+				}
+			}
+			// A cycle has ≥ 2 members (a lone self-loop was already
+			// excluded upstream — see sortTablesByFK's e.from == e.to
+			// guard).
+			if len(component) > 1 {
+				for _, c := range component {
+					cycleSet[c] = true
+				}
+			}
+		}
+	}
+	for _, n := range allNames {
+		if !unresolved[n] {
+			continue
+		}
+		if _, seen := idx[n]; !seen {
+			strongconnect(n)
+		}
+	}
+
+	// Fallback: if Tarjan found no size->=2 SCC (shouldn't happen
+	// given we only run this branch on a genuine deadlock, but be
+	// safe), return every unresolved node so the tenant still gets a
+	// clue.
+	if len(cycleSet) == 0 {
+		for k := range unresolved {
+			cycleSet[k] = true
+		}
+	}
+
+	out := make([]string, 0, len(cycleSet))
+	for k := range cycleSet {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // supabaseUser is the projected shape we read from Supabase's
@@ -470,12 +650,15 @@ type typedLiteral struct {
 // single JSONB payload Eurobase stores as `users.metadata`. User-meta
 // stays at the top level so existing app code that reads
 // `user.metadata.display_name` keeps working; app-meta nests under
-// `app_metadata` so provider / role / tenant-hint fields aren't lost.
+// `_app_metadata` (underscored to avoid collision with an existing
+// user-supplied `app_metadata` key in the source).
 //
-// Non-JSON or invalid input is normalised to `{}`. If both are empty,
-// the result is `{}`. If either is non-empty but not a JSON object
-// (e.g. Supabase stored a bare scalar in it — unusual but possible),
-// it gets nested under `_source` so nothing gets silently dropped.
+// Non-JSON or invalid input is preserved as a JSON string under
+// `_user_metadata_source` / the same nested key — rather than
+// silently dropped. Both marshal cleanly on the outer json.Marshal
+// (the previous version used json.RawMessage(bytes) which would
+// re-marshal the invalid JSON as-is and blow up on the outer
+// json.Marshal, losing app-meta too). (#275 round-2 M #3 + L #7.)
 func mergeUserAndAppMetadata(userMeta, appMeta string) string {
 	merged := map[string]interface{}{}
 
@@ -485,14 +668,14 @@ func mergeUserAndAppMetadata(userMeta, appMeta string) string {
 			merged[k] = v
 		}
 	} else if userMeta != "" && userMeta != "null" && userMeta != "{}" {
-		merged["_user_metadata_source"] = json.RawMessage(userMeta)
+		merged["_user_metadata_source"] = safeJSONPayload(userMeta)
 	}
 
 	if appMeta != "" && appMeta != "null" && appMeta != "{}" {
 		if appObj, ok := parseJSONObject(appMeta); ok {
-			merged["app_metadata"] = appObj
+			merged["_app_metadata"] = appObj
 		} else {
-			merged["app_metadata"] = json.RawMessage(appMeta)
+			merged["_app_metadata"] = safeJSONPayload(appMeta)
 		}
 	}
 
@@ -504,6 +687,17 @@ func mergeUserAndAppMetadata(userMeta, appMeta string) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+// safeJSONPayload wraps a raw source blob so the outer json.Marshal
+// can always encode it. Valid JSON → RawMessage passes through
+// verbatim. Invalid JSON → wrap as a plain string so the outer marshal
+// still succeeds. Either way, nothing gets silently lost.
+func safeJSONPayload(raw string) interface{} {
+	if json.Valid([]byte(raw)) {
+		return json.RawMessage(raw)
+	}
+	return raw
 }
 
 func parseJSONObject(s string) (map[string]interface{}, bool) {

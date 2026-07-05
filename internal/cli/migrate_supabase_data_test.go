@@ -57,9 +57,15 @@ func TestSQLFileWriter_SplitsAtSizeCap(t *testing.T) {
 
 func TestSQLFileWriter_EachFileGetsHeader(t *testing.T) {
 	dir := t.TempDir()
-	w := newSQLFileWriter(dir, "test", time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC), 1024)
-	// 3 large statements → 3 files.
-	stmt := strings.Repeat("y", 900) + ";\n"
+	// Use a larger cap so header + one 900B statement fits comfortably
+	// under the cap — the previous version of this test used cap=1024
+	// which resulted in each file being ~1130 bytes (over cap) but the
+	// test only counted paths, not size. #275 round-2 L #6.
+	cap := 2048
+	w := newSQLFileWriter(dir, "test", time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC), cap)
+	// 3 large statements — each 1500B, so the first fits but the
+	// second forces rotation → 3 files total.
+	stmt := strings.Repeat("y", 1490) + ";\n"
 	for i := 0; i < 3; i++ {
 		if err := w.WriteStatement(stmt); err != nil {
 			t.Fatalf("WriteStatement: %v", err)
@@ -73,6 +79,15 @@ func TestSQLFileWriter_EachFileGetsHeader(t *testing.T) {
 		t.Fatalf("expected 3 files, got %d", len(paths))
 	}
 	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		// Each file must fit under the cap — otherwise the endpoint
+		// rejects it and we've failed silently.
+		if info.Size() > int64(cap) {
+			t.Errorf("file %s exceeds cap (%d > %d)", p, info.Size(), cap)
+		}
 		body, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatalf("read %s: %v", p, err)
@@ -216,5 +231,99 @@ func TestSelectExprFor_PlainTypeIsBareIdent(t *testing.T) {
 	// UUID needs no cast — pgx handles it. Should be bare.
 	if strings.Contains(got, "::text") {
 		t.Errorf("uuid column should NOT be text-cast: %q", got)
+	}
+}
+
+// TestNeedsTextCast_ExtendedPgTypes pins #275 round-2 M #4 — range,
+// bit, hstore, ltree, citext, pg_lsn, regclass etc. must all route
+// through the ::text cast so pgx doesn't return pgtype wrappers that
+// sqlLiteral's default fallback would %v-print.
+func TestNeedsTextCast_ExtendedPgTypes(t *testing.T) {
+	for _, ty := range []string{
+		"int4range", "int8range", "numrange",
+		"tsrange", "tstzrange", "daterange",
+		"int4multirange", "int8multirange",
+		"tstzmultirange", "datemultirange",
+		"bit", "bit varying",
+		"hstore", "ltree", "citext", "pg_lsn",
+		"regclass", "regconfig", "regrole",
+	} {
+		if !needsTextCast(ty) {
+			t.Errorf("%q should route through ::text cast (silent %%v-print on wrong path)", ty)
+		}
+	}
+}
+
+// TestWrapValue_RangeTypeWrapsCorrectly confirms `tstzrange` and the
+// friends route back through typedLiteral so the emit is
+// `'[…,…)'::tstzrange` — Postgres re-parses on insert.
+func TestWrapValue_RangeTypeWrapsCorrectly(t *testing.T) {
+	c := columnInfo{name: "window", pgType: "tstzrange"}
+	got := wrapValue(c, `["2026-01-01 00:00:00+00","2026-01-02 00:00:00+00")`)
+	tl, ok := got.(typedLiteral)
+	if !ok {
+		t.Fatalf("range text-cast result should wrap as typedLiteral, got %T", got)
+	}
+	if tl.pgType != "tstzrange" {
+		t.Errorf("tstzrange pgType lost: %q", tl.pgType)
+	}
+}
+
+// TestEmitOneTable_ByteBatchingRespectsCap pins #275 round-2
+// ship-blocker #1: batching must respect a byte ceiling, not just
+// a row-count ceiling. Wide-row tables previously produced 1000-row
+// batches that individually exceeded the 512 KiB endpoint cap. We
+// can't easily invoke emitOneTable from a unit test (needs a live
+// pgx.Conn) — assert the estimator itself here, plus the constant
+// wiring.
+func TestMaxBatchBytes_BelowEndpointCap(t *testing.T) {
+	// The endpoint's cap is 512 KiB; our batch cap must be strictly
+	// below (needs headroom for the per-file header + writer slack).
+	if maxBatchBytes >= 512*1024 {
+		t.Errorf("maxBatchBytes (%d) must be < 512 KiB endpoint cap", maxBatchBytes)
+	}
+	// And not so tiny it wrecks throughput on realistic rows.
+	if maxBatchBytes < 100*1024 {
+		t.Errorf("maxBatchBytes (%d) too small — ingest would crawl", maxBatchBytes)
+	}
+}
+
+func TestEstimateRowBytes_ScalesWithColumnCount(t *testing.T) {
+	row1 := []interface{}{"a", "b"}
+	row10 := make([]interface{}, 10)
+	for i := range row10 {
+		row10[i] = "a"
+	}
+	if estimateRowBytes(row10) <= estimateRowBytes(row1) {
+		t.Errorf("byte estimate should grow with column count")
+	}
+}
+
+func TestEstimateRowBytes_NoUnderestimateOnRealShapes(t *testing.T) {
+	// A realistic auth.users row: uuid + email + bcrypt + jsonb + times.
+	// The estimator must be conservative — never smaller than the
+	// actual emitted bytes.
+	email := "someone-with-a-longer-than-average-email-address@example.co.uk"
+	pw := "$2b$12$abcdefghijklmnopqrstuvwxyz.1234567890abcdefghij"
+	tm := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	row := []interface{}{
+		"8e6a6b74-5a5f-45d2-9c2f-2d3a5b8e1a1c",
+		&email,
+		(*string)(nil),
+		&pw,
+		jsonbLiteral(`{"display_name":"Alice","avatar_url":"https://example.com/avatars/a.png"}`),
+		&tm, &tm, &tm, (*time.Time)(nil), tm, tm,
+	}
+	est := estimateRowBytes(row)
+	// Actually render the row.
+	var buf strings.Builder
+	emitInsertBatch(&buf, "users", authUserColumns, [][]interface{}{row})
+	// The batch emits header + one row + trailing `;`. We're interested
+	// in the row's contribution — the header is at most 300 bytes for
+	// this column list. Estimate must cover row + wrapping.
+	actualForOneRow := buf.Len() - 100 // subtract rough header
+	if est < actualForOneRow {
+		t.Errorf("byte estimate underestimated a realistic row: est %d, actual ~%d",
+			est, actualForOneRow)
 	}
 }

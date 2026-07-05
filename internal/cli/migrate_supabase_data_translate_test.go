@@ -167,6 +167,37 @@ func TestSortTablesByFK_CycleErrors(t *testing.T) {
 	}
 }
 
+// TestSortTablesByFK_CycleReportsOnlyCycleMembers pins #275 round-2
+// H #2 — the SCC finder must report ONLY the tables in the cycle,
+// not every downstream table that's stuck waiting on the cycle to
+// resolve. In `a↔b, c→b`, `c` is stuck but not IN the cycle.
+func TestSortTablesByFK_CycleReportsOnlyCycleMembers(t *testing.T) {
+	tables := []tableRef{
+		{name: "a"}, {name: "b"}, {name: "c"}, {name: "d"},
+	}
+	edges := []fkEdge{
+		{from: "a", to: "b"},
+		{from: "b", to: "a"},
+		{from: "c", to: "b"}, // c waits on b but is not IN the cycle
+		{from: "d", to: "c"}, // d waits on c, still not in the cycle
+	}
+	_, err := sortTablesByFK(tables, edges)
+	if err == nil {
+		t.Fatal("expected an error on FK cycle, got nil")
+	}
+	msg := err.Error()
+	// The two-node cycle must be named.
+	if !strings.Contains(msg, "a") || !strings.Contains(msg, "b") {
+		t.Errorf("error should name cycle members a + b: %v", msg)
+	}
+	// Downstream `c` and `d` must NOT be reported as cycle members —
+	// they're victims, not perpetrators. Reporting them would
+	// mislead the tenant into "fixing" something that isn't broken.
+	if strings.Contains(msg, "[a b c") || strings.Contains(msg, "c d") {
+		t.Errorf("error mislabels downstream victims as cycle members: %v", msg)
+	}
+}
+
 func TestSortTablesByFK_EdgesToUnknownTablesIgnored(t *testing.T) {
 	// An FK to a table outside our input set (e.g. auth.users, or a
 	// dropped table) must not crash the sort.
@@ -411,7 +442,9 @@ func TestSQLLiteral_TypedLiteralEmitsCast(t *testing.T) {
 
 // TestMergeUserAndAppMetadata_KeepsUserAtTopLevel pins H #6:
 // raw_app_meta_data used to be silently discarded. Now it nests
-// under `app_metadata` so provider / role / tenant hints survive.
+// under `_app_metadata` so provider / role / tenant hints survive.
+// (Underscored to avoid colliding with a user-supplied `app_metadata`
+// key — #275 round-2 L #7.)
 func TestMergeUserAndAppMetadata_KeepsUserAtTopLevel(t *testing.T) {
 	got := mergeUserAndAppMetadata(
 		`{"display_name":"alice","avatar_url":"https://x/a.png"}`,
@@ -421,12 +454,12 @@ func TestMergeUserAndAppMetadata_KeepsUserAtTopLevel(t *testing.T) {
 	if !strings.Contains(got, `"display_name":"alice"`) {
 		t.Errorf("user_metadata display_name lost: %s", got)
 	}
-	// App-meta nests under app_metadata (no field silently dropped).
-	if !strings.Contains(got, `"app_metadata":`) {
-		t.Errorf("app_metadata key missing: %s", got)
+	// App-meta nests under _app_metadata (no field silently dropped).
+	if !strings.Contains(got, `"_app_metadata":`) {
+		t.Errorf("_app_metadata key missing: %s", got)
 	}
 	if !strings.Contains(got, `"role":"admin"`) {
-		t.Errorf("app_metadata contents lost: %s", got)
+		t.Errorf("_app_metadata contents lost: %s", got)
 	}
 }
 
@@ -439,7 +472,7 @@ func TestMergeUserAndAppMetadata_EmptyInputs(t *testing.T) {
 		{"null", "null", "{}"},
 		{"{}", "{}", "{}"},
 		{`{"k":"v"}`, "", `{"k":"v"}`},
-		{"", `{"provider":"google"}`, `{"app_metadata":{"provider":"google"}}`},
+		{"", `{"provider":"google"}`, `{"_app_metadata":{"provider":"google"}}`},
 	}
 	for _, c := range cases {
 		got := mergeUserAndAppMetadata(c.user, c.app)
@@ -457,13 +490,51 @@ func TestMergeUserAndAppMetadata_NonObjectPreserved(t *testing.T) {
 		t.Errorf("non-object user_metadata dropped: %s", got)
 	}
 	if !strings.Contains(got, `"role":"admin"`) {
-		t.Errorf("app_metadata lost when user_metadata was non-object: %s", got)
+		t.Errorf("_app_metadata lost when user_metadata was non-object: %s", got)
+	}
+}
+
+// TestMergeUserAndAppMetadata_InvalidUserJSONDoesNotDropAppMeta pins
+// #275 round-2 M #3: previously, invalid JSON in user_metadata
+// wrapped as json.RawMessage failed the outer json.Marshal, silently
+// dropping BOTH user AND app metadata. Now invalid JSON falls back to
+// a string wrap so the outer marshal always succeeds.
+func TestMergeUserAndAppMetadata_InvalidUserJSONDoesNotDropAppMeta(t *testing.T) {
+	// `{{{` is not valid JSON — the old code would json.RawMessage it
+	// and blow up on the final Marshal, returning "{}".
+	got := mergeUserAndAppMetadata(`{{{ not json`, `{"provider":"google"}`)
+	// The invalid user meta must be preserved somewhere (as a string).
+	if !strings.Contains(got, `_user_metadata_source`) {
+		t.Errorf("invalid user_metadata dropped: %s", got)
+	}
+	// And crucially, app-meta MUST survive.
+	if !strings.Contains(got, `"provider":"google"`) {
+		t.Errorf("app_metadata dropped by invalid user_metadata regression: %s", got)
+	}
+}
+
+// TestMergeUserAndAppMetadata_UserAppMetadataKeyDoesNotClobber pins
+// #275 round-2 L #7: if user_metadata legitimately has an
+// `app_metadata` top-level key, our injected merge target must not
+// silently overwrite it. Using `_app_metadata` (underscored) as our
+// key protects that.
+func TestMergeUserAndAppMetadata_UserAppMetadataKeyDoesNotClobber(t *testing.T) {
+	got := mergeUserAndAppMetadata(
+		`{"app_metadata":"legacy-user-value"}`,
+		`{"provider":"google"}`,
+	)
+	if !strings.Contains(got, `"app_metadata":"legacy-user-value"`) {
+		t.Errorf("user's legit app_metadata key clobbered by merge: %s", got)
+	}
+	if !strings.Contains(got, `"_app_metadata":`) {
+		t.Errorf("injected _app_metadata key missing: %s", got)
 	}
 }
 
 // TestTranslateAuthUser_MergesAppMetadata is the end-to-end pin —
 // translate must produce metadata that includes both user + app
-// meta (H #6).
+// meta (H #6). App-meta lands under `_app_metadata` (underscored to
+// avoid collision, L #7).
 func TestTranslateAuthUser_MergesAppMetadata(t *testing.T) {
 	email := "a@x"
 	in := supabaseUser{
@@ -477,11 +548,11 @@ func TestTranslateAuthUser_MergesAppMetadata(t *testing.T) {
 	if !strings.Contains(got.Metadata, `"display_name":"alice"`) {
 		t.Errorf("user meta discarded: %s", got.Metadata)
 	}
-	if !strings.Contains(got.Metadata, `"app_metadata"`) {
+	if !strings.Contains(got.Metadata, `"_app_metadata"`) {
 		t.Errorf("app meta discarded (regression on H #6): %s", got.Metadata)
 	}
 	if !strings.Contains(got.Metadata, `"provider":"google"`) {
-		t.Errorf("app_metadata contents lost: %s", got.Metadata)
+		t.Errorf("_app_metadata contents lost: %s", got.Metadata)
 	}
 }
 
