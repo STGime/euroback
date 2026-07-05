@@ -347,6 +347,11 @@ var castToTextTypes = map[string]bool{
 	"regtype":       true,
 	"regrole":       true,
 	"regnamespace":  true,
+	// tid (row identifiers) — rare, but pgtype.TID would %v-print.
+	// xml — pgx returns []byte, which our default bytea branch would
+	// hex-emit into an xml column (wrong cast).
+	"tid": true,
+	"xml": true,
 }
 
 // selectExpr for one column — casts troublesome types to text so
@@ -410,7 +415,8 @@ func wrapValue(c columnInfo, v interface{}) interface{} {
 		"int4multirange", "int8multirange", "nummultirange", "tsmultirange", "tstzmultirange", "datemultirange",
 		"bit", "bit varying",
 		"hstore", "ltree", "lquery", "ltxtquery", "citext", "pg_lsn",
-		"regconfig", "regprocedure", "regoper", "regoperator", "regclass", "regtype", "regrole", "regnamespace":
+		"regconfig", "regprocedure", "regoper", "regoperator", "regclass", "regtype", "regrole", "regnamespace",
+		"tid", "xml":
 		if s, ok := v.(string); ok {
 			return typedLiteral{value: s, pgType: baseType}
 		}

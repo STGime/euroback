@@ -65,9 +65,15 @@ func estimateValueBytes(v interface{}) int {
 	}
 	switch t := v.(type) {
 	case jsonbValue:
-		return len(t) + 12 // '' + ::jsonb
+		// Budget the same 25% single-quote doubling as the `string`
+		// case — a JSONB payload with embedded `'` chars (error
+		// messages, O'Brien-style names) doubles on emit. Without
+		// this, an adversarial 100%-quote payload could bloat a
+		// 175 KiB batch to 350 KiB (still under the 512 KiB endpoint
+		// cap given our 350 KiB flush threshold, but not by much).
+		return len(t) + len(t)/4 + 12 // '' + ::jsonb + slack
 	case typedLiteral:
-		return len(t.value) + len(t.pgType) + 6 // '' + ::
+		return len(t.value) + len(t.value)/4 + len(t.pgType) + 6 // '' + :: + slack
 	case string:
 		// Assume up to ~25% of chars might be `'` needing doubling
 		// (worst-realistic case for JSON-ish payloads).
