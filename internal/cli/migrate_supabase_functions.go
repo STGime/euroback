@@ -195,6 +195,14 @@ func translateOneFunction(inputDir, outputDir, name string, cmd *cobra.Command, 
 // but honours a per-function `deno.json` `"main"` field if present.
 // Round-1 review M #5 flagged that tenants with a `deno.json`-
 // configured entry point silently got "no index.ts" and no rewrite.
+//
+// Rejects entrypoints that would escape the function dir — an
+// absolute path or one containing `..` traversal would steer both
+// reads and writes outside the tenant's project tree, which is
+// unwanted even on a local dev-machine CLI. Falls back to
+// `index.ts` on rejection so the tenant sees the standard "no
+// index.ts" note rather than a path-outside error. (#277 round-5
+// review M.)
 func resolveEntrypoint(funcDir string) string {
 	denoConfig := filepath.Join(funcDir, "deno.json")
 	b, err := os.ReadFile(denoConfig)
@@ -211,13 +219,38 @@ func resolveEntrypoint(funcDir string) string {
 	// Deno CLI honours `"main"` officially; some Supabase-templated
 	// projects use `"entrypoint"`. Accept either — the file we open
 	// matters, not the config key.
-	if cfg.Main != "" {
-		return cfg.Main
+	candidate := cfg.Main
+	if candidate == "" {
+		candidate = cfg.Entrypoint
 	}
-	if cfg.Entrypoint != "" {
-		return cfg.Entrypoint
+	if candidate == "" {
+		return "index.ts"
 	}
-	return "index.ts"
+	if !isSafeEntrypoint(candidate) {
+		return "index.ts"
+	}
+	return candidate
+}
+
+// isSafeEntrypoint returns true if `p` stays inside the function's
+// own dir when joined onto it. Rejects: absolute paths, `..`
+// traversal, and empty strings. Used to gate deno.json `main` /
+// `entrypoint` values so a hostile / typo'd config can't steer the
+// CLI's reads or writes outside the tenant tree.
+func isSafeEntrypoint(p string) bool {
+	if p == "" {
+		return false
+	}
+	if filepath.IsAbs(p) {
+		return false
+	}
+	// Normalise separators + collapse any `..` — if the cleaned
+	// path still starts with `..` (or IS `..`), it escapes.
+	clean := filepath.Clean(p)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 func printFuncSummary(cmd *cobra.Command, s funcMigrationSummary) {

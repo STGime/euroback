@@ -43,6 +43,41 @@ func TestResolveEntrypoint_EntrypointOverride(t *testing.T) {
 	}
 }
 
+// TestResolveEntrypoint_RejectsTraversal pins #277 round-5 M: a
+// deno.json with `main: "../../etc/passwd"` (or `"/tmp/x.ts"`) must
+// NOT steer the CLI to read/write outside the function dir. Falls
+// back to index.ts so the tenant sees the standard "no index.ts"
+// note rather than a path-outside error.
+func TestResolveEntrypoint_RejectsTraversal(t *testing.T) {
+	for _, hostile := range []string{
+		"../../etc/passwd",
+		"../outside.ts",
+		"/tmp/escape.ts",
+		"/etc/passwd",
+	} {
+		dir := t.TempDir()
+		body := `{"main":"` + hostile + `"}`
+		if err := os.WriteFile(filepath.Join(dir, "deno.json"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		got := resolveEntrypoint(dir)
+		if got != "index.ts" {
+			t.Errorf("hostile entrypoint %q was accepted (got %q) — path traversal", hostile, got)
+		}
+	}
+}
+
+// Symmetric guard — a legitimate nested entrypoint must still work.
+func TestResolveEntrypoint_NestedPathAccepted(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "deno.json"), []byte(`{"main":"src/handler.ts"}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := resolveEntrypoint(dir); got != "src/handler.ts" {
+		t.Errorf("legitimate nested path rejected: %q", got)
+	}
+}
+
 // A malformed deno.json falls back to index.ts (fail-soft — the
 // tenant sees the "no index.ts" note if they need to fix it).
 func TestResolveEntrypoint_MalformedFallsBack(t *testing.T) {
