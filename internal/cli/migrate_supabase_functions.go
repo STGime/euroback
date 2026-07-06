@@ -153,10 +153,15 @@ func translateOneFunction(inputDir, outputDir, name string, cmd *cobra.Command, 
 	}
 
 	outSubdir := filepath.Join(outputDir, name)
-	if err := os.MkdirAll(outSubdir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", outSubdir, err)
-	}
 	outPath := filepath.Join(outSubdir, entryFile)
+	// Nested entrypoints (`main: "src/handler.ts"`) need the
+	// intermediate directory created too — MkdirAll on outSubdir
+	// alone would leave WriteFile with a missing `src/`. Use the
+	// dir of outPath so both flat and nested shapes work. (#277
+	// round-4 review H.)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(outPath), err)
+	}
 	if err := os.WriteFile(outPath, []byte(res.Source), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", outPath, err)
 	}
