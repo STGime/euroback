@@ -117,39 +117,324 @@ func TranslateFunction(input string) FunctionTranslationResult {
 			note: "uses `Deno.env.get(<expr>)` with a non-literal argument — Eurobase's `ctx.env` is a plain object; rewrite the dynamic access to `ctx.env[expr]`",
 		})
 	}
-	// Rewrite: Deno.serve((req) => …) → module.exports = async (req, ctx) => …
-	// The arrow form covers all common shapes:
-	//   Deno.serve((req) => …)
-	//   Deno.serve(async (req) => …)
-	//   Deno.serve(handler)                     (named function reference)
-	// Named-function-reference form gets a specific rewrite so the
-	// symbol is exported.
-	if n := countAndReplaceStr(&out, reDenoServeArrowAsync,
-		"module.exports = async (req, ctx) => "); n > 0 {
-		res.Rewrites["rewrite:Deno.serve(async (req) => …) → module.exports"] += n
+	// Rewrite Deno.serve(…) — walks balanced parens so the closing
+	// `)` is stripped correctly regardless of body shape. Handles:
+	//   Deno.serve((req) => body)               (arrow, any body)
+	//   Deno.serve(async (req) => body)         (arrow-async)
+	//   Deno.serve((req: Request) => body)      (typed arg)
+	//   Deno.serve(handler)                     (named ident)
+	//   Deno.serve(handler, { port: 8000 })     (with options — warn)
+	// The old regex-only approach failed on: single-expression arrow
+	// bodies (kept stray `)`), files with multiple Deno.serve calls
+	// (only the last stripped), and second-arg options (dangling
+	// `, {…})`). See #277 review H #1 / #2 / #3.
+	out, serveRewrites, serveWarns := rewriteDenoServeCalls(out)
+	for name, n := range serveRewrites {
+		res.Rewrites[name] += n
 	}
-	if n := countAndReplaceStr(&out, reDenoServeArrow,
-		"module.exports = async (req, ctx) => "); n > 0 {
-		res.Rewrites["rewrite:Deno.serve((req) => …) → module.exports"] += n
+	res.Warnings = append(res.Warnings, serveWarns...)
+
+	// If any `Deno.serve(` survives the rewrite pass, the tenant's
+	// source used a shape we couldn't safely rewrite (non-`req` arg
+	// name, unusual whitespace, comment injected inside the call).
+	// Warn loudly so the tenant knows why the file will fail to
+	// deploy. (#277 review M #6.)
+	if strings.Contains(out, "Deno.serve(") {
+		res.Warnings = append(res.Warnings, FunctionWarning{
+			line: 0,
+			note: "`Deno.serve(...)` survived the rewrite pass — the handler arg wasn't in a recognised shape (arrow with `req`, or bare identifier). Rewrite by hand to `module.exports = async (req, ctx) => …`",
+		})
 	}
-	if n := countAndReplaceStr(&out, reDenoServeNamed,
-		"module.exports = $1"); n > 0 {
-		res.Rewrites["rewrite:Deno.serve(handler) → module.exports = handler"] += n
-	}
-	// Closing `)` of the original Deno.serve(…) call — leaves a
-	// stray `)` at the end of the arrow body. The rewrite above
-	// captured up to `=> `; the tenant's body follows, and we need
-	// to strip the trailing `)` that used to close the Deno.serve
-	// call. Handle in a second pass on the whole file: find the
-	// pattern `module.exports = async (req, ctx) => <body>);` and
-	// drop the final `)`. Cheap approach: reStripDenoServeClose runs
-	// against every logical statement close.
-	if n := countAndReplaceStr(&out, reStripTrailingParenAfterMEx, "$1"); n > 0 {
-		res.Rewrites["cleanup:strip trailing `)` from Deno.serve closer"] += n
+
+	// Detect Supabase SDK imports (also catches aliased forms like
+	// `import { createClient as sb }`). Even when the URL literal
+	// isn't a direct match for reSupabaseCreateClient, a
+	// @supabase/supabase-js import is enough signal that the tenant
+	// is running the SDK inside the handler — warn. (#277 review H #4.)
+	if reSupabaseSDKImport.MatchString(input) && !res.Unsupported {
+		res.Warnings = append(res.Warnings, FunctionWarning{
+			line: 0,
+			note: "imports @supabase/supabase-js — Eurobase functions don't have an in-handler SDK client. If you use it inside the handler, rewrite queries to `ctx.db.sql(...)`",
+		})
 	}
 
 	res.Source = out
 	return res
+}
+
+// rewriteDenoServeCalls walks the input looking for `Deno.serve(`,
+// finds the balanced closing `)`, and rewrites the whole call in one
+// step. Robust against multiple calls, nested braces in the body,
+// and single-expression arrow bodies.
+func rewriteDenoServeCalls(input string) (string, map[string]int, []FunctionWarning) {
+	rewrites := map[string]int{}
+	var warns []FunctionWarning
+	var out strings.Builder
+	out.Grow(len(input))
+	i := 0
+	for i < len(input) {
+		// Find next `Deno.serve(` with word boundary at start.
+		idx := strings.Index(input[i:], "Deno.serve")
+		if idx < 0 {
+			out.WriteString(input[i:])
+			break
+		}
+		start := i + idx
+		// Word-boundary check on the char before `D` (mustn't be an
+		// ident char — avoids matching `MyDeno.serve`).
+		if start > 0 {
+			c := input[start-1]
+			if isIdentByte(c) {
+				out.WriteString(input[i : start+len("Deno.serve")])
+				i = start + len("Deno.serve")
+				continue
+			}
+		}
+		// Skip whitespace after `Deno.serve` before the `(`.
+		openParen := start + len("Deno.serve")
+		for openParen < len(input) && (input[openParen] == ' ' || input[openParen] == '\t') {
+			openParen++
+		}
+		if openParen >= len(input) || input[openParen] != '(' {
+			// Not a call — bare identifier reference, leave alone.
+			out.WriteString(input[i : start+1])
+			i = start + 1
+			continue
+		}
+		closeParen := matchParen(input, openParen)
+		if closeParen < 0 {
+			// Malformed — bail out, leave the rest untouched.
+			out.WriteString(input[i:])
+			break
+		}
+		inner := input[openParen+1 : closeParen]
+		// Emit everything before Deno.serve unchanged.
+		out.WriteString(input[i:start])
+		// Analyse inner.
+		replacement, rule, warn := rewriteDenoServeInner(inner)
+		if rule != "" {
+			rewrites[rule]++
+		}
+		if warn != "" {
+			warns = append(warns, FunctionWarning{line: 0, note: warn})
+		}
+		if replacement != "" {
+			out.WriteString(replacement)
+		} else {
+			// Couldn't rewrite — leave the call as-is (warning above
+			// covers this in the caller too).
+			out.WriteString(input[start : closeParen+1])
+		}
+		i = closeParen + 1
+	}
+	return out.String(), rewrites, warns
+}
+
+// rewriteDenoServeInner takes the text INSIDE the outermost parens of
+// a `Deno.serve(…)` call and returns:
+//   - the replacement text for the whole call (empty on "leave alone")
+//   - the rewrite rule name to bump in the counter (empty if none)
+//   - a warning note (empty if none)
+func rewriteDenoServeInner(inner string) (string, string, string) {
+	// Split on top-level comma to check for a second (options) arg.
+	// If present, we still rewrite the first arg but warn that options
+	// were dropped.
+	firstArg, secondArg := splitTopLevelComma(inner)
+	firstArg = strings.TrimSpace(firstArg)
+	var warn string
+	if strings.TrimSpace(secondArg) != "" {
+		warn = "Deno.serve had a second (options) argument that's not portable to Eurobase — options dropped; port / signal / onListen configured on Eurobase's side"
+	}
+
+	// Arrow: `async (req[: Type]) => body` or `(req[: Type]) => body`
+	if body, isAsync, ok := extractArrowBody(firstArg); ok {
+		asyncKW := ""
+		if isAsync {
+			// Preserve async modifier — most handlers are async
+			// anyway but a sync one shouldn't get force-async'd.
+			asyncKW = "async "
+		} else {
+			// Eurobase's runner expects an async handler; if the
+			// source was sync, force async so we don't break
+			// promise-consuming code paths.
+			asyncKW = "async "
+		}
+		rule := "rewrite:Deno.serve((req) => …) → module.exports"
+		return "module.exports = " + asyncKW + "(req, ctx) => " + body, rule, warn
+	}
+
+	// Named-identifier form: `handler`
+	if isPlainIdent(firstArg) {
+		rule := "rewrite:Deno.serve(handler) → module.exports = handler"
+		return "module.exports = " + firstArg, rule, warn
+	}
+
+	// Neither shape — leave the whole call alone. Caller emits an
+	// additional warning about the surviving `Deno.serve(...)`.
+	return "", "", warn
+}
+
+// extractArrowBody inspects `expr` for the shape `async? (req[: Type]) => <body>`.
+// Returns the body text, whether async was present, and true on match.
+// Whitespace-tolerant.
+func extractArrowBody(expr string) (string, bool, bool) {
+	rest := strings.TrimSpace(expr)
+	isAsync := false
+	if strings.HasPrefix(rest, "async") && len(rest) > 5 && !isIdentByte(rest[5]) {
+		isAsync = true
+		rest = strings.TrimSpace(rest[5:])
+	}
+	// Must open with `(`
+	if len(rest) == 0 || rest[0] != '(' {
+		return "", false, false
+	}
+	// Match balanced parens for the arg list.
+	depth := 0
+	argEnd := -1
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				argEnd = i
+			}
+		}
+		if argEnd >= 0 {
+			break
+		}
+	}
+	if argEnd < 0 {
+		return "", false, false
+	}
+	// Arg text between the outer `(` and `)`. Must be `req` (with
+	// optional type annotation) so we don't accidentally rewrite a
+	// two-arg or destructured handler.
+	arg := strings.TrimSpace(rest[1:argEnd])
+	if !argIsReq(arg) {
+		return "", false, false
+	}
+	// Skip past `)` then whitespace, then must see `=>`.
+	i := argEnd + 1
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+		i++
+	}
+	if i+1 >= len(rest) || rest[i] != '=' || rest[i+1] != '>' {
+		return "", false, false
+	}
+	body := strings.TrimSpace(rest[i+2:])
+	return body, isAsync, true
+}
+
+// argIsReq accepts `req` or `req: Request` (or any `req: <type>`),
+// but not `request`, `event`, `(req, res)` etc.
+func argIsReq(arg string) bool {
+	if arg == "req" {
+		return true
+	}
+	if strings.HasPrefix(arg, "req") && len(arg) > 3 {
+		c := arg[3]
+		if c == ':' || c == ' ' || c == '\t' {
+			return true
+		}
+	}
+	return false
+}
+
+// isPlainIdent returns true if `s` is a bare JS identifier (no
+// operators, no parens). Used to detect the named-handler form of
+// Deno.serve.
+func isPlainIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	if !isIdentStart(s[0]) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if !isIdentByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isIdentStart(b byte) bool {
+	return b == '_' || b == '$' ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z')
+}
+
+func isIdentByte(b byte) bool {
+	return isIdentStart(b) || (b >= '0' && b <= '9')
+}
+
+// splitTopLevelComma splits `s` at the first comma NOT nested inside
+// parens, brackets, braces, or strings. Returns (before, after);
+// after is "" when no such comma exists.
+func splitTopLevelComma(s string) (string, string) {
+	depth := 0
+	inString := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString != 0 {
+			if c == '\\' && i+1 < len(s) {
+				i++
+				continue
+			}
+			if c == inString {
+				inString = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			inString = c
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				return s[:i], s[i+1:]
+			}
+		}
+	}
+	return s, ""
+}
+
+// matchParen given the index of a `(` returns the index of its
+// matching `)`, respecting string literals and nested parens. Returns
+// -1 on unbalanced input.
+func matchParen(s string, openIdx int) int {
+	depth := 0
+	inString := byte(0)
+	for i := openIdx; i < len(s); i++ {
+		c := s[i]
+		if inString != 0 {
+			if c == '\\' && i+1 < len(s) {
+				i++
+				continue
+			}
+			if c == inString {
+				inString = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			inString = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // countAndReplaceStr is a small sibling of countAndReplace (in
@@ -191,35 +476,20 @@ var (
 	// `import 'https://…'`. Line-anchored to reduce false positives.
 	reHTTPSImport = regexp.MustCompile(`^\s*import\b[^'"]*['"]https://`)
 
-	// Deno.serve variants. Two capture forms + a NAMED form so the
-	// symbol handler gets re-exported.
-	//
-	// Arrow-async: `Deno.serve(async (req) => `
-	reDenoServeArrowAsync = regexp.MustCompile(`\bDeno\.serve\s*\(\s*async\s*\(\s*req\s*(?::[^,)]+)?\s*\)\s*=>\s*`)
-	// Plain arrow: `Deno.serve((req) => ` (also picks up `(req: Request) =>`)
-	reDenoServeArrow = regexp.MustCompile(`\bDeno\.serve\s*\(\s*\(\s*req\s*(?::[^,)]+)?\s*\)\s*=>\s*`)
-	// Named reference: `Deno.serve(handlerName)` (handlerName is a
-	// plain JS ident). We rewrite to `module.exports = handlerName`
-	// and drop the trailing `)` via reStripTrailingParenAfterMEx.
-	reDenoServeNamed = regexp.MustCompile(`\bDeno\.serve\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)`)
-
-	// After the arrow rewrite, the tenant's function body is followed
-	// by the original `)` that closed `Deno.serve(…)`. Strip a
-	// trailing `)` that immediately precedes the file's final
-	// newline / semicolon so the emitted code parses cleanly.
-	//
-	// Cheap heuristic: match `<lines>});` (or `})`) at the END of the
-	// input where the preceding text starts with `module.exports = `.
-	// Fully general is impossible without a JS parser — we accept a
-	// small false-negative rate and let the tenant eyeball the diff.
-	reStripTrailingParenAfterMEx = regexp.MustCompile(
-		`(?s)(module\.exports\s*=\s*async\s*\(req,\s*ctx\)\s*=>\s*\{[^}]*(?:\}[^{}]*)*\})\s*\)\s*;?\s*$`,
-	)
-
 	// `createClient(SUPABASE_URL, …)` or `createClient(supabaseUrl, …)`
 	// — the presence indicator that the function uses Supabase's SDK
-	// client, which Eurobase doesn't emulate.
+	// client with a hardcoded URL literal. Aliased-import cases
+	// (`import { createClient as sb }`) are caught separately via
+	// reSupabaseSDKImport.
 	reSupabaseCreateClient = regexp.MustCompile(
 		`\bcreateClient\s*\(\s*(?:SUPABASE_URL|process\.env\.SUPABASE_URL|Deno\.env\.get\(\s*['"]SUPABASE_URL['"]\s*\)|supabaseUrl)`,
 	)
+
+	// `import … from '…@supabase/supabase-js…'` — signal that the
+	// tenant likely uses the SDK inside the handler, even if the
+	// createClient invocation was renamed via `as` or reads its URL
+	// from a variable the createClient regex doesn't cover. We warn
+	// rather than mark unsupported — the tenant might legitimately
+	// import types-only. (#277 review H #4.)
+	reSupabaseSDKImport = regexp.MustCompile(`(?m)^\s*import\b.*@supabase/supabase-js`)
 )
