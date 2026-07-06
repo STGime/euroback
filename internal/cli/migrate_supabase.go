@@ -73,6 +73,6 @@ into an empty project unless you're comfortable overwriting.`,
 	cmd.AddCommand(importSupabaseSchemaCmd())
 	cmd.AddCommand(importSupabaseDataCmd())
 	cmd.AddCommand(importSupabaseStorageCmd())
-	// Placeholder subcommand lands in follow-up PR #272.
+	cmd.AddCommand(importSupabaseFunctionsCmd())
 	return cmd
 }
