@@ -23,6 +23,7 @@ package cli
 // tenant fixes those by hand and reruns.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,11 +134,12 @@ type funcMigrationSummary struct {
 // index.ts is skipped with a note — Supabase supports other entry
 // points but 95% of tenant functions use the canonical shape.
 func translateOneFunction(inputDir, outputDir, name string, cmd *cobra.Command, summary *funcMigrationSummary) error {
-	inPath := filepath.Join(inputDir, name, "index.ts")
+	entryFile := resolveEntrypoint(filepath.Join(inputDir, name))
+	inPath := filepath.Join(inputDir, name, entryFile)
 	source, err := os.ReadFile(inPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  %-40s (skipped — no index.ts)\n", name)
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %-40s (skipped — no %s)\n", name, entryFile)
 			return nil
 		}
 		return fmt.Errorf("read %s: %w", inPath, err)
@@ -154,7 +156,7 @@ func translateOneFunction(inputDir, outputDir, name string, cmd *cobra.Command, 
 	if err := os.MkdirAll(outSubdir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", outSubdir, err)
 	}
-	outPath := filepath.Join(outSubdir, "index.ts")
+	outPath := filepath.Join(outSubdir, entryFile)
 	if err := os.WriteFile(outPath, []byte(res.Source), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", outPath, err)
 	}
@@ -181,6 +183,36 @@ func translateOneFunction(inputDir, outputDir, name string, cmd *cobra.Command, 
 		}
 	}
 	return nil
+}
+
+// resolveEntrypoint returns the filename the CLI should read as the
+// function's entry. Defaults to `index.ts` (the Supabase convention),
+// but honours a per-function `deno.json` `"main"` field if present.
+// Round-1 review M #5 flagged that tenants with a `deno.json`-
+// configured entry point silently got "no index.ts" and no rewrite.
+func resolveEntrypoint(funcDir string) string {
+	denoConfig := filepath.Join(funcDir, "deno.json")
+	b, err := os.ReadFile(denoConfig)
+	if err != nil {
+		return "index.ts"
+	}
+	var cfg struct {
+		Main       string `json:"main"`
+		Entrypoint string `json:"entrypoint"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return "index.ts"
+	}
+	// Deno CLI honours `"main"` officially; some Supabase-templated
+	// projects use `"entrypoint"`. Accept either — the file we open
+	// matters, not the config key.
+	if cfg.Main != "" {
+		return cfg.Main
+	}
+	if cfg.Entrypoint != "" {
+		return cfg.Entrypoint
+	}
+	return "index.ts"
 }
 
 func printFuncSummary(cmd *cobra.Command, s funcMigrationSummary) {

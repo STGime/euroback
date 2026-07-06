@@ -435,9 +435,17 @@ type jsScanState struct {
 	inSQuote, inDQuote, inBQuote bool
 	inLineComment, inBlockComment bool
 	inRegex, inRegexClass         bool
-	// Last non-whitespace CODE byte we saw. Used to decide whether
-	// `/` opens a regex literal or is division.
+	// Last non-whitespace CODE byte we saw. Used as a fast check
+	// for whether `/` opens a regex literal or is division.
 	prevSig byte
+	// Current-token buffer: while we're accumulating identifier
+	// bytes, they land here. Finalised on the next non-ident code
+	// byte into `lastToken`, so a `/` following a keyword like
+	// `return` correctly treats the `/` as regex context. Round-3
+	// review SB #1 flagged that `prevSig` alone (`n` after `return`)
+	// misclassified `return /foo/` as division-then-parse-error.
+	tokenBuf   []byte
+	lastToken  string
 }
 
 // step consumes byte s[i] and returns:
@@ -533,49 +541,100 @@ func (st *jsScanState) step(s string, i int) (codeByte bool, advance int) {
 		st.inBlockComment = true
 		return false, 1
 	}
-	// Regex literal `/…/` — context-sensitive: `/` starts a regex
-	// when the previous non-whitespace code byte is an operator or
-	// delimiter (or nothing). Conservative: treat as regex when
-	// prevSig is a bounded set of chars. False positives here mean
-	// we OVER-skip parens; false negatives mean we might miscount.
-	// Real Supabase edge functions rarely mix division with parens
-	// in ways that break this heuristic.
-	if c == '/' && isRegexContext(st.prevSig) {
+	// Regex literal `/…/` — context-sensitive. See isRegexContext
+	// for the rules; keyword-terminated positions (`return /foo/`,
+	// `typeof /bar/`, …) are the tricky ones and need the token
+	// buffer, not just prevSig.
+	if c == '/' && st.isRegexContext() {
 		st.inRegex = true
+		st.tokenBuf = st.tokenBuf[:0]
 		return false, 0
 	}
 	// String literals
 	switch c {
 	case '\'':
+		st.finalizeToken()
 		st.inSQuote = true
 		return false, 0
 	case '"':
+		st.finalizeToken()
 		st.inDQuote = true
 		return false, 0
 	case '`':
+		st.finalizeToken()
 		st.inBQuote = true
 		return false, 0
 	}
-	// Regular code byte — update prevSig if it's meaningful.
+	// Update token buffer: identifier bytes extend the current
+	// token; anything else finalises whatever we had.
+	if isIdentByte(c) {
+		st.tokenBuf = append(st.tokenBuf, c)
+	} else {
+		st.finalizeToken()
+	}
+	// Whitespace doesn't shift prevSig — a comma with intervening
+	// space is still "after comma".
 	if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
 		st.prevSig = c
 	}
 	return true, 0
 }
 
-// isRegexContext decides whether a `/` at the current position starts
-// a regex literal (given the last non-whitespace CODE byte seen).
-// A `/` after an operator or delimiter is regex; after an identifier
-// or `)` or `]` it's division. `0` (start-of-input) is regex context.
-func isRegexContext(prev byte) bool {
-	switch prev {
-	case 0: // start of input
+// finalizeToken snapshots the accumulated identifier bytes into
+// `lastToken` (or clears both, if we were in an identifier that
+// turned out to be one byte of trailing whitespace).
+func (st *jsScanState) finalizeToken() {
+	if len(st.tokenBuf) == 0 {
+		return
+	}
+	st.lastToken = string(st.tokenBuf)
+	st.tokenBuf = st.tokenBuf[:0]
+}
+
+// isRegexContext returns true when the `/` at the current position
+// starts a regex literal. Two cases:
+//
+//  1. prevSig is an operator / delimiter (or nothing) — regex.
+//  2. prevSig is an identifier byte, and the identifier we just
+//     finished (either currently in tokenBuf, or the last one we
+//     finalised) is a JS keyword that can precede a regex:
+//       return / typeof / in / of / throw / yield / await / delete
+//       / new / void / case / do / else / instanceof
+//     A regex after any of these is idiomatic — `return /foo/`,
+//     `if (typeof /bar/)`, etc.
+//
+// Otherwise it's division. (#277 round-3 SB #1.)
+func (st *jsScanState) isRegexContext() bool {
+	prev := st.prevSig
+	if prev == 0 {
 		return true
+	}
+	switch prev {
 	case '(', ',', '=', '!', '&', '|', '?', ':', '{', '[', ';', '<', '>', '+', '-', '*', '/', '%', '^', '~':
+		return true
+	}
+	// Ident-like prevSig — could be a keyword.
+	if !isIdentByte(prev) {
+		return false
+	}
+	// The token that ended at prev is either the one still in
+	// tokenBuf (if we haven't finalised yet — normal case where we
+	// see `/` immediately after `return`), or lastToken (if
+	// something like whitespace + finalise happened).
+	token := ""
+	if len(st.tokenBuf) > 0 {
+		token = string(st.tokenBuf)
+	} else {
+		token = st.lastToken
+	}
+	switch token {
+	case "return", "typeof", "in", "of", "throw", "yield", "await",
+		"delete", "new", "void", "case", "do", "else", "instanceof":
 		return true
 	}
 	return false
 }
+
 
 // matchParen given the index of a `(` returns the index of its
 // matching `)`. The scanner skips string literals (`'…'` / `"…"` /

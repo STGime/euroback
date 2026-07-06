@@ -425,6 +425,66 @@ func TestTranslateFunction_HandlerBodyWithBlockComment(t *testing.T) {
 	}
 }
 
+// TestTranslateFunction_ReturnRegexLiteral pins #277 round-3 SB #1:
+// `return /foo/` after a keyword must be treated as a regex literal,
+// not division. Previously, prevSig was `n` (an ident byte), so the
+// walker treated `/` as division and the `)` inside the regex closed
+// the walker early, silently truncating the file.
+func TestTranslateFunction_ReturnRegexLiteral(t *testing.T) {
+	in := `Deno.serve(async (req) => {
+  return /pat)tern/.test(req.url);
+});`
+	res := TranslateFunction(in)
+	// Full regex must survive.
+	if !strings.Contains(res.Source, "/pat)tern/") {
+		t.Errorf("regex after `return` was truncated (SB #1 regression):\n%s", res.Source)
+	}
+	// `.test(req.url)` must still be there.
+	if !strings.Contains(res.Source, ".test(req.url)") {
+		t.Errorf("expression after regex was lost:\n%s", res.Source)
+	}
+	if strings.Contains(res.Source, "Deno.serve") {
+		t.Errorf("Deno.serve survived when regex followed return:\n%s", res.Source)
+	}
+}
+
+// TestTranslateFunction_RegexAfterKeywords covers the other keywords
+// that legitimately precede a regex literal in JS.
+func TestTranslateFunction_RegexAfterKeywords(t *testing.T) {
+	for _, prefix := range []string{
+		"return",
+		"typeof",
+		"throw",
+		"await",
+		"delete",
+	} {
+		body := "if (true) " + prefix + " /foo)bar/;"
+		in := "Deno.serve(async (req) => { " + body + " return new Response(\"ok\"); });"
+		res := TranslateFunction(in)
+		if !strings.Contains(res.Source, "/foo)bar/") {
+			t.Errorf("regex after keyword %q was truncated:\n%s", prefix, res.Source)
+		}
+	}
+}
+
+// TestTranslateFunction_DivisionStillWorks confirms we didn't
+// overshoot — `a / b` after an identifier is still division, not
+// a regex context.
+func TestTranslateFunction_DivisionStillWorks(t *testing.T) {
+	in := `Deno.serve(async (req) => {
+  const ratio = 100 / 4;
+  return new Response(String(ratio));
+});`
+	res := TranslateFunction(in)
+	// `100 / 4` must survive verbatim.
+	if !strings.Contains(res.Source, "100 / 4") {
+		t.Errorf("division misdetected as regex, truncated:\n%s", res.Source)
+	}
+	if strings.Contains(res.Source, "Deno.serve") {
+		t.Errorf("Deno.serve survived on plain-division body:\n%s", res.Source)
+	}
+}
+
 // TestTranslateFunction_TypeOnlySupabaseImportDoesNotWarn pins #277
 // round-2 M #7: `import type` is a types-only construct with no
 // runtime effect, so the SDK-usage warning would be a false positive.
