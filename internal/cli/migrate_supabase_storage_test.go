@@ -149,12 +149,13 @@ func TestRenderBucketSection_EscapesHostileBucketName(t *testing.T) {
 	if strings.Contains(got, "\n# Fake H1") {
 		t.Errorf("hostile bucket name injected an H1:\n%s", got)
 	}
-	// Positive assertion: the header line must show the escaped forms
-	// (backslash-escaped backtick + asterisks, and the ↩ replacement
-	// mdEscape uses for newlines). Without this, a future change to
-	// mdEscape that let raw newlines through would still make the
-	// negative "no \n# Fake H1" check pass by accident.
-	if !strings.Contains(got, `\`+"`") && !strings.Contains(got, "↩") {
+	// Positive assertion: the header line must show BOTH escaped forms
+	// — the backslash-escaped backtick (from `\``) AND the ↩ mdEscape
+	// uses for newlines. `||` (fail if EITHER missing), not `&&`,
+	// because a future regression that let raw newlines through would
+	// still emit the backtick escape, and `&&` would short-circuit
+	// through the tautology round-2 review flagged. (#276 round-3 M.)
+	if !strings.Contains(got, `\`+"`") || !strings.Contains(got, "↩") {
 		t.Errorf("hostile bucket name didn't route through mdEscape (missing escape markers):\n%s", got)
 	}
 	// Object count + size still land in the output.

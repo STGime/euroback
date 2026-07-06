@@ -375,7 +375,7 @@ type storageTotal struct {
 
 // storageObjectTotals returns per-bucket object counts + byte sums via
 // one aggregate scan of storage.objects. Cheaper than N queries when a
-// project has many buckets. Missing metadata.size falls back to 0 (the
+// project has many buckets. Missing `metadata->>'size'` falls back to 0 (the
 // count is still accurate).
 func storageObjectTotals(ctx context.Context, conn *pgx.Conn) (map[string]storageTotal, error) {
 	rows, err := conn.Query(ctx, `
