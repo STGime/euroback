@@ -326,6 +326,119 @@ func TestTranslateFunction_NonReqArgWarnsAndLeavesAlone(t *testing.T) {
 	}
 }
 
+// TestTranslateFunction_BareServeFromDenoStd pins #277 round-2
+// ship-blocker #1: the canonical Supabase template imports `serve`
+// from deno.land/std/http/server.ts and calls it at statement head.
+// The old walker only knew about `Deno.serve` — this pattern
+// silently deployed and 500'd at first invoke.
+func TestTranslateFunction_BareServeFromDenoStd(t *testing.T) {
+	in := `import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+
+serve(async (req) => {
+  return new Response("ok");
+});`
+	res := TranslateFunction(in)
+	if !strings.Contains(res.Source, "module.exports = async (req, ctx) =>") {
+		t.Errorf("bare serve(...) from deno.land/std not rewritten:\n%s", res.Source)
+	}
+	if strings.Contains(res.Source, "\nserve(") {
+		t.Errorf("original serve( call survived at statement head:\n%s", res.Source)
+	}
+	// The `import { serve }` line must be commented out — else the
+	// file has an orphan import that fails at deploy.
+	if !strings.Contains(res.Source, "// import { serve") {
+		t.Errorf("serve import not commented out:\n%s", res.Source)
+	}
+}
+
+// TestTranslateFunction_BareServeGuardedOnImport confirms we DON'T
+// rewrite a tenant's own `serve(...)` helper that has no
+// deno.land/std/http import.
+func TestTranslateFunction_BareServeGuardedOnImport(t *testing.T) {
+	in := `function serve(x) { return x + 1; }
+const r = serve(41);`
+	res := TranslateFunction(in)
+	if res.Source != in {
+		t.Errorf("tenant helper serve() got rewritten (bad — no deno.land import present):\nwant: %s\ngot:  %s", in, res.Source)
+	}
+}
+
+// TestTranslateFunction_HandlerBodyWithRegexLiteral pins #277 round-2
+// ship-blocker #2: a `)` inside a regex literal used to fool
+// matchParen into closing early, silently truncating the file.
+func TestTranslateFunction_HandlerBodyWithRegexLiteral(t *testing.T) {
+	in := `Deno.serve(async (req) => {
+  const rx = /foo)/;
+  return new Response("ok");
+});`
+	res := TranslateFunction(in)
+	// The full regex must survive verbatim.
+	if !strings.Contains(res.Source, "/foo)/") {
+		t.Errorf("regex literal truncated by walker:\n%s", res.Source)
+	}
+	// The Response line must also be intact.
+	if !strings.Contains(res.Source, `new Response("ok")`) {
+		t.Errorf("body content after the regex was lost:\n%s", res.Source)
+	}
+	// Deno.serve must be gone (rewritten).
+	if strings.Contains(res.Source, "Deno.serve") {
+		t.Errorf("Deno.serve survived when regex was in body:\n%s", res.Source)
+	}
+}
+
+// TestTranslateFunction_HandlerBodyWithLineComment pins #277 round-2
+// ship-blocker #3: a `)` inside a line comment used to close the
+// walker early.
+func TestTranslateFunction_HandlerBodyWithLineComment(t *testing.T) {
+	in := `Deno.serve(async (req) => {
+  // close ) here
+  return new Response("ok");
+});`
+	res := TranslateFunction(in)
+	if !strings.Contains(res.Source, "// close ) here") {
+		t.Errorf("line comment lost / truncated:\n%s", res.Source)
+	}
+	if !strings.Contains(res.Source, `new Response("ok")`) {
+		t.Errorf("body after comment was lost:\n%s", res.Source)
+	}
+	if strings.Contains(res.Source, "Deno.serve") {
+		t.Errorf("Deno.serve survived with line comment in body:\n%s", res.Source)
+	}
+}
+
+// TestTranslateFunction_HandlerBodyWithBlockComment pins #277 round-2
+// ship-blocker #4: same class as line-comment.
+func TestTranslateFunction_HandlerBodyWithBlockComment(t *testing.T) {
+	in := `Deno.serve(async (req) => {
+  /* close ) and { in a block */
+  return new Response("ok");
+});`
+	res := TranslateFunction(in)
+	if !strings.Contains(res.Source, "/* close ) and { in a block */") {
+		t.Errorf("block comment truncated:\n%s", res.Source)
+	}
+	if !strings.Contains(res.Source, `new Response("ok")`) {
+		t.Errorf("body after block comment was lost:\n%s", res.Source)
+	}
+	if strings.Contains(res.Source, "Deno.serve") {
+		t.Errorf("Deno.serve survived with block comment in body:\n%s", res.Source)
+	}
+}
+
+// TestTranslateFunction_TypeOnlySupabaseImportDoesNotWarn pins #277
+// round-2 M #7: `import type` is a types-only construct with no
+// runtime effect, so the SDK-usage warning would be a false positive.
+func TestTranslateFunction_TypeOnlySupabaseImportDoesNotWarn(t *testing.T) {
+	in := `import type { SupabaseClient } from '@supabase/supabase-js';
+Deno.serve(async (req) => new Response("hi"));`
+	res := TranslateFunction(in)
+	for _, w := range res.Warnings {
+		if strings.Contains(w.note, "@supabase/supabase-js") || strings.Contains(w.note, "SDK client") {
+			t.Errorf("false-positive SDK warning on type-only import: %+v", w)
+		}
+	}
+}
+
 // TestTranslateFunction_NoDenoServeIsClean confirms a file without
 // Deno.serve is a clean no-op — no false-positive rewrites, no
 // surviving-Deno.serve warning.
