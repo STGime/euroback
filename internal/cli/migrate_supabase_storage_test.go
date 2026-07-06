@@ -60,21 +60,30 @@ func TestRcloneCommandFor_BucketNameWithSpecialCharsRemains(t *testing.T) {
 }
 
 // TestIsSafeBucketName pins the shell-embedding guard — the rclone
-// command is emitted inside a Markdown code fence, so a name with
-// newlines / backticks / quotes could either break the fence or
-// inject a second shell argument.
+// command is emitted inside a Markdown code fence, so any character
+// outside Supabase's actual bucket-name grammar (`[a-zA-Z0-9-_.]`)
+// is a rejection. Allowlist design: adding a new attack char to the
+// blocklist can't accidentally miss.
 func TestIsSafeBucketName(t *testing.T) {
-	safe := []string{"avatars", "user-photos", "photos_2026", "backup.v2"}
+	safe := []string{"avatars", "user-photos", "photos_2026", "backup.v2", "a"}
 	unsafe := []string{
-		"",             // empty
-		"a`b",          // backtick — closes code fence
-		"a\nb",         // newline — breaks fence
-		"a\tb",         // control char
-		"a\"b",         // quote
-		"a'b",          // quote
-		"a\\b",         // backslash
-		"a$b",          // shell expansion
-		"\x00nul",      // NUL
+		"",              // empty
+		"a`b",           // backtick — closes code fence
+		"a\nb",          // newline — breaks fence
+		"a\tb",          // control char
+		"a\"b",          // quote
+		"a'b",           // quote
+		"a\\b",          // backslash
+		"a$b",           // shell expansion
+		"\x00nul",       // NUL
+		"a b",           // space — breaks arg into two tokens
+		"a;b", "a|b", "a&b", "a<b", "a>b",
+		"a(b", "a)b", "a{b", "a}b", "a#b",
+		"a b",      // Unicode line separator
+		"a b",      // Unicode paragraph separator
+		"a‮b",      // Right-to-left override (visual reorder)
+		"a/b",           // path separator
+		"日本語",           // non-ASCII (outside Supabase grammar)
 	}
 	for _, s := range safe {
 		if !isSafeBucketName(s) {
@@ -140,6 +149,14 @@ func TestRenderBucketSection_EscapesHostileBucketName(t *testing.T) {
 	if strings.Contains(got, "\n# Fake H1") {
 		t.Errorf("hostile bucket name injected an H1:\n%s", got)
 	}
+	// Positive assertion: the header line must show the escaped forms
+	// (backslash-escaped backtick + asterisks, and the ↩ replacement
+	// mdEscape uses for newlines). Without this, a future change to
+	// mdEscape that let raw newlines through would still make the
+	// negative "no \n# Fake H1" check pass by accident.
+	if !strings.Contains(got, `\`+"`") && !strings.Contains(got, "↩") {
+		t.Errorf("hostile bucket name didn't route through mdEscape (missing escape markers):\n%s", got)
+	}
 	// Object count + size still land in the output.
 	if !strings.Contains(got, "Objects: 42") {
 		t.Errorf("object count missing: %s", got)
@@ -165,8 +182,8 @@ func TestRenderBucketSection_ZeroBytesWithObjectsWarns(t *testing.T) {
 		totalBytes:  0,
 	}
 	got := renderBucketSection(b, true)
-	if !strings.Contains(got, "metadata.size") {
-		t.Errorf("expected a note about metadata.size on 0-byte bucket:\n%s", got)
+	if !strings.Contains(got, "metadata->>'size'") {
+		t.Errorf("expected a note about metadata->>'size' on 0-byte bucket:\n%s", got)
 	}
 }
 

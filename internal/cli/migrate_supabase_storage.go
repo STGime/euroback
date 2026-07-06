@@ -96,7 +96,7 @@ Pass --bucket <name> to filter to a single source bucket. Pass
 			if showRclone {
 				if _, err := exec.LookPath("rclone"); err != nil {
 					fmt.Fprintln(cmd.ErrOrStderr(),
-						"warning: rclone not found on PATH — install it (`brew install rclone` / `apt install rclone`) before running the printed commands")
+						"warning: rclone not found on PATH — install it (`brew install rclone` / `apt install rclone` / `apk add rclone`, or https://rclone.org/downloads/) before running the printed commands")
 				}
 			}
 
@@ -251,7 +251,7 @@ func buildStorageReport(ctx context.Context, conn *pgx.Conn, buckets []supabaseB
 	fmt.Fprintln(&out, "")
 	fmt.Fprintln(&out, "## Multi-bucket note")
 	fmt.Fprintln(&out, "")
-	fmt.Fprintln(&out, "Eurobase currently exposes one bucket per project. Each `rclone sync` above targets `eurobase_dst:/<bucket-name>/`, so once Eurobase's multi-bucket support ships (planned follow-up in umbrella #267), your object layout already matches — no re-sync needed.")
+	fmt.Fprintln(&out, "Eurobase currently exposes one bucket per project. Each `rclone sync` above targets `eurobase_dst:<bucket-name>/`, so once Eurobase's multi-bucket support ships (planned follow-up in umbrella #267), your object layout already matches — no re-sync needed.")
 	fmt.Fprintln(&out, "")
 	fmt.Fprintln(&out, "## Storage policies")
 	fmt.Fprintln(&out, "")
@@ -299,7 +299,7 @@ func renderBucketSection(b supabaseBucket, showRclone bool) string {
 	// `metadata->>'size'` wasn't populated yet. Object count is
 	// accurate; the byte total is uninformative.
 	if b.objectCount > 0 && b.totalBytes == 0 {
-		fmt.Fprintln(&out, "- **Note:** total-bytes shows 0 because `metadata.size` wasn't populated on this project's storage.objects. The rclone sync copies every object regardless — it only affects this summary.")
+		fmt.Fprintln(&out, "- **Note:** total-bytes shows 0 because `metadata->>'size'` wasn't populated on this project's storage.objects (common on older Supabase schemas). The rclone sync copies every object regardless — the gap only affects this summary.")
 	}
 	fmt.Fprintln(&out)
 	if showRclone {
@@ -343,18 +343,25 @@ func rcloneCommandFor(b supabaseBucket) string {
 	)
 }
 
-// isSafeBucketName returns true if the name is safe to embed in a
-// shell command inside a Markdown code fence. Rejects newlines,
-// backticks, quotes, backslashes, `$`, and any control char.
+// isSafeBucketName returns true if the name matches Supabase's actual
+// bucket-name grammar: `[a-zA-Z0-9-_.]+`. Strict allowlist so no
+// injection vector — shell metacharacters (space, `;`, `|`, `&`, `<`,
+// `>`, `(`, `)`, `{`, `}`, `#`, `$`, backticks, quotes, backslash) all
+// fall on the reject side, as do Unicode line/paragraph separators
+// (U+2028 / U+2029) and BiDi overrides (U+202E) that can visually
+// reorder text in some Markdown renderers. (#276 round-2 review M —
+// closed the whole class.)
 func isSafeBucketName(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
 		switch {
-		case r < 0x20, r == 0x7f: // control chars incl. \n, \r, tab
-			return false
-		case r == '`' || r == '"' || r == '\'' || r == '\\' || r == '$':
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
 			return false
 		}
 	}
