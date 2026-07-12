@@ -12,8 +12,9 @@ import (
 type AuthRateLimiter func(w http.ResponseWriter, r *http.Request, action, identifier string) bool
 
 type signUpRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string             `json:"email"`
+	Password string             `json:"password"`
+	Accepted []AcceptedDocument `json:"accepted_documents"`
 }
 
 type signInRequest struct {
@@ -39,7 +40,7 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 			return
 		}
 
-		resp, err := svc.SignUp(r.Context(), req.Email, req.Password)
+		resp, err := svc.SignUp(r.Context(), req.Email, req.Password, req.Accepted, clientIP(r), r.UserAgent())
 		if err != nil {
 			if _, ok := err.(*WaitlistError); ok {
 				slog.Info("signup blocked by allowlist", "email", req.Email)
