@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -86,6 +87,20 @@ type AcceptedDocument struct {
 	Version string `json:"version"` // '2.0'
 }
 
+// ErrStaleDocumentVersion is returned when a client sends a document
+// version that isn't the currently-required one (superseded or unknown).
+// Typed sentinel — the HTTP handler recognises it and returns 400 rather
+// than 500, and the console can safely re-fetch the legal-documents list
+// on receipt. Fixes #279 review high #1.
+type ErrStaleDocumentVersion struct {
+	DocumentType string
+	Version      string
+}
+
+func (e *ErrStaleDocumentVersion) Error() string {
+	return fmt.Sprintf("unknown or superseded document version: %s v%s — please refresh the page and try again", e.DocumentType, e.Version)
+}
+
 // requiredAcceptances is the set of document types signup MUST record.
 // Additional documents (privacy, aup) may be present in the client
 // payload and get recorded too, but their absence isn't a hard block —
@@ -140,9 +155,10 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	// Resolve each accepted (type, version) to a legal_documents row
 	// BEFORE opening the user-insert tx. If the client sent a version
 	// we don't recognise (e.g. an old browser tab from before we
-	// rolled v2), fail loud so the console re-fetches the current
-	// versions — better than silently accepting a stale acceptance.
-	documentIDs, err := s.resolveAcceptedDocuments(ctx, accepted)
+	// rolled v2), a typed ErrStaleDocumentVersion bubbles up so the
+	// HTTP layer returns 400 and the console can re-fetch — better
+	// than silently accepting a stale acceptance.
+	documents, err := s.resolveAcceptedDocuments(ctx, accepted)
 	if err != nil {
 		return nil, err
 	}
@@ -174,10 +190,18 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 
 	// Write one acceptance row per accepted document. `clientIP` and
 	// `userAgent` may be empty (e.g. in a test) — the columns are
-	// nullable to make that case legal without special-casing here.
+	// nullable. IP is parsed via net.ParseIP so a malformed XFF value
+	// (`1.2.3.4:5678`, `unknown`, a hostname) writes NULL rather than
+	// crashing the INET cast + rolling back the whole signup — #279
+	// review high #2. `document_type` is lowercased at insert so the
+	// `idx_legal_acceptances_user_type` index is queryable
+	// case-consistently — #279 review med #4. The `checksum` we
+	// resolved above lands in the row so audit later can prove what
+	// bytes the user saw (defensible under GDPR Article 7 even if a
+	// future deploy mutates `legal_documents.checksum` — #279 med #3).
 	var ipParam interface{}
-	if clientIP != "" {
-		ipParam = clientIP
+	if parsed := net.ParseIP(clientIP); parsed != nil {
+		ipParam = parsed.String()
 	}
 	var uaParam interface{}
 	if userAgent != "" {
@@ -185,9 +209,9 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	}
 	for i, doc := range accepted {
 		_, err = tx.Exec(ctx,
-			`INSERT INTO legal_acceptances (user_id, document_id, document_type, document_version, ip, user_agent)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			user.ID, documentIDs[i], doc.Type, doc.Version, ipParam, uaParam,
+			`INSERT INTO legal_acceptances (user_id, document_id, document_type, document_version, document_checksum, ip, user_agent)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			user.ID, documents[i].id, strings.ToLower(doc.Type), doc.Version, documents[i].checksum, ipParam, uaParam,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("record acceptance for %s: %w", doc.Type, err)
@@ -234,30 +258,40 @@ func validateRequiredAcceptances(accepted []AcceptedDocument) error {
 	return nil
 }
 
+// resolvedDocument bundles the DB-resolved fields the caller needs to
+// insert into legal_acceptances: the FK id, and the checksum the user
+// saw at click-through time. Denormalising the checksum into the
+// acceptance row means an audit later can prove exactly which bytes
+// the user consented to, even if the `legal_documents` row gets its
+// checksum column mutated by a follow-up deploy (#279 review med #3).
+type resolvedDocument struct {
+	id       string
+	checksum string
+}
+
 // resolveAcceptedDocuments looks each (type, version) up in
-// legal_documents. Returns the document IDs in the same order as the
-// input, so the caller can zip them back into acceptance rows. A
-// missing row means the client sent a stale version — return an error
-// that tells the console to re-fetch the current legal_documents set.
-func (s *PlatformAuthService) resolveAcceptedDocuments(ctx context.Context, accepted []AcceptedDocument) ([]string, error) {
-	out := make([]string, len(accepted))
+// legal_documents. Returns the resolved rows in the same order as
+// the input. A missing row returns a typed ErrStaleDocumentVersion
+// so the HTTP layer can 400 + the console can re-fetch.
+func (s *PlatformAuthService) resolveAcceptedDocuments(ctx context.Context, accepted []AcceptedDocument) ([]resolvedDocument, error) {
+	out := make([]resolvedDocument, len(accepted))
 	for i, doc := range accepted {
-		var id string
+		var r resolvedDocument
 		err := s.pool.QueryRow(ctx,
-			`SELECT id FROM legal_documents
+			`SELECT id, checksum FROM legal_documents
 			  WHERE document_type = $1
 			    AND version = $2
 			    AND active = true
 			    AND superseded_at IS NULL`,
 			strings.ToLower(doc.Type), doc.Version,
-		).Scan(&id)
+		).Scan(&r.id, &r.checksum)
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				return nil, fmt.Errorf("unknown or superseded document version: %s v%s — please refresh the page and try again", doc.Type, doc.Version)
+				return nil, &ErrStaleDocumentVersion{DocumentType: doc.Type, Version: doc.Version}
 			}
 			return nil, fmt.Errorf("resolve document %s v%s: %w", doc.Type, doc.Version, err)
 		}
-		out[i] = id
+		out[i] = r
 	}
 	return out, nil
 }

@@ -68,6 +68,27 @@ func TestValidateRequiredAcceptances_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// #279 review high #1: ErrStaleDocumentVersion is the typed sentinel
+// the HTTP layer switches on to return 400. If someone renames the
+// struct or changes the error() text, this test fails loudly so the
+// handler branch below (which matches by type) stays in sync.
+func TestErrStaleDocumentVersion_TypedSentinel(t *testing.T) {
+	err := &ErrStaleDocumentVersion{DocumentType: "terms", Version: "1.0"}
+	// Type-assert path — HTTP layer relies on this exact shape.
+	if _, ok := interface{}(err).(*ErrStaleDocumentVersion); !ok {
+		t.Fatal("ErrStaleDocumentVersion type assertion broken")
+	}
+	// Human-readable text includes both fields so the console banner
+	// can display something specific ("terms v1.0 is out of date").
+	msg := err.Error()
+	if !strings.Contains(msg, "terms") || !strings.Contains(msg, "1.0") {
+		t.Errorf("error message should name the doc + version: %q", msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "refresh") {
+		t.Errorf("error message should tell the user to refresh: %q", msg)
+	}
+}
+
 func TestValidateRequiredAcceptances_ExtrasAllowed(t *testing.T) {
 	// Accepting privacy/aup/cookies too doesn't fail — only the
 	// required set is gated. Extras get recorded downstream by

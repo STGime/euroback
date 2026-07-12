@@ -52,6 +52,21 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 				})
 				return
 			}
+			// Stale document version → 400 with the "please refresh"
+			// message so the console can re-fetch the current
+			// legal_documents set and retry. Typed sentinel so we
+			// don't string-match a human-readable error. (#279
+			// review high #1.)
+			if _, ok := err.(*ErrStaleDocumentVersion); ok {
+				slog.Info("signup rejected: stale document version", "email", req.Email, "error", err)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "stale_document_version",
+					"message": err.Error(),
+				})
+				return
+			}
 			slog.Warn("platform signup failed", "error", err)
 			status := http.StatusInternalServerError
 			if isUserError(err) {
@@ -305,7 +320,8 @@ func isUserError(err error) bool {
 		msg == "current password is incorrect" ||
 		msg == "delete all projects before deleting your account" ||
 		msg == "invalid or expired token" ||
-		msg == "email service not configured"
+		msg == "email service not configured" ||
+		strings.HasPrefix(msg, "you must accept the following to sign up:")
 }
 
 func writeJSONError(w http.ResponseWriter, msg string, status int) {

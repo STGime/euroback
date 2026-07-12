@@ -17,10 +17,11 @@ CREATE TABLE public.legal_acceptances (
     id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id           UUID NOT NULL REFERENCES public.platform_users(id) ON DELETE CASCADE,
     document_id       UUID NOT NULL REFERENCES public.legal_documents(id),
-    document_type     TEXT NOT NULL,   -- denormalised for read-time queries; matches legal_documents.document_type
+    document_type     TEXT NOT NULL,   -- denormalised for read-time queries; matches legal_documents.document_type; lowercased at insert
     document_version  TEXT NOT NULL,   -- denormalised; matches legal_documents.version
+    document_checksum TEXT NOT NULL,   -- snapshot of the document body the user actually saw; audit-proof under GDPR Art. 7 even if legal_documents.checksum is later mutated (#279 review med #3)
     accepted_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    ip                INET,             -- client IP at click-through; nullable for backfill / test data
+    ip                INET,             -- client IP at click-through; nullable so a malformed XFF (parsed → nil) writes NULL rather than fail the tx (#279 review high #2)
     user_agent        TEXT,             -- client UA at click-through
     added_at          TIMESTAMPTZ DEFAULT now()
 );
