@@ -1,18 +1,23 @@
 <!--
-REVIEWER NOTES — read before publication
+REVIEWER NOTES — read before publication (v2)
 
   1. This is a STATIC SNAPSHOT for the docs folder. The live page on
      the marketing/console site should render this list dynamically
      from the sub_processors DB table so it cannot drift from reality.
      The static text below mirrors what the seed migrations produce
      today.
-  2. Whenever a new sub-processor is added or replaced:
+  2. What changed vs v1: nothing substantive. The sub-processor set
+     doesn't shift with the Estonia entity pivot — Scaleway (FR),
+     Mollie (NL), Google + GitHub (US, DPF-covered) remain the same
+     set. Version bump kept for consistency with the rest of the v2
+     set.
+  3. Whenever a new sub-processor is added or replaced:
        - Insert into sub_processors in the same migration that adds
          the integration (CLAUDE.md: Compliance / Sub-Processors flow);
        - Bump this static doc;
        - Email project owners 30 days before activation
          (notify_subprocessor_changes flag — Phase 2).
-  3. CLOUD-Act flag is set by the registry; we frame this neutrally:
+  4. CLOUD-Act flag is set by the registry; we frame this neutrally:
      "based outside the EU" + "transfer mechanism: EU-US DPF".
      Per user preference: do NOT use anti-US wording.
 -->

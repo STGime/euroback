@@ -1,22 +1,30 @@
 <!--
-REVIEWER NOTES — read before publication
+REVIEWER NOTES — read before publication (v2)
 
   1. Scope: this DPA covers personal data Customers process VIA Eurobase
      about THEIR end-users — Eurobase as processor, Customer as
      controller (Art. 28 GDPR). Personal data we collect about the
      Customer themselves (their email, billing, etc.) is in the
      Privacy Policy at /legal/privacy.
-  2. This DPA is incorporated by reference into the Terms of Service
-     and accepted by click-wrap at signup. Acceptance must be recorded
-     (legal_acceptances table — Phase 2).
-  3. The clause referencing the live compliance report at
-     /legal/compliance/<project_id> assumes that endpoint is reachable
-     by Customer. Verify the route is wired before publication.
-  4. Annex 2 (TOMs) lists concrete controls in the codebase. Keep in
+  2. What changed vs v1:
+       - Click-through acceptance is now recorded (legal_acceptances
+         table, migration 000074, landed with PR #279). Closes the
+         Phase 2 gap the v1 header called out.
+       - Governing law is inherited from the Terms (§16 — Republic
+         of Estonia + Harju County Court, Tallinn). No text change
+         to this DPA's §13 needed because it already references
+         "the law applicable to the Terms of Service."
+  3. This DPA is incorporated by reference into the Terms of Service
+     and accepted by click-wrap at signup.
+  4. The clause referencing the live compliance report at
+     /console/projects/{id}/compliance assumes that endpoint is
+     reachable by Customer. Verify the route is wired before
+     publication.
+  5. Annex 2 (TOMs) lists concrete controls in the codebase. Keep in
      sync with reality at version bumps.
-  5. Annex 3 (Sub-processors) is rendered live from the sub_processors
+  6. Annex 3 (Sub-processors) is rendered live from the sub_processors
      DB table; the static text below is a snapshot for completeness.
-  6. Lawyer review required.
+  7. Lawyer review required.
 -->
 
 # Data Processing Agreement
