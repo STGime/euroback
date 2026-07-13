@@ -1,17 +1,25 @@
 <!--
-REVIEWER NOTES — read before publication
+REVIEWER NOTES — read before publication (v2)
 
   1. Scope: this Privacy Policy covers personal data Eurobase processes
      AS CONTROLLER — i.e. data about the developers/customers using the
      Eurobase platform itself. Personal data Customers process via the
      platform on behalf of their own end-users is governed by the DPA
      (/legal/dpa), where Eurobase is processor.
-  2. Pre-incorporation. Replace every {{PLACEHOLDER}} once the operating
-     entity is registered. Do NOT publish with placeholders left in.
-  3. The retention table cites concrete code paths so engineering can
+  2. What changed vs v1:
+       - Lead supervisory authority: Berliner Beauftragte für
+         Datenschutz → Andmekaitse Inspektsioon (Estonian DPA) in §6,
+         reflecting the choice to incorporate in Estonia. Direct
+         result of the Terms §16 governing-law change; no separate
+         review decision needed.
+  3. Entity strings ({{LEGAL_ENTITY}}, {{REGISTERED_ADDRESS}},
+     {{EFFECTIVE_DATE}}) are still placeholders until formation
+     completes. Fill in one follow-up commit; do NOT publish with
+     placeholders left in.
+  4. The retention table cites concrete code paths so engineering can
      verify the policy matches reality at publication time. Re-grep
      the codebase before publishing.
-  4. Mandatory before publication:
+  5. Mandatory before publication:
        - Right-to-erasure handler (Phase 2: gdpr_erasure.go).
        - Account-delete UI (Phase 2).
        - Token cleanup job (Phase 2: cleanup_expired_tokens.go).
@@ -85,7 +93,7 @@ Under the GDPR you have the right to:
 - **Object** — object to processing based on our legitimate interests; we will stop unless we have compelling legitimate grounds that override your interests.
 - **Withdraw consent** — where processing is based on consent (e.g. waitlist), withdraw at any time. This does not affect prior lawful processing.
 - **Not be subject to automated decisions** — we do not make automated decisions with legal or similarly significant effects about you.
-- **Lodge a complaint** with a supervisory authority. Our lead authority is **{{LEAD_SA}}** ({{LEAD_SA_URL}}). You may also complain to the authority in the EU country where you live.
+- **Lodge a complaint** with a supervisory authority. Our lead authority is the **Estonian Data Protection Inspectorate (Andmekaitse Inspektsioon)** at Tatari 39, 10134 Tallinn, Estonia — https://www.aki.ee/en. You may also complain to the authority in the EU country where you live.
 
 We do not charge for these requests unless they are manifestly unfounded or excessive.
 

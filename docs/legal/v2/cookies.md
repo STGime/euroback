@@ -1,7 +1,8 @@
 <!--
-REVIEWER NOTES — read before publication
+REVIEWER NOTES — read before publication (v2)
 
-  1. This notice reflects an audit of the codebase as of v1.0:
+  1. This notice reflects an audit of the codebase as of v2.0
+     (re-verified during the public-beta launch Phase A):
        - 0 Set-Cookie calls in the Go backend.
        - localStorage keys: eurobase_token, eurobase_email,
          SQL editor tabs/history.
@@ -9,10 +10,14 @@ REVIEWER NOTES — read before publication
        - No analytics, no marketing pixels, no tracking.
      If any of those change, update this page in the SAME PR that
      introduces the change.
-  2. Verdict: no consent banner required today. Keep this verdict
+  2. What changed vs v1: nothing substantive. Version bump kept for
+     consistency with the rest of the v2 set. Cookies notice is
+     jurisdiction-neutral — the Estonia governing-law pivot in Terms
+     doesn't touch this page.
+  3. Verdict: no consent banner required today. Keep this verdict
      under review every time anything is added that touches storage
      or third-party scripts.
-  3. Lawyer review recommended but not blocking — content is factual.
+  4. Lawyer review recommended but not blocking — content is factual.
 -->
 
 # Cookie & Storage Notice

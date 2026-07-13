@@ -1,15 +1,21 @@
 <!--
-REVIEWER NOTES — read before publication
+REVIEWER NOTES — read before publication (v2)
 
   1. AUP is referenced from Terms §6 and is a contractual obligation.
      Keep it short and enforceable; we'll get into trouble for
      overpromising more than for underpromising.
-  2. Reporting flow at the bottom commits us to act on abuse reports.
+  2. What changed vs v1: no substantive change. AUP's "law of any
+     jurisdiction your users are in" language is user-facing content
+     rules, not the Eurobase entity's governing law (that's Terms
+     §16, now Republic of Estonia). Version bump kept for consistency
+     with the rest of the v2 set.
+  3. Reporting flow at the bottom commits us to act on abuse reports.
      Make sure abuse@eurobase.app actually receives mail before
      publication (currently aliased to founder).
-  3. CSAM clause: legally required to cooperate with hotlines (INHOPE,
+  4. CSAM clause: legally required to cooperate with hotlines (INHOPE,
      national reporters). Do NOT remove without lawyer review.
-  4. Pre-incorporation: replace {{LEGAL_ENTITY}} once registered.
+  5. Entity strings ({{LEGAL_ENTITY}}) still placeholders until
+     formation completes.
 -->
 
 # Acceptable Use Policy
