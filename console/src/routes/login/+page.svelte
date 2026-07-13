@@ -17,6 +17,13 @@
 	let submitting = $state(false);
 	let error = $state('');
 	let waitlisted = $state(false);
+	// Click-through acceptance for Terms + DPA (public-beta launch,
+	// Phase A). Versions match legal_documents seed rows from migration
+	// 000073; if we bump the docs to v3 later, these strings + the
+	// checkbox labels update in the same PR.
+	let acceptedTerms = $state(false);
+	let acceptedDPA = $state(false);
+	const LEGAL_VERSION = '2.0';
 
 	function parseError(raw: string): string {
 		const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
@@ -50,6 +57,10 @@
 			error = 'Passwords do not match';
 			return;
 		}
+		if (isSignUp && !(acceptedTerms && acceptedDPA)) {
+			error = 'You must accept the Terms of Service and the Data Processing Agreement to sign up';
+			return;
+		}
 		submitting = true;
 		try {
 			if (isForgotPassword) {
@@ -57,7 +68,10 @@
 				forgotPasswordSent = true;
 			} else {
 				const result = isSignUp
-					? await api.signUp(email, password)
+					? await api.signUp(email, password, [
+						{ type: 'terms', version: LEGAL_VERSION },
+						{ type: 'dpa', version: LEGAL_VERSION },
+					])
 					: await api.signIn(email, password);
 				user.set({ token: result.access_token, email });
 				await redirectAfterLogin();
@@ -256,6 +270,42 @@
 										placeholder="Repeat your password"
 										class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 									/>
+								</div>
+
+								<!--
+									Click-through acceptance for Terms + DPA (public-beta launch,
+									Phase A). Backend rejects the signup with 400 if either is
+									missing from the `accepted_documents` array — the form-level
+									guard in handleSubmit is the client-side mirror of that check.
+								-->
+								<div class="space-y-2 rounded-lg bg-gray-50 border border-gray-200 px-3.5 py-3">
+									<label class="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+										<input
+											type="checkbox"
+											bind:checked={acceptedTerms}
+											required
+											class="mt-0.5 h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500"
+										/>
+										<span>
+											I accept the
+											<a href="https://www.eurobase.app/terms" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Terms of Service</a>
+											(v{LEGAL_VERSION}).
+										</span>
+									</label>
+									<label class="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+										<input
+											type="checkbox"
+											bind:checked={acceptedDPA}
+											required
+											class="mt-0.5 h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500"
+										/>
+										<span>
+											I accept the
+											<a href="https://www.eurobase.app/dpa" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Data Processing Agreement</a>
+											(v{LEGAL_VERSION}) and have read the
+											<a href="https://www.eurobase.app/privacy" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Privacy Policy</a>.
+										</span>
+									</label>
 								</div>
 							{/if}
 						{/if}

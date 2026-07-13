@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -76,16 +77,58 @@ func NewPlatformAuthService(pool *pgxpool.Pool, jwtSecret string) *PlatformAuthS
 	}
 }
 
+// AcceptedDocument represents one click-through consent bundled with a
+// signup request. Recorded to `legal_acceptances` in the same tx as
+// the `platform_users` insert, so no user row ever lives without its
+// consent trail (Phase A of the public-beta launch plan; closes the
+// gap called out in docs/legal/v1/dpa.md).
+type AcceptedDocument struct {
+	Type    string `json:"type"`    // 'terms' | 'dpa' | 'privacy' | …
+	Version string `json:"version"` // '2.0'
+}
+
+// ErrStaleDocumentVersion is returned when a client sends a document
+// version that isn't the currently-required one (superseded or unknown).
+// Typed sentinel — the HTTP handler recognises it and returns 400 rather
+// than 500, and the console can safely re-fetch the legal-documents list
+// on receipt. Fixes #279 review high #1.
+type ErrStaleDocumentVersion struct {
+	DocumentType string
+	Version      string
+}
+
+func (e *ErrStaleDocumentVersion) Error() string {
+	return fmt.Sprintf("unknown or superseded document version: %s v%s — please refresh the page and try again", e.DocumentType, e.Version)
+}
+
+// requiredAcceptances is the set of document types signup MUST record.
+// Additional documents (privacy, aup) may be present in the client
+// payload and get recorded too, but their absence isn't a hard block —
+// only Terms + DPA are load-bearing on GDPR Article 7 lawful-basis
+// grounds.
+var requiredAcceptances = []string{"terms", "dpa"}
+
 // SignUp creates a new platform user with email + bcrypt-hashed password.
 // When AllowPublicSignup is false (default), only emails present in the
 // platform_allowlist table can register. Others receive a waitlist error.
-func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string) (*PlatformAuthResponse, error) {
+//
+// `accepted` is the click-through list from the signup form. Must
+// include entries for all `requiredAcceptances` document types with
+// matching `document_type + document_version` rows in `legal_documents`;
+// otherwise SignUp fails without touching `platform_users`. On success,
+// one row per accepted document lands in `legal_acceptances` inside the
+// same transaction as the user insert, so there's never a user without
+// its consent trail.
+func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string, accepted []AcceptedDocument, clientIP, userAgent string) (*PlatformAuthResponse, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return nil, fmt.Errorf("email is required")
 	}
 	if len(password) < 8 {
 		return nil, fmt.Errorf("password must be at least 8 characters")
+	}
+	if err := validateRequiredAcceptances(accepted); err != nil {
+		return nil, err
 	}
 
 	if !s.AllowPublicSignup {
@@ -109,13 +152,30 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 		}
 	}
 
+	// Resolve each accepted (type, version) to a legal_documents row
+	// BEFORE opening the user-insert tx. If the client sent a version
+	// we don't recognise (e.g. an old browser tab from before we
+	// rolled v2), a typed ErrStaleDocumentVersion bubbles up so the
+	// HTTP layer returns 400 and the console can re-fetch — better
+	// than silently accepting a stale acceptance.
+	documents, err := s.resolveAcceptedDocuments(ctx, accepted)
+	if err != nil {
+		return nil, err
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // committed path returns before deferred rollback
+
 	var user PlatformUser
-	err = s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
 		 VALUES ($1, $2, now())
 		 RETURNING id, email, display_name`,
@@ -128,7 +188,41 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 
-	slog.Info("platform user signed up", "user_id", user.ID, "email", user.Email)
+	// Write one acceptance row per accepted document. `clientIP` and
+	// `userAgent` may be empty (e.g. in a test) — the columns are
+	// nullable. IP is parsed via net.ParseIP so a malformed XFF value
+	// (`1.2.3.4:5678`, `unknown`, a hostname) writes NULL rather than
+	// crashing the INET cast + rolling back the whole signup — #279
+	// review high #2. `document_type` is lowercased at insert so the
+	// `idx_legal_acceptances_user_type` index is queryable
+	// case-consistently — #279 review med #4. The `checksum` we
+	// resolved above lands in the row so audit later can prove what
+	// bytes the user saw (defensible under GDPR Article 7 even if a
+	// future deploy mutates `legal_documents.checksum` — #279 med #3).
+	var ipParam interface{}
+	if parsed := net.ParseIP(clientIP); parsed != nil {
+		ipParam = parsed.String()
+	}
+	var uaParam interface{}
+	if userAgent != "" {
+		uaParam = userAgent
+	}
+	for i, doc := range accepted {
+		_, err = tx.Exec(ctx,
+			`INSERT INTO legal_acceptances (user_id, document_id, document_type, document_version, document_checksum, ip, user_agent)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			user.ID, documents[i].id, strings.ToLower(doc.Type), doc.Version, documents[i].checksum, ipParam, uaParam,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("record acceptance for %s: %w", doc.Type, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit signup: %w", err)
+	}
+
+	slog.Info("platform user signed up", "user_id", user.ID, "email", user.Email, "acceptances", len(accepted))
 
 	// New signups are never superadmin; that flag is granted out-of-band.
 	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, false)
@@ -142,6 +236,64 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 		ExpiresIn:   expiresIn,
 		User:        user,
 	}, nil
+}
+
+// validateRequiredAcceptances ensures every entry in `requiredAcceptances`
+// is present in `accepted`. Returns a user-facing error naming the
+// missing docs so the console can highlight the checkboxes.
+func validateRequiredAcceptances(accepted []AcceptedDocument) error {
+	seen := make(map[string]bool, len(accepted))
+	for _, doc := range accepted {
+		seen[strings.ToLower(doc.Type)] = true
+	}
+	var missing []string
+	for _, req := range requiredAcceptances {
+		if !seen[req] {
+			missing = append(missing, req)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("you must accept the following to sign up: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// resolvedDocument bundles the DB-resolved fields the caller needs to
+// insert into legal_acceptances: the FK id, and the checksum the user
+// saw at click-through time. Denormalising the checksum into the
+// acceptance row means an audit later can prove exactly which bytes
+// the user consented to, even if the `legal_documents` row gets its
+// checksum column mutated by a follow-up deploy (#279 review med #3).
+type resolvedDocument struct {
+	id       string
+	checksum string
+}
+
+// resolveAcceptedDocuments looks each (type, version) up in
+// legal_documents. Returns the resolved rows in the same order as
+// the input. A missing row returns a typed ErrStaleDocumentVersion
+// so the HTTP layer can 400 + the console can re-fetch.
+func (s *PlatformAuthService) resolveAcceptedDocuments(ctx context.Context, accepted []AcceptedDocument) ([]resolvedDocument, error) {
+	out := make([]resolvedDocument, len(accepted))
+	for i, doc := range accepted {
+		var r resolvedDocument
+		err := s.pool.QueryRow(ctx,
+			`SELECT id, checksum FROM legal_documents
+			  WHERE document_type = $1
+			    AND version = $2
+			    AND active = true
+			    AND superseded_at IS NULL`,
+			strings.ToLower(doc.Type), doc.Version,
+		).Scan(&r.id, &r.checksum)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				return nil, &ErrStaleDocumentVersion{DocumentType: doc.Type, Version: doc.Version}
+			}
+			return nil, fmt.Errorf("resolve document %s v%s: %w", doc.Type, doc.Version, err)
+		}
+		out[i] = r
+	}
+	return out, nil
 }
 
 // SignIn authenticates a platform user by email + password.

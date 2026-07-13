@@ -374,11 +374,22 @@ export class EurobaseAPI {
 
 	// ---- public methods ----
 
-	/** Sign up a new platform user. */
-	async signUp(email: string, password: string): Promise<{ access_token: string; user: { id: string; email: string } }> {
+	/**
+	 * Sign up a new platform user.
+	 *
+	 * `acceptedDocuments` is the click-through consent for Terms + DPA
+	 * (public-beta launch, Phase A). Backend rejects with 400 if the
+	 * required set (`terms`, `dpa`) is missing — the console gates the
+	 * submit button on both checkboxes, so this list must be present.
+	 */
+	async signUp(
+		email: string,
+		password: string,
+		acceptedDocuments: Array<{ type: string; version: string }>,
+	): Promise<{ access_token: string; user: { id: string; email: string } }> {
 		const resp = await this.fetch<{ access_token: string; user: { id: string; email: string } }>('/platform/auth/signup', {
 			method: 'POST',
-			body: JSON.stringify({ email, password })
+			body: JSON.stringify({ email, password, accepted_documents: acceptedDocuments })
 		});
 		this.setToken(resp.access_token);
 		return resp;

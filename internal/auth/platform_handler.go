@@ -12,8 +12,9 @@ import (
 type AuthRateLimiter func(w http.ResponseWriter, r *http.Request, action, identifier string) bool
 
 type signUpRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string             `json:"email"`
+	Password string             `json:"password"`
+	Accepted []AcceptedDocument `json:"accepted_documents"`
 }
 
 type signInRequest struct {
@@ -39,7 +40,7 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 			return
 		}
 
-		resp, err := svc.SignUp(r.Context(), req.Email, req.Password)
+		resp, err := svc.SignUp(r.Context(), req.Email, req.Password, req.Accepted, clientIP(r), r.UserAgent())
 		if err != nil {
 			if _, ok := err.(*WaitlistError); ok {
 				slog.Info("signup blocked by allowlist", "email", req.Email)
@@ -48,6 +49,21 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 				json.NewEncoder(w).Encode(map[string]string{
 					"error": "waitlist",
 					"message": "Eurobase is currently in closed beta. You've been added to the waitlist and we'll notify you when your spot opens up.",
+				})
+				return
+			}
+			// Stale document version → 400 with the "please refresh"
+			// message so the console can re-fetch the current
+			// legal_documents set and retry. Typed sentinel so we
+			// don't string-match a human-readable error. (#279
+			// review high #1.)
+			if _, ok := err.(*ErrStaleDocumentVersion); ok {
+				slog.Info("signup rejected: stale document version", "email", req.Email, "error", err)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "stale_document_version",
+					"message": err.Error(),
 				})
 				return
 			}
@@ -304,7 +320,8 @@ func isUserError(err error) bool {
 		msg == "current password is incorrect" ||
 		msg == "delete all projects before deleting your account" ||
 		msg == "invalid or expired token" ||
-		msg == "email service not configured"
+		msg == "email service not configured" ||
+		strings.HasPrefix(msg, "you must accept the following to sign up:")
 }
 
 func writeJSONError(w http.ResponseWriter, msg string, status int) {
