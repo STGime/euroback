@@ -10,10 +10,10 @@ REVIEWER NOTES — read before publication (v2)
        - Click-through acceptance is now recorded (legal_acceptances
          table, migration 000074, landed with PR #279). Closes the
          Phase 2 gap the v1 header called out.
-       - Governing law is inherited from the Terms (§13), which is
-         now the Republic of Estonia — no explicit change here
-         needed because §13 references "the law applicable to the
-         Terms of Service."
+       - Governing law is inherited from the Terms (§16 — Republic
+         of Estonia + Harju County Court, Tallinn). No text change
+         to this DPA's §13 needed because it already references
+         "the law applicable to the Terms of Service."
   3. This DPA is incorporated by reference into the Terms of Service
      and accepted by click-wrap at signup.
   4. The clause referencing the live compliance report at
