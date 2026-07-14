@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,7 +20,22 @@ import (
 type SubdomainMiddleware struct {
 	pool   *pgxpool.Pool
 	suffix string // e.g. ".eurobase.app"
+	// lastActiveBump coalesces the per-request `last_active_at`
+	// UPDATE. Without this, a busy project at 10 req/s would fire
+	// 10 UPDATEs/s on the same `projects` row → hot tuple, WAL /
+	// vacuum pressure. The idle-pause cron runs hourly and only
+	// needs coarse-grained timestamps, so a 60-s coalescing window
+	// drops the write load by ~600× on hot projects with no loss
+	// of pause-detection accuracy. (#284 review high #1.)
+	//
+	// Key: project ID (string). Value: unix nanos of the last bump.
+	lastActiveBump sync.Map
 }
+
+// lastActiveBumpInterval is the coalescing window for last_active_at
+// writes. The idle-pause cron has 30-day granularity so anything
+// finer than a minute is DB write waste.
+const lastActiveBumpInterval = 60 * time.Second
 
 // NewSubdomainMiddleware creates middleware that resolves projects by subdomain.
 // suffix is the domain suffix to strip (e.g. ".eurobase.app").
@@ -96,46 +112,49 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 		// above for the reasoning. Only fires on the state-flipping
 		// request; subsequent requests skip both branches.
 		if state == "paused" {
-			if _, err := m.pool.Exec(r.Context(),
+			// Detached ctx so a client bailing mid-wake doesn't cancel
+			// the UPDATE — the write is idempotent + must complete
+			// even if this request abandons (otherwise the project
+			// stays paused and every subsequent request repeats the
+			// wake).  (#284 review med #7.)
+			wakeCtx, wakeCancel := timeoutCtx(5 * time.Second)
+			tag, err := m.pool.Exec(wakeCtx,
 				`UPDATE public.projects
 				    SET state = 'active', last_active_at = now()
 				  WHERE id = $1 AND state = 'paused'`,
 				pc.ProjectID,
-			); err != nil {
+			)
+			wakeCancel()
+			if err != nil {
 				slog.Error("wake paused project", "slug", slug, "project_id", pc.ProjectID, "error", err)
 				http.Error(w, `{"error":"wake failed — please retry"}`, http.StatusServiceUnavailable)
 				return
 			}
-			jitter := time.Duration(rand.Int64N(int64(wakeSleepJitter))) //nolint:gosec // not security-sensitive
-			sleep := wakeSleepBase + jitter
-			slog.Info("waking paused project", "slug", slug, "project_id", pc.ProjectID, "sleep", sleep)
-			// Signal to any client-side handler that the delay was
-			// intentional. Console renders the upgrade prompt on
-			// seeing this header.
-			w.Header().Set("X-Eurobase-Woke-From-Pause", "true")
-			select {
-			case <-time.After(sleep):
-			case <-r.Context().Done():
-				// Client bailed mid-wake; abandon.
-				return
+			// Concurrent-wake safety: two requests can race the SELECT
+			// above and both attempt the guarded UPDATE. The
+			// `WHERE state='paused'` clause means only one row flips;
+			// the loser gets `RowsAffected() == 0`. Without this
+			// check, the loser would ALSO sleep 30 s + set the
+			// wake header, double-billing the pause pain for one
+			// actual pause. Skip both when we didn't do the flip.
+			// (#284 review high #3.)
+			if tag.RowsAffected() > 0 {
+				jitter := time.Duration(rand.Int64N(int64(wakeSleepJitter))) //nolint:gosec // not security-sensitive
+				sleep := wakeSleepBase + jitter
+				slog.Info("waking paused project", "slug", slug, "project_id", pc.ProjectID, "sleep", sleep)
+				// Signal to any client-side handler that the delay was
+				// intentional. Console renders the upgrade prompt on
+				// seeing this header.
+				w.Header().Set("X-Eurobase-Woke-From-Pause", "true")
+				select {
+				case <-time.After(sleep):
+				case <-r.Context().Done():
+					// Client bailed mid-wake; abandon.
+					return
+				}
 			}
 		} else {
-			// Bump last_active_at in the background so the cron sees
-			// fresh timestamps without slowing the request path. The
-			// UPDATE is a single-row point write, cheap enough to not
-			// need coalescing at beta scale.
-			go func(projectID string) {
-				ctx, cancel := timeoutCtx(2 * time.Second)
-				defer cancel()
-				if _, err := m.pool.Exec(ctx,
-					`UPDATE public.projects
-					    SET last_active_at = now()
-					  WHERE id = $1`,
-					projectID,
-				); err != nil {
-					slog.Debug("bump last_active_at failed", "project_id", projectID, "error", err)
-				}
-			}(pc.ProjectID)
+			m.maybeBumpLastActive(pc.ProjectID)
 		}
 
 		slog.Debug("subdomain resolved", "slug", slug, "project_id", pc.ProjectID)
@@ -151,4 +170,34 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 // for fire-and-forget writes that must not outlive their intent.
 func timeoutCtx(d time.Duration) (ctx context.Context, cancel context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
+}
+
+// maybeBumpLastActive fires the last_active_at UPDATE for `projectID`
+// iff the previous bump was more than lastActiveBumpInterval ago. On
+// projects taking 10+ req/s this eliminates ~99% of what would
+// otherwise be a hot-tuple write pattern (#284 review high #1).
+//
+// last-write-wins races between two concurrent goroutines are fine —
+// the UPDATE is idempotent, and the coarse timestamps are only
+// consumed by the idle-pause cron with 30-day granularity.
+func (m *SubdomainMiddleware) maybeBumpLastActive(projectID string) {
+	nowNanos := time.Now().UnixNano()
+	if prev, ok := m.lastActiveBump.Load(projectID); ok {
+		if nowNanos-prev.(int64) < int64(lastActiveBumpInterval) {
+			return
+		}
+	}
+	m.lastActiveBump.Store(projectID, nowNanos)
+	go func(projectID string) {
+		ctx, cancel := timeoutCtx(2 * time.Second)
+		defer cancel()
+		if _, err := m.pool.Exec(ctx,
+			`UPDATE public.projects
+			    SET last_active_at = now()
+			  WHERE id = $1`,
+			projectID,
+		); err != nil {
+			slog.Debug("bump last_active_at failed", "project_id", projectID, "error", err)
+		}
+	}(projectID)
 }

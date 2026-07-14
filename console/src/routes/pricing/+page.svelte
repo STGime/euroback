@@ -133,7 +133,7 @@
 
 	<!-- Tier cards -->
 	<section class="mx-auto max-w-6xl px-6 pb-12">
-		<div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+		<div class="grid grid-cols-1 gap-6 md:grid-cols-3">
 			<!-- Free -->
 			<div class="rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
 				<h2 class="text-xl font-semibold text-gray-900">Free</h2>
