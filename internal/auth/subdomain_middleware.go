@@ -173,21 +173,17 @@ func timeoutCtx(d time.Duration) (ctx context.Context, cancel context.CancelFunc
 }
 
 // maybeBumpLastActive fires the last_active_at UPDATE for `projectID`
-// iff the previous bump was more than lastActiveBumpInterval ago. On
-// projects taking 10+ req/s this eliminates ~99% of what would
-// otherwise be a hot-tuple write pattern (#284 review high #1).
+// iff `shouldBump` returns true. On projects taking 10+ req/s this
+// eliminates ~99% of what would otherwise be a hot-tuple write
+// pattern (#284 review high #1).
 //
 // last-write-wins races between two concurrent goroutines are fine —
 // the UPDATE is idempotent, and the coarse timestamps are only
 // consumed by the idle-pause cron with 30-day granularity.
 func (m *SubdomainMiddleware) maybeBumpLastActive(projectID string) {
-	nowNanos := time.Now().UnixNano()
-	if prev, ok := m.lastActiveBump.Load(projectID); ok {
-		if nowNanos-prev.(int64) < int64(lastActiveBumpInterval) {
-			return
-		}
+	if !shouldBump(&m.lastActiveBump, projectID, time.Now(), lastActiveBumpInterval) {
+		return
 	}
-	m.lastActiveBump.Store(projectID, nowNanos)
 	go func(projectID string) {
 		ctx, cancel := timeoutCtx(2 * time.Second)
 		defer cancel()
@@ -200,4 +196,19 @@ func (m *SubdomainMiddleware) maybeBumpLastActive(projectID string) {
 			slog.Debug("bump last_active_at failed", "project_id", projectID, "error", err)
 		}
 	}(projectID)
+}
+
+// shouldBump is the pure coalescing decision. Extracted from
+// maybeBumpLastActive so the guard is directly unit-testable and the
+// test doesn't have to keep a shadow copy in sync (#284 round-2
+// review low #1).
+func shouldBump(store *sync.Map, key string, now time.Time, interval time.Duration) bool {
+	nowNanos := now.UnixNano()
+	if prev, ok := store.Load(key); ok {
+		if nowNanos-prev.(int64) < int64(interval) {
+			return false
+		}
+	}
+	store.Store(key, nowNanos)
+	return true
 }
