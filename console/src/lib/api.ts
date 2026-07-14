@@ -170,6 +170,17 @@ export interface Project {
 	created_at: string;
 	public_key?: string;
 	secret_key?: string;
+	/** Phase B lifecycle (migration 000076). `state = 'paused'` when
+	 * a Free project has gone 30 days without a signed request; the
+	 * gateway wake middleware flips it back on the next request with
+	 * a deliberate ~30 s pause. */
+	state?: 'active' | 'paused';
+	last_active_at?: string | null;
+	/** Grandfather window: while this timestamp is in the future,
+	 * existing Free projects keep the pre-Phase-B (higher) numeric
+	 * caps. Set to now() + 90 days for every Free project at the
+	 * time migration 000076 landed; NULL for fresh signups. */
+	grandfathered_until?: string | null;
 }
 
 export interface ForeignKeyInfo {
@@ -1483,6 +1494,12 @@ export interface PlanLimits {
 	 * upgrade card. The underlying API endpoints stay callable —
 	 * this is purely a console-render gate. Free = false, Pro = true. */
 	dsar_console_ui: boolean;
+	/** Phase B binary Pro-only gates (migration 000075). All three
+	 * default to false on Free, true on Pro. Enforcement lands in
+	 * `internal/plans/enforcement.go`. */
+	custom_domain: boolean;
+	byo_smtp: boolean;
+	quota_alerts: boolean;
 }
 
 export interface ProjectUsage {
