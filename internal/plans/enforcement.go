@@ -78,8 +78,11 @@ func (s *LimitsService) CheckWebhookLimit(ctx context.Context, projectID string)
 }
 
 // CheckMAULimit verifies the project has not exceeded its plan's monthly active user limit.
+// Uses GetEffectiveProjectLimits so grandfathered Free projects keep
+// the pre-Phase-B 10 000 cap until their `grandfathered_until` window
+// closes (public-beta launch plan decision #3, migration 000076).
 func (s *LimitsService) CheckMAULimit(ctx context.Context, projectID, schemaName string) error {
-	limits, err := s.GetProjectLimits(ctx, projectID)
+	limits, err := s.GetEffectiveProjectLimits(ctx, projectID)
 	if err != nil {
 		return err
 	}
@@ -123,4 +126,49 @@ func (s *LimitsService) GetUploadSizeLimit(ctx context.Context, projectID string
 	}
 
 	return int64(limits.UploadSizeMB) * 1024 * 1024, nil
+}
+
+// CheckCustomDomain gates the CNAME-your-own-domain feature (Phase B
+// binary Pro-only gate, migration 000075). Free = false, Pro = true.
+// Doesn't consider grandfathering — the feature didn't exist on the
+// pre-Phase-B plan, so enabling it for grandfathered Free projects
+// would be a real product change, not a grandfather.
+func (s *LimitsService) CheckCustomDomain(ctx context.Context, projectID string) error {
+	limits, err := s.GetProjectLimits(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if !limits.CustomDomain {
+		slog.Warn("custom domain not available", "project_id", projectID, "plan", limits.Plan)
+		return fmt.Errorf("custom domains are not available on the %s plan, upgrade to pro", limits.Plan)
+	}
+	return nil
+}
+
+// CheckBYOSMTP gates bring-your-own-SMTP for auth mail (Phase B
+// binary Pro-only gate, migration 000075).
+func (s *LimitsService) CheckBYOSMTP(ctx context.Context, projectID string) error {
+	limits, err := s.GetProjectLimits(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if !limits.BYOSMTP {
+		slog.Warn("BYO SMTP not available", "project_id", projectID, "plan", limits.Plan)
+		return fmt.Errorf("BYO SMTP is not available on the %s plan, upgrade to pro", limits.Plan)
+	}
+	return nil
+}
+
+// CheckQuotaAlerts gates Slack / webhook alerts at 80% of any quota
+// (Phase B binary Pro-only gate, migration 000075).
+func (s *LimitsService) CheckQuotaAlerts(ctx context.Context, projectID string) error {
+	limits, err := s.GetProjectLimits(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if !limits.QuotaAlerts {
+		slog.Warn("quota alerts not available", "project_id", projectID, "plan", limits.Plan)
+		return fmt.Errorf("quota alerts are not available on the %s plan, upgrade to pro", limits.Plan)
+	}
+	return nil
 }

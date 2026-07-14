@@ -125,6 +125,15 @@ func main() {
 	limitsSvc := plans.NewLimitsService(pool)
 	slog.Info("plan limits service initialized")
 
+	// ── Idle-pause worker ── (Phase B of the public-beta launch plan)
+	// Hourly scan of Free projects that haven't seen a signed request
+	// in 30 days; flips them to state='paused'. The wake-on-request
+	// path in the subdomain middleware handles the reverse direction
+	// with a deliberate ~30 s pause to make "Pro never pauses" a
+	// visible pain point.
+	go plans.NewIdlePauseWorker(pool).Run(ctx)
+	slog.Info("idle-pause worker scheduled")
+
 	// ── Set up platform auth ──
 	platformAuthSvc := auth.NewPlatformAuthService(pool, platformJWTSecret)
 	platformAuthSvc.AllowPublicSignup = os.Getenv("ALLOW_PUBLIC_SIGNUP") == "true"
