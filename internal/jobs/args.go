@@ -45,3 +45,26 @@ func (UserExportArgs) Kind() string { return "export_user" }
 func (UserExportArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 2}
 }
+
+// SendDripEmailArgs is one step of the 6-mail onboarding drip series.
+// Enqueued by tenant/auth signup with ScheduledAt = signupTime +
+// step*OnboardingIntervalDays. See the SendDripEmailWorker for what
+// it does at execution time (opt-out check, idempotency guard,
+// render, send, audit-log row).
+//
+// Phase C of the public-beta launch plan.
+type SendDripEmailArgs struct {
+	UserID string `json:"user_id"`
+	Step   int    `json:"step"` // 0..5 (six-mail drip)
+}
+
+func (SendDripEmailArgs) Kind() string { return "send_drip_email" }
+
+// MaxAttempts = 3: transient TEM failures should retry, but a
+// permanent bounce or template render error shouldn't spam the
+// user's inbox with the same mail on 25 retries. Failed sends land
+// in drip_email_sends with status='failed' + error message so we
+// can inspect without needing to grep the worker logs.
+func (SendDripEmailArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 3}
+}

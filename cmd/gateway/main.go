@@ -34,7 +34,11 @@ import (
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
+	"github.com/eurobase/euroback/internal/workers"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -142,6 +146,19 @@ func main() {
 	}
 	patSvc := auth.NewPATService(pool)
 	platformAuth := auth.NewPlatformAuthMiddleware(platformAuthSvc).WithPATService(patSvc)
+
+	// ── River insert-only client for onboarding-drip enqueue (Phase C) ──
+	// The gateway only enqueues; the worker pod runs the actual jobs.
+	// A River client with no Workers is "insert-only" and safe here.
+	riverInsertOnly, err := river.NewClient(riverpgxv5.New(pool), &river.Config{})
+	if err != nil {
+		slog.Error("failed to create river insert-only client", "error", err)
+		os.Exit(1)
+	}
+	platformAuthSvc.SetDripEnqueuer(func(ctx context.Context, tx pgx.Tx, userID string, signupTime time.Time) error {
+		return workers.EnqueueOnboardingSeries(ctx, riverInsertOnly, tx, userID, signupTime)
+	})
+	slog.Info("onboarding drip enqueuer wired")
 
 	// ── Set up rate limiter (optional — degrades gracefully) ──
 	var limiter *ratelimit.RateLimiter
@@ -411,8 +428,14 @@ func main() {
 	}
 	accessRecorder := audit.NewAccessRecorder(pool, accessCfg)
 
+	// ── Unsubscribe token signer (Phase C) ──
+	// HMAC-signs opt-out URLs baked into every outbound platform
+	// mail footer. Shares the PLATFORM_JWT_SECRET so gateway +
+	// worker agree on the derived HMAC key.
+	unsubSigner := email.NewUnsubscribeSigner(platformJWTSecret)
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
