@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/workers"
@@ -89,6 +91,40 @@ func main() {
 	}
 	slog.Info("s3 client initialized")
 
+	// ── Set up outbound email + unsubscribe signer (Phase C) ──
+	// Same TEM client + platform-JWT-derived unsubscribe secret as
+	// the gateway uses. Missing TEM creds is a soft warning: the
+	// drip worker's SendRaw will log-only, but the audit table
+	// still lands the send-attempt row.
+	consoleURL := strings.TrimRight(os.Getenv("CONSOLE_URL"), "/")
+	if consoleURL == "" {
+		consoleURL = "https://console.eurobase.app"
+	}
+	baseURL := strings.TrimRight(os.Getenv("GATEWAY_BASE_URL"), "/")
+	if baseURL == "" {
+		baseURL = "https://api.eurobase.app"
+	}
+	docsURL := consoleURL + "/docs"
+
+	// Drip sender falls back to `hello@eurobase.app` if no explicit
+	// env override — the persona split (`hello@` drip vs `noreply@`
+	// transactional) is a locked-in decision in the public-beta
+	// launch plan; hardcoding the fallback keeps a Secret typo from
+	// silently pointing "reply to this email — we read replies" at a
+	// dead noreply@ inbox.
+	emailClient := email.NewEmailClient(
+		os.Getenv("SCW_TEM_SECRET_KEY"),
+		os.Getenv("SCW_TEM_REGION"),
+		coalesceEnv("SCW_TEM_PROJECT_ID", "SCW_PROJECT_ID"),
+		firstNonEmpty(os.Getenv("EMAIL_FROM_ADDRESS_DRIP"), "hello@eurobase.app"),
+		firstNonEmpty(os.Getenv("EMAIL_FROM_NAME_DRIP"), "Eurobase"),
+	)
+	emailService := email.NewEmailService(emailClient, pool, consoleURL)
+	if !emailClient.Configured() {
+		slog.Warn("email client not configured — drip sends will log-only")
+	}
+	unsubSigner := email.NewUnsubscribeSigner(requireEnv("PLATFORM_JWT_SECRET"))
+
 	// ── Register River workers ──
 	riverWorkers := river.NewWorkers()
 	river.AddWorker(riverWorkers, &workers.ProvisionProjectWorker{
@@ -102,6 +138,14 @@ func main() {
 	river.AddWorker(riverWorkers, &workers.UserExportWorker{
 		DBPool: pool,
 		S3:     s3Client,
+	})
+	river.AddWorker(riverWorkers, &workers.SendDripEmailWorker{
+		DBPool:     pool,
+		Emails:     emailService,
+		Signer:     unsubSigner,
+		BaseURL:    baseURL,
+		ConsoleURL: consoleURL,
+		DocsURL:    docsURL,
 	})
 
 	// ── Create River client in worker mode ──
@@ -199,6 +243,30 @@ func requireEnv(key string) string {
 		os.Exit(1)
 	}
 	return val
+}
+
+// coalesceEnv returns the first non-empty value from the given env
+// var keys. Used to fall back from a service-specific setting to a
+// shared one (e.g. SCW_TEM_PROJECT_ID → SCW_PROJECT_ID).
+func coalesceEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// firstNonEmpty returns the first non-empty string from the args.
+// Handy for "prefer specific, fall back to shared" patterns where
+// the values are already-resolved strings rather than env keys.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // parseLogLevel converts a string log level to slog.Level.

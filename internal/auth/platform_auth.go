@@ -22,10 +22,22 @@ type PlatformEmailer interface {
 	VerifyPlatformToken(ctx context.Context, rawToken, tokenType string) (string, error)
 }
 
+// DripEnqueuer is an optional hook the gateway wires up in main.go to
+// enqueue the onboarding drip series when a signup succeeds. Runs
+// inside the same tx as the platform_users insert so a signup that
+// rolls back never leaves orphan drip jobs. Typed as a closure rather
+// than a River client to keep the auth package free of a hard River
+// dep — cmd/gateway/main.go passes a closure that calls
+// workers.EnqueueOnboardingSeries.
+//
+// Phase C of the public-beta launch plan.
+type DripEnqueuer func(ctx context.Context, tx pgx.Tx, userID string, signupTime time.Time) error
+
 type PlatformAuthService struct {
 	pool              *pgxpool.Pool
 	jwtSecret         []byte
 	emailService      PlatformEmailer
+	dripEnqueuer      DripEnqueuer
 	AllowPublicSignup bool // when false, only emails in platform_allowlist can sign up
 }
 
@@ -41,6 +53,13 @@ func (e *WaitlistError) Error() string {
 // SetEmailService sets the email service for password reset emails.
 func (s *PlatformAuthService) SetEmailService(svc PlatformEmailer) {
 	s.emailService = svc
+}
+
+// SetDripEnqueuer wires the Phase-C onboarding-drip enqueue hook.
+// Optional — if unset, SignUp just skips the enqueue step and a user
+// gets no drip mails. Runs inside the signup tx.
+func (s *PlatformAuthService) SetDripEnqueuer(fn DripEnqueuer) {
+	s.dripEnqueuer = fn
 }
 
 // PlatformUser represents a row from public.platform_users.
@@ -215,6 +234,29 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 		)
 		if err != nil {
 			return nil, fmt.Errorf("record acceptance for %s: %w", doc.Type, err)
+		}
+	}
+
+	// Enqueue the onboarding drip series inside the same tx (Phase C).
+	// Wrapped in a SAVEPOINT — a River insert failure (missing/stale
+	// river_job schema on first Phase-C deploy, driver hiccup, etc.)
+	// would otherwise abort the outer tx and Postgres would convert
+	// the subsequent COMMIT into a ROLLBACK, dropping the signup.
+	// With a savepoint, only the enqueue rolls back; the platform_users
+	// + legal_acceptances rows still commit. Trade-off matches the
+	// PR's locked-in intent: signup should not be blocked by a queue
+	// insert. `signupTime = now()` matches what the user just saw.
+	if s.dripEnqueuer != nil {
+		sp, spErr := tx.Begin(ctx)
+		if spErr != nil {
+			slog.Warn("open drip-enqueue savepoint failed — signup continues without drip", "user_id", user.ID, "error", spErr)
+		} else {
+			if err := s.dripEnqueuer(ctx, sp, user.ID, time.Now().UTC()); err != nil {
+				slog.Warn("enqueue onboarding drip failed — signup continues without drip", "user_id", user.ID, "error", err)
+				_ = sp.Rollback(ctx)
+			} else if err := sp.Commit(ctx); err != nil {
+				slog.Warn("commit drip-enqueue savepoint failed — signup continues without drip", "user_id", user.ID, "error", err)
+			}
 		}
 	}
 

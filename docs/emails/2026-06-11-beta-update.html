@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eurobase beta update — edge functions grew up</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#1d4ed8; padding:28px 32px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff;">Eurobase</p>
+              <p style="margin:6px 0 0; font-size:14px; color:#bfdbfe;">Beta update &middot; June 2026</p>
+            </td>
+          </tr>
+
+          <!-- Intro -->
+          <tr>
+            <td style="padding:32px 32px 8px;">
+              <p style="margin:0 0 16px; font-size:16px; line-height:1.6; color:#111827;">Hi,</p>
+              <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#374151;">
+                We spent the last days building a real app on Eurobase ourselves — and fixed everything
+                that got in the way. The result is a big batch of improvements, most of them to
+                <strong>edge functions</strong>. Everything below is already live; no action needed on your side.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Changes -->
+          <tr>
+            <td style="padding:8px 32px;">
+
+              <h2 style="margin:16px 0 4px; font-size:17px; color:#111827;">⚡ Edge functions</h2>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">TypeScript &amp; <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">export default</code> now work</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Write your function in TypeScript with a standard <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">export default async (req, ctx) =&gt; …</code> —
+                we compile it when you deploy. Broken code now fails <em>at deploy time</em> with line numbers instead of erroring on first invocation.
+                One honest limitation: third-party imports (URL or npm) aren't supported yet — using one returns a clear runtime error rather than failing silently.
+              </p>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">Vault secrets work inside functions</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">ctx.vault.get('MY_API_KEY')</code> previously
+                returned <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">null</code> for recently written secrets — fixed.
+                And when something <em>is</em> wrong on our side, you now get a descriptive error instead of a null that looks like a missing secret.
+              </p>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">Row-level security behaves like the REST API</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">auth_uid()</code> and
+                <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">is_service_role()</code> now work in SQL run from functions:
+                a function invoked with a user JWT acts as that user, and without one it gets service access — exactly like the REST API.
+                If you wrote RLS policy workarounds for functions, you can delete them.
+              </p>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">Redeploys take effect immediately</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Previously a redeployed function could keep running old code for up to 5 minutes. Now a deploy is live on the very next invocation.
+              </p>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">Schedules accept real timezones</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">timezone: 'Europe/Berlin'</code> (or any IANA timezone)
+                now works for scheduled functions — no more UTC-only workarounds.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">🛠 CLI &amp; getting started</h2>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">Install the CLI with Homebrew</h3>
+              <p style="margin:0 0 8px; font-size:14px; line-height:1.6; color:#374151;">
+                The CLI is now properly distributed — install or update it with:
+              </p>
+              <p style="margin:0 0 12px;">
+                <code style="display:block; background:#111827; color:#4ade80; padding:10px 14px; border-radius:6px; font-size:13px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;">brew install stgime/tap/eurobase</code>
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Check what you're running with <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">eurobase version</code> —
+                future updates arrive via <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">brew upgrade</code>.
+                Prefer a plain binary? <a href="https://github.com/STGime/homebrew-tap/releases" style="color:#1d4ed8;">Download it here</a>.
+              </p>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">The CLI tells you where things go</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">eurobase status</code> now actually shows your active
+                project, plan, and usage. Deploys name their target (<em>"deployed to predwell (0515e4e2…)"</em>), and login can no longer leave you
+                silently pointed at an old project — so a deploy can't land somewhere you didn't expect.
+              </p>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">localhost works out of the box</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                New projects now allow browser requests from <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">http://localhost:3000</code> by
+                default — no more CORS wall on your first <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">fetch</code>.
+                For existing projects, add your app's origin under <strong>Project → Auth settings → CORS origins</strong>.
+              </p>
+
+            </td>
+          </tr>
+
+          <!-- CTA -->
+          <tr>
+            <td style="padding:16px 32px 8px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background-color:#eff6ff; border-radius:8px;">
+                <tr>
+                  <td style="padding:20px 24px;">
+                    <p style="margin:0; font-size:14px; line-height:1.6; color:#1e3a8a;">
+                      <strong>Found something broken? That's the point of beta.</strong><br>
+                      Every fix above started as feedback from real usage. Tell us what's in your way —
+                      just reply to this email.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Sign-off -->
+          <tr>
+            <td style="padding:16px 32px 32px;">
+              <p style="margin:0 0 4px; font-size:15px; line-height:1.6; color:#374151;">Happy building,</p>
+              <p style="margin:0; font-size:15px; line-height:1.6; color:#111827;"><strong>Stefan</strong><br>
+              <span style="font-size:13px; color:#6b7280;">Eurobase</span></p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#f9fafb; padding:20px 32px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0 0 8px; font-size:12px; line-height:1.6; color:#9ca3af;">
+                Eurobase — the EU-sovereign backend platform. All your data stays on European infrastructure in France.<br>
+                You're receiving this because you're part of the Eurobase beta.
+              </p>
+              <p style="margin:0; font-size:12px; line-height:1.6; color:#9ca3af;">
+                Don't want these updates? <a href="https://console.eurobase.app/account/mail" style="color:#6b7280; text-decoration:underline;">Manage mailing preferences</a>.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

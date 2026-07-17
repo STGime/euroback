@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eurobase beta update — BYO SMTP, one-click DSAR, rate limits</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#1d4ed8; padding:28px 32px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff;">Eurobase</p>
+              <p style="margin:6px 0 0; font-size:14px; color:#bfdbfe;">Beta update &middot; June 30, 2026</p>
+            </td>
+          </tr>
+
+          <!-- Intro -->
+          <tr>
+            <td style="padding:32px 32px 8px;">
+              <p style="margin:0 0 16px; font-size:16px; line-height:1.6; color:#111827;">Hi,</p>
+              <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#374151;">
+                Six days since the cert-outage note, and a lot has shipped on the auth + compliance side. Three things are new in the console — <strong>your own SMTP provider</strong>, <strong>per-project rate limits</strong>, and <strong>one-click DSAR exports</strong> — plus one bug fix worth flagging. Everything below is already live.
+              </p>
+            </td>
+          </tr>
+
+          <!-- TL;DR (moved to top per request) -->
+          <tr>
+            <td style="padding:0 32px 16px;">
+              <div style="background-color:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:16px 18px;">
+                <p style="margin:0 0 6px; font-size:14px; font-weight:600; color:#1e3a8a;">TL;DR — what to try this week</p>
+                <ul style="margin:0; padding-left:20px; font-size:14px; line-height:1.6; color:#1e40af;">
+                  <li>Hook up your own SMTP (<em>Auth &rarr; SMTP</em>) and send a test.</li>
+                  <li>Set your rate limits (<em>Auth &rarr; Rate Limits</em>) before launching the next thing.</li>
+                  <li>If you're on Pro, click through a DSAR export to see the flow (<em>Compliance &rarr; Data Export</em>).</li>
+                  <li>Re-open any edge function that previously errored — it works now.</li>
+                </ul>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Section: BYO SMTP -->
+          <tr>
+            <td style="padding:8px 32px;">
+
+              <h2 style="margin:16px 0 4px; font-size:17px; color:#111827;">📤 Bring your own SMTP provider</h2>
+
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Until now, every auth email (verification, password reset, magic link) went through the shared Eurobase sender. Fine for a sketch, painful past a few signups a day. You can now plug in your own provider and Eurobase routes your project's auth mail through it — your sender domain, your deliverability, your provider's quota.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Where: <strong>Project &rarr; Auth &rarr; SMTP</strong> tab. Fill in host / port / username / password / from-address / encryption (STARTTLS, TLS or none). Hit Save, then <strong>Send test</strong> to verify before the project starts using it — the upstream's exact error is shown if it fails, so a misconfig dies at setup, not at first signup.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Your SMTP password is sealed at rest with your project's per-tenant key (same AES-256-GCM pipeline as your vault secrets and edge-function env vars). The API never returns it, and an "edit other fields without retyping" affordance keeps the saved one when you leave the password blank on an edit.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                If you point at a US provider (SendGrid, Mailgun, Postmark, SES, Mandrill, SparkPost, SMTP.com), the console shows an amber advisory: your email content leaves the EU jurisdiction even though the rest of your project doesn't. <strong>It's advisory, not a block</strong> — your data, your call. EU alternatives worth knowing if you want sovereignty end-to-end: Scaleway TEM, Brevo (FR), Mailjet (EU), Mailtrap EU.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">⚡ Per-project rate limits</h2>
+
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Five auth knobs + an "IP Address Forwarding" toggle, all on one page. Cap signup/sign-in rate per IP, token-refresh rate, token-verify rate, emails/hour, SMS/hour. Defaults are platform-wide and sane for a project up to a few thousand signups/day; you only touch the page if you want to tighten or loosen a specific knob.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Where: <strong>Project &rarr; Auth &rarr; Rate Limits</strong> tab. Empty input = platform default (the placeholder shows the current default value). Over-quota responses arrive as <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">HTTP 429</code> with a <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">Retry-After</code> header — your SDK can surface a friendly message and retry cleanly.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                If your app sits behind a CDN or reverse proxy you control, flip the <strong>IP Address Forwarding</strong> toggle so the limiter keys off the leftmost <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">X-Forwarded-For</code> entry instead of the TCP peer. Leave it off otherwise — a forged XFF header would dodge the limit.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">📦 One-click DSAR exports (GDPR Article 15 + 20)</h2>
+
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                When a user emails "what do you have on me?" or a customer asks for their data so they can leave, the Compliance &rarr; Data Export tab now handles both in one click. <strong>Per-user export</strong> grabs every row in your tenant tables that references their <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">user_id</code>, plus the auth record. <strong>Full project export</strong> bundles every table + the auth manifest + the storage manifest + the audit log as a single zip. Pick JSON for round-trippable structure or CSV for spreadsheets.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                The 30-day GDPR Article 12 deadline stays statutory; the tooling stops being the bottleneck. All bytes stay on Scaleway fr-par, download links expire after 7 days, and every request / completion / failure is recorded in your Audit Log with the actor's email + IP — your evidence trail is built in, not bolted on.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                <strong>Pricing note:</strong> the one-click console flow is part of the Pro tier from now on. The underlying export API endpoints stay open on Free — DSAR is a legal obligation and we won't paywall a path to GDPR compliance. If you're on Free and an authority knocks, you can still meet the deadline by scripting the export against the API. Pro saves you from writing the script. Either way: the Audit Log, rate limiting, and EU residency are identical.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">🐛 Edge functions: "Function not found" bug fixed</h2>
+
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                If you tried to open an edge function in the console over the past week or two and saw a red banner saying "Function not found" — that was a backend bug masking the real reason. Two issues actually: <strong>(a)</strong> the gateway was collapsing every error from the function read into a 404, hiding the actual cause, and <strong>(b)</strong> the underlying cause was a SQL scan that didn't handle NULL on the new sealed-env-vars column for functions created before the encryption migration shipped. Both are fixed. Open any function in the console and you'll land in the editor.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">📚 Tenant docs — three new chapters</h2>
+
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                The in-console docs at <strong>/docs</strong> now cover:
+              </p>
+              <ul style="margin:0 0 12px 18px; padding:0; font-size:14px; line-height:1.6; color:#374151;">
+                <li style="margin-bottom:6px;"><strong>Chapter 7 — Rate Limits</strong>: every knob, tuning guidance for four real scenarios, SDK code for handling 429.</li>
+                <li style="margin-bottom:6px;"><strong>Chapter 8 — Custom SMTP</strong>: setup walkthrough, the verify-first contract, what stays on the platform sender, EU vs US provider trade-offs.</li>
+                <li style="margin-bottom:6px;"><strong>Chapter 17 — Compliance, Audit Log &amp; DSAR</strong>: "What is a DSAR?" callout, Article 15 vs 20 split, the auto-audit-trail behind every export.</li>
+              </ul>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                The earlier chapters (Database, Storage, Auth basics, RLS, Vault, Edge Functions, ...) shifted numbers slightly to make room. The table of contents stays linear; old anchors that used a name (e.g. <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">#compliance</code>) still resolve.
+              </p>
+
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:24px 32px 32px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0 0 8px; font-size:13px; line-height:1.6; color:#6b7280;">
+                As always: feedback, bug reports, "this didn't work for me" — reply to this email or drop into our Discord. Everything Eurobase runs on stays in EU jurisdiction (Scaleway, France).
+              </p>
+              <p style="margin:0 0 8px; font-size:12px; color:#9ca3af;">
+                Eurobase &middot; <a href="https://www.eurobase.app" style="color:#6b7280; text-decoration:underline;">eurobase.app</a> &middot; <a href="https://www.eurobase.app/docs" style="color:#6b7280; text-decoration:underline;">Docs</a>
+              </p>
+              <p style="margin:0; font-size:12px; color:#9ca3af;">
+                Don't want these updates? <a href="https://console.eurobase.app/account/mail" style="color:#6b7280; text-decoration:underline;">Manage mailing preferences</a>.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

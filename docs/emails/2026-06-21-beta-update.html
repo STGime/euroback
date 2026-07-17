@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eurobase beta update — schema migrations land</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#1d4ed8; padding:28px 32px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff;">Eurobase</p>
+              <p style="margin:6px 0 0; font-size:14px; color:#bfdbfe;">Beta update &middot; June 21, 2026</p>
+            </td>
+          </tr>
+
+          <!-- Intro -->
+          <tr>
+            <td style="padding:32px 32px 8px;">
+              <p style="margin:0 0 16px; font-size:16px; line-height:1.6; color:#111827;">Hi,</p>
+              <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#374151;">
+                Ten days, four user-facing changes — including the one a lot of you have been waiting for: <strong>versioned schema migrations</strong> for your own project. Everything below is already live; no action needed on your side.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Section: Tenant migrations -->
+          <tr>
+            <td style="padding:8px 32px;">
+
+              <h2 style="margin:16px 0 4px; font-size:17px; color:#111827;">🧱 Versioned schema migrations for your project</h2>
+
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Until now, table changes through the console were one-offs — fine for a sketch, painful for a team. The CLI now ships a real migration channel for your tenant schema:
+              </p>
+              <p style="margin:0 0 12px;">
+                <code style="display:block; background:#111827; color:#4ade80; padding:10px 14px; border-radius:6px; font-size:13px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;">eurobase migrations new add_orders_table
+eurobase migrations up
+eurobase migrations status</code>
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Numbered SQL files under <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">./migrations</code>, applied transactionally, recorded per-project. Each migration runs under a short-lived per-tenant role that can only see your own schema — a malicious <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">RESET ROLE</code> in a migration body can't pivot into another project.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Honest footnote: shipping this channel cost us three deploy retries against managed Postgres (default INHERIT / SET options differ from local PG). It's solid now, but if you tried <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">migrations up</code> on June 12 or 13 and saw a 503 — it works today, please retry.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">⚡ Edge functions can finally be real webhook receivers</h2>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">Custom headers are forwarded</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Functions now receive your caller's request headers — <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">X-Signature</code>, <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">X-Api-Key</code>, <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">X-Webhook-*</code>, the works. Stripe, GitHub, Twilio and the rest now have everything they need to verify a request. The gateway still withholds two families on purpose: your Eurobase auth credentials (so a function can't impersonate the caller upstream) and the <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">X-Eurobase-*</code> control namespace (so a caller can't spoof a signed identity header).
+              </p>
+
+              <h3 style="margin:16px 0 4px; font-size:15px; color:#1d4ed8;">Query string is preserved</h3>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">new URL(req.url).searchParams</code> now actually contains what the caller sent. The one exception: a caller-supplied <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">?apikey=</code> is stripped before reaching your function, mirroring how we already stripped <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">Authorization</code> — a caller's secret should never end up in your function's logs.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">🚨 Breach register &amp; 24h/72h SLA workflow (plumbing first)</h2>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                For the GDPR-conscious among you: the platform now has a real incident channel. Open an incident, identify affected subjects from your own data, fire the 24h customer notification (recipients resolved server-side from your project members — no caller-supplied list, since "official-looking breach notice to arbitrary inbox" is a footgun), then the 72h authority notification. All timed against the SLA, all written to an append-only register and the audit log. MTTD and MTTR are exported as metrics.
+              </p>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                <strong>Honest scope:</strong> the API and runbook ship today (<code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">/compliance/breaches/*</code> + <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">docs/runbooks/breach-notification.md</code>). The console UI for it is next — we wanted the audited, append-only register and the SLA timers to be in place first, so by the time you click "Open incident" the clock and the paper trail are already correct. If you want to wire it up to your own on-call now, the endpoints are documented; if not, the console workflow lands in the next update.
+              </p>
+
+              <h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">🛠 CLI docs caught up with the CLI</h2>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                The command reference had drifted. It's now accurate:
+              </p>
+              <ul style="margin:0 0 12px 18px; padding:0; font-size:14px; line-height:1.7; color:#374151;">
+                <li>The full <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">edge-functions</code> group (list, deploy, get, invoke, logs, delete) is documented — it was missing entirely.</li>
+                <li><code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">version</code>, <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">projects delete</code>, <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">db create-table / add-column / drop-column / drop-table</code>, and <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">compliance report / sub-processors</code> are now listed.</li>
+                <li>The platform-only <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">admin migrations</code> commands are out of the user docs — they ran against a local dev DB, not your project, and listing them just invited confusion.</li>
+              </ul>
+              <p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
+                Update with <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">brew upgrade eurobase</code>, then <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">eurobase --help</code> to see the real list.
+              </p>
+
+            </td>
+          </tr>
+
+          <!-- CTA -->
+          <tr>
+            <td style="padding:16px 32px 8px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background-color:#eff6ff; border-radius:8px;">
+                <tr>
+                  <td style="padding:20px 24px;">
+                    <p style="margin:0 0 8px; font-size:14px; line-height:1.6; color:#1e3a8a;">
+                      <strong>Try the new bits and tell us what's awkward.</strong>
+                    </p>
+                    <p style="margin:0; font-size:14px; line-height:1.6; color:#1e3a8a;">
+                      Run a migration. Point a webhook at a function. Open a synthetic breach. If any of it gets in your way, just reply to this email — we ship every week and your reply usually shows up in the next release notes.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Sign-off -->
+          <tr>
+            <td style="padding:16px 32px 8px;">
+              <p style="margin:0 0 4px; font-size:15px; line-height:1.6; color:#374151;">Happy building,</p>
+              <p style="margin:0; font-size:15px; line-height:1.6; color:#111827;"><strong>Stefan</strong><br>
+              <span style="font-size:13px; color:#6b7280;">Eurobase</span></p>
+            </td>
+          </tr>
+
+          <!-- Social -->
+          <tr>
+            <td style="padding:8px 32px 24px;">
+              <p style="margin:0; font-size:13px; line-height:1.6; color:#6b7280;">
+                We're on Bluesky now — <a href="https://bsky.app/profile/eurobasebaas.bsky.social" style="color:#1d4ed8;">@eurobasebaas.bsky.social</a>. Short updates, build-in-public, no algorithm circus.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#f9fafb; padding:20px 32px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0 0 8px; font-size:12px; line-height:1.6; color:#9ca3af;">
+                Eurobase — the EU-sovereign backend platform. All your data stays on European infrastructure in France.<br>
+                You're receiving this because you're part of the Eurobase beta.
+              </p>
+              <p style="margin:0; font-size:12px; line-height:1.6; color:#9ca3af;">
+                Don't want these updates? <a href="https://console.eurobase.app/account/mail" style="color:#6b7280; text-decoration:underline;">Manage mailing preferences</a>.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

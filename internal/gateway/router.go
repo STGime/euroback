@@ -48,7 +48,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -180,6 +180,18 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/reset-password", auth.HandlePlatformResetPassword(platformAuthSvc))
+
+		// Mailing opt-out — unauthenticated (possession of the
+		// HMAC-signed token IS the authorisation). GET renders a
+		// confirm form so mail scanners (Defender SafeLinks etc.)
+		// pre-fetching the URL can't silently opt users out; POST
+		// actually performs the write. Also supports RFC 8058
+		// One-Click via POST-with-token-in-query. Phase C.
+		if unsubSigner != nil {
+			handler := email.UnsubscribeHandler(unsubSigner, pool)
+			r.Get("/mailing/unsubscribe", handler)
+			r.Post("/mailing/unsubscribe", handler)
+		}
 
 		// Authenticated: account management.
 		r.Route("/auth/account", func(r chi.Router) {
