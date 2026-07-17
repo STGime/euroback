@@ -147,7 +147,7 @@ var unsubConfirmTemplate = template.Must(template.New("unsubConfirm").Parse(`<!D
                 </button>
               </form>
               <p style="margin:16px 0 0; font-size:13px; color:#6b7280;">
-                Or manage all preferences in the <a href="https://console.eurobase.app/account/mail" style="color:#1d4ed8;">console → Account → Mail</a>.
+                Or manage all preferences in the <a href="https://console.eurobase.app/account#mail" style="color:#1d4ed8;">console → Account → Mail</a>.
               </p>
             </td>
           </tr>
@@ -216,7 +216,7 @@ var unsubResultTemplate = template.Must(template.New("unsub").Parse(`<!DOCTYPE h
               <h1 style="margin:0 0 12px; font-size:22px; color:#111827;">{{.Heading}}</h1>
               <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#374151;">{{.Message}}</p>
               <p style="margin:0; font-size:14px; line-height:1.6; color:#374151;">
-                Manage all your preferences in the <a href="https://console.eurobase.app/account/mail" style="color:#1d4ed8;">console → Account → Mail</a>.
+                Manage all your preferences in the <a href="https://console.eurobase.app/account#mail" style="color:#1d4ed8;">console → Account → Mail</a>.
               </p>
             </td>
           </tr>

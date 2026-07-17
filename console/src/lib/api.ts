@@ -140,6 +140,20 @@ export interface PersonalAccessToken {
 	created_at: string;
 }
 
+/**
+ * One mailing_preferences row (or the default "no row = opted in" for
+ * categories the user has never explicitly touched). Category matches
+ * the DB CHECK constraint in migration 000077.
+ */
+export interface MailingPreference {
+	category: 'onboarding' | 'beta_updates' | 'usage_alerts' | 'all';
+	label: string;
+	description: string;
+	opted_out: boolean;
+	opted_out_at?: string | null;
+	updated_at?: string | null;
+}
+
 export interface AdminProject {
 	id: string;
 	name: string;
@@ -468,6 +482,24 @@ export class EurobaseAPI {
 	/** Revoke a personal access token. */
 	async revokePAT(id: string): Promise<void> {
 		return this.fetch(`/platform/auth/account/tokens/${id}`, { method: 'DELETE' });
+	}
+
+	// ---- Mailing preferences ----
+
+	/** List the current user's mailing preferences for every known category. */
+	async listMailingPreferences(): Promise<MailingPreference[]> {
+		return this.fetch<MailingPreference[]>('/platform/auth/account/mailing-preferences');
+	}
+
+	/** Opt in/out of one mailing category. Idempotent. */
+	async setMailingPreference(
+		category: MailingPreference['category'],
+		optedOut: boolean
+	): Promise<{ status: string }> {
+		return this.fetch('/platform/auth/account/mailing-preferences', {
+			method: 'PUT',
+			body: JSON.stringify({ category, opted_out: optedOut })
+		});
 	}
 
 	/** List all projects (tenants) for the authenticated user. */

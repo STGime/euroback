@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { user, logout } from '$lib/stores.js';
-	import { api, type PlatformProfile, type PersonalAccessToken } from '$lib/api.js';
+	import { api, type PlatformProfile, type PersonalAccessToken, type MailingPreference } from '$lib/api.js';
 
 	let profile = $state<PlatformProfile | null>(null);
 	let profileLoading = $state(true);
@@ -35,6 +35,12 @@
 	let copiedToken = $state(false);
 	let revokingTokenId = $state('');
 
+	// Mailing preferences
+	let mailingPrefs = $state<MailingPreference[]>([]);
+	let mailingLoading = $state(true);
+	let mailingError = $state('');
+	let mailingSavingCategory = $state('');
+
 	// Delete account
 	let deleteEmail = $state('');
 	let deleting = $state(false);
@@ -50,7 +56,38 @@
 			profileLoading = false;
 		}
 		await loadTokens();
+		await loadMailingPrefs();
 	});
+
+	async function loadMailingPrefs() {
+		mailingLoading = true;
+		mailingError = '';
+		try {
+			mailingPrefs = await api.listMailingPreferences();
+		} catch (err) {
+			mailingError = err instanceof Error ? err.message : 'Failed to load mailing preferences';
+		} finally {
+			mailingLoading = false;
+		}
+	}
+
+	async function toggleMailing(pref: MailingPreference) {
+		const next = !pref.opted_out;
+		mailingSavingCategory = pref.category;
+		mailingError = '';
+		try {
+			await api.setMailingPreference(pref.category, next);
+			mailingPrefs = mailingPrefs.map(p =>
+				p.category === pref.category
+					? { ...p, opted_out: next, updated_at: new Date().toISOString(), opted_out_at: next ? new Date().toISOString() : null }
+					: p
+			);
+		} catch (err) {
+			mailingError = err instanceof Error ? err.message : 'Failed to update preference';
+		} finally {
+			mailingSavingCategory = '';
+		}
+	}
 
 	async function loadTokens() {
 		tokensLoading = true;
@@ -462,6 +499,51 @@
 				Sign Out
 			</button>
 		</div>
+	</div>
+
+	<!-- Card 4.5: Mail Preferences -->
+	<div id="mail" class="rounded-xl border border-gray-200 bg-white overflow-hidden scroll-mt-6">
+		<div class="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+			<h3 class="text-sm font-semibold text-gray-900">Mail</h3>
+			<p class="text-xs text-gray-500">
+				Transactional mail (verification, password reset, magic link) is separate and always sent.
+			</p>
+		</div>
+		{#if mailingLoading}
+			<div class="px-5 py-6 text-sm text-gray-500">Loading…</div>
+		{:else if mailingError}
+			<div class="px-5 py-4 text-sm text-red-600">{mailingError}</div>
+		{:else}
+			<ul class="divide-y divide-gray-100">
+				{#each mailingPrefs as pref (pref.category)}
+					<li class="px-5 py-4 flex items-start justify-between gap-6">
+						<div class="min-w-0">
+							<p class="text-sm font-medium text-gray-900">{pref.label}</p>
+							<p class="mt-0.5 text-xs text-gray-500">{pref.description}</p>
+							{#if pref.opted_out && pref.opted_out_at}
+								<p class="mt-1 text-xs text-gray-400">
+									Opted out {formatDate(pref.opted_out_at)}.
+								</p>
+							{/if}
+						</div>
+						<button
+							type="button"
+							role="switch"
+							aria-checked={!pref.opted_out}
+							disabled={mailingSavingCategory === pref.category}
+							onclick={() => toggleMailing(pref)}
+							class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-eurobase-500 focus:ring-offset-2 disabled:opacity-50 {pref.opted_out ? 'bg-gray-200' : 'bg-eurobase-600'}"
+						>
+							<span class="sr-only">Toggle {pref.label}</span>
+							<span
+								aria-hidden="true"
+								class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform {pref.opted_out ? 'translate-x-0' : 'translate-x-5'}"
+							></span>
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
 	</div>
 
 	<!-- Card 5: Danger Zone -->
