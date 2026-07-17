@@ -321,6 +321,7 @@ func isUserError(err error) bool {
 		msg == "delete all projects before deleting your account" ||
 		msg == "invalid or expired token" ||
 		msg == "email service not configured" ||
+		msg == "unknown mailing category" ||
 		strings.HasPrefix(msg, "you must accept the following to sign up:")
 }
 

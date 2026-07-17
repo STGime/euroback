@@ -209,6 +209,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Get("/tokens", auth.HandleListPATs(patSvc))
 			r.Post("/tokens", auth.HandleCreatePAT(patSvc))
 			r.Delete("/tokens/{id}", auth.HandleRevokePAT(patSvc))
+
+			// Mailing preferences — the in-console counterpart to
+			// the drip-mail unsubscribe link. Categories match the
+			// mailing_preferences CHECK constraint (migration 000077).
+			r.Get("/mailing-preferences", auth.HandleListMailingPreferences(platformAuthSvc))
+			r.Put("/mailing-preferences", auth.HandleSetMailingPreference(platformAuthSvc))
 		})
 
 		// Authenticated: accept project invitation (token-based).
