@@ -182,10 +182,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.Post("/auth/reset-password", auth.HandlePlatformResetPassword(platformAuthSvc))
 
 		// Mailing opt-out — unauthenticated (possession of the
-		// HMAC-signed token IS the authorisation). Phase C of the
-		// public-beta launch plan; feeds mailing_preferences.
+		// HMAC-signed token IS the authorisation). GET renders a
+		// confirm form so mail scanners (Defender SafeLinks etc.)
+		// pre-fetching the URL can't silently opt users out; POST
+		// actually performs the write. Also supports RFC 8058
+		// One-Click via POST-with-token-in-query. Phase C.
 		if unsubSigner != nil {
-			r.Get("/mailing/unsubscribe", email.UnsubscribeHandler(unsubSigner, pool))
+			handler := email.UnsubscribeHandler(unsubSigner, pool)
+			r.Get("/mailing/unsubscribe", handler)
+			r.Post("/mailing/unsubscribe", handler)
 		}
 
 		// Authenticated: account management.

@@ -103,11 +103,18 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 
 	// ── Idempotency guard ──
 	// If a terminal row already exists for (user, step), don't
-	// re-send. This defends against manual re-enqueue AND against
-	// a River worker crash between step 5 (send) and step 6
-	// (record) — the re-run would double-send otherwise. Loser of
-	// a race between two concurrent workers gets the UNIQUE
-	// (user_id, step, status) violation and returns nil.
+	// re-send. Defends against manual re-enqueue (rerun a completed
+	// job by ID → guard catches it).
+	//
+	// Delivery is at-least-once: a worker crash between SendRaw
+	// (below) and recordSend leaves no row, so River's retry will
+	// re-send. A concurrent-worker race (two runners picking up the
+	// same job) is not blocked here — both pass this SELECT, both
+	// SendRaw, both recordSend (ON CONFLICT DO UPDATE never raises).
+	// For onboarding drip that trade-off is acceptable: a duplicate
+	// welcome mail is annoying, not incorrect. Do not build stronger
+	// guarantees (billing side-effects, external one-shot API calls)
+	// on top of this worker without adding a 'sending' pre-write.
 	var already bool
 	err = w.DBPool.QueryRow(ctx,
 		`SELECT EXISTS (

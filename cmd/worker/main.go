@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"time"
@@ -95,22 +96,28 @@ func main() {
 	// the gateway uses. Missing TEM creds is a soft warning: the
 	// drip worker's SendRaw will log-only, but the audit table
 	// still lands the send-attempt row.
-	consoleURL := os.Getenv("CONSOLE_URL")
+	consoleURL := strings.TrimRight(os.Getenv("CONSOLE_URL"), "/")
 	if consoleURL == "" {
 		consoleURL = "https://console.eurobase.app"
 	}
-	baseURL := os.Getenv("GATEWAY_BASE_URL")
+	baseURL := strings.TrimRight(os.Getenv("GATEWAY_BASE_URL"), "/")
 	if baseURL == "" {
 		baseURL = "https://api.eurobase.app"
 	}
 	docsURL := consoleURL + "/docs"
 
+	// Drip sender falls back to `hello@eurobase.app` if no explicit
+	// env override — the persona split (`hello@` drip vs `noreply@`
+	// transactional) is a locked-in decision in the public-beta
+	// launch plan; hardcoding the fallback keeps a Secret typo from
+	// silently pointing "reply to this email — we read replies" at a
+	// dead noreply@ inbox.
 	emailClient := email.NewEmailClient(
 		os.Getenv("SCW_TEM_SECRET_KEY"),
 		os.Getenv("SCW_TEM_REGION"),
 		coalesceEnv("SCW_TEM_PROJECT_ID", "SCW_PROJECT_ID"),
-		firstNonEmpty(os.Getenv("EMAIL_FROM_ADDRESS_DRIP"), os.Getenv("EMAIL_FROM_ADDRESS")),
-		firstNonEmpty(os.Getenv("EMAIL_FROM_NAME_DRIP"), os.Getenv("EMAIL_FROM_NAME")),
+		firstNonEmpty(os.Getenv("EMAIL_FROM_ADDRESS_DRIP"), "hello@eurobase.app"),
+		firstNonEmpty(os.Getenv("EMAIL_FROM_NAME_DRIP"), "Eurobase"),
 	)
 	emailService := email.NewEmailService(emailClient, pool, consoleURL)
 	if !emailClient.Configured() {

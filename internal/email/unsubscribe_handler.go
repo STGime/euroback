@@ -10,25 +10,48 @@ import (
 )
 
 // UnsubscribeHandler handles the opt-out endpoint that lives in
-// every outbound platform-mail footer. GET-only (idempotent — matches
-// what mail clients + bots will do to preview the link).
+// every outbound platform-mail footer.
 //
-// URL shape: GET /platform/mailing/unsubscribe?token=<opaque>
+// URL shape:
 //
-// Flow:
-//   1. Verify the token via UnsubscribeSigner (HMAC + expiry).
-//   2. UPSERT mailing_preferences (user_id, category, opted_out_at=now()).
-//   3. Render a confirmation HTML page with a resubscribe button.
+//	GET  /platform/mailing/unsubscribe?token=<opaque>  → confirm form
+//	POST /platform/mailing/unsubscribe (token in body) → performs opt-out
 //
-// Nothing here is user-authenticated: possession of a signed token
-// IS the authorisation. The token is user-scoped + expiring, so a
-// leaked link only opts out that specific user + category and only
-// for 90 days from issue.
+// **Why GET is safe and POST does the write.** Corporate anti-phishing
+// scanners (Microsoft Defender SafeLinks, Mimecast URL Protect,
+// Proofpoint URL Defense, Barracuda, Cisco IronPort) auto-fetch every
+// URL in inbound mail to detonate for phishing detection. That fetch
+// would land on this endpoint carrying the real signed token, so a
+// mutating GET would silently opt out every recipient behind such a
+// scanner before they ever open the mail. RFC 7231 §4.2.1 requires
+// GET be safe (no observable side effect); the POST/confirm shape is
+// what List-Unsubscribe-Post (RFC 8058) callers expect too.
+//
+// Verification via UnsubscribeSigner (HMAC + expiry) is done on both
+// paths — the token IS the authorisation.
 //
 // Phase C of the public-beta launch plan.
 func UnsubscribeHandler(signer *UnsubscribeSigner, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("token")
+		var token string
+		switch r.Method {
+		case http.MethodGet:
+			token = r.URL.Query().Get("token")
+		case http.MethodPost:
+			// Token can come from form body (browser-submitted confirm
+			// form) or from the URL for List-Unsubscribe-Post callers
+			// (RFC 8058) that POST with an empty body.
+			_ = r.ParseForm()
+			token = r.PostFormValue("token")
+			if token == "" {
+				token = r.URL.Query().Get("token")
+			}
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		if token == "" {
 			renderUnsubResult(w, "Missing link", "The unsubscribe link is incomplete. Copy the link from the mail again, or open the console and manage your mailing preferences there.", http.StatusBadRequest)
 			return
@@ -45,6 +68,11 @@ func UnsubscribeHandler(signer *UnsubscribeSigner, pool *pgxpool.Pool) http.Hand
 					"The unsubscribe link is invalid. Copy the link from the mail again, or reply to any Eurobase mail asking to be removed.",
 					http.StatusBadRequest)
 			}
+			return
+		}
+
+		if r.Method == http.MethodGet {
+			renderUnsubConfirm(w, token, humanCategory(category))
 			return
 		}
 
@@ -83,6 +111,70 @@ func humanCategory(category string) string {
 	default:
 		return category
 	}
+}
+
+// unsubConfirmTemplate is the page GET renders. Same 600 px shape as
+// the confirmation page + drip mails. Body is a POST form the user
+// must click — mail scanners don't submit POSTs, so this closes the
+// silent-opt-out hazard (bug #002).
+var unsubConfirmTemplate = template.Must(template.New("unsubConfirm").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Confirm unsubscribe — Eurobase</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:48px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden;">
+          <tr>
+            <td style="background-color:#1d4ed8; padding:28px 32px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff;">Eurobase</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px;">
+              <h1 style="margin:0 0 12px; font-size:22px; color:#111827;">Unsubscribe from {{.Category}} mail?</h1>
+              <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#374151;">
+                Click the button below to stop receiving further {{.Category}} mail from Eurobase. Transactional mail sent from your own project (verification, password reset, magic link) is separate and will keep working.
+              </p>
+              <form method="post" action="/platform/mailing/unsubscribe" style="margin:0;">
+                <input type="hidden" name="token" value="{{.Token}}">
+                <button type="submit" style="background-color:#1d4ed8; color:#ffffff; border:0; border-radius:8px; padding:12px 22px; font-size:15px; font-weight:600; cursor:pointer;">
+                  Unsubscribe
+                </button>
+              </form>
+              <p style="margin:16px 0 0; font-size:13px; color:#6b7280;">
+                Or manage all preferences in the <a href="https://console.eurobase.app/account/mail" style="color:#1d4ed8;">console → Account → Mail</a>.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:20px 32px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0; font-size:12px; color:#9ca3af;">Eurobase &middot; EU-sovereign backend-as-a-service &middot; Made in Berlin, hosted in France.</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`))
+
+// renderUnsubConfirm renders the confirm-form page. Called on GET
+// when the token verifies. HTTP 200 — the token was valid, the user
+// (or their mail scanner) can safely look at this page without any
+// state change.
+func renderUnsubConfirm(w http.ResponseWriter, token, category string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Extra belt-and-braces: tell shared proxies not to cache the
+	// confirm page. Scanners that cache would otherwise cache the
+	// HTML that carries the raw token as a form value.
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = unsubConfirmTemplate.Execute(w, struct{ Token, Category string }{token, category})
 }
 
 // unsubResultTemplate is the one-page confirmation HTML shown after
