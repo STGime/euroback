@@ -41,6 +41,13 @@ func TestUnsubscribeHandler_GET_ValidToken_RendersConfirmForm(t *testing.T) {
 	if rec.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("Cache-Control: got %q want no-store", rec.Header().Get("Cache-Control"))
 	}
+	// The confirm page MUST override the gateway's default
+	// `form-action 'none'` CSP, else the browser silently blocks
+	// the POST when the user clicks Unsubscribe.
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "form-action 'self'") {
+		t.Errorf("Content-Security-Policy missing form-action 'self': %q", csp)
+	}
 }
 
 func TestUnsubscribeHandler_GET_MissingToken(t *testing.T) {
