@@ -163,12 +163,26 @@ var unsubConfirmTemplate = template.Must(template.New("unsubConfirm").Parse(`<!D
 </body>
 </html>`))
 
+// unsubPageCSP overrides the gateway's global JSON-API CSP
+// (`form-action 'none'`) for the unsubscribe pages. Without it, the
+// browser silently blocks the confirm-form POST — the button
+// visually clicks but nothing happens. Only the two mailing pages
+// serve real HTML forms; every other gateway response is JSON.
+//
+// Kept nearly as tight as the default: no external resources,
+// clickjacking blocked, `form-action 'self'` scoped exactly to this
+// origin so the POST to `/platform/mailing/unsubscribe` works.
+// `style-src 'unsafe-inline'` allows the inline styling that keeps
+// the page's visual identity aligned with the drip mails.
+const unsubPageCSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
 // renderUnsubConfirm renders the confirm-form page. Called on GET
 // when the token verifies. HTTP 200 — the token was valid, the user
 // (or their mail scanner) can safely look at this page without any
 // state change.
 func renderUnsubConfirm(w http.ResponseWriter, token, category string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", unsubPageCSP)
 	// Extra belt-and-braces: tell shared proxies not to cache the
 	// confirm page. Scanners that cache would otherwise cache the
 	// HTML that carries the raw token as a form value.
@@ -220,9 +234,11 @@ var unsubResultTemplate = template.Must(template.New("unsub").Parse(`<!DOCTYPE h
 
 // renderUnsubResult writes the confirmation page with the given
 // heading + message. Sets the given HTTP status (200 on success,
-// 400 / 410 / 500 on failure) so monitoring can distinguish.
+// 400 / 410 / 500 on failure) so monitoring can distinguish. CSP
+// override matches renderUnsubConfirm so inline styles render.
 func renderUnsubResult(w http.ResponseWriter, heading, message string, status int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", unsubPageCSP)
 	w.WriteHeader(status)
 	_ = unsubResultTemplate.Execute(w, struct{ Heading, Message string }{heading, message})
 }
