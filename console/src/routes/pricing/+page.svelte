@@ -74,7 +74,7 @@
 		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: 'Unlimited', team: 'Coming soon' },
 		{ label: 'Custom email templates', free: false, pro: true, team: 'Coming soon' },
 		// Phase B binary Pro-only gates (migration 000075).
-		{ label: 'Custom domain (CNAME your own domain)', free: false, pro: true, team: 'Coming soon' },
+		{ label: 'Custom domain (CNAME your own domain)', free: false, pro: 'Coming soon', team: 'Coming soon' },
 		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: 'Coming soon' },
 		{ label: 'Slack / webhook quota alerts', free: false, pro: true, team: 'Coming soon' },
 
@@ -170,7 +170,7 @@
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{kmau(proPlan?.ws_connections, '10k')} realtime connections</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.edge_function_limit ?? 25} edge functions, unlimited cron &amp; webhooks</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.log_retention_days ?? 30}-day log retention, custom email templates</span></li>
-					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>Custom domain, BYO SMTP, quota alerts</span></li>
+					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>BYO SMTP for auth mail, Slack quota alerts</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span><strong>Never pauses</strong> — Free projects idle-pause after 30 days</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span><strong>One-click DSAR exports</strong> (Article 15 + 20) — audit-trailed, EU-only</span></li>
 				</ul>
