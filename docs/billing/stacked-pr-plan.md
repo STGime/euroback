@@ -54,17 +54,42 @@ docs. Open → reviewer → wait → fix → auto-merge → next.
 
 **Ship gate:** unit tests green, no `cmd/` wiring, zero prod risk.
 
-### PR 2 — Migration `000081`: extend `subscriptions` + new `billing_customers`
-*~200 LOC SQL*
+### PR 2 — Migration `000079`: extend `subscriptions` + `invoices`
+*~130 LOC SQL* — smaller than planned because two shortcuts landed at
+authoring time:
 
-- `migrations/000081_billing_schema.{up,down}.sql`
-- New table `public.billing_customers (platform_user_id UUID PK, mollie_customer_id TEXT UNIQUE, created_at TIMESTAMPTZ)`
-- Extend `public.subscriptions` with: `mollie_customer_id`, `plan_code`, `price_cents`, `currency`, `billing_interval`, `started_at`, `next_charge_at`, `canceled_at`, `past_due_since`, `status` (CHECK IN `'incomplete','active','past_due','canceled','expired'`)
-- Extend `public.invoices` with: `mollie_payment_id UNIQUE`, `pdf_object_key`, `paid_at`, `amount_cents`, `currency`
-- Indexes: `idx_subscriptions_next_charge_at`, `idx_subscriptions_past_due_since`, `idx_invoices_mollie_payment_id`
-- RLS: reuse existing project-scoped policies; add `scripts/verify-billing-rls.sh`
+- **No new `billing_customers` table.** `platform_users.mollie_customer_id`
+  already exists (from `000001`); a separate join table would just
+  add a hop. Mollie customer stays on `platform_users`.
+- **No new RLS.** `subscriptions` and `invoices` are platform-tier
+  tables accessed only via the `eurobase_developer` pool (member of
+  the migrator role). The SDK gateway pool (`eurobase_gateway`) has
+  no GRANT on them at all — isolation is by absence of grant, not by
+  policy filter. So no `verify-billing-rls.sh` needed.
+- **`amount_cents` + `currency` on `invoices` already exist** (from
+  `000001`). Only `pdf_object_key` is added.
 
-**Ship gate:** `pg_dump` diff reviewed, verify-billing-rls passes on clean DB.
+Actual shape:
+
+- `migrations/000079_billing_schema.{up,down}.sql`
+- Extend `public.subscriptions` with: `mollie_customer_id`,
+  `price_cents`, `currency`, `billing_interval`, `started_at`,
+  `next_charge_at`, `canceled_at`, `past_due_since`
+- Widen `subscriptions.status` CHECK from
+  `('active', 'cancelled', 'overdue')` → `('incomplete', 'active',
+  'past_due', 'canceled', 'expired')` (American spelling to match
+  Mollie API surface)
+- Default status flips from `'active'` to `'incomplete'` (a fresh sub
+  is waiting for first payment, not already live)
+- Extend `public.invoices` with: `pdf_object_key`
+- Partial indexes: `idx_subscriptions_next_charge_at` (WHERE not
+  null), `idx_subscriptions_past_due_since` (WHERE not null),
+  `idx_subscriptions_project_live` (UNIQUE partial WHERE status IN
+  live-set — prevents a race where two concurrent `CreateCheckout`
+  transactions each create an `incomplete` row)
+
+**Ship gate:** CI `test-go` runs it against a real Postgres and
+downgrades cleanly; `pg_dump` diff reviewed.
 
 ### PR 3 — Checkout API
 *~350 LOC + tests*
