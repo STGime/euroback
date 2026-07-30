@@ -82,6 +82,22 @@ docs. Open → reviewer → wait → fix → auto-merge → next.
 ### PR 4 — Webhook handler + state machine
 *~550 LOC + tests*
 
+**Trust model note.** Mollie webhooks are *not* signed. Trust rests
+on two things: (1) the webhook URL is a secret registered per
+subscription/payment at creation time, and (2) the webhook body
+contains only `{id}` — we always GET the canonical state back from
+Mollie's API using our authenticated API key. So a malicious POST to
+our webhook endpoint with a random ID either 404s at Mollie (rejected
+by GetPayment) or returns a state we can safely re-apply idempotently.
+Additional defence: rate-limit the endpoint, and log every miss.
+
+Also: on merge of this PR, update `internal/compliance/registry.go`
+`resolveActiveFeatures()` to expose a `billing` feature (present when
+`BILLING_ENABLED=true`) and link it to Mollie in
+`service_dependencies` so the DPA report picks it up automatically.
+This is the "CLAUDE.md sub-processor rule" — Mollie is already in
+`sub_processors` from `000025` but not yet linked to a feature.
+
 - `internal/handlers/webhook_mollie.go` — `POST /platform/billing/webhook`
 - Receives Mollie's `{id}`, calls back for canonical state, applies transition
 - State machine (documented table):
@@ -101,6 +117,16 @@ docs. Open → reviewer → wait → fix → auto-merge → next.
 
 ### PR 5 — Legacy-Pro grace + downgrade cron
 *~300 LOC + tests*
+
+**Race to avoid.** A user who starts checkout at grace-day 13 hour 23
+and completes at grace-day 14 hour 1 must not be downgraded by the
+hourly cron mid-flow. Two guards: (1) the downgrade query excludes
+projects with any `subscriptions.status IN ('incomplete', 'active')`
+row (not just active), and (2) checkout writes the `incomplete` row
+inside the same transaction that reserves the Mollie subscription, so
+the row is visible to the cron before the Mollie API even confirms.
+Add an explicit test for the hour-335 race.
+
 
 - Migration `000082_legacy_pro_grace.{up,down}.sql`:
   - Adds `projects.legacy_pro_grace_until TIMESTAMPTZ NULL`

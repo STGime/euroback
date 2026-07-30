@@ -374,3 +374,85 @@ func TestAmountRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+// TestAmount_CentsRejectsGarbage documents the parse-failure branch
+// added after the PR 1 review: negative signs, letters, more than
+// two decimals all return 0. The reviewer flagged that silent 0 lets
+// malformed webhook bodies flow into invoice reconciliation as €0.00
+// charges; we now slog.Warn on every failure branch so ops sees them.
+func TestAmount_CentsRejectsGarbage(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"leading minus", "-19.00"},
+		{"trailing letter", "19.0a"},
+		{"three decimals", "19.005"},
+		{"multiple dots", "1.9.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Amount{Currency: "EUR", Value: tt.value}.Cents()
+			if got != 0 {
+				t.Errorf("Cents(%q) = %d, want 0 (should refuse malformed input)", tt.value, got)
+			}
+		})
+	}
+}
+
+// ── Idempotency-Key ────────────────────────────────────────────────
+
+func TestClient_WithIdempotencyKey_SetsHeader(t *testing.T) {
+	f := newFakeServer(t)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Idempotency-Key"); got != "checkout:proj_123" {
+			t.Errorf("Idempotency-Key = %q, want %q", got, "checkout:proj_123")
+		}
+		writeJSON(t, w, http.StatusCreated, Customer{ID: "cst_x"})
+	}
+	_, err := f.client().CreateCustomer(
+		context.Background(),
+		CustomerCreateRequest{Email: "x@example.com"},
+		WithIdempotencyKey("checkout:proj_123"),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClient_WithoutIdempotencyKey_OmitsHeader(t *testing.T) {
+	f := newFakeServer(t)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Idempotency-Key"); got != "" {
+			t.Errorf("Idempotency-Key = %q, want empty when option not passed", got)
+		}
+		writeJSON(t, w, http.StatusCreated, Customer{ID: "cst_x"})
+	}
+	_, err := f.client().CreateCustomer(context.Background(), CustomerCreateRequest{Email: "x@example.com"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ── Context cancellation ───────────────────────────────────────────
+
+func TestClient_ContextCancellation(t *testing.T) {
+	f := newFakeServer(t)
+	// Handler stalls; the request should abort as soon as ctx is
+	// canceled rather than waiting for the response.
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, err := f.client().GetCustomer(ctx, "cst_x")
+	if err == nil {
+		t.Fatal("expected error on context cancellation, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in chain, got %v", err)
+	}
+}

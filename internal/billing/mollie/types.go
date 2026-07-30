@@ -18,7 +18,10 @@
 // deserialisation.
 package mollie
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // Amount is Mollie's standard money envelope: currency + decimal
 // string. Kept as a string (not float) to avoid IEEE-754 rounding on
@@ -133,9 +136,11 @@ type Payment struct {
 
 // PaymentLinks carries Mollie's HATEOAS follow-up URLs. Eurobase only
 // consumes Checkout — the URL the user must visit to complete a first
-// payment (SEPA mandate signature or card 3DS).
+// payment (SEPA mandate signature or card 3DS). Pointer type so
+// omitempty actually elides the field for recurring payments where
+// Mollie omits the checkout link entirely.
 type PaymentLinks struct {
-	Checkout LinkObject `json:"checkout,omitempty"`
+	Checkout *LinkObject `json:"checkout,omitempty"`
 }
 
 // LinkObject is Mollie's canonical link envelope.
@@ -185,46 +190,56 @@ func AmountFromCents(cents int, currency string) Amount {
 
 // Cents parses Mollie's decimal-string value back to integer
 // eurocents. Returns 0 on parse failure so that a malformed webhook
-// body doesn't panic the state machine; callers that care about
-// precision should re-fetch from the API rather than trust the
-// webhook echo.
+// body doesn't panic the state machine; the failure is slog-warned
+// with the offending value so operators can trace the bad input.
+// Callers that care about precision should re-fetch from Mollie's
+// API rather than trust the webhook echo.
+//
+// Supported shapes: "0.00", "19.00", "19.5" (single decimal, promoted
+// to 1950), "0" (whole only). Rejected: negative signs, more than
+// two decimals, letters, empty string. Mollie returns exactly two
+// decimals for EUR in every observed response so anything else is
+// either operator-injected test data or a Mollie API-side change
+// worth an ops alert.
 func (a Amount) Cents() int {
-	// Fast path: "19.00" -> 1900. Written by hand so the client
-	// doesn't pull in strconv dependencies on a hot webhook path.
+	if a.Value == "" {
+		return 0 // Empty value is a common "not applicable" from optional Amount fields (e.g. amountRefunded) — no warn.
+	}
 	whole, frac := 0, 0
 	sawDot := false
+	fracDigits := 0
 	for i := 0; i < len(a.Value); i++ {
 		ch := a.Value[i]
 		switch {
 		case ch == '.':
 			if sawDot {
+				slog.Warn("mollie: Amount.Cents parse failure, multiple dots", "value", a.Value)
 				return 0
 			}
 			sawDot = true
 		case ch >= '0' && ch <= '9':
 			if sawDot {
+				if fracDigits >= 2 {
+					// More than two decimal places — Mollie
+					// doesn't emit these for EUR. Rather than
+					// silently truncate we warn and refuse.
+					slog.Warn("mollie: Amount.Cents parse failure, more than 2 decimals", "value", a.Value)
+					return 0
+				}
 				frac = frac*10 + int(ch-'0')
+				fracDigits++
 			} else {
 				whole = whole*10 + int(ch-'0')
 			}
 		default:
+			slog.Warn("mollie: Amount.Cents parse failure, unexpected char", "value", a.Value, "char", string(ch))
 			return 0
 		}
 	}
-	// Normalise "19.5" (one digit) to 1950, not 195. Mollie always
-	// returns two decimals for EUR so this branch is defensive.
-	if sawDot {
-		// If the caller sent one digit, promote it.
-		digits := 0
-		for i := len(a.Value) - 1; i >= 0; i-- {
-			if a.Value[i] == '.' {
-				break
-			}
-			digits++
-		}
-		if digits == 1 {
-			frac *= 10
-		}
+	// Promote "19.5" (1 decimal) to 1950. Two-decimal input is the
+	// common case and needs no adjustment.
+	if sawDot && fracDigits == 1 {
+		frac *= 10
 	}
 	return whole*100 + frac
 }

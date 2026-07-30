@@ -85,6 +85,11 @@ func NewClient(cfg Config) *Client {
 		c.baseURL = defaultBaseURL
 	}
 	if cfg.Env != EnvTest && cfg.Env != EnvLive {
+		// Loud warning symmetric with the API-key prefix mismatch
+		// warning below. Silent fall-through here would let a
+		// ConfigMap typo (e.g. MOLLIE_ENV=production) route a
+		// live-key deploy into test mode.
+		slog.Warn("mollie: unrecognised env, falling back to test", "requested_env", string(cfg.Env))
 		c.env = EnvTest
 	}
 	c.httpClient = cfg.HTTPClient
@@ -120,12 +125,33 @@ func (c *Client) Configured() bool { return c.apiKey != "" }
 // URL; live-mode webhooks go to prod).
 func (c *Client) Env() Env { return c.env }
 
+// CreateOption tunes a single request. Currently only Idempotency-Key
+// is exposed; a variadic option slice on every POST leaves headroom
+// for per-call testmode overrides or profile switches later without
+// breaking the method signatures.
+type CreateOption func(*requestOptions)
+
+type requestOptions struct {
+	idempotencyKey string
+}
+
+// WithIdempotencyKey attaches Mollie's Idempotency-Key header to a
+// POST. Mollie caches the response for 24h keyed on (API key, key),
+// so a River worker retry after a network flake will replay the same
+// {id} instead of creating a second customer / subscription. Callers
+// should pick a deterministic key — e.g. "checkout:{project_id}" so
+// two concurrent checkout attempts collapse to one Mollie
+// subscription.
+func WithIdempotencyKey(key string) CreateOption {
+	return func(o *requestOptions) { o.idempotencyKey = key }
+}
+
 // CreateCustomer POSTs /v2/customers and returns the Mollie-assigned
 // customer object. Metadata should include at least {"platform_user_id":
 // "..."} so operators can trace back from the Mollie dashboard.
-func (c *Client) CreateCustomer(ctx context.Context, req CustomerCreateRequest) (*Customer, error) {
+func (c *Client) CreateCustomer(ctx context.Context, req CustomerCreateRequest, opts ...CreateOption) (*Customer, error) {
 	var out Customer
-	if err := c.do(ctx, http.MethodPost, "/customers", req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/customers", req, &out, opts...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -146,9 +172,9 @@ func (c *Client) GetCustomer(ctx context.Context, id string) (*Customer, error) 
 // silently, this endpoint should only be called after the initial
 // first-payment flow has captured a mandate. The billing service
 // handles that ordering — this method is a straight passthrough.
-func (c *Client) CreateSubscription(ctx context.Context, customerID string, req SubscriptionCreateRequest) (*Subscription, error) {
+func (c *Client) CreateSubscription(ctx context.Context, customerID string, req SubscriptionCreateRequest, opts ...CreateOption) (*Subscription, error) {
 	var out Subscription
-	if err := c.do(ctx, http.MethodPost, "/customers/"+customerID+"/subscriptions", req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/customers/"+customerID+"/subscriptions", req, &out, opts...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -192,20 +218,26 @@ func (c *Client) GetPayment(ctx context.Context, id string) (*Payment, error) {
 // CreateRefund refunds a payment. Amount can be less than the payment
 // total for partial refunds (Eurobase uses this for prorated
 // cancellations). Returns the created refund object.
-func (c *Client) CreateRefund(ctx context.Context, paymentID string, req RefundCreateRequest) (*Refund, error) {
+func (c *Client) CreateRefund(ctx context.Context, paymentID string, req RefundCreateRequest, opts ...CreateOption) (*Refund, error) {
 	var out Refund
-	if err := c.do(ctx, http.MethodPost, "/payments/"+paymentID+"/refunds", req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/payments/"+paymentID+"/refunds", req, &out, opts...); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 // do is the shared request-execution path. It handles auth header,
-// JSON marshalling, response classification, and body draining. All
-// public methods are ~3 lines of glue on top of this.
-func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+// JSON marshalling, optional Idempotency-Key, response
+// classification, and body draining. All public methods are ~3 lines
+// of glue on top of this.
+func (c *Client) do(ctx context.Context, method, path string, body, out any, opts ...CreateOption) error {
 	if !c.Configured() {
 		return ErrUnauthorized
+	}
+
+	var reqOpts requestOptions
+	for _, opt := range opts {
+		opt(&reqOpts)
 	}
 
 	var reqBody io.Reader
@@ -225,6 +257,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if reqOpts.idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", reqOpts.idempotencyKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
