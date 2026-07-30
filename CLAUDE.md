@@ -28,6 +28,14 @@
   - unset/other → soft mode (warn-only on missing); invalid signature still 401. Use during rollout window.
 - Gateway aborts startup if the secret is missing in production (`ENV=production` or `DOMAIN_SUFFIX` ends with `eurobase.app`).
 
+## Mollie billing
+- Payment processor is Mollie (Dutch, EU-headquartered — already in `sub_processors` from migration `000025`).
+- API-key secrets in `eurobase-secrets`: `MOLLIE_API_KEY_TEST` (starts `test_`), `MOLLIE_API_KEY_LIVE` (starts `live_`), `MOLLIE_ENV` (`test`|`live`). The client's `NewClient` construction logs a warning if the API-key prefix doesn't match the env, so ops key mixups are visible in the first minute after deploy.
+- **Test key first, live key on the flip.** Staging always runs `MOLLIE_ENV=test`; prod runs `MOLLIE_ENV=test` until PR 8 lands and `BILLING_ENABLED=true`, then flips to `live`.
+- Empty API key is legal — client construction succeeds and every endpoint returns `ErrUnauthorized` without hitting the network. Lets dev environments boot without secrets.
+- Feature flag: `BILLING_ENABLED` (default false in prod, true in staging). All billing HTTP handlers 404 when false.
+- **Estonian VAT status:** Eurobase OÜ is below the €40k VAT threshold, so invoices carry "Not VAT-registered under Estonian VAT Act §19" and no VAT is charged. Register for VAT and switch to reverse-charge B2B / local-VAT B2C on crossing the threshold.
+
 ## Auth
 - Custom auth built in Go (email/password, magic links, OAuth)
 - Anon key for public client access
