@@ -3,15 +3,21 @@
 	// button, invoices scoped to this project. Deep-linked from
 	// usage-alert emails and the paused-project wake screen.
 	import { page } from '$app/stores';
-	import { api, type Invoice, type Project } from '$lib/api.js';
+	import { api, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
 	import { onMount } from 'svelte';
+	import CancelSubscriptionModal from '$lib/CancelSubscriptionModal.svelte';
 
 	let projectId = $derived($page.params.id as string);
 
 	let project: Project | null = $state(null);
+	let subscription: ProjectSubscription | null = $state(null);
 	let invoices: Invoice[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);
+
+	// Cancel modal state
+	let cancelModalOpen = $state(false);
+	let cancelSuccess: string | null = $state(null);
 
 	// Checkout state — while a redirect is in flight the button
 	// should be disabled so a double-click doesn't hit the API
@@ -30,8 +36,12 @@
 		loading = true;
 		try {
 			project = await api.getProject(projectId);
-			const list = await api.listInvoices();
+			const [list, sub] = await Promise.all([
+				api.listInvoices(),
+				api.getProjectSubscription(projectId)
+			]);
 			invoices = list.invoices.filter((i) => i.project_id === projectId);
+			subscription = sub;
 			// Kick off checkout if the URL asked and the project
 			// is Pro-eligible (still on Free OR the legacy-Pro
 			// pending-payment case).
@@ -44,6 +54,37 @@
 			loading = false;
 		}
 	});
+
+	function onCancelComplete(result: { mode: string; refundedCents: number }): void {
+		cancelModalOpen = false;
+		if (result.mode === 'immediate') {
+			const refund = result.refundedCents > 0
+				? ` A prorated refund of €${(result.refundedCents / 100).toFixed(2)} will land on your card within 5–10 business days.`
+				: '';
+			cancelSuccess = `Your subscription has been canceled and this project is now on the Free plan.${refund}`;
+		} else {
+			cancelSuccess =
+				'Your subscription will end at the end of the current period. You keep Pro features until then.';
+		}
+		// Reload state so plan flip + subscription clear are
+		// visible immediately.
+		void refresh();
+	}
+
+	async function refresh(): Promise<void> {
+		try {
+			project = await api.getProject(projectId);
+			const [list, sub] = await Promise.all([
+				api.listInvoices(),
+				api.getProjectSubscription(projectId)
+			]);
+			invoices = list.invoices.filter((i) => i.project_id === projectId);
+			subscription = sub;
+		} catch {
+			// Non-fatal; the cancelSuccess banner is the primary
+			// user signal.
+		}
+	}
 
 	function needsPayment(p: Project): boolean {
 		// "Legacy-Pro pending payment" OR "still on Free wanting Pro"
@@ -111,6 +152,12 @@
 		</div>
 	{/if}
 
+	{#if cancelSuccess}
+		<div class="mb-6 rounded-md border border-blue-200 bg-blue-50 p-4">
+			<p class="text-sm font-medium text-blue-800">{cancelSuccess}</p>
+		</div>
+	{/if}
+
 	{#if loading}
 		<p class="text-sm text-gray-500">Loading billing status…</p>
 	{:else if error}
@@ -170,9 +217,20 @@
 							{checkoutInFlight ? 'Redirecting…' : 'Upgrade to Pro'}
 						</button>
 					{:else}
-						<span class="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"
-							>Active</span
-						>
+						<div class="flex items-center gap-3">
+							<span class="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"
+								>Active</span
+							>
+							{#if subscription && subscription.status !== 'past_due'}
+								<button
+									type="button"
+									onclick={() => (cancelModalOpen = true)}
+									class="text-sm text-gray-600 hover:text-red-700"
+								>
+									Cancel Pro
+								</button>
+							{/if}
+						</div>
 					{/if}
 				</div>
 			</div>
@@ -257,3 +315,11 @@
 		</div>
 	{/if}
 </div>
+
+{#if cancelModalOpen && subscription}
+	<CancelSubscriptionModal
+		{subscription}
+		onclose={() => (cancelModalOpen = false)}
+		oncomplete={onCancelComplete}
+	/>
+{/if}

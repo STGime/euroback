@@ -9,6 +9,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 )
 
 // invoiceListItem is the JSON shape returned by
@@ -88,6 +89,73 @@ func HandleListInvoices(svc *Service) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"invoices": out})
+	}
+}
+
+// subscriptionSummary is the JSON shape returned by
+// GET /platform/billing/projects/:id/subscription. Kept flat so
+// the per-project billing page can render "Pro until <date>" +
+// cancel affordances without any client-side derivation.
+type subscriptionSummary struct {
+	ID           string     `json:"id"`
+	PlanCode     string     `json:"plan_code"`
+	Status       string     `json:"status"`
+	PriceCents   int        `json:"price_cents"`
+	Currency     string     `json:"currency"`
+	NextChargeAt *time.Time `json:"next_charge_at,omitempty"`
+	CanceledAt   *time.Time `json:"canceled_at,omitempty"`
+}
+
+// HandleGetProjectSubscription is
+// GET /platform/billing/projects/{project_id}/subscription.
+// Returns the LIVE subscription for the project (status IN
+// 'incomplete','active','past_due') or 404 if none. Used by the
+// console to render the cancel modal and the "Pro until <date>"
+// summary. Ownership enforced against the authenticated user.
+func HandleGetProjectSubscription(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !svc.Enabled() {
+			writeJSONError(w, http.StatusServiceUnavailable, "billing_disabled", "billing is not enabled in this environment")
+			return
+		}
+		claims, ok := auth.ClaimsFromContext(r.Context())
+		if !ok || claims == nil {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+		projectID := chi.URLParam(r, "project_id")
+		if projectID == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing_project_id", "project_id path parameter required")
+			return
+		}
+
+		var sum subscriptionSummary
+		err := svc.pool.QueryRow(r.Context(),
+			`SELECT s.id, s.plan, s.status, s.price_cents, s.currency,
+			        s.next_charge_at, s.canceled_at
+			   FROM public.subscriptions s
+			   JOIN public.projects p ON p.id = s.project_id
+			  WHERE s.project_id = $1
+			    AND p.owner_id = $2::uuid
+			    AND s.status IN ('incomplete', 'active', 'past_due')
+			  ORDER BY s.started_at DESC NULLS LAST
+			  LIMIT 1`,
+			projectID, claims.Subject,
+		).Scan(&sum.ID, &sum.PlanCode, &sum.Status, &sum.PriceCents, &sum.Currency,
+			&sum.NextChargeAt, &sum.CanceledAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusNotFound, "subscription_not_found", "no live subscription for this project")
+			return
+		}
+		if err != nil {
+			slog.Error("billing: get project subscription failed",
+				"project_id", projectID, "user_id", claims.Subject, "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "internal_error", "failed to load subscription")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sum)
 	}
 }
 

@@ -544,6 +544,50 @@ export class EurobaseAPI {
 		return `${this.baseURL}/platform/billing/invoices/${invoiceId}/pdf`;
 	}
 
+	/**
+	 * Cancel a subscription. `end_of_period` keeps Pro features
+	 * until the current period expires (no refund). `immediate`
+	 * flips to Free right away and creates a prorated refund on
+	 * Mollie for the unused portion of the current invoice.
+	 * Backend defaults to end_of_period if body is empty — this
+	 * client always sends the mode explicitly so the console
+	 * behaviour matches the button the user clicked.
+	 */
+	async cancelSubscription(
+		subscriptionId: string,
+		mode: 'end_of_period' | 'immediate'
+	): Promise<{
+		mode: 'end_of_period' | 'immediate';
+		effective_at: string;
+		refunded_cents?: number;
+	}> {
+		return this.fetch(`/platform/billing/subscriptions/${subscriptionId}/cancel`, {
+			method: 'POST',
+			body: JSON.stringify({ mode })
+		});
+	}
+
+	/**
+	 * Fetch the live subscription for a project (or 404 if none).
+	 * Returns the subscription ID + status + next_charge_at so
+	 * the per-project billing page can render "Pro until <date>"
+	 * and the cancel modal knows what to POST against.
+	 */
+	async getProjectSubscription(projectId: string): Promise<ProjectSubscription | null> {
+		try {
+			return await this.fetch<ProjectSubscription>(
+				`/platform/billing/projects/${projectId}/subscription`
+			);
+		} catch (err) {
+			// 404 subscription_not_found = no live sub; degrade
+			// to null rather than propagating an error.
+			if (err instanceof Error && err.message.includes('subscription_not_found')) {
+				return null;
+			}
+			throw err;
+		}
+	}
+
 	/** List all projects (tenants) for the authenticated user. */
 	async listProjects(): Promise<Project[]> {
 		return this.fetch<Project[]>('/v1/tenants');
@@ -1923,6 +1967,18 @@ export interface FunctionMetrics {
 	avg_duration_ms: number;
 	p95_duration_ms: number;
 	period: string;
+}
+
+/** Live subscription for a project, returned by
+ * GET /platform/billing/projects/{id}/subscription. */
+export interface ProjectSubscription {
+	id: string;
+	plan_code: string;
+	status: 'incomplete' | 'active' | 'past_due';
+	price_cents: number;
+	currency: string;
+	next_charge_at?: string | null;
+	canceled_at?: string | null;
 }
 
 /** Invoice row returned by GET /platform/billing/invoices. */
