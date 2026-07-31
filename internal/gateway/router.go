@@ -241,6 +241,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					r.Use(platformAuth.Handler)
 				}
 				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
+				r.Get("/invoices", billing.HandleListInvoices(billingSvc))
+				r.Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
 			})
 
 			// UNAUTHENTICATED: Mollie's webhook endpoint. Mollie

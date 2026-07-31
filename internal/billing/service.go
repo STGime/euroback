@@ -72,6 +72,7 @@ type Service struct {
 	config  Config
 	enabled bool
 	metrics WebhookMetrics
+	storage invoiceStorage
 }
 
 // Config holds the settings CreateCheckout reads on every call.
