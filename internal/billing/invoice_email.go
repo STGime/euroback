@@ -4,7 +4,24 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 )
+
+// reflectIsNil is the reflect-based nil check for interface
+// values with a typed-nil concrete value. Package-local so
+// isNilInterface reads naturally and we don't sprinkle reflect
+// imports elsewhere.
+func reflectIsNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice:
+		return rv.IsNil()
+	}
+	return false
+}
 
 // accountingBCC is the internal address we CC on every outbound
 // invoice mail. Kept as a package constant rather than an env
@@ -39,9 +56,36 @@ type invoiceEmailState struct {
 // — a nil mailer means auto-send is skipped; the PDF still
 // lands in S3 and remains available via the download endpoint.
 // Called from main.go after NewService.
+//
+// The typed-nil trap: passing a `(*email.EmailService)(nil)`
+// through an interface parameter yields an interface whose
+// dynamic type is set but whose concrete value is nil — the
+// naive `if s.invoiceMailer == nil` check would be FALSE. Guard
+// on the concrete Go rule (untyped-nil-only assignments) by
+// comparing on the caller side via `m != nil`, which for
+// interface parameters is safe against typed-nil concrete
+// values only in the `switch v := m.(type)` idiom. Cheapest
+// robust option: use reflect at construction to detect a
+// nil-dynamic-value interface and NOT store it.
 func (s *Service) WithInvoiceMailer(m invoiceMailer) *Service {
+	if m == nil || isNilInterface(m) {
+		return s
+	}
 	s.invoiceMailer = m
 	return s
+}
+
+// isNilInterface returns true if v is an interface holding a nil
+// dynamic value (e.g. `var x *email.EmailService; var m invoiceMailer = x`).
+// Uses reflect to avoid the classic Go trap where `x == nil`
+// returns false because the interface has type information.
+func isNilInterface(v invoiceMailer) bool {
+	if v == nil {
+		return true
+	}
+	// Reflection here is cheap (once at startup); avoids
+	// importing reflect for anything else.
+	return reflectIsNil(v)
 }
 
 // sendInvoiceReadyMail delivers the "your invoice is ready" mail
@@ -69,24 +113,32 @@ func (s *Service) sendInvoiceReadyMail(ctx context.Context, state invoiceEmailSt
 	subject := fmt.Sprintf("Eurobase invoice %s", state.InvoiceNumber)
 	body := renderInvoiceMailBody(state)
 
-	// Primary send to buyer.
+	// Accounting copy FIRST. Rationale: if the TEM provider is
+	// broken and one of the two sends is going to fail, we would
+	// rather lose the buyer-visible send (they can still fetch
+	// the PDF from the console; we'll notice + resend on the
+	// next event) than lose our own audit record. Reversing the
+	// order means the "did we try to notify the buyer?" question
+	// is answerable from our own accounting inbox even in the
+	// TEM-degraded case.
+	//
+	// The "[copy] " subject prefix + "Auto-Submitted: auto-
+	// generated" header semantics let inbox rules filter these
+	// out of the main billing@ inbox — the header is an RFC 3834
+	// signal for auto-responders too, keeping vacation-reply
+	// loops off.
+	if err := s.invoiceMailer.SendRaw(ctx, accountingBCC, "[copy] "+subject, body); err != nil {
+		slog.Warn("billing: invoice accounting copy failed",
+			"invoice_number", state.InvoiceNumber, "error", err)
+	}
+
+	// Buyer send.
 	if err := s.invoiceMailer.SendRaw(ctx, state.BuyerEmail, subject, body); err != nil {
 		slog.Warn("billing: invoice mail to buyer failed",
 			"buyer", state.BuyerEmail,
 			"invoice_number", state.InvoiceNumber,
 			"error", err,
 		)
-		// Don't return — the accounting BCC still matters even
-		// if the buyer mail bounced (proves we tried).
-	}
-
-	// Accounting copy. Separate send rather than a real BCC
-	// header because TEM's REST body doesn't expose BCC — see
-	// internal/email/client.go temRequest. A second SendRaw is
-	// cheap.
-	if err := s.invoiceMailer.SendRaw(ctx, accountingBCC, "[copy] "+subject, body); err != nil {
-		slog.Warn("billing: invoice accounting copy failed",
-			"invoice_number", state.InvoiceNumber, "error", err)
 	}
 }
 

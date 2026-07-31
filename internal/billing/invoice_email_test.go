@@ -51,9 +51,13 @@ func TestSendInvoiceReadyMail_BothRecipients(t *testing.T) {
 	})
 
 	if len(m.sends) != 2 {
-		t.Fatalf("want 2 sends (buyer + BCC), got %d", len(m.sends))
+		t.Fatalf("want 2 sends (BCC + buyer), got %d", len(m.sends))
 	}
-	buyer, bcc := m.sends[0], m.sends[1]
+	// Order is deliberately BCC-first so a TEM-degraded case
+	// preserves the audit record — see sendInvoiceReadyMail
+	// docstring. Rely on this ordering; a change here is a
+	// signal to review the ordering rationale.
+	bcc, buyer := m.sends[0], m.sends[1]
 	if buyer.to != "alice@example.com" {
 		t.Errorf("buyer recipient = %q", buyer.to)
 	}
@@ -88,11 +92,11 @@ func TestSendInvoiceReadyMail_BothRecipients(t *testing.T) {
 	}
 }
 
-// TestSendInvoiceReadyMail_BuyerBounceStillSendsBCC verifies
-// the accounting copy fires even when the buyer send fails —
-// otherwise a bad buyer address would silently drop our own
-// audit trail.
-func TestSendInvoiceReadyMail_BuyerBounceStillSendsBCC(t *testing.T) {
+// TestSendInvoiceReadyMail_BuyerBounceStillFiredBCC verifies
+// both sends happen even when the buyer send bounces. Since
+// BCC is sent FIRST (per sendInvoiceReadyMail rationale), a
+// buyer bounce leaves the accounting record already in place.
+func TestSendInvoiceReadyMail_BuyerBounceStillFiredBCC(t *testing.T) {
 	m := &fakeInvoiceMailer{errFor: "bad@example.com"}
 	svc := &Service{invoiceMailer: m}
 	svc.sendInvoiceReadyMail(context.Background(), invoiceEmailState{
@@ -106,8 +110,11 @@ func TestSendInvoiceReadyMail_BuyerBounceStillSendsBCC(t *testing.T) {
 	if len(m.sends) != 2 {
 		t.Fatalf("want 2 sends even on buyer bounce, got %d", len(m.sends))
 	}
-	if m.sends[1].to != accountingBCC {
-		t.Errorf("second send should be accounting BCC, got %q", m.sends[1].to)
+	if m.sends[0].to != accountingBCC {
+		t.Errorf("first send should be accounting BCC (audit-first), got %q", m.sends[0].to)
+	}
+	if m.sends[1].to != "bad@example.com" {
+		t.Errorf("second send should be buyer, got %q", m.sends[1].to)
 	}
 }
 
@@ -120,6 +127,25 @@ func TestSendInvoiceReadyMail_NilMailerIsNoop(t *testing.T) {
 	svc.sendInvoiceReadyMail(context.Background(), invoiceEmailState{
 		BuyerEmail: "x@example.com",
 	})
+}
+
+// TestWithInvoiceMailer_TypedNilTrap. Guarantees the classic
+// Go interface-typed-nil trap can't ship a fake-nil mailer into
+// Service. Passing a (*fakeInvoiceMailer)(nil) — an interface
+// with dynamic type set and nil concrete value — must NOT be
+// stored; otherwise SendRaw would panic on the first paid
+// invoice.
+func TestWithInvoiceMailer_TypedNilTrap(t *testing.T) {
+	var m *fakeInvoiceMailer // nil concrete
+	svc := (&Service{}).WithInvoiceMailer(m)
+	if svc.invoiceMailer != nil {
+		t.Errorf("typed-nil concrete value smuggled through interface — invoiceMailer should be nil, got %#v", svc.invoiceMailer)
+	}
+	// And the plain-nil case:
+	svc2 := (&Service{}).WithInvoiceMailer(nil)
+	if svc2.invoiceMailer != nil {
+		t.Errorf("nil interface arg should leave invoiceMailer nil")
+	}
 }
 
 // TestSendInvoiceReadyMail_EmptyBuyerSkipsBoth. If we can't

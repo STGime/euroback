@@ -103,15 +103,35 @@ func (s *Service) RenderAndUploadInvoice(ctx context.Context, invoiceID string) 
 	// the paid-transition webhook, but the on-demand path can be
 	// hit against an unpaid invoice via the download endpoint).
 	if !data.PaidAt.IsZero() {
-		s.sendInvoiceReadyMail(ctx, invoiceEmailState{
-			InvoiceNumber:     data.InvoiceNumber,
-			ProjectName:       data.ProjectName,
-			AmountCents:       data.AmountCents,
-			Currency:          data.Currency,
-			BuyerEmail:        data.BuyerEmail,
-			BuyerName:         data.BuyerDisplayName,
-			ConsoleBillingURL: s.config.ConsoleBaseURL + "/billing",
-		})
+		// Atomic claim-then-send. Two concurrent
+		// RenderAndUploadInvoice calls (async webhook +
+		// on-demand download) can both reach this point for
+		// the same paid invoice; without this UPDATE both
+		// would fire buyer + BCC mails. The UPDATE only
+		// affects a row where invoice_mail_sent_at IS NULL,
+		// so the SECOND caller sees RowsAffected == 0 and
+		// silently skips the send.
+		claim, cerr := s.pool.Exec(ctx,
+			`UPDATE public.invoices
+			    SET invoice_mail_sent_at = now()
+			  WHERE id = $1
+			    AND invoice_mail_sent_at IS NULL`,
+			invoiceID,
+		)
+		if cerr != nil {
+			slog.Warn("billing: mail-claim update failed — skipping mail",
+				"invoice_id", invoiceID, "error", cerr)
+		} else if claim.RowsAffected() > 0 {
+			s.sendInvoiceReadyMail(ctx, invoiceEmailState{
+				InvoiceNumber:     data.InvoiceNumber,
+				ProjectName:       data.ProjectName,
+				AmountCents:       data.AmountCents,
+				Currency:          data.Currency,
+				BuyerEmail:        data.BuyerEmail,
+				BuyerName:         data.BuyerDisplayName,
+				ConsoleBillingURL: s.config.ConsoleBaseURL + "/billing",
+			})
+		}
 	}
 	return nil
 }
