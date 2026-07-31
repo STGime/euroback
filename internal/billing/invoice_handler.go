@@ -44,7 +44,8 @@ func HandleListInvoices(svc *Service) http.HandlerFunc {
 
 		rows, err := svc.pool.Query(r.Context(),
 			`SELECT i.id, i.project_id, p.name, i.created_at, i.paid_at,
-			        i.amount_cents, i.currency, i.status, i.pdf_object_key
+			        i.amount_cents, i.currency, i.status, i.pdf_object_key,
+			        i.invoice_number
 			   FROM public.invoices i
 			   JOIN public.projects p ON p.id = i.project_id
 			  WHERE p.owner_id = $1::uuid
@@ -62,14 +63,15 @@ func HandleListInvoices(svc *Service) http.HandlerFunc {
 		out := make([]invoiceListItem, 0, 32)
 		for rows.Next() {
 			var (
-				it        invoiceListItem
-				createdAt time.Time
-				paidAt    *time.Time
-				pdfKey    *string
+				it            invoiceListItem
+				createdAt     time.Time
+				paidAt        *time.Time
+				pdfKey        *string
+				invoiceNumber int64
 			)
 			if err := rows.Scan(&it.ID, &it.ProjectID, &it.ProjectName,
 				&createdAt, &paidAt, &it.AmountCents, &it.Currency,
-				&it.Status, &pdfKey); err != nil {
+				&it.Status, &pdfKey, &invoiceNumber); err != nil {
 				slog.Error("billing: list invoices scan failed", "error", err)
 				writeJSONError(w, http.StatusInternalServerError, "internal_error", "failed to read invoices")
 				return
@@ -79,7 +81,7 @@ func HandleListInvoices(svc *Service) http.HandlerFunc {
 				s := paidAt.Format(time.RFC3339)
 				it.PaidAt = &s
 			}
-			it.Number = shortInvoiceNumber(it.ID)
+			it.Number = formatInvoiceNumber(createdAt.Year(), invoiceNumber)
 			it.HasPDF = pdfKey != nil && *pdfKey != ""
 			out = append(out, it)
 		}
@@ -114,18 +116,22 @@ func HandleDownloadInvoicePDF(svc *Service) http.HandlerFunc {
 			return
 		}
 
-		// Ownership check + fetch pdf_object_key in one query.
+		// Ownership check + fetch pdf_object_key + invoice_number
+		// (for the download filename) in one query.
 		var (
-			pdfKey *string
-			ownerMatch bool
+			pdfKey        *string
+			ownerMatch    bool
+			invoiceNumber int64
+			createdAt     time.Time
 		)
 		err := svc.pool.QueryRow(r.Context(),
-			`SELECT i.pdf_object_key, (p.owner_id = $2::uuid) AS owner_match
+			`SELECT i.pdf_object_key, (p.owner_id = $2::uuid) AS owner_match,
+			        i.invoice_number, i.created_at
 			   FROM public.invoices i
 			   JOIN public.projects p ON p.id = i.project_id
 			  WHERE i.id = $1`,
 			invoiceID, claims.Subject,
-		).Scan(&pdfKey, &ownerMatch)
+		).Scan(&pdfKey, &ownerMatch, &invoiceNumber, &createdAt)
 		if err != nil {
 			// Not-found and not-owned are indistinguishable
 			// deliberately (same reasoning as HandleCreateCheckout).
@@ -176,7 +182,7 @@ func HandleDownloadInvoicePDF(svc *Service) http.HandlerFunc {
 		// Presigned GET URL — 5 min is long enough for the
 		// browser to fetch but short enough that a leaked URL
 		// isn't a lasting problem.
-		filename := shortInvoiceNumber(invoiceID) + ".pdf"
+		filename := formatInvoiceNumber(createdAt.Year(), invoiceNumber) + ".pdf"
 		url, err := svc.storage.GeneratePresignedDownloadURLAs(r.Context(),
 			invoicesBucket, key, 5*time.Minute, filename)
 		if err != nil {

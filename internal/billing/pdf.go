@@ -46,6 +46,11 @@ type InvoiceData struct {
 	PeriodTo     time.Time
 	AmountCents  int
 	Currency     string // "EUR"
+
+	// ProjectName is repeated separately from Description so
+	// the invoice-ready mail can render "Your invoice for
+	// <project>" without string-splitting Description.
+	ProjectName string
 }
 
 // RenderInvoicePDF produces a PDF (A4, single page) matching the

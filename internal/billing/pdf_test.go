@@ -35,22 +35,25 @@ func TestFormatEUR(t *testing.T) {
 	}
 }
 
-// TestShortInvoiceNumber verifies the phone-friendly identifier
-// shape. Uppercase for readability; "EB-" prefix so a support
-// operator can pattern-match "is that an invoice ID?".
-func TestShortInvoiceNumber(t *testing.T) {
+// TestFormatInvoiceNumber pins the tax-audit-friendly format
+// "EB-YYYY-NNNNNN". Sequence is monotonic across the whole
+// invoices table (per migration 000082); the year is a display
+// concern derived from invoice.created_at.
+func TestFormatInvoiceNumber(t *testing.T) {
 	tests := []struct {
-		uuid string
+		year int
+		seq  int64
 		want string
 	}{
-		{"eb0af5c1-1234-5678-9abc-def012345678", "EB-EB0AF5C1"},
-		{"00000000-0000-0000-0000-000000000000", "EB-00000000"},
-		{"short", "EB-short"}, // defensive on short input
+		{2026, 1, "EB-2026-000001"},
+		{2026, 587, "EB-2026-000587"},
+		{2027, 1000000, "EB-2027-1000000"}, // 7-digit past the pad cap
+		{2026, 0, "EB-2026-000000"},         // defensive edge
 	}
 	for _, tt := range tests {
-		got := shortInvoiceNumber(tt.uuid)
+		got := formatInvoiceNumber(tt.year, tt.seq)
 		if got != tt.want {
-			t.Errorf("shortInvoiceNumber(%q) = %q, want %q", tt.uuid, got, tt.want)
+			t.Errorf("formatInvoiceNumber(%d,%d) = %q, want %q", tt.year, tt.seq, got, tt.want)
 		}
 	}
 }
