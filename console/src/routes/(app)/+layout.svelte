@@ -56,7 +56,7 @@
 		[
 			{ label: 'Projects', href: '/projects', icon: 'projects' },
 			{ label: 'Account', href: '/account', icon: 'account' },
-			{ label: 'Billing', href: '/billing', icon: 'account' },
+			{ label: 'Billing', href: '/billing', icon: 'billing' },
 			{ label: 'Pricing', href: '/pricing', icon: 'pricing' },
 			{ label: 'Documentation', href: '/docs', icon: 'docs' },
 			...(isSuperadmin ? [{ label: 'Admin', href: '/admin', icon: 'admin' }] : [])
@@ -107,6 +107,13 @@
 						{:else if item.icon === 'pricing'}
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z" />
+							</svg>
+						{:else if item.icon === 'billing'}
+							<!-- Receipt icon (Heroicons outline). Distinct from
+								 the `account` person silhouette above so the two
+								 sidebar items don't visually collide. -->
+							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2Z" />
 							</svg>
 						{:else if item.icon === 'admin'}
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

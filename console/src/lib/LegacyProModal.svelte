@@ -52,13 +52,14 @@
 		goto(`/p/${project.id}/billing?plan=pro`);
 	}
 
-	async function switchToFree(): Promise<void> {
-		// Immediate downgrade path: the backend doesn't yet
-		// expose a dedicated "user-initiated cancel" endpoint
-		// (PR 8), so send them to the billing page where they
-		// can decide with more context. This deliberately does
-		// NOT auto-trigger a downgrade — a stray click on
-		// "Switch to Free" shouldn't silently lose Pro status.
+	async function seeFreePlan(): Promise<void> {
+		// Sends the user to the billing page for a more
+		// considered decision — the backend doesn't yet expose
+		// a dedicated user-initiated cancel endpoint (PR 8).
+		// Button label deliberately reads "See Free plan"
+		// rather than "Switch to Free" (PR 7 review): the
+		// action is navigation, not downgrade, and the old
+		// label implied an immediate switch.
 		goto(`/p/${project.id}/billing`);
 	}
 </script>
@@ -116,10 +117,10 @@
 				{/if}
 				<button
 					type="button"
-					onclick={switchToFree}
+					onclick={seeFreePlan}
 					class="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
 				>
-					Switch to Free
+					See Free plan
 				</button>
 				<button
 					type="button"

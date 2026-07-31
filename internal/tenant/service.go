@@ -251,11 +251,12 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 	var p Project
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status,
-		        auth_config, created_at, state, last_active_at, grandfathered_until
+		        auth_config, created_at, state, last_active_at, grandfathered_until,
+		        legacy_pro_grace_until
 		 FROM projects WHERE id = $1`,
 		projectID,
 	).Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status,
-		&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil)
+		&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("project not found: %s", projectID)
