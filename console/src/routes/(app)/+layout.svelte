@@ -3,18 +3,24 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { user, logout } from '$lib/stores.js';
-	import { api } from '$lib/api.js';
+	import { api, type Project } from '$lib/api.js';
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
 	import BlueskyIcon from '$lib/BlueskyIcon.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
+	import LegacyProModal from '$lib/LegacyProModal.svelte';
 
 	const BLUESKY_URL = 'https://bsky.app/profile/eurobasebaas.bsky.social';
 
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
 	let isSuperadmin = $state<boolean>(false);
+
+	// Legacy-Pro projects awaiting payment (billing PR 5).
+	// Loaded on every app-shell render; the modal component
+	// decides visibility from sessionStorage + grace days left.
+	let legacyProProject: Project | null = $state(null);
 
 	onMount(async () => {
 		if (!$user) {
@@ -28,12 +34,29 @@
 		} catch {
 			// Silently ignore — falls back to email display.
 		}
+		try {
+			const projects = await api.listProjects();
+			// Pick the FIRST project that matches
+			// plan='pro' && legacy_pro_grace_until != null.
+			// Rationale: showing multiple modals stacked would
+			// overwhelm; the user handles them one at a time by
+			// paying (removes the flag) or switching to Free.
+			// After dismissal the next page-load re-evaluates
+			// against the same list.
+			legacyProProject =
+				projects.find(
+					(p) => p.plan === 'pro' && !!p.legacy_pro_grace_until
+				) ?? null;
+		} catch {
+			// Non-fatal — modal simply doesn't render.
+		}
 	});
 
 	let navItems = $derived(
 		[
 			{ label: 'Projects', href: '/projects', icon: 'projects' },
 			{ label: 'Account', href: '/account', icon: 'account' },
+			{ label: 'Billing', href: '/billing', icon: 'account' },
 			{ label: 'Pricing', href: '/pricing', icon: 'pricing' },
 			{ label: 'Documentation', href: '/docs', icon: 'docs' },
 			...(isSuperadmin ? [{ label: 'Admin', href: '/admin', icon: 'admin' }] : [])
@@ -189,3 +212,7 @@
 		</main>
 	</div>
 </div>
+
+{#if legacyProProject}
+	<LegacyProModal project={legacyProProject} />
+{/if}

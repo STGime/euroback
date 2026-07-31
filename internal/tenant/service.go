@@ -38,6 +38,14 @@ type Project struct {
 	State              string     `json:"state,omitempty"`
 	LastActiveAt       *time.Time `json:"last_active_at,omitempty"`
 	GrandfatheredUntil *time.Time `json:"grandfathered_until,omitempty"`
+	// Billing legacy-Pro grace window (migration 000080, PR 5).
+	// Set for existing beta-Pro projects at the moment
+	// BILLING_ENABLED flips true; cleared when the user completes
+	// checkout (PR 4 webhook activate) OR the downgrade sweep sets
+	// the project to Free. The console consults this — combined
+	// with plan='pro' — to render the "add a payment method"
+	// modal for the 1% of beta users on Pro at billing-flip time.
+	LegacyProGraceUntil *time.Time `json:"legacy_pro_grace_until,omitempty"`
 }
 
 // SecretStore is the minimal interface the tenant package needs to persist
@@ -275,7 +283,8 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
 		        p.region, p.plan, p.status, p.auth_config, p.created_at,
-		        p.state, p.last_active_at, p.grandfathered_until
+		        p.state, p.last_active_at, p.grandfathered_until,
+		        p.legacy_pro_grace_until
 		 FROM projects p
 		 JOIN project_members pm ON pm.project_id = p.id
 		 WHERE pm.user_id = $1::uuid
@@ -291,7 +300,7 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 	for rows.Next() {
 		var p Project
 		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status,
-			&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil); err != nil {
+			&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil); err != nil {
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)

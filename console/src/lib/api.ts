@@ -195,6 +195,13 @@ export interface Project {
 	 * caps. Set to now() + 90 days for every Free project at the
 	 * time migration 000076 landed; NULL for fresh signups. */
 	grandfathered_until?: string | null;
+	/** Legacy-Pro grace window (migration 000080, billing PR 5).
+	 * Set on projects that were plan='pro' at the moment
+	 * BILLING_ENABLED flipped true; cleared when the user
+	 * completes checkout OR the downgrade sweep flips them to
+	 * Free. When plan='pro' AND this field is non-null, the
+	 * console shows a "add a payment method" conversion modal. */
+	legacy_pro_grace_until?: string | null;
 }
 
 export interface ForeignKeyInfo {
@@ -500,6 +507,41 @@ export class EurobaseAPI {
 			method: 'PUT',
 			body: JSON.stringify({ category, opted_out: optedOut })
 		});
+	}
+
+	// ---- Billing (PR 3–7 of the billing stack) ----
+
+	/**
+	 * Start a Mollie checkout for a project. Returns the Mollie
+	 * checkout URL — the console should redirect the browser to
+	 * it. Backend returns 409 already_subscribed if a live sub
+	 * already exists, 400 invalid_plan for anything except 'pro',
+	 * and 503 billing_disabled when BILLING_ENABLED is off.
+	 */
+	async startBillingCheckout(
+		projectId: string,
+		planCode: 'pro' | 'team' = 'pro'
+	): Promise<{ subscription_id: string; checkout_url: string }> {
+		return this.fetch('/platform/billing/checkout', {
+			method: 'POST',
+			body: JSON.stringify({ project_id: projectId, plan_code: planCode })
+		});
+	}
+
+	/** List every invoice for every project the caller owns. */
+	async listInvoices(): Promise<{ invoices: Invoice[] }> {
+		return this.fetch('/platform/billing/invoices');
+	}
+
+	/**
+	 * The URL of the invoice-PDF download endpoint. Returns a
+	 * URL string rather than fetching directly — the endpoint
+	 * 302s to a presigned S3 URL (5-min TTL), which browsers
+	 * follow correctly via a plain <a href> or window.location.
+	 * Fetch-based downloads would hit CORS on the redirect.
+	 */
+	invoicePDFUrl(invoiceId: string): string {
+		return `${this.baseURL}/platform/billing/invoices/${invoiceId}/pdf`;
 	}
 
 	/** List all projects (tenants) for the authenticated user. */
@@ -1881,6 +1923,27 @@ export interface FunctionMetrics {
 	avg_duration_ms: number;
 	p95_duration_ms: number;
 	period: string;
+}
+
+/** Invoice row returned by GET /platform/billing/invoices. */
+export interface Invoice {
+	id: string;
+	/** Display number, format EB-YYYY-NNNNNN. Gap-free monotonic
+	 * sequence + year-from-created_at prefix (migration 000082). */
+	number: string;
+	project_id: string;
+	project_name: string;
+	/** ISO 8601 timestamps. */
+	created_at: string;
+	paid_at?: string | null;
+	amount_cents: number;
+	currency: string;
+	/** 'pending' | 'paid' | 'failed' | 'refunded'. */
+	status: string;
+	/** True once the async render has completed. If false, the
+	 * download endpoint renders on demand — no separate handling
+	 * needed by the client. */
+	has_pdf: boolean;
 }
 
 export const api = new EurobaseAPI();
