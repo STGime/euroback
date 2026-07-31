@@ -295,6 +295,14 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 		"plan_code", planCode,
 		"mollie_subscription_id", mollieSub.ID,
 	)
+
+	// Kick off PDF render in the background. Detached goroutine
+	// so a slow render doesn't hold the Mollie response; the
+	// download endpoint has an on-demand render fallback if
+	// this fires before pdf_object_key is populated.
+	if invoiceID := s.invoiceIDForPayment(ctx, payment.ID); invoiceID != "" {
+		s.enqueueInvoiceRender(invoiceID)
+	}
 	return nil
 }
 
@@ -342,13 +350,15 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Insert invoice, ignoring duplicate delivery.
+	// Insert invoice, ignoring duplicate delivery. subscription_id
+	// linked so re-renders don't drift after cancel+resubscribe
+	// (PR 6 review).
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, mollie_payment_id, amount_cents, currency, status, paid_at)
-		 VALUES ($1, $2, $3, 'EUR', 'paid', now())
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now())
 		 ON CONFLICT (mollie_payment_id) DO NOTHING`,
-		projectID, payment.ID, priceCents,
+		projectID, subscriptionID, payment.ID, priceCents,
 	)
 	if err != nil {
 		return fmt.Errorf("insert recurring invoice: %w", err)
@@ -387,8 +397,28 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 			"payment_id", payment.ID,
 			"amount_cents", priceCents,
 		)
+		if invoiceID := s.invoiceIDForPayment(ctx, payment.ID); invoiceID != "" {
+			s.enqueueInvoiceRender(invoiceID)
+		}
 	}
 	return nil
+}
+
+// invoiceIDForPayment looks up our invoice UUID from Mollie's
+// payment ID. Small helper used at both paid-transition sites
+// (activate + recurring) to feed the async PDF render.
+func (s *Service) invoiceIDForPayment(ctx context.Context, molliePaymentID string) string {
+	var id string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id FROM public.invoices WHERE mollie_payment_id = $1`,
+		molliePaymentID,
+	).Scan(&id)
+	if err != nil {
+		slog.Warn("billing: invoice lookup by mollie_payment_id failed",
+			"mollie_payment_id", molliePaymentID, "error", err)
+		return ""
+	}
+	return id
 }
 
 // markPaymentFailure flags the subscription past_due on the first

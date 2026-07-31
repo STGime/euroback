@@ -468,7 +468,7 @@ func main() {
 	billingSvc := billing.NewService(pool, mollieClient, billing.Config{
 		ConsoleBaseURL: consoleBaseURL,
 		WebhookBaseURL: platformBaseURL,
-	}, billingEnabled).WithMetrics(metricsReg)
+	}, billingEnabled).WithMetrics(metricsReg).WithStorage(s3Client)
 	if billingEnabled {
 		slog.Info("billing: enabled", "mollie_env", mollieEnv)
 	} else {
