@@ -475,6 +475,15 @@ func main() {
 		slog.Info("billing: disabled (BILLING_ENABLED not 'true')")
 	}
 
+	// Downgrade sweep — hourly goroutine that flips past-due
+	// grace-elapsed and legacy-Pro grace-elapsed projects back to
+	// Free. Only started when billing is enabled; otherwise the
+	// grace timestamps set by migration 000080 aren't yet relevant.
+	if billingEnabled {
+		downgradeSvc := billing.NewDowngradeService(pool, mollieClient, emailService, "hello@eurobase.app")
+		downgradeSvc.StartLoop(ctx)
+	}
+
 	// ── Set up chi router (extracted for testability) ──
 	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, devMode)
 
