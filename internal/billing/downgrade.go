@@ -252,7 +252,7 @@ func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidat
 		}
 	}
 
-	if _, err := tx.Exec(ctx,
+	projectRes, err := tx.Exec(ctx,
 		`UPDATE public.projects
 		    SET plan = 'free',
 		        legacy_pro_grace_until = NULL,
@@ -260,7 +260,8 @@ func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidat
 		  WHERE id = $1
 		    AND plan = 'pro'`,
 		c.ProjectID,
-	); err != nil {
+	)
+	if err != nil {
 		slog.Error("billing: downgrade project update failed",
 			"project_id", c.ProjectID, "error", err)
 		return
@@ -269,6 +270,19 @@ func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidat
 	if err := tx.Commit(ctx); err != nil {
 		slog.Error("billing: downgrade commit failed",
 			"project_id", c.ProjectID, "error", err)
+		return
+	}
+
+	// If the project UPDATE affected 0 rows, another actor already
+	// downgraded this project (typical cause: two gateway pods both
+	// hit the startup-fire sweep simultaneously — subscription
+	// UPDATE is also 0-row-safe via its status guard, but without
+	// this check we'd log "downgraded" AND send the notification
+	// mail twice). Skip both here; the winning actor has already
+	// done them.
+	if projectRes.RowsAffected() == 0 {
+		slog.Debug("billing: downgrade skipped — project already Free (concurrent sweep)",
+			"project_id", c.ProjectID)
 		return
 	}
 
