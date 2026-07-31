@@ -33,8 +33,10 @@
 - API-key secrets in `eurobase-secrets`: `MOLLIE_API_KEY_TEST` (starts `test_`), `MOLLIE_API_KEY_LIVE` (starts `live_`), `MOLLIE_ENV` (`test`|`live`). The client's `NewClient` construction logs a warning if the API-key prefix doesn't match the env, so ops key mixups are visible in the first minute after deploy.
 - **Test key first, live key on the flip.** Staging always runs `MOLLIE_ENV=test`; prod runs `MOLLIE_ENV=test` until PR 8 lands and `BILLING_ENABLED=true`, then flips to `live`.
 - Empty API key is legal — client construction succeeds and every endpoint returns `ErrUnauthorized` without hitting the network. Lets dev environments boot without secrets.
-- Feature flag: `BILLING_ENABLED` (default false in prod, true in staging). All billing HTTP handlers 404 when false.
+- Feature flag: `BILLING_ENABLED` (default false in prod, true in staging). All billing HTTP handlers return 503 when false (not 404 — the route is registered so 503 is a clearer signal of "temporarily off" than "doesn't exist").
+- URL config: `CONSOLE_BASE_URL` (post-checkout redirect target, default `https://console.eurobase.app`), `PLATFORM_BASE_URL` (webhook URL Mollie POSTs to, default `https://api.eurobase.app`).
 - **Estonian VAT status:** Eurobase OÜ is below the €40k VAT threshold, so invoices carry "Not VAT-registered under Estonian VAT Act §19" and no VAT is charged. Register for VAT and switch to reverse-charge B2B / local-VAT B2C on crossing the threshold.
+- **Recurring flow.** Mollie doesn't create a subscription until a mandate exists. Checkout (PR 3) creates a first Payment with `sequenceType=first`; the user completes it on Mollie's page; the webhook (PR 4) sees `paid` + `mandateId`, then creates the recurring Subscription against the mandate.
 
 ## Auth
 - Custom auth built in Go (email/password, magic links, OAuth)

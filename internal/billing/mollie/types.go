@@ -143,6 +143,29 @@ type PaymentLinks struct {
 	Checkout *LinkObject `json:"checkout,omitempty"`
 }
 
+// PaymentCreateRequest is the POST /v2/payments body. Eurobase uses
+// this for the first-payment flow: SequenceType=first + CustomerID
+// captures a mandate as a side-effect of the customer paying the
+// first monthly charge, and the subsequent recurring subscription
+// draws against that mandate silently.
+//
+// RedirectURL is where Mollie sends the user after they complete
+// checkout (typically the console's /billing?status=success page).
+// WebhookURL is where Mollie POSTs {id} when the payment state
+// changes — the handler in PR 4 lives here.
+type PaymentCreateRequest struct {
+	Amount       Amount            `json:"amount"`
+	Description  string            `json:"description"`
+	RedirectURL  string            `json:"redirectUrl,omitempty"`
+	CancelURL    string            `json:"cancelUrl,omitempty"`
+	WebhookURL   string            `json:"webhookUrl,omitempty"`
+	Method       string            `json:"method,omitempty"`
+	CustomerID   string            `json:"customerId,omitempty"`
+	SequenceType SequenceType      `json:"sequenceType,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Locale       string            `json:"locale,omitempty"`
+}
+
 // LinkObject is Mollie's canonical link envelope.
 type LinkObject struct {
 	Href string `json:"href"`

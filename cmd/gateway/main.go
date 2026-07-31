@@ -19,6 +19,8 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/billing"
+	"github.com/eurobase/euroback/internal/billing/mollie"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
@@ -434,8 +436,47 @@ func main() {
 	// worker agree on the derived HMAC key.
 	unsubSigner := email.NewUnsubscribeSigner(platformJWTSecret)
 
+	// ── Billing service (Mollie) ──
+	// Feature-flagged behind BILLING_ENABLED — every checkout call
+	// short-circuits to 503 until PR 8 flips the flag in prod. The
+	// Mollie client is constructed with the API key that matches
+	// MOLLIE_ENV; a mismatched prefix logs a warning at construction
+	// time. Empty MOLLIE_API_KEY_* also boots cleanly (returns
+	// ErrUnauthorized from every endpoint) so the process runs in
+	// environments without secrets wired.
+	billingEnabled := os.Getenv("BILLING_ENABLED") == "true"
+	mollieEnv := mollie.EnvTest
+	if os.Getenv("MOLLIE_ENV") == "live" {
+		mollieEnv = mollie.EnvLive
+	}
+	mollieAPIKey := os.Getenv("MOLLIE_API_KEY_TEST")
+	if mollieEnv == mollie.EnvLive {
+		mollieAPIKey = os.Getenv("MOLLIE_API_KEY_LIVE")
+	}
+	mollieClient := mollie.NewClient(mollie.Config{
+		APIKey: mollieAPIKey,
+		Env:    mollieEnv,
+	})
+	consoleBaseURL := os.Getenv("CONSOLE_BASE_URL")
+	if consoleBaseURL == "" {
+		consoleBaseURL = "https://console.eurobase.app"
+	}
+	platformBaseURL := os.Getenv("PLATFORM_BASE_URL")
+	if platformBaseURL == "" {
+		platformBaseURL = "https://api.eurobase.app"
+	}
+	billingSvc := billing.NewService(pool, mollieClient, billing.Config{
+		ConsoleBaseURL: consoleBaseURL,
+		WebhookBaseURL: platformBaseURL,
+	}, billingEnabled)
+	if billingEnabled {
+		slog.Info("billing: enabled", "mollie_env", mollieEnv)
+	} else {
+		slog.Info("billing: disabled (BILLING_ENABLED not 'true')")
+	}
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
