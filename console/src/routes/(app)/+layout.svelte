@@ -3,18 +3,24 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { user, logout } from '$lib/stores.js';
-	import { api } from '$lib/api.js';
+	import { api, type Project } from '$lib/api.js';
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
 	import BlueskyIcon from '$lib/BlueskyIcon.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
+	import LegacyProModal from '$lib/LegacyProModal.svelte';
 
 	const BLUESKY_URL = 'https://bsky.app/profile/eurobasebaas.bsky.social';
 
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
 	let isSuperadmin = $state<boolean>(false);
+
+	// Legacy-Pro projects awaiting payment (billing PR 5).
+	// Loaded on every app-shell render; the modal component
+	// decides visibility from sessionStorage + grace days left.
+	let legacyProProject: Project | null = $state(null);
 
 	onMount(async () => {
 		if (!$user) {
@@ -28,12 +34,29 @@
 		} catch {
 			// Silently ignore — falls back to email display.
 		}
+		try {
+			const projects = await api.listProjects();
+			// Pick the FIRST project that matches
+			// plan='pro' && legacy_pro_grace_until != null.
+			// Rationale: showing multiple modals stacked would
+			// overwhelm; the user handles them one at a time by
+			// paying (removes the flag) or switching to Free.
+			// After dismissal the next page-load re-evaluates
+			// against the same list.
+			legacyProProject =
+				projects.find(
+					(p) => p.plan === 'pro' && !!p.legacy_pro_grace_until
+				) ?? null;
+		} catch {
+			// Non-fatal — modal simply doesn't render.
+		}
 	});
 
 	let navItems = $derived(
 		[
 			{ label: 'Projects', href: '/projects', icon: 'projects' },
 			{ label: 'Account', href: '/account', icon: 'account' },
+			{ label: 'Billing', href: '/billing', icon: 'billing' },
 			{ label: 'Pricing', href: '/pricing', icon: 'pricing' },
 			{ label: 'Documentation', href: '/docs', icon: 'docs' },
 			...(isSuperadmin ? [{ label: 'Admin', href: '/admin', icon: 'admin' }] : [])
@@ -84,6 +107,13 @@
 						{:else if item.icon === 'pricing'}
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z" />
+							</svg>
+						{:else if item.icon === 'billing'}
+							<!-- Receipt icon (Heroicons outline). Distinct from
+								 the `account` person silhouette above so the two
+								 sidebar items don't visually collide. -->
+							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2Z" />
 							</svg>
 						{:else if item.icon === 'admin'}
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -189,3 +219,7 @@
 		</main>
 	</div>
 </div>
+
+{#if legacyProProject}
+	<LegacyProModal project={legacyProProject} />
+{/if}

@@ -278,8 +278,16 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 		return fmt.Errorf("mark invoice paid: %w", err)
 	}
 
+	// Also clear legacy_pro_grace_until (migration 000080).
+	// A legacy-Pro user who completes checkout must fall out of
+	// the console modal's detection rule (plan='pro' &&
+	// legacy_pro_grace_until != NULL); without this clear, the
+	// modal would keep nagging them after they've paid.
 	if _, err := tx.Exec(ctx,
-		`UPDATE public.projects SET plan = $1 WHERE id = $2`,
+		`UPDATE public.projects
+		    SET plan = $1,
+		        legacy_pro_grace_until = NULL
+		  WHERE id = $2`,
 		planCode, projectID,
 	); err != nil {
 		return fmt.Errorf("flip project plan: %w", err)
