@@ -120,19 +120,48 @@ FROM projects;
 
 If something fatal shows up:
 
-1. `kubectl -n eurobase set env deploy/gateway BILLING_ENABLED=false`
-2. Roll back the pod. Endpoints all revert to 503
-   `billing_disabled`.
-3. Mollie subscriptions already created are left running;
-   they'll continue to charge but our webhooks silently 200
-   (see PR 4). Cancel them manually from the Mollie dashboard
-   for the affected users, refund via Mollie for any charges
-   users didn't sign off on.
-4. `subscriptions` / `invoices` rows are safe to keep —
-   nothing depends on them until `BILLING_ENABLED=true`.
+1. **Flip the flag off first — stops the bleeding:**
+   `kubectl -n eurobase set env deploy/gateway BILLING_ENABLED=false`
+   then `kubectl rollout restart deploy/gateway`. Endpoints
+   revert to 503 `billing_disabled` within seconds.
 
-The migrations DO NOT need to be rolled back for a rollback —
-extra columns are all nullable / defaulted.
+2. **Cancel existing Mollie subscriptions.** They'll keep
+   charging users until explicitly stopped — our webhooks are
+   now silently 200'ing (see PR 4), so we won't record the
+   charges but Mollie will still make them. Two options
+   depending on volume:
+
+   **≤5 subscriptions** — manual cancel from the Mollie
+   dashboard (`my.mollie.com` → Customers → each customer →
+   Subscriptions → Cancel).
+
+   **>5 subscriptions** — run the mass-cancel script:
+
+   ```bash
+   MOLLIE_API_KEY=live_xxx \
+   DATABASE_URL=postgres://... \
+     ./deploy/scripts/mass-cancel-mollie-subscriptions.sh
+   ```
+
+   Script is idempotent (already-canceled subs return 404 →
+   treated as success) and rate-limited to 1 req/s so it's
+   safe against Mollie's rate limits. Prompts before doing
+   anything destructive.
+
+3. **Refund any charges users didn't sign off on** — Mollie
+   dashboard → Payments → Refund. There's no bulk-refund
+   equivalent; do these by hand. At >20 refunds, script the
+   Refunds API by adapting the mass-cancel script.
+
+4. **Local state stays** — `subscriptions` / `invoices` rows
+   are safe to keep. Nothing depends on them until
+   `BILLING_ENABLED=true`. The migrations DO NOT need to be
+   rolled back — extra columns are all nullable / defaulted.
+
+**Time-to-rollback:** ≤5 minutes on the flag flip, then ~1 min
+per subscription to cancel (linear in subscription count via
+the script). Aim to catch problems within the T+15m or T+24h
+checkpoints below to keep the cancel population small.
 
 ## Follow-ups (post-launch)
 
