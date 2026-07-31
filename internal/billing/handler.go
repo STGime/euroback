@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // checkoutRequest is the JSON body of POST /platform/billing/checkout.
@@ -81,13 +82,19 @@ func HandleCreateCheckout(svc *Service) http.HandlerFunc {
 			case errors.Is(err, ErrInvalidPlan):
 				writeJSONError(w, http.StatusBadRequest, "invalid_plan", err.Error())
 			default:
+				// Echo the chi request ID on the 500 body so a
+				// user reporting "checkout failed with error X"
+				// gives support a token that correlates to a
+				// single ingress log line + slog line.
+				reqID := middleware.GetReqID(r.Context())
 				slog.Error("billing: checkout failed",
+					"request_id", reqID,
 					"user_id", claims.Subject,
 					"project_id", req.ProjectID,
 					"plan_code", req.PlanCode,
 					"error", err,
 				)
-				writeJSONError(w, http.StatusInternalServerError, "internal_error", "checkout failed")
+				writeJSONErrorWithRequestID(w, http.StatusInternalServerError, "internal_error", "checkout failed", reqID)
 			}
 			return
 		}
@@ -100,10 +107,11 @@ func HandleCreateCheckout(svc *Service) http.HandlerFunc {
 	}
 }
 
-// writeJSONError emits the platform's standard error envelope. Kept
-// package-private since it's tuned to billing's needs (no request-ID
-// echo, no i18n) — other packages have their own writers with the
-// specifics they care about.
+// writeJSONError emits the platform's standard error envelope.
+// Non-500 responses omit the request ID (the user-facing error is
+// already actionable — "invalid_plan", "already_subscribed"); 500
+// responses use writeJSONErrorWithRequestID below so support can
+// correlate.
 func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -111,4 +119,21 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 		"error":   code,
 		"message": message,
 	})
+}
+
+// writeJSONErrorWithRequestID emits the standard envelope plus a
+// request_id field. Called from the 500 branch so a user pasting
+// their error message into support gives us a token that indexes
+// straight into slog + the ingress log.
+func writeJSONErrorWithRequestID(w http.ResponseWriter, status int, code, message, requestID string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	body := map[string]string{
+		"error":   code,
+		"message": message,
+	}
+	if requestID != "" {
+		body["request_id"] = requestID
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }

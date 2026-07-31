@@ -204,29 +204,25 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 			`UPDATE public.platform_users SET mollie_customer_id = $1 WHERE id = $2::uuid`,
 			customerID, userID,
 		); uerr != nil {
-			// Non-fatal: the customer exists on Mollie's side and
-			// will be reused via metadata lookup on retry. Log
-			// loudly so ops sees the drift.
+			// Non-fatal: the WithIdempotencyKey("customer:"+userID)
+			// above means Mollie returns the SAME customer on retry
+			// (no leak). We just fail to remember the ID locally, so
+			// the next checkout re-derives via the same idempotency
+			// key and gets the same cst_ back. Log loudly so ops
+			// sees the drift and can investigate the DB-write path.
 			slog.Warn("billing: created Mollie customer but failed to persist ID",
 				"user_id", userID, "mollie_customer_id", customerID, "error", uerr)
 		}
 	}
 
-	// 4. Insert the incomplete subscription row inside a tx so a
-	// Mollie payment-create failure below rolls back cleanly. Any
-	// SQLSTATE 23505 from the unique partial index surfaces as
-	// ErrAlreadySubscribed.
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("billing: begin tx: %w", err)
-	}
-	defer func() {
-		// Rollback is a no-op if we've already committed.
-		_ = tx.Rollback(ctx)
-	}()
-
+	// 4. Insert the incomplete subscription row. Kept OUT of a
+	// long-running tx so the Mollie HTTP call below doesn't hold
+	// row locks + unique-index writes for up to 15 s under a
+	// slow-Mollie failure mode (which would block every concurrent
+	// checkout on the same project). Any SQLSTATE 23505 from the
+	// unique partial index surfaces as ErrAlreadySubscribed.
 	var subscriptionID string
-	err = tx.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`INSERT INTO public.subscriptions
 		    (project_id, mollie_customer_id, plan, price_cents, currency,
 		     billing_interval, status)
@@ -250,6 +246,13 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	// back without a lookup. The idempotency key derives from the
 	// subscription UUID (freshly minted above) so a River retry
 	// after a network flake reuses the same Mollie payment.
+	//
+	// On failure we EXPLICITLY roll back the subscription row so
+	// the unique partial index doesn't block a retry with a fresh
+	// UUID. Without this rollback the row would linger in
+	// 'incomplete' state until PR 5's cron sweeps it — that's
+	// operationally fine but produces a confusing "already
+	// subscribed" error for the user on their next attempt.
 	payment, err := s.client.CreatePayment(ctx, mollie.PaymentCreateRequest{
 		Amount:       mollie.AmountFromCents(price, "EUR"),
 		Description:  fmt.Sprintf("Eurobase %s — %s", planCode, projectName),
@@ -264,19 +267,27 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 		},
 	}, mollie.WithIdempotencyKey("checkout:"+subscriptionID))
 	if err != nil {
+		s.rollbackSubscription(ctx, subscriptionID)
 		return nil, fmt.Errorf("billing: create mollie payment: %w", err)
 	}
-
 	if payment.Links.Checkout == nil || payment.Links.Checkout.Href == "" {
 		// Extremely unexpected — first payments always return a
 		// checkout URL. Surface loudly rather than 500 silently.
+		s.rollbackSubscription(ctx, subscriptionID)
 		return nil, fmt.Errorf("billing: mollie returned no checkout URL (payment %s)", payment.ID)
 	}
 
 	// 6. Persist the payment ID for the webhook idempotency
 	// guard. We also drop an invoices row in 'pending' so the
 	// console can immediately show "Awaiting first payment" on
-	// the /billing screen.
+	// the /billing screen. Two writes in one tx now that the
+	// external call is safely behind us.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("billing: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	_, err = tx.Exec(ctx,
 		`INSERT INTO public.invoices
 		    (project_id, mollie_payment_id, amount_cents, currency, status)
@@ -303,4 +314,23 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 		SubscriptionID: subscriptionID,
 		CheckoutURL:    payment.Links.Checkout.Href,
 	}, nil
+}
+
+// rollbackSubscription deletes an 'incomplete' subscription row
+// after a downstream failure (Mollie call errored, or Mollie
+// returned no checkout URL). Uses status='incomplete' as a guard
+// so a webhook that races us can't get its 'active' flip deleted.
+// Logs but does not surface the error — the caller is already
+// returning a wrapped error to the user, and losing the rollback
+// row is preferable to hiding the original failure behind a
+// double-fault log line.
+func (s *Service) rollbackSubscription(ctx context.Context, subscriptionID string) {
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM public.subscriptions
+		  WHERE id = $1 AND status = 'incomplete'`,
+		subscriptionID,
+	); err != nil {
+		slog.Warn("billing: rollback of incomplete subscription failed — will be swept by PR 5 cron",
+			"subscription_id", subscriptionID, "error", err)
+	}
 }
