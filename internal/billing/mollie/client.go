@@ -204,6 +204,20 @@ func (c *Client) CancelSubscription(ctx context.Context, customerID, subscriptio
 	return &out, nil
 }
 
+// CreatePayment POSTs /v2/payments and returns the payment object.
+// For the first-payment flow (SequenceType=first + CustomerID), the
+// response carries Links.Checkout.Href — that's the URL the user
+// must visit to complete the payment and capture a mandate. Once
+// paid, PR 4's webhook creates the recurring subscription against
+// the mandate.
+func (c *Client) CreatePayment(ctx context.Context, req PaymentCreateRequest, opts ...CreateOption) (*Payment, error) {
+	var out Payment
+	if err := c.do(ctx, http.MethodPost, "/payments", req, &out, opts...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // GetPayment fetches a payment by ID. Used by the webhook handler on
 // every /platform/billing/webhook POST — Mollie sends only {id}, the
 // canonical state comes from a GET-back.

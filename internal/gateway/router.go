@@ -12,6 +12,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/billing"
 	"github.com/eurobase/euroback/internal/breach"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
@@ -48,7 +49,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -226,6 +227,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 			r.Post("/accept", tenant.HandleAcceptInvitation(pool))
 		})
+
+		// Authenticated: billing (Mollie subscription checkout).
+		// Feature-flagged behind BILLING_ENABLED — the handler
+		// returns 503 when the service reports disabled, so wiring
+		// the route unconditionally is safe. Downstream PRs add
+		// webhook + subscription management + invoice download.
+		if billingSvc != nil {
+			r.Route("/billing", func(r chi.Router) {
+				if isDev {
+					r.Use(devAuthMiddleware)
+				} else {
+					r.Use(platformAuth.Handler)
+				}
+				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
+			})
+		}
 
 		// Authenticated: superadmin-only platform administration.
 		// These endpoints manage state that spans every tenant (allowlist,
