@@ -54,6 +54,14 @@ var planPriceCents = map[string]int{
 	"team": 14900, // €149/mo per project (not shipped yet)
 }
 
+// WebhookMetrics is the surface the webhook handler uses to record
+// failure counts. Kept as a tiny interface so tests can inject a
+// no-op recorder and the billing package doesn't have to import
+// internal/metrics. Nil is safe — every method is a no-op on nil.
+type WebhookMetrics interface {
+	IncBillingWebhookFailed(resource string)
+}
+
 // Service owns the runtime dependencies for the billing HTTP
 // surface. Constructed once at server startup and re-used across
 // every request — safe because Client, Pool, and the config strings
@@ -63,6 +71,7 @@ type Service struct {
 	client  *mollie.Client
 	config  Config
 	enabled bool
+	metrics WebhookMetrics
 }
 
 // Config holds the settings CreateCheckout reads on every call.
@@ -90,6 +99,24 @@ func NewService(pool *pgxpool.Pool, client *mollie.Client, cfg Config, enabled b
 		client:  client,
 		config:  cfg,
 		enabled: enabled,
+	}
+}
+
+// WithMetrics attaches a metrics recorder. Optional — a nil
+// metrics is safe (IncBillingWebhookFailed is a no-op on nil).
+// Call after NewService and before serving traffic.
+func (s *Service) WithMetrics(m WebhookMetrics) *Service {
+	s.metrics = m
+	return s
+}
+
+// incFailureMetric bumps the webhook-failure counter if metrics is
+// wired. Called from the webhook handler on every terminal error
+// branch (which returns 200 to Mollie — the counter is our only
+// signal that something broke).
+func (s *Service) incFailureMetric(resource string) {
+	if s.metrics != nil {
+		s.metrics.IncBillingWebhookFailed(resource)
 	}
 }
 

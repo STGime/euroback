@@ -44,6 +44,17 @@ type Registry struct {
 	breachClosedTotal *prometheus.CounterVec
 	breachMTTD        prometheus.Histogram
 	breachMTTR        prometheus.Histogram
+
+	// Mollie billing webhook health. Every incoming webhook that
+	// hits a terminal error (Mollie 5xx, DB write failure,
+	// unexpected state) increments billingWebhookFailedTotal so
+	// the cockpit alert `BillingWebhookFailingSpike` can fire.
+	// The handler always returns HTTP 200 to Mollie (retry-storm
+	// avoidance) — this counter is the only visibility into
+	// silent failures. Labelled by resource type (payment vs
+	// subscription) so a Mollie API-side regression is easy to
+	// bisect.
+	billingWebhookFailedTotal *prometheus.CounterVec
 }
 
 // New creates and registers all gateway metrics.
@@ -95,13 +106,23 @@ func New(buildVersion string) *Registry {
 	})
 	reg.MustRegister(breachOpenedTotal, breachClosedTotal, breachMTTD, breachMTTR)
 
+	billingWebhookFailedTotal := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "eurobase_billing_webhook_failed_total",
+			Help: "Mollie webhook handler failures (returned 200 to Mollie but hit a terminal error internally). Labelled by resource type (payment|subscription|unknown).",
+		},
+		[]string{"resource"},
+	)
+	reg.MustRegister(billingWebhookFailedTotal)
+
 	r := &Registry{
-		reg:               reg,
-		ExportsTotal:      exportsTotal,
-		breachOpenedTotal: breachOpenedTotal,
-		breachClosedTotal: breachClosedTotal,
-		breachMTTD:        breachMTTD,
-		breachMTTR:        breachMTTR,
+		reg:                       reg,
+		ExportsTotal:              exportsTotal,
+		breachOpenedTotal:         breachOpenedTotal,
+		breachClosedTotal:         breachClosedTotal,
+		breachMTTD:                breachMTTD,
+		breachMTTR:                breachMTTR,
+		billingWebhookFailedTotal: billingWebhookFailedTotal,
 		requestsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "eurobase_http_requests_total",
@@ -188,6 +209,18 @@ func (r *Registry) ObserveBreachMTTD(seconds float64) {
 // ObserveBreachMTTR records a mean-time-to-resolve sample in seconds.
 func (r *Registry) ObserveBreachMTTR(seconds float64) {
 	r.breachMTTR.Observe(seconds)
+}
+
+// IncBillingWebhookFailed increments the Mollie webhook failure
+// counter. Called from internal/billing when a webhook path hits
+// an unrecoverable error but returns 200 to Mollie anyway (see
+// docs/billing/webhook-state-machine.md for the trust model).
+// resource is "payment", "subscription", or "unknown".
+func (r *Registry) IncBillingWebhookFailed(resource string) {
+	if r == nil {
+		return
+	}
+	r.billingWebhookFailedTotal.WithLabelValues(resource).Inc()
 }
 
 // Middleware records request count, latency, and in-flight count for every

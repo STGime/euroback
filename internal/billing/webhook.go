@@ -50,6 +50,12 @@ func HandleMollieWebhook(svc *Service) http.HandlerFunc {
 		}
 
 		if err := svc.ProcessMollieWebhook(r.Context(), id); err != nil {
+			// Every terminal error path also bumps a Prometheus
+			// counter so the `BillingWebhookFailingSpike` alert
+			// in deploy/k8s/cockpit/alerts.yaml can fire — the
+			// slog line alone would be silent because we return
+			// 200 to Mollie regardless (retry-storm avoidance).
+			svc.incFailureMetric(resourceFromID(id))
 			slog.Error("billing.webhook.failed",
 				"id", id,
 				"error", err,
@@ -59,6 +65,20 @@ func HandleMollieWebhook(svc *Service) http.HandlerFunc {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+	}
+}
+
+// resourceFromID classifies a Mollie ID into a metric label so
+// dashboards can bisect "payment failing" from "subscription
+// failing" without eyeballing raw IDs.
+func resourceFromID(id string) string {
+	switch {
+	case strings.HasPrefix(id, "tr_"):
+		return "payment"
+	case strings.HasPrefix(id, "sub_"):
+		return "subscription"
+	default:
+		return "unknown"
 	}
 }
 
@@ -210,7 +230,13 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 		Amount:      mollie.AmountFromCents(priceCents, "EUR"),
 		Interval:    "1 month",
 		Description: payment.Description,
-		WebhookURL:  fmt.Sprintf("%s/platform/billing/webhook", s.config.WebhookBaseURL),
+		// Pin the recurring subscription to the mandate captured
+		// by THIS first payment. Without this, Mollie picks the
+		// most-recent-valid mandate, which is ambiguous once a
+		// customer has cycled through cancel-and-resubscribe
+		// (multiple mandates on file). See PR 4 review.
+		MandateID:  payment.MandateID,
+		WebhookURL: fmt.Sprintf("%s/platform/billing/webhook", s.config.WebhookBaseURL),
 		Metadata: map[string]string{
 			"subscription_id": subscriptionID,
 			"project_id":      projectID,
