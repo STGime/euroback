@@ -1,4 +1,4 @@
-# Invoice PDFs (PR 6)
+# Invoice PDFs (PR 6 + 6.5)
 
 Every paid invoice gets a PDF rendered asynchronously, uploaded
 to Scaleway Object Storage, and pointed at by
@@ -13,8 +13,12 @@ Estonian invoice-minimum for a non-VAT-registered SaaS:
   code 17557586, contact@eurobase.app.
 - **Buyer.** Owner email + display name (billing profile is a
   future feature — no full billing address today).
-- **Invoice number.** `EB-XXXXXXXX` — uppercase first-8-hex of
-  the invoice UUID. Short enough to quote over the phone.
+- **Invoice number.** `EB-YYYY-NNNNNN` — year prefix from
+  `invoices.created_at`, gap-free monotonic sequence from
+  `invoices.invoice_number` (BIGINT, backed by
+  `invoice_number_seq` — migration 000082). Estonian
+  Accounting Act §7 requires the sequence; the year prefix is
+  for accountant readability.
 - **Dates.** Issued (invoice `created_at`) + Paid (invoice
   `paid_at` if set). Zero-value `paid_at` elides the "Paid" line
   entirely rather than showing `0001-01-01`.
@@ -149,6 +153,43 @@ Not covered by unit tests (same rationale as PR 4/5): DB JOIN
 in `loadInvoiceData`, S3 upload, download-handler DB queries.
 CI runs `go test` without a Postgres service or Scaleway
 credentials. Exercised via manual staging QA.
+
+## Auto-email delivery (PR 6.5)
+
+Once the async render completes and the PDF is retrievable, the
+render path fires an HTML email to the buyer with a
+"Download PDF invoice →" button linking to the console billing
+page (from there they hit the download endpoint, which 302s to
+the presigned S3 URL). The mail carries the invoice number,
+amount, project name, and the Estonian entity footer with the
+VAT §19 statement.
+
+**Accounting BCC.** Every buyer send is followed by a separate
+send to `billing@eurobase.app` with `[copy]` prefix in the
+subject line, so we retain our own delivery trail. Separate
+send (not a real BCC header) because TEM's REST body doesn't
+expose BCC; two small sends is cheaper than adding attachment
+support to the client.
+
+**Attachment vs link.** Modern SaaS practice (Stripe, Chargebee,
+Paddle) delivers the PDF as a signed link, not an attachment.
+Legal compliance is satisfied — Estonian tax law requires the
+invoice to be MADE AVAILABLE, not necessarily attached. Keeps
+mail size small and deliverability high. Buyers who need the
+PDF attached can download and forward manually.
+
+**Fires on paid state.** The render path guards on
+`data.PaidAt != zero` so the on-demand render for an unpaid
+invoice (via the download endpoint) doesn't spam mail. Only the
+async render triggered by the paid-transition webhook produces
+the mail.
+
+Buyer-bounce still fires the BCC — the accounting copy exists
+to mirror what we tried to send, not to depend on it landing.
+
+Nil mailer (dev environment without TEM creds) is a no-op; the
+PDF still lands in S3 and is retrievable via the download
+endpoint.
 
 ## Manual QA
 

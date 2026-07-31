@@ -67,12 +67,13 @@ type WebhookMetrics interface {
 // every request — safe because Client, Pool, and the config strings
 // are read-only after construction.
 type Service struct {
-	pool    *pgxpool.Pool
-	client  *mollie.Client
-	config  Config
-	enabled bool
-	metrics WebhookMetrics
-	storage invoiceStorage
+	pool          *pgxpool.Pool
+	client        *mollie.Client
+	config        Config
+	enabled       bool
+	metrics       WebhookMetrics
+	storage       invoiceStorage
+	invoiceMailer invoiceMailer
 }
 
 // Config holds the settings CreateCheckout reads on every call.

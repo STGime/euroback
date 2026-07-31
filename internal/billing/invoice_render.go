@@ -96,6 +96,43 @@ func (s *Service) RenderAndUploadInvoice(ctx context.Context, invoiceID string) 
 		"key", key,
 		"bytes", len(pdf),
 	)
+
+	// Fire the buyer notification + accounting BCC once the PDF
+	// is actually retrievable. Guarded on paidAt to avoid mailing
+	// on pre-render for unpaid rows (the async path fires from
+	// the paid-transition webhook, but the on-demand path can be
+	// hit against an unpaid invoice via the download endpoint).
+	if !data.PaidAt.IsZero() {
+		// Atomic claim-then-send. Two concurrent
+		// RenderAndUploadInvoice calls (async webhook +
+		// on-demand download) can both reach this point for
+		// the same paid invoice; without this UPDATE both
+		// would fire buyer + BCC mails. The UPDATE only
+		// affects a row where invoice_mail_sent_at IS NULL,
+		// so the SECOND caller sees RowsAffected == 0 and
+		// silently skips the send.
+		claim, cerr := s.pool.Exec(ctx,
+			`UPDATE public.invoices
+			    SET invoice_mail_sent_at = now()
+			  WHERE id = $1
+			    AND invoice_mail_sent_at IS NULL`,
+			invoiceID,
+		)
+		if cerr != nil {
+			slog.Warn("billing: mail-claim update failed — skipping mail",
+				"invoice_id", invoiceID, "error", cerr)
+		} else if claim.RowsAffected() > 0 {
+			s.sendInvoiceReadyMail(ctx, invoiceEmailState{
+				InvoiceNumber:     data.InvoiceNumber,
+				ProjectName:       data.ProjectName,
+				AmountCents:       data.AmountCents,
+				Currency:          data.Currency,
+				BuyerEmail:        data.BuyerEmail,
+				BuyerName:         data.BuyerDisplayName,
+				ConsoleBillingURL: s.config.ConsoleBaseURL + "/billing",
+			})
+		}
+	}
 	return nil
 }
 
@@ -144,6 +181,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		paidAt           *time.Time
 		amountCents      int
 		currency         string
+		invoiceNumber    int64
 		periodStart      *time.Time
 		periodEnd        *time.Time
 		planCode         string
@@ -158,6 +196,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 	// historical rows where subscription_id may still be NULL.
 	err := s.pool.QueryRow(ctx,
 		`SELECT i.created_at, i.paid_at, i.amount_cents, i.currency,
+		        i.invoice_number,
 		        s.started_at, s.next_charge_at, s.plan,
 		        p.name, u.email, u.display_name
 		   FROM public.invoices i
@@ -174,6 +213,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		  WHERE i.id = $1`,
 		invoiceID,
 	).Scan(&invoiceCreatedAt, &paidAt, &amountCents, &currency,
+		&invoiceNumber,
 		&periodStart, &periodEnd, &planCode,
 		&projectName, &ownerEmail, &ownerDisplayName)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -209,7 +249,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 	}
 
 	data := InvoiceData{
-		InvoiceNumber:      shortInvoiceNumber(invoiceID),
+		InvoiceNumber:      formatInvoiceNumber(invoiceCreatedAt.Year(), invoiceNumber),
 		IssuedAt:           invoiceCreatedAt,
 		PaidAt:             paidAtVal,
 		SellerLegalName:    "Eurobase OÜ",
@@ -224,6 +264,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		PeriodTo:           *periodEnd,
 		AmountCents:        amountCents,
 		Currency:           currency,
+		ProjectName:        projectName,
 	}
 
 	// Object key derived from the invoice UUID. Grouped by first
@@ -238,22 +279,13 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 // exist. Handlers translate to 404.
 var ErrInvoiceNotFound = errors.New("billing: invoice not found")
 
-// shortInvoiceNumber renders a human-quotable identifier from
-// the invoice UUID's first segment. Example:
-// "eb0af5c1-..." → "EB-EB0AF5C1".
-func shortInvoiceNumber(uuid string) string {
-	if len(uuid) < 8 {
-		return "EB-" + uuid
-	}
-	// Uppercase the first 8 chars for readability over the phone.
-	first := uuid[:8]
-	b := make([]byte, 8)
-	for i := 0; i < 8; i++ {
-		c := first[i]
-		if c >= 'a' && c <= 'z' {
-			c -= 32
-		}
-		b[i] = c
-	}
-	return "EB-" + string(b)
+// formatInvoiceNumber renders the sequence + year as
+// EB-YYYY-NNNNNN. Year comes from the invoice's created_at so
+// re-rendering a historical invoice never drifts. The 6-digit
+// zero-pad handles up to a million invoices — well beyond
+// what beta needs and simple to widen later if we ever hit
+// it. The tax-audit-friendly property is the monotonic
+// sequence, not the format string.
+func formatInvoiceNumber(year int, seq int64) string {
+	return fmt.Sprintf("EB-%04d-%06d", year, seq)
 }
