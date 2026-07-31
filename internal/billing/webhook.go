@@ -350,13 +350,15 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Insert invoice, ignoring duplicate delivery.
+	// Insert invoice, ignoring duplicate delivery. subscription_id
+	// linked so re-renders don't drift after cancel+resubscribe
+	// (PR 6 review).
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, mollie_payment_id, amount_cents, currency, status, paid_at)
-		 VALUES ($1, $2, $3, 'EUR', 'paid', now())
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now())
 		 ON CONFLICT (mollie_payment_id) DO NOTHING`,
-		projectID, payment.ID, priceCents,
+		projectID, subscriptionID, payment.ID, priceCents,
 	)
 	if err != nil {
 		return fmt.Errorf("insert recurring invoice: %w", err)

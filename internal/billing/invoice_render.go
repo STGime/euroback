@@ -151,6 +151,11 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		ownerEmail       string
 		ownerDisplayName *string
 	)
+	// Prefer the invoice.subscription_id link (migration 000081)
+	// so a re-render always resolves to the SAME subscription the
+	// invoice was originally issued for. LEFT JOIN falls back to
+	// "any subscription for this project" only for pre-000081
+	// historical rows where subscription_id may still be NULL.
 	err := s.pool.QueryRow(ctx,
 		`SELECT i.created_at, i.paid_at, i.amount_cents, i.currency,
 		        s.started_at, s.next_charge_at, s.plan,
@@ -158,11 +163,15 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		   FROM public.invoices i
 		   JOIN public.projects p ON p.id = i.project_id
 		   JOIN public.platform_users u ON u.id = p.owner_id
-		   LEFT JOIN public.subscriptions s ON s.project_id = p.id
-		            AND s.status IN ('active', 'past_due', 'expired', 'canceled')
-		  WHERE i.id = $1
-		  ORDER BY s.started_at DESC NULLS LAST
-		  LIMIT 1`,
+		   LEFT JOIN public.subscriptions s ON s.id = COALESCE(
+		          i.subscription_id,
+		          (SELECT id FROM public.subscriptions
+		            WHERE project_id = i.project_id
+		              AND status IN ('active', 'past_due', 'expired', 'canceled', 'incomplete')
+		            ORDER BY started_at ASC NULLS LAST
+		            LIMIT 1)
+		   )
+		  WHERE i.id = $1`,
 		invoiceID,
 	).Scan(&invoiceCreatedAt, &paidAt, &amountCents, &currency,
 		&periodStart, &periodEnd, &planCode,

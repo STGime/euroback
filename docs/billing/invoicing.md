@@ -41,6 +41,13 @@ Chrome-headless approach. For a one-line subscription invoice
 that's fine; if we ever need multi-line invoices with tables
 that need HTML/CSS layout, revisit.
 
+**Known font limitation:** Helvetica (fpdf core font) is Latin-1
+only. Cyrillic / Greek / CJK buyer names or project names will
+corrupt PDFs. Not blocking today (all closed-beta users are
+Latin-script) but will bite the first Bulgarian / Greek / Asian
+customer. Fix requires embedding a Unicode TTF (~1 MB per font);
+tracked as a follow-up.
+
 ## Storage
 
 Bucket: `eurobase-platform-invoices` (Scaleway fr-par, private).

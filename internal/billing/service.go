@@ -316,11 +316,13 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Link invoice to subscription so re-renders of historical
+	// invoices don't drift after cancel+resubscribe (PR 6 review).
 	_, err = tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, mollie_payment_id, amount_cents, currency, status)
-		 VALUES ($1, $2, $3, 'EUR', 'pending')`,
-		projectID, payment.ID, price,
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'pending')`,
+		projectID, subscriptionID, payment.ID, price,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("billing: insert invoice: %w", err)
