@@ -140,3 +140,50 @@ groups:
         annotations:
           summary: "{{ $labels.pod }} memory > 90% of limit"
           description: "Container is close to OOMKill; investigate or raise limits."
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Mollie billing webhook health
+  # ═══════════════════════════════════════════════════════════════════════
+  #
+  # POST /platform/billing/webhook always returns HTTP 200 to Mollie
+  # (retry-storm avoidance — non-2xx would put the webhook into
+  # Mollie's exponential-backoff retry queue). That's the right call
+  # operationally but it means slog.Error("billing.webhook.failed",
+  # ...) is the only signal a webhook actually broke. This alert
+  # counts them via the Prometheus counter incremented alongside
+  # the slog line — 5 failures in 10 min pages ops. See
+  # docs/billing/webhook-state-machine.md for the trust model.
+  - name: eurobase-billing
+    interval: 1m
+    rules:
+
+      - alert: BillingWebhookFailingSpike
+        expr: |
+          sum(increase(eurobase_billing_webhook_failed_total[10m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "Mollie webhook failing — {{ $value | printf \"%.0f\" }} failures in the last 10 min"
+          description: |
+            The gateway hit >5 unrecoverable failures processing Mollie webhooks
+            in the last 10 min. Every one returned 200 to Mollie (see docs) so
+            Mollie will NOT retry — payment / subscription state is drifting
+            away from Mollie's view of the world.
+            Check: kubectl -n eurobase logs -l app=gateway | grep billing.webhook.failed
+
+      - alert: BillingWebhookFailingSustained
+        expr: |
+          sum(rate(eurobase_billing_webhook_failed_total[30m])) > 0
+        for: 30m
+        labels:
+          severity: critical
+          service: billing
+          pager: "true"
+        annotations:
+          summary: "Mollie webhook has been failing for 30+ minutes"
+          description: |
+            Any sustained non-zero webhook-failure rate for 30 min likely
+            means an outright bug in the state machine (Mollie API change,
+            missing metadata, DB drift). Page immediately.

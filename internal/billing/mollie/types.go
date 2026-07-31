@@ -94,6 +94,14 @@ type Subscription struct {
 // subscription on an existing customer. Interval is a Mollie-native
 // string ("1 month", "3 months"); Eurobase always uses "1 month" for
 // the Pro tier.
+//
+// MandateID explicitly ties the subscription to a specific mandate.
+// Optional in the Mollie API — omitting it lets Mollie auto-select
+// the most-recent-valid mandate. That's safe today (a fresh
+// customer has exactly one mandate captured at first payment) but
+// becomes ambiguous once a customer has cycled through a
+// cancel-and-resubscribe flow (multiple mandates on file). Set it
+// explicitly to remove that ambiguity — see PR 4 review comment.
 type SubscriptionCreateRequest struct {
 	Amount      Amount            `json:"amount"`
 	Interval    string            `json:"interval"`
@@ -102,6 +110,7 @@ type SubscriptionCreateRequest struct {
 	WebhookURL  string            `json:"webhookUrl,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	Method      string            `json:"method,omitempty"`
+	MandateID   string            `json:"mandateId,omitempty"`
 	Times       *int              `json:"times,omitempty"`
 }
 

@@ -232,7 +232,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// Feature-flagged behind BILLING_ENABLED — the handler
 		// returns 503 when the service reports disabled, so wiring
 		// the route unconditionally is safe. Downstream PRs add
-		// webhook + subscription management + invoice download.
+		// subscription management + invoice download.
 		if billingSvc != nil {
 			r.Route("/billing", func(r chi.Router) {
 				if isDev {
@@ -242,6 +242,18 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				}
 				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
 			})
+
+			// UNAUTHENTICATED: Mollie's webhook endpoint. Mollie
+			// doesn't sign webhook POSTs — trust rests on the URL
+			// being a secret held only by us + Mollie plus the
+			// handler GET-ing canonical state back from Mollie's
+			// API. A malicious POST with a random ID either hits
+			// 404 at Mollie (ErrNotFound → 200 no-op) or lands on
+			// an idempotent state that's already applied.
+			//
+			// Deliberately registered OUTSIDE the platform auth
+			// middleware — Mollie is not a Eurobase platform user.
+			r.Post("/billing/webhook", billing.HandleMollieWebhook(billingSvc))
 		}
 
 		// Authenticated: superadmin-only platform administration.
