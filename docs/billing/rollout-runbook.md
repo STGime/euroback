@@ -4,30 +4,96 @@ Sequence for flipping `BILLING_ENABLED=true` in prod and
 launching paid Pro. Every step is scripted so it can be paused
 between phases if something surprising happens.
 
-## Pre-flight (run 24h before)
+## Pre-flight — once KYC is complete
 
-- [ ] **Mollie live-mode key** provisioned via the Mollie
-  dashboard as Eurobase OÜ. Bearer token in
-  `eurobase-secrets` as `MOLLIE_API_KEY_LIVE`.
-- [ ] **Bank account verified for payouts** — Mollie pays to
-  the Estonian business IBAN. Confirm in Mollie dashboard →
-  Settings → Payouts.
-- [ ] **Estonian accountant sign-off** on the invoice
-  template. Verify the VAT §19 wording is exactly what they
-  want to see.
-- [ ] **Object Storage bucket exists** in prod:
-  `AWS_PROFILE=scw ./deploy/scripts/create-invoices-bucket.sh`.
-- [ ] **Migrations 000079–000082 applied** in prod (verify
-  via `SELECT column_name FROM information_schema.columns
-  WHERE table_name='invoices' AND column_name IN
-  ('invoice_number','invoice_mail_sent_at','subscription_id',
-  'pdf_object_key')` — should return 4 rows).
-- [ ] **Cockpit alerts registered:**
-  `BillingWebhookFailingSpike` + `BillingWebhookFailingSustained`
-  from `deploy/k8s/cockpit/alerts.yaml`.
-- [ ] **Discord `#alerts` receiving webhook failure test
-  ping** (fire a broken webhook via `curl` against staging,
-  verify the alert lands).
+Everything here is copy-pasteable. Order matters only for the
+Mollie-secret step (the pod won't pick up the live key until
+it's in the Secret before restart).
+
+### 1. Get the live key from Mollie
+
+Mollie dashboard → **Developers → API keys** → copy the string
+starting with `live_`. Only visible after KYC completes.
+
+### 2. Confirm the payout IBAN
+
+Mollie dashboard → **Settings → Payouts**. Must show the
+Estonian business IBAN (Eurobase OÜ). If it says "pending
+verification", Mollie hasn't finished KYC yet — stop here and
+resume this runbook when it clears.
+
+### 3. Patch `eurobase-secrets` with the three billing keys
+
+```bash
+kubectl -n eurobase patch secret eurobase-secrets --type merge -p '{
+  "stringData": {
+    "MOLLIE_API_KEY_LIVE": "live_XXXXXXXX_paste_from_dashboard",
+    "MOLLIE_ENV":          "live",
+    "BILLING_ENABLED":     "true"
+  }
+}'
+```
+
+**Don't restart the pod yet** — restart is Step 8 below (T-0).
+This step just gets the values into the Secret so the next
+restart picks them up atomically.
+
+### 4. Verify the migrations landed in prod
+
+```sql
+SELECT column_name
+  FROM information_schema.columns
+ WHERE table_name = 'invoices'
+   AND column_name IN
+       ('invoice_number', 'invoice_mail_sent_at',
+        'subscription_id', 'pdf_object_key');
+-- Should return 4 rows.
+
+SELECT column_name
+  FROM information_schema.columns
+ WHERE table_name = 'projects'
+   AND column_name = 'legacy_pro_grace_until';
+-- Should return 1 row.
+
+SELECT relname FROM pg_class WHERE relname = 'invoice_number_seq';
+-- Should return 1 row.
+```
+
+If any row-count is off, the migrations haven't all applied —
+resolve before proceeding.
+
+### 5. Create the invoices bucket (idempotent)
+
+```bash
+AWS_PROFILE=scw ./deploy/scripts/create-invoices-bucket.sh
+```
+
+Script no-ops if `eurobase-platform-invoices` already exists.
+
+### 6. Load Cockpit alert rules
+
+Import `deploy/k8s/cockpit/alerts.yaml` into Grafana Alerting
+(the file's header comment has the three import methods). The
+two rules to verify exist post-import:
+`BillingWebhookFailingSpike`, `BillingWebhookFailingSustained`.
+
+### 7. Estonian accountant sign-off on the invoice PDF
+
+Render a sample invoice against staging (any Pro sub in
+test-mode produces one). Send to the accountant, confirm the
+VAT §19 wording is exactly what they'd want on a real invoice
+before any real one goes out.
+
+### 8. Ping Discord `#alerts` end-to-end
+
+Fire a deliberate broken webhook against staging:
+```bash
+curl -X POST https://staging-api.eurobase.app/platform/billing/webhook \
+  -d 'id=tr_definitely_not_real'
+```
+Wait ≤10 min for `BillingWebhookFailingSpike` to fire in
+Discord. If nothing lands, the alert wiring is broken — fix
+before the prod flip.
 
 ## Cohort mail 24h ahead
 
@@ -64,18 +130,47 @@ Run manual QA:
 
 ### T-0 — flip prod
 
+Pre-flight step 3 already put `MOLLIE_API_KEY_LIVE`,
+`MOLLIE_ENV=live`, and `BILLING_ENABLED=true` into
+`eurobase-secrets`. This step just rolls the pod so the
+process picks them up:
+
 ```bash
-# Prerequisite: pod-config secret is already patched with
-# BILLING_ENABLED=true (via SealedSecret or kubectl patch).
 kubectl -n eurobase rollout restart deploy/gateway
+kubectl -n eurobase rollout status deploy/gateway --timeout=2m
 ```
 
-Verify:
-- `kubectl logs -l app=gateway | grep 'billing: enabled'`
-  fires with `mollie_env=live`.
-- `curl -X POST https://api.eurobase.app/platform/billing/checkout`
-  with a real bearer token succeeds and returns a
-  `https://www.mollie.com/checkout/...` URL.
+Verify **all three** before proceeding to the smoke test:
+
+1. **Startup log shows enabled + live mode:**
+   ```bash
+   kubectl -n eurobase logs -l app=gateway --tail=200 \
+     | grep 'billing: enabled'
+   ```
+   Should print `mollie_env=live`. If it shows `mollie_env=test`
+   the ConfigMap didn't merge — check step 3.
+
+2. **No API-key prefix mismatch warning** — the client logs
+   `mollie: live env but API key does not start with live_` in
+   the first minute after boot if the key was pasted wrong.
+   Grep for it and abort if it appears:
+   ```bash
+   kubectl -n eurobase logs -l app=gateway --tail=200 \
+     | grep 'mollie:.*prefix' || echo "OK — no prefix warnings"
+   ```
+
+3. **Checkout call actually reaches Mollie** — from any dev
+   machine with a real platform JWT for a Free-tier project:
+   ```bash
+   curl -sX POST https://api.eurobase.app/platform/billing/checkout \
+     -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"project_id":"...","plan_code":"pro"}' | jq
+   ```
+   Should return `{"subscription_id":"...","checkout_url":"https://www.mollie.com/checkout/..."}`.
+
+If any of the three fails, roll the flag back (rollback
+section) before opening the door wider.
 
 ### T+5m — smoke test
 
