@@ -94,10 +94,22 @@ func (s *DowngradeService) StartLoop(ctx context.Context) {
 	slog.Info("billing: downgrade sweep loop started", "interval", downgradeInterval)
 }
 
-// RunSweep processes both branches. Exposed for manual invocation
-// from an ops runbook and for the eventual integration test.
-// Never returns error — each candidate row is best-effort; a
-// single failure logs and the loop continues to the next.
+// RunSweep processes three branches. Exposed for manual
+// invocation from an ops runbook and for the eventual
+// integration test. Never returns error — each candidate row is
+// best-effort; a single failure logs and the loop continues to
+// the next.
+//
+// Branches:
+//   1. past-due-grace-elapsed (PR 5) — recurring charge failed,
+//      Mollie's retry window is up.
+//   2. legacy-Pro-grace-elapsed (PR 5) — beta-Pro user never
+//      added a card within 14 days.
+//   3. end-of-period cancel (PR 8) — user canceled with
+//      end_of_period mode; canceled_at stamped, next_charge_at
+//      passed. Without this branch the project would stay on
+//      Pro indefinitely — the PR 8 review caught this before
+//      merge.
 func (s *DowngradeService) RunSweep(ctx context.Context) {
 	pastDue, err := s.findPastDueGraceElapsed(ctx)
 	if err != nil {
@@ -114,6 +126,15 @@ func (s *DowngradeService) RunSweep(ctx context.Context) {
 	} else {
 		for _, c := range legacy {
 			s.downgradeOne(ctx, c, "legacy_pro_grace_elapsed")
+		}
+	}
+
+	endOfPeriod, err := s.findEndOfPeriodElapsed(ctx)
+	if err != nil {
+		slog.Error("billing: end-of-period sweep query failed", "error", err)
+	} else {
+		for _, c := range endOfPeriod {
+			s.downgradeOne(ctx, c, "end_of_period_cancel")
 		}
 	}
 }
@@ -143,6 +164,43 @@ func (s *DowngradeService) findPastDueGraceElapsed(ctx context.Context) ([]downg
 		  ORDER BY s.past_due_since ASC
 		  LIMIT 500`,
 		fmt.Sprintf("%d hours", int(pastDueGracePeriod.Hours())),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []downgradeCandidate
+	for rows.Next() {
+		var c downgradeCandidate
+		var subID string
+		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.OwnerEmail,
+			&subID, &c.MollieSubscriptionID, &c.MollieCustomerID); err != nil {
+			return nil, err
+		}
+		c.SubscriptionID = &subID
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// findEndOfPeriodElapsed returns subscriptions the user cancelled
+// with end_of_period mode whose next_charge_at has now passed.
+// PR 8 branch. Guarded by canceled_at IS NOT NULL so an active
+// subscription with a future next_charge_at doesn't get swept.
+func (s *DowngradeService) findEndOfPeriodElapsed(ctx context.Context) ([]downgradeCandidate, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT p.id, p.name, u.email,
+		        s.id, s.mollie_subscription_id, s.mollie_customer_id
+		   FROM public.subscriptions s
+		   JOIN public.projects p ON p.id = s.project_id
+		   JOIN public.platform_users u ON u.id = p.owner_id
+		  WHERE s.status = 'active'
+		    AND s.canceled_at IS NOT NULL
+		    AND s.next_charge_at IS NOT NULL
+		    AND s.next_charge_at < now()
+		  ORDER BY s.canceled_at ASC
+		  LIMIT 500`,
 	)
 	if err != nil {
 		return nil, err

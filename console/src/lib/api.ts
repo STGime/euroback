@@ -271,12 +271,22 @@ export interface SignedUrlResponse {
 
 const TOKEN_KEY = 'eurobase_token';
 
-/** Parse raw API error responses into user-friendly messages. */
+/** Parse raw API error responses into user-friendly messages.
+ *
+ * PR 8 review fix: the old regex `\{"error":"(.+?)"\}` looked
+ * non-greedy but the terminator `"\}` didn't match the actual
+ * response shape, which now carries both `error` and `message`
+ * fields: `{"error":"code","message":"human"}`. The old pattern
+ * would fall through to the raw-body fallback OR capture the
+ * wrong span. New regex targets the JSON `error` field
+ * specifically and terminates on the first `"` — works for both
+ * the old `{"error":"..."}` shape and the newer two-field
+ * envelope.
+ */
 function parseAPIError(status: number, body: string): string {
-	// Try to extract error message from JSON body like {"error":"email already registered"}
-	const jsonMatch = body.match(/\{"error":"(.+?)"\}/);
-	if (jsonMatch) {
-		const msg = jsonMatch[1];
+	const match = body.match(/"error":"([^"]+)"/);
+	if (match) {
+		const msg = match[1];
 		return msg.charAt(0).toUpperCase() + msg.slice(1);
 	}
 	// Fallback: common status codes
@@ -542,6 +552,55 @@ export class EurobaseAPI {
 	 */
 	invoicePDFUrl(invoiceId: string): string {
 		return `${this.baseURL}/platform/billing/invoices/${invoiceId}/pdf`;
+	}
+
+	/**
+	 * Cancel a subscription. `end_of_period` keeps Pro features
+	 * until the current period expires (no refund). `immediate`
+	 * flips to Free right away and creates a prorated refund on
+	 * Mollie for the unused portion of the current invoice.
+	 * Backend defaults to end_of_period if body is empty — this
+	 * client always sends the mode explicitly so the console
+	 * behaviour matches the button the user clicked.
+	 */
+	async cancelSubscription(
+		subscriptionId: string,
+		mode: 'end_of_period' | 'immediate'
+	): Promise<{
+		mode: 'end_of_period' | 'immediate';
+		effective_at: string;
+		refunded_cents?: number;
+	}> {
+		return this.fetch(`/platform/billing/subscriptions/${subscriptionId}/cancel`, {
+			method: 'POST',
+			body: JSON.stringify({ mode })
+		});
+	}
+
+	/**
+	 * Fetch the live subscription for a project (or null if none).
+	 * Returns the subscription ID + status + next_charge_at so
+	 * the per-project billing page can render "Pro until <date>"
+	 * and the cancel modal knows what to POST against.
+	 *
+	 * PR 8 review fix: the previous implementation matched on
+	 * `err.message.includes('subscription_not_found')`. That was
+	 * broken twice over — parseAPIError's regex was capturing
+	 * the wrong span AND the capitalize step made the substring
+	 * check case-mismatch. Result: every Free-tier user visiting
+	 * /billing saw a red error banner instead of an "Upgrade to
+	 * Pro" prompt. Fixed by branching on HTTP status directly via
+	 * rawFetch rather than parsing error strings.
+	 */
+	async getProjectSubscription(projectId: string): Promise<ProjectSubscription | null> {
+		const res = await this.rawFetch(`/platform/billing/projects/${projectId}/subscription`);
+		if (res.status === 404) return null;
+		if (res.status === 503) return null; // billing not enabled → same UX as "no subscription"
+		if (!res.ok) {
+			const body = await res.text();
+			throw new Error(parseAPIError(res.status, body || res.statusText));
+		}
+		return (await res.json()) as ProjectSubscription;
 	}
 
 	/** List all projects (tenants) for the authenticated user. */
@@ -1923,6 +1982,18 @@ export interface FunctionMetrics {
 	avg_duration_ms: number;
 	p95_duration_ms: number;
 	period: string;
+}
+
+/** Live subscription for a project, returned by
+ * GET /platform/billing/projects/{id}/subscription. */
+export interface ProjectSubscription {
+	id: string;
+	plan_code: string;
+	status: 'incomplete' | 'active' | 'past_due';
+	price_cents: number;
+	currency: string;
+	next_charge_at?: string | null;
+	canceled_at?: string | null;
 }
 
 /** Invoice row returned by GET /platform/billing/invoices. */
