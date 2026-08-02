@@ -128,6 +128,20 @@ export interface PlatformProfile {
 	is_superadmin: boolean;
 	created_at: string;
 	last_sign_in_at: string | null;
+	// Team-tier closed-beta gate (M2). When true, the pricing page
+	// shows a live "Create Team project" CTA instead of "Coming soon".
+	// Flipped per-user by superadmin via /platform/admin/team-beta.
+	team_beta_access: boolean;
+}
+
+export interface TeamBetaEntry {
+	user_id: string;
+	email: string;
+	display_name: string | null;
+	granted_at: string | null;
+	granted_by_email: string | null;
+	active_team_projects: number;
+	created_at: string;
 }
 
 export interface PersonalAccessToken {
@@ -1545,6 +1559,28 @@ export class EurobaseAPI {
 	/** Remove an email from the platform allowlist. Superadmin only. */
 	async adminRemoveAllowlist(email: string): Promise<void> {
 		return this.fetch(`/platform/admin/allowlist/${encodeURIComponent(email)}`, {
+			method: 'DELETE'
+		});
+	}
+
+	// ---- Team-tier closed-beta (Team-tier M2, issue #308) ----
+
+	/** List every platform_user with team_beta_access = true. Superadmin only. */
+	async adminListTeamBetaUsers(): Promise<{ entries: TeamBetaEntry[]; total: number }> {
+		return this.fetch<{ entries: TeamBetaEntry[]; total: number }>('/platform/admin/team-beta');
+	}
+
+	/** Grant Team-tier closed-beta access to a user. Superadmin only. */
+	async adminGrantTeamBeta(userId: string): Promise<void> {
+		return this.fetch(`/platform/admin/team-beta/${encodeURIComponent(userId)}`, {
+			method: 'POST'
+		});
+	}
+
+	/** Revoke Team-tier closed-beta access. Revocation is prospective —
+	 * existing Team projects the user created keep running. Superadmin only. */
+	async adminRevokeTeamBeta(userId: string): Promise<void> {
+		return this.fetch(`/platform/admin/team-beta/${encodeURIComponent(userId)}`, {
 			method: 'DELETE'
 		});
 	}

@@ -5,6 +5,10 @@
 	let limits: PlanLimits[] = $state([]);
 	let loading = $state(true);
 	let signedIn = $state(false);
+	// Team-tier closed-beta gate (M2). When true, the Team column
+	// swaps its "Coming soon" copy for a live "Create Team project"
+	// CTA that deep-links into /projects?new=team.
+	let hasTeamBeta = $state(false);
 
 	onMount(async () => {
 		// Only fetch live limits when the visitor is already signed in.
@@ -18,7 +22,14 @@
 			return;
 		}
 		try {
-			limits = await api.getPlans();
+			// Load plans + profile in parallel so the Team CTA
+			// resolves at the same time as the limits.
+			const [plansRes, profile] = await Promise.all([
+				api.getPlans(),
+				api.getProfile().catch(() => null)
+			]);
+			limits = plansRes;
+			if (profile) hasTeamBeta = !!profile.team_beta_access;
 		} catch {
 			// Falls back to the hard-coded defaults below.
 		} finally {
@@ -177,22 +188,39 @@
 			</div>
 
 			<!--
-				Team card — the feature is planned but the tier hasn't
-				launched yet. Card is styled muted (dashed border, no
-				CTA button, "Coming soon" pill) so it signals intent
-				without pretending to be purchasable. Matches the
-				pattern the Supabase-migration Solution card uses on
-				the marketing site.
+				Team card — closed-beta gate (Team-tier M2).
+				  * hasTeamBeta = true  → live "Create Team project" CTA,
+				                          "Free during closed beta" price.
+				  * hasTeamBeta = false → "Coming soon" pill, muted price,
+				                          no CTA (existing pre-M2 behaviour).
+				The card structure stays the same either way so the grid
+				doesn't visually reflow between granted and non-granted
+				users.
 			-->
-			<div class="relative rounded-2xl border border-dashed border-gray-300 bg-white p-8 shadow-sm">
-				<span class="absolute -top-3 right-6 rounded-full bg-amber-500/20 text-amber-700 border border-amber-400/60 px-3 py-1 text-xs font-semibold shadow">Coming soon</span>
+			<div class="relative rounded-2xl border {hasTeamBeta ? 'border-2 border-emerald-500 shadow-lg' : 'border border-dashed border-gray-300 shadow-sm'} bg-white p-8">
+				{#if hasTeamBeta}
+					<span class="absolute -top-3 right-6 rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow">Closed beta</span>
+				{:else}
+					<span class="absolute -top-3 right-6 rounded-full bg-amber-500/20 text-amber-700 border border-amber-400/60 px-3 py-1 text-xs font-semibold shadow">Coming soon</span>
+				{/if}
 				<h2 class="text-xl font-semibold text-gray-900">Team</h2>
 				<p class="mt-1 text-sm text-gray-500">For SMBs running production on Eurobase.</p>
 				<div class="mt-6 flex items-baseline gap-1">
-					<span class="text-4xl font-bold text-gray-400">€149</span>
-					<span class="text-sm text-gray-400">/mo per project</span>
+					{#if hasTeamBeta}
+						<span class="text-4xl font-bold text-emerald-700">Free</span>
+						<span class="text-sm text-gray-500">during closed beta</span>
+					{:else}
+						<span class="text-4xl font-bold text-gray-400">€—</span>
+						<span class="text-sm text-gray-400">pricing TBD</span>
+					{/if}
 				</div>
-				<div class="mt-6 block rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-center text-sm text-gray-500">Waitlist opening later</div>
+				{#if hasTeamBeta}
+					<a href="/projects?new=team" class="mt-6 block rounded-lg bg-emerald-600 px-4 py-2.5 text-center text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 transition-colors">
+						Create Team project
+					</a>
+				{:else}
+					<div class="mt-6 block rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-center text-sm text-gray-500">Waitlist opening later</div>
+				{/if}
 				<ul class="mt-6 space-y-2 text-sm text-gray-600">
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Everything in Pro, plus:</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Dedicated Postgres instance</strong> per project — direct <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px] font-mono">DATABASE_URL</code> for Payload / Prisma / Drizzle</span></li>

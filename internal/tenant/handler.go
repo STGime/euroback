@@ -3,6 +3,7 @@ package tenant
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -198,6 +199,10 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		project, err := svc.CreateProject(r.Context(), claims.Subject, claims.Email, req)
 		if err != nil {
 			slog.Error("failed to create project", "error", err, "user_id", claims.Subject)
+			if errors.Is(err, ErrTeamBetaRequired) {
+				http.Error(w, `{"error":"team plan requires closed-beta access","code":"team_beta_required"}`, http.StatusForbidden)
+				return
+			}
 			if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
 				http.Error(w, `{"error":"This project URL is already taken. Each project gets a unique subdomain (slug.eurobase.app), so please choose a different name or slug."}`, http.StatusConflict)
 				return

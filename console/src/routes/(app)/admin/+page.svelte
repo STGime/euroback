@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type AdminProject, type AllowlistEntry } from '$lib/api.js';
+	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
 	let allowlist = $state<AllowlistEntry[]>([]);
+	let teamBeta = $state<TeamBetaEntry[]>([]);
+	let teamBetaSearch = $state('');
+	let teamBetaBusy = $state(false);
 	let newEmail = $state('');
 	let newNote = $state('');
 	let loading = $state(true);
@@ -58,13 +61,65 @@
 		loading = true;
 		error = null;
 		try {
-			const [p, a] = await Promise.all([api.adminListAllProjects(), api.adminListAllowlist()]);
+			const [p, a, tb] = await Promise.all([
+				api.adminListAllProjects(),
+				api.adminListAllowlist(),
+				api.adminListTeamBetaUsers()
+			]);
 			projects = p.projects;
 			allowlist = a.entries;
+			teamBeta = tb.entries;
 		} catch (e: any) {
 			error = e?.message ?? 'Failed to load admin data';
 		} finally {
 			loading = false;
+		}
+	}
+
+	// Team-tier closed-beta grant (M2).
+	// Search-by-email + one-click grant. The "grant by email" flow
+	// looks up the user in AdminListAllProjects — every project's
+	// owner is a candidate, so scoping the search to "seen" owners
+	// avoids surfacing users we've never heard of. If the target
+	// isn't in that list yet, they need to sign up first.
+	async function grantTeamBeta(email: string) {
+		if (teamBetaBusy) return;
+		const owner = projects.find((p) => p.owner_email.toLowerCase() === email.toLowerCase());
+		if (!owner) {
+			error = `No project owner found with email ${email}. Ask them to sign up first.`;
+			return;
+		}
+		teamBetaBusy = true;
+		error = null;
+		try {
+			await api.adminGrantTeamBeta(owner.owner_id);
+			teamBetaSearch = '';
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Grant failed';
+		} finally {
+			teamBetaBusy = false;
+		}
+	}
+
+	async function revokeTeamBeta(entry: TeamBetaEntry) {
+		if (
+			!confirm(
+				`Revoke Team-beta access for ${entry.email}?\n\n` +
+					`They currently have ${entry.active_team_projects} active Team project(s). ` +
+					`Revocation is prospective — existing projects keep running.`
+			)
+		)
+			return;
+		teamBetaBusy = true;
+		error = null;
+		try {
+			await api.adminRevokeTeamBeta(entry.user_id);
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Revoke failed';
+		} finally {
+			teamBetaBusy = false;
 		}
 	}
 
@@ -275,6 +330,89 @@
 										class="text-red-600 hover:text-red-800 text-xs cursor-pointer"
 									>
 										Remove
+									</button>
+								</td>
+							</tr>
+						{/each}
+					{/if}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="space-y-3">
+		<div class="flex items-baseline justify-between">
+			<h2 class="text-lg font-semibold text-gray-900">Team-tier closed beta</h2>
+			<div class="text-xs text-gray-500">
+				{teamBeta.length} granted ·
+				{teamBeta.reduce((n, e) => n + e.active_team_projects, 0)} active Team projects
+			</div>
+		</div>
+		<p class="text-xs text-gray-500">
+			Granted users see the "Create Team project" CTA on their pricing page and can spin up
+			dedicated managed-PG instances (fr-par). Revocation is prospective — existing Team
+			projects keep running.
+		</p>
+
+		<div class="flex gap-2 items-end">
+			<div class="flex-1">
+				<label for="team-beta-email" class="text-xs text-gray-500 block mb-1">
+					Grant by email (must be an existing project owner)
+				</label>
+				<input
+					id="team-beta-email"
+					type="email"
+					bind:value={teamBetaSearch}
+					placeholder="user@example.com"
+					class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+				/>
+			</div>
+			<button
+				onclick={() => grantTeamBeta(teamBetaSearch.trim())}
+				disabled={teamBetaBusy || !teamBetaSearch.trim()}
+				class="rounded-md bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+			>
+				Grant
+			</button>
+		</div>
+
+		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+			<table class="w-full text-sm">
+				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
+					<tr>
+						<th class="px-4 py-2">User</th>
+						<th class="px-4 py-2">Granted</th>
+						<th class="px-4 py-2">Granted by</th>
+						<th class="px-4 py-2">Active Team projects</th>
+						<th class="px-4 py-2"></th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-gray-100">
+					{#if loading}
+						<tr><td colspan="5" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+					{:else if teamBeta.length === 0}
+						<tr><td colspan="5" class="px-4 py-6 text-center text-gray-400">No Team-beta grants yet.</td></tr>
+					{:else}
+						{#each teamBeta as e}
+							<tr>
+								<td class="px-4 py-2">
+									<div class="font-mono text-gray-900">{e.email}</div>
+									{#if e.display_name}
+										<div class="text-xs text-gray-500">{e.display_name}</div>
+									{/if}
+								</td>
+								<td class="px-4 py-2 text-gray-500">
+									{e.granted_at ? new Date(e.granted_at).toLocaleDateString() : '—'}
+								</td>
+								<td class="px-4 py-2 text-gray-500">{e.granted_by_email ?? '—'}</td>
+								<td class="px-4 py-2 text-gray-600">{e.active_team_projects}</td>
+								<td class="px-4 py-2 text-right">
+									<button
+										onclick={() => revokeTeamBeta(e)}
+										disabled={teamBetaBusy}
+										class="text-red-600 hover:text-red-800 text-xs cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+									>
+										Revoke
 									</button>
 								</td>
 							</tr>

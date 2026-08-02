@@ -172,3 +172,23 @@ func (s *LimitsService) CheckQuotaAlerts(ctx context.Context, projectID string) 
 	}
 	return nil
 }
+
+// CheckDedicatedDB gates features that only Team-tier projects have —
+// backup / PITR / restore endpoints, direct DATABASE_URL exposure (M4),
+// and the M2b Legal-Team compliance surface. Returns nil for any plan
+// with `dedicated_db = true` in plan_limits (currently Team; Legal-Team
+// will inherit true when M2b lands).
+//
+// Callers should surface this as HTTP 402 (payment required) so the
+// console can render an upgrade prompt.
+func (s *LimitsService) CheckDedicatedDB(ctx context.Context, projectID string) error {
+	limits, err := s.GetProjectLimits(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if !limits.DedicatedDB {
+		slog.Warn("dedicated-DB feature not available", "project_id", projectID, "plan", limits.Plan)
+		return fmt.Errorf("this feature requires a dedicated database — upgrade to Team from %s", limits.Plan)
+	}
+	return nil
+}

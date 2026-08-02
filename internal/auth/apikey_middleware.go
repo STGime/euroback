@@ -26,6 +26,12 @@ func NewAPIKeyMiddleware(pool *pgxpool.Pool) *APIKeyMiddleware {
 // WebSocket authorize callback in #62) can validate apikeys without
 // the middleware glue. Returns an error if the key is unknown, the
 // project is not active, or the lookup fails.
+//
+// Team-tier M2: also LEFT JOINs project_databases so callers know
+// whether the project has a dedicated managed-PG instance. The
+// pd_id column is nullable in the SELECT — populated only for
+// projects with a live row (state in provisioning/active/restoring,
+// deleted_at IS NULL).
 func ResolveAPIKey(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*ProjectContext, error) {
 	if apiKey == "" {
 		return nil, errInvalidAPIKey
@@ -34,15 +40,27 @@ func ResolveAPIKey(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Pro
 	keyHash := hex.EncodeToString(h[:])
 
 	var pc ProjectContext
+	var pdID *string
 	err := pool.QueryRow(ctx,
-		`SELECT p.id, p.schema_name, p.slug, p.jwt_secret, ak.type, COALESCE(p.plan, 'free'), p.auth_config
-		 FROM api_keys ak
-		 JOIN projects p ON ak.project_id = p.id
-		 WHERE ak.key_hash = $1 AND p.status = 'active'`,
+		`SELECT p.id, p.schema_name, p.slug, p.jwt_secret, ak.type,
+		        COALESCE(p.plan, 'free'), p.auth_config,
+		        pd.id
+		   FROM api_keys ak
+		   JOIN projects p ON ak.project_id = p.id
+		   LEFT JOIN project_databases pd
+		          ON pd.project_id = p.id
+		         AND pd.state IN ('provisioning','active','restoring')
+		         AND pd.deleted_at IS NULL
+		  WHERE ak.key_hash = $1 AND p.status = 'active'`,
 		keyHash,
-	).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType, &pc.Plan, &pc.AuthConfig)
+	).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType,
+		&pc.Plan, &pc.AuthConfig, &pdID)
 	if err != nil {
 		return nil, errInvalidAPIKey
+	}
+	if pdID != nil {
+		pc.ProjectDatabaseID = pdID
+		pc.HasDedicatedDB = true
 	}
 	return &pc, nil
 }
@@ -73,17 +91,29 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 		keyHash := hex.EncodeToString(h[:])
 
 		var pc ProjectContext
+		var pdID *string
 		err := m.pool.QueryRow(r.Context(),
-			`SELECT p.id, p.schema_name, p.slug, p.jwt_secret, ak.type, COALESCE(p.plan, 'free'), p.auth_config
-			 FROM api_keys ak
-			 JOIN projects p ON ak.project_id = p.id
-			 WHERE ak.key_hash = $1 AND p.status = 'active'`,
+			`SELECT p.id, p.schema_name, p.slug, p.jwt_secret, ak.type,
+			        COALESCE(p.plan, 'free'), p.auth_config,
+			        pd.id
+			   FROM api_keys ak
+			   JOIN projects p ON ak.project_id = p.id
+			   LEFT JOIN project_databases pd
+			          ON pd.project_id = p.id
+			         AND pd.state IN ('provisioning','active','restoring')
+			         AND pd.deleted_at IS NULL
+			  WHERE ak.key_hash = $1 AND p.status = 'active'`,
 			keyHash,
-		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType, &pc.Plan, &pc.AuthConfig)
+		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType,
+			&pc.Plan, &pc.AuthConfig, &pdID)
 		if err != nil {
 			slog.Warn("invalid API key", "error", err, "prefix", safePrefix(apiKey))
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 			return
+		}
+		if pdID != nil {
+			pc.ProjectDatabaseID = pdID
+			pc.HasDedicatedDB = true
 		}
 
 		// If a subdomain already resolved a project, verify the API key

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { api, type Project } from '$lib/api.js';
 	import { projects, projectsLoading, projectsError, loadProjects } from '$lib/stores.js';
 
@@ -10,6 +11,10 @@
 	let newPlan = $state('free');
 	let creating = $state(false);
 	let createError = $state('');
+	// Team-tier closed-beta gate (M2). Populated on mount from the
+	// profile endpoint; controls whether the Team option appears on
+	// the plan picker.
+	let hasTeamBeta = $state(false);
 
 	// Derived slug from name
 	let newSlug = $derived(
@@ -24,17 +29,34 @@
 	let redirecting = $state(false);
 
 	onMount(async () => {
-		await loadProjects();
+		// Load profile in parallel with projects so the Team option
+		// is available immediately when the modal opens. Failure is
+		// non-fatal — hasTeamBeta stays false.
+		const [_, profile] = await Promise.all([
+			loadProjects(),
+			api.getProfile().catch(() => null)
+		]);
+		if (profile) hasTeamBeta = !!profile.team_beta_access;
+
 		// Auto-redirect new users (0 projects) to onboarding.
 		if ($projects.length === 0 && !$projectsError) {
 			redirecting = true;
 			goto('/onboarding');
+			return;
+		}
+
+		// Deep link from pricing page: /projects?new=team opens the
+		// modal pre-set to Team. Only honoured if the user actually
+		// has beta access — otherwise silently ignored.
+		const wantNew = $page.url.searchParams.get('new');
+		if (wantNew === 'team' && hasTeamBeta) {
+			openModal('team');
 		}
 	});
 
-	function openModal() {
+	function openModal(preselectPlan?: string) {
 		newName = '';
-		newPlan = 'free';
+		newPlan = preselectPlan && (preselectPlan === 'team' ? hasTeamBeta : true) ? preselectPlan : 'free';
 		createError = '';
 		showNewModal = true;
 	}
@@ -301,7 +323,25 @@
 								<p class="text-xs text-eurobase-600 font-medium">&euro;19/mo</p>
 							</div>
 						</label>
+						{#if hasTeamBeta}
+							<!-- Team-tier closed-beta option (M2). Only rendered
+							     for users with team_beta_access = true; everyone
+							     else keeps the two-option Free/Pro picker. -->
+							<label class="flex-1 cursor-pointer">
+								<input type="radio" name="plan" value="team" bind:group={newPlan} class="peer sr-only" />
+								<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-emerald-600 peer-checked:bg-emerald-50 border-emerald-200 hover:border-emerald-300">
+									<p class="text-sm font-semibold text-gray-900">Team</p>
+									<p class="text-xs text-emerald-700 font-medium">Beta · free</p>
+								</div>
+							</label>
+						{/if}
 					</div>
+					{#if newPlan === 'team'}
+						<p class="mt-2 text-xs text-gray-500">
+							Provisions a dedicated Postgres instance in fr-par (Scaleway).
+							Takes 2–5 min after project creation to reach <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px]">active</code>.
+						</p>
+					{/if}
 				</fieldset>
 
 				<!-- Actions -->

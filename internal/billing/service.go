@@ -42,16 +42,33 @@ var (
 	// ErrInvalidPlan is returned when planCode isn't one we
 	// recognise. Handler returns 400.
 	ErrInvalidPlan = errors.New("billing: invalid plan code")
+
+	// ErrPlanNotPriced is returned when a caller requests checkout
+	// for a plan whose price_cents on plan_limits is NULL — currently
+	// only Team during the closed-beta window. The correct path for
+	// these plans is either the admin beta-grant flow (RecordBetaGrant)
+	// or waiting for the plan to be priced. Handler returns 400 with
+	// a distinct code so the console can render an accurate message.
+	ErrPlanNotPriced = errors.New("billing: plan is not priced yet — beta grant required")
+
+	// ErrTeamBetaRequired is returned when a non-beta user tries to
+	// subscribe to Team via the checkout path. Mirrors the tenant
+	// package's error so callers see a consistent shape regardless
+	// of which layer catches it. Handler returns 403.
+	ErrTeamBetaRequired = errors.New("billing: team plan requires closed-beta access")
 )
 
-// planPriceCents is the source of truth for public plan pricing.
+// planPriceCents is the source of truth for public plan pricing
+// used by the Mollie checkout path. Team is intentionally NOT
+// listed here — its price is stored on plan_limits.price_cents (may
+// be NULL during the closed beta) and looked up dynamically in
+// CreateCheckout. Non-beta Team checkout will read the DB value; if
+// still NULL it errors with ErrTeamNotPriced.
+//
 // Grandfathering was dropped from the launch scope (see
-// docs/billing/stacked-pr-plan.md); every user pays the same
-// price. Team is here for schema completeness but the handler
-// refuses it until Team billing ships.
+// docs/billing/stacked-pr-plan.md); every user pays the same price.
 var planPriceCents = map[string]int{
-	"pro":  1900,  // €19/mo per project
-	"team": 14900, // €149/mo per project (not shipped yet)
+	"pro": 1900, // €19/mo per project
 }
 
 // WebhookMetrics is the surface the webhook handler uses to record
@@ -157,20 +174,15 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 		return nil, ErrBillingDisabled
 	}
 
-	price, ok := planPriceCents[planCode]
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrInvalidPlan, planCode)
-	}
-	// Guard: Team billing isn't shipped yet. Fail closed rather
-	// than accept a plan we don't invoice for.
-	if planCode == "team" {
-		return nil, fmt.Errorf("%w: team billing not yet available", ErrInvalidPlan)
+	price, err := s.resolvePriceCents(ctx, planCode)
+	if err != nil {
+		return nil, err
 	}
 
 	// 1. Ownership check. Same query shape as tenant/context.go
 	// uses so error semantics match the rest of the platform.
 	var projectName string
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`SELECT name
 		   FROM public.projects
 		  WHERE id = $1 AND owner_id = $2::uuid AND status = 'active'`,
@@ -364,4 +376,93 @@ func (s *Service) rollbackSubscription(ctx context.Context, subscriptionID strin
 		slog.Warn("billing: rollback of incomplete subscription failed — will be swept by PR 5 cron",
 			"subscription_id", subscriptionID, "error", err)
 	}
+}
+
+// dbPricedPlans is the allow-list of plan codes whose price comes
+// from plan_limits.price_cents rather than the planPriceCents map.
+// Keeping this explicit means an unknown/typoed plan code fails
+// fast without a pool round-trip (see TestHandler_InvalidPlanReturns400
+// which passes a nil pool to check the branch).
+var dbPricedPlans = map[string]struct{}{
+	"team":       {},
+	"legal_team": {}, // M2b — reserved so the same code path works when the tier ships
+}
+
+// resolvePriceCents returns the price for a plan code, looking up
+// plan_limits.price_cents when the plan isn't in the hardcoded
+// planPriceCents map AND is on the dbPricedPlans allow-list. Team
+// lives in the DB (nullable — NULL during the closed beta), Pro
+// lives in the map (kept there so a DB misconfiguration can't
+// accidentally move Pro's price).
+//
+// Returns ErrPlanNotPriced when the DB row has NULL price_cents —
+// this is the closed-beta signal that the caller should use the
+// RecordBetaGrant path instead of Mollie.
+func (s *Service) resolvePriceCents(ctx context.Context, planCode string) (int, error) {
+	if price, ok := planPriceCents[planCode]; ok {
+		return price, nil
+	}
+	if _, ok := dbPricedPlans[planCode]; !ok {
+		return 0, fmt.Errorf("%w: %q", ErrInvalidPlan, planCode)
+	}
+	var priceCents *int
+	err := s.pool.QueryRow(ctx,
+		`SELECT price_cents FROM public.plan_limits WHERE plan = $1`,
+		planCode,
+	).Scan(&priceCents)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("%w: %q", ErrInvalidPlan, planCode)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("billing: resolve plan price: %w", err)
+	}
+	if priceCents == nil {
+		return 0, ErrPlanNotPriced
+	}
+	return *priceCents, nil
+}
+
+// RecordBetaGrant writes a subscriptions row with status='beta_grant'
+// for a project the caller was awarded via the Team-tier closed beta
+// admin flow. Same schema shape as a paid subscription so downstream
+// UI (list, cancel, downgrade) doesn't need to branch. Zero price;
+// no Mollie customer or subscription IDs; no invoice.
+//
+// Called from tenant.CreateProject when plan=team AND the user has
+// team_beta_access. Idempotent — if a live subscription already
+// exists for the project the caller gets ErrAlreadySubscribed.
+//
+// Kept separate from CreateCheckout so the fail-closed
+// `BILLING_ENABLED=false` gate on that path never blocks the closed
+// beta — beta grants are recorded regardless of the Mollie flag. If
+// billing IS enabled, RecordBetaGrant still won't touch Mollie.
+func (s *Service) RecordBetaGrant(ctx context.Context, projectID, planCode string) (string, error) {
+	if planCode == "" {
+		return "", fmt.Errorf("%w: empty plan code", ErrInvalidPlan)
+	}
+	// The unique partial index on public.subscriptions catches races
+	// with a concurrent checkout attempt for the same project — the
+	// SQLSTATE 23505 surfaces as ErrAlreadySubscribed.
+	var subscriptionID string
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO public.subscriptions
+		    (project_id, plan, price_cents, currency,
+		     billing_interval, status, started_at)
+		 VALUES ($1, $2, 0, 'EUR', '1 month', 'beta_grant', now())
+		 RETURNING id`,
+		projectID, planCode,
+	).Scan(&subscriptionID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return "", ErrAlreadySubscribed
+		}
+		return "", fmt.Errorf("billing: insert beta grant subscription: %w", err)
+	}
+	slog.Info("billing: beta_grant subscription recorded",
+		"project_id", projectID,
+		"subscription_id", subscriptionID,
+		"plan_code", planCode,
+	)
+	return subscriptionID, nil
 }

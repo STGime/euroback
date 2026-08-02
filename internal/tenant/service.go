@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -59,11 +60,21 @@ type SecretStore interface {
 	Configured() bool
 }
 
+// BetaGrantRecorder is the subset of billing.Service that
+// CreateProject needs to record a Team-tier closed-beta subscription
+// (M2). Matched by *billing.Service.RecordBetaGrant. Optional — if
+// nil, CreateProject just skips the subscription row and logs a
+// warning; the project itself still provisions.
+type BetaGrantRecorder interface {
+	RecordBetaGrant(ctx context.Context, projectID, planCode string) (string, error)
+}
+
 // TenantService encapsulates database operations for tenant/project management.
 type TenantService struct {
 	pool        *pgxpool.Pool
 	riverClient *river.Client[pgx.Tx]
 	secrets     SecretStore
+	betaGrants  BetaGrantRecorder
 }
 
 // NewTenantService creates a new TenantService backed by the given connection pool.
@@ -91,14 +102,60 @@ func (s *TenantService) SetSecretStore(store SecretStore) {
 	s.secrets = store
 }
 
+// SetBetaGrantRecorder wires an optional beta-grant recorder
+// (typically *billing.Service) into the tenant service. When set,
+// CreateProject with plan=team writes a beta_grant subscription row
+// so the console shows an accurate billing state. Optional — nil
+// causes the project to still provision, just without the
+// bookkeeping row.
+func (s *TenantService) SetBetaGrantRecorder(r BetaGrantRecorder) {
+	s.betaGrants = r
+}
+
+// ErrTeamBetaRequired is returned by CreateProject when a caller
+// asks for plan=team but doesn't have the closed-beta flag set on
+// their platform_user row. Handlers should surface this as HTTP 403
+// with a code the console can map to a "join the waitlist" prompt.
+var ErrTeamBetaRequired = errors.New("team plan requires closed-beta access")
+
 // CreateProject provisions a new project for the given owner within a transaction.
 // It upserts the platform_user, inserts the project, calls provision_tenant(),
 // and updates the status to 'active' or 'provisioning_failed'.
 // The platformUserID is the platform_users.id (UUID), and email is the user's email.
+//
+// Team-tier dispatch (M2): if req.Plan == "team":
+//   1. Verify the platform_user has team_beta_access = true. If not,
+//      return ErrTeamBetaRequired (the beta window is admin-managed —
+//      users must be granted via the admin panel first).
+//   2. Provision the shared-cluster tenant schema like any other
+//      project (SDK / REST still land there for M2; gateway routing
+//      to the dedicated instance is a follow-up).
+//   3. After the tx commits, enqueue ProvisionTeamDatabaseArgs so
+//      the worker (internal/workers/provision_team_db.go) spins up
+//      the per-project dedicated managed-PG instance.
+//   4. Also enqueue a beta_grant subscription via billing.RecordBetaGrant
+//      so the console's /billing screen shows the "Team (closed beta)"
+//      status instead of "no active subscription."
 func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email string, req CreateProjectRequest) (*Project, error) {
 	slug := req.Slug
 	if slug == "" {
 		slug = slugify(req.Name)
+	}
+
+	// Team-plan gate — verify beta access BEFORE opening the tx so a
+	// rejected user doesn't waste a schema-create round trip.
+	if req.Plan == "team" {
+		var granted bool
+		err := s.pool.QueryRow(ctx,
+			`SELECT COALESCE(team_beta_access, false) FROM platform_users WHERE id = $1::uuid`,
+			platformUserID,
+		).Scan(&granted)
+		if err != nil {
+			return nil, fmt.Errorf("check team beta access: %w", err)
+		}
+		if !granted {
+			return nil, ErrTeamBetaRequired
+		}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -219,6 +276,39 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 			slog.Error("failed to enqueue provision job", "error", err, "project_id", projectID)
 		} else {
 			slog.Info("async provision job enqueued (s3 bucket)", "project_id", projectID, "slug", slug)
+		}
+	}
+
+	// Team-tier: enqueue the dedicated managed-PG provisioning worker
+	// (M1). Runs in parallel with the S3 bucket job above — the two
+	// don't interact. If enqueue fails, we log loudly and continue —
+	// ops can manually enqueue via a river-cli command; the project
+	// row is already 'active' with a NULL project_databases row that
+	// the console can render as "provisioning pending."
+	if status == "active" && req.Plan == "team" && s.riverClient != nil {
+		_, err := s.riverClient.Insert(ctx, jobs.ProvisionTeamDatabaseArgs{
+			ProjectID: projectID,
+			Slug:      slug,
+			Provider:  "scaleway",
+			Region:    "fr-par",
+			Size:      "medium",
+		}, nil)
+		if err != nil {
+			slog.Error("failed to enqueue team-database provision job",
+				"error", err, "project_id", projectID)
+		} else {
+			slog.Info("team-database provision job enqueued", "project_id", projectID, "slug", slug)
+		}
+
+		// Record the closed-beta subscription so /billing shows a
+		// coherent state. Missing recorder or duplicate row (race)
+		// is non-fatal; the project still provisions.
+		if s.betaGrants != nil {
+			_, err := s.betaGrants.RecordBetaGrant(ctx, projectID, req.Plan)
+			if err != nil {
+				slog.Warn("failed to record team-tier beta_grant subscription",
+					"error", err, "project_id", projectID)
+			}
 		}
 	}
 
