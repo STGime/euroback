@@ -16,6 +16,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/storage"
@@ -125,6 +126,35 @@ func main() {
 	}
 	unsubSigner := email.NewUnsubscribeSigner(requireEnv("PLATFORM_JWT_SECRET"))
 
+	// ── Team-tier database provider registry (M1) ──
+	// Wire the Scaleway managed-PG provider if a secret is present.
+	// Empty secret is legal — the provider returns ErrUnauthorized
+	// on every method call, matching the pattern the vault + mollie
+	// packages use for dev environments without production secrets.
+	providerRegistry := dbprovider.NewRegistry()
+	scwSecret := os.Getenv("SCW_SECRET_KEY")
+	scwProject := os.Getenv("SCW_PROJECT_ID")
+	scw := dbprovider.NewScaleway(dbprovider.ScalewayConfig{
+		SecretKey:     scwSecret,
+		ProjectID:     scwProject,
+		DefaultRegion: firstNonEmpty(os.Getenv("SCW_RDB_REGION"), "fr-par"),
+	})
+	providerRegistry.Register(scw)
+	if !scw.Configured() {
+		slog.Warn("scaleway managed-PG provider not configured — Team-tier provisioning will fail with ErrUnauthorized until SCW_SECRET_KEY + SCW_PROJECT_ID are set")
+	}
+
+	// Password cipher for project_databases. Reuses the vault master
+	// key so ops have one secret to rotate. Missing key is a hard
+	// error — the provisioning worker can't be trusted to boot
+	// without the ability to seal credentials.
+	cipher, err := dbprovider.NewCipher(requireEnv("VAULT_ENCRYPTION_KEY"), 1)
+	if err != nil {
+		slog.Error("failed to construct dbprovider cipher", "error", err)
+		os.Exit(1)
+	}
+	providerRepo := dbprovider.NewRepo(pool)
+
 	// ── Register River workers ──
 	riverWorkers := river.NewWorkers()
 	river.AddWorker(riverWorkers, &workers.ProvisionProjectWorker{
@@ -146,6 +176,15 @@ func main() {
 		BaseURL:    baseURL,
 		ConsoleURL: consoleURL,
 		DocsURL:    docsURL,
+	})
+	river.AddWorker(riverWorkers, &workers.ProvisionTeamDatabaseWorker{
+		Registry: providerRegistry,
+		Cipher:   cipher,
+		Repo:     providerRepo,
+	})
+	river.AddWorker(riverWorkers, &workers.DeprovisionTeamDatabaseWorker{
+		Registry: providerRegistry,
+		Repo:     providerRepo,
 	})
 
 	// ── Create River client in worker mode ──

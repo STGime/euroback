@@ -68,3 +68,44 @@ func (SendDripEmailArgs) Kind() string { return "send_drip_email" }
 func (SendDripEmailArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 3}
 }
+
+// ProvisionTeamDatabaseArgs is enqueued when a Team-tier project is
+// created. The worker (internal/workers/provision_team_db.go) calls
+// the dbprovider Provision method, polls Health until StateActive,
+// then flips the project_databases row's state.
+//
+// M1 of the Team-tier plan (milestone #2). See
+// ~/.claude/plans/zazzy-booping-fountain.md.
+type ProvisionTeamDatabaseArgs struct {
+	ProjectID string `json:"project_id"`
+	Slug      string `json:"slug"`
+	Provider  string `json:"provider"` // "scaleway" today; EU-only allow-list
+	Region    string `json:"region"`   // "fr-par" today
+	Size      string `json:"size"`     // "small" | "medium" | "large"
+}
+
+func (ProvisionTeamDatabaseArgs) Kind() string { return "provision_team_database" }
+
+// MaxAttempts = 5 with River's exponential backoff. Provider
+// provisioning can take 2-5 minutes; a network flake during the
+// polling loop shouldn't burn the whole job — we want a few
+// automatic retries before we page ops.
+func (ProvisionTeamDatabaseArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 5}
+}
+
+// DeprovisionTeamDatabaseArgs is enqueued by the periodic sweep to
+// tear down a dedicated instance after its 7-day rollback window
+// has elapsed. Also usable one-off if an operator wants to force
+// deletion after a Team-tier project is fully removed.
+type DeprovisionTeamDatabaseArgs struct {
+	ProjectDatabaseID string `json:"project_database_id"`
+}
+
+func (DeprovisionTeamDatabaseArgs) Kind() string { return "deprovision_team_database" }
+
+// MaxAttempts = 5 — provider deletes are idempotent (404 is treated
+// as success), so retries are safe.
+func (DeprovisionTeamDatabaseArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 5}
+}
