@@ -145,13 +145,27 @@ func main() {
 	}
 
 	// Password cipher for project_databases. Reuses the vault master
-	// key so ops have one secret to rotate. Missing key is a hard
-	// error — the provisioning worker can't be trusted to boot
-	// without the ability to seal credentials.
-	cipher, err := dbprovider.NewCipher(requireEnv("VAULT_ENCRYPTION_KEY"), 1)
-	if err != nil {
-		slog.Error("failed to construct dbprovider cipher", "error", err)
+	// key so ops have one secret to rotate. Follows the same
+	// dev-vs-prod pattern as cmd/gateway/main.go:303-317 — required
+	// in production (any environment that will actually run Team-tier
+	// provisioning), soft warning in dev/CI so the worker binary
+	// still starts without secrets that pre-M1 dev environments
+	// never needed.
+	var cipher *dbprovider.Cipher
+	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
+		var cErr error
+		cipher, cErr = dbprovider.NewCipher(vaultKey, 1)
+		if cErr != nil {
+			slog.Error("failed to construct dbprovider cipher", "error", cErr)
+			if isProdEnv() {
+				os.Exit(1)
+			}
+		}
+	} else if isProdEnv() {
+		slog.Error("FATAL: VAULT_ENCRYPTION_KEY required in production for Team-tier provisioning")
 		os.Exit(1)
+	} else {
+		slog.Warn("VAULT_ENCRYPTION_KEY not set — Team-tier provisioning will fail at seal time (dev mode)")
 	}
 	providerRepo := dbprovider.NewRepo(pool)
 
@@ -306,6 +320,19 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// isProdEnv reports whether the current environment looks like
+// production — mirrors the shape used at cmd/gateway/main.go:288-290
+// so the two binaries fail-closed on the same criteria. Any of:
+//   - ENV=production or ENV=prod (case-insensitive)
+//   - DOMAIN_SUFFIX ending in eurobase.app
+func isProdEnv() bool {
+	env := strings.ToLower(os.Getenv("ENV"))
+	if env == "production" || env == "prod" {
+		return true
+	}
+	return strings.HasSuffix(strings.ToLower(os.Getenv("DOMAIN_SUFFIX")), "eurobase.app")
 }
 
 // parseLogLevel converts a string log level to slog.Level.

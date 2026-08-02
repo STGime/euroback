@@ -12,7 +12,19 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
+
+// stubJob wraps a *river.Job[T] with a non-nil embedded *JobRow so
+// Worker code that reads job.ID (idempotency key) doesn't dereference
+// nil. In production, River always populates JobRow from Postgres —
+// this is a test-construction quirk only.
+func stubJob[T river.JobArgs](args T, id int64) *river.Job[T] {
+	return &river.Job[T]{
+		JobRow: &rivertype.JobRow{ID: id},
+		Args:   args,
+	}
+}
 
 // mockProvider is an in-memory Provider used to exercise the worker's
 // polling loop, retry classification, and error branches without a
@@ -223,11 +235,9 @@ func TestProvisionTeamDatabaseWorker_CancelsOnConfigError(t *testing.T) {
 		Cipher:   cipher,
 		Repo:     dbprovider.NewRepo(nil),
 	}
-	err := w.Work(context.Background(), &river.Job[jobs.ProvisionTeamDatabaseArgs]{
-		Args: jobs.ProvisionTeamDatabaseArgs{
-			ProjectID: "p", Slug: "s", Provider: "scaleway", Region: "fr-par",
-		},
-	})
+	err := w.Work(context.Background(), stubJob(jobs.ProvisionTeamDatabaseArgs{
+		ProjectID: "p", Slug: "s", Provider: "scaleway", Region: "fr-par",
+	}, 42))
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -246,9 +256,29 @@ func TestProvisionTeamDatabaseWorker_CancelsOnUnknownProvider(t *testing.T) {
 		Cipher:   cipher,
 		Repo:     dbprovider.NewRepo(nil),
 	}
-	err := w.Work(context.Background(), &river.Job[jobs.ProvisionTeamDatabaseArgs]{
-		Args: jobs.ProvisionTeamDatabaseArgs{Provider: "unknown"},
-	})
+	err := w.Work(context.Background(), stubJob(jobs.ProvisionTeamDatabaseArgs{Provider: "unknown"}, 43))
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	var cancelErr *river.JobCancelError
+	if !errors.As(err, &cancelErr) {
+		t.Errorf("want river.JobCancelError, got %T: %v", err, err)
+	}
+}
+
+// TestProvisionTeamDatabaseWorker_CancelsOnMissingCipher — a
+// Team-tier job that lands on a worker that booted without
+// VAULT_ENCRYPTION_KEY (dev mode allowed this per M1 fix bug_014)
+// must cancel the job rather than segfault or silently loop.
+func TestProvisionTeamDatabaseWorker_CancelsOnMissingCipher(t *testing.T) {
+	reg := dbprovider.NewRegistry()
+	reg.Register(&mockProvider{name: "scaleway"})
+	w := &ProvisionTeamDatabaseWorker{
+		Registry: reg,
+		Cipher:   nil, // dev-mode boot, no VAULT_ENCRYPTION_KEY
+		Repo:     dbprovider.NewRepo(nil),
+	}
+	err := w.Work(context.Background(), stubJob(jobs.ProvisionTeamDatabaseArgs{Provider: "scaleway"}, 1))
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}

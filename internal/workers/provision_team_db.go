@@ -56,6 +56,16 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 	)
 	logger.Info("provisioning team-tier database")
 
+	// Fail fast on missing cipher — dev mode is allowed to boot the
+	// worker without VAULT_ENCRYPTION_KEY (per cmd/worker/main.go),
+	// but a Team-tier job that reaches this point can't proceed
+	// without the ability to seal credentials.
+	if w.Cipher == nil {
+		err := errors.New("cipher not configured (VAULT_ENCRYPTION_KEY missing) — cannot seal Team-tier DB credentials")
+		logger.Error(err.Error())
+		return river.JobCancel(err)
+	}
+
 	provider, err := w.Registry.Get(args.Provider)
 	if err != nil {
 		logger.Error("provider not registered", "error", err)
@@ -68,11 +78,17 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 		size = dbprovider.SizeMedium
 	}
 
+	// Idempotency-Key = deterministic per job. River retries hit
+	// the same key so Scaleway returns the previously-created
+	// instance rather than spinning up a duplicate (~€50-500/mo of
+	// orphan spend per leak on a MaxAttempts=5 job).
+	idemKey := fmt.Sprintf("provision-%d", job.ID)
+
 	inst, err := provider.Provision(ctx, dbprovider.ProvisionOpts{
-		ProjectID: args.ProjectID,
-		Slug:      args.Slug,
-		Region:    args.Region,
-		Size:      size,
+		ProjectID:      args.ProjectID,
+		Slug:           args.Slug,
+		Size:           size,
+		IdempotencyKey: idemKey,
 	})
 	if err != nil {
 		if isNonRetryable(err) {
@@ -87,6 +103,11 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 	// only in memory during this worker invocation.
 	ct, nonce, ver, err := w.Cipher.Seal(inst.Password)
 	if err != nil {
+		// Provider instance now exists but we can't seal its
+		// credentials — best-effort cleanup so retries don't leak.
+		// context.WithoutCancel because the parent ctx may already
+		// be canceled by River's job timeout.
+		bestEffortDelete(ctx, provider, inst.ProviderID, logger, "seal password failed")
 		return fmt.Errorf("seal password: %w", err)
 	}
 	// Wipe plaintext to reduce accidental exposure via slog / panic.
@@ -94,9 +115,13 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 
 	rec, err := w.Repo.InsertProvisioning(ctx, args.ProjectID, inst, provider.Name(), ct, nonce, ver)
 	if err != nil {
-		// The provider instance now exists but we can't record it
-		// — worst-case orphan. Return retryable; on repeated failure
-		// operations should reconcile manually.
+		// Same story — provider instance exists but no local
+		// record. Retries WILL now hit Scaleway's idempotency
+		// cache (same job.ID → same instance), so this cleanup
+		// is belt-and-suspenders. Belt only, actually — the
+		// idempotency window on Scaleway may expire before the
+		// last River retry.
+		bestEffortDelete(ctx, provider, inst.ProviderID, logger, "insert row failed")
 		return fmt.Errorf("insert project_databases: %w", err)
 	}
 	logger = logger.With("project_database_id", rec.ID, "provider_instance_id", inst.ProviderID)
@@ -117,8 +142,18 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 	active, err := pollUntilActive(pollCtx, provider, inst.ProviderID, interval, logger)
 	if err != nil {
 		logger.Error("poll for active state failed", "error", err)
-		if markErr := w.Repo.MarkFailed(context.WithoutCancel(ctx), rec.ID); markErr != nil {
-			logger.Error("also failed to mark row as failed", "mark_error", markErr)
+		// Tear down the provider-side instance and mark the row
+		// deleted_at=now() so the deprovision sweeper picks it up.
+		// (MarkFailed alone would leave a `failed`-state row invisible
+		// to the sweeper — `state='failed'` isn't in its filter, but
+		// deleted_at IS NULL is — so the instance would keep billing
+		// with no reclaim path.) The next River attempt hits Scaleway
+		// with the same idempotency key, but at that point the
+		// instance is gone so Scaleway allocates a fresh one — that's
+		// the correct behaviour for a retry that follows a real failure.
+		bestEffortDelete(context.WithoutCancel(ctx), provider, inst.ProviderID, logger, "poll timeout")
+		if markErr := w.Repo.MarkDeleted(context.WithoutCancel(ctx), rec.ID); markErr != nil {
+			logger.Error("failed to mark row deleted after poll failure", "mark_error", markErr)
 		}
 		return fmt.Errorf("poll: %w", err)
 	}
@@ -133,6 +168,11 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 // pollUntilActive polls Describe at the configured interval until
 // StateActive, StateFailed, or the context expires. Returns the
 // Instance at the moment of the state transition.
+//
+// Non-retryable errors from Describe (auth failure, unknown
+// provider, malformed request) exit the loop immediately rather
+// than burning the full PollTimeout — a rotated SCW_SECRET_KEY
+// mid-provision should surface in seconds, not 10 minutes.
 func pollUntilActive(
 	ctx context.Context,
 	provider dbprovider.Provider,
@@ -143,6 +183,9 @@ func pollUntilActive(
 	for {
 		inst, err := provider.Describe(ctx, instanceID)
 		if err != nil {
+			if isNonRetryable(err) {
+				return nil, err
+			}
 			// Transient errors during startup are common — log +
 			// retry rather than fail the whole worker.
 			logger.Warn("describe errored during polling", "error", err)
@@ -166,6 +209,32 @@ func pollUntilActive(
 		case <-time.After(interval):
 		}
 	}
+}
+
+// bestEffortDelete tears down a just-provisioned instance when a
+// downstream step (seal, insert, poll) fails. Uses the un-cancelled
+// context so the delete lands even if the parent job is being
+// aborted by River. Logs but never returns errors — the caller has
+// already decided the job outcome.
+func bestEffortDelete(
+	ctx context.Context,
+	provider dbprovider.Provider,
+	instanceID string,
+	logger *slog.Logger,
+	reason string,
+) {
+	if err := provider.Delete(ctx, instanceID); err != nil {
+		logger.Error("best-effort delete after failed provisioning also failed — instance may be orphaned",
+			"instance_id", instanceID,
+			"reason", reason,
+			"delete_error", err,
+		)
+		return
+	}
+	logger.Info("best-effort delete after failed provisioning succeeded",
+		"instance_id", instanceID,
+		"reason", reason,
+	)
 }
 
 // isNonRetryable returns true for errors that will never succeed on

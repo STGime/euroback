@@ -36,7 +36,14 @@ BEGIN;
 
 CREATE TABLE public.project_databases (
     id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id            UUID        NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+    -- ON DELETE RESTRICT (not CASCADE) — every row here owns a
+    -- billed managed-PG instance at the provider. Cascading the
+    -- delete would silently drop the row before the deprovision
+    -- worker could tear down the underlying instance, leaving an
+    -- orphan running (~€50-500/mo). The FK becomes the enforcement
+    -- point: `DELETE FROM projects` fails until the caller walks
+    -- MarkDeleted → 7-day window → DeprovisionTeamDatabaseWorker.
+    project_id            UUID        NOT NULL REFERENCES public.projects(id) ON DELETE RESTRICT,
 
     -- Provider identity. Restricted at application layer to the
     -- EU-only allow-list in internal/dbprovider/registry.go — no CHECK

@@ -86,6 +86,12 @@ const (
 // ProvisionOpts is the caller-supplied set of provisioning inputs.
 // SKU / node size / storage are provider-scoped — the Provider
 // implementation picks a sensible default from the Size hint.
+//
+// M1 is single-region (fr-par); region is baked into the Provider
+// implementation at construction time (Scaleway.defaultRegion),
+// not passed per-call. Multi-region will need to thread region
+// through EVERY method on the interface — not just Provision — so
+// a plain `Region` field here would be misleading.
 type ProvisionOpts struct {
 	// ProjectID is the Eurobase project UUID; used to name the
 	// instance so it's identifiable in the provider's dashboard.
@@ -93,13 +99,16 @@ type ProvisionOpts struct {
 	// Slug is the project slug — human-readable component of the
 	// provider-side instance name.
 	Slug string
-	// Region is the provider region (e.g. "fr-par"). Locked to
-	// fr-par for M1 — passed explicitly so a future multi-region
-	// rollout doesn't need a Provider signature change.
-	Region string
 	// Size is a coarse hint: SizeSmall (dev), SizeMedium (default),
 	// SizeLarge. Providers map this to their own SKU catalogue.
 	Size Size
+	// IdempotencyKey, when non-empty, is sent to the provider so a
+	// retry (River backoff, transient DB blip) lands on the same
+	// instance rather than spinning up a duplicate billed resource.
+	// Callers should use a deterministic value keyed on the job or
+	// project — e.g. `provision-<job.ID>`. Empty is legal but not
+	// recommended in production.
+	IdempotencyKey string
 }
 
 // Size is a coarse hint mapped to provider SKUs at Provision time.

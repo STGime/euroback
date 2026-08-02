@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -66,6 +67,13 @@ const (
 	scalewayDefaultBaseURL = "https://api.scaleway.com"
 	scalewayEngine         = "PostgreSQL-15"
 	scalewayVolumeType     = "bssd" // block SSD; provider default for RDB
+	// scalewayDefaultDB is the maintenance database Scaleway creates
+	// on every RDB instance. Also used as the DBName on our Instance
+	// returns; app DBs are created via CREATE DATABASE later.
+	scalewayDefaultDB = "rdb"
+	// scalewayMaxInstanceName is Scaleway's slug limit for RDB
+	// instance names. Composed names are capped to this.
+	scalewayMaxInstanceName = 63
 )
 
 // scalewayNodeType maps our coarse Size hint to a Scaleway RDB node
@@ -185,10 +193,21 @@ type scalewayBackupList struct {
 }
 
 type scalewayCreateBackupRequest struct {
-	InstanceID   string    `json:"instance_id"`
-	DatabaseName string    `json:"database_name"`
-	Name         string    `json:"name"`
-	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+	InstanceID string `json:"instance_id"`
+	// DatabaseName must be non-empty — Scaleway RDB backups are
+	// per-database, not per-instance. Snapshot() defaults to the
+	// maintenance DB name `rdb` (mapScalewayInstance also uses
+	// this as the DBName) so on-demand snapshots cover the DB
+	// that carries the tenant's data.
+	DatabaseName string `json:"database_name"`
+	Name         string `json:"name"`
+	// ExpiresAt is a *time.Time (not time.Time) because
+	// encoding/json's omitempty never treats a zero-value struct
+	// as empty — a plain time.Time field would always serialise
+	// as "0001-01-01T00:00:00Z" and Scaleway would either 400 or
+	// interpret it as immediate-expiry. See the pattern used in
+	// billing/mollie/types.go for the same reason.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 type scalewayRestoreBackupRequest struct {
@@ -208,14 +227,14 @@ type scalewayPITRRequest struct {
 
 // ── Provider methods ───────────────────────────────────────────────
 
-// Provision creates a new managed-PG instance in the region from
-// opts. Returns once Scaleway has assigned an ID; caller polls
-// Health() to reach StateActive.
+// Provision creates a new managed-PG instance in this client's
+// region. Returns once Scaleway has assigned an ID; caller polls
+// Describe/Health to reach StateActive. When opts.IdempotencyKey is
+// non-empty, a retry (same key) returns the previously-created
+// instance rather than a duplicate — critical for River-retry
+// safety since a leaked instance costs ~€50-500/mo of orphan spend.
 func (s *Scaleway) Provision(ctx context.Context, opts ProvisionOpts) (*Instance, error) {
-	region := opts.Region
-	if region == "" {
-		region = s.defaultRegion
-	}
+	region := s.defaultRegion
 	size := opts.Size
 	if size == "" {
 		size = SizeMedium
@@ -262,7 +281,7 @@ func (s *Scaleway) Provision(ctx context.Context, opts ProvisionOpts) (*Instance
 
 	var out scalewayInstance
 	path := fmt.Sprintf("/rdb/v1/regions/%s/instances", region)
-	if err := s.do(ctx, http.MethodPost, path, req, &out); err != nil {
+	if err := s.do(ctx, http.MethodPost, path, req, &out, withIdempotency(opts.IdempotencyKey)); err != nil {
 		return nil, err
 	}
 	return mapScalewayInstance(&out, region, username, password), nil
@@ -300,15 +319,17 @@ func (s *Scaleway) getInstance(ctx context.Context, instanceID, region string) (
 	return &out, nil
 }
 
-// Snapshot — see Provider. Creates an on-demand backup.
+// Snapshot — see Provider. Creates an on-demand backup of the
+// maintenance DB `rdb` (which is where the tenant's schema lives).
 func (s *Scaleway) Snapshot(ctx context.Context, instanceID string) (*Snapshot, error) {
 	name, err := randomHex(6)
 	if err != nil {
 		return nil, err
 	}
 	req := scalewayCreateBackupRequest{
-		InstanceID: instanceID,
-		Name:       "eurobase-ondemand-" + name,
+		InstanceID:   instanceID,
+		DatabaseName: scalewayDefaultDB,
+		Name:         "eurobase-ondemand-" + name,
 	}
 	var out scalewayBackup
 	path := fmt.Sprintf("/rdb/v1/regions/%s/backups", s.defaultRegion)
@@ -359,7 +380,22 @@ func (s *Scaleway) Restore(ctx context.Context, instanceID string, source Restor
 	if err != nil {
 		return nil, err
 	}
-	restoredName := fmt.Sprintf("%s-restore-%s", strings.TrimSuffix(src.Name, "-"), suffix)
+	// Shorter marker (`-r-` vs `-restore-`) saves 6 chars vs the
+	// obvious composition. Even so, worst-case source names (58
+	// chars per Provision + sanitizeSlug's 40-char cap) plus the
+	// 12-char suffix would still overflow the 63-char limit, so
+	// cap defensively.
+	base := strings.TrimSuffix(src.Name, "-")
+	restoredName := fmt.Sprintf("%s-r-%s", base, suffix)
+	if len(restoredName) > scalewayMaxInstanceName {
+		// Trim the source name portion so the composed result
+		// exactly hits the limit, then trim any trailing '-'
+		// left over from a mid-word cut.
+		overflow := len(restoredName) - scalewayMaxInstanceName
+		trimmed := base[:len(base)-overflow]
+		trimmed = strings.TrimRight(trimmed, "-")
+		restoredName = fmt.Sprintf("%s-r-%s", trimmed, suffix)
+	}
 
 	if source.SnapshotID != "" {
 		req := scalewayRestoreBackupRequest{
@@ -411,10 +447,27 @@ func (s *Scaleway) Delete(ctx context.Context, instanceID string) error {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+// requestOption tunes a single request — currently only for the
+// idempotency-key header. Variadic option slice on the do() call
+// leaves headroom for other per-call headers without needing to
+// bump the signature.
+type requestOption func(*http.Request)
+
+// withIdempotency attaches Scaleway's Idempotency-Key header when
+// key is non-empty. Scaleway caches the response for the key so a
+// retry lands on the same instance instead of creating a duplicate.
+func withIdempotency(key string) requestOption {
+	return func(r *http.Request) {
+		if key != "" {
+			r.Header.Set("Idempotency-Key", key)
+		}
+	}
+}
+
 // do is the shared request-execution path — same shape as the mollie
 // client. Auth via X-Auth-Token, JSON marshalling, structured error
 // classification into the sentinels in errors.go.
-func (s *Scaleway) do(ctx context.Context, method, path string, body, out any) error {
+func (s *Scaleway) do(ctx context.Context, method, path string, body, out any, opts ...requestOption) error {
 	if !s.Configured() {
 		return ErrUnauthorized
 	}
@@ -434,6 +487,9 @@ func (s *Scaleway) do(ctx context.Context, method, path string, body, out any) e
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for _, opt := range opts {
+		opt(req)
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -552,9 +608,10 @@ func pickEndpoint(eps []scalewayEndpoint) (host string, port int) {
 	return "", 0
 }
 
-// isNotFound peels the sentinel out of a wrapped error.
+// isNotFound peels the sentinel out of a wrapped error. classifyStatus
+// wraps 404 with %w so errors.Is works directly.
 func isNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), ErrNotFound.Error())
+	return errors.Is(err, ErrNotFound)
 }
 
 func randomHex(n int) (string, error) {

@@ -173,10 +173,13 @@ func TestScaleway_StatusMapping(t *testing.T) {
 }
 
 func TestScaleway_Snapshot(t *testing.T) {
+	var seenBody map[string]any
 	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || !strings.Contains(r.URL.Path, "/backups") {
 			t.Errorf("expected POST .../backups, got %s %s", r.Method, r.URL.Path)
 		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &seenBody)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{
 			"id":"bkp-1","instance_id":"rdb-1","name":"eurobase-ondemand-abcdef",
@@ -193,6 +196,60 @@ func TestScaleway_Snapshot(t *testing.T) {
 	}
 	if snap.SizeMB != 10 {
 		t.Errorf("SizeMB: got %d, want 10", snap.SizeMB)
+	}
+	// merged_bug_001: request body must carry a non-empty
+	// database_name and must NOT ship a zero-value expires_at.
+	if seenBody["database_name"] != "rdb" {
+		t.Errorf("database_name in body: got %v, want \"rdb\"", seenBody["database_name"])
+	}
+	if v, ok := seenBody["expires_at"]; ok {
+		t.Errorf("expires_at should be omitted when zero (else Scaleway may 400 or immediately expire), got %v", v)
+	}
+}
+
+// TestScaleway_ProvisionPassesIdempotencyKey — bug_002 fix: the
+// Idempotency-Key header must land on the create request so that a
+// River retry lands on the same billed instance rather than
+// spinning up a duplicate.
+func TestScaleway_ProvisionPassesIdempotencyKey(t *testing.T) {
+	var seenKey string
+	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
+		seenKey = r.Header.Get("Idempotency-Key")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"rdb-1","status":"provisioning","endpoints":[]}`))
+	})
+	_, err := p.Provision(context.Background(), ProvisionOpts{
+		ProjectID:      "proj-1",
+		Slug:           "site",
+		Size:           SizeMedium,
+		IdempotencyKey: "provision-42",
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if seenKey != "provision-42" {
+		t.Errorf("Idempotency-Key header: got %q, want provision-42", seenKey)
+	}
+}
+
+// TestScaleway_ProvisionOmitsIdempotencyKeyWhenEmpty — belt-and-
+// suspenders: an empty IdempotencyKey means no header at all
+// (rather than sending an empty-string one, which Scaleway may
+// reject).
+func TestScaleway_ProvisionOmitsIdempotencyKeyWhenEmpty(t *testing.T) {
+	var sawHeader bool
+	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.Header["Idempotency-Key"]; ok {
+			sawHeader = true
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"rdb-1","status":"provisioning","endpoints":[]}`))
+	})
+	_, _ = p.Provision(context.Background(), ProvisionOpts{
+		ProjectID: "p", Slug: "s", Size: SizeMedium,
+	})
+	if sawHeader {
+		t.Error("empty IdempotencyKey should not send the header at all")
 	}
 }
 
@@ -247,6 +304,53 @@ func TestScaleway_ClassifyStatus(t *testing.T) {
 		if !errors.Is(got, want) {
 			t.Errorf("status %d: got %v, want %v", status, got, want)
 		}
+	}
+}
+
+// TestScaleway_RestoreNameCappedAt63 — bug_011 fix: even for a
+// worst-case source name (58 chars, the Provision-time max), the
+// composed restored name must fit under Scaleway's 63-char slug
+// limit. Uses the actual Restore code path (with a mock backing
+// the two API calls Restore makes).
+func TestScaleway_RestoreNameCappedAt63(t *testing.T) {
+	var seenBody map[string]any
+	longSrcName := strings.Repeat("a", 40) + "-" + strings.Repeat("b", 17) // 58 chars, worst-case Provision output
+	getCalls := 0
+	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCalls++
+			// source instance lookup
+			_, _ = w.Write([]byte(`{
+				"id":"rdb-src","name":"` + longSrcName + `","status":"ready",
+				"node_type":"db-gp-s","endpoints":[]
+			}`))
+		case http.MethodPost:
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &seenBody)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"rdb-new","status":"provisioning","endpoints":[]}`))
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	})
+	_, err := p.Restore(context.Background(), "rdb-src", RestoreSource{SnapshotID: "bkp-1"})
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if getCalls != 1 {
+		t.Errorf("expected 1 GET (source lookup), got %d", getCalls)
+	}
+	name, _ := seenBody["instance_name"].(string)
+	if name == "" {
+		t.Fatal("instance_name missing from restore request body")
+	}
+	if len(name) > scalewayMaxInstanceName {
+		t.Errorf("restored name over Scaleway's %d-char limit: len=%d, name=%q",
+			scalewayMaxInstanceName, len(name), name)
+	}
+	if strings.HasSuffix(name, "-") {
+		t.Errorf("restored name ends in trailing hyphen (invalid slug): %q", name)
 	}
 }
 
