@@ -332,6 +332,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Get("/team-beta", tenant.AdminListTeamBetaUsers(pool))
 			r.Post("/team-beta/{id}", tenant.AdminGrantTeamBeta(pool))
 			r.Delete("/team-beta/{id}", tenant.AdminRevokeTeamBeta(pool))
+			// Legal-Team-tier closed-beta grants (M2b).
+			r.Get("/legal-team-beta", tenant.AdminListLegalTeamBetaUsers(pool))
+			r.Post("/legal-team-beta/{id}", tenant.AdminGrantLegalTeamBeta(pool))
+			r.Delete("/legal-team-beta/{id}", tenant.AdminRevokeLegalTeamBeta(pool))
 		})
 
 		// Authenticated: platform config endpoints.
@@ -494,6 +498,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.With(tenant.RequireMinRole("admin")).Get("/connection", connSvc.HandleGetConnection())
 				r.With(tenant.RequireMinRole("admin")).Post("/connection/rotate", connSvc.HandleRotateConnection())
 			}
+
+			// Legal-Team compliance surface (M2b). Gated by
+			// plans.CheckLegalTeamTier inside each handler — returns
+			// 402 with code=legal_team_required for non-legal-team
+			// projects so the console can render an upgrade prompt.
+			holdSvc := compliance.NewHoldService(pool)
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/retention-holds", compliance.HandlePlaceRetentionHold(pool, limitsSvc, holdSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/retention-holds", compliance.HandleListRetentionHolds(pool, limitsSvc, holdSvc))
+			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/retention-holds/{holdId}", compliance.HandleRevokeRetentionHold(pool, limitsSvc, holdSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/gobd-export", compliance.HandleGoBDExport(pool, limitsSvc))
 
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names

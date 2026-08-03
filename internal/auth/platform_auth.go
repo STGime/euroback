@@ -83,6 +83,11 @@ type PlatformProfile struct {
 	// the admin panel; false → the page keeps its "Coming soon"
 	// copy. Team-tier M2 (migration 000084, issue #307).
 	TeamBetaAccess bool `json:"team_beta_access"`
+	// LegalTeamBetaAccess gates the Legal Team tier (M2b, migration
+	// 000087) — a premium tier bundling the German legal-tech
+	// compliance pack. Separate flag from Team so ops can hand
+	// them out independently.
+	LegalTeamBetaAccess bool `json:"legal_team_beta_access"`
 }
 
 // PlatformAuthResponse is returned after successful sign-up or sign-in.
@@ -420,11 +425,13 @@ func (s *PlatformAuthService) GetProfile(ctx context.Context, userID string) (*P
 	var p PlatformProfile
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, email, display_name, COALESCE(plan, 'free'), COALESCE(is_superadmin, false),
-		        created_at, last_sign_in_at, COALESCE(team_beta_access, false)
+		        created_at, last_sign_in_at,
+		        COALESCE(team_beta_access, false),
+		        COALESCE(legal_team_beta_access, false)
 		 FROM platform_users WHERE id = $1`,
 		userID,
 	).Scan(&p.ID, &p.Email, &p.DisplayName, &p.Plan, &p.IsSuperadmin,
-		&p.CreatedAt, &p.LastSignInAt, &p.TeamBetaAccess)
+		&p.CreatedAt, &p.LastSignInAt, &p.TeamBetaAccess, &p.LegalTeamBetaAccess)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("user not found")

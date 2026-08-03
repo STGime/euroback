@@ -201,8 +201,7 @@ func (s *LimitsService) CheckQuotaAlerts(ctx context.Context, projectID string) 
 // CheckDedicatedDB gates features that only Team-tier projects have —
 // backup / PITR / restore endpoints, direct DATABASE_URL exposure (M4),
 // and the M2b Legal-Team compliance surface. Returns nil for any plan
-// with `dedicated_db = true` in plan_limits (currently Team; Legal-Team
-// will inherit true when M2b lands).
+// with `dedicated_db = true` in plan_limits (currently Team + Legal-Team).
 //
 // Callers should surface this as HTTP 402 (payment required) so the
 // console can render an upgrade prompt.
@@ -214,6 +213,36 @@ func (s *LimitsService) CheckDedicatedDB(ctx context.Context, projectID string) 
 	if !limits.DedicatedDB {
 		slog.Warn("dedicated-DB feature not available", "project_id", projectID, "plan", limits.Plan)
 		return fmt.Errorf("this feature requires a dedicated database — upgrade to Team from %s", limits.Plan)
+	}
+	return nil
+}
+
+// legalTechPlans is the allow-list of plan codes that grant access
+// to the M2b German legal-tech compliance surface (staff secrecy
+// register, retention holds, GoBD export, extended audit retention).
+// Kept as an explicit set so a typoed or new plan code doesn't
+// accidentally unlock legal-tech-specific features.
+var legalTechPlans = map[string]struct{}{
+	"legal_team": {},
+}
+
+// CheckLegalTeamTier gates the M2b German legal-tech compliance
+// features. Distinct from CheckDedicatedDB because "has a dedicated
+// database" (base Team) is not the same signal as "has committed to
+// the legal-tech compliance package" (Legal Team). Team-tier
+// customers get their own DB but do NOT get the §203 / §43e / GoBD
+// / retention-hold surface unless they upgraded to Legal Team.
+//
+// Callers should surface this as HTTP 402 with a code the console
+// maps to a "learn about Legal Team" upgrade prompt.
+func (s *LimitsService) CheckLegalTeamTier(ctx context.Context, projectID string) error {
+	limits, err := s.GetProjectLimits(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if _, ok := legalTechPlans[limits.Plan]; !ok {
+		slog.Warn("legal-tech feature not available", "project_id", projectID, "plan", limits.Plan)
+		return fmt.Errorf("this feature is part of the Legal Team tier — currently on %s", limits.Plan)
 	}
 	return nil
 }

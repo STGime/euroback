@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/compliance"
 	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
@@ -394,6 +395,34 @@ func handleDeleteUser(pool *pgxpool.Pool) http.HandlerFunc {
 		if userID == "" {
 			http.Error(w, `{"error":"user ID is required"}`, http.StatusBadRequest)
 			return
+		}
+
+		// Retention-hold check (M2b, hard blocker #3). Legal-Team
+		// tenants can pin specific rows under §50 BRAO / §257 HGB /
+		// §147 AO retention. Refuse the delete with 409 + hold
+		// metadata so the console can surface "retained until <date>
+		// under <legal_basis>" to the operator. Non-Legal-Team
+		// projects never see this branch — the retention_holds table
+		// is empty for them.
+		if projectID := query.ProjectIDFromContext(r.Context()); projectID != "" {
+			hs := compliance.NewHoldService(pool)
+			targetRef := map[string]any{
+				"schema": schema,
+				"table":  "users",
+				"pkey":   map[string]any{"id": userID},
+			}
+			if hold, herr := hs.IsHeld(r.Context(), projectID, compliance.TargetRow, targetRef); herr == nil && hold != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error":       "user is under retention hold — refuse delete",
+					"code":        "retention_hold_active",
+					"legal_basis": hold.LegalBasis,
+					"expires_at":  hold.ExpiresAt.Format(time.RFC3339),
+					"hold_id":     hold.ID,
+				})
+				return
+			}
 		}
 
 		q := fmt.Sprintf(`DELETE FROM %s.users WHERE id = $1`, quoteIdent(schema))

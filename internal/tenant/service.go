@@ -119,6 +119,11 @@ func (s *TenantService) SetBetaGrantRecorder(r BetaGrantRecorder) {
 // with a code the console can map to a "join the waitlist" prompt.
 var ErrTeamBetaRequired = errors.New("team plan requires closed-beta access")
 
+// ErrLegalTeamBetaRequired is the M2b analog: caller asked for
+// plan=legal_team but doesn't have legal_team_beta_access. Separate
+// flag from Team so ops can hand them out independently.
+var ErrLegalTeamBetaRequired = errors.New("legal team plan requires closed-beta access")
+
 // CreateProject provisions a new project for the given owner within a transaction.
 // It upserts the platform_user, inserts the project, calls provision_tenant(),
 // and updates the status to 'active' or 'provisioning_failed'.
@@ -143,18 +148,29 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		slug = slugify(req.Name)
 	}
 
-	// Team-plan gate — verify beta access BEFORE opening the tx so a
-	// rejected user doesn't waste a schema-create round trip. Uses
-	// the exported UserHasTeamBetaAccess helper so the CreateProject
-	// path and the admin-lookup path can't drift on the query shape
-	// (M2 review minor #1).
-	if req.Plan == "team" {
+	// Team-plan / Legal-Team-plan gates — verify beta access BEFORE
+	// opening the tx so a rejected user doesn't waste a schema-create
+	// round trip. Each plan reads its own beta flag so ops can hand
+	// out Team and Legal-Team grants independently. Both use the
+	// exported *_BetaAccess helpers so the CreateProject path and the
+	// admin-lookup path can't drift on the query shape (M2 review
+	// minor #1 + M2b addition).
+	switch req.Plan {
+	case "team":
 		granted, err := UserHasTeamBetaAccess(ctx, s.pool, platformUserID)
 		if err != nil {
 			return nil, fmt.Errorf("check team beta access: %w", err)
 		}
 		if !granted {
 			return nil, ErrTeamBetaRequired
+		}
+	case "legal_team":
+		granted, err := UserHasLegalTeamBetaAccess(ctx, s.pool, platformUserID)
+		if err != nil {
+			return nil, fmt.Errorf("check legal-team beta access: %w", err)
+		}
+		if !granted {
+			return nil, ErrLegalTeamBetaRequired
 		}
 	}
 
@@ -279,13 +295,18 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		}
 	}
 
-	// Team-tier: enqueue the dedicated managed-PG provisioning worker
-	// (M1). Runs in parallel with the S3 bucket job above — the two
-	// don't interact. If enqueue fails, we log loudly and continue —
-	// ops can manually enqueue via a river-cli command; the project
+	// Team + Legal-Team: enqueue the dedicated managed-PG provisioning
+	// worker (M1). Runs in parallel with the S3 bucket job above — the
+	// two don't interact. If enqueue fails, we log loudly and continue
+	// — ops can manually enqueue via a river-cli command; the project
 	// row is already 'active' with a NULL project_databases row that
 	// the console can render as "provisioning pending."
-	if status == "active" && req.Plan == "team" && s.riverClient != nil {
+	//
+	// Both tiers get identical infra provisioning; the compliance
+	// features that differentiate Legal-Team from Team are gated at
+	// endpoint time via plans.CheckLegalTeamTier, not at provision
+	// time.
+	if status == "active" && (req.Plan == "team" || req.Plan == "legal_team") && s.riverClient != nil {
 		_, err := s.riverClient.Insert(ctx, jobs.ProvisionTeamDatabaseArgs{
 			ProjectID: projectID,
 			Slug:      slug,
@@ -295,9 +316,9 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		}, nil)
 		if err != nil {
 			slog.Error("failed to enqueue team-database provision job",
-				"error", err, "project_id", projectID)
+				"error", err, "project_id", projectID, "plan", req.Plan)
 		} else {
-			slog.Info("team-database provision job enqueued", "project_id", projectID, "slug", slug)
+			slog.Info("team-database provision job enqueued", "project_id", projectID, "slug", slug, "plan", req.Plan)
 		}
 
 		// Record the closed-beta subscription so /billing shows a
@@ -306,8 +327,8 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		if s.betaGrants != nil {
 			_, err := s.betaGrants.RecordBetaGrant(ctx, projectID, req.Plan)
 			if err != nil {
-				slog.Warn("failed to record team-tier beta_grant subscription",
-					"error", err, "project_id", projectID)
+				slog.Warn("failed to record beta_grant subscription",
+					"error", err, "project_id", projectID, "plan", req.Plan)
 			}
 		}
 	}
