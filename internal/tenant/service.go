@@ -3,11 +3,13 @@ package tenant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,11 +61,21 @@ type SecretStore interface {
 	Configured() bool
 }
 
+// BetaGrantRecorder is the subset of billing.Service that
+// CreateProject needs to record a Team-tier closed-beta subscription
+// (M2). Matched by *billing.Service.RecordBetaGrant. Optional — if
+// nil, CreateProject just skips the subscription row and logs a
+// warning; the project itself still provisions.
+type BetaGrantRecorder interface {
+	RecordBetaGrant(ctx context.Context, projectID, planCode string) (string, error)
+}
+
 // TenantService encapsulates database operations for tenant/project management.
 type TenantService struct {
 	pool        *pgxpool.Pool
 	riverClient *river.Client[pgx.Tx]
 	secrets     SecretStore
+	betaGrants  BetaGrantRecorder
 }
 
 // NewTenantService creates a new TenantService backed by the given connection pool.
@@ -91,14 +103,59 @@ func (s *TenantService) SetSecretStore(store SecretStore) {
 	s.secrets = store
 }
 
+// SetBetaGrantRecorder wires an optional beta-grant recorder
+// (typically *billing.Service) into the tenant service. When set,
+// CreateProject with plan=team writes a beta_grant subscription row
+// so the console shows an accurate billing state. Optional — nil
+// causes the project to still provision, just without the
+// bookkeeping row.
+func (s *TenantService) SetBetaGrantRecorder(r BetaGrantRecorder) {
+	s.betaGrants = r
+}
+
+// ErrTeamBetaRequired is returned by CreateProject when a caller
+// asks for plan=team but doesn't have the closed-beta flag set on
+// their platform_user row. Handlers should surface this as HTTP 403
+// with a code the console can map to a "join the waitlist" prompt.
+var ErrTeamBetaRequired = errors.New("team plan requires closed-beta access")
+
 // CreateProject provisions a new project for the given owner within a transaction.
 // It upserts the platform_user, inserts the project, calls provision_tenant(),
 // and updates the status to 'active' or 'provisioning_failed'.
 // The platformUserID is the platform_users.id (UUID), and email is the user's email.
+//
+// Team-tier dispatch (M2): if req.Plan == "team":
+//   1. Verify the platform_user has team_beta_access = true. If not,
+//      return ErrTeamBetaRequired (the beta window is admin-managed —
+//      users must be granted via the admin panel first).
+//   2. Provision the shared-cluster tenant schema like any other
+//      project (SDK / REST still land there for M2; gateway routing
+//      to the dedicated instance is a follow-up).
+//   3. After the tx commits, enqueue ProvisionTeamDatabaseArgs so
+//      the worker (internal/workers/provision_team_db.go) spins up
+//      the per-project dedicated managed-PG instance.
+//   4. Also enqueue a beta_grant subscription via billing.RecordBetaGrant
+//      so the console's /billing screen shows the "Team (closed beta)"
+//      status instead of "no active subscription."
 func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email string, req CreateProjectRequest) (*Project, error) {
 	slug := req.Slug
 	if slug == "" {
 		slug = slugify(req.Name)
+	}
+
+	// Team-plan gate — verify beta access BEFORE opening the tx so a
+	// rejected user doesn't waste a schema-create round trip. Uses
+	// the exported UserHasTeamBetaAccess helper so the CreateProject
+	// path and the admin-lookup path can't drift on the query shape
+	// (M2 review minor #1).
+	if req.Plan == "team" {
+		granted, err := UserHasTeamBetaAccess(ctx, s.pool, platformUserID)
+		if err != nil {
+			return nil, fmt.Errorf("check team beta access: %w", err)
+		}
+		if !granted {
+			return nil, ErrTeamBetaRequired
+		}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -222,6 +279,39 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		}
 	}
 
+	// Team-tier: enqueue the dedicated managed-PG provisioning worker
+	// (M1). Runs in parallel with the S3 bucket job above — the two
+	// don't interact. If enqueue fails, we log loudly and continue —
+	// ops can manually enqueue via a river-cli command; the project
+	// row is already 'active' with a NULL project_databases row that
+	// the console can render as "provisioning pending."
+	if status == "active" && req.Plan == "team" && s.riverClient != nil {
+		_, err := s.riverClient.Insert(ctx, jobs.ProvisionTeamDatabaseArgs{
+			ProjectID: projectID,
+			Slug:      slug,
+			Provider:  "scaleway",
+			Region:    "fr-par",
+			Size:      "medium",
+		}, nil)
+		if err != nil {
+			slog.Error("failed to enqueue team-database provision job",
+				"error", err, "project_id", projectID)
+		} else {
+			slog.Info("team-database provision job enqueued", "project_id", projectID, "slug", slug)
+		}
+
+		// Record the closed-beta subscription so /billing shows a
+		// coherent state. Missing recorder or duplicate row (race)
+		// is non-fatal; the project still provisions.
+		if s.betaGrants != nil {
+			_, err := s.betaGrants.RecordBetaGrant(ctx, projectID, req.Plan)
+			if err != nil {
+				slog.Warn("failed to record team-tier beta_grant subscription",
+					"error", err, "project_id", projectID)
+			}
+		}
+	}
+
 	slog.Info("project provisioned",
 		"project_id", projectID,
 		"slug", slug,
@@ -318,15 +408,46 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 
 // DeleteProject drops the tenant schema and deletes the project row.
 // The caller must verify ownership before calling this.
+//
+// Team-tier note (M2 review bug_002): if a live project_databases row
+// exists for this project, mark it deleted_at=now() BEFORE the
+// DELETE FROM projects. The FK is ON DELETE RESTRICT (migration
+// 000083) — the delete would otherwise 23503 and leave the tenant
+// schema already dropped by deprovision_tenant but the row still
+// visible. MarkDeleted flips state='deleting' and sets deleted_at,
+// which drops the row out of the unique-live-per-project index and
+// lets the FK-target-side cascade proceed. The DeprovisionTeamDatabaseWorker
+// sweeps the marked row 7 days later + destroys the actual Scaleway
+// instance.
 func (s *TenantService) DeleteProject(ctx context.Context, projectID string) error {
+	// Mark any live project_databases row deleted so the ON DELETE
+	// RESTRICT FK doesn't block the projects row delete. Idempotent
+	// — no live row is fine (Free / Pro projects), returns quickly.
+	repo := dbprovider.NewRepo(s.pool)
+	rec, err := repo.GetLiveByProject(ctx, projectID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("lookup project_databases: %w", err)
+	}
+	if rec != nil {
+		if err := repo.MarkDeleted(ctx, rec.ID); err != nil {
+			return fmt.Errorf("mark project_databases deleted: %w", err)
+		}
+		slog.Info("marked project_databases row deleted before project drop",
+			"project_id", projectID, "project_database_id", rec.ID)
+	}
+
 	// Call deprovision_tenant to drop the schema.
-	_, err := s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID)
+	_, err = s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID)
 	if err != nil {
 		slog.Error("deprovision_tenant failed", "error", err, "project_id", projectID)
 		return fmt.Errorf("deprovision tenant: %w", err)
 	}
 
 	// Delete the project row (cascades to api_keys, webhooks, etc.).
+	// project_databases (Team-tier) is RESTRICT rather than CASCADE —
+	// the MarkDeleted above soft-deletes the row so the RESTRICT sees
+	// no live reference. superseded_by FK on project_databases is
+	// SET NULL so nothing else blocks.
 	tag, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
 	if err != nil {
 		return fmt.Errorf("delete project: %w", err)

@@ -67,12 +67,17 @@ func (w *DeprovisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job
 	if window == 0 {
 		window = defaultRollbackWindow
 	}
+	// Wrap invariant violations in river.JobCancel so River doesn't
+	// retry all 5 attempts against a condition that cannot heal
+	// (deleted_at doesn't flip while the job body sits in the queue,
+	// and River's total backoff is ~16 min vs a 7-day rollback
+	// window). Bug_004 from PR #331 review.
 	if rec.DeletedAt == nil {
-		return fmt.Errorf("refusing to deprovision live row: deleted_at is NULL for %s", rec.ID)
+		return river.JobCancel(fmt.Errorf("refusing to deprovision live row: deleted_at is NULL for %s", rec.ID))
 	}
 	if time.Since(*rec.DeletedAt) < window {
-		return fmt.Errorf("refusing to deprovision row still in %s rollback window (deleted_at=%s)",
-			window, rec.DeletedAt.Format(time.RFC3339))
+		return river.JobCancel(fmt.Errorf("refusing to deprovision row still in %s rollback window (deleted_at=%s)",
+			window, rec.DeletedAt.Format(time.RFC3339)))
 	}
 
 	provider, err := w.Registry.Get(rec.Provider)

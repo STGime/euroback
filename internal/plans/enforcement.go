@@ -6,27 +6,49 @@ import (
 	"log/slog"
 )
 
-// CheckProjectLimit verifies the owner has not exceeded their project limit.
-// Logic: if the owner has any pro project, they get the pro project limit (10).
-// Otherwise they get the free limit (2).
+// CheckProjectLimit verifies the owner has not exceeded their
+// project limit. Elevation is based on the highest-tier project the
+// owner already has PLUS the closed-beta flags on their platform_user
+// row:
+//
+//   * team_beta_access or legal_team_beta_access → team's ProjectLimit
+//     applies (currently 50). This handles the "beta-granted user with
+//     2 Free projects" case that would otherwise hit Free's limit=2
+//     before ever getting to create their first Team project.
+//   * else any existing team/legal_team project → team's ProjectLimit
+//   * else any existing pro project → pro's ProjectLimit (10)
+//   * else free's ProjectLimit (2)
+//
+// The check runs BEFORE the request body is decoded (handler.go:137),
+// so we can't plumb the requested plan through — the beta-flag check
+// on platform_users is what carries the intent instead. Fix from M2
+// review bug_012.
 func (s *LimitsService) CheckProjectLimit(ctx context.Context, ownerID string) error {
-	var totalCount, proCount int
+	var totalCount, teamCount, proCount int
+	var hasTeamBeta, hasLegalTeamBeta bool
 	err := s.pool.QueryRow(ctx,
 		`SELECT
-			count(*),
-			count(*) FILTER (WHERE plan = 'pro')
-		 FROM projects
-		 WHERE owner_id = $1::uuid AND status = 'active'`,
+			count(p.*),
+			count(p.*) FILTER (WHERE p.plan IN ('team','legal_team')),
+			count(p.*) FILTER (WHERE p.plan = 'pro'),
+			COALESCE(bool_or(u.team_beta_access), false),
+			COALESCE(bool_or(u.legal_team_beta_access), false)
+		 FROM public.platform_users u
+		 LEFT JOIN public.projects p
+		        ON p.owner_id = u.id AND p.status = 'active'
+		 WHERE u.id = $1::uuid`,
 		ownerID,
-	).Scan(&totalCount, &proCount)
+	).Scan(&totalCount, &teamCount, &proCount, &hasTeamBeta, &hasLegalTeamBeta)
 	if err != nil {
 		slog.Error("check project limit: count failed", "owner_id", ownerID, "error", err)
 		return fmt.Errorf("failed to count projects: %w", err)
 	}
 
-	// Determine effective plan based on whether user has any pro projects.
 	effectivePlan := "free"
-	if proCount > 0 {
+	switch {
+	case hasTeamBeta || hasLegalTeamBeta || teamCount > 0:
+		effectivePlan = "team"
+	case proCount > 0:
 		effectivePlan = "pro"
 	}
 
@@ -36,12 +58,15 @@ func (s *LimitsService) CheckProjectLimit(ctx context.Context, ownerID string) e
 	}
 
 	if totalCount >= limits.ProjectLimit {
-		if effectivePlan == "free" {
-			slog.Warn("project limit reached", "owner_id", ownerID, "plan", effectivePlan, "current", totalCount, "limit", limits.ProjectLimit)
-			return fmt.Errorf("free plan limited to %d projects — upgrade a project to Pro to create up to %d", limits.ProjectLimit, 10)
-		}
 		slog.Warn("project limit reached", "owner_id", ownerID, "plan", effectivePlan, "current", totalCount, "limit", limits.ProjectLimit)
-		return fmt.Errorf("pro plan limited to %d projects", limits.ProjectLimit)
+		switch effectivePlan {
+		case "free":
+			return fmt.Errorf("free plan limited to %d projects — upgrade a project to Pro to create up to %d", limits.ProjectLimit, 10)
+		case "pro":
+			return fmt.Errorf("pro plan limited to %d projects", limits.ProjectLimit)
+		default:
+			return fmt.Errorf("%s plan limited to %d projects", effectivePlan, limits.ProjectLimit)
+		}
 	}
 
 	return nil
@@ -169,6 +194,26 @@ func (s *LimitsService) CheckQuotaAlerts(ctx context.Context, projectID string) 
 	if !limits.QuotaAlerts {
 		slog.Warn("quota alerts not available", "project_id", projectID, "plan", limits.Plan)
 		return fmt.Errorf("quota alerts are not available on the %s plan, upgrade to pro", limits.Plan)
+	}
+	return nil
+}
+
+// CheckDedicatedDB gates features that only Team-tier projects have —
+// backup / PITR / restore endpoints, direct DATABASE_URL exposure (M4),
+// and the M2b Legal-Team compliance surface. Returns nil for any plan
+// with `dedicated_db = true` in plan_limits (currently Team; Legal-Team
+// will inherit true when M2b lands).
+//
+// Callers should surface this as HTTP 402 (payment required) so the
+// console can render an upgrade prompt.
+func (s *LimitsService) CheckDedicatedDB(ctx context.Context, projectID string) error {
+	limits, err := s.GetProjectLimits(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if !limits.DedicatedDB {
+		slog.Warn("dedicated-DB feature not available", "project_id", projectID, "plan", limits.Plan)
+		return fmt.Errorf("this feature requires a dedicated database — upgrade to Team from %s", limits.Plan)
 	}
 	return nil
 }

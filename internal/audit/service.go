@@ -34,6 +34,11 @@ const (
 	ActionAllowlistAdded      = "allowlist.added"
 	ActionAllowlistRemoved    = "allowlist.removed"
 	ActionAllowlistEmailed    = "allowlist.emailed"
+	// Team-tier closed-beta grants (Team-tier M2, milestone #2).
+	// Superadmin flips team_beta_access on a specific platform_user
+	// so they can create Team-tier projects during the closed beta.
+	ActionTeamBetaGranted = "team_beta.granted"
+	ActionTeamBetaRevoked = "team_beta.revoked"
 	// Compliance / DSAR export lifecycle. Closes #100. Tenant +
 	// per-user exports run on the platform admin path; self-serve
 	// is an end-user-initiated export of their own data.

@@ -78,6 +78,11 @@ type PlatformProfile struct {
 	IsSuperadmin bool       `json:"is_superadmin"`
 	CreatedAt    time.Time  `json:"created_at"`
 	LastSignInAt *time.Time `json:"last_sign_in_at"`
+	// TeamBetaAccess gates the console's "Create Team project" CTA
+	// on the pricing page. True → the user was granted access via
+	// the admin panel; false → the page keeps its "Coming soon"
+	// copy. Team-tier M2 (migration 000084, issue #307).
+	TeamBetaAccess bool `json:"team_beta_access"`
 }
 
 // PlatformAuthResponse is returned after successful sign-up or sign-in.
@@ -414,10 +419,12 @@ func (s *PlatformAuthService) generatePlatformJWT(userID, email string, isSupera
 func (s *PlatformAuthService) GetProfile(ctx context.Context, userID string) (*PlatformProfile, error) {
 	var p PlatformProfile
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, display_name, COALESCE(plan, 'free'), COALESCE(is_superadmin, false), created_at, last_sign_in_at
+		`SELECT id, email, display_name, COALESCE(plan, 'free'), COALESCE(is_superadmin, false),
+		        created_at, last_sign_in_at, COALESCE(team_beta_access, false)
 		 FROM platform_users WHERE id = $1`,
 		userID,
-	).Scan(&p.ID, &p.Email, &p.DisplayName, &p.Plan, &p.IsSuperadmin, &p.CreatedAt, &p.LastSignInAt)
+	).Scan(&p.ID, &p.Email, &p.DisplayName, &p.Plan, &p.IsSuperadmin,
+		&p.CreatedAt, &p.LastSignInAt, &p.TeamBetaAccess)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("user not found")

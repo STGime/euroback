@@ -39,6 +39,17 @@ type PlanLimits struct {
 	CustomDomain bool `json:"custom_domain"` // CNAME your own domain to the project's REST + Auth surface.
 	BYOSMTP      bool `json:"byo_smtp"`      // Bring your own SMTP for auth mail.
 	QuotaAlerts  bool `json:"quota_alerts"`  // Slack / webhook alerts at 80% of any quota.
+
+	// Team-tier fields (migration 000085). Pricing + capability
+	// flags that only apply to Team (and future Legal-Team) plans.
+	// PriceCents is nullable in the DB — a NULL surfaces here as
+	// nil so the billing service can refuse checkout with a clear
+	// "plan not priced yet, requires beta grant" error.
+	PriceCents            *int `json:"price_cents,omitempty"`
+	DedicatedDB           bool `json:"dedicated_db"`
+	PITRDays              int  `json:"pitr_days"`
+	BackupRetentionDays   int  `json:"backup_retention_days"`
+	AuditLogRetentionDays int  `json:"audit_log_retention_days"`
 }
 
 // legacyFreeLimits returns a PlanLimits struct with the pre-Phase-B
@@ -93,13 +104,17 @@ func (s *LimitsService) GetLimits(ctx context.Context, plan string) (*PlanLimits
 		`SELECT plan, db_size_mb, storage_mb, bandwidth_mb, mau_limit,
 		        rate_limit_rps, ws_connections, upload_size_mb, webhook_limit,
 		        project_limit, log_retention_days, custom_templates, edge_function_limit,
-		        dsar_console_ui, custom_domain, byo_smtp, quota_alerts
+		        dsar_console_ui, custom_domain, byo_smtp, quota_alerts,
+		        price_cents, dedicated_db, pitr_days, backup_retention_days,
+		        audit_log_retention_days
 		 FROM plan_limits WHERE plan = $1`, plan,
 	).Scan(
 		&l.Plan, &l.DBSizeMB, &l.StorageMB, &l.BandwidthMB, &l.MAULimit,
 		&l.RateLimitRPS, &l.WSConnections, &l.UploadSizeMB, &l.WebhookLimit,
 		&l.ProjectLimit, &l.LogRetentionDays, &l.CustomTemplates, &l.EdgeFunctionLimit,
 		&l.DSARConsoleUI, &l.CustomDomain, &l.BYOSMTP, &l.QuotaAlerts,
+		&l.PriceCents, &l.DedicatedDB, &l.PITRDays, &l.BackupRetentionDays,
+		&l.AuditLogRetentionDays,
 	)
 	if err != nil {
 		slog.Error("failed to load plan limits", "plan", plan, "error", err)

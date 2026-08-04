@@ -121,6 +121,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	if vaultSvc != nil && vaultSvc.Configured() {
 		tenantSvc.SetSecretStore(vaultSvc)
 	}
+	// Team-tier closed-beta: wire the billing service as the beta-grant
+	// recorder so tenant.CreateProject can drop a `beta_grant`
+	// subscription row when a granted user creates their first Team
+	// project. Skipped if billing is nil (dev environments without
+	// Mollie config); the project still provisions.
+	if billingSvc != nil {
+		tenantSvc.SetBetaGrantRecorder(billingSvc)
+	}
 
 	// End-user auth service.
 	endUserAuthSvc := enduser.NewAuthService(pool)
@@ -287,6 +295,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))
 			r.Delete("/allowlist/{email}", tenant.AdminRemoveAllowlist(pool))
 			r.Post("/allowlist/email", tenant.AdminSendAllowlistEmail(pool, emailService))
+			// Team-tier closed-beta grants (M2, issue #308).
+			r.Get("/team-beta", tenant.AdminListTeamBetaUsers(pool))
+			r.Post("/team-beta/{id}", tenant.AdminGrantTeamBeta(pool))
+			r.Delete("/team-beta/{id}", tenant.AdminRevokeTeamBeta(pool))
 		})
 
 		// Authenticated: platform config endpoints.
