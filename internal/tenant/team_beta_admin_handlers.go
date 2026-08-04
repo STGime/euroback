@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -143,12 +144,15 @@ func AdminRevokeTeamBeta(pool *pgxpool.Pool) http.HandlerFunc {
 // UserHasTeamBetaAccess reads the flag off platform_users. Called
 // from the profile handler + CreateProject dispatch. Missing row is
 // treated as false (not found).
-func UserHasTeamBetaAccess(pool *pgxpool.Pool, r *http.Request, userID string) (bool, error) {
+//
+// Takes context.Context (not *http.Request) so CreateProject can call
+// it without holding the request — the two callers stay in sync.
+func UserHasTeamBetaAccess(ctx context.Context, pool *pgxpool.Pool, userID string) (bool, error) {
 	if userID == "" {
 		return false, nil
 	}
 	var granted bool
-	err := pool.QueryRow(r.Context(),
+	err := pool.QueryRow(ctx,
 		`SELECT COALESCE(team_beta_access, false) FROM public.platform_users WHERE id = $1::uuid`,
 		userID,
 	).Scan(&granted)

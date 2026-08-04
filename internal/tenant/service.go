@@ -144,13 +144,12 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 	}
 
 	// Team-plan gate — verify beta access BEFORE opening the tx so a
-	// rejected user doesn't waste a schema-create round trip.
+	// rejected user doesn't waste a schema-create round trip. Uses
+	// the exported UserHasTeamBetaAccess helper so the CreateProject
+	// path and the admin-lookup path can't drift on the query shape
+	// (M2 review minor #1).
 	if req.Plan == "team" {
-		var granted bool
-		err := s.pool.QueryRow(ctx,
-			`SELECT COALESCE(team_beta_access, false) FROM platform_users WHERE id = $1::uuid`,
-			platformUserID,
-		).Scan(&granted)
+		granted, err := UserHasTeamBetaAccess(ctx, s.pool, platformUserID)
 		if err != nil {
 			return nil, fmt.Errorf("check team beta access: %w", err)
 		}
