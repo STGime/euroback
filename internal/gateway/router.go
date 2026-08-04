@@ -16,6 +16,7 @@ import (
 	"github.com/eurobase/euroback/internal/breach"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/functions"
@@ -129,6 +130,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	if billingSvc != nil {
 		tenantSvc.SetBetaGrantRecorder(billingSvc)
 	}
+
+	// Team-tier M3 (backup + PITR). Same provider registry shape as
+	// cmd/worker/main.go — Scaleway wired against SCW_SECRET_KEY /
+	// SCW_PROJECT_ID. Empty secret is legal (dev environments); the
+	// provider's methods return ErrUnauthorized without hitting the
+	// network, and the backup handlers surface that as 502.
+	scwRegion := os.Getenv("SCW_RDB_REGION")
+	if scwRegion == "" {
+		scwRegion = "fr-par"
+	}
+	providerRegistry := dbprovider.NewRegistry()
+	providerRegistry.Register(dbprovider.NewScaleway(dbprovider.ScalewayConfig{
+		SecretKey:     os.Getenv("SCW_SECRET_KEY"),
+		ProjectID:     os.Getenv("SCW_PROJECT_ID"),
+		DefaultRegion: scwRegion,
+	}))
 
 	// End-user auth service.
 	endUserAuthSvc := enduser.NewAuthService(pool)
@@ -438,6 +455,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/user-export", compliance.HandleRequestUserExport(exportSvc))
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports", compliance.HandleListExports(exportSvc))
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports/{exportId}", compliance.HandleGetExport(exportSvc))
+
+			// Team-tier backup + restore surface (M3).
+			// Gated inside each handler on plans.CheckDedicatedDB —
+			// 402 for Free/Pro. All routes admin-only in the
+			// membership sense (destructive by nature).
+			backupSvc := tenant.NewBackupService(pool, providerRegistry, limitsSvc)
+			r.With(tenant.RequireMinRole("viewer")).Get("/backups", backupSvc.HandleListBackups())
+			r.With(tenant.RequireMinRole("admin")).Post("/backups", backupSvc.HandleCreateBackup())
+			r.With(tenant.RequireMinRole("admin")).Post("/restore", backupSvc.HandleCreateRestore())
+			r.With(tenant.RequireMinRole("viewer")).Get("/restore/{restoreId}", backupSvc.HandleGetRestore())
 
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names

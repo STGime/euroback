@@ -1,0 +1,429 @@
+package tenant
+
+// Backup + restore HTTP handlers (Team-tier M3).
+//
+// All routes are Legal-Team-aware only by inheritance — the actual
+// gate is plans.CheckDedicatedDB, which allows any tier with
+// `dedicated_db = true` in plan_limits (Team + Legal-Team today).
+// M2b's Legal-Team-specific surface lives elsewhere (retention_holds,
+// gobd_export); backups are baseline dedicated-DB functionality.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/dbprovider"
+	"github.com/eurobase/euroback/internal/jobs"
+	"github.com/eurobase/euroback/internal/plans"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+)
+
+// BackupSnapshot mirrors a row in public.backup_snapshots — the
+// cached view of a provider-side backup.
+type BackupSnapshot struct {
+	ID                 string    `json:"id"`
+	ProjectID          string    `json:"project_id"`
+	ProjectDatabaseID  string    `json:"project_database_id"`
+	ProviderSnapshotID string    `json:"provider_snapshot_id"`
+	Name               string    `json:"name"`
+	SizeMB             int64     `json:"size_mb"`
+	Kind               string    `json:"kind"`     // 'scheduled' | 'ondemand'
+	CreatedAt          time.Time `json:"created_at"`
+	ExpiresAt          time.Time `json:"expires_at"`
+}
+
+// RestoreOperation mirrors a row in public.restore_operations.
+type RestoreOperation struct {
+	ID              string     `json:"id"`
+	ProjectID       string     `json:"project_id"`
+	Kind            string     `json:"kind"`
+	SourceRef       string     `json:"source_ref"`
+	TargetTime      *time.Time `json:"target_time,omitempty"`
+	State           string     `json:"state"`
+	NewInstanceID   *string    `json:"new_instance_id,omitempty"`
+	OldInstanceID   string     `json:"old_instance_id"`
+	Error           *string    `json:"error,omitempty"`
+	RequestedBy     *string    `json:"requested_by,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
+// BackupService owns the state around backup/restore requests.
+// Combines the cache-facing DB, the dbprovider registry (for
+// on-demand snapshots + restore worker input), and the River client
+// (for enqueuing restore jobs).
+type BackupService struct {
+	pool     *pgxpool.Pool
+	registry *dbprovider.Registry
+	repo     *dbprovider.Repo
+	river    *river.Client[pgx.Tx]
+	limits   *plans.LimitsService
+}
+
+func NewBackupService(pool *pgxpool.Pool, registry *dbprovider.Registry, limits *plans.LimitsService) *BackupService {
+	// Insert-only River client (workers are in the worker pod).
+	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{})
+	if err != nil {
+		slog.Error("backup service: could not create river client", "error", err)
+	}
+	return &BackupService{
+		pool:     pool,
+		registry: registry,
+		repo:     dbprovider.NewRepo(pool),
+		river:    client,
+		limits:   limits,
+	}
+}
+
+// ── HTTP handlers ────────────────────────────────────────────────
+
+// HandleListBackups — GET /platform/projects/{id}/backups.
+// Reads the cache; refresh-from-provider happens via the cron.
+// Gated on CheckDedicatedDB → 402 for Free/Pro.
+func (s *BackupService) HandleListBackups() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			http.Error(w, `{"error":"project id required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+
+		rows, err := s.pool.Query(r.Context(),
+			`SELECT id, project_id, project_database_id, provider_snapshot_id,
+			        name, size_mb, kind, created_at, expires_at
+			   FROM public.backup_snapshots
+			  WHERE project_id = $1::uuid
+			    AND expires_at > now()
+			  ORDER BY created_at DESC
+			  LIMIT 500`,
+			projectID)
+		if err != nil {
+			slog.Error("list backups query failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		out := make([]BackupSnapshot, 0)
+		for rows.Next() {
+			var b BackupSnapshot
+			if err := rows.Scan(&b.ID, &b.ProjectID, &b.ProjectDatabaseID, &b.ProviderSnapshotID,
+				&b.Name, &b.SizeMB, &b.Kind, &b.CreatedAt, &b.ExpiresAt); err != nil {
+				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
+				return
+			}
+			out = append(out, b)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"backups": out, "total": len(out)})
+	}
+}
+
+// onDemandBackupRateLimit — 5 on-demand backups per project per day.
+// Matches the plan doc. The count query filters on
+// (kind='ondemand', created_at > now() - '24h').
+const onDemandBackupRateLimit = 5
+
+// HandleCreateBackup — POST /platform/projects/{id}/backups.
+// Triggers an on-demand snapshot. Rate-limited to 5/day/project.
+// Runs synchronously (provider returns fast; the snapshot itself
+// takes minutes but the row is created immediately).
+func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			http.Error(w, `{"error":"project id required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+
+		// Rate limit — on-demand snapshots count towards the daily
+		// budget (scheduled ones don't).
+		var dailyCount int
+		if err := s.pool.QueryRow(r.Context(),
+			`SELECT count(*) FROM public.backup_snapshots
+			  WHERE project_id = $1::uuid
+			    AND kind = 'ondemand'
+			    AND created_at > now() - interval '24 hours'`,
+			projectID,
+		).Scan(&dailyCount); err != nil {
+			http.Error(w, `{"error":"rate check failed"}`, http.StatusInternalServerError)
+			return
+		}
+		if dailyCount >= onDemandBackupRateLimit {
+			http.Error(w, fmt.Sprintf(`{"error":"on-demand backup limit of %d per 24h reached","code":"rate_limited","retry_after_seconds":86400}`, onDemandBackupRateLimit),
+				http.StatusTooManyRequests)
+			return
+		}
+
+		// Look up the live project_databases row.
+		rec, err := s.repo.GetLiveByProject(r.Context(), projectID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				http.Error(w, `{"error":"project has no active dedicated database"}`, http.StatusConflict)
+				return
+			}
+			slog.Error("get live db for backup failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		provider, err := s.registry.Get(rec.Provider)
+		if err != nil {
+			slog.Error("backup: provider not registered", "provider", rec.Provider)
+			http.Error(w, `{"error":"provider not available"}`, http.StatusInternalServerError)
+			return
+		}
+
+		snap, err := provider.Snapshot(r.Context(), rec.ProviderInstanceID)
+		if err != nil {
+			slog.Error("backup: provider snapshot failed", "error", err, "project_id", projectID)
+			http.Error(w, fmt.Sprintf(`{"error":"provider snapshot failed: %v"}`, err), http.StatusBadGateway)
+			return
+		}
+
+		// Cache the row so it appears in list-endpoint output immediately.
+		var out BackupSnapshot
+		err = s.pool.QueryRow(r.Context(),
+			`INSERT INTO public.backup_snapshots
+			    (project_id, project_database_id, provider_snapshot_id, name, size_mb, kind, created_at, expires_at)
+			 VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)
+			 RETURNING id, project_id, project_database_id, provider_snapshot_id, name, size_mb, kind, created_at, expires_at`,
+			projectID, rec.ID, snap.ProviderID, snap.Name, snap.SizeMB, string(snap.Kind), snap.CreatedAt, snap.ExpiresAt,
+		).Scan(&out.ID, &out.ProjectID, &out.ProjectDatabaseID, &out.ProviderSnapshotID,
+			&out.Name, &out.SizeMB, &out.Kind, &out.CreatedAt, &out.ExpiresAt)
+		if err != nil {
+			slog.Error("cache new backup row failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"snapshot created at provider but cache write failed — refresh to see it"}`, http.StatusInternalServerError)
+			return
+		}
+
+		writeBackupAudit(r, projectID, audit.ActionExportRequested, map[string]any{
+			"kind":                 "on_demand_backup",
+			"provider_snapshot_id": snap.ProviderID,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
+// RestoreRequest is the JSON body for POST /restore. Exactly one of
+// `snapshot_id` or `target_time` must be set (validated at handler
+// time; Provider.Restore also validates via RestoreSource.Valid()).
+type RestoreRequest struct {
+	Source     string     `json:"source"` // "snapshot" | "pitr"
+	SnapshotID string     `json:"snapshot_id,omitempty"`
+	TargetTime *time.Time `json:"target_time,omitempty"`
+}
+
+// HandleCreateRestore — POST /platform/projects/{id}/restore.
+// Validates the request, inserts a restore_operations row in
+// state='pending', and enqueues a River job. Returns 202 with the
+// restore-op ID so the client can start polling immediately.
+//
+// Gated on CheckDedicatedDB. The unique partial index on
+// restore_operations enforces one live restore per project — a
+// concurrent restore attempt gets 409.
+func (s *BackupService) HandleCreateRestore() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			http.Error(w, `{"error":"project id required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+
+		var req RestoreRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+			return
+		}
+		// Validate source.
+		hasSnap := req.SnapshotID != ""
+		hasPITR := req.TargetTime != nil && !req.TargetTime.IsZero()
+		if hasSnap == hasPITR {
+			http.Error(w, `{"error":"exactly one of snapshot_id or target_time must be set"}`, http.StatusBadRequest)
+			return
+		}
+		if hasPITR && req.Source != "pitr" {
+			req.Source = "pitr"
+		}
+		if hasSnap && req.Source != "snapshot" {
+			req.Source = "snapshot"
+		}
+
+		// Look up the live project_databases row — this is the
+		// "old" instance the restore replaces.
+		oldRec, err := s.repo.GetLiveByProject(r.Context(), projectID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				http.Error(w, `{"error":"project has no active dedicated database"}`, http.StatusConflict)
+				return
+			}
+			slog.Error("get live db for restore failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// PITR window check — must fall within the plan's pitr_days.
+		if hasPITR {
+			limits, err := s.limits.GetProjectLimits(r.Context(), projectID)
+			if err != nil {
+				http.Error(w, `{"error":"limits lookup failed"}`, http.StatusInternalServerError)
+				return
+			}
+			window := time.Duration(limits.PITRDays) * 24 * time.Hour
+			if window <= 0 {
+				http.Error(w, `{"error":"pitr not available on this plan","code":"pitr_disabled"}`, http.StatusPaymentRequired)
+				return
+			}
+			earliest := time.Now().Add(-window)
+			if req.TargetTime.Before(earliest) || req.TargetTime.After(time.Now()) {
+				http.Error(w, fmt.Sprintf(`{"error":"target_time must be within the last %d days","code":"pitr_out_of_window"}`, limits.PITRDays), http.StatusBadRequest)
+				return
+			}
+		}
+
+		sourceRef := req.SnapshotID
+		if hasPITR {
+			sourceRef = req.TargetTime.Format(time.RFC3339Nano)
+		}
+
+		var actorID string
+		if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
+			actorID = claims.Subject
+		}
+
+		// Insert the pending restore row. The unique partial index
+		// on (project_id) WHERE state IN (pending/provisioning/
+		// verifying/cutover) catches races.
+		var restoreID string
+		err = s.pool.QueryRow(r.Context(),
+			`INSERT INTO public.restore_operations
+			    (project_id, kind, source_ref, target_time,
+			     old_instance_id, requested_by)
+			 VALUES ($1::uuid, $2, $3, $4, $5::uuid, NULLIF($6, '')::uuid)
+			 RETURNING id`,
+			projectID, req.Source, sourceRef, req.TargetTime,
+			oldRec.ID, actorID,
+		).Scan(&restoreID)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				http.Error(w, `{"error":"a restore is already in progress for this project","code":"restore_in_flight"}`, http.StatusConflict)
+				return
+			}
+			slog.Error("insert restore_operations failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"insert failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Enqueue the restore worker.
+		if s.river != nil {
+			if _, err := s.river.Insert(r.Context(), jobs.RestoreTeamDatabaseArgs{
+				RestoreOperationID: restoreID,
+			}, nil); err != nil {
+				// Don't fail the request — the restore row is
+				// there; ops can re-enqueue if needed.
+				slog.Error("enqueue restore worker failed", "error", err, "restore_id", restoreID)
+			}
+		}
+
+		writeBackupAudit(r, projectID, audit.ActionExportRequested, map[string]any{
+			"kind":              "restore",
+			"restore_operation": restoreID,
+			"source":            req.Source,
+			"source_ref":        sourceRef,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"restore_id": restoreID,
+			"state":      "pending",
+		})
+	}
+}
+
+// HandleGetRestore — GET /platform/projects/{id}/restore/{restore_id}.
+// Poll endpoint the console hits every ~5s while a restore runs.
+func (s *BackupService) HandleGetRestore() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		restoreID := chi.URLParam(r, "restoreId")
+		if projectID == "" || restoreID == "" {
+			http.Error(w, `{"error":"project id and restore id required"}`, http.StatusBadRequest)
+			return
+		}
+		// CheckDedicatedDB not strictly needed here (read-only status
+		// endpoint) but consistent with the other routes.
+		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+
+		var op RestoreOperation
+		err := s.pool.QueryRow(r.Context(),
+			`SELECT id, project_id, kind, source_ref, target_time, state,
+			        new_instance_id, old_instance_id, error, requested_by,
+			        created_at, completed_at
+			   FROM public.restore_operations
+			  WHERE id = $1::uuid AND project_id = $2::uuid`,
+			restoreID, projectID,
+		).Scan(&op.ID, &op.ProjectID, &op.Kind, &op.SourceRef, &op.TargetTime, &op.State,
+			&op.NewInstanceID, &op.OldInstanceID, &op.Error, &op.RequestedBy,
+			&op.CreatedAt, &op.CompletedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, `{"error":"restore operation not found"}`, http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(op)
+	}
+}
+
+// writeBackupAudit is a tiny helper — audit action + metadata for
+// each backup/restore-lifecycle write.
+func writeBackupAudit(r *http.Request, projectID, action string, metadata map[string]any) {
+	svc := audit.FromContext(r.Context())
+	if svc == nil {
+		return
+	}
+	actorID, actorEmail := audit.ActorFromContext(r.Context())
+	svc.Log(r.Context(), projectID, actorID, actorEmail, action,
+		audit.WithMetadata(metadata),
+		audit.WithIP(r.RemoteAddr))
+}
+
+// Kept for the compiler until I clean up imports.
+var _ = context.Background

@@ -109,3 +109,22 @@ func (DeprovisionTeamDatabaseArgs) Kind() string { return "deprovision_team_data
 func (DeprovisionTeamDatabaseArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 5}
 }
+
+// RestoreTeamDatabaseArgs is enqueued when a user triggers a
+// snapshot restore or a PITR restore (Team-tier M3). Carries just
+// the restore_operations row ID — the worker reads every other
+// input (source_ref, target_time, old_instance_id) from that row so
+// the job payload stays tiny and idempotent-checkable.
+type RestoreTeamDatabaseArgs struct {
+	RestoreOperationID string `json:"restore_operation_id"`
+}
+
+func (RestoreTeamDatabaseArgs) Kind() string { return "restore_team_database" }
+
+// MaxAttempts = 3 — provider restores are expensive; a persistent
+// failure should surface fast to a human rather than burn Scaleway
+// spend across 5 attempts. The worker itself is careful to update
+// restore_operations.state='failed' on terminal errors.
+func (RestoreTeamDatabaseArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 3}
+}
