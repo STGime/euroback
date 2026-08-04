@@ -16,6 +16,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/storage"
@@ -125,6 +126,49 @@ func main() {
 	}
 	unsubSigner := email.NewUnsubscribeSigner(requireEnv("PLATFORM_JWT_SECRET"))
 
+	// ── Team-tier database provider registry (M1) ──
+	// Wire the Scaleway managed-PG provider if a secret is present.
+	// Empty secret is legal — the provider returns ErrUnauthorized
+	// on every method call, matching the pattern the vault + mollie
+	// packages use for dev environments without production secrets.
+	providerRegistry := dbprovider.NewRegistry()
+	scwSecret := os.Getenv("SCW_SECRET_KEY")
+	scwProject := os.Getenv("SCW_PROJECT_ID")
+	scw := dbprovider.NewScaleway(dbprovider.ScalewayConfig{
+		SecretKey:     scwSecret,
+		ProjectID:     scwProject,
+		DefaultRegion: firstNonEmpty(os.Getenv("SCW_RDB_REGION"), "fr-par"),
+	})
+	providerRegistry.Register(scw)
+	if !scw.Configured() {
+		slog.Warn("scaleway managed-PG provider not configured — Team-tier provisioning will fail with ErrUnauthorized until SCW_SECRET_KEY + SCW_PROJECT_ID are set")
+	}
+
+	// Password cipher for project_databases. Reuses the vault master
+	// key so ops have one secret to rotate. Follows the same
+	// dev-vs-prod pattern as cmd/gateway/main.go:303-317 — required
+	// in production (any environment that will actually run Team-tier
+	// provisioning), soft warning in dev/CI so the worker binary
+	// still starts without secrets that pre-M1 dev environments
+	// never needed.
+	var cipher *dbprovider.Cipher
+	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
+		var cErr error
+		cipher, cErr = dbprovider.NewCipher(vaultKey, 1)
+		if cErr != nil {
+			slog.Error("failed to construct dbprovider cipher", "error", cErr)
+			if isProdEnv() {
+				os.Exit(1)
+			}
+		}
+	} else if isProdEnv() {
+		slog.Error("FATAL: VAULT_ENCRYPTION_KEY required in production for Team-tier provisioning")
+		os.Exit(1)
+	} else {
+		slog.Warn("VAULT_ENCRYPTION_KEY not set — Team-tier provisioning will fail at seal time (dev mode)")
+	}
+	providerRepo := dbprovider.NewRepo(pool)
+
 	// ── Register River workers ──
 	riverWorkers := river.NewWorkers()
 	river.AddWorker(riverWorkers, &workers.ProvisionProjectWorker{
@@ -146,6 +190,15 @@ func main() {
 		BaseURL:    baseURL,
 		ConsoleURL: consoleURL,
 		DocsURL:    docsURL,
+	})
+	river.AddWorker(riverWorkers, &workers.ProvisionTeamDatabaseWorker{
+		Registry: providerRegistry,
+		Cipher:   cipher,
+		Repo:     providerRepo,
+	})
+	river.AddWorker(riverWorkers, &workers.DeprovisionTeamDatabaseWorker{
+		Registry: providerRegistry,
+		Repo:     providerRepo,
 	})
 
 	// ── Create River client in worker mode ──
@@ -267,6 +320,19 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// isProdEnv reports whether the current environment looks like
+// production — mirrors the shape used at cmd/gateway/main.go:288-290
+// so the two binaries fail-closed on the same criteria. Any of:
+//   - ENV=production or ENV=prod (case-insensitive)
+//   - DOMAIN_SUFFIX ending in eurobase.app
+func isProdEnv() bool {
+	env := strings.ToLower(os.Getenv("ENV"))
+	if env == "production" || env == "prod" {
+		return true
+	}
+	return strings.HasSuffix(strings.ToLower(os.Getenv("DOMAIN_SUFFIX")), "eurobase.app")
 }
 
 // parseLogLevel converts a string log level to slog.Level.
