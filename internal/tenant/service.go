@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -408,15 +409,46 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 
 // DeleteProject drops the tenant schema and deletes the project row.
 // The caller must verify ownership before calling this.
+//
+// Team-tier note (M2 review bug_002): if a live project_databases row
+// exists for this project, mark it deleted_at=now() BEFORE the
+// DELETE FROM projects. The FK is ON DELETE RESTRICT (migration
+// 000083) — the delete would otherwise 23503 and leave the tenant
+// schema already dropped by deprovision_tenant but the row still
+// visible. MarkDeleted flips state='deleting' and sets deleted_at,
+// which drops the row out of the unique-live-per-project index and
+// lets the FK-target-side cascade proceed. The DeprovisionTeamDatabaseWorker
+// sweeps the marked row 7 days later + destroys the actual Scaleway
+// instance.
 func (s *TenantService) DeleteProject(ctx context.Context, projectID string) error {
+	// Mark any live project_databases row deleted so the ON DELETE
+	// RESTRICT FK doesn't block the projects row delete. Idempotent
+	// — no live row is fine (Free / Pro projects), returns quickly.
+	repo := dbprovider.NewRepo(s.pool)
+	rec, err := repo.GetLiveByProject(ctx, projectID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("lookup project_databases: %w", err)
+	}
+	if rec != nil {
+		if err := repo.MarkDeleted(ctx, rec.ID); err != nil {
+			return fmt.Errorf("mark project_databases deleted: %w", err)
+		}
+		slog.Info("marked project_databases row deleted before project drop",
+			"project_id", projectID, "project_database_id", rec.ID)
+	}
+
 	// Call deprovision_tenant to drop the schema.
-	_, err := s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID)
+	_, err = s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID)
 	if err != nil {
 		slog.Error("deprovision_tenant failed", "error", err, "project_id", projectID)
 		return fmt.Errorf("deprovision tenant: %w", err)
 	}
 
 	// Delete the project row (cascades to api_keys, webhooks, etc.).
+	// project_databases (Team-tier) is RESTRICT rather than CASCADE —
+	// the MarkDeleted above soft-deletes the row so the RESTRICT sees
+	// no live reference. superseded_by FK on project_databases is
+	// SET NULL so nothing else blocks.
 	tag, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
 	if err != nil {
 		return fmt.Errorf("delete project: %w", err)

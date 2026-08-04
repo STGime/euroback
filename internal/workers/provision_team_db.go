@@ -106,8 +106,10 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 		// Provider instance now exists but we can't seal its
 		// credentials — best-effort cleanup so retries don't leak.
 		// context.WithoutCancel because the parent ctx may already
-		// be canceled by River's job timeout.
-		bestEffortDelete(ctx, provider, inst.ProviderID, logger, "seal password failed")
+		// be canceled by River's job timeout — a cancelled ctx makes
+		// provider.Delete short-circuit on ctx.Err() and orphans the
+		// paid instance (bug_003 from PR #331 review).
+		bestEffortDelete(context.WithoutCancel(ctx), provider, inst.ProviderID, logger, "seal password failed")
 		return fmt.Errorf("seal password: %w", err)
 	}
 	// Wipe plaintext to reduce accidental exposure via slog / panic.
@@ -115,13 +117,14 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 
 	rec, err := w.Repo.InsertProvisioning(ctx, args.ProjectID, inst, provider.Name(), ct, nonce, ver)
 	if err != nil {
-		// Same story — provider instance exists but no local
-		// record. Retries WILL now hit Scaleway's idempotency
-		// cache (same job.ID → same instance), so this cleanup
-		// is belt-and-suspenders. Belt only, actually — the
-		// idempotency window on Scaleway may expire before the
-		// last River retry.
-		bestEffortDelete(ctx, provider, inst.ProviderID, logger, "insert row failed")
+		// Same story — provider instance exists but no local record.
+		// Retries WILL hit Scaleway's idempotency cache (same job.ID
+		// → same instance), so this cleanup is belt-and-suspenders.
+		// But: the idempotency window on Scaleway may expire before
+		// the last River retry, AND context.WithoutCancel is required
+		// so the delete lands even if River is shutting down the pod
+		// (bug_003 from PR #331 review).
+		bestEffortDelete(context.WithoutCancel(ctx), provider, inst.ProviderID, logger, "insert row failed")
 		return fmt.Errorf("insert project_databases: %w", err)
 	}
 	logger = logger.With("project_database_id", rec.ID, "provider_instance_id", inst.ProviderID)
