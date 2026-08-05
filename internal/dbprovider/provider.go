@@ -191,3 +191,20 @@ type Provider interface {
 	// providers populate the endpoint only at that moment.
 	Describe(ctx context.Context, instanceID string) (*Instance, error)
 }
+
+// PasswordRotator is an optional capability providers CAN implement
+// to support direct-DATABASE_URL credential rotation (Team-tier M4).
+// Kept as a distinct interface (rather than a required Provider
+// method) so a future stub / self-hosted provider can omit it
+// without breaking the base Provider contract.
+//
+// Callers should type-assert on this interface and return 501 if
+// the provider doesn't implement it.
+type PasswordRotator interface {
+	// RotatePassword sets a new password for `username` on
+	// `instanceID`. Implementations must invalidate old
+	// credentials immediately on the provider side. Success
+	// guarantees the new password is live — the caller then
+	// re-seals and writes it to project_databases.
+	RotatePassword(ctx context.Context, instanceID, username, newPassword string) error
+}

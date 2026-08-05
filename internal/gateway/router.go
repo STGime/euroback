@@ -147,6 +147,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		DefaultRegion: scwRegion,
 	}))
 
+	// Cipher for the direct-DATABASE_URL surface (M4). Reuses the
+	// vault master key already required by the vault package.
+	// Nil in dev environments without the secret — the connection
+	// handlers are omitted from the router in that case (rather
+	// than mounted-but-broken).
+	var connCipher *dbprovider.Cipher
+	if vk := os.Getenv("VAULT_ENCRYPTION_KEY"); vk != "" {
+		if c, err := dbprovider.NewCipher(vk, 1); err != nil {
+			slog.Warn("dbprovider cipher init failed — /connection routes disabled", "error", err)
+		} else {
+			connCipher = c
+		}
+	} else {
+		slog.Warn("VAULT_ENCRYPTION_KEY not set — /connection routes disabled")
+	}
+
 	// End-user auth service.
 	endUserAuthSvc := enduser.NewAuthService(pool)
 	if emailService != nil {
@@ -465,6 +481,19 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("admin")).Post("/backups", backupSvc.HandleCreateBackup())
 			r.With(tenant.RequireMinRole("admin")).Post("/restore", backupSvc.HandleCreateRestore())
 			r.With(tenant.RequireMinRole("viewer")).Get("/restore/{restoreId}", backupSvc.HandleGetRestore())
+
+			// Team-tier direct-DATABASE_URL surface (M4).
+			// Emits a real postgres:// URL for Payload / Prisma /
+			// Drizzle / psql — the whole reason a customer chooses
+			// Team over Pro. Rotation lives on the same service so
+			// a leaked URL is a one-click reset. Every URL fetch is
+			// audited (ActionConnectionURLViewed) — the URL is a
+			// bearer credential once revealed.
+			if connCipher != nil {
+				connSvc := tenant.NewConnectionService(pool, providerRegistry, connCipher, limitsSvc)
+				r.With(tenant.RequireMinRole("admin")).Get("/connection", connSvc.HandleGetConnection())
+				r.With(tenant.RequireMinRole("admin")).Post("/connection/rotate", connSvc.HandleRotateConnection())
+			}
 
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names

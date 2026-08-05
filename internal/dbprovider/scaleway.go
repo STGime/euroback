@@ -445,6 +445,30 @@ func (s *Scaleway) Delete(ctx context.Context, instanceID string) error {
 	return err
 }
 
+// scalewayUpdateUserRequest is the Scaleway RDB PATCH-user body.
+// We only ever set the password field; other fields (permissions,
+// etc.) are managed at provision time.
+type scalewayUpdateUserRequest struct {
+	Password string `json:"password"`
+}
+
+// RotatePassword — see PasswordRotator. Endpoint:
+//   PATCH /rdb/v1/regions/{region}/instances/{instance_id}/users/{name}
+// with `{"password":"..."}`. Scaleway invalidates old credentials
+// immediately (documented behaviour of the users API).
+func (s *Scaleway) RotatePassword(ctx context.Context, instanceID, username, newPassword string) error {
+	if newPassword == "" {
+		return fmt.Errorf("%w: newPassword required", ErrInvalidRequest)
+	}
+	if username == "" {
+		return fmt.Errorf("%w: username required", ErrInvalidRequest)
+	}
+	path := fmt.Sprintf("/rdb/v1/regions/%s/instances/%s/users/%s",
+		s.defaultRegion, instanceID, username)
+	req := scalewayUpdateUserRequest{Password: newPassword}
+	return s.do(ctx, http.MethodPatch, path, req, nil)
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 // requestOption tunes a single request — currently only for the

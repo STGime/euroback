@@ -67,6 +67,14 @@ const (
 	// `vault_secrets` before the policy gated it).
 	ActionMCPSQLExecuted         = "mcp.sql.executed"
 	ActionMCPSQLRejectedReadOnly = "mcp.sql.rejected_write_in_readonly"
+
+	// Team-tier direct-DATABASE_URL surface (M4).
+	// Every URL view is audited so an operator can see who fetched
+	// the connection string and when — the URL is a bearer credential
+	// once revealed. Rotation is audited separately so ops can
+	// confirm password changes landed.
+	ActionConnectionURLViewed  = "team.connection.url_viewed"
+	ActionConnectionURLRotated = "team.connection.url_rotated"
 )
 
 // Entry represents a single audit log row.
