@@ -125,15 +125,15 @@ func (c *PoolCache) Get(ctx context.Context, projectID string) (*pgxpool.Pool, e
 	// routing SDK traffic as the owner would leak rows across
 	// end-users. The runtime credential is provisioned by
 	// #338 follow-up work; until it lands for a given project,
-	// EffectivePasswordSealed falls back to the owner and the
+	// EffectiveCredential falls back to the owner and the
 	// TEAM_TIER_ROUTING gate stays off in prod.
-	ct, nonce, ver := rec.EffectivePasswordSealed()
+	username, ct, nonce, ver := rec.EffectiveCredential()
 	password, err := c.cipher.Open(ct, nonce, ver)
 	if err != nil {
 		return nil, fmt.Errorf("pool cache: decrypt: %w", err)
 	}
 
-	dsn := buildDSN(rec.EffectiveUsername(), password, rec.Host, rec.Port, rec.DatabaseName)
+	dsn := buildDSN(username, password, rec.Host, rec.Port, rec.DatabaseName)
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pool cache: parse dsn: %w", err)

@@ -66,25 +66,41 @@ type Record struct {
 	DeletedAt                   *time.Time
 }
 
-// EffectiveUsername returns the runtime username if set (non-owner,
-// RLS-enforced), else the owner username (bypasses RLS). Consumers
-// picking the SDK-runtime connection should use this rather than
-// reading Username directly — the fallback keeps M1/M2 rows working
-// until the part-2 worker patch populates the runtime slot.
-func (r *Record) EffectiveUsername() string {
-	if r.RuntimeUsername != nil {
-		return *r.RuntimeUsername
+// EffectiveCredential returns the credential the SDK pool cache
+// should use: the runtime (non-owner) credential if it has been
+// provisioned, else the owner credential (which bypasses RLS).
+//
+// Single-method by design so username and password physically
+// cannot pick different slots — the CHECK on migration 000093
+// enforces all-or-none at the DB level, and this signature makes
+// the invariant a compile-time property of the API. A safety-net
+// check (`allRuntimeSet`) guards against a hand-constructed
+// Record where a caller populated RuntimeUsername but forgot the
+// password fields; in that case the runtime slot is treated as
+// absent and the owner is used. The alternative (nil-deref
+// `*r.RuntimePasswordKeyVersion`) would panic on the pool-cache
+// hot path — a fail-safe fallback is the right posture.
+//
+// Consumers picking the SDK-runtime connection MUST call this
+// instead of reading Username / PasswordCiphertext / … directly.
+// The fallback keeps M1/M2 rows working until the part-2 worker
+// patch populates the runtime slot.
+func (r *Record) EffectiveCredential() (user string, ciphertext, nonce []byte, version int16) {
+	if r.allRuntimeSet() {
+		return *r.RuntimeUsername, r.RuntimePasswordCiphertext, r.RuntimePasswordNonce, *r.RuntimePasswordKeyVersion
 	}
-	return r.Username
+	return r.Username, r.PasswordCiphertext, r.PasswordNonce, r.PasswordKeyVersion
 }
 
-// EffectivePasswordSealed returns the sealed password fields for the
-// same login EffectiveUsername picks. Callers unseal via Cipher.Open.
-func (r *Record) EffectivePasswordSealed() (ciphertext, nonce []byte, version int16) {
-	if r.RuntimeUsername != nil {
-		return r.RuntimePasswordCiphertext, r.RuntimePasswordNonce, *r.RuntimePasswordKeyVersion
-	}
-	return r.PasswordCiphertext, r.PasswordNonce, r.PasswordKeyVersion
+// allRuntimeSet mirrors migration 000093's all-or-none CHECK in
+// Go — every DB-sourced Record satisfies one branch or the other,
+// but a hand-constructed Record could straddle the two. Belt +
+// suspenders.
+func (r *Record) allRuntimeSet() bool {
+	return r.RuntimeUsername != nil &&
+		r.RuntimePasswordKeyVersion != nil &&
+		len(r.RuntimePasswordCiphertext) > 0 &&
+		len(r.RuntimePasswordNonce) > 0
 }
 
 // InsertProvisioning writes the initial project_databases row while
