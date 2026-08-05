@@ -120,12 +120,20 @@ func (c *PoolCache) Get(ctx context.Context, projectID string) (*pgxpool.Pool, e
 		return nil, fmt.Errorf("pool cache: lookup: %w", err)
 	}
 
-	password, err := c.cipher.Open(rec.PasswordCiphertext, rec.PasswordNonce, rec.PasswordKeyVersion)
+	// Prefer the RUNTIME (non-owner) credential over the owner:
+	// the owner bypasses RLS by definition (table owner), so
+	// routing SDK traffic as the owner would leak rows across
+	// end-users. The runtime credential is provisioned by
+	// #338 follow-up work; until it lands for a given project,
+	// EffectivePasswordSealed falls back to the owner and the
+	// TEAM_TIER_ROUTING gate stays off in prod.
+	ct, nonce, ver := rec.EffectivePasswordSealed()
+	password, err := c.cipher.Open(ct, nonce, ver)
 	if err != nil {
 		return nil, fmt.Errorf("pool cache: decrypt: %w", err)
 	}
 
-	dsn := buildDSN(rec.Username, password, rec.Host, rec.Port, rec.DatabaseName)
+	dsn := buildDSN(rec.EffectiveUsername(), password, rec.Host, rec.Port, rec.DatabaseName)
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pool cache: parse dsn: %w", err)
