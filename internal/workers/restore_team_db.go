@@ -178,9 +178,11 @@ func (w *RestoreTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[job
 		_ = w.Repo.MarkDeleted(context.WithoutCancel(ctx), newRec.ID)
 		return w.fail(ctx, restoreID, fmt.Errorf("poll for active: %w", err))
 	}
-	if err := w.Repo.UpdateState(ctx, newRec.ID, dbprovider.StateActive, active.Host, active.Port); err != nil {
-		return w.fail(ctx, restoreID, fmt.Errorf("mark new instance active: %w", err))
-	}
+	// Do NOT flip the shadow row to 'active' here — that would open
+	// a window where two rows for the same project are simultaneously
+	// state='active' (violating the intent of the live-instance
+	// index and breaking any consumer that reads "the live row").
+	// The flip lives inside the cutover tx below.
 
 	// 7. Verify state (best-effort — a live SELECT would need us to
 	//    open a fresh pgxpool against the restored instance, which
@@ -193,10 +195,16 @@ func (w *RestoreTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[job
 	}
 	logger.Info("skipping schema-query verification (M2.5 follow-up)", "new_host", active.Host)
 
-	// 8. Atomic swap — new row stays state='active'; old row goes
-	//    state='deleting', deleted_at=now(), superseded_by=new.
-	//    Wrapped in a tx so a partial failure can't leave two live
-	//    rows for the same project.
+	// 8. Atomic swap in a single tx: the OLD row exits the live set
+	//    (state='deleting', deleted_at=now(), superseded_by=new) and
+	//    the NEW row enters it (state='active' with the polled host
+	//    /port). Migration 000092 drops 'restoring' from the live-
+	//    instance unique-index predicate so co-existence is legal
+	//    up to this moment; the tx flips the flags atomically so at
+	//    no time do two rows simultaneously satisfy the "live"
+	//    predicate. Also updates restore_operations to 'complete'
+	//    inside the same tx so a mid-cutover crash leaves an
+	//    internally-consistent state.
 	if err := w.setState(ctx, restoreID, "cutover", ""); err != nil {
 		return w.fail(ctx, restoreID, fmt.Errorf("mark cutover: %w", err))
 	}
@@ -215,6 +223,17 @@ func (w *RestoreTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[job
 		oldRec.ID, newRec.ID,
 	); err != nil {
 		return w.fail(ctx, restoreID, fmt.Errorf("mark old instance superseded: %w", err))
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE public.project_databases
+		    SET state = 'active',
+		        host  = $2,
+		        port  = $3
+		  WHERE id = $1::uuid`,
+		newRec.ID, active.Host, active.Port,
+	); err != nil {
+		return w.fail(ctx, restoreID, fmt.Errorf("promote new instance to active: %w", err))
 	}
 
 	if _, err := tx.Exec(ctx,

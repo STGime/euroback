@@ -9,7 +9,6 @@ package tenant
 // gobd_export); backups are baseline dedicated-DB functionality.
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -309,8 +308,46 @@ func (s *BackupService) HandleCreateRestore() http.HandlerFunc {
 			}
 		}
 
-		sourceRef := req.SnapshotID
-		if hasPITR {
+		// Resolve source_ref.
+		//
+		// Snapshot restores: SECURITY — the client-supplied
+		// SnapshotID is untrusted. Scaleway addresses backups by
+		// GLOBAL ID (not per-instance), so passing the raw client
+		// value to Provider.Restore would let any Team admin
+		// restore ANOTHER tenant's snapshot into their own project
+		// (M3 review blocker #1). Look up through the project-
+		// scoped backup_snapshots cache and use only the verified
+		// provider_snapshot_id. 404 for anything not owned by this
+		// project (or expired). Accepts either our internal cache
+		// row ID OR the provider_snapshot_id — both are per-project
+		// unique.
+		//
+		// PITR restores: source_ref is the target timestamp; the
+		// PITR API path in the Scaleway provider hits
+		// /instances/{oldInstanceID}/renew-pitr, so the source
+		// instance is enforced by the URL — no cross-tenant vector.
+		var sourceRef string
+		if hasSnap {
+			var verifiedProviderID string
+			err := s.pool.QueryRow(r.Context(),
+				`SELECT provider_snapshot_id
+				   FROM public.backup_snapshots
+				  WHERE (id::text = $1 OR provider_snapshot_id = $1)
+				    AND project_id = $2::uuid
+				    AND expires_at > now()`,
+				req.SnapshotID, projectID,
+			).Scan(&verifiedProviderID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				http.Error(w, `{"error":"snapshot not found for this project","code":"snapshot_not_found"}`, http.StatusNotFound)
+				return
+			}
+			if err != nil {
+				slog.Error("resolve snapshot for restore failed", "error", err, "project_id", projectID)
+				http.Error(w, `{"error":"snapshot lookup failed"}`, http.StatusInternalServerError)
+				return
+			}
+			sourceRef = verifiedProviderID
+		} else {
 			sourceRef = req.TargetTime.Format(time.RFC3339Nano)
 		}
 
@@ -425,5 +462,3 @@ func writeBackupAudit(r *http.Request, projectID, action string, metadata map[st
 		audit.WithIP(r.RemoteAddr))
 }
 
-// Kept for the compiler until I clean up imports.
-var _ = context.Background
