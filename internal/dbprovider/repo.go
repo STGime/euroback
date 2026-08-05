@@ -140,6 +140,11 @@ func (r *Repo) MarkDeleted(ctx context.Context, id string) error {
 // IS NULL). Returns pgx.ErrNoRows if there isn't one — the caller
 // treats that as "this is a Free/Pro project, use the shared pool."
 func (r *Repo) GetLiveByProject(ctx context.Context, projectID string) (*Record, error) {
+	// ORDER BY prefers the 'active' row when it coexists with a
+	// 'provisioning'/'restoring' shadow (two-instance restore window).
+	// Without this, LIMIT 1 was nondeterministic and could return the
+	// half-built instance to /connection or /rotate. Falls back to
+	// most-recent within the same state class.
 	const q = `
 		SELECT id, project_id, provider, provider_instance_id, host, port,
 		       database_name, username, password_ciphertext, password_nonce,
@@ -149,6 +154,7 @@ func (r *Repo) GetLiveByProject(ctx context.Context, projectID string) (*Record,
 		 WHERE project_id = $1
 		   AND state IN ('provisioning', 'active', 'restoring')
 		   AND deleted_at IS NULL
+	     ORDER BY (state = 'active') DESC, created_at DESC
 		 LIMIT 1
 	`
 	var rec Record

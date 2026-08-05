@@ -6,6 +6,9 @@
 	let projectId = $derived($page.params.id);
 	let project = $state<Project | null>(null);
 	let conn = $state<ConnectionInfo | null>(null);
+	// `role` is what the user *requested* — the effective role the URL
+	// grants is `conn.role` (backend truth). During the readonly_pending
+	// window they can differ.
 	let role = $state<'readonly' | 'readwrite'>('readonly');
 
 	let revealed = $state(false);
@@ -142,10 +145,19 @@
 				</div>
 				<p class="mt-2 text-xs text-gray-500">
 					Every URL fetch is audited — the URL is a bearer credential once revealed.
-					{#if role === 'readwrite'}
+					{#if conn.role === 'readwrite'}
 						<span class="text-red-600">Read/Write access allows destructive queries.</span>
 					{/if}
 				</p>
+
+				{#if conn.readonly_pending}
+					<div class="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+						<strong>Read-only role provisioning.</strong>
+						You requested a read-only URL, but the read-only role isn't ready yet on this project's
+						dedicated instance. The URL above is the <strong>owner (read/write)</strong> credential —
+						treat it as such. Do not hand this out to analysts or read-replica configs.
+					</div>
+				{/if}
 			</div>
 
 			<dl class="grid grid-cols-2 gap-3 text-sm border-t border-gray-100 pt-4">

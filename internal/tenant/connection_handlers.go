@@ -62,16 +62,19 @@ func NewConnectionService(pool *pgxpool.Pool, registry *dbprovider.Registry, cip
 }
 
 // ConnectionResponse is the JSON body returned by GET /connection
-// and POST /connection/rotate. `role` echoes the requested role
-// (`readwrite` or `readonly`) so callers can double-check what
-// they got.
+// and POST /connection/rotate. `role` is the *effective* role the
+// URL grants (never a promise the caller can't verify), so a caller
+// that asked for "readonly" while the _ro role is still being
+// provisioned sees `role: "readwrite"` + `readonly_pending: true`
+// and knows to treat the URL as a bearer write credential.
 type ConnectionResponse struct {
-	URL      string `json:"url"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Database string `json:"database"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	URL             string `json:"url"`
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	Database        string `json:"database"`
+	Username        string `json:"username"`
+	Role            string `json:"role"`
+	ReadonlyPending bool   `json:"readonly_pending,omitempty"`
 }
 
 // HandleGetConnection — GET /platform/projects/{id}/connection[?role=readwrite].
@@ -88,11 +91,14 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 			return
 		}
 
-		role := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("role")))
-		if role == "" || role == "ro" {
-			role = "readonly"
+		requestedRole := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("role")))
+		switch requestedRole {
+		case "", "ro":
+			requestedRole = "readonly"
+		case "rw":
+			requestedRole = "readwrite"
 		}
-		if role != "readonly" && role != "readwrite" {
+		if requestedRole != "readonly" && requestedRole != "readwrite" {
 			http.Error(w, `{"error":"role must be readonly or readwrite"}`, http.StatusBadRequest)
 			return
 		}
@@ -115,39 +121,39 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 			return
 		}
 
-		// Read-only role naming convention: <owner_username>_ro
-		// (created by the provisioning worker in M4 — new-projects
-		// get it automatically; older Team projects fall back to
-		// the owner role with a soft warning header).
+		// Read-only role convention: <owner_username>_ro. Not yet
+		// materialised — TODO(m4-follow-up) provisions it on the
+		// dedicated instance. Until then a `?role=readonly` request
+		// still emits the *owner* URL, but we tell the truth in the
+		// JSON body: the effective role is "readwrite" and
+		// `readonly_pending=true`. The console renders both the
+		// destructive-access warning and the "read-only role pending"
+		// banner off that flag — a header-only signal was lost by the
+		// SPA's fetch wrapper (drops res.headers) and could mislead a
+		// customer into handing an owner URL to an analyst.
 		username := rec.Username
-		if role == "readonly" {
-			// TODO(m4-follow-up): materialise the _ro role via a
-			// provisioning-worker step for existing Team projects.
-			// For M4 we emit the owner URL with a soft header so
-			// the console knows to display a "read-only role
-			// pending" hint.
-			w.Header().Set("X-Eurobase-Readonly-Pending", "true")
-			// Still emit the owner role for now — the follow-up
-			// swap is transparent to the caller.
-			// (No behaviour change; documented.)
-		}
+		effectiveRole := "readwrite"
+		readonlyPending := requestedRole == "readonly"
 
 		connURL := buildPostgresURL(username, password, rec.Host, rec.Port, rec.DatabaseName)
 
 		writeConnectionAudit(r, projectID, audit.ActionConnectionURLViewed, map[string]any{
-			"role": role,
-			"host": rec.Host,
+			"requested_role":   requestedRole,
+			"effective_role":   effectiveRole,
+			"readonly_pending": readonlyPending,
+			"host":             rec.Host,
 		})
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(ConnectionResponse{
-			URL:      connURL,
-			Host:     rec.Host,
-			Port:     rec.Port,
-			Database: rec.DatabaseName,
-			Username: username,
-			Role:     role,
+			URL:             connURL,
+			Host:            rec.Host,
+			Port:            rec.Port,
+			Database:        rec.DatabaseName,
+			Username:        username,
+			Role:            effectiveRole,
+			ReadonlyPending: readonlyPending,
 		})
 	}
 }
@@ -200,8 +206,12 @@ func (s *ConnectionService) HandleRotateConnection() http.HandlerFunc {
 		}
 
 		if err := rotator.RotatePassword(r.Context(), rec.ProviderInstanceID, rec.Username, newPassword); err != nil {
+			// Provider-side detail (instance IDs, provider URLs) stays
+			// in slog — do not echo `err` to the tenant, both to avoid
+			// leaking internal identifiers and to keep the JSON body
+			// well-formed (err may contain quotes / newlines).
 			slog.Error("provider rotate failed", "error", err, "project_id", projectID)
-			http.Error(w, fmt.Sprintf(`{"error":"provider rotate failed: %v"}`, err), http.StatusBadGateway)
+			http.Error(w, `{"error":"provider rotate failed"}`, http.StatusBadGateway)
 			return
 		}
 
