@@ -208,6 +208,15 @@ export type RestoreState =
 	| 'complete'
 	| 'failed';
 
+export interface ConnectionInfo {
+	url: string;
+	host: string;
+	port: number;
+	database: string;
+	username: string;
+	role: 'readonly' | 'readwrite';
+}
+
 export interface RestoreOperation {
 	id: string;
 	project_id: string;
@@ -1615,6 +1624,29 @@ export class EurobaseAPI {
 	async getRestoreOperation(projectId: string, restoreId: string): Promise<RestoreOperation> {
 		return this.fetch<RestoreOperation>(
 			`/platform/projects/${projectId}/restore/${restoreId}`
+		);
+	}
+
+	// ---- Team-tier direct-DATABASE_URL (M4) ----
+
+	/**
+	 * Fetch the project's dedicated-DB connection URL. `role` defaults
+	 * to 'readonly'. Every fetch is audited (`team.connection.url_viewed`).
+	 */
+	async getConnection(
+		projectId: string,
+		role: 'readonly' | 'readwrite' = 'readonly'
+	): Promise<ConnectionInfo> {
+		return this.fetch<ConnectionInfo>(
+			`/platform/projects/${projectId}/connection?role=${role}`
+		);
+	}
+
+	/** Rotate the read-write password. Invalidates the old URL immediately. */
+	async rotateConnection(projectId: string): Promise<ConnectionInfo> {
+		return this.fetch<ConnectionInfo>(
+			`/platform/projects/${projectId}/connection/rotate`,
+			{ method: 'POST' }
 		);
 	}
 
