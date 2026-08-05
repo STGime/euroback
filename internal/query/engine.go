@@ -11,14 +11,53 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// PoolResolver picks the pool to use for a given request context.
+// Returning nil means "use the engine's shared pool" — a convenient
+// signal for cache misses / dedicated-DB-not-applicable so the
+// caller (gateway wire-up) doesn't have to fabricate a shared-pool
+// reference at closure-construction time.
+//
+// Introduced with Team-tier M2.5. Free/Pro projects always return
+// nil (no dedicated instance) so the engine transparently uses the
+// shared pool. Team+ projects with a live project_databases row
+// return the cached per-project pool.
+//
+// This is a func type rather than a package import to keep the
+// query package free of auth / dbprovider imports (both of which
+// already transitively depend on query).
+type PoolResolver func(ctx context.Context) *pgxpool.Pool
+
 // QueryEngine translates REST API calls into parameterized PostgreSQL queries.
 type QueryEngine struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	resolver PoolResolver
 }
 
 // NewQueryEngine creates a new QueryEngine backed by the given connection pool.
 func NewQueryEngine(pool *pgxpool.Pool) *QueryEngine {
 	return &QueryEngine{pool: pool}
+}
+
+// WithPoolResolver attaches a per-project pool resolver so tenant
+// traffic can route to a project's dedicated managed-PG instance
+// (Team-tier and above). Nil-safe — a QueryEngine constructed
+// without a resolver behaves as before (shared pool only).
+func (e *QueryEngine) WithPoolResolver(r PoolResolver) *QueryEngine {
+	e.resolver = r
+	return e
+}
+
+// resolvePool returns the dedicated-instance pool if the resolver
+// picks one for this ctx, else the shared pool. Callers never have
+// to branch — they get a usable *pgxpool.Pool every time.
+func (e *QueryEngine) resolvePool(ctx context.Context) *pgxpool.Pool {
+	if e.resolver == nil {
+		return e.pool
+	}
+	if p := e.resolver(ctx); p != nil {
+		return p
+	}
+	return e.pool
 }
 
 
@@ -68,7 +107,7 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 // against migrator-owned tables. This is set only by the platform-route
 // middleware; SDK runtime traffic leaves it off.
 func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
-	tx, err := e.pool.Begin(ctx)
+	tx, err := e.resolvePool(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -127,7 +166,7 @@ var validAggregates = map[string]bool{
 // Returns the aggregate result value and any error.
 func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName string, params QueryParams) (interface{}, error) {
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
 
@@ -146,7 +185,7 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 
 	// Validate the aggregate column exists (if not count).
 	if aggCol != "" {
-		if err := ValidateColumns(ctx, e.pool, schemaName, tableName, []string{aggCol}); err != nil {
+		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, []string{aggCol}); err != nil {
 			return nil, err
 		}
 	}
@@ -157,7 +196,7 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 		filterCols = append(filterCols, f.Column)
 	}
 	if len(filterCols) > 0 {
-		if err := ValidateColumns(ctx, e.pool, schemaName, tableName, filterCols); err != nil {
+		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, filterCols); err != nil {
 			return nil, err
 		}
 	}
@@ -183,20 +222,20 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 
 	for _, rel := range relations {
 		// Validate the related table exists.
-		if err := ValidateTable(ctx, e.pool, schemaName, rel.Table); err != nil {
+		if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, rel.Table); err != nil {
 			return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
 		}
 
 		// Validate the related table columns (unless "*").
 		if len(rel.Columns) > 0 && !(len(rel.Columns) == 1 && rel.Columns[0] == "*") {
-			if err := ValidateColumns(ctx, e.pool, schemaName, rel.Table, rel.Columns); err != nil {
+			if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, rel.Table, rel.Columns); err != nil {
 				return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
 			}
 		}
 
 		// Find FK from main table to related table.
 		var fkCol, refCol string
-		err := e.pool.QueryRow(ctx,
+		err := e.resolvePool(ctx).QueryRow(ctx,
 			`SELECT kcu.column_name, ccu.column_name
 			 FROM information_schema.key_column_usage kcu
 			 JOIN information_schema.table_constraints tc
@@ -232,7 +271,7 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 // Returns the result rows, total count, and any error.
 func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName string, params QueryParams) ([]map[string]interface{}, int, error) {
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return nil, 0, err
 	}
 
@@ -245,7 +284,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 			}
 		}
 		if len(colsToValidate) > 0 {
-			if err := ValidateColumns(ctx, e.pool, schemaName, tableName, colsToValidate); err != nil {
+			if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, colsToValidate); err != nil {
 				return nil, 0, err
 			}
 		}
@@ -257,7 +296,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		filterCols = append(filterCols, f.Column)
 	}
 	if len(filterCols) > 0 {
-		if err := ValidateColumns(ctx, e.pool, schemaName, tableName, filterCols); err != nil {
+		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, filterCols); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -268,7 +307,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		orderCols = append(orderCols, o.Column)
 	}
 	if len(orderCols) > 0 {
-		if err := ValidateColumns(ctx, e.pool, schemaName, tableName, orderCols); err != nil {
+		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, orderCols); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -393,7 +432,7 @@ func nestRelationColumns(rows []map[string]interface{}, relations []ResolvedRela
 // InsertRow builds and executes a parameterized INSERT ... RETURNING * query.
 func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName string, data map[string]interface{}) (map[string]interface{}, error) {
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
 
@@ -410,7 +449,7 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 		for k := range data {
 			cols = append(cols, k)
 		}
-		if err := ValidateColumns(ctx, e.pool, schemaName, tableName, cols); err != nil {
+		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, cols); err != nil {
 			return nil, err
 		}
 		sql, args = buildInsertQuery(schemaName, tableName, data)
@@ -449,7 +488,7 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	}
 
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
 
@@ -458,7 +497,7 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	for k := range data {
 		cols = append(cols, k)
 	}
-	if err := ValidateColumns(ctx, e.pool, schemaName, tableName, cols); err != nil {
+	if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, cols); err != nil {
 		return nil, err
 	}
 
@@ -492,7 +531,7 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 // DeleteRow builds and executes a parameterized DELETE WHERE id = $1.
 func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowID string) error {
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return err
 	}
 
@@ -514,7 +553,7 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 // DeleteRows deletes multiple rows by ID using ANY($1).
 // Returns the number of rows affected.
 func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) (int64, error) {
-	if err := ValidateTable(ctx, e.pool, schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return 0, err
 	}
 
@@ -548,7 +587,7 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 
 	// Validate the function exists in the schema.
 	var exists bool
-	err := e.pool.QueryRow(ctx,
+	err := e.resolvePool(ctx).QueryRow(ctx,
 		`SELECT EXISTS (
 			SELECT 1 FROM information_schema.routines
 			WHERE routine_schema = $1 AND routine_name = $2
@@ -614,7 +653,7 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 	rawSQL = strings.TrimRight(rawSQL, ";")
 	rawSQL = strings.TrimSpace(rawSQL)
 
-	conn, err := e.pool.Acquire(ctx)
+	conn, err := e.resolvePool(ctx).Acquire(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquire connection: %w", err)
 	}
@@ -716,7 +755,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	}
 	isReadOnly := len(readOnly) > 0 && readOnly[0]
 
-	conn, err := e.pool.Acquire(ctx)
+	conn, err := e.resolvePool(ctx).Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire connection: %w", err)
 	}
