@@ -54,15 +54,17 @@ CREATE UNIQUE INDEX ux_backup_snapshots_provider_id
     ON public.backup_snapshots(project_id, provider_snapshot_id);
 
 -- Console-list query filter — Team-tier projects fetch their own
--- snapshot list ordered newest-first.
+-- snapshot list ordered newest-first. Query-time filter on
+-- expires_at handles the "hide expired" behaviour; a partial
+-- predicate using now() is rejected by Postgres (index predicates
+-- must reference only IMMUTABLE functions, and now() is STABLE).
 CREATE INDEX ix_backup_snapshots_project_created
-    ON public.backup_snapshots(project_id, created_at DESC)
-    WHERE expires_at > now();
+    ON public.backup_snapshots(project_id, created_at DESC);
 
 -- Prune sweeper — daily cron deletes expired rows.
+-- expires_at is NOT NULL, so the plain index covers the sweep.
 CREATE INDEX ix_backup_snapshots_expiry
-    ON public.backup_snapshots(expires_at)
-    WHERE expires_at IS NOT NULL;
+    ON public.backup_snapshots(expires_at);
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.backup_snapshots TO eurobase_gateway;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.backup_snapshots TO eurobase_developer;
