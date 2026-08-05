@@ -39,6 +39,30 @@ const (
 	// so they can create Team-tier projects during the closed beta.
 	ActionTeamBetaGranted = "team_beta.granted"
 	ActionTeamBetaRevoked = "team_beta.revoked"
+
+	// Legal-Team-tier closed-beta grants (Team-tier M2b).
+	// Separate flag from team_beta_access — Legal Team is a premium
+	// tier bundling the German legal-tech compliance pack (§203 /
+	// §43e docs, retention holds, GoBD export, 10y audit retention).
+	ActionLegalTeamBetaGranted = "legal_team_beta.granted"
+	ActionLegalTeamBetaRevoked = "legal_team_beta.revoked"
+
+	// Retention-hold lifecycle (M2b, hard blocker #3).
+	// Written every time a Legal-Team tenant places, revokes, or
+	// lets expire a retention hold. Cross-refs into audit_log so
+	// the DSAR "retained not exported" reason is verifiable.
+	ActionRetentionHoldPlaced  = "retention_hold.placed"
+	ActionRetentionHoldRevoked = "retention_hold.revoked"
+	ActionRetentionHoldExpired = "retention_hold.expired"
+
+	// GoBD export (M2b, hard blocker #4). Distinct from
+	// ActionExportRequested so operators can grep tax-audit
+	// exports separately from DSAR exports.
+	ActionGoBDExportRequested = "compliance.gobd_export.requested"
+
+	// Staff secrecy declarations (M2b, hard blocker #1).
+	ActionStaffSecrecyDeclarationAdded   = "staff_secrecy.declaration_added"
+	ActionStaffSecrecyDeclarationRevoked = "staff_secrecy.declaration_revoked"
 	// Compliance / DSAR export lifecycle. Closes #100. Tenant +
 	// per-user exports run on the platform admin path; self-serve
 	// is an end-user-initiated export of their own data.

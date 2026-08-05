@@ -203,6 +203,10 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 				http.Error(w, `{"error":"team plan requires closed-beta access","code":"team_beta_required"}`, http.StatusForbidden)
 				return
 			}
+			if errors.Is(err, ErrLegalTeamBetaRequired) {
+				http.Error(w, `{"error":"legal team plan requires closed-beta access","code":"legal_team_beta_required"}`, http.StatusForbidden)
+				return
+			}
 			if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
 				http.Error(w, `{"error":"This project URL is already taken. Each project gets a unique subdomain (slug.eurobase.app), so please choose a different name or slug."}`, http.StatusConflict)
 				return
