@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"github.com/eurobase/euroback/internal/webhook"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -162,6 +164,53 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	} else {
 		slog.Warn("VAULT_ENCRYPTION_KEY not set — /connection routes disabled")
 	}
+
+	// Per-project pool cache — Team-tier M2.5. Routes SDK tenant
+	// traffic to the project's dedicated managed-PG instance when
+	// HasDedicatedDB=true. Free/Pro traffic transparently keeps the
+	// shared pool. Requires the cipher (uses it to open sealed
+	// passwords); without it we ship no routing (fail closed = fall
+	// back to shared, which is the pre-M2.5 behaviour).
+	//
+	// Feature flag TEAM_TIER_ROUTING=1 gates the cache. Ships OFF in
+	// prod by default because the *follow-up* work — provisioning the
+	// tenant schema + tenant helpers on the dedicated instance at
+	// project-create time — is a separate PR. Without that, a
+	// dedicated instance is empty; routing SDK queries to it would
+	// hit "schema not found" instead of falling back gracefully. Ops
+	// flips this on once the schema-provisioning work also lands.
+	var poolCache *dbprovider.PoolCache
+	if connCipher != nil && os.Getenv("TEAM_TIER_ROUTING") == "1" {
+		repo := dbprovider.NewRepo(pool)
+		poolCache = dbprovider.NewPoolCache(connCipher, repo, 30*time.Minute, 8)
+		slog.Info("Team-tier routing enabled (TEAM_TIER_ROUTING=1)")
+	}
+
+	// poolResolver bridges query.PoolResolver → poolCache without
+	// dragging auth into the query package (cycle). Consulted at
+	// every WithTenantTx call. Returning nil = "use shared pool";
+	// the query engine handles the fall-through.
+	poolResolver := query.PoolResolver(func(ctx context.Context) *pgxpool.Pool {
+		if poolCache == nil {
+			return nil
+		}
+		pc, ok := auth.ProjectFromContext(ctx)
+		if !ok || pc == nil || !pc.HasDedicatedDB {
+			return nil
+		}
+		p, err := poolCache.Get(ctx, pc.ProjectID)
+		if err != nil {
+			// Stale context (project_databases row deleted between
+			// middleware and handler) or provider transient failure.
+			// Fall back to shared pool rather than break the request.
+			if !errors.Is(err, pgx.ErrNoRows) {
+				slog.Error("pool cache: dedicated pool unavailable, falling back to shared",
+					"project_id", pc.ProjectID, "error", err)
+			}
+			return nil
+		}
+		return p
+	})
 
 	// End-user auth service.
 	endUserAuthSvc := enduser.NewAuthService(pool)
@@ -732,7 +781,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Use(ratelimit.RateLimitMiddleware(limiter))
 			}
 
-			queryEngine := query.NewQueryEngine(pool)
+			// SDK runtime engine — routes tenant queries to the
+			// dedicated pool when the API key resolves to a Team+
+			// project with HasDedicatedDB=true (Team-tier M2.5).
+			queryEngine := query.NewQueryEngine(pool).WithPoolResolver(poolResolver)
 			publisher := realtime.NewEventPublisher(nil, hub)
 
 			r.Post("/sql", query.HandleSQL(queryEngine))
@@ -775,7 +827,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					r.Use(endUserMw.Handler)
 				}
 
-				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool))
+				// SDK storage — same routing story as SDK SQL: tenant
+				// metadata lookups go to the dedicated instance when the
+				// project has one (M2.5).
+				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(poolResolver))
 				r.Mount("/", storageHandler.Routes())
 			})
 		} else {
