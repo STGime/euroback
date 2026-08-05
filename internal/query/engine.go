@@ -60,10 +60,6 @@ func (e *QueryEngine) resolvePool(ctx context.Context) *pgxpool.Pool {
 	return e.pool
 }
 
-// Ensure log/slog stays imported even in trimmed builds where the
-// resolver is never invoked.
-var _ = slog.Debug
-
 
 // applyRLSContext sets the three app.end_user_* GUCs on the provided tx
 // based on the request context. Secret keys get role='service' (bypasses

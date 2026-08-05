@@ -49,6 +49,13 @@ type ConnectionService struct {
 	cipher   *dbprovider.Cipher
 	repo     *dbprovider.Repo
 	limits   *plans.LimitsService
+	// poolCache is nil when Team-tier routing is disabled. When set,
+	// rotate paths evict the cached pool so subsequent SDK traffic
+	// opens a fresh pool with the new password. Without eviction, the
+	// pgxpool.Pool's cached DSN keeps the old password and new
+	// connections start failing auth within ~30 min (as the pool
+	// cycles past MaxConnLifetime).
+	poolCache *dbprovider.PoolCache
 }
 
 func NewConnectionService(pool *pgxpool.Pool, registry *dbprovider.Registry, cipher *dbprovider.Cipher, limits *plans.LimitsService) *ConnectionService {
@@ -59,6 +66,16 @@ func NewConnectionService(pool *pgxpool.Pool, registry *dbprovider.Registry, cip
 		repo:     dbprovider.NewRepo(pool),
 		limits:   limits,
 	}
+}
+
+// WithPoolCache attaches the gateway's per-project pool cache so
+// /connection/rotate can evict the cached pool immediately after a
+// password rotation. Nil-safe — a service constructed without a
+// cache still functions (rotate + return new URL), but stale pool
+// entries will keep serving until they cycle past MaxConnLifetime.
+func (s *ConnectionService) WithPoolCache(c *dbprovider.PoolCache) *ConnectionService {
+	s.poolCache = c
+	return s
 }
 
 // ConnectionResponse is the JSON body returned by GET /connection
@@ -237,6 +254,18 @@ func (s *ConnectionService) HandleRotateConnection() http.HandlerFunc {
 			slog.Error("password_ciphertext update failed", "error", err, "project_id", projectID)
 			http.Error(w, `{"error":"password rotated at provider but DB write failed — contact support"}`, http.StatusInternalServerError)
 			return
+		}
+
+		// Evict the cached pool (M2.5) so subsequent SDK traffic
+		// opens fresh connections against the new password. Without
+		// this, the pgxpool.Pool retains the old password in its
+		// pinned config; new connections opened after MaxConnLifetime
+		// (30 min) would auth with the old creds and Scaleway would
+		// reject them — the tenant's SDK traffic starts failing with
+		// no signal tying it back to the rotate. Local-pod eviction
+		// only in part 1; cross-pod via LISTEN/NOTIFY lands in part 2.
+		if s.poolCache != nil {
+			s.poolCache.Evict(projectID)
 		}
 
 		writeConnectionAudit(r, projectID, audit.ActionConnectionURLRotated, map[string]any{

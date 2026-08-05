@@ -177,8 +177,21 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// tenant schema + tenant helpers on the dedicated instance at
 	// project-create time — is a separate PR. Without that, a
 	// dedicated instance is empty; routing SDK queries to it would
-	// hit "schema not found" instead of falling back gracefully. Ops
-	// flips this on once the schema-provisioning work also lands.
+	// hit "schema not found" instead of falling back gracefully.
+	//
+	// ⚠️  DO NOT FLIP THIS ON UNTIL PART 2 SHIPS A NON-OWNER RUNTIME
+	// ROLE ON THE DEDICATED INSTANCE. The pool cache currently
+	// opens its DSN with rec.Username which is the *owner* role. In
+	// Postgres, RLS policies are SKIPPED for a table's owner unless
+	// the table has FORCE ROW LEVEL SECURITY. If SDK traffic reaches
+	// tenant tables as the owner, `applyRLSContext`'s app.end_user_*
+	// GUCs are set but never consulted, and every end-user of a
+	// Team-tier app could read/write every other end-user's rows.
+	// Part 2 MUST provision a non-owner tenant runtime role
+	// (mirroring `eurobase_gateway`'s non-owner status on the shared
+	// cluster) and point project_databases.username at it before
+	// this flag can be safely flipped. A regression test asserting
+	// RLS isolation on the dedicated instance is the safety gate.
 	var poolCache *dbprovider.PoolCache
 	if connCipher != nil && os.Getenv("TEAM_TIER_ROUTING") == "1" {
 		repo := dbprovider.NewRepo(pool)
@@ -543,7 +556,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// audited (ActionConnectionURLViewed) — the URL is a
 			// bearer credential once revealed.
 			if connCipher != nil {
-				connSvc := tenant.NewConnectionService(pool, providerRegistry, connCipher, limitsSvc)
+				connSvc := tenant.NewConnectionService(pool, providerRegistry, connCipher, limitsSvc).WithPoolCache(poolCache)
 				r.With(tenant.RequireMinRole("admin")).Get("/connection", connSvc.HandleGetConnection())
 				r.With(tenant.RequireMinRole("admin")).Post("/connection/rotate", connSvc.HandleRotateConnection())
 			}

@@ -44,9 +44,10 @@ type PoolCache struct {
 	idleTTL time.Duration
 	maxConn int32
 
-	mu    sync.Mutex
-	pools map[string]*cachedPool
-	stop  chan struct{}
+	mu        sync.Mutex
+	pools     map[string]*cachedPool
+	stop      chan struct{}
+	closeOnce sync.Once
 }
 
 type cachedPool struct {
@@ -79,9 +80,14 @@ func NewPoolCache(cipher *Cipher, repo *Repo, idleTTL time.Duration, maxConn int
 	return c
 }
 
-// Close closes every cached pool and stops the sweeper.
+// Close closes every cached pool and stops the sweeper. Idempotent
+// — sync.Once guards the stop-channel close so ambient shutdown
+// paths (test cleanup, ctx-cancel handlers, signal handlers) don't
+// race into a panic on a second call.
 func (c *PoolCache) Close() {
-	close(c.stop)
+	c.closeOnce.Do(func() {
+		close(c.stop)
+	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for id, cp := range c.pools {

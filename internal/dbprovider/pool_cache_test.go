@@ -40,18 +40,15 @@ func TestPoolCache_EvictNoop(t *testing.T) {
 
 func TestPoolCache_CloseIsIdempotent(t *testing.T) {
 	c := NewPoolCache(nil, nil, time.Minute, 4)
-	c.Close()
 
-	// A double-Close panics (closing a closed channel). We accept
-	// that as the contract — the constructor is fresh per gateway
-	// process, so callers control the single Close. This test just
-	// asserts Close() on an empty cache doesn't panic.
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("Close on empty cache panicked: %v", r)
+			t.Fatalf("multiple Close calls panicked: %v", r)
 		}
 	}()
-	// One clean close only.
+	c.Close()
+	c.Close() // sync.Once must swallow the second call.
+	c.Close() // …and any further calls.
 }
 
 func TestBuildDSN_URLEncodesPassword(t *testing.T) {
