@@ -23,24 +23,84 @@ func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 // Record is the persisted view of a project_databases row. Password
 // stays sealed here — callers Open() it via a Cipher when they need
 // the plaintext to build a DSN.
+//
+// Two credential slots (Team-tier M2.5 part 2):
+//
+//   * Owner fields (Username, PasswordCiphertext, PasswordNonce,
+//     PasswordKeyVersion) — the admin login the user sees in the
+//     Direct Connection UI (M4). Bypasses RLS by definition (table
+//     owner); safe for DDL, migrations, and end-user connections
+//     from Payload / Prisma / Drizzle. Never used by the SDK.
+//
+//   * Runtime fields (RuntimeUsername + RuntimePassword*) — a
+//     non-owner login used by the SDK pool cache when TEAM_TIER_
+//     ROUTING is on. Non-owner is the whole point: Postgres skips
+//     RLS for a table owner, so if the runtime pool connected as
+//     the owner, applyRLSContext's app.end_user_* GUCs would be set
+//     but never enforced. NULL until the runtime role has been
+//     provisioned on the dedicated instance (follow-up work on
+//     #338); the CHECK on migration 000093 enforces all-or-none.
+//     Consumers must fall back to the owner credential when Runtime
+//     is nil so pre-part-2 rows keep working.
 type Record struct {
-	ID                   string
-	ProjectID            string
-	Provider             string
-	ProviderInstanceID   string
-	Host                 string
-	Port                 int
-	DatabaseName         string
-	Username             string
-	PasswordCiphertext   []byte
-	PasswordNonce        []byte
-	PasswordKeyVersion   int16
-	Region               string
-	State                State
-	SupersededBy         *string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	DeletedAt            *time.Time
+	ID                          string
+	ProjectID                   string
+	Provider                    string
+	ProviderInstanceID          string
+	Host                        string
+	Port                        int
+	DatabaseName                string
+	Username                    string
+	PasswordCiphertext          []byte
+	PasswordNonce               []byte
+	PasswordKeyVersion          int16
+	RuntimeUsername             *string
+	RuntimePasswordCiphertext   []byte
+	RuntimePasswordNonce        []byte
+	RuntimePasswordKeyVersion   *int16
+	Region                      string
+	State                       State
+	SupersededBy                *string
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
+	DeletedAt                   *time.Time
+}
+
+// EffectiveCredential returns the credential the SDK pool cache
+// should use: the runtime (non-owner) credential if it has been
+// provisioned, else the owner credential (which bypasses RLS).
+//
+// Single-method by design so username and password physically
+// cannot pick different slots — the CHECK on migration 000093
+// enforces all-or-none at the DB level, and this signature makes
+// the invariant a compile-time property of the API. A safety-net
+// check (`allRuntimeSet`) guards against a hand-constructed
+// Record where a caller populated RuntimeUsername but forgot the
+// password fields; in that case the runtime slot is treated as
+// absent and the owner is used. The alternative (nil-deref
+// `*r.RuntimePasswordKeyVersion`) would panic on the pool-cache
+// hot path — a fail-safe fallback is the right posture.
+//
+// Consumers picking the SDK-runtime connection MUST call this
+// instead of reading Username / PasswordCiphertext / … directly.
+// The fallback keeps M1/M2 rows working until the part-2 worker
+// patch populates the runtime slot.
+func (r *Record) EffectiveCredential() (user string, ciphertext, nonce []byte, version int16) {
+	if r.allRuntimeSet() {
+		return *r.RuntimeUsername, r.RuntimePasswordCiphertext, r.RuntimePasswordNonce, *r.RuntimePasswordKeyVersion
+	}
+	return r.Username, r.PasswordCiphertext, r.PasswordNonce, r.PasswordKeyVersion
+}
+
+// allRuntimeSet mirrors migration 000093's all-or-none CHECK in
+// Go — every DB-sourced Record satisfies one branch or the other,
+// but a hand-constructed Record could straddle the two. Belt +
+// suspenders.
+func (r *Record) allRuntimeSet() bool {
+	return r.RuntimeUsername != nil &&
+		r.RuntimePasswordKeyVersion != nil &&
+		len(r.RuntimePasswordCiphertext) > 0 &&
+		len(r.RuntimePasswordNonce) > 0
 }
 
 // InsertProvisioning writes the initial project_databases row while
@@ -67,7 +127,10 @@ func (r *Repo) InsertProvisioning(
 		    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, project_id, provider, provider_instance_id, host, port,
 		          database_name, username, password_ciphertext, password_nonce,
-		          password_key_version, region, state,
+		          password_key_version,
+		          runtime_username, runtime_password_ciphertext,
+		          runtime_password_nonce, runtime_password_key_version,
+		          region, state,
 		          superseded_by, created_at, updated_at, deleted_at
 	`
 	var rec Record
@@ -79,6 +142,8 @@ func (r *Repo) InsertProvisioning(
 		&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
 		&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
 		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
 		&rec.Region, &rec.State,
 		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 	)
@@ -148,7 +213,10 @@ func (r *Repo) GetLiveByProject(ctx context.Context, projectID string) (*Record,
 	const q = `
 		SELECT id, project_id, provider, provider_instance_id, host, port,
 		       database_name, username, password_ciphertext, password_nonce,
-		       password_key_version, region, state,
+		       password_key_version,
+		       runtime_username, runtime_password_ciphertext,
+		       runtime_password_nonce, runtime_password_key_version,
+		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
 		 WHERE project_id = $1
@@ -162,6 +230,8 @@ func (r *Repo) GetLiveByProject(ctx context.Context, projectID string) (*Record,
 		&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
 		&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
 		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
 		&rec.Region, &rec.State,
 		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 	)
@@ -176,7 +246,10 @@ func (r *Repo) Get(ctx context.Context, id string) (*Record, error) {
 	const q = `
 		SELECT id, project_id, provider, provider_instance_id, host, port,
 		       database_name, username, password_ciphertext, password_nonce,
-		       password_key_version, region, state,
+		       password_key_version,
+		       runtime_username, runtime_password_ciphertext,
+		       runtime_password_nonce, runtime_password_key_version,
+		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
 		 WHERE id = $1
@@ -186,6 +259,8 @@ func (r *Repo) Get(ctx context.Context, id string) (*Record, error) {
 		&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
 		&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
 		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
 		&rec.Region, &rec.State,
 		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 	)
@@ -201,7 +276,10 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 	const q = `
 		SELECT id, project_id, provider, provider_instance_id, host, port,
 		       database_name, username, password_ciphertext, password_nonce,
-		       password_key_version, region, state,
+		       password_key_version,
+		       runtime_username, runtime_password_ciphertext,
+		       runtime_password_nonce, runtime_password_key_version,
+		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
 		 WHERE deleted_at IS NOT NULL
