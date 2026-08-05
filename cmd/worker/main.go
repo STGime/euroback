@@ -200,6 +200,15 @@ func main() {
 		Registry: providerRegistry,
 		Repo:     providerRepo,
 	})
+	// M3 restore worker — same cipher + registry + repo as
+	// provisioning, plus the pool for state-machine writes on
+	// restore_operations.
+	river.AddWorker(riverWorkers, &workers.RestoreTeamDatabaseWorker{
+		Pool:     pool,
+		Registry: providerRegistry,
+		Cipher:   cipher,
+		Repo:     providerRepo,
+	})
 
 	// ── Create River client in worker mode ──
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
@@ -269,6 +278,14 @@ func main() {
 	// prune audit_log row tails. Tuned via env vars; see
 	// internal/workers/audit_retention.go.
 	workers.StartAuditRetention(ctx, pool)
+
+	// ── Backup sweeper (M3) ──
+	// 6-hour ticker: refreshes backup_snapshots cache from
+	// Provider.ListSnapshots for every Team project, prunes rows
+	// past expires_at. Also cleans up superseded project_databases
+	// rows past the 7-day rollback window via the existing
+	// deprovision-eligible query.
+	workers.StartBackupSweeper(ctx, pool, providerRegistry)
 
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)

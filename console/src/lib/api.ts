@@ -186,6 +186,43 @@ export interface AllowlistEntry {
 	created_at: string;
 }
 
+// Team-tier backup + restore (M3).
+
+export interface BackupSnapshot {
+	id: string;
+	project_id: string;
+	project_database_id: string;
+	provider_snapshot_id: string;
+	name: string;
+	size_mb: number;
+	kind: 'scheduled' | 'ondemand';
+	created_at: string;
+	expires_at: string;
+}
+
+export type RestoreState =
+	| 'pending'
+	| 'provisioning'
+	| 'verifying'
+	| 'cutover'
+	| 'complete'
+	| 'failed';
+
+export interface RestoreOperation {
+	id: string;
+	project_id: string;
+	kind: 'snapshot' | 'pitr';
+	source_ref: string;
+	target_time?: string | null;
+	state: RestoreState;
+	new_instance_id?: string | null;
+	old_instance_id: string;
+	error?: string | null;
+	requested_by?: string | null;
+	created_at: string;
+	completed_at?: string | null;
+}
+
 export interface Project {
 	id: string;
 	name: string;
@@ -1534,6 +1571,51 @@ export class EurobaseAPI {
 	/** Get all available plans and their limits. */
 	async getPlans(): Promise<PlanLimits[]> {
 		return this.fetch<PlanLimits[]>('/platform/config/plans');
+	}
+
+	// ---- Team-tier backup + restore (M3) ----
+
+	/** List backup snapshots for a Team-tier project. */
+	async listBackups(projectId: string): Promise<{ backups: BackupSnapshot[]; total: number }> {
+		return this.fetch<{ backups: BackupSnapshot[]; total: number }>(
+			`/platform/projects/${projectId}/backups`
+		);
+	}
+
+	/** Trigger an on-demand backup. Rate-limited (5/day/project). */
+	async createBackup(projectId: string): Promise<BackupSnapshot> {
+		return this.fetch<BackupSnapshot>(`/platform/projects/${projectId}/backups`, {
+			method: 'POST'
+		});
+	}
+
+	/** Trigger a snapshot restore. Returns the restore-operation id for polling. */
+	async restoreFromSnapshot(
+		projectId: string,
+		snapshotId: string
+	): Promise<{ restore_id: string; state: string }> {
+		return this.fetch(`/platform/projects/${projectId}/restore`, {
+			method: 'POST',
+			body: JSON.stringify({ source: 'snapshot', snapshot_id: snapshotId })
+		});
+	}
+
+	/** Trigger a PITR restore. target_time must be inside plan_limits.team.pitr_days. */
+	async restoreFromPITR(
+		projectId: string,
+		targetTime: string
+	): Promise<{ restore_id: string; state: string }> {
+		return this.fetch(`/platform/projects/${projectId}/restore`, {
+			method: 'POST',
+			body: JSON.stringify({ source: 'pitr', target_time: targetTime })
+		});
+	}
+
+	/** Poll a restore-operation for progress. */
+	async getRestoreOperation(projectId: string, restoreId: string): Promise<RestoreOperation> {
+		return this.fetch<RestoreOperation>(
+			`/platform/projects/${projectId}/restore/${restoreId}`
+		);
 	}
 
 	// ---- Superadmin ----
