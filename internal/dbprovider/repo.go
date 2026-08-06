@@ -181,6 +181,40 @@ func (r *Repo) MarkFailed(ctx context.Context, id string) error {
 	return r.UpdateState(ctx, id, StateFailed, "", 0)
 }
 
+// SetRuntimeCredentials writes the sealed non-owner runtime login
+// into the runtime_* columns added by migration 000093. Called by
+// ProvisionTeamDatabaseWorker after BootstrapDedicated returns.
+//
+// All-or-none — the caller passes username + all three sealed
+// password fields; migration 000093's CHECK constraint enforces
+// that we can't leave a row half-populated (would masquerade as
+// "runtime provisioned" and route SDK traffic to an unopenable
+// DSN).
+func (r *Repo) SetRuntimeCredentials(
+	ctx context.Context,
+	id string,
+	runtimeUsername string,
+	ciphertext, nonce []byte,
+	keyVersion int16,
+) error {
+	const q = `
+		UPDATE public.project_databases
+		   SET runtime_username             = $2,
+		       runtime_password_ciphertext  = $3,
+		       runtime_password_nonce       = $4,
+		       runtime_password_key_version = $5
+		 WHERE id = $1
+	`
+	tag, err := r.pool.Exec(ctx, q, id, runtimeUsername, ciphertext, nonce, keyVersion)
+	if err != nil {
+		return fmt.Errorf("dbprovider.Repo.SetRuntimeCredentials: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("dbprovider.Repo.SetRuntimeCredentials: no rows affected")
+	}
+	return nil
+}
+
 // MarkDeleted flips the row to state='deleting', sets deleted_at.
 // The deprovision sweep picks it up 7 days later.
 func (r *Repo) MarkDeleted(ctx context.Context, id string) error {

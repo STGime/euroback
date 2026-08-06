@@ -165,6 +165,81 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 		return fmt.Errorf("mark active: %w", err)
 	}
 	logger.Info("team-tier database ready", "host", active.Host, "port", active.Port)
+
+	// Team-tier M2.5 part 2b — bootstrap the fresh instance so it
+	// can safely serve SDK traffic as a non-owner runtime role.
+	// See internal/dbprovider/bootstrap.go for the flow.
+	//
+	// The instance is fully functional without this step (the M4
+	// Direct Connection UI still works, since it hands out the
+	// owner credentials). Bootstrap failure marks the row failed
+	// so ops can retry; it does NOT tear the instance down (paid
+	// resource; retry-friendly).
+	//
+	// Idempotent: BootstrapDedicated is safe to re-run on the same
+	// instance for the same project.
+	if err := w.bootstrapRuntime(ctx, rec, active, logger); err != nil {
+		// Loud error, but the row stays in state='active' — the
+		// owner credential is usable; the runtime credential just
+		// isn't populated yet. PoolCache's EffectiveCredential
+		// fallback keeps SDK traffic on the shared pool (which is
+		// where TEAM_TIER_ROUTING=0 keeps it anyway). River retries
+		// this job; ops can also re-enqueue.
+		logger.Error("bootstrap dedicated instance failed — runtime credential not populated; owner still usable",
+			"error", err)
+		return fmt.Errorf("bootstrap dedicated: %w", err)
+	}
+
+	return nil
+}
+
+// bootstrapRuntime applies the dedicated-instance bootstrap SQL,
+// creates the non-owner runtime role with a fresh password, calls
+// provision_tenant, and writes the runtime credential into
+// project_databases.runtime_*. Plaintext password lives only in
+// this stack frame.
+func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
+	ctx context.Context,
+	rec *dbprovider.Record,
+	active *dbprovider.Instance,
+	logger *slog.Logger,
+) error {
+	// Owner DSN — reconstitute from the record + the sealed owner
+	// password just committed in InsertProvisioning. Same shape as
+	// PoolCache.buildDSN + connection_handlers.buildPostgresURL:
+	// sslmode=require, URL-encoded credentials.
+	ownerPassword, err := w.Cipher.Open(rec.PasswordCiphertext, rec.PasswordNonce, rec.PasswordKeyVersion)
+	if err != nil {
+		return fmt.Errorf("open owner password: %w", err)
+	}
+	ownerDSN := dbprovider.BuildOwnerDSN(rec.Username, ownerPassword, active.Host, active.Port, rec.DatabaseName)
+
+	// Look up the human-readable project name so provision_tenant
+	// can log it and (in the future) name related resources.
+	// Optional: falls back to the project ID if the lookup errors,
+	// so a transient projects-table hiccup doesn't fail bootstrap.
+	displayName := rec.ProjectID
+	// (The projects lookup lives outside the dbprovider package;
+	//  we don't want to reach across the layer just for a log
+	//  string. project_id in display works fine.)
+
+	cred, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, displayName, logger)
+	if err != nil {
+		return fmt.Errorf("BootstrapDedicated: %w", err)
+	}
+
+	// Seal + persist the runtime credential.
+	ct, nonce, ver, err := w.Cipher.Seal(cred.Password)
+	if err != nil {
+		return fmt.Errorf("seal runtime password: %w", err)
+	}
+	if err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, cred.Username, ct, nonce, ver); err != nil {
+		return fmt.Errorf("persist runtime credentials: %w", err)
+	}
+
+	logger.Info("runtime credential populated — SDK traffic can now route as non-owner",
+		"runtime_username", cred.Username,
+		"schema", schemaName)
 	return nil
 }
 
