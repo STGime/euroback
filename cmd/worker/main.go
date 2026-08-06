@@ -210,6 +210,14 @@ func main() {
 		Repo:     providerRepo,
 	})
 
+	// M2.5 part 2b backfill — runs BootstrapDedicated against
+	// Team-tier projects provisioned before part 2b (runtime slot
+	// empty). Fanned out one-per-project by BackfillSweeper below.
+	river.AddWorker(riverWorkers, &workers.BackfillRuntimeCredentialWorker{
+		Cipher: cipher,
+		Repo:   providerRepo,
+	})
+
 	// ── Create River client in worker mode ──
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
@@ -286,6 +294,14 @@ func main() {
 	// rows past the 7-day rollback window via the existing
 	// deprovision-eligible query.
 	workers.StartBackupSweeper(ctx, pool, providerRegistry)
+
+	// ── Backfill sweeper (M2.5 part 2b) ──
+	// Hourly ticker: fans out BackfillRuntimeCredentialArgs jobs
+	// (25/tick) for Team-tier projects still missing a non-owner
+	// runtime credential. Idempotent — once the runtime slot is
+	// populated, the WHERE filter excludes the row. Naturally
+	// stops firing once the backlog drains.
+	workers.StartBackfillSweeper(ctx, pool, riverClient)
 
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)

@@ -336,10 +336,66 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 			&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
 			&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("dbprovider.Repo.ListDeprovisionCandidates: scan: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveWithoutRuntime returns rows in state='active' that
+// still have the runtime credential slot empty. This is the M2.5
+// part 2b backfill surface — projects provisioned before Part 2b
+// landed have no non-owner runtime login, so SDK routing (once the
+// TEAM_TIER_ROUTING flag flips) would fall back to the owner
+// credential and bypass RLS. The backfill worker walks this list
+// and calls BootstrapDedicated for each.
+//
+// Bounded LIMIT so a single worker tick doesn't try to bootstrap
+// every existing Team project at once. Backfill worker paginates
+// by repeatedly draining until the list is empty.
+func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Record, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	const q = `
+		SELECT id, project_id, provider, provider_instance_id, host, port,
+		       database_name, username, password_ciphertext, password_nonce,
+		       password_key_version,
+		       runtime_username, runtime_password_ciphertext,
+		       runtime_password_nonce, runtime_password_key_version,
+		       region, state,
+		       superseded_by, created_at, updated_at, deleted_at
+		  FROM public.project_databases
+		 WHERE state = 'active'
+		   AND deleted_at IS NULL
+		   AND runtime_username IS NULL
+		 ORDER BY created_at ASC
+		 LIMIT $1
+	`
+	rows, err := r.pool.Query(ctx, q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("dbprovider.Repo.ListActiveWithoutRuntime: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Record, 0, 16)
+	for rows.Next() {
+		var rec Record
+		if err := rows.Scan(
+			&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
+			&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
+			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.Region, &rec.State,
+			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("dbprovider.Repo.ListActiveWithoutRuntime: scan: %w", err)
 		}
 		out = append(out, rec)
 	}

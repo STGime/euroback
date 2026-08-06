@@ -110,6 +110,30 @@ func (DeprovisionTeamDatabaseArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 5}
 }
 
+// BackfillRuntimeCredentialArgs is enqueued (one job per project)
+// to run BootstrapDedicated against a Team-tier project that was
+// provisioned BEFORE M2.5 part 2b landed and therefore has no
+// non-owner runtime credential set. Without this, an existing Team
+// project stays on the shared pool after TEAM_TIER_ROUTING flips
+// (PoolCache.EffectiveCredential falls back to owner → RLS bypass →
+// resolver returns nil to shared).
+//
+// The periodic sweeper (a separate scheduled worker) walks
+// project_databases WHERE runtime_username IS NULL and fans out
+// one of these per matching row.
+type BackfillRuntimeCredentialArgs struct {
+	ProjectDatabaseID string `json:"project_database_id"`
+}
+
+func (BackfillRuntimeCredentialArgs) Kind() string { return "backfill_runtime_credential" }
+
+// MaxAttempts = 3 — bootstrap is idempotent (schema/role checks
+// short-circuit on retry), so retries are safe, but a persistent
+// failure is a real issue that should surface fast.
+func (BackfillRuntimeCredentialArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 3}
+}
+
 // RestoreTeamDatabaseArgs is enqueued when a user triggers a
 // snapshot restore or a PITR restore (Team-tier M3). Carries just
 // the restore_operations row ID — the worker reads every other
