@@ -110,6 +110,47 @@ func (DeprovisionTeamDatabaseArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 5}
 }
 
+// BackfillRuntimeCredentialArgs is enqueued (one job per project)
+// to run BootstrapDedicated against a Team-tier project that was
+// provisioned BEFORE M2.5 part 2b landed and therefore has no
+// non-owner runtime credential set. Without this, an existing Team
+// project stays on the shared pool after TEAM_TIER_ROUTING flips
+// (PoolCache.EffectiveCredential falls back to owner → RLS bypass →
+// resolver returns nil to shared).
+//
+// The periodic sweeper (a separate scheduled worker) walks
+// project_databases WHERE runtime_username IS NULL and fans out
+// one of these per matching row.
+type BackfillRuntimeCredentialArgs struct {
+	ProjectDatabaseID string `json:"project_database_id"`
+}
+
+func (BackfillRuntimeCredentialArgs) Kind() string { return "backfill_runtime_credential" }
+
+// MaxAttempts = 3 — bootstrap is idempotent (schema/role checks
+// short-circuit on retry), so retries are safe, but a persistent
+// failure is a real issue that should surface fast.
+//
+// UniqueOpts.ByArgs collapses duplicate pending jobs for the same
+// project_database_id. Two enqueue sources exist that can target
+// the same row: (a) the hourly sweeper, and (b) the M2.5 part 2b
+// provision-worker resume path (`job.Attempt > 1`). Without dedup
+// they can race — both calls to BootstrapDedicated rotate the
+// runtime password (last ALTER ROLE wins on Scaleway) and the two
+// SetRuntimeCredentials writes can persist a ciphertext that
+// doesn't match the live password → silent auth failures on the
+// dedicated instance. The DB-side WHERE guard on
+// SetRuntimeCredentials narrows the race further; UniqueOpts is
+// the primary defence.
+func (BackfillRuntimeCredentialArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 3,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+		},
+	}
+}
+
 // RestoreTeamDatabaseArgs is enqueued when a user triggers a
 // snapshot restore or a PITR restore (Team-tier M3). Carries just
 // the restore_operations row ID — the worker reads every other

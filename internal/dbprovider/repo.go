@@ -190,13 +190,30 @@ func (r *Repo) MarkFailed(ctx context.Context, id string) error {
 // that we can't leave a row half-populated (would masquerade as
 // "runtime provisioned" and route SDK traffic to an unopenable
 // DSN).
+//
+// Compare-and-swap on `runtime_username IS NULL`: two concurrent
+// bootstrap runs (sweeper vs provision-worker resume path) both
+// rotate the eurobase_gateway password on Scaleway. Without this
+// guard the second write could persist a ciphertext that matches
+// the earlier ALTER ROLE — but Scaleway holds the LATER password,
+// so the pool cache opens with a stale credential and every SDK
+// call fails auth silently. With the guard, only the first
+// successful writer persists; subsequent runs return `false` and
+// the caller logs + exits (the extra ALTER ROLE is wasted work
+// but harmless — Scaleway ends up with whichever password the
+// first winner already committed too, since both writes race the
+// same UPDATE gate). Combined with UniqueOpts on the backfill
+// job args, the race window is vanishingly small in practice.
+//
+// Returns (true, nil) on the winning write, (false, nil) if a
+// concurrent runner already populated the slot.
 func (r *Repo) SetRuntimeCredentials(
 	ctx context.Context,
 	id string,
 	runtimeUsername string,
 	ciphertext, nonce []byte,
 	keyVersion int16,
-) error {
+) (bool, error) {
 	const q = `
 		UPDATE public.project_databases
 		   SET runtime_username             = $2,
@@ -204,15 +221,21 @@ func (r *Repo) SetRuntimeCredentials(
 		       runtime_password_nonce       = $4,
 		       runtime_password_key_version = $5
 		 WHERE id = $1
+		   AND runtime_username IS NULL
 	`
 	tag, err := r.pool.Exec(ctx, q, id, runtimeUsername, ciphertext, nonce, keyVersion)
 	if err != nil {
-		return fmt.Errorf("dbprovider.Repo.SetRuntimeCredentials: %w", err)
+		return false, fmt.Errorf("dbprovider.Repo.SetRuntimeCredentials: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return errors.New("dbprovider.Repo.SetRuntimeCredentials: no rows affected")
+		// Two possibilities: (a) row doesn't exist (caller should
+		// have loaded it first — treat as bug, but non-fatal here),
+		// (b) runtime slot already populated by a concurrent
+		// winner. Both collapse to "someone else got there first"
+		// — don't error, let the caller decide via the bool.
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // MarkDeleted flips the row to state='deleting', sets deleted_at.
@@ -336,10 +359,70 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 			&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
 			&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("dbprovider.Repo.ListDeprovisionCandidates: scan: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveWithoutRuntime returns rows in state='active' that
+// still have the runtime credential slot empty. This is the M2.5
+// part 2b backfill surface — projects provisioned before Part 2b
+// landed have no non-owner runtime login, so SDK routing (once the
+// TEAM_TIER_ROUTING flag flips) would fall back to the owner
+// credential and bypass RLS. The backfill worker walks this list
+// and calls BootstrapDedicated for each.
+//
+// Bounded LIMIT so a single worker tick doesn't attempt to
+// bootstrap every existing Team project at once. The sweeper drains
+// exactly one batch per hourly tick — a backlog of N projects
+// takes ceil(N/limit) hours to fully drain. Successful backfills
+// exit the result set on the next tick (the runtime_username IS
+// NULL filter), so the query self-limits without any pagination
+// cursor.
+func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Record, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	const q = `
+		SELECT id, project_id, provider, provider_instance_id, host, port,
+		       database_name, username, password_ciphertext, password_nonce,
+		       password_key_version,
+		       runtime_username, runtime_password_ciphertext,
+		       runtime_password_nonce, runtime_password_key_version,
+		       region, state,
+		       superseded_by, created_at, updated_at, deleted_at
+		  FROM public.project_databases
+		 WHERE state = 'active'
+		   AND deleted_at IS NULL
+		   AND runtime_username IS NULL
+		 ORDER BY created_at ASC
+		 LIMIT $1
+	`
+	rows, err := r.pool.Query(ctx, q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("dbprovider.Repo.ListActiveWithoutRuntime: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Record, 0, 16)
+	for rows.Next() {
+		var rec Record
+		if err := rows.Scan(
+			&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
+			&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
+			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.Region, &rec.State,
+			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("dbprovider.Repo.ListActiveWithoutRuntime: scan: %w", err)
 		}
 		out = append(out, rec)
 	}

@@ -191,10 +191,37 @@ func main() {
 		ConsoleURL: consoleURL,
 		DocsURL:    docsURL,
 	})
+	// Shared secret for deterministic eurobase_gateway password
+	// derivation on the dedicated instance (M2.5 part 2b + backfill).
+	// HMAC-SHA256(secret, project_database_id) ensures every runner
+	// (provision retry, backfill sweeper, future rotate) sets the
+	// same live password so Scaleway and the persisted ciphertext
+	// can't diverge.
+	//
+	// Empty is legal (dev) — workers skip the bootstrap step and
+	// leave the runtime slot NULL; instance stays usable via the
+	// owner credential. A too-short secret (< 32 bytes) is a
+	// configuration bug: HMAC-SHA256 keys shorter than the block
+	// size are silently zero-padded, weakening the primitive.
+	// Fail closed rather than silently derive from a weak key —
+	// mirrors the analogous DDL_PASSWORD_SECRET requirement in
+	// CLAUDE.md.
+	const runtimePwSecretMinLen = 32
+	runtimePwSecret := []byte(os.Getenv("RUNTIME_PASSWORD_SECRET"))
+	switch {
+	case len(runtimePwSecret) == 0:
+		slog.Warn("RUNTIME_PASSWORD_SECRET not set — Team-tier bootstrap step will skip; runtime credential slot stays NULL")
+	case len(runtimePwSecret) < runtimePwSecretMinLen:
+		slog.Error("RUNTIME_PASSWORD_SECRET too short — must be at least 32 bytes",
+			"len", len(runtimePwSecret), "min", runtimePwSecretMinLen)
+		os.Exit(1)
+	}
+
 	river.AddWorker(riverWorkers, &workers.ProvisionTeamDatabaseWorker{
-		Registry: providerRegistry,
-		Cipher:   cipher,
-		Repo:     providerRepo,
+		Registry:              providerRegistry,
+		Cipher:                cipher,
+		Repo:                  providerRepo,
+		RuntimePasswordSecret: runtimePwSecret,
 	})
 	river.AddWorker(riverWorkers, &workers.DeprovisionTeamDatabaseWorker{
 		Registry: providerRegistry,
@@ -208,6 +235,15 @@ func main() {
 		Registry: providerRegistry,
 		Cipher:   cipher,
 		Repo:     providerRepo,
+	})
+
+	// M2.5 part 2b backfill — runs BootstrapDedicated against
+	// Team-tier projects provisioned before part 2b (runtime slot
+	// empty). Fanned out one-per-project by BackfillSweeper below.
+	river.AddWorker(riverWorkers, &workers.BackfillRuntimeCredentialWorker{
+		Cipher:                cipher,
+		Repo:                  providerRepo,
+		RuntimePasswordSecret: runtimePwSecret,
 	})
 
 	// ── Create River client in worker mode ──
@@ -286,6 +322,14 @@ func main() {
 	// rows past the 7-day rollback window via the existing
 	// deprovision-eligible query.
 	workers.StartBackupSweeper(ctx, pool, providerRegistry)
+
+	// ── Backfill sweeper (M2.5 part 2b) ──
+	// Hourly ticker: fans out BackfillRuntimeCredentialArgs jobs
+	// (25/tick) for Team-tier projects still missing a non-owner
+	// runtime credential. Idempotent — once the runtime slot is
+	// populated, the WHERE filter excludes the row. Naturally
+	// stops firing once the backlog drains.
+	workers.StartBackfillSweeper(ctx, pool, riverClient)
 
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)
