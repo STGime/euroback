@@ -155,7 +155,11 @@ export interface SignupUserEntry {
 	display_name: string | null;
 	signup_date: string;
 	last_active_at: string | null;
+	/** Reflects PAID state — 'pro' only if the user has an
+	 *  active subscription. An in-flight checkout keeps this
+	 *  'free' and flips checkout_pending. */
 	plan: 'free' | 'pro';
+	checkout_pending: boolean;
 	mrr_cents: number;
 	project_count: number;
 	team_beta_access: boolean;

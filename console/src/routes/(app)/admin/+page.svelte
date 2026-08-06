@@ -539,6 +539,8 @@
 								<td class="px-4 py-2">
 									{#if u.plan === 'pro'}
 										<span class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">Pro</span>
+									{:else if u.checkout_pending}
+										<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800" title="Checkout started, payment not yet confirmed">Pro (pending)</span>
 									{:else}
 										<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">Free</span>
 									{/if}

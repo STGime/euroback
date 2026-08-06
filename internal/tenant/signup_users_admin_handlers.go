@@ -23,13 +23,20 @@ import (
 // SignupUserEntry is one row on the /admin/signup-users dashboard.
 // One row per platform_users row, joined against projects +
 // subscriptions for the derived plan / MRR / count columns.
+//
+// Plan reflects PAID state only — 'pro' iff the user has at least
+// one subscription in `status='active'`. An in-flight checkout
+// (`status='incomplete'`) surfaces separately in CheckoutPending
+// so the row can render a "checkout pending" indicator without
+// misrepresenting the €0 case as Pro.
 type SignupUserEntry struct {
 	UserID              string     `json:"user_id"`
 	Email               string     `json:"email"`
 	DisplayName         *string    `json:"display_name"`
 	SignupDate          time.Time  `json:"signup_date"`
 	LastActiveAt        *time.Time `json:"last_active_at"`
-	Plan                string     `json:"plan"` // "free" | "pro" (aggregate across projects)
+	Plan                string     `json:"plan"` // "free" | "pro"
+	CheckoutPending     bool       `json:"checkout_pending"`
 	MRRCents            int64      `json:"mrr_cents"`
 	ProjectCount        int        `json:"project_count"`
 	TeamBetaAccess      bool       `json:"team_beta_access"`
@@ -61,10 +68,16 @@ func AdminListSignupUsers(pool *pgxpool.Pool) http.HandlerFunc {
 			    COALESCE(u.team_beta_access, false),
 			    COALESCE(u.legal_team_beta_access, false),
 			    COUNT(DISTINCT p.id) AS project_count,
+			    -- Plan = 'pro' only if the user has a paid subscription
+			    -- (status='active'). An in-flight checkout keeps them
+			    -- 'free' but flips checkout_pending so the UI can render
+			    -- a pending indicator instead of a green Pro badge over
+			    -- a €0 MRR.
 			    COALESCE(
-			        MAX(CASE WHEN s.status IN ('active','incomplete') THEN 'pro' END),
+			        MAX(CASE WHEN s.status = 'active' THEN 'pro' END),
 			        'free'
 			    ) AS plan,
+			    BOOL_OR(s.status = 'incomplete') AS checkout_pending,
 			    COALESCE(
 			        SUM(CASE WHEN s.status = 'active' THEN s.price_cents ELSE 0 END),
 			        0
@@ -87,14 +100,21 @@ func AdminListSignupUsers(pool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]SignupUserEntry, 0, 64)
 		for rows.Next() {
 			var e SignupUserEntry
+			// BOOL_OR returns NULL when every input row's expression
+			// is NULL (i.e. the user has no subscriptions at all);
+			// Scan through a *bool wrapper to normalise to Go bool.
+			var pending *bool
 			if err := rows.Scan(
 				&e.UserID, &e.Email, &e.DisplayName, &e.SignupDate, &e.LastActiveAt,
 				&e.TeamBetaAccess, &e.LegalTeamBetaAccess,
-				&e.ProjectCount, &e.Plan, &e.MRRCents,
+				&e.ProjectCount, &e.Plan, &pending, &e.MRRCents,
 			); err != nil {
 				slog.Error("AdminListSignupUsers: scan failed", "error", err)
 				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
 				return
+			}
+			if pending != nil {
+				e.CheckoutPending = *pending
 			}
 			out = append(out, e)
 		}
