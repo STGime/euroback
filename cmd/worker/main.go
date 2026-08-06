@@ -196,12 +196,25 @@ func main() {
 	// HMAC-SHA256(secret, project_database_id) ensures every runner
 	// (provision retry, backfill sweeper, future rotate) sets the
 	// same live password so Scaleway and the persisted ciphertext
-	// can't diverge. Unset → workers skip the bootstrap step and
+	// can't diverge.
+	//
+	// Empty is legal (dev) — workers skip the bootstrap step and
 	// leave the runtime slot NULL; instance stays usable via the
-	// owner credential.
+	// owner credential. A too-short secret (< 32 bytes) is a
+	// configuration bug: HMAC-SHA256 keys shorter than the block
+	// size are silently zero-padded, weakening the primitive.
+	// Fail closed rather than silently derive from a weak key —
+	// mirrors the analogous DDL_PASSWORD_SECRET requirement in
+	// CLAUDE.md.
+	const runtimePwSecretMinLen = 32
 	runtimePwSecret := []byte(os.Getenv("RUNTIME_PASSWORD_SECRET"))
-	if len(runtimePwSecret) == 0 {
+	switch {
+	case len(runtimePwSecret) == 0:
 		slog.Warn("RUNTIME_PASSWORD_SECRET not set — Team-tier bootstrap step will skip; runtime credential slot stays NULL")
+	case len(runtimePwSecret) < runtimePwSecretMinLen:
+		slog.Error("RUNTIME_PASSWORD_SECRET too short — must be at least 32 bytes",
+			"len", len(runtimePwSecret), "min", runtimePwSecretMinLen)
+		os.Exit(1)
 	}
 
 	river.AddWorker(riverWorkers, &workers.ProvisionTeamDatabaseWorker{

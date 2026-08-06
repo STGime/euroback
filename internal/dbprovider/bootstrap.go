@@ -27,7 +27,6 @@ package dbprovider
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -180,21 +179,11 @@ func BootstrapDedicated(
 	}, schemaName, nil
 }
 
-// randomHexPassword32 returns a 32-byte CSPRNG value hex-encoded to
-// 64 characters. Matches the shape used by connection_handlers.go's
-// owner rotate path.
-func randomHexPassword32() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
 // isHexChars is a belt-and-suspenders check that a candidate
-// password contains only hex characters — the shape randomHexPassword32
-// produces. Prevents an accidental future change to the password
-// generator from silently opening a SQL-literal injection surface.
+// password contains only hex characters — the shape DeriveRuntimePassword
+// produces. Guards the one DDL statement pgx cannot bind-
+// parameterise (`ALTER ROLE … PASSWORD '…'`) against a future
+// caller passing a value that could embed a SQL literal.
 func isHexChars(s string) bool {
 	if s == "" {
 		return false

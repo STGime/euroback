@@ -28,6 +28,10 @@
   - unset/other → soft mode (warn-only on missing); invalid signature still 401. Use during rollout window.
 - Gateway aborts startup if the secret is missing in production (`ENV=production` or `DOMAIN_SUFFIX` ends with `eurobase.app`).
 
+## Team-tier runtime password (M2.5 part 2b)
+- `RUNTIME_PASSWORD_SECRET` (≥32 bytes) in `eurobase-secrets` derives the deterministic `eurobase_gateway` login password on each dedicated managed-PG instance: `HMAC-SHA256(secret, project_database_id)`, hex64. Same pattern as `DDL_PASSWORD_SECRET`. Deterministic derivation is what lets concurrent runners (provision retry + backfill sweeper) set the same live Scaleway password so the persisted ciphertext in `project_databases.runtime_*` can't diverge from what Scaleway holds. Generate via `openssl rand -hex 32`.
+- Empty is legal (dev) — worker skips the bootstrap step and leaves `runtime_username` NULL; SDK routing falls back to shared cluster. Too-short (< 32 bytes) fails worker startup rather than silently deriving from a weak HMAC key.
+
 ## Mollie billing
 - Payment processor is Mollie (Dutch, EU-headquartered — already in `sub_processors` from migration `000025`).
 - API-key secrets in `eurobase-secrets`: `MOLLIE_API_KEY_TEST` (starts `test_`), `MOLLIE_API_KEY_LIVE` (starts `live_`), `MOLLIE_ENV` (`test`|`live`). The client's `NewClient` construction logs a warning if the API-key prefix doesn't match the env, so ops key mixups are visible in the first minute after deploy.

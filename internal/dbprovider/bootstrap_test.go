@@ -19,26 +19,6 @@ import (
 //     interpolate a secret into DDL because pgx doesn't bind DDL
 //     parameters.
 
-func TestRandomHexPassword32_ShapeAndUniqueness(t *testing.T) {
-	seen := map[string]bool{}
-	for i := 0; i < 32; i++ {
-		p, err := randomHexPassword32()
-		if err != nil {
-			t.Fatalf("randomHexPassword32: %v", err)
-		}
-		if len(p) != 64 {
-			t.Fatalf("password length: got %d want 64", len(p))
-		}
-		if !isHexChars(p) {
-			t.Fatalf("password not hex: %q", p)
-		}
-		if seen[p] {
-			t.Fatalf("duplicate password in 32 draws: %q", p)
-		}
-		seen[p] = true
-	}
-}
-
 func TestIsHexChars_AcceptsHex(t *testing.T) {
 	for _, s := range []string{
 		"deadbeef",
