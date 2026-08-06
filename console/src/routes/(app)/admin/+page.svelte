@@ -1,12 +1,25 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry } from '$lib/api.js';
+	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry, type SignupUserEntry } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
 	let allowlist = $state<AllowlistEntry[]>([]);
 	let teamBeta = $state<TeamBetaEntry[]>([]);
 	let teamBetaSearch = $state('');
 	let teamBetaBusy = $state(false);
+
+	// Signup-users dashboard state (public-beta launch).
+	let signupUsers = $state<SignupUserEntry[]>([]);
+	let signupSearch = $state('');
+	let signupToggleBusy = $state<string | null>(null); // user_id currently being toggled
+	let signupFiltered = $derived(
+		signupSearch.trim() === ''
+			? signupUsers
+			: signupUsers.filter((u) =>
+					u.email.toLowerCase().includes(signupSearch.toLowerCase().trim())
+				)
+	);
+	let mrrTotalCents = $derived(signupUsers.reduce((sum, u) => sum + u.mrr_cents, 0));
 	let newEmail = $state('');
 	let newNote = $state('');
 	let loading = $state(true);
@@ -61,14 +74,16 @@
 		loading = true;
 		error = null;
 		try {
-			const [p, a, tb] = await Promise.all([
+			const [p, a, tb, su] = await Promise.all([
 				api.adminListAllProjects(),
 				api.adminListAllowlist(),
-				api.adminListTeamBetaUsers()
+				api.adminListTeamBetaUsers(),
+				api.adminListSignupUsers()
 			]);
 			projects = p.projects;
 			allowlist = a.entries;
 			teamBeta = tb.entries;
+			signupUsers = su.users;
 		} catch (e: any) {
 			error = e?.message ?? 'Failed to load admin data';
 		} finally {
@@ -120,6 +135,51 @@
 			error = e?.message ?? 'Revoke failed';
 		} finally {
 			teamBetaBusy = false;
+		}
+	}
+
+	// Per-row toggles for the signup-users table. Optimistic local
+	// update + refetch on error keeps the UI snappy while still
+	// converging on server truth if the toggle fails.
+	async function toggleSignupTeamBeta(u: SignupUserEntry) {
+		if (signupToggleBusy) return;
+		signupToggleBusy = u.user_id;
+		error = null;
+		const prev = u.team_beta_access;
+		try {
+			u.team_beta_access = !prev; // optimistic
+			if (prev) {
+				await api.adminRevokeTeamBeta(u.user_id);
+			} else {
+				await api.adminGrantTeamBeta(u.user_id);
+			}
+		} catch (e: any) {
+			u.team_beta_access = prev; // rollback
+			error = e?.message ?? 'Toggle failed';
+			await refresh();
+		} finally {
+			signupToggleBusy = null;
+		}
+	}
+
+	async function toggleSignupLegalTeamBeta(u: SignupUserEntry) {
+		if (signupToggleBusy) return;
+		signupToggleBusy = u.user_id;
+		error = null;
+		const prev = u.legal_team_beta_access;
+		try {
+			u.legal_team_beta_access = !prev;
+			if (prev) {
+				await api.adminRevokeLegalTeamBeta(u.user_id);
+			} else {
+				await api.adminGrantLegalTeamBeta(u.user_id);
+			}
+		} catch (e: any) {
+			u.legal_team_beta_access = prev;
+			error = e?.message ?? 'Toggle failed';
+			await refresh();
+		} finally {
+			signupToggleBusy = null;
 		}
 	}
 
@@ -413,6 +473,107 @@
 										class="text-red-600 hover:text-red-800 text-xs cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
 									>
 										Revoke
+									</button>
+								</td>
+							</tr>
+						{/each}
+					{/if}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="space-y-3">
+		<div class="flex items-center justify-between">
+			<div>
+				<h2 class="text-lg font-semibold text-gray-900">Signup Users</h2>
+				<p class="text-xs text-gray-500">
+					Every platform user, derived plan + MRR. Toggle Team / Legal-Team beta access per row.
+				</p>
+			</div>
+			<div class="text-right">
+				<div class="text-xs text-gray-500">Total MRR</div>
+				<div class="text-lg font-semibold text-gray-900">
+					€{(mrrTotalCents / 100).toFixed(2)}
+				</div>
+			</div>
+		</div>
+		<div>
+			<input
+				type="search"
+				placeholder="Filter by email…"
+				bind:value={signupSearch}
+				class="w-full max-w-md rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+			/>
+		</div>
+		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+			<table class="w-full text-sm">
+				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
+					<tr>
+						<th class="px-4 py-2">Email</th>
+						<th class="px-4 py-2">Name</th>
+						<th class="px-4 py-2">Signed up</th>
+						<th class="px-4 py-2">Plan</th>
+						<th class="px-4 py-2 text-right">MRR</th>
+						<th class="px-4 py-2">Last active</th>
+						<th class="px-4 py-2 text-right">Projects</th>
+						<th class="px-4 py-2 text-center">Team beta</th>
+						<th class="px-4 py-2 text-center">Legal Team beta</th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-gray-100">
+					{#if loading}
+						<tr><td colspan="9" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+					{:else if signupFiltered.length === 0}
+						<tr><td colspan="9" class="px-4 py-6 text-center text-gray-400">
+							{signupSearch.trim() === '' ? 'No signups yet.' : 'No matches.'}
+						</td></tr>
+					{:else}
+						{#each signupFiltered as u (u.user_id)}
+							<tr>
+								<td class="px-4 py-2 font-medium text-gray-900">{u.email}</td>
+								<td class="px-4 py-2 text-gray-600">{u.display_name ?? '—'}</td>
+								<td class="px-4 py-2 text-gray-500">
+									{new Date(u.signup_date).toLocaleDateString('en-GB')}
+								</td>
+								<td class="px-4 py-2">
+									{#if u.plan === 'pro'}
+										<span class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">Pro</span>
+									{:else if u.checkout_pending}
+										<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800" title="Checkout started, payment not yet confirmed">Pro (pending)</span>
+									{:else}
+										<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">Free</span>
+									{/if}
+								</td>
+								<td class="px-4 py-2 text-right text-gray-700 font-mono">
+									{u.mrr_cents > 0 ? `€${(u.mrr_cents / 100).toFixed(2)}` : '—'}
+								</td>
+								<td class="px-4 py-2 text-gray-500">
+									{u.last_active_at ? new Date(u.last_active_at).toLocaleDateString('en-GB') : '—'}
+								</td>
+								<td class="px-4 py-2 text-right text-gray-700">{u.project_count}</td>
+								<td class="px-4 py-2 text-center">
+									<button
+										type="button"
+										onclick={() => toggleSignupTeamBeta(u)}
+										disabled={signupToggleBusy === u.user_id}
+										class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50 {u.team_beta_access
+											? 'bg-blue-100 text-blue-800 hover:bg-blue-200'
+											: 'bg-gray-100 text-gray-600 hover:bg-gray-200'}"
+									>
+										{u.team_beta_access ? '✓ Granted' : 'Grant'}
+									</button>
+								</td>
+								<td class="px-4 py-2 text-center">
+									<button
+										type="button"
+										onclick={() => toggleSignupLegalTeamBeta(u)}
+										disabled={signupToggleBusy === u.user_id}
+										class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50 {u.legal_team_beta_access
+											? 'bg-purple-100 text-purple-800 hover:bg-purple-200'
+											: 'bg-gray-100 text-gray-600 hover:bg-gray-200'}"
+									>
+										{u.legal_team_beta_access ? '✓ Granted' : 'Grant'}
 									</button>
 								</td>
 							</tr>

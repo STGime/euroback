@@ -398,6 +398,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Get("/legal-team-beta", tenant.AdminListLegalTeamBetaUsers(pool))
 			r.Post("/legal-team-beta/{id}", tenant.AdminGrantLegalTeamBeta(pool))
 			r.Delete("/legal-team-beta/{id}", tenant.AdminRevokeLegalTeamBeta(pool))
+			// Signup-users dashboard (public-beta launch observability).
+			// One row per platform_users + derived plan / MRR / project count.
+			r.Get("/signup-users", tenant.AdminListSignupUsers(pool))
 		})
 
 		// Authenticated: platform config endpoints.
