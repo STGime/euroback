@@ -32,6 +32,15 @@ type ProvisionTeamDatabaseWorker struct {
 	Registry *dbprovider.Registry
 	Cipher   *dbprovider.Cipher
 	Repo     *dbprovider.Repo
+	// RuntimePasswordSecret is the shared secret used to derive the
+	// per-instance eurobase_gateway login password
+	// (HMAC-SHA256(secret, project_database_id) → hex64). Sourced
+	// from RUNTIME_PASSWORD_SECRET in eurobase-secrets. Nil/empty
+	// disables the bootstrap step — provisioning still succeeds up
+	// to state=active, but the runtime credential slot stays NULL
+	// and SDK routing falls back to shared (safe posture until the
+	// secret is configured).
+	RuntimePasswordSecret []byte
 	// PollInterval is the delay between Describe() checks during the
 	// active-wait loop. Defaults to 10s if zero — Scaleway RDB
 	// typically reaches 'ready' within 90s to 4 minutes.
@@ -259,7 +268,19 @@ func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 	//  we don't want to reach across the layer just for a log
 	//  string. project_id in display works fine.)
 
-	cred, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, displayName, logger)
+	if len(w.RuntimePasswordSecret) == 0 {
+		// Fail-safe: without the secret we can't derive the same
+		// password on retries → future ALTER ROLE would drift.
+		// Skip the bootstrap step entirely and leave the runtime
+		// slot NULL. The instance stays fully usable via the owner
+		// credential (M4 Direct Connection). Backfill sweeper picks
+		// it up once the secret is configured.
+		logger.Warn("RUNTIME_PASSWORD_SECRET not set — skipping bootstrap; runtime credential slot will remain NULL")
+		return nil
+	}
+	runtimePassword := dbprovider.DeriveRuntimePassword(w.RuntimePasswordSecret, rec.ID)
+
+	cred, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, displayName, runtimePassword, logger)
 	if err != nil {
 		return fmt.Errorf("BootstrapDedicated: %w", err)
 	}

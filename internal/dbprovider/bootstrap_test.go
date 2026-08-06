@@ -105,6 +105,55 @@ func stripSQLLineComments(s string) string {
 	return b.String()
 }
 
+// DeriveRuntimePassword is the primitive that dissolves the
+// Scaleway/DB credential mismatch race described in the M2.5
+// part 2b + backfill review. Two properties MUST hold, forever:
+//   1. Deterministic — same (secret, project_database_id) always
+//      yields the same password. If this ever regresses, concurrent
+//      or re-run bootstrap calls will ALTER ROLE with different
+//      values and the persisted ciphertext could diverge from
+//      Scaleway (pool cache opens with a stale password → silent
+//      auth failures on the dedicated instance).
+//   2. Salted per project — different project_database_id yields a
+//      different password. A single leaked eurobase_gateway
+//      credential must not open other tenants' dedicated instances.
+// Shape: 64 lowercase hex chars (isHexChars-safe, matches the
+// randomHexPassword32 pattern the codebase already trusts).
+func TestDeriveRuntimePassword_DeterministicPerProject(t *testing.T) {
+	secret := []byte("shared-secret-32-bytes-of-entropy-here")
+	pdb := "11111111-1111-1111-1111-111111111111"
+
+	a := DeriveRuntimePassword(secret, pdb)
+	b := DeriveRuntimePassword(secret, pdb)
+	if a != b {
+		t.Fatalf("determinism broken: two calls with same input yielded different passwords\n  a=%q\n  b=%q", a, b)
+	}
+	if len(a) != 64 {
+		t.Fatalf("password length: got %d want 64", len(a))
+	}
+	if !isHexChars(a) {
+		t.Fatalf("password not hex: %q", a)
+	}
+}
+
+func TestDeriveRuntimePassword_UniquePerProject(t *testing.T) {
+	secret := []byte("shared-secret-32-bytes-of-entropy-here")
+	a := DeriveRuntimePassword(secret, "11111111-1111-1111-1111-111111111111")
+	b := DeriveRuntimePassword(secret, "22222222-2222-2222-2222-222222222222")
+	if a == b {
+		t.Fatalf("salt broken: different project_database_ids yielded same password\n  both=%q", a)
+	}
+}
+
+func TestDeriveRuntimePassword_UniquePerSecret(t *testing.T) {
+	pdb := "11111111-1111-1111-1111-111111111111"
+	a := DeriveRuntimePassword([]byte("secret-A"), pdb)
+	b := DeriveRuntimePassword([]byte("secret-B"), pdb)
+	if a == b {
+		t.Fatalf("secret ignored: two different secrets yielded same password\n  both=%q", a)
+	}
+}
+
 // CLAUDE.md convention (recurrence-prevention rule from #217):
 // every new SECURITY DEFINER function in `public` MUST revoke
 // EXECUTE from PUBLIC in the same migration/bundle. Without this

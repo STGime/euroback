@@ -35,6 +35,11 @@ type BackfillRuntimeCredentialWorker struct {
 	river.WorkerDefaults[jobs.BackfillRuntimeCredentialArgs]
 	Cipher *dbprovider.Cipher
 	Repo   *dbprovider.Repo
+	// RuntimePasswordSecret — same value as the provision worker's
+	// field. Both derive `HMAC(secret, project_database_id)` so the
+	// eurobase_gateway password is identical no matter which runner
+	// (provision retry, this backfill, a future rotate) sets it.
+	RuntimePasswordSecret []byte
 }
 
 func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.Job[jobs.BackfillRuntimeCredentialArgs]) error {
@@ -48,6 +53,13 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 		// boot the worker without VAULT_ENCRYPTION_KEY but a real
 		// backfill needs to open the owner password.
 		return river.JobCancel(errors.New("cipher not configured — cannot open sealed owner password"))
+	}
+	if len(w.RuntimePasswordSecret) == 0 {
+		// Same reason: without the shared secret the password we
+		// derive would be different from what other runners
+		// derived (or would derive on retry) → Scaleway/DB drift.
+		// Config error, do not retry.
+		return river.JobCancel(errors.New("RUNTIME_PASSWORD_SECRET not configured — cannot derive stable runtime password"))
 	}
 
 	rec, err := w.Repo.Get(ctx, job.Args.ProjectDatabaseID)
@@ -86,7 +98,8 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 	}
 	ownerDSN := dbprovider.BuildOwnerDSN(rec.Username, ownerPassword, rec.Host, rec.Port, rec.DatabaseName)
 
-	cred, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, rec.ProjectID, logger)
+	runtimePassword := dbprovider.DeriveRuntimePassword(w.RuntimePasswordSecret, rec.ID)
+	cred, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, rec.ProjectID, runtimePassword, logger)
 	if err != nil {
 		return fmt.Errorf("BootstrapDedicated: %w", err)
 	}

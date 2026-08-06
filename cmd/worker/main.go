@@ -191,10 +191,24 @@ func main() {
 		ConsoleURL: consoleURL,
 		DocsURL:    docsURL,
 	})
+	// Shared secret for deterministic eurobase_gateway password
+	// derivation on the dedicated instance (M2.5 part 2b + backfill).
+	// HMAC-SHA256(secret, project_database_id) ensures every runner
+	// (provision retry, backfill sweeper, future rotate) sets the
+	// same live password so Scaleway and the persisted ciphertext
+	// can't diverge. Unset → workers skip the bootstrap step and
+	// leave the runtime slot NULL; instance stays usable via the
+	// owner credential.
+	runtimePwSecret := []byte(os.Getenv("RUNTIME_PASSWORD_SECRET"))
+	if len(runtimePwSecret) == 0 {
+		slog.Warn("RUNTIME_PASSWORD_SECRET not set — Team-tier bootstrap step will skip; runtime credential slot stays NULL")
+	}
+
 	river.AddWorker(riverWorkers, &workers.ProvisionTeamDatabaseWorker{
-		Registry: providerRegistry,
-		Cipher:   cipher,
-		Repo:     providerRepo,
+		Registry:              providerRegistry,
+		Cipher:                cipher,
+		Repo:                  providerRepo,
+		RuntimePasswordSecret: runtimePwSecret,
 	})
 	river.AddWorker(riverWorkers, &workers.DeprovisionTeamDatabaseWorker{
 		Registry: providerRegistry,
@@ -214,8 +228,9 @@ func main() {
 	// Team-tier projects provisioned before part 2b (runtime slot
 	// empty). Fanned out one-per-project by BackfillSweeper below.
 	river.AddWorker(riverWorkers, &workers.BackfillRuntimeCredentialWorker{
-		Cipher: cipher,
-		Repo:   providerRepo,
+		Cipher:                cipher,
+		Repo:                  providerRepo,
+		RuntimePasswordSecret: runtimePwSecret,
 	})
 
 	// ── Create River client in worker mode ──
