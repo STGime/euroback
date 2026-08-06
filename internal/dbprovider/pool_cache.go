@@ -233,3 +233,11 @@ func buildDSN(user, password, host string, port int, db string) string {
 	u.RawQuery = q.Encode()
 	return u.String()
 }
+
+// BuildOwnerDSN is the exported alias workers use to build an owner
+// connection string for bootstrap. Same shape as the pool cache's
+// internal buildDSN; a separate export keeps the internal helper
+// package-private without duplicating the URL-encoding logic.
+func BuildOwnerDSN(user, password, host string, port int, db string) string {
+	return buildDSN(user, password, host, port, db)
+}
