@@ -45,8 +45,16 @@ set -euo pipefail
 : "${RUNTIME_PASSWORD:?RUNTIME_PASSWORD required}"
 
 SCHEMA="tenant_${PROJECT_ID//-/_}"
-OWNER_URL="postgres://eurobase_owner:${OWNER_PASSWORD}@${DEDICATED_HOST}:${DEDICATED_PORT}/${DEDICATED_DB}?sslmode=require"
-RUNTIME_URL="postgres://eurobase_gateway:${RUNTIME_PASSWORD}@${DEDICATED_HOST}:${DEDICATED_PORT}/${DEDICATED_DB}?sslmode=require"
+
+# Passwords are passed to psql via PGPASSWORD (env), NOT via the URL,
+# so they never appear in `ps aux` while the script runs. The URLs
+# below carry only the username; each psql invocation sets
+# PGPASSWORD inline for the specific role it's authenticating as.
+OWNER_URL="postgres://eurobase_owner@${DEDICATED_HOST}:${DEDICATED_PORT}/${DEDICATED_DB}?sslmode=require"
+RUNTIME_URL="postgres://eurobase_gateway@${DEDICATED_HOST}:${DEDICATED_PORT}/${DEDICATED_DB}?sslmode=require"
+
+as_owner()   { PGPASSWORD="$OWNER_PASSWORD"   psql "$OWNER_URL"   "$@"; }
+as_runtime() { PGPASSWORD="$RUNTIME_PASSWORD" psql "$RUNTIME_URL" "$@"; }
 
 # UUIDs held stable across the run so the assertions can compare.
 USER_A_ID="11111111-1111-1111-1111-111111111111"
@@ -56,11 +64,27 @@ pass() { printf "  \033[32m✓\033[0m %s\n" "$1"; }
 fail() { printf "  \033[31m✗ FAIL:\033[0m %s\n" "$1"; exit 1; }
 info() { printf "\n\033[1m==>\033[0m %s\n" "$1"; }
 
+# Cleanup trap: remove the seeded test users no matter how the
+# script exits (fail-fast assertion, ^C, unexpected error). Prevents
+# ops-test-a@ / ops-test-b@ from leaking into the tenant's real
+# auth users table across runs. The delete is idempotent + safe on
+# a partially-seeded state.
+cleanup() {
+    local exit_code=$?
+    if [ -n "${SKIP_CLEANUP:-}" ]; then return $exit_code; fi
+    as_owner -qc "
+        DELETE FROM ${SCHEMA}.users
+         WHERE id IN ('${USER_A_ID}', '${USER_B_ID}')
+    " >/dev/null 2>&1 || true
+    return $exit_code
+}
+trap cleanup EXIT
+
 info "1. Verifying runtime role is NOT the table owner"
 # If eurobase_gateway owns any tenant table, Postgres skips RLS
 # for it and every subsequent assertion would pass for the wrong
 # reason. Catch that up front.
-owner_leak=$(psql "$OWNER_URL" -Atqc "
+owner_leak=$(as_owner -Atqc "
     SELECT count(*)
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -75,7 +99,7 @@ fi
 pass "eurobase_gateway owns zero tables in ${SCHEMA} (RLS applies)"
 
 info "2. Seeding two test users as owner"
-psql "$OWNER_URL" -qc "
+as_owner -qc "
     INSERT INTO ${SCHEMA}.users (id, email, display_name)
     VALUES ('${USER_A_ID}', 'ops-test-a@eurobase.app', 'Ops Test A'),
            ('${USER_B_ID}', 'ops-test-b@eurobase.app', 'Ops Test B')
@@ -84,7 +108,7 @@ psql "$OWNER_URL" -qc "
 pass "seeded users A + B in ${SCHEMA}.users"
 
 info "3. Runtime role: anonymous SELECT returns zero rows"
-anon_count=$(psql "$RUNTIME_URL" -Atqc "
+anon_count=$(as_runtime -Atqc "
     SET LOCAL search_path TO ${SCHEMA}, public;
     SELECT count(*) FROM users
 ")
@@ -94,7 +118,7 @@ fi
 pass "anon SELECT returned 0 rows"
 
 info "4. Runtime role: SELECT as user-A returns only user-A"
-a_row=$(psql "$RUNTIME_URL" -Atqc "
+a_row=$(as_runtime -Atqc "
     SET LOCAL search_path TO ${SCHEMA}, public;
     SELECT set_config('app.end_user_id', '${USER_A_ID}', true);
     SELECT set_config('app.end_user_role', 'authenticated', true);
@@ -106,7 +130,7 @@ fi
 pass "user-A SELECT returned only user-A"
 
 info "5. Runtime role: SELECT as user-B returns only user-B"
-b_row=$(psql "$RUNTIME_URL" -Atqc "
+b_row=$(as_runtime -Atqc "
     SET LOCAL search_path TO ${SCHEMA}, public;
     SELECT set_config('app.end_user_id', '${USER_B_ID}', true);
     SELECT set_config('app.end_user_role', 'authenticated', true);
@@ -118,7 +142,7 @@ fi
 pass "user-B SELECT returned only user-B"
 
 info "6. Runtime role: service-role escape hatch sees both users"
-service_count=$(psql "$RUNTIME_URL" -Atqc "
+service_count=$(as_runtime -Atqc "
     SET LOCAL search_path TO ${SCHEMA}, public;
     SELECT set_config('app.end_user_role', 'service', true);
     SELECT count(*) FROM users WHERE id IN ('${USER_A_ID}', '${USER_B_ID}')
@@ -128,11 +152,8 @@ if [ "$service_count" != "2" ]; then
 fi
 pass "service-role SELECT sees both test users"
 
-info "7. Cleanup"
-psql "$OWNER_URL" -qc "
-    DELETE FROM ${SCHEMA}.users
-     WHERE id IN ('${USER_A_ID}', '${USER_B_ID}')
-"
-pass "removed test users"
+# Cleanup handled by the EXIT trap — fires whether we reach here
+# or exit early on a failed assertion. Keeps the tenant's real
+# `users` table clean regardless of outcome.
 
 printf "\n\033[32m✓ ALL CHECKS PASSED\033[0m — TEAM_TIER_ROUTING=1 is safe to flip for this project.\n"
