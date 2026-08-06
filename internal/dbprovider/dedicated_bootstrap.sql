@@ -133,6 +133,7 @@ CREATE OR REPLACE FUNCTION public.provision_tenant(
 RETURNS TEXT
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $fn$
 DECLARE
     v_schema_name TEXT;
@@ -353,3 +354,15 @@ BEGIN
     RETURN v_schema_name;
 END;
 $fn$;
+
+-- Convention (CLAUDE.md: recurrence-prevention rule from #217): every
+-- new SECURITY DEFINER function in `public` MUST revoke EXECUTE from
+-- PUBLIC in the same migration/bundle. Only the owner-side
+-- Bootstrapper calls provision_tenant on this instance; leaving the
+-- default PUBLIC grant would let eurobase_gateway (member of PUBLIC)
+-- SELECT public.provision_tenant('…','…') and create arbitrary
+-- tenant_* schemas as the owner — a disk/catalog-exhaustion nuisance
+-- and a privilege the runtime role has no business holding.
+-- The owner connection retains EXECUTE by ownership; no re-grant
+-- needed.
+REVOKE EXECUTE ON FUNCTION public.provision_tenant(uuid, text) FROM PUBLIC;

@@ -105,6 +105,26 @@ func stripSQLLineComments(s string) string {
 	return b.String()
 }
 
+// CLAUDE.md convention (recurrence-prevention rule from #217):
+// every new SECURITY DEFINER function in `public` MUST revoke
+// EXECUTE from PUBLIC in the same migration/bundle. Without this
+// on the dedicated instance, eurobase_gateway (member of PUBLIC)
+// could invoke provision_tenant as the owner and create arbitrary
+// tenant_* schemas — a privilege the runtime role has no business
+// holding.
+func TestDedicatedBootstrapSQL_RevokesProvisionTenantFromPublic(t *testing.T) {
+	lowered := strings.ToLower(dedicatedBootstrapSQL)
+	// Look for both the REVOKE statement and the SET search_path
+	// pinning on the SECURITY DEFINER function — belt + suspenders
+	// against a future edit that drops either.
+	if !strings.Contains(lowered, "revoke execute on function public.provision_tenant") {
+		t.Error("dedicated_bootstrap.sql must REVOKE EXECUTE on provision_tenant FROM PUBLIC (CLAUDE.md convention, #217)")
+	}
+	if !strings.Contains(lowered, "set search_path = public, pg_temp") {
+		t.Error("provision_tenant SECURITY DEFINER must pin `SET search_path = public, pg_temp` on the function definition")
+	}
+}
+
 // The tenant-schema shape must stay in lockstep with the shared
 // cluster's provision_tenant (migration 000063). This test lists the
 // six tables that MUST be created — a future edit that drops one

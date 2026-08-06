@@ -73,6 +73,42 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 		return river.JobCancel(err)
 	}
 
+	// Resume-from-active on retries only: if a previous attempt
+	// reached state='active' and only the bootstrap step failed,
+	// don't re-run Provision + InsertProvisioning (they'd insert
+	// a SECOND project_databases row, which then violates the
+	// `state='active'` partial unique index on the promote step
+	// and stalls the whole retry chain with orphan `provisioning`
+	// -state rows). Instead pick up the existing live row and
+	// jump straight to bootstrapRuntime.
+	//
+	// Gated on job.Attempt > 1 because first attempts by definition
+	// have no prior row — skipping the lookup keeps the happy path
+	// clean and lets unit tests exercise the fresh-provision flow
+	// without a live platform pool. On a River retry (Attempt >= 2)
+	// the platform pool is always populated in production.
+	if job.Attempt > 1 {
+		if existing, err := w.Repo.GetLiveByProject(ctx, args.ProjectID); err == nil && existing.State == dbprovider.StateActive {
+			logger.Info("resuming from active row — re-running bootstrapRuntime only",
+				"project_database_id", existing.ID,
+				"host", existing.Host,
+				"attempt", job.Attempt)
+			activeInst := &dbprovider.Instance{
+				ProviderID: existing.ProviderInstanceID,
+				Host:       existing.Host,
+				Port:       existing.Port,
+				DBName:     existing.DatabaseName,
+				Username:   existing.Username,
+				Region:     existing.Region,
+				State:      existing.State,
+			}
+			if err := w.bootstrapRuntime(ctx, existing, activeInst, logger); err != nil {
+				return fmt.Errorf("resume bootstrap dedicated: %w", err)
+			}
+			return nil
+		}
+	}
+
 	size := dbprovider.Size(args.Size)
 	if size == "" {
 		size = dbprovider.SizeMedium
