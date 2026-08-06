@@ -144,6 +144,24 @@ export interface TeamBetaEntry {
 	created_at: string;
 }
 
+// SignupUserEntry — one row on the admin "Signup Users" dashboard
+// (public-beta launch). Aggregates across a user's projects:
+// `plan` is 'pro' if any of their projects has an active/incomplete
+// subscription, else 'free'. `mrr_cents` sums price_cents of
+// their `active` subscriptions.
+export interface SignupUserEntry {
+	user_id: string;
+	email: string;
+	display_name: string | null;
+	signup_date: string;
+	last_active_at: string | null;
+	plan: 'free' | 'pro';
+	mrr_cents: number;
+	project_count: number;
+	team_beta_access: boolean;
+	legal_team_beta_access: boolean;
+}
+
 export interface PersonalAccessToken {
 	id: string;
 	user_id: string;
@@ -1686,6 +1704,16 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Signup-users dashboard (public-beta launch) ----
+
+	/** List every platform_user with derived plan / MRR / project
+	 *  count. Superadmin only. Read-only v1; per-row beta toggles
+	 *  reuse the adminGrant/RevokeTeamBeta + LegalTeamBeta methods
+	 *  below. */
+	async adminListSignupUsers(): Promise<{ users: SignupUserEntry[]; total: number }> {
+		return this.fetch<{ users: SignupUserEntry[]; total: number }>('/platform/admin/signup-users');
+	}
+
 	// ---- Team-tier closed-beta (Team-tier M2, issue #308) ----
 
 	/** List every platform_user with team_beta_access = true. Superadmin only. */
@@ -1704,6 +1732,23 @@ export class EurobaseAPI {
 	 * existing Team projects the user created keep running. Superadmin only. */
 	async adminRevokeTeamBeta(userId: string): Promise<void> {
 		return this.fetch(`/platform/admin/team-beta/${encodeURIComponent(userId)}`, {
+			method: 'DELETE'
+		});
+	}
+
+	// ---- Legal-Team-tier closed-beta (M2b) ----
+	//
+	// Wraps the /admin/legal-team-beta endpoints that already exist on
+	// the backend. Mirrors the Team-beta trio above shape-for-shape.
+
+	async adminGrantLegalTeamBeta(userId: string): Promise<void> {
+		return this.fetch(`/platform/admin/legal-team-beta/${encodeURIComponent(userId)}`, {
+			method: 'POST'
+		});
+	}
+
+	async adminRevokeLegalTeamBeta(userId: string): Promise<void> {
+		return this.fetch(`/platform/admin/legal-team-beta/${encodeURIComponent(userId)}`, {
 			method: 'DELETE'
 		});
 	}
