@@ -190,13 +190,30 @@ func (r *Repo) MarkFailed(ctx context.Context, id string) error {
 // that we can't leave a row half-populated (would masquerade as
 // "runtime provisioned" and route SDK traffic to an unopenable
 // DSN).
+//
+// Compare-and-swap on `runtime_username IS NULL`: two concurrent
+// bootstrap runs (sweeper vs provision-worker resume path) both
+// rotate the eurobase_gateway password on Scaleway. Without this
+// guard the second write could persist a ciphertext that matches
+// the earlier ALTER ROLE — but Scaleway holds the LATER password,
+// so the pool cache opens with a stale credential and every SDK
+// call fails auth silently. With the guard, only the first
+// successful writer persists; subsequent runs return `false` and
+// the caller logs + exits (the extra ALTER ROLE is wasted work
+// but harmless — Scaleway ends up with whichever password the
+// first winner already committed too, since both writes race the
+// same UPDATE gate). Combined with UniqueOpts on the backfill
+// job args, the race window is vanishingly small in practice.
+//
+// Returns (true, nil) on the winning write, (false, nil) if a
+// concurrent runner already populated the slot.
 func (r *Repo) SetRuntimeCredentials(
 	ctx context.Context,
 	id string,
 	runtimeUsername string,
 	ciphertext, nonce []byte,
 	keyVersion int16,
-) error {
+) (bool, error) {
 	const q = `
 		UPDATE public.project_databases
 		   SET runtime_username             = $2,
@@ -204,15 +221,21 @@ func (r *Repo) SetRuntimeCredentials(
 		       runtime_password_nonce       = $4,
 		       runtime_password_key_version = $5
 		 WHERE id = $1
+		   AND runtime_username IS NULL
 	`
 	tag, err := r.pool.Exec(ctx, q, id, runtimeUsername, ciphertext, nonce, keyVersion)
 	if err != nil {
-		return fmt.Errorf("dbprovider.Repo.SetRuntimeCredentials: %w", err)
+		return false, fmt.Errorf("dbprovider.Repo.SetRuntimeCredentials: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return errors.New("dbprovider.Repo.SetRuntimeCredentials: no rows affected")
+		// Two possibilities: (a) row doesn't exist (caller should
+		// have loaded it first — treat as bug, but non-fatal here),
+		// (b) runtime slot already populated by a concurrent
+		// winner. Both collapse to "someone else got there first"
+		// — don't error, let the caller decide via the bool.
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // MarkDeleted flips the row to state='deleting', sets deleted_at.
@@ -356,9 +379,13 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 // credential and bypass RLS. The backfill worker walks this list
 // and calls BootstrapDedicated for each.
 //
-// Bounded LIMIT so a single worker tick doesn't try to bootstrap
-// every existing Team project at once. Backfill worker paginates
-// by repeatedly draining until the list is empty.
+// Bounded LIMIT so a single worker tick doesn't attempt to
+// bootstrap every existing Team project at once. The sweeper drains
+// exactly one batch per hourly tick — a backlog of N projects
+// takes ceil(N/limit) hours to fully drain. Successful backfills
+// exit the result set on the next tick (the runtime_username IS
+// NULL filter), so the query self-limits without any pagination
+// cursor.
 func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Record, error) {
 	if limit <= 0 {
 		limit = 25

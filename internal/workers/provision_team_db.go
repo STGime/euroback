@@ -269,8 +269,18 @@ func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 	if err != nil {
 		return fmt.Errorf("seal runtime password: %w", err)
 	}
-	if err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, cred.Username, ct, nonce, ver); err != nil {
+	won, err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, cred.Username, ct, nonce, ver)
+	if err != nil {
 		return fmt.Errorf("persist runtime credentials: %w", err)
+	}
+	if !won {
+		// A concurrent bootstrap runner (backfill sweeper firing
+		// while this provisioning attempt was in flight) already
+		// populated the slot. Our ALTER ROLE on Scaleway is wasted
+		// work but not harmful — the winner also rotated the same
+		// role. Log and exit cleanly.
+		logger.Info("runtime credential already populated by a concurrent runner — skipping our write")
+		return nil
 	}
 
 	logger.Info("runtime credential populated — SDK traffic can now route as non-owner",

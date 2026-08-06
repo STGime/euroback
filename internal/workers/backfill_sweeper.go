@@ -9,14 +9,31 @@ package workers
 // River UI and retryable independently.
 //
 // Bounded batch size (25 per tick, matches Repo.ListActiveWithoutRuntime
-// default) so a big pre-part-2b backlog doesn't attempt to open 100
-// concurrent Scaleway connections. At an hourly cadence + 25/tick,
-// a hypothetical 500-project backfill drains in ~20 hours — fine for
-// a one-off historical fix that runs after part 2b lands.
+// default) — protects Scaleway from a thundering herd of concurrent
+// bootstrap connections. At an hourly cadence + 25/tick, a
+// hypothetical 500-project backlog drains in ~20 hours (fine for a
+// one-off historical fix that runs after part 2b lands).
 //
 // Idempotent: once a project's runtime slot is populated, the WHERE
 // filter excludes it — the sweeper naturally stops firing jobs for
-// completed projects.
+// completed projects. Duplicate concurrent enqueues are collapsed
+// by river.UniqueOpts on BackfillRuntimeCredentialArgs, and a
+// losing concurrent write to project_databases returns won=false
+// (see Repo.SetRuntimeCredentials) so at most one worker actually
+// persists.
+//
+// ⚠️  Backfilling a runtime credential DOES NOT MOVE TENANT DATA.
+// A project provisioned before part 2b has its tenant data on the
+// SHARED cluster (routing was off then). BootstrapDedicated
+// provisions a *fresh, empty* tenant schema on the dedicated
+// instance. Flipping TEAM_TIER_ROUTING=1 for such a project would
+// route SDK traffic to an empty schema — the tenant's data would
+// appear gone.
+//
+// The sweeper's job is to close the credential/routing gap only.
+// The data-cutover story (dump from shared, restore into dedicated,
+// then flip the flag) is a separate ops procedure per project.
+// See #338 for the checklist.
 
 import (
 	"context"

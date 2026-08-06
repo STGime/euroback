@@ -95,8 +95,18 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 	if err != nil {
 		return fmt.Errorf("seal runtime password: %w", err)
 	}
-	if err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, cred.Username, ct, nonce, ver); err != nil {
+	won, err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, cred.Username, ct, nonce, ver)
+	if err != nil {
 		return fmt.Errorf("persist runtime credentials: %w", err)
+	}
+	if !won {
+		// A concurrent runner (provision-worker resume path, or an
+		// earlier sweeper tick still finishing) already populated
+		// the slot. Our ALTER ROLE on Scaleway is wasted work but
+		// not harmful — Scaleway ended up with the winner's
+		// password too. Log and exit cleanly.
+		logger.Info("backfill lost the race — runtime credential already populated by a concurrent runner")
+		return nil
 	}
 
 	logger.Info("backfill complete — runtime credential populated",
