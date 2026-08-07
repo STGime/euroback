@@ -519,3 +519,93 @@ func keysOf(m map[string]*zip.File) []string {
 	}
 	return out
 }
+
+// ── #314 review: cross-subject redaction in user-scope DSAR ─────────────
+
+// filterUserRetentionHolds must never let subject A see subject B's
+// row/object identifiers. Table-scope holds pass through unchanged
+// (they name schema+table, not people). Row/object holds either keep
+// their ref (if the requester's userID appears in it) or have it
+// redacted while preserving the fact of retention (basis/type/expiry).
+func TestFilterUserRetentionHolds_RedactsOtherSubjects(t *testing.T) {
+	userA := "00000000-0000-0000-0000-00000000aaaa"
+	userB := "00000000-0000-0000-0000-00000000bbbb"
+	now := time.Now().UTC()
+	expiry := now.Add(24 * time.Hour)
+
+	all := []RetentionHoldExportEntry{
+		{ // table hold — always disclosable
+			LegalBasis: "§257 HGB",
+			ExpiresAt:  expiry,
+			TargetType: "table",
+			TargetRef:  map[string]any{"schema": "public", "table": "invoices"},
+			CreatedAt:  now,
+		},
+		{ // row hold naming userA — this is the requester's own data
+			LegalBasis: "§50 BRAO",
+			ExpiresAt:  expiry,
+			TargetType: "row",
+			TargetRef:  map[string]any{"schema": "public", "table": "matters", "pkey": map[string]any{"user_id": userA}},
+			CreatedAt:  now,
+		},
+		{ // row hold naming userB — must be redacted for A's export
+			LegalBasis: "§50 BRAO",
+			ExpiresAt:  expiry,
+			TargetType: "row",
+			TargetRef:  map[string]any{"schema": "public", "table": "matters", "pkey": map[string]any{"user_id": userB}},
+			CreatedAt:  now,
+		},
+		{ // object hold with userA's id in the key — disclosable
+			LegalBasis: "§147 AO",
+			ExpiresAt:  expiry,
+			TargetType: "object",
+			TargetRef:  map[string]any{"bucket": "docs", "key": "users/" + userA + "/return.pdf"},
+			CreatedAt:  now,
+		},
+		{ // object hold for userB — must be redacted
+			LegalBasis: "§147 AO",
+			ExpiresAt:  expiry,
+			TargetType: "object",
+			TargetRef:  map[string]any{"bucket": "docs", "key": "users/" + userB + "/return.pdf"},
+			CreatedAt:  now,
+		},
+	}
+
+	got := filterUserRetentionHolds(all, userA)
+	if len(got) != len(all) {
+		t.Fatalf("filter dropped rows: got %d, want %d — filter should redact refs, not drop entries", len(got), len(all))
+	}
+
+	// Serialise the whole filtered list and make sure userB's id
+	// does not appear anywhere. This is the whole point: a DSAR
+	// for A must not leak B's identifier.
+	blob, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal filtered holds: %v", err)
+	}
+	if strings.Contains(string(blob), userB) {
+		t.Errorf("filtered user export leaks userB's id: %s", string(blob))
+	}
+
+	// The table hold, the userA row hold, and the userA object hold
+	// must all retain their target_ref (redacted=false). The two
+	// userB holds must have target_ref cleared and redacted=true.
+	kept, redacted := 0, 0
+	for _, h := range got {
+		if h.TargetRefRedacted {
+			redacted++
+			if h.TargetRef != nil {
+				t.Errorf("redacted entry still has target_ref set: %+v", h)
+			}
+		} else {
+			kept++
+			if h.TargetRef == nil {
+				t.Errorf("kept entry has nil target_ref: %+v", h)
+			}
+		}
+	}
+	if kept != 3 || redacted != 2 {
+		t.Errorf("kept=%d redacted=%d, want kept=3 redacted=2", kept, redacted)
+	}
+}
+

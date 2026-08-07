@@ -473,13 +473,137 @@ func ListTenantTables(ctx context.Context, pool *pgxpool.Pool, schemaName string
 
 // ExportMetadata is the _metadata.json file in the export zip.
 type ExportMetadata struct {
-	ExportID    string    `json:"export_id"`
-	ProjectID   string    `json:"project_id"`
-	UserID      *string   `json:"user_id,omitempty"`
-	Format      string    `json:"format"`
-	ExportedAt  time.Time `json:"exported_at"`
-	TableCount  int       `json:"table_count"`
-	TotalRows   int       `json:"total_rows"`
+	ExportID   string    `json:"export_id"`
+	ProjectID  string    `json:"project_id"`
+	UserID     *string   `json:"user_id,omitempty"`
+	Format     string    `json:"format"`
+	ExportedAt time.Time `json:"exported_at"`
+	TableCount int       `json:"table_count"`
+	TotalRows  int       `json:"total_rows"`
+	// RetentionHoldCount is the number of active
+	// retention-hold rows recorded against this project (tenant
+	// exports) or scoped to this requester (user exports — see
+	// filterUserRetentionHolds). Only present when the collection
+	// query succeeded — if RetentionHoldsUnavailable is true, this
+	// field is omitted so the archive does not affirmatively assert
+	// "no holds" while the underlying query failed.
+	RetentionHoldCount *int `json:"retention_hold_count,omitempty"`
+	// RetentionHoldsUnavailable signals that the retention-hold
+	// query failed during export. The primary export still ships;
+	// this flag tells the recipient / regulator that the count is
+	// unknown rather than zero — a misstatement in a legal
+	// disclosure is worse than an honest "unavailable."
+	RetentionHoldsUnavailable bool `json:"retention_holds_unavailable,omitempty"`
+}
+
+// RetentionHoldExportEntry is the shape of each row in
+// `_retention_holds.json` inside a DSAR export archive. Named apart
+// from the internal `RetentionHold` struct because this is a public
+// contract with recipients (regulators, DPOs, end-users) and should
+// stay stable across internal renames.
+//
+// TargetRefRedacted is set on per-user exports when a row/object hold
+// concerns some *other* subject: we still disclose that a hold exists
+// (legal_basis + target_type + expires_at) but omit the identifier so
+// the requester does not receive personal data about another subject
+// (GDPR Art. 15(4)).
+type RetentionHoldExportEntry struct {
+	LegalBasis        string    `json:"legal_basis"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	TargetType        string    `json:"target_type"` // "row" | "object" | "table"
+	TargetRef         any       `json:"target_ref,omitempty"`
+	TargetRefRedacted bool      `json:"target_ref_redacted,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+// filterUserRetentionHolds narrows a project-wide hold list to what
+// is disclosable to a single subject in an Art. 15 access request.
+//
+//   - "table" holds are kept verbatim — they name a schema+table, not
+//     a subject, so no cross-subject data is leaked.
+//   - "row" / "object" holds have their target_ref inspected for the
+//     requester's userID. If the ref plausibly points at this user
+//     (userID appears anywhere in the serialised ref — e.g. as a pkey
+//     value or embedded in an object key like "users/<uid>/…"), the
+//     ref is preserved. Otherwise target_ref is dropped and
+//     target_ref_redacted is set to true, so the requester still
+//     learns "there are N additional retained items" but not *whose*.
+//
+// Assumption: refs are single-subject. The shapes we produce today
+// ({schema,table,pkey:{user_id:X}} for rows, users/<uid>/… for
+// objects) name one subject. A future two-party shape (e.g. messages
+// pkey {"from":A,"to":B} or matter files naming client + counterparty)
+// would ride along under this rule — the whole ref is disclosed once
+// A's id appears in it, so B's id would leak too. If/when that shape
+// ships, switch to field-level redaction here. The other direction
+// (a surrogate-key ref belonging to A but not containing A's UUID) is
+// already the safe one — redacted rather than leaked.
+//
+// Art. 15(4): "the right to obtain a copy … shall not adversely
+// affect the rights and freedoms of others." Handing subject A a
+// hold naming subject B's row primary key is such an adverse effect;
+// this filter closes that gap without under-disclosing the fact of
+// retention.
+func filterUserRetentionHolds(all []RetentionHoldExportEntry, userID string) []RetentionHoldExportEntry {
+	out := make([]RetentionHoldExportEntry, 0, len(all))
+	for _, h := range all {
+		if h.TargetType == "table" {
+			out = append(out, h)
+			continue
+		}
+		// row / object — inspect the serialised ref for userID.
+		refBytes, err := json.Marshal(h.TargetRef)
+		if err == nil && userID != "" && strings.Contains(string(refBytes), userID) {
+			out = append(out, h)
+			continue
+		}
+		out = append(out, RetentionHoldExportEntry{
+			LegalBasis:        h.LegalBasis,
+			ExpiresAt:         h.ExpiresAt,
+			TargetType:        h.TargetType,
+			TargetRef:         nil,
+			TargetRefRedacted: true,
+			CreatedAt:         h.CreatedAt,
+		})
+	}
+	return out
+}
+
+// collectRetentionHolds returns the export-shaped view of every
+// active hold for the project. WriteTenantExport uses the list
+// as-is; WriteUserExport runs it through filterUserRetentionHolds
+// to redact refs that would leak other subjects' identifiers.
+func collectRetentionHolds(ctx context.Context, pool *pgxpool.Pool, projectID string) ([]RetentionHoldExportEntry, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT legal_basis, expires_at, target_type, target_ref, created_at
+		   FROM public.retention_holds
+		  WHERE project_id = $1::uuid
+		    AND expires_at > now()
+		  ORDER BY expires_at ASC`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query retention_holds: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]RetentionHoldExportEntry, 0)
+	for rows.Next() {
+		var e RetentionHoldExportEntry
+		var raw []byte
+		if err := rows.Scan(&e.LegalBasis, &e.ExpiresAt, &e.TargetType, &raw, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan retention_holds: %w", err)
+		}
+		// target_ref is JSONB. Unmarshal into `any` so writeJSONToZip
+		// re-emits it as native JSON rather than a base64 blob.
+		var ref any
+		if err := json.Unmarshal(raw, &ref); err != nil {
+			return nil, fmt.Errorf("unmarshal target_ref: %w", err)
+		}
+		e.TargetRef = ref
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // WriteTenantExport streams a tenant-scope export zip into w. Closes
@@ -527,6 +651,15 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, w io.Writer, sch
 		totalRows += n
 	}
 
+	// Retention holds — Legal-Team-tier disclosure (issue #314).
+	// A tenant may hold items under §50 BRAO / §257 HGB / §147 AO
+	// (or arbitrary legal basis); the DSAR recipient needs to see
+	// them so they can reconcile "here's your data" with "here's
+	// what we're additionally retaining under legal obligation."
+	// A failure to gather holds is warn-only — the primary export
+	// still ships; but we surface the failure explicitly via
+	// retention_holds_unavailable rather than lying with count=0.
+	holds, herr := collectRetentionHolds(ctx, pool, projectID)
 	meta := ExportMetadata{
 		ExportID:   exportID,
 		ProjectID:  projectID,
@@ -534,6 +667,14 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, w io.Writer, sch
 		ExportedAt: time.Now().UTC(),
 		TableCount: len(tables),
 		TotalRows:  totalRows,
+	}
+	if herr != nil {
+		slog.Warn("export: collect retention holds failed", "error", herr, "project_id", projectID)
+		meta.RetentionHoldsUnavailable = true
+	} else {
+		writeJSONToZip(zw, "_retention_holds.json", holds)
+		n := len(holds)
+		meta.RetentionHoldCount = &n
 	}
 	writeJSONToZip(zw, "_metadata.json", meta)
 
@@ -589,6 +730,18 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, w io.Writer, schem
 		totalRows += n
 	}
 
+	// Retention holds — see filterUserRetentionHolds. Table-scope
+	// holds ship verbatim (schema/table names aren't personal data
+	// about other subjects). Row/object holds are kept if their
+	// target_ref plausibly references this user; otherwise
+	// target_ref is redacted so the fact of retention is disclosed
+	// (count + legal basis + expiry) without leaking another
+	// subject's identifier. GDPR Art. 15(4) — a copy under Art. 15
+	// must not adversely affect the rights and freedoms of others.
+	// Warn-only on query failure: primary export still ships,
+	// metadata carries retention_holds_unavailable rather than a
+	// false count=0.
+	allHolds, herr := collectRetentionHolds(ctx, pool, projectID)
 	meta := ExportMetadata{
 		ExportID:   exportID,
 		ProjectID:  projectID,
@@ -597,6 +750,15 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, w io.Writer, schem
 		ExportedAt: time.Now().UTC(),
 		TableCount: len(refs) + 1,
 		TotalRows:  totalRows,
+	}
+	if herr != nil {
+		slog.Warn("export: collect retention holds failed", "error", herr, "project_id", projectID, "user_id", userID)
+		meta.RetentionHoldsUnavailable = true
+	} else {
+		holds := filterUserRetentionHolds(allHolds, userID)
+		writeJSONToZip(zw, "_retention_holds.json", holds)
+		n := len(holds)
+		meta.RetentionHoldCount = &n
 	}
 	writeJSONToZip(zw, "_metadata.json", meta)
 
