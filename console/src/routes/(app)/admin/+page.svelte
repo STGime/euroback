@@ -70,6 +70,28 @@
 <p>— Stefan</p>`
 	};
 
+	// Informational announcement — sends to every existing platform_user
+	// (all of whom were invited via allowlist during closed beta). No
+	// action required from them; public signup is now open for anyone
+	// they want to share with. Ship the same hour as Deploy 1's env flip
+	// (ALLOW_PUBLIC_SIGNUP=true / BILLING_ENABLED=true / MOLLIE_ENV=test).
+	const PUBLIC_BETA_OPEN_TEMPLATE = {
+		subject: 'Eurobase is now in public beta',
+		body: `<p>Hi,</p>
+<p>Quick note: <strong>Eurobase is now in public beta</strong>. You don't need to do anything — your account, projects, and data are unchanged.</p>
+<p>What changed today:</p>
+<ul>
+  <li><strong>Signup is open to everyone</strong> at <a href="https://console.eurobase.app">console.eurobase.app</a>. Feel free to share.</li>
+  <li><strong>Pro tier is live</strong> — €19/mo per project, upgrade any time from the console. Free stays free.</li>
+  <li>Full write-up: <a href="https://eurobase.app/blog/public-beta-open">eurobase.app/blog/public-beta-open</a></li>
+</ul>
+<p>The closed-beta framing is over, but the practical reality is the same as yesterday: your data stays in EU jurisdiction (Scaleway, France), the SDK / CLI / MCP haven't changed, and <code>eurobase db dump</code> still gives you a standard <code>pg_dump</code> you can migrate anywhere.</p>
+<p>Bug reports or feedback: reply to this mail, or open an issue at <a href="https://github.com/STGime/euroback/issues">github.com/STGime/euroback/issues</a>. I read every word.</p>
+<p>— Stefan</p>
+<hr/>
+<p style="color:#6b7280;font-size:12px;">Sent to Eurobase account holders. This is not a marketing email — one-off announcement.</p>`
+	};
+
 	async function refresh() {
 		loading = true;
 		error = null;
@@ -663,6 +685,14 @@
 						onclick={() => applyTemplate(UPDATE_TEMPLATE)}
 					>
 						Product update
+					</button>
+					<span class="text-gray-300">·</span>
+					<button
+						type="button"
+						class="text-eurobase-600 hover:underline cursor-pointer"
+						onclick={() => applyTemplate(PUBLIC_BETA_OPEN_TEMPLATE)}
+					>
+						Public beta open
 					</button>
 				</div>
 
