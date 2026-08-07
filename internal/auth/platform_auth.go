@@ -270,11 +270,26 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 		}
 	}
 
+	// Cheap COUNT(*) inside the tx so the Discord ping below can
+	// include a running total. Kept inside the tx so the counted
+	// value includes the row we just inserted — matches what the
+	// admin dashboard would show a moment later. A failure here is
+	// non-fatal; we log and pass 0 to the notifier.
+	var totalSignups int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM public.platform_users`).Scan(&totalSignups); err != nil {
+		slog.Warn("count platform_users for signup notification failed — continuing", "error", err)
+		totalSignups = 0
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit signup: %w", err)
 	}
 
 	slog.Info("platform user signed up", "user_id", user.ID, "email", user.Email, "acceptances", len(accepted))
+
+	// Fire-and-forget Discord ping (goroutine inside notifySignupAsync).
+	// No-op when DISCORD_SIGNUPS_WEBHOOK is unset.
+	notifySignupAsync(user.Email, totalSignups)
 
 	// New signups are never superadmin; that flag is granted out-of-band.
 	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, false)

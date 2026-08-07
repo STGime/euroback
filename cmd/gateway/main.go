@@ -143,6 +143,13 @@ func main() {
 	// ── Set up platform auth ──
 	platformAuthSvc := auth.NewPlatformAuthService(pool, platformJWTSecret)
 	platformAuthSvc.AllowPublicSignup = os.Getenv("ALLOW_PUBLIC_SIGNUP") == "true"
+
+	// Real-time signup notifications to Discord — optional. When
+	// DISCORD_SIGNUPS_WEBHOOK is unset, the notifier is a silent
+	// no-op (matches the DISCORD_ALERTS_WEBHOOK pattern in
+	// deploy/k8s/{cert,health}-monitor-cronjob.yaml).
+	auth.SetDiscordSignupsWebhook(os.Getenv("DISCORD_SIGNUPS_WEBHOOK"))
+
 	if !platformAuthSvc.AllowPublicSignup {
 		slog.Info("signup gated behind platform_allowlist (set ALLOW_PUBLIC_SIGNUP=true to open)")
 	}
