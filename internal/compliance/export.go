@@ -529,6 +529,16 @@ type RetentionHoldExportEntry struct {
 //     target_ref_redacted is set to true, so the requester still
 //     learns "there are N additional retained items" but not *whose*.
 //
+// Assumption: refs are single-subject. The shapes we produce today
+// ({schema,table,pkey:{user_id:X}} for rows, users/<uid>/… for
+// objects) name one subject. A future two-party shape (e.g. messages
+// pkey {"from":A,"to":B} or matter files naming client + counterparty)
+// would ride along under this rule — the whole ref is disclosed once
+// A's id appears in it, so B's id would leak too. If/when that shape
+// ships, switch to field-level redaction here. The other direction
+// (a surrogate-key ref belonging to A but not containing A's UUID) is
+// already the safe one — redacted rather than leaked.
+//
 // Art. 15(4): "the right to obtain a copy … shall not adversely
 // affect the rights and freedoms of others." Handing subject A a
 // hold naming subject B's row primary key is such an adverse effect;
