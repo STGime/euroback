@@ -577,8 +577,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// Storage retention policies (Legal-Team M2b follow-on, #330).
 			// Per-prefix WORM defaults that the upload path resolves at
 			// PUT time; Scaleway then enforces immutability at rest via
-			// S3 Object Lock.
+			// S3 Object Lock. The bucket-lock checker refuses new
+			// policies against buckets that weren't provisioned with
+			// Object Lock (guards tier-upgraded projects — a plain
+			// bucket + lock headers on PUT would fail InvalidRequest).
 			storageRetentionSvc := compliance.NewStorageRetentionService(pool)
+			if s3Client != nil {
+				storageRetentionSvc = storageRetentionSvc.WithBucketLockChecker(s3Client)
+			}
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/storage-retention-policies", compliance.HandleUpsertStorageRetentionPolicy(pool, limitsSvc, storageRetentionSvc))
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/storage-retention-policies", compliance.HandleListStorageRetentionPolicies(pool, limitsSvc, storageRetentionSvc))
 			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/storage-retention-policies", compliance.HandleRemoveStorageRetentionPolicy(pool, limitsSvc, storageRetentionSvc))

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -61,4 +62,55 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// #349 review blocker: presigned upload URLs signed with retention
+// headers used to return only the URL, so the client had no way to
+// know it must send x-amz-object-lock-* on the PUT — every retention-
+// prefix signed-URL upload failed with 403 SignatureDoesNotMatch.
+// Pin that SignedHeaders is populated on the retention path and
+// empty on the plain path.
+func TestPresignedUploadSignedHeaders(t *testing.T) {
+	client := setupTestS3(t)
+	ctx := context.Background()
+	bucket := "test-presign-headers"
+	t.Cleanup(func() { _ = client.DeleteBucket(ctx, bucket) })
+	if err := client.CreateBucket(ctx, bucket); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	t.Run("no retention → no headers", func(t *testing.T) {
+		p, err := client.GeneratePresignedUploadURLWithRetention(ctx, bucket, "plain.txt", "text/plain", 0, Retention{})
+		if err != nil {
+			t.Fatalf("presign: %v", err)
+		}
+		if p.URL == "" {
+			t.Errorf("empty URL")
+		}
+		if len(p.SignedHeaders) != 0 {
+			t.Errorf("expected no signed headers, got %v", p.SignedHeaders)
+		}
+	})
+
+	t.Run("with retention → lock headers surfaced", func(t *testing.T) {
+		retainUntil := time.Now().Add(24 * time.Hour).UTC()
+		p, err := client.GeneratePresignedUploadURLWithRetention(ctx, bucket, "invoices/x.pdf", "application/pdf", 0, Retention{
+			Mode:        RetentionCompliance,
+			RetainUntil: retainUntil,
+		})
+		if err != nil {
+			t.Fatalf("presign: %v", err)
+		}
+		if p.URL == "" {
+			t.Errorf("empty URL")
+		}
+		mode := p.SignedHeaders["x-amz-object-lock-mode"]
+		if mode != "COMPLIANCE" {
+			t.Errorf("mode header: got %q, want COMPLIANCE", mode)
+		}
+		until := p.SignedHeaders["x-amz-object-lock-retain-until-date"]
+		if until == "" {
+			t.Errorf("retain-until header missing")
+		}
+	})
 }

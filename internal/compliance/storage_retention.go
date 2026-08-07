@@ -48,20 +48,47 @@ type StorageRetentionPolicy struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// BucketLockChecker reports whether S3 Object Lock is enabled on a
+// bucket. Implemented by *storage.S3Client — kept as an interface so
+// this file doesn't have to construct a full client for unit tests.
+// Optional (nil-safe) at the service level; the Upsert handler
+// enforces its presence for the safety check.
+type BucketLockChecker interface {
+	ObjectLockEnabled(ctx context.Context, bucketName string) (bool, error)
+}
+
 // StorageRetentionService is the DB-facing side of
 // storage_retention_policies + the upload-time resolver.
 type StorageRetentionService struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	bucketLock   BucketLockChecker
+	bucketPrefix string // usually "eurobase-" — matches storage.bucketForRequest
 }
 
 func NewStorageRetentionService(pool *pgxpool.Pool) *StorageRetentionService {
-	return &StorageRetentionService{pool: pool}
+	return &StorageRetentionService{pool: pool, bucketPrefix: "eurobase-"}
+}
+
+// WithBucketLockChecker attaches an S3-facing checker so the Upsert
+// path can refuse a policy against a bucket that wasn't provisioned
+// with Object Lock (tier-upgraded projects). Without the checker,
+// Upsert still works but the safety net is off — the pre-review
+// behaviour.
+func (s *StorageRetentionService) WithBucketLockChecker(c BucketLockChecker) *StorageRetentionService {
+	s.bucketLock = c
+	return s
 }
 
 // Upsert inserts or updates a per-prefix policy. Editing a prefix is
 // an UPDATE rather than DELETE+INSERT so the created_at + created_by
 // history stays intact across policy tweaks.
-func (s *StorageRetentionService) Upsert(ctx context.Context, projectID, prefix, mode string, retentionYears int, legalBasis, createdBy string) (*StorageRetentionPolicy, error) {
+func (s *StorageRetentionService) Upsert(ctx context.Context, projectID, projectSlug, prefix, mode string, retentionYears int, legalBasis, createdBy string) (*StorageRetentionPolicy, error) {
+	// Prefix normalisation: S3 object keys never start with '/'
+	// (see storage.ValidateStorageKey), so a policy prefix that
+	// does would silently never match. For a compliance feature
+	// silent-non-match is the worst failure mode — strip it.
+	prefix = strings.TrimPrefix(prefix, "/")
+
 	if mode != string(storage.RetentionCompliance) && mode != string(storage.RetentionGovernance) &&
 		mode != "compliance" && mode != "governance" {
 		return nil, errors.New("mode must be compliance or governance")
@@ -74,6 +101,25 @@ func (s *StorageRetentionService) Upsert(ctx context.Context, projectID, prefix,
 	}
 	// Normalise mode to lower-case for the DB CHECK constraint.
 	mode = strings.ToLower(mode)
+
+	// Bucket-lock safety net (tier-upgrade guard). A project that
+	// upgraded to Legal-Team *after* provisioning has a plain
+	// bucket; creating a policy would attach lock headers to
+	// subsequent uploads, which S3 rejects with InvalidRequest —
+	// silently breaking the tenant's upload path.
+	//
+	// Skipped when the checker isn't wired (unit-tests) or when we
+	// don't have a slug (should never happen; the caller supplies
+	// it).
+	if s.bucketLock != nil && projectSlug != "" {
+		enabled, err := s.bucketLock.ObjectLockEnabled(ctx, s.bucketPrefix+projectSlug)
+		if err != nil {
+			return nil, fmt.Errorf("check bucket object-lock status: %w", err)
+		}
+		if !enabled {
+			return nil, errors.New("this project's bucket was provisioned without Object Lock — contact support to migrate before creating retention policies")
+		}
+	}
 
 	var p StorageRetentionPolicy
 	err := s.pool.QueryRow(ctx,
@@ -208,7 +254,15 @@ func HandleUpsertStorageRetentionPolicy(pool *pgxpool.Pool, limits *plans.Limits
 			actorID = claims.Subject
 		}
 
-		p, err := svc.Upsert(r.Context(), projectID, req.Prefix, req.Mode, req.RetentionYears, req.LegalBasis, actorID)
+		// Slug needed for the bucket-lock safety check. If lookup
+		// fails, skip the safety net rather than blocking Upsert on
+		// a DB blip — the caller still gets 400 later if uploads
+		// don't work, which is worse than a silent skip only when
+		// the safety check itself can't run.
+		var slug string
+		_ = pool.QueryRow(r.Context(), `SELECT slug FROM projects WHERE id = $1`, projectID).Scan(&slug)
+
+		p, err := svc.Upsert(r.Context(), projectID, slug, req.Prefix, req.Mode, req.RetentionYears, req.LegalBasis, actorID)
 		if err != nil {
 			slog.Error("upsert storage retention policy failed", "error", err, "project_id", projectID)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)

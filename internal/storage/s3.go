@@ -175,6 +175,39 @@ func (s *S3Client) DeleteBucket(ctx context.Context, bucketName string) error {
 	return nil
 }
 
+// ObjectLockEnabled reports whether S3 Object Lock is enabled on the
+// given bucket. Used by the policy-upsert path to refuse creating a
+// retention policy on a bucket that wasn't provisioned with lock
+// support — otherwise every subsequent upload would attach lock
+// headers and S3 would reject with InvalidRequest.
+//
+// Returns (false, nil) on the "not enabled" case (S3 returns
+// ObjectLockConfigurationNotFoundError in that shape). A network
+// failure returns the error verbatim so callers can distinguish
+// "definitely off" from "couldn't tell."
+func (s *S3Client) ObjectLockEnabled(ctx context.Context, bucketName string) (bool, error) {
+	out, err := s.client.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		// The SDK's typed error for "not configured" isn't reliably
+		// surfaced by S3-compatible backends (Scaleway returns a
+		// generic 404). Fall back to a substring check on the
+		// message — same rationale as isObjectLockedError.
+		msg := err.Error()
+		if containsFold(msg, "ObjectLockConfigurationNotFoundError") ||
+			containsFold(msg, "object lock configuration") ||
+			containsFold(msg, "not found") {
+			return false, nil
+		}
+		return false, fmt.Errorf("get object lock configuration %s: %w", bucketName, err)
+	}
+	if out == nil || out.ObjectLockConfiguration == nil {
+		return false, nil
+	}
+	return out.ObjectLockConfiguration.ObjectLockEnabled == types.ObjectLockEnabledEnabled, nil
+}
+
 // BucketExists checks whether the given bucket exists and is accessible.
 func (s *S3Client) BucketExists(ctx context.Context, bucketName string) (bool, error) {
 	_, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{
@@ -446,21 +479,42 @@ func (s *S3Client) ListObjects(ctx context.Context, bucketName, prefix string, l
 	return result, nil
 }
 
+// PresignedUpload is the result of a presigned PUT-URL request. When
+// Retention is set, SignedHeaders carries the x-amz-object-lock-*
+// headers that got baked into the SigV4 signature — the client MUST
+// echo them verbatim on the PUT or S3 refuses with
+// SignatureDoesNotMatch. Passing them out explicitly is what lets a
+// SDK/console client construct a valid upload without either
+// dropping the lock (bad) or having to know which S3 headers exist
+// (also bad).
+type PresignedUpload struct {
+	URL           string
+	SignedHeaders map[string]string
+}
+
 // GeneratePresignedUploadURL creates a pre-signed PUT URL for direct client
 // uploads. Default expiry is 15 minutes if expiry <= 0.
+//
+// Legacy signature preserved — returns just the URL. Non-retention
+// uploads have no required headers beyond Content-Type, which the
+// caller already knows about, so no signed-header map is needed.
 func (s *S3Client) GeneratePresignedUploadURL(ctx context.Context, bucketName, key, contentType string, expiry time.Duration) (string, error) {
-	return s.GeneratePresignedUploadURLWithRetention(ctx, bucketName, key, contentType, expiry, Retention{})
+	p, err := s.GeneratePresignedUploadURLWithRetention(ctx, bucketName, key, contentType, expiry, Retention{})
+	if err != nil {
+		return "", err
+	}
+	return p.URL, nil
 }
 
 // GeneratePresignedUploadURLWithRetention is the retention-aware
-// variant. If retention.Mode is set, the returned URL carries the
-// x-amz-object-lock-* headers baked into the signature, so any client
-// re-using it must send those same headers or S3 will reject with
-// SignatureDoesNotMatch. That's the desired behaviour for a
-// Legal-Team upload — the caller can't accidentally drop the lock by
-// omitting a header. A zero-value Retention behaves like
-// GeneratePresignedUploadURL.
-func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention) (string, error) {
+// variant. If retention.Mode is set, the returned PresignedUpload
+// carries the x-amz-object-lock-* headers that were baked into the
+// SigV4 signature; the client MUST echo them on the PUT or S3
+// refuses with SignatureDoesNotMatch. The "can't drop the lock"
+// property still holds — a client omitting a header just gets a
+// 403, they can't quietly succeed with no retention. A zero-value
+// Retention returns SignedHeaders=nil.
+func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention) (*PresignedUpload, error) {
 	if expiry <= 0 {
 		expiry = 15 * time.Minute
 	}
@@ -479,10 +533,25 @@ func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, 
 
 	presigned, err := s.presignClient.PresignPutObject(ctx, input, s3.WithPresignExpires(expiry))
 	if err != nil {
-		return "", fmt.Errorf("presign put object %s/%s: %w", bucketName, key, err)
+		return nil, fmt.Errorf("presign put object %s/%s: %w", bucketName, key, err)
 	}
 
-	return presigned.URL, nil
+	out := &PresignedUpload{URL: presigned.URL}
+	if retention.Mode != "" {
+		// Emit the two lock headers ourselves rather than iterating
+		// presigned.SignedHeader — that map includes Host and other
+		// SigV4 machinery the caller shouldn't have to know about
+		// and would be confusing to expose. The values must match
+		// exactly what we passed into PutObjectInput, hence the
+		// re-formatting from the same source (types.ObjectLockMode
+		// serialises as its string form; RetainUntil goes as
+		// RFC3339 like the AWS SDK does internally).
+		out.SignedHeaders = map[string]string{
+			"x-amz-object-lock-mode":              string(retention.Mode),
+			"x-amz-object-lock-retain-until-date": retention.RetainUntil.UTC().Format(time.RFC3339),
+		}
+	}
+	return out, nil
 }
 
 // GeneratePresignedDownloadURL creates a pre-signed GET URL for direct client

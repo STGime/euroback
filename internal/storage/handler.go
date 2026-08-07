@@ -456,43 +456,56 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retention-hold check (row-level policy, complements the
-	// bucket-level Object Lock). A hold placed after upload will not
-	// be enforced by S3 alone — we have to refuse the delete here.
-	if h.holds != nil {
-		if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil && pc.ProjectID != "" {
-			until, held, herr := h.holds.IsHeldObject(r.Context(), pc.ProjectID, bucket, key)
-			if herr != nil {
-				slog.Warn("storage delete: hold check failed", "error", herr, "key", key)
-			} else if held {
-				resp := map[string]any{
-					"error": "object is under retention hold",
-					"code":  "object_locked",
-				}
-				if !until.IsZero() {
-					resp["retention_until"] = until.Format(time.RFC3339)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				_ = json.NewEncoder(w).Encode(resp)
-				return
-			}
+	// Retention checks BEFORE the S3 call. Two reasons this has to
+	// happen pre-S3 for the policy layer too, not just the hold layer:
+	//
+	// 1. Object Lock at bucket-create force-enables versioning. On a
+	//    versioned bucket, DeleteObject *without* VersionId writes a
+	//    delete marker and returns success — Object Lock only refuses
+	//    a specific locked version. So the S3-side lock protects data
+	//    at rest, but a bare DeleteObject silently succeeds and hides
+	//    the object from future listings even though the underlying
+	//    version is retained. The app then deletes the tracking row
+	//    and forgets it entirely.
+	// 2. We can catch the delete before the tracking row goes, so the
+	//    caller sees a clean 409 with retention_until instead of
+	//    "success + object vanished from listings."
+	//
+	// Ordering: hold layer first (an ad-hoc hold overrides the
+	// default), policy layer second (bucket-wide default).
+	pc, _ := auth.ProjectFromContext(r.Context())
+	projectID := ""
+	if pc != nil {
+		projectID = pc.ProjectID
+	}
+
+	if h.holds != nil && projectID != "" {
+		until, held, herr := h.holds.IsHeldObject(r.Context(), projectID, bucket, key)
+		if herr != nil {
+			slog.Warn("storage delete: hold check failed", "error", herr, "key", key)
+		} else if held {
+			writeObjectLockedResponse(w, until)
+			return
+		}
+	}
+
+	if h.retention != nil && projectID != "" {
+		ret, rerr := h.retention.Resolve(r.Context(), projectID, key)
+		if rerr != nil {
+			slog.Warn("storage delete: retention resolver failed", "error", rerr, "key", key)
+		} else if ret.Mode != "" && time.Now().Before(ret.RetainUntil) {
+			writeObjectLockedResponse(w, ret.RetainUntil)
+			return
 		}
 	}
 
 	if err := h.s3.DeleteObject(r.Context(), bucket, key); err != nil {
+		// Backstop: if S3 refuses (e.g. a version-scoped delete we
+		// don't issue here, or a future code path that does), still
+		// translate to 409 rather than leaking as a 500.
 		var locked *ErrObjectLocked
 		if errors.As(err, &locked) {
-			resp := map[string]any{
-				"error": "object is under retention hold",
-				"code":  "object_locked",
-			}
-			if !locked.RetainUntil.IsZero() {
-				resp["retention_until"] = locked.RetainUntil.Format(time.RFC3339)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			_ = json.NewEncoder(w).Encode(resp)
+			writeObjectLockedResponse(w, locked.RetainUntil)
 			return
 		}
 		slog.Error("storage delete failed", "error", err, "bucket", bucket, "key", key)
@@ -580,9 +593,17 @@ type signedURLRequest struct {
 }
 
 // signedURLResponse is the JSON response with the generated URL.
+//
+// Headers is populated only for retention-aware upload URLs (Legal-
+// Team projects, key under a per-prefix policy). The client MUST
+// echo every listed header on the PUT — S3 baked their values into
+// the SigV4 signature so a missing one fails with
+// SignatureDoesNotMatch. Preserving the lock's non-droppable
+// property while still telling the client what to send.
 type signedURLResponse struct {
-	URL       string    `json:"url"`
-	ExpiresAt time.Time `json:"expires_at"`
+	URL       string            `json:"url"`
+	ExpiresAt time.Time         `json:"expires_at"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 // GenerateSignedURL handles POST /v1/storage/signed-url.
@@ -637,8 +658,9 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	}
 
 	var (
-		url    string
-		expiry time.Duration
+		url            string
+		signedHeaders  map[string]string
+		expiry         time.Duration
 	)
 
 	switch req.Operation {
@@ -652,7 +674,12 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			expiry = 15 * time.Minute // default for upload
 		}
 		retention := h.retentionFor(r, req.Key)
-		url, err = h.s3.GeneratePresignedUploadURLWithRetention(r.Context(), bucket, req.Key, req.ContentType, expiry, retention)
+		p, perr := h.s3.GeneratePresignedUploadURLWithRetention(r.Context(), bucket, req.Key, req.ContentType, expiry, retention)
+		if p != nil {
+			url = p.URL
+			signedHeaders = p.SignedHeaders
+		}
+		err = perr
 
 	case "download":
 		if req.ExpiresIn > 0 {
@@ -672,6 +699,7 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	resp := signedURLResponse{
 		URL:       url,
 		ExpiresAt: time.Now().Add(expiry),
+		Headers:   signedHeaders,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -699,6 +727,23 @@ func (h *StorageHandler) schemaForRequest(r *http.Request) string {
 		return pc.SchemaName
 	}
 	return ""
+}
+
+// writeObjectLockedResponse writes the shared 409 JSON envelope for
+// a delete refused by either the hold layer, the policy layer, or
+// the S3 backstop. Kept in one place so the shape ({error, code,
+// retention_until?}) stays consistent across the three call sites.
+func writeObjectLockedResponse(w http.ResponseWriter, retentionUntil time.Time) {
+	resp := map[string]any{
+		"error": "object is under retention hold",
+		"code":  "object_locked",
+	}
+	if !retentionUntil.IsZero() {
+		resp["retention_until"] = retentionUntil.Format(time.RFC3339)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // retentionFor returns the S3 Object Lock retention window that
