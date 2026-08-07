@@ -113,3 +113,43 @@ func TestResolveLongestPrefix(t *testing.T) {
 		})
 	}
 }
+
+// Delete-path variant: retention must be measured from the object's
+// actual upload time, not now. Pins the #349 review-round-2 fix.
+func TestResolveLongestPrefix_UploadTime(t *testing.T) {
+	policies := []StorageRetentionPolicy{
+		{Prefix: "invoices/", Mode: "compliance", RetentionYears: 10},
+	}
+
+	t.Run("uploaded yesterday under 10y policy → still locked, retain-until ~10y", func(t *testing.T) {
+		uploaded := time.Now().Add(-24 * time.Hour).UTC()
+		got := resolveLongestPrefixAt(policies, "invoices/x.pdf", uploaded)
+		if got.Mode != "COMPLIANCE" {
+			t.Fatalf("expected active lock, got zero: %+v", got)
+		}
+		want := uploaded.AddDate(10, 0, 0).Truncate(time.Second)
+		if !got.RetainUntil.Equal(want) {
+			t.Errorf("RetainUntil: got %v, want %v (upload+10y, second-truncated)", got.RetainUntil, want)
+		}
+	})
+
+	t.Run("uploaded 11y ago under 10y policy → no active lock", func(t *testing.T) {
+		uploaded := time.Now().AddDate(-11, 0, 0).UTC()
+		got := resolveLongestPrefixAt(policies, "invoices/old.pdf", uploaded)
+		if got.Mode != "" {
+			t.Errorf("expected zero-value Retention (lock expired), got %+v", got)
+		}
+	})
+
+	t.Run("zero uploadedAt → measure from now", func(t *testing.T) {
+		got := resolveLongestPrefixAt(policies, "invoices/y.pdf", time.Time{})
+		if got.Mode != "COMPLIANCE" {
+			t.Fatalf("expected active lock with zero uploadedAt, got %+v", got)
+		}
+		want := time.Now().UTC().AddDate(10, 0, 0)
+		if diff := got.RetainUntil.Sub(want); diff < -time.Minute || diff > time.Minute {
+			t.Errorf("RetainUntil off by %v", diff)
+		}
+	})
+}
+

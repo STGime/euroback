@@ -183,23 +183,45 @@ func (s *StorageRetentionService) List(ctx context.Context, projectID string) ([
 // Resolve returns the storage.Retention to apply for uploading `key`
 // in `projectID`, or a zero-value Retention if no policy matches.
 // Longest-prefix-wins: if both "" and "/invoices/" match, the more
-// specific "/invoices/" prefix takes effect.
+// specific "/invoices/" prefix takes effect. RetainUntil is measured
+// from *now* — this is the upload path.
 //
 // Runs one query per upload — the table is small enough that this is
 // fine for now. If the volume ever justifies it, cache List() output
 // per project with a TTL similar to LimitsService.
 func (s *StorageRetentionService) Resolve(ctx context.Context, projectID, key string) (storage.Retention, error) {
+	return s.ResolveFromUpload(ctx, projectID, key, time.Time{})
+}
+
+// ResolveFromUpload is the retention resolver with an explicit upload
+// timestamp — used by the delete path so the reported retain-until
+// reflects the object's ACTUAL lock date (upload_time + N years),
+// not a fabricated "delete-time + N years."
+//
+// A zero uploadedAt means "compute from now" (the upload path). Any
+// non-zero value is treated as authoritative: an object uploaded 11
+// years ago under a 10-year policy already has retain-until in the
+// past, so this returns a zero-value Retention → the delete-path
+// guard lets the delete through.
+func (s *StorageRetentionService) ResolveFromUpload(ctx context.Context, projectID, key string, uploadedAt time.Time) (storage.Retention, error) {
 	policies, err := s.List(ctx, projectID)
 	if err != nil {
 		return storage.Retention{}, err
 	}
-	return resolveLongestPrefix(policies, key), nil
+	return resolveLongestPrefixAt(policies, key, uploadedAt), nil
 }
 
-// resolveLongestPrefix is the pure logic: given a policy list and an
-// object key, return the storage.Retention derived from the longest
-// prefix that matches. Split out for unit testing without a DB.
+// resolveLongestPrefix is the pure logic used by the upload path:
+// pick the longest matching prefix and return storage.Retention with
+// RetainUntil measured from now.
 func resolveLongestPrefix(policies []StorageRetentionPolicy, key string) storage.Retention {
+	return resolveLongestPrefixAt(policies, key, time.Time{})
+}
+
+// resolveLongestPrefixAt is the delete-path variant: computes
+// RetainUntil from uploadedAt when non-zero. A retain-until in the
+// past → zero-value Retention (no active lock).
+func resolveLongestPrefixAt(policies []StorageRetentionPolicy, key string, uploadedAt time.Time) storage.Retention {
 	var best *StorageRetentionPolicy
 	for i := range policies {
 		p := &policies[i]
@@ -213,9 +235,20 @@ func resolveLongestPrefix(policies []StorageRetentionPolicy, key string) storage
 	if best == nil {
 		return storage.Retention{}
 	}
+	base := uploadedAt
+	if base.IsZero() {
+		base = time.Now().UTC()
+	}
+	retainUntil := base.UTC().AddDate(best.RetentionYears, 0, 0).Truncate(time.Second)
+	// If the retention window already closed, the object is no
+	// longer under an active lock. Return zero so callers (delete
+	// guard) don't over-block.
+	if !retainUntil.After(time.Now()) {
+		return storage.Retention{}
+	}
 	return storage.Retention{
 		Mode:        storage.RetentionMode(strings.ToUpper(best.Mode)),
-		RetainUntil: time.Now().UTC().AddDate(best.RetentionYears, 0, 0),
+		RetainUntil: retainUntil,
 	}
 }
 
@@ -256,11 +289,13 @@ func HandleUpsertStorageRetentionPolicy(pool *pgxpool.Pool, limits *plans.Limits
 
 		// Slug needed for the bucket-lock safety check. If lookup
 		// fails, skip the safety net rather than blocking Upsert on
-		// a DB blip — the caller still gets 400 later if uploads
-		// don't work, which is worse than a silent skip only when
-		// the safety check itself can't run.
+		// a DB blip — but log the skip so a broken lookup doesn't
+		// quietly disable the guard (per #349 review).
 		var slug string
-		_ = pool.QueryRow(r.Context(), `SELECT slug FROM projects WHERE id = $1`, projectID).Scan(&slug)
+		if err := pool.QueryRow(r.Context(), `SELECT slug FROM projects WHERE id = $1`, projectID).Scan(&slug); err != nil {
+			slog.Warn("storage-retention Upsert: slug lookup failed, bucket-lock safety check skipped",
+				"error", err, "project_id", projectID)
+		}
 
 		p, err := svc.Upsert(r.Context(), projectID, slug, req.Prefix, req.Mode, req.RetentionYears, req.LegalBasis, actorID)
 		if err != nil {

@@ -59,8 +59,15 @@ const maxUploadSize = 50 << 20 // 50 MB
 // compliance.StorageRetentionService — kept as an interface here so
 // storage doesn't import compliance (which would be a cycle) and so
 // tests can stub it out.
+//
+// Resolve is the upload-path variant: measures retention from now.
+// ResolveFromUpload is the delete-path variant: measures retention
+// from the object's actual upload time so an already-expired lock
+// doesn't over-block. A zero uploadedAt in ResolveFromUpload behaves
+// like Resolve.
 type RetentionResolver interface {
 	Resolve(ctx context.Context, projectID, key string) (Retention, error)
+	ResolveFromUpload(ctx context.Context, projectID, key string, uploadedAt time.Time) (Retention, error)
 }
 
 // HoldChecker reports whether a given storage object is under an
@@ -82,6 +89,7 @@ type RetentionResolver interface {
 type HoldChecker interface {
 	IsHeldObject(ctx context.Context, projectID, bucket, key string) (retentionUntil time.Time, held bool, err error)
 }
+
 
 // StorageHandler holds dependencies for the storage HTTP handlers.
 type StorageHandler struct {
@@ -490,7 +498,8 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.retention != nil && projectID != "" {
-		ret, rerr := h.retention.Resolve(r.Context(), projectID, key)
+		uploadedAt := h.lookupUploadedAt(r, key) // zero if unknown
+		ret, rerr := h.retention.ResolveFromUpload(r.Context(), projectID, key, uploadedAt)
 		if rerr != nil {
 			slog.Warn("storage delete: retention resolver failed", "error", rerr, "key", key)
 		} else if ret.Mode != "" && time.Now().Before(ret.RetainUntil) {
@@ -727,6 +736,35 @@ func (h *StorageHandler) schemaForRequest(r *http.Request) string {
 		return pc.SchemaName
 	}
 	return ""
+}
+
+// lookupUploadedAt returns the created_at from storage_objects for
+// the given key, or zero if the row can't be found. The zero is a
+// signal (not an error) — ResolveFromUpload treats it as "measure
+// from now" (defensive over-block), so a missing tracking row for a
+// currently-policied object still gets refused. Best-effort by
+// design: a DB blip here shouldn't block a delete for a Free-tier
+// project that has no policy anyway (the retention check itself
+// only runs when h.retention != nil).
+func (h *StorageHandler) lookupUploadedAt(r *http.Request, key string) time.Time {
+	schema := h.schemaForRequest(r)
+	if schema == "" || h.pool == nil {
+		return time.Time{}
+	}
+	esc := strings.ReplaceAll(schema, `"`, `""`)
+	q := fmt.Sprintf(`SELECT created_at FROM "%s".storage_objects WHERE key = $1`, esc)
+	var t time.Time
+	if err := edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, key).Scan(&t)
+	}); err != nil {
+		// No row / RLS filter / query error — leave zero so the
+		// resolver defaults to over-block. slog is intentionally
+		// debug: a missing tracking row for an untracked object
+		// (uploaded pre-tracking, or via a path that doesn't
+		// record) is normal, not an error.
+		return time.Time{}
+	}
+	return t
 }
 
 // writeObjectLockedResponse writes the shared 409 JSON envelope for

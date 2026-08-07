@@ -514,9 +514,24 @@ func (s *S3Client) GeneratePresignedUploadURL(ctx context.Context, bucketName, k
 // property still holds — a client omitting a header just gets a
 // 403, they can't quietly succeed with no retention. A zero-value
 // Retention returns SignedHeaders=nil.
+//
+// The echoed header VALUES come straight from presigned.SignedHeader
+// — the SDK's own byte-exact record of what got signed — filtered
+// to just the two X-Amz-Object-Lock-* entries. This is the fix for
+// review-round-2 blocker: the SDK serialises retain-until with
+// smithy's `2006-01-02T15:04:05.999Z` layout (millisecond precision),
+// so a hand-rolled `time.RFC3339` format diverges whenever RetainUntil
+// has sub-second precision → SignatureDoesNotMatch on the PUT. Reading
+// from SignedHeader is immune to that (and to future SDK format
+// changes). We also Truncate the incoming RetainUntil to second so
+// upstream comparators (audit logs, policy resolution) see a stable
+// value regardless of when the presigner ran.
 func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention) (*PresignedUpload, error) {
 	if expiry <= 0 {
 		expiry = 15 * time.Minute
+	}
+	if retention.Mode != "" {
+		retention.RetainUntil = retention.RetainUntil.Truncate(time.Second)
 	}
 
 	slog.Info("generating presigned upload URL", "bucket", bucketName, "key", key, "expiry", expiry, "retention_mode", retention.Mode)
@@ -538,20 +553,45 @@ func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, 
 
 	out := &PresignedUpload{URL: presigned.URL}
 	if retention.Mode != "" {
-		// Emit the two lock headers ourselves rather than iterating
-		// presigned.SignedHeader — that map includes Host and other
-		// SigV4 machinery the caller shouldn't have to know about
-		// and would be confusing to expose. The values must match
-		// exactly what we passed into PutObjectInput, hence the
-		// re-formatting from the same source (types.ObjectLockMode
-		// serialises as its string form; RetainUntil goes as
-		// RFC3339 like the AWS SDK does internally).
-		out.SignedHeaders = map[string]string{
-			"x-amz-object-lock-mode":              string(retention.Mode),
-			"x-amz-object-lock-retain-until-date": retention.RetainUntil.UTC().Format(time.RFC3339),
-		}
+		// Pull only the X-Amz-Object-Lock-* headers out of the
+		// signed set. presigned.SignedHeader also contains Host,
+		// X-Amz-Content-SHA256, etc. — SigV4 machinery the client
+		// gets right for free (Host from the URL, SHA256 the SDK
+		// handles) and doesn't need to see. Only the lock headers
+		// are opaque to the client without our help.
+		out.SignedHeaders = extractObjectLockHeaders(presigned.SignedHeader)
 	}
 	return out, nil
+}
+
+// extractObjectLockHeaders picks out just the two x-amz-object-lock
+// headers (case-insensitively) from a signed-header set. Kept as its
+// own tiny function so it's cheap to test independently of an S3
+// round-trip.
+func extractObjectLockHeaders(in map[string][]string) map[string]string {
+	out := map[string]string{}
+	for k, vs := range in {
+		if len(vs) == 0 {
+			continue
+		}
+		lk := lowerFold(k)
+		if lk == "x-amz-object-lock-mode" || lk == "x-amz-object-lock-retain-until-date" {
+			out[lk] = vs[0]
+		}
+	}
+	return out
+}
+
+func lowerFold(s string) string {
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return string(b)
 }
 
 // GeneratePresignedDownloadURL creates a pre-signed GET URL for direct client

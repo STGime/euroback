@@ -64,6 +64,41 @@ func contains(s, sub string) bool {
 	return false
 }
 
+// #349 review-round-2 blocker: the header VALUES echoed to the client
+// must match byte-exact what the SDK signed. The SDK uses smithy's
+// FormatDateTime ("2006-01-02T15:04:05.999Z", millisecond precision),
+// so a hand-rolled RFC3339 emit diverges whenever RetainUntil has
+// sub-second precision → SignatureDoesNotMatch on the client's PUT.
+//
+// Fix: pull the two X-Amz-Object-Lock-* headers directly out of
+// presigned.SignedHeader (byte-exact by construction). This test
+// pins that extractObjectLockHeaders returns exactly the two lock
+// headers, case-normalised, and drops everything else the SDK
+// signed (Host, X-Amz-Content-Sha256, X-Amz-Date, etc.).
+func TestExtractObjectLockHeaders(t *testing.T) {
+	in := map[string][]string{
+		"Host":                                {"example.com"},
+		"X-Amz-Content-Sha256":                {"UNSIGNED-PAYLOAD"},
+		"X-Amz-Date":                          {"20260807T120000Z"},
+		"X-Amz-Object-Lock-Mode":              {"COMPLIANCE"},
+		"X-Amz-Object-Lock-Retain-Until-Date": {"2036-08-07T20:01:25.699Z"},
+		"Content-Type":                        {"application/pdf"},
+	}
+	got := extractObjectLockHeaders(in)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 lock headers, got %d: %v", len(got), got)
+	}
+	if got["x-amz-object-lock-mode"] != "COMPLIANCE" {
+		t.Errorf("mode: got %q", got["x-amz-object-lock-mode"])
+	}
+	// Byte-exact preservation of the SDK's format — crucially
+	// INCLUDING the millisecond fraction — is the whole point.
+	if got["x-amz-object-lock-retain-until-date"] != "2036-08-07T20:01:25.699Z" {
+		t.Errorf("retain-until: got %q, want byte-exact millisecond value from SDK",
+			got["x-amz-object-lock-retain-until-date"])
+	}
+}
+
 // #349 review blocker: presigned upload URLs signed with retention
 // headers used to return only the URL, so the client had no way to
 // know it must send x-amz-object-lock-* on the PUT — every retention-
