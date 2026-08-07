@@ -27,10 +27,16 @@ func (w *ProvisionProjectWorker) Work(ctx context.Context, job *river.Job[jobs.P
 
 	logger.Info("starting async project provisioning (s3 bucket)")
 
-	// Create S3 bucket.
+	// Create S3 bucket. Legal-Team-tier projects get Object Lock
+	// enabled at bucket-create time so per-object retention headers
+	// on PUT are honoured by Scaleway (GoBD §146 Abs. 4 AO WORM). It
+	// is a one-time flag — Object Lock cannot be enabled after a
+	// bucket exists, so this decision has to be made here at
+	// provisioning time. All other tiers create a plain bucket.
 	bucketName := fmt.Sprintf("eurobase-%s", args.Slug)
-	logger.Info("creating s3 bucket", "bucket", bucketName)
-	if err := w.S3.CreateBucket(ctx, bucketName); err != nil {
+	enableObjectLock := args.Plan == "legal_team"
+	logger.Info("creating s3 bucket", "bucket", bucketName, "object_lock", enableObjectLock)
+	if err := w.S3.CreateBucketWithObjectLock(ctx, bucketName, enableObjectLock); err != nil {
 		logger.Error("failed to create s3 bucket", "error", err)
 		w.markFailed(ctx, args.ProjectID)
 		return fmt.Errorf("create s3 bucket: %w", err)

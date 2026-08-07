@@ -574,6 +574,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/retention-holds/{holdId}", compliance.HandleRevokeRetentionHold(pool, limitsSvc, holdSvc))
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/gobd-export", compliance.HandleGoBDExport(pool, limitsSvc))
 
+			// Storage retention policies (Legal-Team M2b follow-on, #330).
+			// Per-prefix WORM defaults that the upload path resolves at
+			// PUT time; Scaleway then enforces immutability at rest via
+			// S3 Object Lock.
+			storageRetentionSvc := compliance.NewStorageRetentionService(pool)
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/storage-retention-policies", compliance.HandleUpsertStorageRetentionPolicy(pool, limitsSvc, storageRetentionSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/storage-retention-policies", compliance.HandleListStorageRetentionPolicies(pool, limitsSvc, storageRetentionSvc))
+			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/storage-retention-policies", compliance.HandleRemoveStorageRetentionPolicy(pool, limitsSvc, storageRetentionSvc))
+
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names
 			// affected subjects and triggers customer/authority comms.
@@ -648,7 +657,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
 					r.Use(tenant.PlatformStorageContext(pool))
-					storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool))
+					storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool)).
+						WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
+						WithHoldChecker(compliance.NewHoldService(pool))
 					r.With(tenant.RequireMinRole("developer")).Post("/upload", storageHandler.UploadFile)
 					r.With(tenant.RequireMinRole("developer")).Post("/signed-url", storageHandler.GenerateSignedURL)
 					r.With(tenant.RequireMinRole("viewer")).Get("/", storageHandler.ListFiles)
@@ -845,8 +856,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 				// SDK storage — same routing story as SDK SQL: tenant
 				// metadata lookups go to the dedicated instance when the
-				// project has one (M2.5).
-				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(poolResolver))
+				// project has one (M2.5). Legal-Team projects get a
+				// retention resolver so per-prefix WORM policies apply
+				// to SDK uploads too (not just console uploads), plus a
+				// hold checker so post-upload retention_holds refuse
+				// SDK deletes with 409 object_locked.
+				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(poolResolver)).
+					WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
+					WithHoldChecker(compliance.NewHoldService(pool))
 				r.Mount("/", storageHandler.Routes())
 			})
 		} else {

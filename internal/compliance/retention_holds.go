@@ -178,6 +178,26 @@ func (s *HoldService) IsHeld(ctx context.Context, projectID string, targetType T
 	return &h, nil
 }
 
+// IsHeldObject is a storage-facing convenience over IsHeld that
+// serialises {bucket, key} into the canonical object-hold target_ref
+// shape and reports the retain-until. Returns (zero, false, nil) when
+// no hold matches.
+//
+// Storage-facing interface (storage.HoldChecker) — kept here so the
+// storage package doesn't need to depend on compliance's internal
+// TargetType/RetentionHold shapes.
+func (s *HoldService) IsHeldObject(ctx context.Context, projectID, bucket, key string) (time.Time, bool, error) {
+	ref := map[string]any{"bucket": bucket, "key": key}
+	h, err := s.IsHeld(ctx, projectID, TargetObject, ref)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if h == nil {
+		return time.Time{}, false, nil
+	}
+	return h.ExpiresAt, true, nil
+}
+
 // SweepExpired deletes holds past their expires_at. Called by a
 // daily cron so held items become erasable promptly after the
 // retention window closes without waiting for the next erasure

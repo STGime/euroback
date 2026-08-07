@@ -55,6 +55,13 @@ const (
 	ActionRetentionHoldRevoked = "retention_hold.revoked"
 	ActionRetentionHoldExpired = "retention_hold.expired"
 
+	// Storage-retention-policy lifecycle (M2b follow-on, #330).
+	// Per-prefix WORM policy set / removed by a Legal-Team operator.
+	// Object-lock enforcement itself is silent (Scaleway refuses the
+	// delete); these events cover the policy management surface.
+	ActionStorageRetentionPolicySet     = "storage_retention_policy.set"
+	ActionStorageRetentionPolicyRemoved = "storage_retention_policy.removed"
+
 	// GoBD export (M2b, hard blocker #4). Distinct from
 	// ActionExportRequested so operators can grep tax-audit
 	// exports separately from DSAR exports.

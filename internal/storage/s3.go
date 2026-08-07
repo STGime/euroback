@@ -71,12 +71,36 @@ func NewS3Client(endpoint, region, accessKey, secretKey string) (*S3Client, erro
 }
 
 // CreateBucket creates a private S3 bucket. Returns nil if the bucket already exists (idempotent).
+// Object Lock is off by default — call CreateBucketWithObjectLock for
+// Legal-Team projects that need WORM enforcement.
 func (s *S3Client) CreateBucket(ctx context.Context, bucketName string) error {
-	slog.Info("creating s3 bucket", "bucket", bucketName)
+	return s.CreateBucketWithObjectLock(ctx, bucketName, false)
+}
 
-	_, err := s.client.CreateBucket(ctx, &s3.CreateBucketInput{
+// CreateBucketWithObjectLock creates a private S3 bucket, optionally
+// enabling S3 Object Lock at bucket creation time (a one-time flag —
+// Object Lock cannot be turned on after the fact). Returns nil if the
+// bucket already exists (idempotent).
+//
+// For Legal-Team-tier projects we pass enableObjectLock=true so per-
+// object retention headers on PUT are honoured by Scaleway. For every
+// other tier we pass false — Object Lock adds no cost but exposing it
+// only to tiers that need it keeps the storage tier gated and the
+// bucket-config surface small.
+//
+// GoBD §146 Abs. 4 AO ("Unveränderbarkeit") requires WORM at rest for
+// tax / accounting / mandant documents; Object Lock in COMPLIANCE mode
+// is how we deliver that on S3-compatible storage.
+func (s *S3Client) CreateBucketWithObjectLock(ctx context.Context, bucketName string, enableObjectLock bool) error {
+	slog.Info("creating s3 bucket", "bucket", bucketName, "object_lock", enableObjectLock)
+
+	input := &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
-	})
+	}
+	if enableObjectLock {
+		input.ObjectLockEnabledForBucket = aws.Bool(true)
+	}
+	_, err := s.client.CreateBucket(ctx, input)
 	if err != nil {
 		// Check if bucket already exists (owned by us).
 		var alreadyOwned *types.BucketAlreadyOwnedByYou
@@ -97,7 +121,7 @@ func (s *S3Client) CreateBucket(ctx context.Context, bucketName string) error {
 		return fmt.Errorf("set bucket acl to private %s: %w", bucketName, err)
 	}
 
-	slog.Info("s3 bucket created", "bucket", bucketName)
+	slog.Info("s3 bucket created", "bucket", bucketName, "object_lock", enableObjectLock)
 	return nil
 }
 
@@ -167,10 +191,53 @@ func (s *S3Client) BucketExists(ctx context.Context, bucketName string) (bool, e
 	return true, nil
 }
 
+// Retention describes an S3 Object Lock retention window applied at
+// upload time. Zero value = no retention (equivalent to a nil pointer
+// in the S3 API); use RetentionCompliance / RetentionGovernance to
+// construct.
+//
+// Mode "compliance" cannot be shortened by any principal, even root
+// credentials, until RetainUntil passes — this is what §146 Abs. 4 AO
+// / GoBD Unveränderbarkeit requires. Mode "governance" is softer:
+// principals with s3:BypassGovernanceRetention can override, which is
+// useful for non-legal retention use-cases (e.g. an audit window a
+// customer can waive after internal review).
+type Retention struct {
+	Mode        RetentionMode
+	RetainUntil time.Time
+}
+
+// RetentionMode is the S3 Object Lock mode. The two-value set matches
+// the S3 spec; we surface it as a typed string so callers don't have
+// to import the AWS SDK enum.
+type RetentionMode string
+
+const (
+	RetentionCompliance RetentionMode = "COMPLIANCE"
+	RetentionGovernance RetentionMode = "GOVERNANCE"
+)
+
 // UploadObject streams an upload to the given bucket/key without buffering the
-// entire file in memory.
+// entire file in memory. No retention is applied — call
+// UploadObjectWithRetention for WORM enforcement.
 func (s *S3Client) UploadObject(ctx context.Context, bucketName, key string, reader io.Reader, contentType string, size int64) error {
-	slog.Info("uploading object", "bucket", bucketName, "key", key, "content_type", contentType, "size", size)
+	return s.UploadObjectWithRetention(ctx, bucketName, key, reader, contentType, size, Retention{})
+}
+
+// UploadObjectWithRetention streams an upload and, if retention.Mode
+// is set, attaches S3 Object Lock retention headers so the object
+// cannot be deleted or overwritten before retention.RetainUntil.
+//
+// The bucket must have been created with Object Lock enabled
+// (CreateBucketWithObjectLock(..., true)) — Object Lock is a one-time
+// bucket-level flag, and PutObject with retention headers against a
+// non-locked bucket returns InvalidRequest. The provisioning path
+// (workers/provision.go) is responsible for setting that flag for
+// Legal-Team-tier projects.
+//
+// A zero-value Retention (Mode=="") behaves exactly like UploadObject.
+func (s *S3Client) UploadObjectWithRetention(ctx context.Context, bucketName, key string, reader io.Reader, contentType string, size int64, retention Retention) error {
+	slog.Info("uploading object", "bucket", bucketName, "key", key, "content_type", contentType, "size", size, "retention_mode", retention.Mode)
 
 	input := &s3.PutObjectInput{
 		Bucket:        aws.String(bucketName),
@@ -179,13 +246,17 @@ func (s *S3Client) UploadObject(ctx context.Context, bucketName, key string, rea
 		ContentType:   aws.String(contentType),
 		ContentLength: aws.Int64(size),
 	}
+	if retention.Mode != "" {
+		input.ObjectLockMode = types.ObjectLockMode(retention.Mode)
+		input.ObjectLockRetainUntilDate = aws.Time(retention.RetainUntil)
+	}
 
 	_, err := s.client.PutObject(ctx, input)
 	if err != nil {
 		return fmt.Errorf("put object %s/%s: %w", bucketName, key, err)
 	}
 
-	slog.Info("object uploaded", "bucket", bucketName, "key", key)
+	slog.Info("object uploaded", "bucket", bucketName, "key", key, "retention_until", retention.RetainUntil)
 	return nil
 }
 
@@ -219,7 +290,35 @@ func (s *S3Client) DownloadObject(ctx context.Context, bucketName, key string) (
 	return output.Body, contentType, size, nil
 }
 
-// DeleteObject removes an object from the bucket.
+// ErrObjectLocked is returned by DeleteObject when the underlying S3
+// call is refused because the object is under an active Object Lock
+// retention window (compliance-mode WORM). Callers surface this as
+// HTTP 409 with code "object_locked" so the UI can explain why the
+// delete failed and when it would succeed.
+//
+// We can't reliably fetch the exact retention_until from the delete
+// error alone — HeadObject with ObjectLockRetainUntilDate is required
+// — so the field is best-effort populated when the caller has already
+// looked it up (e.g. the retention-hold check).
+type ErrObjectLocked struct {
+	Bucket      string
+	Key         string
+	RetainUntil time.Time // zero if unknown
+	Cause       error
+}
+
+func (e *ErrObjectLocked) Error() string {
+	if !e.RetainUntil.IsZero() {
+		return fmt.Sprintf("object %s/%s is under retention until %s", e.Bucket, e.Key, e.RetainUntil.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("object %s/%s is under retention", e.Bucket, e.Key)
+}
+
+func (e *ErrObjectLocked) Unwrap() error { return e.Cause }
+
+// DeleteObject removes an object from the bucket. Returns an
+// *ErrObjectLocked (which callers can detect via errors.As) if S3
+// refuses because the object is under an active retention window.
 func (s *S3Client) DeleteObject(ctx context.Context, bucketName, key string) error {
 	slog.Info("deleting object", "bucket", bucketName, "key", key)
 
@@ -228,11 +327,71 @@ func (s *S3Client) DeleteObject(ctx context.Context, bucketName, key string) err
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if isObjectLockedError(err) {
+			return &ErrObjectLocked{Bucket: bucketName, Key: key, Cause: err}
+		}
 		return fmt.Errorf("delete object %s/%s: %w", bucketName, key, err)
 	}
 
 	slog.Info("object deleted", "bucket", bucketName, "key", key)
 	return nil
+}
+
+// isObjectLockedError inspects an S3 delete error and reports whether
+// it looks like an Object-Lock refusal. Scaleway (and S3-in-general)
+// returns 403 AccessDenied for locked objects; the SDK surfaces this
+// as a *types.ObjectLockConfigurationNotFoundError only for
+// GetObjectLockConfiguration, not for DeleteObject. The safest
+// available check is a substring match on the message the S3 API
+// puts in the error — "Access Denied because object protected by
+// object lock" (Scaleway) or "AccessDenied" combined with a
+// retention hint. False negatives here degrade to a generic 500 for
+// the caller, which is safer than false positives that would mask a
+// real permissions bug.
+func isObjectLockedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Scaleway phrasing observed in fr-par tests.
+	if containsFold(msg, "object lock") || containsFold(msg, "retention period") {
+		return true
+	}
+	return false
+}
+
+func containsFold(s, substr string) bool {
+	// Simple case-insensitive substring — small strings, no need for
+	// a compiled regex. Kept as its own tiny helper to make the
+	// intent obvious and testable.
+	return len(s) >= len(substr) && indexFold(s, substr) >= 0
+}
+
+func indexFold(s, substr string) int {
+	sn, tn := len(s), len(substr)
+	if tn == 0 {
+		return 0
+	}
+	for i := 0; i+tn <= sn; i++ {
+		match := true
+		for j := 0; j < tn; j++ {
+			cs, ct := s[i+j], substr[j]
+			if cs >= 'A' && cs <= 'Z' {
+				cs += 'a' - 'A'
+			}
+			if ct >= 'A' && ct <= 'Z' {
+				ct += 'a' - 'A'
+			}
+			if cs != ct {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
 }
 
 // ListObjects lists objects in a bucket with optional prefix filtering and
@@ -290,16 +449,32 @@ func (s *S3Client) ListObjects(ctx context.Context, bucketName, prefix string, l
 // GeneratePresignedUploadURL creates a pre-signed PUT URL for direct client
 // uploads. Default expiry is 15 minutes if expiry <= 0.
 func (s *S3Client) GeneratePresignedUploadURL(ctx context.Context, bucketName, key, contentType string, expiry time.Duration) (string, error) {
+	return s.GeneratePresignedUploadURLWithRetention(ctx, bucketName, key, contentType, expiry, Retention{})
+}
+
+// GeneratePresignedUploadURLWithRetention is the retention-aware
+// variant. If retention.Mode is set, the returned URL carries the
+// x-amz-object-lock-* headers baked into the signature, so any client
+// re-using it must send those same headers or S3 will reject with
+// SignatureDoesNotMatch. That's the desired behaviour for a
+// Legal-Team upload — the caller can't accidentally drop the lock by
+// omitting a header. A zero-value Retention behaves like
+// GeneratePresignedUploadURL.
+func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention) (string, error) {
 	if expiry <= 0 {
 		expiry = 15 * time.Minute
 	}
 
-	slog.Info("generating presigned upload URL", "bucket", bucketName, "key", key, "expiry", expiry)
+	slog.Info("generating presigned upload URL", "bucket", bucketName, "key", key, "expiry", expiry, "retention_mode", retention.Mode)
 
 	input := &s3.PutObjectInput{
 		Bucket:      aws.String(bucketName),
 		Key:         aws.String(key),
 		ContentType: aws.String(contentType),
+	}
+	if retention.Mode != "" {
+		input.ObjectLockMode = types.ObjectLockMode(retention.Mode)
+		input.ObjectLockRetainUntilDate = aws.Time(retention.RetainUntil)
 	}
 
 	presigned, err := s.presignClient.PresignPutObject(ctx, input, s3.WithPresignExpires(expiry))
