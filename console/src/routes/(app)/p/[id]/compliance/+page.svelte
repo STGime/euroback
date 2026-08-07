@@ -1,12 +1,20 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { api, type DPAReport, type AuditLogEntry, type EndUser } from '$lib/api.js';
+	import {
+		api,
+		type DPAReport,
+		type AuditLogEntry,
+		type EndUser,
+		type StorageRetentionPolicy,
+		type StorageRetentionMode,
+		type RetentionHold,
+	} from '$lib/api.js';
 	import { onMount } from 'svelte';
 
 	let projectId = $derived($page.params.id);
 
 	// Tab state
-	let activeTab = $state<'dpa' | 'audit' | 'export'>('dpa');
+	let activeTab = $state<'dpa' | 'audit' | 'export' | 'retention'>('dpa');
 
 	// #251 soft-gate state. The Data Export tab is rendered for
 	// every tier (so a free-tier admin can still see the value),
@@ -310,6 +318,145 @@
 		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
 		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 	}
+
+	// ── Retention tab (Legal-Team M2b, #314 + #330) ────────────────
+	//
+	// Two lists on one tab, because "retention" is one mental model
+	// for the operator even though the DB has two tables. Storage
+	// policies are the *default* per-prefix WORM rules (every
+	// /invoices/* is retained 10y); retention holds are the *ad-hoc*
+	// row/object-scoped exceptions ops files against specific items.
+	//
+	// The three POST/DELETE endpoints refuse with HTTP 402 +
+	// code:legal_team_required on non-Legal-Team projects — the
+	// upgrade-card branch below catches that and renders an upsell
+	// instead of a raw error. Same soft-gate shape DSAR uses.
+
+	let retentionPolicies: StorageRetentionPolicy[] = $state([]);
+	let retentionHolds: RetentionHold[] = $state([]);
+	let retentionLoading = $state(false);
+	let retentionError: string | null = $state(null);
+	let retentionGated = $state(false); // true once we know the project isn't Legal-Team
+
+	// New-policy dialog
+	let policyDialogOpen = $state(false);
+	let policyPrefix = $state('');
+	let policyMode = $state<StorageRetentionMode>('compliance');
+	let policyYears = $state(10);
+	let policyBasis = $state('');
+	let policySaving = $state(false);
+	let policyDialogError: string | null = $state(null);
+
+	async function switchToRetention() {
+		activeTab = 'retention';
+		if (retentionPolicies.length === 0 && retentionHolds.length === 0 && !retentionError) {
+			await loadRetention();
+		}
+	}
+
+	async function loadRetention() {
+		retentionLoading = true;
+		retentionError = null;
+		retentionGated = false;
+		try {
+			const [policies, holds] = await Promise.all([
+				api.listStorageRetentionPolicies(projectId),
+				api.listRetentionHolds(projectId),
+			]);
+			retentionPolicies = policies.policies ?? [];
+			retentionHolds = holds.holds ?? [];
+		} catch (err) {
+			// The three routes return 402 with body {"code":"legal_team_required"}.
+			// The fetch wrapper surfaces the response text — cheapest tell
+			// without a typed error is a substring check. Free/Pro/Team
+			// admins see the upsell; anything else is a real error.
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.includes('legal_team_required') || msg.includes('402')) {
+				retentionGated = true;
+			} else {
+				retentionError = msg;
+			}
+		} finally {
+			retentionLoading = false;
+		}
+	}
+
+	function openPolicyDialog() {
+		policyPrefix = '';
+		policyMode = 'compliance';
+		policyYears = 10;
+		policyBasis = '';
+		policyDialogError = null;
+		policyDialogOpen = true;
+	}
+
+	function closePolicyDialog() {
+		policyDialogOpen = false;
+	}
+
+	async function savePolicy(e: Event) {
+		e.preventDefault();
+		policySaving = true;
+		policyDialogError = null;
+		try {
+			await api.upsertStorageRetentionPolicy(projectId, {
+				prefix: policyPrefix,
+				mode: policyMode,
+				retention_years: policyYears,
+				legal_basis: policyBasis,
+			});
+			policyDialogOpen = false;
+			await loadRetention();
+		} catch (err) {
+			policyDialogError = err instanceof Error ? err.message : 'Failed to save policy';
+		} finally {
+			policySaving = false;
+		}
+	}
+
+	async function removePolicy(prefix: string) {
+		// Confirm because policy deletion means new uploads under that
+		// prefix land WITHOUT WORM — a compliance regression the
+		// operator should have to opt into. Existing objects keep
+		// their S3-side retention (Object Lock is per-object, not
+		// per-policy).
+		if (!confirm(`Remove policy for prefix "${prefix}"?\n\nNew uploads under this prefix will no longer be retained. Existing objects keep their S3 Object Lock until their individual retain-until dates.`)) return;
+		try {
+			await api.removeStorageRetentionPolicy(projectId, prefix);
+			await loadRetention();
+		} catch (err) {
+			retentionError = err instanceof Error ? err.message : 'Failed to remove policy';
+		}
+	}
+
+	async function revokeHold(holdId: string, basis: string) {
+		if (!confirm(`Revoke this retention hold (${basis})?\n\nThe held item will become erasable again on the next DSAR.`)) return;
+		try {
+			await api.revokeRetentionHold(projectId, holdId);
+			await loadRetention();
+		} catch (err) {
+			retentionError = err instanceof Error ? err.message : 'Failed to revoke hold';
+		}
+	}
+
+	function formatTargetRef(hold: RetentionHold): string {
+		try {
+			const ref = hold.target_ref as Record<string, unknown>;
+			if (hold.target_type === 'table' && ref?.schema && ref?.table) {
+				return `${ref.schema}.${ref.table}`;
+			}
+			if (hold.target_type === 'object' && ref?.bucket && ref?.key) {
+				return `${ref.bucket}/${ref.key}`;
+			}
+			if (hold.target_type === 'row' && ref?.schema && ref?.table) {
+				const pkey = ref.pkey ? ` [${JSON.stringify(ref.pkey)}]` : '';
+				return `${ref.schema}.${ref.table}${pkey}`;
+			}
+			return JSON.stringify(hold.target_ref);
+		} catch {
+			return String(hold.target_ref);
+		}
+	}
 </script>
 
 <div class="space-y-6">
@@ -332,6 +479,12 @@
 			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'export' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
 		>
 			Data Export
+		</button>
+		<button
+			onclick={switchToRetention}
+			class="cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-colors {activeTab === 'retention' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}"
+		>
+			Retention
 		</button>
 	</div>
 
@@ -911,5 +1064,245 @@
 		</div>
 	</div>
 {/if}
+{/if}
+
+{#if activeTab === 'retention'}
+	<!--
+		Retention tab. Two lists, one mental model:
+		  • Storage policies (top) — default WORM windows per prefix
+		  • Retention holds (bottom) — ad-hoc row/object holds
+		Both are Legal-Team-only; a Free/Pro/Team admin sees the
+		upgrade card branch below.
+	-->
+
+	{#if retentionLoading}
+		<div class="space-y-4">
+			<div class="h-6 w-40 animate-pulse rounded bg-gray-100"></div>
+			<div class="h-32 animate-pulse rounded-lg bg-gray-100"></div>
+			<div class="h-32 animate-pulse rounded-lg bg-gray-100"></div>
+		</div>
+	{:else if retentionGated}
+		<div class="rounded-lg border-2 border-eurobase-200 bg-eurobase-50/30 p-6 space-y-4">
+			<div class="flex items-start gap-3">
+				<svg class="h-6 w-6 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M12 2.25a.75.75 0 0 1 .53.22l6.72 6.72a.75.75 0 0 1 .22.53v10.28a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V3.75a1.5 1.5 0 0 1 1.5-1.5h6ZM9 12a3 3 0 1 1 6 0 3 3 0 0 1-6 0Z" />
+				</svg>
+				<div class="flex-1">
+					<h2 class="text-lg font-semibold text-gray-900">German legal-tech retention — Legal Team tier</h2>
+					<p class="mt-1 text-sm text-gray-600 leading-relaxed">
+						Per-prefix WORM policies (S3 Object Lock) + row/object-scoped retention holds. Built for tenants subject to §50 BRAO (6y lawyer files), §257 HGB (10y commercial records) or §147 AO (10y tax records).
+					</p>
+				</div>
+			</div>
+
+			<ul class="text-sm text-gray-700 space-y-1.5 ml-9">
+				<li class="flex gap-2"><span class="text-eurobase-600">✓</span><span>Default per-prefix policies — every <code class="rounded bg-white border border-gray-200 px-1.5 py-0.5 font-mono text-[11px]">/invoices/*</code> retained 10y under §257 HGB, WORM-enforced by S3</span></li>
+				<li class="flex gap-2"><span class="text-eurobase-600">✓</span><span>Ad-hoc retention holds on specific rows / objects / tables when a customer cites a legal basis mid-lifetime</span></li>
+				<li class="flex gap-2"><span class="text-eurobase-600">✓</span><span>DSAR erasure refuses held items with a "retained under &lt;basis&gt;, purgeable after &lt;date&gt;" message the requester sees in their export</span></li>
+			</ul>
+
+			<div class="flex items-center gap-3 pt-2">
+				<a href="/pricing" class="cursor-pointer inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors">
+					Upgrade to Legal Team
+					<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" /></svg>
+				</a>
+				<a href="/docs#legal-tech" class="text-sm text-eurobase-700 hover:text-eurobase-800 underline">Read the legal-tech guide</a>
+			</div>
+		</div>
+	{:else}
+		<div class="space-y-8">
+			{#if retentionError}
+				<div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+					<p class="text-sm text-red-700">{retentionError}</p>
+				</div>
+			{/if}
+
+			<!-- Storage retention policies -->
+			<section class="space-y-3">
+				<div class="flex items-center justify-between">
+					<div>
+						<h2 class="text-lg font-semibold text-gray-900">Storage retention policies</h2>
+						<p class="mt-1 text-sm text-gray-500">
+							Per-prefix WORM defaults. New uploads at a matching prefix land under S3 Object Lock for the configured window — even root credentials can't shorten it in compliance mode.
+						</p>
+					</div>
+					<button
+						onclick={openPolicyDialog}
+						class="cursor-pointer inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
+					>
+						<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+						Add policy
+					</button>
+				</div>
+
+				{#if retentionPolicies.length === 0}
+					<div class="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-500">
+						No storage retention policies yet. Common starters:
+						<code class="mx-1 rounded bg-white border border-gray-200 px-1.5 py-0.5 font-mono text-[11px]">invoices/</code> 10y §257 HGB,
+						<code class="mx-1 rounded bg-white border border-gray-200 px-1.5 py-0.5 font-mono text-[11px]">tax/</code> 10y §147 AO,
+						<code class="mx-1 rounded bg-white border border-gray-200 px-1.5 py-0.5 font-mono text-[11px]">mandant/</code> 6y §50 BRAO.
+					</div>
+				{:else}
+					<div class="overflow-hidden rounded-lg border border-gray-200">
+						<table class="min-w-full divide-y divide-gray-200">
+							<thead class="bg-gray-50">
+								<tr>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Prefix</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Mode</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Retention</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Legal basis</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Updated</th>
+									<th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-gray-200 bg-white">
+								{#each retentionPolicies as p}
+									<tr>
+										<td class="px-4 py-2 text-xs font-mono text-gray-900">{p.prefix || '(root)'}</td>
+										<td class="px-4 py-2 text-xs">
+											<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium {p.mode === 'compliance' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}">
+												{p.mode}
+											</span>
+										</td>
+										<td class="px-4 py-2 text-xs text-gray-700">{p.retention_years}y</td>
+										<td class="px-4 py-2 text-xs text-gray-700">{p.legal_basis}</td>
+										<td class="px-4 py-2 text-xs text-gray-500">{formatDate(p.updated_at)}</td>
+										<td class="px-4 py-2 text-right text-xs">
+											<button onclick={() => removePolicy(p.prefix)} class="cursor-pointer text-red-600 hover:text-red-700 font-medium">Remove</button>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</section>
+
+			<!-- Retention holds -->
+			<section class="space-y-3">
+				<div>
+					<h2 class="text-lg font-semibold text-gray-900">Retention holds</h2>
+					<p class="mt-1 text-sm text-gray-500">
+						Ad-hoc holds on specific rows, storage objects, or entire tables. DSAR erasure refuses held items until <code class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[11px]">expires_at</code> passes. Placed via the API — this list is read-only + revoke.
+					</p>
+				</div>
+
+				{#if retentionHolds.length === 0}
+					<div class="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-500">
+						No active retention holds.
+					</div>
+				{:else}
+					<div class="overflow-hidden rounded-lg border border-gray-200">
+						<table class="min-w-full divide-y divide-gray-200">
+							<thead class="bg-gray-50">
+								<tr>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Target</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Legal basis</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Expires</th>
+									<th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-gray-200 bg-white">
+								{#each retentionHolds as h}
+									<tr>
+										<td class="px-4 py-2 text-xs font-mono text-gray-900">{formatTargetRef(h)}</td>
+										<td class="px-4 py-2 text-xs">
+											<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-700">{h.target_type}</span>
+										</td>
+										<td class="px-4 py-2 text-xs text-gray-700">{h.legal_basis}</td>
+										<td class="px-4 py-2 text-xs text-gray-500">{formatDate(h.expires_at)}</td>
+										<td class="px-4 py-2 text-right text-xs">
+											<button onclick={() => revokeHold(h.id, h.legal_basis)} class="cursor-pointer text-red-600 hover:text-red-700 font-medium">Revoke</button>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</section>
+		</div>
+	{/if}
+
+	{#if policyDialogOpen}
+		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onclick={closePolicyDialog}>
+			<form
+				onsubmit={savePolicy}
+				onclick={(e) => e.stopPropagation()}
+				class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl space-y-4"
+			>
+				<div>
+					<h3 class="text-lg font-semibold text-gray-900">Add storage retention policy</h3>
+					<p class="mt-1 text-xs text-gray-500">Existing objects keep their current lock. Only new uploads matching the prefix pick this up.</p>
+				</div>
+
+				<div class="space-y-3">
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Key prefix</span>
+						<input
+							type="text"
+							bind:value={policyPrefix}
+							placeholder="invoices/"
+							required
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						/>
+						<span class="mt-1 block text-[11px] text-gray-500">Longest-matching prefix wins. Empty string = whole bucket.</span>
+					</label>
+
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Mode</span>
+						<select
+							bind:value={policyMode}
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						>
+							<option value="compliance">Compliance — not even root credentials can shorten (recommended for §257/§147/§50)</option>
+							<option value="governance">Governance — override allowed with s3:BypassGovernanceRetention</option>
+						</select>
+					</label>
+
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Retention (years)</span>
+						<input
+							type="number"
+							min="1"
+							max="100"
+							bind:value={policyYears}
+							required
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						/>
+					</label>
+
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Legal basis</span>
+						<input
+							type="text"
+							bind:value={policyBasis}
+							placeholder="§257 HGB — 10y commercial records"
+							required
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						/>
+					</label>
+				</div>
+
+				{#if policyDialogError}
+					<div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+						{policyDialogError}
+					</div>
+				{/if}
+
+				<div class="flex justify-end gap-2 pt-2">
+					<button type="button" onclick={closePolicyDialog} class="cursor-pointer rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
+					<button
+						type="submit"
+						disabled={policySaving}
+						class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						{policySaving ? 'Saving…' : 'Save policy'}
+					</button>
+				</div>
+			</form>
+		</div>
+	{/if}
 {/if}
 </div>

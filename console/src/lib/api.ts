@@ -1404,6 +1404,81 @@ export class EurobaseAPI {
 		return this.fetch<ExportRequestRow>(`/platform/projects/${projectId}/compliance/exports/${exportId}`);
 	}
 
+	// ---- Legal-Team retention (M2b #314 / #330) ----
+	//
+	// All six calls fail with HTTP 402 (Payment Required) + code
+	// "legal_team_required" for projects not on the Legal-Team plan.
+	// The Compliance page catches that and swaps in an upgrade card
+	// rather than surfacing the raw error — same pattern DSAR uses.
+
+	/** List active retention holds (project scope). Legal-Team only. */
+	async listRetentionHolds(projectId: string): Promise<{ holds: RetentionHold[]; total: number }> {
+		return this.fetch<{ holds: RetentionHold[]; total: number }>(
+			`/platform/projects/${projectId}/compliance/retention-holds`,
+		);
+	}
+
+	/** Place a retention hold on a row / object / whole table. Legal-Team only. */
+	async placeRetentionHold(
+		projectId: string,
+		body: {
+			target_type: RetentionTargetType;
+			target_ref: unknown;
+			legal_basis: string;
+			expires_at: string;
+		},
+	): Promise<RetentionHold> {
+		return this.fetch<RetentionHold>(`/platform/projects/${projectId}/compliance/retention-holds`, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	}
+
+	/** Revoke a retention hold by ID. Legal-Team only. */
+	async revokeRetentionHold(projectId: string, holdId: string): Promise<void> {
+		await this.fetch(`/platform/projects/${projectId}/compliance/retention-holds/${holdId}`, {
+			method: 'DELETE',
+		});
+	}
+
+	/** List per-prefix storage-object WORM policies. Legal-Team only. */
+	async listStorageRetentionPolicies(
+		projectId: string,
+	): Promise<{ policies: StorageRetentionPolicy[]; total: number }> {
+		return this.fetch<{ policies: StorageRetentionPolicy[]; total: number }>(
+			`/platform/projects/${projectId}/compliance/storage-retention-policies`,
+		);
+	}
+
+	/**
+	 * Create or update a per-prefix policy. UPSERT keyed by (project, prefix).
+	 * Legal-Team only; also refuses if the tenant's bucket wasn't provisioned
+	 * with S3 Object Lock (tier-upgraded projects).
+	 */
+	async upsertStorageRetentionPolicy(
+		projectId: string,
+		body: {
+			prefix: string;
+			mode: StorageRetentionMode;
+			retention_years: number;
+			legal_basis: string;
+		},
+	): Promise<StorageRetentionPolicy> {
+		return this.fetch<StorageRetentionPolicy>(
+			`/platform/projects/${projectId}/compliance/storage-retention-policies`,
+			{ method: 'POST', body: JSON.stringify(body) },
+		);
+	}
+
+	/** Remove a policy by prefix. Legal-Team only. */
+	async removeStorageRetentionPolicy(projectId: string, prefix: string): Promise<void> {
+		const qs = new URLSearchParams({ prefix });
+		await this.fetch(
+			`/platform/projects/${projectId}/compliance/storage-retention-policies?${qs}`,
+			{ method: 'DELETE' },
+		);
+	}
+
 	// ---- Team Members ----
 
 	/** List members and pending invitations for a project. */
@@ -2139,6 +2214,35 @@ export interface ExportRequestRow {
 	completed_at?: string | null;
 	expires_at?: string | null;
 	created_at: string;
+}
+
+// ---- Legal-Team retention (M2b) ----
+
+export type RetentionTargetType = 'row' | 'object' | 'table';
+
+export interface RetentionHold {
+	id: string;
+	project_id: string;
+	target_type: RetentionTargetType;
+	target_ref: unknown; // JSONB — schema depends on target_type
+	legal_basis: string;
+	expires_at: string;
+	created_by?: string | null;
+	created_at: string;
+}
+
+export type StorageRetentionMode = 'compliance' | 'governance';
+
+export interface StorageRetentionPolicy {
+	id: string;
+	project_id: string;
+	prefix: string;
+	mode: StorageRetentionMode;
+	retention_years: number;
+	legal_basis: string;
+	created_by?: string | null;
+	created_at: string;
+	updated_at: string;
 }
 
 export interface EdgeFunction {
