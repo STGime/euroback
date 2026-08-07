@@ -331,6 +331,15 @@ func main() {
 	// stops firing once the backlog drains.
 	workers.StartBackfillSweeper(ctx, pool, riverClient)
 
+	// ── Retention hold sweeper (Legal-Team M2b, #314) ──
+	// Daily ticker: purges expired retention_holds rows so the
+	// erasure path stops finding stale hold matches and the table
+	// doesn't grow without bound. The hold *itself* is what gets
+	// deleted — the underlying data referenced by target_ref is
+	// separately erasable via the normal DSAR / delete-user paths
+	// once no matching hold exists.
+	workers.StartRetentionHoldSweeper(ctx, pool)
+
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
