@@ -28,6 +28,12 @@ import (
 
 const retentionHoldSweeperInterval = 24 * time.Hour
 
+// RetentionHoldSweeperDeleteSQL is the query the sweeper runs. Exported
+// (and referenced by the shape-check test) so a future edit to the DELETE
+// predicate has to actively touch both files — the previous mirrored
+// literal in the test was a tautology, not a guard.
+const RetentionHoldSweeperDeleteSQL = `DELETE FROM public.retention_holds WHERE expires_at < now()`
+
 // StartRetentionHoldSweeper launches the daily sweeper. Returns
 // immediately; loop exits when ctx is cancelled.
 //
@@ -56,9 +62,7 @@ func StartRetentionHoldSweeper(ctx context.Context, pool *pgxpool.Pool) {
 }
 
 func runRetentionHoldSweeper(ctx context.Context, pool *pgxpool.Pool) error {
-	tag, err := pool.Exec(ctx,
-		`DELETE FROM public.retention_holds WHERE expires_at < now()`,
-	)
+	tag, err := pool.Exec(ctx, RetentionHoldSweeperDeleteSQL)
 	if err != nil {
 		return err
 	}

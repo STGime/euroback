@@ -10,10 +10,13 @@ import (
 // or purges nothing (indefinite growth). Pin the intent so a
 // future edit that widens the predicate has to actively touch
 // this test.
+//
+// Note this asserts against the package-level RetentionHoldSweeperDeleteSQL
+// constant that runRetentionHoldSweeper actually executes — not a
+// hand-copied mirror string. Editing the DELETE in retention_hold_sweeper.go
+// will trip these assertions.
 func TestRetentionHoldSweeper_QueryShape(t *testing.T) {
-	// The runSweeper query is inline. Read it out of the source
-	// file so the test tracks the actual code, not a copy.
-	got := retentionHoldSweeperDeleteSQL()
+	got := RetentionHoldSweeperDeleteSQL
 	for _, want := range []string{
 		"DELETE FROM public.retention_holds",
 		"WHERE expires_at < now()",
@@ -30,13 +33,4 @@ func TestRetentionHoldSweeper_QueryShape(t *testing.T) {
 	if !strings.Contains(got, "expires_at") {
 		t.Fatalf("sweeper query lost expires_at predicate — would purge live holds")
 	}
-}
-
-// Test hook — mirrors the SQL that runRetentionHoldSweeper
-// actually executes. Not exported from the package under test
-// because the SQL is trivial and inlined; the string appears in
-// exactly one place (retention_hold_sweeper.go) and this constant
-// is a defensive mirror kept in the test file.
-func retentionHoldSweeperDeleteSQL() string {
-	return `DELETE FROM public.retention_holds WHERE expires_at < now()`
 }
