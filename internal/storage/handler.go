@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
 
 // recordDownload emits a GDPR personal-data access-log event for a successful
 // storage download. Fire-and-forget via the context recorder (nil-safe).
@@ -52,19 +54,79 @@ func recordDownload(r *http.Request, key string) {
 // maxUploadSize is the gateway-enforced maximum for multipart uploads (50 MB).
 const maxUploadSize = 50 << 20 // 50 MB
 
+// RetentionResolver resolves the object-lock retention window for
+// a given (project, key). Implemented by
+// compliance.StorageRetentionService — kept as an interface here so
+// storage doesn't import compliance (which would be a cycle) and so
+// tests can stub it out.
+//
+// Resolve is the upload-path variant: measures retention from now.
+// ResolveFromUpload is the delete-path variant: measures retention
+// from the object's actual upload time so an already-expired lock
+// doesn't over-block. A zero uploadedAt in ResolveFromUpload behaves
+// like Resolve.
+type RetentionResolver interface {
+	Resolve(ctx context.Context, projectID, key string) (Retention, error)
+	ResolveFromUpload(ctx context.Context, projectID, key string, uploadedAt time.Time) (Retention, error)
+}
+
+// HoldChecker reports whether a given storage object is under an
+// active retention hold that predates the S3 Object Lock system.
+// Implemented by compliance.HoldService.IsHeldObject — same
+// no-import-cycle motivation as RetentionResolver.
+//
+// Two layers on purpose:
+//   - S3 Object Lock (via RetentionResolver at upload time) covers
+//     the *default* policy — every /invoices/* upload retained 10y.
+//   - retention_holds (via HoldChecker at delete time) covers the
+//     ad-hoc case: ops places a hold on a specific object mid-
+//     lifetime under a legal-basis a customer only just cited.
+//
+// The delete path checks the hold first (cheap DB call) then hits
+// S3 (which enforces the default policy). Belt-and-braces: a hold
+// can protect an object that S3 wouldn't refuse, and Object Lock
+// protects the default case even if a hold row is missing.
+type HoldChecker interface {
+	IsHeldObject(ctx context.Context, projectID, bucket, key string) (retentionUntil time.Time, held bool, err error)
+}
+
+
 // StorageHandler holds dependencies for the storage HTTP handlers.
 type StorageHandler struct {
-	s3     *S3Client
-	pool   *pgxpool.Pool
-	engine *query.QueryEngine
+	s3        *S3Client
+	pool      *pgxpool.Pool
+	engine    *query.QueryEngine
+	retention RetentionResolver
+	holds     HoldChecker
 }
 
 // NewStorageHandler creates a new StorageHandler backed by the given S3Client
 // and database pool (used to track uploads in storage_objects). The query
 // engine is used to run RLS-aware ownership checks before S3 fetches so an
 // end-user can't download another end-user's files by guessing the key.
+//
+// A retention resolver is optional (nil-safe) — Free/Pro/Team projects
+// pass nil and uploads land without any Object Lock retention. Legal-
+// Team projects pass a resolver that looks up per-prefix policies from
+// public.storage_retention_policies.
 func NewStorageHandler(s3 *S3Client, pool *pgxpool.Pool, engine *query.QueryEngine) *StorageHandler {
 	return &StorageHandler{s3: s3, pool: pool, engine: engine}
+}
+
+// WithRetentionResolver attaches a retention resolver so upload paths
+// derive WORM retention from per-prefix policies. Chainable; safe to
+// omit for non-Legal-Team gateway builds.
+func (h *StorageHandler) WithRetentionResolver(r RetentionResolver) *StorageHandler {
+	h.retention = r
+	return h
+}
+
+// WithHoldChecker attaches a hold checker so the delete path refuses
+// with 409 object_locked when the object is under an active
+// retention_holds row. Chainable; nil-safe for non-Legal-Team builds.
+func (h *StorageHandler) WithHoldChecker(c HoldChecker) *StorageHandler {
+	h.holds = c
+	return h
 }
 
 // assertObjectVisible runs a short SELECT against storage_objects under the
@@ -260,7 +322,8 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		"user", userID,
 	)
 
-	if err := h.s3.UploadObject(r.Context(), bucket, key, file, contentType, size); err != nil {
+	retention := h.retentionFor(r, key)
+	if err := h.s3.UploadObjectWithRetention(r.Context(), bucket, key, file, contentType, size, retention); err != nil {
 		slog.Error("storage upload failed", "error", err, "bucket", bucket, "key", key)
 		http.Error(w, `{"error":"failed to upload file"}`, http.StatusInternalServerError)
 		return
@@ -401,7 +464,59 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Retention checks BEFORE the S3 call. Two reasons this has to
+	// happen pre-S3 for the policy layer too, not just the hold layer:
+	//
+	// 1. Object Lock at bucket-create force-enables versioning. On a
+	//    versioned bucket, DeleteObject *without* VersionId writes a
+	//    delete marker and returns success — Object Lock only refuses
+	//    a specific locked version. So the S3-side lock protects data
+	//    at rest, but a bare DeleteObject silently succeeds and hides
+	//    the object from future listings even though the underlying
+	//    version is retained. The app then deletes the tracking row
+	//    and forgets it entirely.
+	// 2. We can catch the delete before the tracking row goes, so the
+	//    caller sees a clean 409 with retention_until instead of
+	//    "success + object vanished from listings."
+	//
+	// Ordering: hold layer first (an ad-hoc hold overrides the
+	// default), policy layer second (bucket-wide default).
+	pc, _ := auth.ProjectFromContext(r.Context())
+	projectID := ""
+	if pc != nil {
+		projectID = pc.ProjectID
+	}
+
+	if h.holds != nil && projectID != "" {
+		until, held, herr := h.holds.IsHeldObject(r.Context(), projectID, bucket, key)
+		if herr != nil {
+			slog.Warn("storage delete: hold check failed", "error", herr, "key", key)
+		} else if held {
+			writeObjectLockedResponse(w, until)
+			return
+		}
+	}
+
+	if h.retention != nil && projectID != "" {
+		uploadedAt := h.lookupUploadedAt(r, key) // zero if unknown
+		ret, rerr := h.retention.ResolveFromUpload(r.Context(), projectID, key, uploadedAt)
+		if rerr != nil {
+			slog.Warn("storage delete: retention resolver failed", "error", rerr, "key", key)
+		} else if ret.Mode != "" && time.Now().Before(ret.RetainUntil) {
+			writeObjectLockedResponse(w, ret.RetainUntil)
+			return
+		}
+	}
+
 	if err := h.s3.DeleteObject(r.Context(), bucket, key); err != nil {
+		// Backstop: if S3 refuses (e.g. a version-scoped delete we
+		// don't issue here, or a future code path that does), still
+		// translate to 409 rather than leaking as a 500.
+		var locked *ErrObjectLocked
+		if errors.As(err, &locked) {
+			writeObjectLockedResponse(w, locked.RetainUntil)
+			return
+		}
 		slog.Error("storage delete failed", "error", err, "bucket", bucket, "key", key)
 		http.Error(w, `{"error":"failed to delete file"}`, http.StatusInternalServerError)
 		return
@@ -487,9 +602,17 @@ type signedURLRequest struct {
 }
 
 // signedURLResponse is the JSON response with the generated URL.
+//
+// Headers is populated only for retention-aware upload URLs (Legal-
+// Team projects, key under a per-prefix policy). The client MUST
+// echo every listed header on the PUT — S3 baked their values into
+// the SigV4 signature so a missing one fails with
+// SignatureDoesNotMatch. Preserving the lock's non-droppable
+// property while still telling the client what to send.
 type signedURLResponse struct {
-	URL       string    `json:"url"`
-	ExpiresAt time.Time `json:"expires_at"`
+	URL       string            `json:"url"`
+	ExpiresAt time.Time         `json:"expires_at"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 // GenerateSignedURL handles POST /v1/storage/signed-url.
@@ -544,8 +667,9 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	}
 
 	var (
-		url    string
-		expiry time.Duration
+		url            string
+		signedHeaders  map[string]string
+		expiry         time.Duration
 	)
 
 	switch req.Operation {
@@ -558,7 +682,13 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		} else {
 			expiry = 15 * time.Minute // default for upload
 		}
-		url, err = h.s3.GeneratePresignedUploadURL(r.Context(), bucket, req.Key, req.ContentType, expiry)
+		retention := h.retentionFor(r, req.Key)
+		p, perr := h.s3.GeneratePresignedUploadURLWithRetention(r.Context(), bucket, req.Key, req.ContentType, expiry, retention)
+		if p != nil {
+			url = p.URL
+			signedHeaders = p.SignedHeaders
+		}
+		err = perr
 
 	case "download":
 		if req.ExpiresIn > 0 {
@@ -578,6 +708,7 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	resp := signedURLResponse{
 		URL:       url,
 		ExpiresAt: time.Now().Add(expiry),
+		Headers:   signedHeaders,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -605,4 +736,75 @@ func (h *StorageHandler) schemaForRequest(r *http.Request) string {
 		return pc.SchemaName
 	}
 	return ""
+}
+
+// lookupUploadedAt returns the created_at from storage_objects for
+// the given key, or zero if the row can't be found. The zero is a
+// signal (not an error) — ResolveFromUpload treats it as "measure
+// from now" (defensive over-block), so a missing tracking row for a
+// currently-policied object still gets refused. Best-effort by
+// design: a DB blip here shouldn't block a delete for a Free-tier
+// project that has no policy anyway (the retention check itself
+// only runs when h.retention != nil).
+func (h *StorageHandler) lookupUploadedAt(r *http.Request, key string) time.Time {
+	schema := h.schemaForRequest(r)
+	if schema == "" || h.pool == nil {
+		return time.Time{}
+	}
+	esc := strings.ReplaceAll(schema, `"`, `""`)
+	q := fmt.Sprintf(`SELECT created_at FROM "%s".storage_objects WHERE key = $1`, esc)
+	var t time.Time
+	if err := edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, key).Scan(&t)
+	}); err != nil {
+		// No row / RLS filter / query error — leave zero so the
+		// resolver defaults to over-block. slog is intentionally
+		// debug: a missing tracking row for an untracked object
+		// (uploaded pre-tracking, or via a path that doesn't
+		// record) is normal, not an error.
+		return time.Time{}
+	}
+	return t
+}
+
+// writeObjectLockedResponse writes the shared 409 JSON envelope for
+// a delete refused by either the hold layer, the policy layer, or
+// the S3 backstop. Kept in one place so the shape ({error, code,
+// retention_until?}) stays consistent across the three call sites.
+func writeObjectLockedResponse(w http.ResponseWriter, retentionUntil time.Time) {
+	resp := map[string]any{
+		"error": "object is under retention hold",
+		"code":  "object_locked",
+	}
+	if !retentionUntil.IsZero() {
+		resp["retention_until"] = retentionUntil.Format(time.RFC3339)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// retentionFor returns the S3 Object Lock retention window that
+// applies to (project, key), or a zero-value Retention if either the
+// resolver is unwired (non-Legal-Team gateway build), the project has
+// no matching policy, or the resolver errors. A resolver failure is
+// logged but does not block the upload — the fall-open behaviour is
+// intentional: a broken policy lookup shouldn't take down the write
+// path for the whole tenant, and the object goes in with no lock
+// rather than none-at-all being written.
+func (h *StorageHandler) retentionFor(r *http.Request, key string) Retention {
+	if h.retention == nil {
+		return Retention{}
+	}
+	pc, ok := auth.ProjectFromContext(r.Context())
+	if !ok || pc == nil || pc.ProjectID == "" {
+		return Retention{}
+	}
+	ret, err := h.retention.Resolve(r.Context(), pc.ProjectID, key)
+	if err != nil {
+		slog.Warn("storage: retention resolver failed, uploading without lock",
+			"error", err, "project_id", pc.ProjectID, "key", key)
+		return Retention{}
+	}
+	return ret
 }

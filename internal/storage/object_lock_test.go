@@ -1,0 +1,151 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+// isObjectLockedError is what the DeleteObject path uses to decide
+// whether an S3 error is a retention refusal (translates to HTTP
+// 409) vs a real failure (500). Getting this wrong in either
+// direction has consequences:
+//   - False positive: a real S3 permission error gets translated to
+//     "object locked", masking the actual bug.
+//   - False negative: a Legal-Team tenant deletes a tax invoice
+//     mid-retention and only finds out at the next audit that the
+//     GoBD immutability chain is broken.
+// Pin the substrings so a future edit doesn't quietly narrow the
+// detector.
+func TestIsObjectLockedError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"generic AccessDenied", errors.New("AccessDenied: user not authorized"), false},
+		{"scaleway object-lock phrasing", errors.New("Access Denied because object protected by object lock"), true},
+		{"aws retention-period phrasing", errors.New("access denied by object lock: retention period not expired"), true},
+		{"case-insensitive match", errors.New("OPERATION FAILED: OBJECT LOCK RETENTION"), true},
+		{"connection reset (real failure)", errors.New("connection reset by peer"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isObjectLockedError(tc.err); got != tc.want {
+				t.Errorf("isObjectLockedError(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// ErrObjectLocked.Error() shape matters because the message flows
+// out to slog telemetry (visible to ops). Both paths (with and
+// without a known retention-until) must produce a readable line.
+func TestErrObjectLockedMessage(t *testing.T) {
+	e := &ErrObjectLocked{Bucket: "eurobase-acme", Key: "invoices/2026/inv-001.pdf"}
+	if got := e.Error(); got == "" {
+		t.Fatalf("empty error message")
+	}
+
+	e.RetainUntil = time.Date(2036, 1, 1, 0, 0, 0, 0, time.UTC)
+	if got := e.Error(); got == "" || !contains(got, "2036") {
+		t.Errorf("expected message to include retention year, got %q", got)
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// #349 review-round-2 blocker: the header VALUES echoed to the client
+// must match byte-exact what the SDK signed. The SDK uses smithy's
+// FormatDateTime ("2006-01-02T15:04:05.999Z", millisecond precision),
+// so a hand-rolled RFC3339 emit diverges whenever RetainUntil has
+// sub-second precision → SignatureDoesNotMatch on the client's PUT.
+//
+// Fix: pull the two X-Amz-Object-Lock-* headers directly out of
+// presigned.SignedHeader (byte-exact by construction). This test
+// pins that extractObjectLockHeaders returns exactly the two lock
+// headers, case-normalised, and drops everything else the SDK
+// signed (Host, X-Amz-Content-Sha256, X-Amz-Date, etc.).
+func TestExtractObjectLockHeaders(t *testing.T) {
+	in := map[string][]string{
+		"Host":                                {"example.com"},
+		"X-Amz-Content-Sha256":                {"UNSIGNED-PAYLOAD"},
+		"X-Amz-Date":                          {"20260807T120000Z"},
+		"X-Amz-Object-Lock-Mode":              {"COMPLIANCE"},
+		"X-Amz-Object-Lock-Retain-Until-Date": {"2036-08-07T20:01:25.699Z"},
+		"Content-Type":                        {"application/pdf"},
+	}
+	got := extractObjectLockHeaders(in)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 lock headers, got %d: %v", len(got), got)
+	}
+	if got["x-amz-object-lock-mode"] != "COMPLIANCE" {
+		t.Errorf("mode: got %q", got["x-amz-object-lock-mode"])
+	}
+	// Byte-exact preservation of the SDK's format — crucially
+	// INCLUDING the millisecond fraction — is the whole point.
+	if got["x-amz-object-lock-retain-until-date"] != "2036-08-07T20:01:25.699Z" {
+		t.Errorf("retain-until: got %q, want byte-exact millisecond value from SDK",
+			got["x-amz-object-lock-retain-until-date"])
+	}
+}
+
+// #349 review blocker: presigned upload URLs signed with retention
+// headers used to return only the URL, so the client had no way to
+// know it must send x-amz-object-lock-* on the PUT — every retention-
+// prefix signed-URL upload failed with 403 SignatureDoesNotMatch.
+// Pin that SignedHeaders is populated on the retention path and
+// empty on the plain path.
+func TestPresignedUploadSignedHeaders(t *testing.T) {
+	client := setupTestS3(t)
+	ctx := context.Background()
+	bucket := "test-presign-headers"
+	t.Cleanup(func() { _ = client.DeleteBucket(ctx, bucket) })
+	if err := client.CreateBucket(ctx, bucket); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	t.Run("no retention → no headers", func(t *testing.T) {
+		p, err := client.GeneratePresignedUploadURLWithRetention(ctx, bucket, "plain.txt", "text/plain", 0, Retention{})
+		if err != nil {
+			t.Fatalf("presign: %v", err)
+		}
+		if p.URL == "" {
+			t.Errorf("empty URL")
+		}
+		if len(p.SignedHeaders) != 0 {
+			t.Errorf("expected no signed headers, got %v", p.SignedHeaders)
+		}
+	})
+
+	t.Run("with retention → lock headers surfaced", func(t *testing.T) {
+		retainUntil := time.Now().Add(24 * time.Hour).UTC()
+		p, err := client.GeneratePresignedUploadURLWithRetention(ctx, bucket, "invoices/x.pdf", "application/pdf", 0, Retention{
+			Mode:        RetentionCompliance,
+			RetainUntil: retainUntil,
+		})
+		if err != nil {
+			t.Fatalf("presign: %v", err)
+		}
+		if p.URL == "" {
+			t.Errorf("empty URL")
+		}
+		mode := p.SignedHeaders["x-amz-object-lock-mode"]
+		if mode != "COMPLIANCE" {
+			t.Errorf("mode header: got %q, want COMPLIANCE", mode)
+		}
+		until := p.SignedHeaders["x-amz-object-lock-retain-until-date"]
+		if until == "" {
+			t.Errorf("retain-until header missing")
+		}
+	})
+}
