@@ -30,6 +30,14 @@ import (
 
 const auditArchiveExportInterval = 24 * time.Hour
 
+// auditArchiveMaxBatchesPerTick caps the drain loop so a runaway
+// insert rate can't turn a single tick into an unbounded upload
+// storm. 50 batches × 5000 rows = 250k rows/tick default — enough
+// to catch up a multi-day backlog on the second daily run but
+// still bounded. If ops needs to bulk-drain more, they can
+// temporarily flip AUDIT_ARCHIVE_EXPORT_BATCH_SIZE up.
+const auditArchiveMaxBatchesPerTick = 50
+
 // StartAuditArchiveExporter launches the daily dumper loop. Returns
 // immediately; the loop exits when ctx is cancelled. Reads config
 // once from env:
@@ -52,15 +60,43 @@ func StartAuditArchiveExporter(ctx context.Context, pool *pgxpool.Pool, s3 *stor
 		Bucket:    bucket,
 		KeyPrefix: os.Getenv("AUDIT_ARCHIVE_EXPORT_PREFIX"),
 	}
+	// Unparseable env values for retention/batch-size fall back to
+	// defaults inside NewArchiveExporter — but silently doing that
+	// on a value controlling a 10-year legal-retention window is a
+	// footgun. Warn loud so an ops typo is visible in the first
+	// pod-boot log line.
 	if v := os.Getenv("AUDIT_ARCHIVE_RETENTION_YEARS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.RetentionYears = n
+		} else {
+			slog.Warn("audit archive exporter: AUDIT_ARCHIVE_RETENTION_YEARS not a positive int, using default (10)",
+				"value", v)
 		}
 	}
 	if v := os.Getenv("AUDIT_ARCHIVE_EXPORT_BATCH_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.BatchSize = n
+		} else {
+			slog.Warn("audit archive exporter: AUDIT_ARCHIVE_EXPORT_BATCH_SIZE not a positive int, using default (5000)",
+				"value", v)
 		}
+	}
+
+	// Preflight: turn "ops pointed at a non-Object-Lock bucket" into
+	// one clear startup log rather than an InvalidRequest error on
+	// every daily tick forever. Failure to check (e.g. transient
+	// network) is warn-only — we still start the loop; the first
+	// tick will surface the real problem.
+	preflightCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if enabled, err := s3.ObjectLockEnabled(preflightCtx, bucket); err != nil {
+		slog.Warn("audit archive exporter: could not verify Object Lock on bucket, continuing",
+			"bucket", bucket, "error", err)
+	} else if !enabled {
+		slog.Error("audit archive exporter: bucket does not have S3 Object Lock enabled, exporter disabled",
+			"bucket", bucket,
+			"remediation", "recreate the bucket with object-lock-enabled=true; Object Lock cannot be added to an existing bucket")
+		return
 	}
 
 	exporter := audit.NewArchiveExporter(pool, &s3WORMUploader{s3: s3}, cfg)
@@ -92,21 +128,44 @@ func StartAuditArchiveExporter(ctx context.Context, pool *pgxpool.Pool, s3 *stor
 	)
 }
 
-// runArchiveExport drains the archive one batch per tick — a
-// backfilling deploy can catch up over successive ticks rather than
-// blocking the goroutine on a giant single upload. If ops wants
-// aggressive catch-up they can drop the interval or set a bigger
-// batch size.
+// runArchiveExport drains the archive until it's empty (or the
+// per-tick batch cap trips), so backlog + first-tick catch-up
+// actually work. Without the loop, a single-batch tick against a
+// project appending faster than BatchSize rows/day would let the
+// archive grow forever with every tick "succeeding."
+//
+// Cap: auditArchiveMaxBatchesPerTick. Kept so a pathological insert
+// rate can't turn one 24h tick into an unbounded upload storm; the
+// next tick picks up whatever's left. Log the "not drained this
+// tick" case explicitly so ops sees the backlog on the daily line.
 func runArchiveExport(ctx context.Context, e *audit.ArchiveExporter) error {
-	res, err := e.Run(ctx)
-	if err != nil {
-		return err
-	}
-	if res != nil && res.RowsDumped > 0 {
+	var totalRows int64
+	var totalBatches int
+	for i := 0; i < auditArchiveMaxBatchesPerTick; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		res, err := e.Run(ctx)
+		if err != nil {
+			return err
+		}
+		if res == nil || res.RowsDumped == 0 {
+			break
+		}
+		totalRows += res.RowsDumped
+		totalBatches += res.Batches
 		slog.Info("audit archive exporter: batch dumped",
 			"rows", res.RowsDumped,
 			"object_keys", res.ObjectKeys,
 		)
+	}
+	if totalBatches == auditArchiveMaxBatchesPerTick {
+		slog.Warn("audit archive exporter: batch cap reached, archive not fully drained this tick",
+			"batches", totalBatches, "rows", totalRows,
+			"next_tick_in", auditArchiveExportInterval.String())
+	} else if totalBatches > 0 {
+		slog.Info("audit archive exporter: tick complete",
+			"batches", totalBatches, "rows", totalRows)
 	}
 	return nil
 }

@@ -62,31 +62,25 @@ func TestArchiveExporter_MissingBucketRefuses(t *testing.T) {
 	}
 }
 
-// #170 review-round-1 blocker prevention: retain-until MUST be
-// truncated to second. Without this the SDK's smithy layout diverges
-// from RFC3339 emission at any downstream re-serialiser, same class
-// of bug as #349 GeneratePresignedUploadURLWithRetention. Not
-// user-facing here (server-side upload) but keeping the invariant
-// consistent across every retention-header emit site avoids a class
-// of bug rather than a single instance.
-//
-// The exporter constructs retention inline; assert on the shape a
-// downstream reader would see.
-func TestWORMRetentionShape(t *testing.T) {
-	now := time.Now().UTC()
-	r := WORMRetention{
-		Mode:        "COMPLIANCE",
-		RetainUntil: now.AddDate(10, 0, 0).Truncate(time.Second),
+// #170 review nit: test the actual buildRetention that Run() calls,
+// not a locally-constructed replica. If someone deletes
+// .Truncate(time.Second) from buildRetention, this test must fail.
+// (Prior version constructed its own WORMRetention and asserted on
+// it — pure tautology, would pass a broken implementation.)
+func TestBuildRetention(t *testing.T) {
+	now := time.Date(2026, 8, 8, 12, 34, 56, 789_000_000, time.UTC)
+	got := buildRetention(ArchiveExportConfig{RetentionYears: 10}, now)
+
+	if got.Mode != "COMPLIANCE" {
+		t.Errorf("mode must be COMPLIANCE for §257 HGB / §147 AO, got %q", got.Mode)
 	}
-	if r.Mode != "COMPLIANCE" {
-		t.Errorf("mode must be COMPLIANCE for §257 HGB / §147 AO, got %q", r.Mode)
-	}
-	if r.RetainUntil.Nanosecond() != 0 {
+	if got.RetainUntil.Nanosecond() != 0 {
 		t.Errorf("retain-until must be second-precision (SDK smithy layout compatibility), got %d ns",
-			r.RetainUntil.Nanosecond())
+			got.RetainUntil.Nanosecond())
 	}
-	if r.RetainUntil.Before(now) {
-		t.Errorf("retain-until must be in the future")
+	wantUntil := time.Date(2036, 8, 8, 12, 34, 56, 0, time.UTC)
+	if !got.RetainUntil.Equal(wantUntil) {
+		t.Errorf("retain-until = %v, want %v (now+10y, second-truncated)", got.RetainUntil, wantUntil)
 	}
 }
 

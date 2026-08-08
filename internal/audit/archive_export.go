@@ -231,13 +231,7 @@ func (e *ArchiveExporter) Run(ctx context.Context) (*ArchiveExportResult, error)
 		runID,
 	)
 
-	// Object Lock: compliance mode, retain-until = now + N years.
-	// Truncated to second so the SDK's smithy layout matches (same
-	// fix as #349 GeneratePresignedUploadURLWithRetention).
-	retention := WORMRetention{
-		Mode:        "COMPLIANCE",
-		RetainUntil: time.Now().UTC().AddDate(e.cfg.RetentionYears, 0, 0).Truncate(time.Second),
-	}
+	retention := buildRetention(e.cfg, time.Now())
 
 	body := buf.Bytes()
 	if err := e.up.Upload(ctx, e.cfg.Bucket, key,
@@ -251,6 +245,16 @@ func (e *ArchiveExporter) Run(ctx context.Context) (*ArchiveExportResult, error)
 	// next tick re-uploads the same rows to a new key — bounded
 	// duplication rather than dropped rows. Consumers dedupe on
 	// (id, archived_at).
+	//
+	// DELETE-by-id assumes each audit_log.id appears at most once in
+	// audit_log_archive. 000097's UNIQUE(id, archived_at) tolerates
+	// (but does not enforce) a same-id second row from a hypothetical
+	// second writer with a different archived_at — today's invariant
+	// is that prune_audit_log_by_plan archives+deletes in one tx so a
+	// second archived row can't appear. If a second writer ever gets
+	// added, tighten this to DELETE WHERE (id, archived_at) IN (…)
+	// to avoid purging an un-uploaded sibling copy. The RowsAffected
+	// mismatch warn below is the belt-and-braces guard.
 	tag, err := e.pool.Exec(ctx,
 		`DELETE FROM public.audit_log_archive WHERE id = ANY($1::uuid[])`,
 		ids,
@@ -269,6 +273,25 @@ func (e *ArchiveExporter) Run(ctx context.Context) (*ArchiveExportResult, error)
 	res.RowsDumped = rowCount
 	res.ObjectKeys = []string{key}
 	return res, nil
+}
+
+// buildRetention derives the Object Lock retention window for the
+// archive blob. Extracted so the invariants (COMPLIANCE mode +
+// second-truncation) sit in one testable place instead of being
+// buried in Run() — a test that removes .Truncate(time.Second) or
+// flips the mode should fail here regardless of whether Run() is
+// exercised end-to-end.
+//
+// The second-truncation matters because the SDK's smithy layout for
+// x-amz-object-lock-retain-until-date is ".999Z"; sub-second
+// precision at construction time doesn't survive round-trip to a
+// consumer that re-serializes as RFC3339 (same class of bug as
+// #349 GeneratePresignedUploadURLWithRetention).
+func buildRetention(cfg ArchiveExportConfig, now time.Time) WORMRetention {
+	return WORMRetention{
+		Mode:        "COMPLIANCE",
+		RetainUntil: now.UTC().AddDate(cfg.RetentionYears, 0, 0).Truncate(time.Second),
+	}
 }
 
 // randomHex returns n random bytes hex-encoded. crypto/rand only —
