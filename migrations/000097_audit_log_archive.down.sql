@@ -1,9 +1,15 @@
 BEGIN;
 
--- Revert the CREATE OR REPLACE by pointing prune_audit_log_by_plan
--- back at the archive-less shape from 000096.
-CREATE OR REPLACE FUNCTION public.prune_audit_log_by_plan(fallback_days int)
-RETURNS TABLE(plan text, project_id uuid, rows_deleted bigint)
+-- DROP + CREATE (not CREATE OR REPLACE): PG rejects any change to
+-- the RETURNS TABLE column names via OR REPLACE. This down path
+-- restores the archive-less prune body — but a symmetric up amend
+-- may or may not have renamed the output params, so DROP-first
+-- keeps the migration idempotent regardless of the target DB's
+-- current signature.
+DROP FUNCTION IF EXISTS public.prune_audit_log_by_plan(int);
+
+CREATE FUNCTION public.prune_audit_log_by_plan(fallback_days int)
+RETURNS TABLE(o_plan text, o_project_id uuid, o_rows_deleted bigint)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
@@ -59,11 +65,16 @@ BEGIN
            SET last_pruned_seq = EXCLUDED.last_pruned_seq,
                last_row_hash   = EXCLUDED.last_row_hash,
                updated_at      = EXCLUDED.updated_at;
-        plan := r.plan_code; project_id := r.project_id; rows_deleted := v_deleted;
+        o_plan := r.plan_code; o_project_id := r.project_id; o_rows_deleted := v_deleted;
         RETURN NEXT;
     END LOOP;
     RETURN;
 END$$;
+
+-- Re-apply the #217 lockdown ACLs after DROP.
+ALTER FUNCTION public.prune_audit_log_by_plan(int) OWNER TO eurobase_migrator;
+REVOKE EXECUTE ON FUNCTION public.prune_audit_log_by_plan(int) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION public.prune_audit_log_by_plan(int) TO eurobase_gateway;
 
 DROP TABLE IF EXISTS public.audit_log_archive;
 

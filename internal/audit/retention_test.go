@@ -296,3 +296,56 @@ func TestRetention_PerPlanCutoff(t *testing.T) {
 			archived)
 	}
 }
+
+// TestRetention_ArchiveMirrorsAuditLogColumns is the guard the 000097
+// header promises: every column on public.audit_log must also exist
+// on public.audit_log_archive, so a future `ALTER TABLE audit_log
+// ADD COLUMN` fails this test loudly instead of silently producing
+// archive rows missing the new column. archive-only bookkeeping
+// columns (archived_at, archived_reason) are allowed extras.
+func TestRetention_ArchiveMirrorsAuditLogColumns(t *testing.T) {
+	_, _, pool := setupAuditTest(t)
+	ctx := context.Background()
+
+	loadCols := func(table string) (map[string]string, error) {
+		rows, err := pool.Query(ctx,
+			`SELECT column_name, data_type
+			   FROM information_schema.columns
+			  WHERE table_schema = 'public' AND table_name = $1`, table)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var name, typ string
+			if err := rows.Scan(&name, &typ); err != nil {
+				return nil, err
+			}
+			out[name] = typ
+		}
+		return out, rows.Err()
+	}
+
+	src, err := loadCols("audit_log")
+	if err != nil {
+		t.Fatalf("load audit_log columns: %v", err)
+	}
+	dst, err := loadCols("audit_log_archive")
+	if err != nil {
+		t.Fatalf("load audit_log_archive columns: %v", err)
+	}
+
+	for col, typ := range src {
+		got, ok := dst[col]
+		if !ok {
+			t.Errorf("audit_log.%s (%s) missing from audit_log_archive — a new column was added to audit_log without mirroring; new prune runs will silently drop this column from the durable copy",
+				col, typ)
+			continue
+		}
+		if got != typ {
+			t.Errorf("audit_log.%s type=%s but audit_log_archive.%s type=%s — divergent types will error at INSERT time or silently lose precision",
+				col, typ, col, got)
+		}
+	}
+}

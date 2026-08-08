@@ -34,10 +34,15 @@
 --     unique on (id, archived_at) would let a mis-configured
 --     re-run coexist safely if the archive ever grew a second
 --     writer — cheap insurance.
---   * REVOKE FROM PUBLIC per the #217 convention. eurobase_gateway
---     needs INSERT (via the SECURITY DEFINER prune function, which
---     runs as migrator anyway — but the grant kept for symmetry with
---     audit_log's grants).
+--   * Grants: SELECT/INSERT to eurobase_gateway (symmetric with
+--     audit_log; the SECURITY DEFINER prune runs as migrator so the
+--     runtime grant isn't strictly required, kept for future
+--     non-SECDEF readers), plus DELETE/TRUNCATE to
+--     eurobase_developer so #170 can dump-then-truncate when it
+--     lands. No REVOKE PUBLIC needed on the table itself — tables
+--     don't get a default PUBLIC ACL; the #217 lockdown is only
+--     about SECURITY DEFINER function EXECUTE (which the recreated
+--     prune_audit_log_by_plan below re-applies after DROP).
 
 BEGIN;
 
@@ -74,11 +79,22 @@ CREATE INDEX ix_audit_log_archive_archived_at ON public.audit_log_archive(archiv
 GRANT SELECT, INSERT ON public.audit_log_archive TO eurobase_gateway;
 GRANT SELECT, INSERT, DELETE, TRUNCATE ON public.audit_log_archive TO eurobase_developer;
 
--- Now update prune_audit_log_by_plan to write the archive row
--- BEFORE the delete. CREATE OR REPLACE preserves the function's
--- OID + grants, so no re-GRANT dance.
+-- Update prune_audit_log_by_plan to write the archive row BEFORE
+-- the delete.
+--
+-- DROP + CREATE (not CREATE OR REPLACE): PG rejects any change to
+-- the RETURNS TABLE column names via OR REPLACE ("cannot change
+-- return type of existing function"). If a target DB applied an
+-- earlier 000096 revision with the pre-`o_` names — plain
+-- `plan`/`project_id`/`rows_deleted` — CREATE OR REPLACE with the
+-- `o_` names would refuse and dirty the migration. DROP-first is
+-- rename-proof either way.
+--
+-- ACLs are lost on DROP (unlike OR REPLACE), so we re-apply the
+-- #217 lockdown after CREATE below.
+DROP FUNCTION IF EXISTS public.prune_audit_log_by_plan(int);
 
-CREATE OR REPLACE FUNCTION public.prune_audit_log_by_plan(fallback_days int)
+CREATE FUNCTION public.prune_audit_log_by_plan(fallback_days int)
 RETURNS TABLE(o_plan text, o_project_id uuid, o_rows_deleted bigint)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -171,5 +187,13 @@ BEGIN
     END LOOP;
     RETURN;
 END$$;
+
+-- Re-apply the #217 lockdown ACLs. DROP wiped them; without this
+-- block, EXECUTE reverts to default PUBLIC and any tenant role
+-- with USAGE on public could invoke this SECURITY DEFINER
+-- cross-tenant.
+ALTER FUNCTION public.prune_audit_log_by_plan(int) OWNER TO eurobase_migrator;
+REVOKE EXECUTE ON FUNCTION public.prune_audit_log_by_plan(int) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION public.prune_audit_log_by_plan(int) TO eurobase_gateway;
 
 COMMIT;
