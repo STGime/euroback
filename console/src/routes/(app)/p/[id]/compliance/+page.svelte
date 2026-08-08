@@ -2,6 +2,7 @@
 	import { page } from '$app/stores';
 	import {
 		api,
+		APIError,
 		type DPAReport,
 		type AuditLogEntry,
 		type EndUser,
@@ -366,15 +367,13 @@
 			retentionPolicies = policies.policies ?? [];
 			retentionHolds = holds.holds ?? [];
 		} catch (err) {
-			// The three routes return 402 with body {"code":"legal_team_required"}.
-			// The fetch wrapper surfaces the response text — cheapest tell
-			// without a typed error is a substring check. Free/Pro/Team
-			// admins see the upsell; anything else is a real error.
-			const msg = err instanceof Error ? err.message : String(err);
-			if (msg.includes('legal_team_required') || msg.includes('402')) {
+			// 402 + code:legal_team_required → upgrade card. The
+			// backend can reword the human message any time; the
+			// machine-readable code is the contract we branch on.
+			if (err instanceof APIError && err.code === 'legal_team_required') {
 				retentionGated = true;
 			} else {
-				retentionError = msg;
+				retentionError = err instanceof Error ? err.message : String(err);
 			}
 		} finally {
 			retentionLoading = false;
@@ -429,10 +428,22 @@
 		}
 	}
 
-	async function revokeHold(holdId: string, basis: string) {
-		if (!confirm(`Revoke this retention hold (${basis})?\n\nThe held item will become erasable again on the next DSAR.`)) return;
+	async function revokeHold(hold: RetentionHold) {
+		// The most consequence-laden action on this page — revoking
+		// makes a legally-held item erasable on the next DSAR. Show
+		// the exact target so an operator can't confuse it with a
+		// neighbouring hold on a different row/object.
+		const target = formatTargetRef(hold);
+		const msg =
+			`Revoke this retention hold?\n\n` +
+			`  Target: ${target}\n` +
+			`  Type:   ${hold.target_type}\n` +
+			`  Basis:  ${hold.legal_basis}\n` +
+			`  Expires: ${formatDate(hold.expires_at)}\n\n` +
+			`The held item will become erasable again on the next DSAR request.`;
+		if (!confirm(msg)) return;
 		try {
-			await api.revokeRetentionHold(projectId, holdId);
+			await api.revokeRetentionHold(projectId, hold.id);
 			await loadRetention();
 		} catch (err) {
 			retentionError = err instanceof Error ? err.message : 'Failed to revoke hold';
@@ -1213,7 +1224,7 @@
 										<td class="px-4 py-2 text-xs text-gray-700">{h.legal_basis}</td>
 										<td class="px-4 py-2 text-xs text-gray-500">{formatDate(h.expires_at)}</td>
 										<td class="px-4 py-2 text-right text-xs">
-											<button onclick={() => revokeHold(h.id, h.legal_basis)} class="cursor-pointer text-red-600 hover:text-red-700 font-medium">Revoke</button>
+											<button onclick={() => revokeHold(h)} class="cursor-pointer text-red-600 hover:text-red-700 font-medium">Revoke</button>
 										</td>
 									</tr>
 								{/each}
@@ -1226,11 +1237,17 @@
 	{/if}
 
 	{#if policyDialogOpen}
-		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onclick={closePolicyDialog}>
+		<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+			<!-- Button backdrop so click-outside + Escape close, keyboard + a11y clean -->
+			<button
+				type="button"
+				aria-label="Close dialog"
+				onclick={closePolicyDialog}
+				class="absolute inset-0 bg-black/40 cursor-default"
+			></button>
 			<form
 				onsubmit={savePolicy}
-				onclick={(e) => e.stopPropagation()}
-				class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl space-y-4"
+				class="relative w-full max-w-md rounded-lg bg-white p-6 shadow-xl space-y-4"
 			>
 				<div>
 					<h3 class="text-lg font-semibold text-gray-900">Add storage retention policy</h3>

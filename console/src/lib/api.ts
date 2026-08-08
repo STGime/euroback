@@ -388,6 +388,39 @@ function parseAPIError(status: number, body: string): string {
 	return `Error ${status}: ${body}`;
 }
 
+// parseErrorCode extracts the "code" field a Go handler sets alongside
+// "error" — e.g. {"error":"…","code":"legal_team_required"} on the 402
+// tier-gate paths. Callers use it to branch on machine-readable
+// outcomes (upgrade card vs. red banner) without substring-matching
+// the human-readable message, which the backend can reword any time.
+function parseErrorCode(body: string): string | undefined {
+	const match = body.match(/"code":"([^"]+)"/);
+	return match ? match[1] : undefined;
+}
+
+/**
+ * APIError is the typed rejection thrown by every EurobaseAPI method.
+ * Carrying `status` + `code` alongside the human message lets callers
+ * branch deterministically — e.g. `err.code === 'legal_team_required'`
+ * → render the upgrade card, without regex-matching the message text.
+ *
+ * Backwards-compatible with plain `Error` catches (`.message` still
+ * populated); new callers can `instanceof APIError` to reach the
+ * structured fields.
+ */
+export class APIError extends Error {
+	readonly status: number;
+	readonly code?: string;
+	readonly body: string;
+	constructor(status: number, body: string) {
+		super(parseAPIError(status, body));
+		this.name = 'APIError';
+		this.status = status;
+		this.code = parseErrorCode(body);
+		this.body = body;
+	}
+}
+
 export class EurobaseAPI {
 	private baseURL: string;
 
@@ -438,7 +471,7 @@ export class EurobaseAPI {
 				}
 			}
 			const body = await res.text().catch(() => '');
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 
 		// Handle 204 No Content
@@ -476,7 +509,7 @@ export class EurobaseAPI {
 				}
 			}
 			const body = await res.text().catch(() => '');
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 
 		return res;
@@ -498,7 +531,7 @@ export class EurobaseAPI {
 
 		if (!res.ok) {
 			const body = await res.text().catch(() => '');
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 
 		if (res.status === 204) return undefined as unknown as T;
@@ -689,7 +722,7 @@ export class EurobaseAPI {
 		if (res.status === 503) return null; // billing not enabled → same UX as "no subscription"
 		if (!res.ok) {
 			const body = await res.text();
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 		return (await res.json()) as ProjectSubscription;
 	}
