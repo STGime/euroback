@@ -340,6 +340,14 @@ func main() {
 	// once no matching hold exists.
 	workers.StartRetentionHoldSweeper(ctx, pool)
 
+	// Daily dumper: drain public.audit_log_archive to a platform-
+	// managed S3 bucket with S3 Object Lock, then purge the
+	// archived rows. Closes the retention loop the prune path
+	// depended on. Disabled (worker logs "not configured") if
+	// AUDIT_ARCHIVE_EXPORT_BUCKET is unset — archive rows keep
+	// accumulating in the DB until ops flips it on.
+	workers.StartAuditArchiveExporter(ctx, pool, s3Client)
+
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
