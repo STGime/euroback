@@ -201,3 +201,81 @@ func TestRetention_RunDefaults(t *testing.T) {
 		t.Errorf("default config should not prune audit_log, got %d deleted", res.AuditLogRowsDeleted)
 	}
 }
+
+// TestRetention_PerPlanCutoff pins the #317 contract: a Team project's
+// audit_log rows are pruned using the plan's own 365-day cap, not the
+// fallback the worker passes for Free/Pro projects. Verifies:
+//   - Rows back-dated 400 days on a `team` project → pruned (365 < 400)
+//   - Rows back-dated 30 days on a `team` project → kept (365 > 30)
+//   - Chain head always survives
+//   - Result rows carry the plan code so ops can see per-tier breakdown
+func TestRetention_PerPlanCutoff(t *testing.T) {
+	svc, projectID, pool := setupAuditTest(t)
+	ctx := context.Background()
+
+	// Flip the fixture project from 'free' to 'team' so the pruner
+	// picks up plan_limits.audit_log_retention_days = 365 for it.
+	if _, err := pool.Exec(ctx,
+		`UPDATE public.projects SET plan = 'team' WHERE id = $1`, projectID); err != nil {
+		t.Skipf("cannot flip project plan (UPDATE denied?): %v", err)
+	}
+
+	svc.Log(ctx, projectID, "", "admin@eurobase.app", "plan.old.one")
+	svc.Log(ctx, projectID, "", "admin@eurobase.app", "plan.old.two")
+	svc.Log(ctx, projectID, "", "admin@eurobase.app", "plan.recent")
+	svc.Log(ctx, projectID, "", "admin@eurobase.app", "plan.head")
+
+	// Back-date the two "old" rows past the 365-day cap. Leave the
+	// recent one at 30d (within cap) and the head at now().
+	if _, err := pool.Exec(ctx,
+		`UPDATE public.audit_log SET created_at = created_at - interval '400 days'
+		 WHERE project_id = $1 AND action IN ('plan.old.one','plan.old.two')`,
+		projectID); err != nil {
+		t.Skipf("cannot back-date rows (UPDATE denied): %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE public.audit_log SET created_at = created_at - interval '30 days'
+		 WHERE project_id = $1 AND action = 'plan.recent'`,
+		projectID); err != nil {
+		t.Skipf("cannot back-date recent row (UPDATE denied): %v", err)
+	}
+
+	// Fallback = 0 (Free/Pro get no pruning). The team plan's 365d
+	// cap should still apply and remove the two 400-day rows.
+	ret := NewRetentionService(pool)
+	res, err := ret.Run(ctx, RetentionConfig{
+		AuditLogRetentionDays:        0,
+		DataAccessLogRetentionMonths: 0,
+		FuturePartitionsMonthsAhead:  0,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// This test project should be represented in the per-plan
+	// breakdown under the "team" key. Other projects in the shared
+	// test DB may also contribute, so assert >= 2 rather than == 2.
+	if got := res.AuditLogPerPlan["team"]; got < 2 {
+		t.Errorf("per-plan team count = %d, want >= 2 (two back-dated rows)", got)
+	}
+
+	// The 30-day row (recent) and the head must survive.
+	var remaining int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM public.audit_log WHERE project_id = $1`,
+		projectID).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining: %v", err)
+	}
+	if remaining != 2 {
+		t.Fatalf("expected 2 rows remaining (recent + head), got %d", remaining)
+	}
+
+	// Chain still verifies after the plan-aware prune.
+	vres, err := svc.Verify(ctx, projectID)
+	if err != nil {
+		t.Fatalf("Verify post-prune: %v", err)
+	}
+	if !vres.OK {
+		t.Fatalf("post-prune verify broken: %s", vres.Reason)
+	}
+}

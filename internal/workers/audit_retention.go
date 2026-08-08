@@ -88,6 +88,7 @@ func runOnce(ctx context.Context, svc *audit.RetentionService, cfg audit.Retenti
 	}
 	slog.Info("audit retention run complete",
 		"audit_log_rows_deleted", res.AuditLogRowsDeleted,
+		"audit_log_per_plan", res.AuditLogPerPlan,
 		"data_access_partitions_ensured", res.DataAccessPartitionsEnsured,
 		"data_access_partitions_dropped", res.DataAccessPartitionsDropped,
 	)

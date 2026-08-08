@@ -17,10 +17,13 @@ import (
 // RetentionConfig tunes the retention worker. Zero values mean "skip this
 // task" — operators can disable individual streams without touching code.
 type RetentionConfig struct {
-	// AuditLogRetentionDays: rows in `public.audit_log` older than this
-	// are deleted, per project, leaving a chain checkpoint behind so
-	// Verify still walks cleanly. 0 = never prune in DB (the off-box
-	// WORM dump in #170 is the long-term store).
+	// AuditLogRetentionDays: fallback cutoff for the audit_log
+	// pruner, used for projects whose plan_limits.audit_log_retention_days
+	// is 0 (Free / Pro today) and for the global chain
+	// (project_id IS NULL — platform-level events). Team / Legal-Team
+	// projects use their plan's per-tier value (365 / 3650) regardless
+	// of this fallback. 0 = never prune the fallback set (matches
+	// pre-#317 default; the WORM dump in #170 is the long-term store).
 	AuditLogRetentionDays int
 
 	// DataAccessLogRetentionMonths: monthly partitions of
@@ -49,9 +52,10 @@ func DefaultRetentionConfig() RetentionConfig {
 // RetentionResult summarizes one pass of the retention worker. Useful for
 // log lines and for the test suite to assert.
 type RetentionResult struct {
-	AuditLogRowsDeleted          int64
-	DataAccessPartitionsDropped  []string
-	DataAccessPartitionsEnsured  int
+	AuditLogRowsDeleted         int64
+	AuditLogPerPlan             map[string]int64 // plan code → rows deleted this pass
+	DataAccessPartitionsDropped []string
+	DataAccessPartitionsEnsured int
 }
 
 // RetentionService is the Go wrapper around the SQL helpers added in
@@ -99,13 +103,32 @@ func (s *RetentionService) Run(ctx context.Context, cfg RetentionConfig) (*Reten
 		}
 	}
 
-	if cfg.AuditLogRetentionDays > 0 {
-		if err := s.pool.QueryRow(ctx,
-			`SELECT public.prune_audit_log($1)`,
-			cfg.AuditLogRetentionDays,
-		).Scan(&res.AuditLogRowsDeleted); err != nil {
-			return res, fmt.Errorf("prune audit_log: %w", err)
+	// Plan-aware pruning (#317). Runs unconditionally: Team gets
+	// 365d and Legal-Team gets 3650d regardless of whether ops has
+	// set the fallback env var. AuditLogRetentionDays only kicks in
+	// for chains whose plan cap is 0 (Free / Pro / global). Setting
+	// it to 0 is the operator's "leave the fallback set alone."
+	rows, err := s.pool.Query(ctx,
+		`SELECT plan, rows_deleted FROM public.prune_audit_log_by_plan($1)`,
+		cfg.AuditLogRetentionDays,
+	)
+	if err != nil {
+		return res, fmt.Errorf("prune audit_log by plan: %w", err)
+	}
+	res.AuditLogPerPlan = map[string]int64{}
+	for rows.Next() {
+		var plan string
+		var n int64
+		if err := rows.Scan(&plan, &n); err != nil {
+			rows.Close()
+			return res, fmt.Errorf("scan prune result: %w", err)
 		}
+		res.AuditLogPerPlan[plan] += n
+		res.AuditLogRowsDeleted += n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("iterate prune results: %w", err)
 	}
 
 	return res, nil
