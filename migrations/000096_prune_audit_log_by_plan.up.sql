@@ -30,7 +30,7 @@
 BEGIN;
 
 CREATE OR REPLACE FUNCTION public.prune_audit_log_by_plan(fallback_days int)
-RETURNS TABLE(plan text, project_id uuid, rows_deleted bigint)
+RETURNS TABLE(o_plan text, o_project_id uuid, o_rows_deleted bigint)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
@@ -108,9 +108,11 @@ BEGIN
 
         -- Emit a row per chain we actually pruned. The worker
         -- aggregates for logging so ops sees per-tier counts.
-        plan         := r.plan_code;
-        project_id   := r.project_id;
-        rows_deleted := v_deleted;
+        -- Output params prefixed o_ to avoid the plpgsql pitfall
+        -- of same-name-as-column shadowing inside the loop body.
+        o_plan         := r.plan_code;
+        o_project_id   := r.project_id;
+        o_rows_deleted := v_deleted;
         RETURN NEXT;
     END LOOP;
     RETURN;

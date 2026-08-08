@@ -109,7 +109,7 @@ func (s *RetentionService) Run(ctx context.Context, cfg RetentionConfig) (*Reten
 	// for chains whose plan cap is 0 (Free / Pro / global). Setting
 	// it to 0 is the operator's "leave the fallback set alone."
 	rows, err := s.pool.Query(ctx,
-		`SELECT plan, rows_deleted FROM public.prune_audit_log_by_plan($1)`,
+		`SELECT o_plan, o_rows_deleted FROM public.prune_audit_log_by_plan($1)`,
 		cfg.AuditLogRetentionDays,
 	)
 	if err != nil {

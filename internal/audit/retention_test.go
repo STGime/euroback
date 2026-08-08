@@ -278,4 +278,21 @@ func TestRetention_PerPlanCutoff(t *testing.T) {
 	if !vres.OK {
 		t.Fatalf("post-prune verify broken: %s", vres.Reason)
 	}
+
+	// #351 review: the deleted rows must have landed in the
+	// archive with archived_reason = plan code. Without this,
+	// pruning would silently destroy audit history the surrounding
+	// code has always claimed the WORM store (#170, unimplemented)
+	// was retaining.
+	var archived int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM public.audit_log_archive
+		  WHERE project_id = $1 AND archived_reason = 'team'`,
+		projectID).Scan(&archived); err != nil {
+		t.Fatalf("count archived: %v", err)
+	}
+	if archived < 2 {
+		t.Errorf("expected >= 2 rows in audit_log_archive with archived_reason='team', got %d — pruning may be destroying data with no durable copy",
+			archived)
+	}
 }
