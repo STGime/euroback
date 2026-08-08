@@ -388,6 +388,39 @@ function parseAPIError(status: number, body: string): string {
 	return `Error ${status}: ${body}`;
 }
 
+// parseErrorCode extracts the "code" field a Go handler sets alongside
+// "error" — e.g. {"error":"…","code":"legal_team_required"} on the 402
+// tier-gate paths. Callers use it to branch on machine-readable
+// outcomes (upgrade card vs. red banner) without substring-matching
+// the human-readable message, which the backend can reword any time.
+function parseErrorCode(body: string): string | undefined {
+	const match = body.match(/"code":"([^"]+)"/);
+	return match ? match[1] : undefined;
+}
+
+/**
+ * APIError is the typed rejection thrown by every EurobaseAPI method.
+ * Carrying `status` + `code` alongside the human message lets callers
+ * branch deterministically — e.g. `err.code === 'legal_team_required'`
+ * → render the upgrade card, without regex-matching the message text.
+ *
+ * Backwards-compatible with plain `Error` catches (`.message` still
+ * populated); new callers can `instanceof APIError` to reach the
+ * structured fields.
+ */
+export class APIError extends Error {
+	readonly status: number;
+	readonly code?: string;
+	readonly body: string;
+	constructor(status: number, body: string) {
+		super(parseAPIError(status, body));
+		this.name = 'APIError';
+		this.status = status;
+		this.code = parseErrorCode(body);
+		this.body = body;
+	}
+}
+
 export class EurobaseAPI {
 	private baseURL: string;
 
@@ -438,7 +471,7 @@ export class EurobaseAPI {
 				}
 			}
 			const body = await res.text().catch(() => '');
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 
 		// Handle 204 No Content
@@ -476,7 +509,7 @@ export class EurobaseAPI {
 				}
 			}
 			const body = await res.text().catch(() => '');
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 
 		return res;
@@ -498,7 +531,7 @@ export class EurobaseAPI {
 
 		if (!res.ok) {
 			const body = await res.text().catch(() => '');
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 
 		if (res.status === 204) return undefined as unknown as T;
@@ -689,7 +722,7 @@ export class EurobaseAPI {
 		if (res.status === 503) return null; // billing not enabled → same UX as "no subscription"
 		if (!res.ok) {
 			const body = await res.text();
-			throw new Error(parseAPIError(res.status, body || res.statusText));
+			throw new APIError(res.status, body || res.statusText);
 		}
 		return (await res.json()) as ProjectSubscription;
 	}
@@ -1402,6 +1435,81 @@ export class EurobaseAPI {
 	/** Get a single export by ID. download_url is populated when status === 'completed'. */
 	async getExport(projectId: string, exportId: string): Promise<ExportRequestRow> {
 		return this.fetch<ExportRequestRow>(`/platform/projects/${projectId}/compliance/exports/${exportId}`);
+	}
+
+	// ---- Legal-Team retention (M2b #314 / #330) ----
+	//
+	// All six calls fail with HTTP 402 (Payment Required) + code
+	// "legal_team_required" for projects not on the Legal-Team plan.
+	// The Compliance page catches that and swaps in an upgrade card
+	// rather than surfacing the raw error — same pattern DSAR uses.
+
+	/** List active retention holds (project scope). Legal-Team only. */
+	async listRetentionHolds(projectId: string): Promise<{ holds: RetentionHold[]; total: number }> {
+		return this.fetch<{ holds: RetentionHold[]; total: number }>(
+			`/platform/projects/${projectId}/compliance/retention-holds`,
+		);
+	}
+
+	/** Place a retention hold on a row / object / whole table. Legal-Team only. */
+	async placeRetentionHold(
+		projectId: string,
+		body: {
+			target_type: RetentionTargetType;
+			target_ref: unknown;
+			legal_basis: string;
+			expires_at: string;
+		},
+	): Promise<RetentionHold> {
+		return this.fetch<RetentionHold>(`/platform/projects/${projectId}/compliance/retention-holds`, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	}
+
+	/** Revoke a retention hold by ID. Legal-Team only. */
+	async revokeRetentionHold(projectId: string, holdId: string): Promise<void> {
+		await this.fetch(`/platform/projects/${projectId}/compliance/retention-holds/${holdId}`, {
+			method: 'DELETE',
+		});
+	}
+
+	/** List per-prefix storage-object WORM policies. Legal-Team only. */
+	async listStorageRetentionPolicies(
+		projectId: string,
+	): Promise<{ policies: StorageRetentionPolicy[]; total: number }> {
+		return this.fetch<{ policies: StorageRetentionPolicy[]; total: number }>(
+			`/platform/projects/${projectId}/compliance/storage-retention-policies`,
+		);
+	}
+
+	/**
+	 * Create or update a per-prefix policy. UPSERT keyed by (project, prefix).
+	 * Legal-Team only; also refuses if the tenant's bucket wasn't provisioned
+	 * with S3 Object Lock (tier-upgraded projects).
+	 */
+	async upsertStorageRetentionPolicy(
+		projectId: string,
+		body: {
+			prefix: string;
+			mode: StorageRetentionMode;
+			retention_years: number;
+			legal_basis: string;
+		},
+	): Promise<StorageRetentionPolicy> {
+		return this.fetch<StorageRetentionPolicy>(
+			`/platform/projects/${projectId}/compliance/storage-retention-policies`,
+			{ method: 'POST', body: JSON.stringify(body) },
+		);
+	}
+
+	/** Remove a policy by prefix. Legal-Team only. */
+	async removeStorageRetentionPolicy(projectId: string, prefix: string): Promise<void> {
+		const qs = new URLSearchParams({ prefix });
+		await this.fetch(
+			`/platform/projects/${projectId}/compliance/storage-retention-policies?${qs}`,
+			{ method: 'DELETE' },
+		);
 	}
 
 	// ---- Team Members ----
@@ -2139,6 +2247,35 @@ export interface ExportRequestRow {
 	completed_at?: string | null;
 	expires_at?: string | null;
 	created_at: string;
+}
+
+// ---- Legal-Team retention (M2b) ----
+
+export type RetentionTargetType = 'row' | 'object' | 'table';
+
+export interface RetentionHold {
+	id: string;
+	project_id: string;
+	target_type: RetentionTargetType;
+	target_ref: unknown; // JSONB — schema depends on target_type
+	legal_basis: string;
+	expires_at: string;
+	created_by?: string | null;
+	created_at: string;
+}
+
+export type StorageRetentionMode = 'compliance' | 'governance';
+
+export interface StorageRetentionPolicy {
+	id: string;
+	project_id: string;
+	prefix: string;
+	mode: StorageRetentionMode;
+	retention_years: number;
+	legal_basis: string;
+	created_by?: string | null;
+	created_at: string;
+	updated_at: string;
 }
 
 export interface EdgeFunction {
