@@ -2,10 +2,13 @@ package compliance
 
 import "testing"
 
-// #353: validateEndpoint per-kind rules matter because a mis-typed
-// webhook URL or plaintext http would silently open an insecure
-// forwarding path. Pin the each rejection reason so a future edit
-// can't quietly relax it.
+// #353 (+ #356 review): validateEndpoint per-kind rules matter
+// because a mis-typed webhook URL or plaintext http would silently
+// open an insecure forwarding path, and permissive host validation
+// would let a tenant point the deliverers at internal targets
+// (SSRF-via-integration — cloud metadata service, cluster-internal
+// IPs, k8s API, shared Postgres). Every rejection reason pinned
+// with a substring so a future edit can't quietly relax it.
 func TestValidateEndpoint(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -13,17 +16,37 @@ func TestValidateEndpoint(t *testing.T) {
 		ep      string
 		wantErr string // substring the error must contain; "" = accept
 	}{
+		// Webhook accept
 		{"webhook https accepted", DestinationWebhook, "https://example.com/audit", ""},
+		// Webhook scheme / shape rejections
 		{"webhook http rejected", DestinationWebhook, "http://example.com/audit", "https"},
 		{"webhook empty rejected", DestinationWebhook, "", "required"},
 		{"webhook whitespace rejected", DestinationWebhook, "   ", "required"},
 		{"webhook missing host rejected", DestinationWebhook, "https://", "host"},
 		{"webhook bad scheme rejected", DestinationWebhook, "ftp://example.com", "https"},
+		// Webhook SSRF rejections
+		{"webhook localhost rejected", DestinationWebhook, "https://localhost/audit", "localhost"},
+		{"webhook 127.0.0.1 rejected", DestinationWebhook, "https://127.0.0.1/audit", "loopback"},
+		{"webhook RFC1918 10.x rejected", DestinationWebhook, "https://10.0.0.1/audit", "private"},
+		{"webhook RFC1918 192.168 rejected", DestinationWebhook, "https://192.168.1.1/audit", "private"},
+		{"webhook RFC1918 172.16 rejected", DestinationWebhook, "https://172.16.0.1/audit", "private"},
+		{"webhook AWS metadata IP rejected", DestinationWebhook, "https://169.254.169.254/latest/meta-data/", "link-local"},
+		{"webhook IPv6 loopback rejected", DestinationWebhook, "https://[::1]/audit", "loopback"},
+		{"webhook IPv6 ULA rejected", DestinationWebhook, "https://[fc00::1]/audit", "private"},
+		{"webhook 0.0.0.0 rejected", DestinationWebhook, "https://0.0.0.0/audit", "0.0.0.0"},
 
+		// Syslog accept
 		{"syslog host:port accepted", DestinationSyslog, "siem.example.com:6514", ""},
-		{"syslog IP:port accepted", DestinationSyslog, "10.0.0.1:6514", ""},
+		// Syslog SSRF rejections
+		{"syslog RFC1918 rejected", DestinationSyslog, "10.0.0.1:6514", "private"},
+		{"syslog localhost rejected", DestinationSyslog, "localhost:6514", "localhost"},
+		{"syslog 127.0.0.1 rejected", DestinationSyslog, "127.0.0.1:6514", "loopback"},
+		{"syslog metadata IP rejected", DestinationSyslog, "169.254.169.254:80", "link-local"},
+		// Syslog shape rejections
 		{"syslog missing port rejected", DestinationSyslog, "siem.example.com", "host:port"},
 		{"syslog empty rejected", DestinationSyslog, "", "required"},
+		{"syslog trailing garbage rejected", DestinationSyslog, "siem.example.com:6514/junk", "1..65535"},
+		{"syslog port out of range rejected", DestinationSyslog, "siem.example.com:99999", "1..65535"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

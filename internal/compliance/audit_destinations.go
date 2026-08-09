@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -250,6 +252,23 @@ func (s *DestinationService) Remove(ctx context.Context, projectID, destID strin
 // without conflating it with "DB error" or "validation error."
 var ErrDestinationNotFound = errors.New("audit export destination not found")
 
+// ErrValidation wraps user-actionable input errors so the HTTP layer
+// can safely surface the message as a 400 body. Everything else
+// (DB failures, UNIQUE collisions, connection drops) falls through
+// as a generic 500 with the details in slog — a bare error
+// pass-through would leak constraint names / connection strings /
+// query fragments into a client-visible JSON.
+type ErrValidation struct{ err error }
+
+func (e *ErrValidation) Error() string { return e.err.Error() }
+func (e *ErrValidation) Unwrap() error { return e.err }
+
+// invalid is the small constructor. Kept short so validators read
+// naturally: `return invalid("kind must be webhook or syslog")`.
+func invalid(format string, a ...any) error {
+	return &ErrValidation{err: fmt.Errorf(format, a...)}
+}
+
 // ── validation helpers ─────────────────────────────────────────────
 
 func validateKind(k DestinationKind) error {
@@ -257,7 +276,7 @@ func validateKind(k DestinationKind) error {
 	case DestinationWebhook, DestinationSyslog:
 		return nil
 	default:
-		return fmt.Errorf("kind must be webhook or syslog, got %q", k)
+		return invalid("kind must be webhook or syslog, got %q", k)
 	}
 }
 
@@ -266,53 +285,123 @@ func validateFormat(f DestinationFormat) error {
 	case FormatJSON, FormatCEF:
 		return nil
 	default:
-		return fmt.Errorf("format must be json or cef, got %q", f)
+		return invalid("format must be json or cef, got %q", f)
 	}
 }
 
-// validateEndpoint shape-checks per kind. Webhook = https URL only
-// (plaintext http rejected — SIEM traffic must not travel
-// unencrypted). Syslog = host:port with a numeric port.
+// validateEndpoint shape-checks per kind, and — critically —
+// rejects hosts that would let a tenant turn the deliverers into
+// an internal port-scanner / metadata-service proxy (SSRF-via-
+// integration). This is the layer whose job that check is; the
+// deliverers (#354/#355) inherit the contract we set here.
+//
+// Rejected literals: loopback, RFC1918, link-local (169.254.*),
+// Unique Local Addresses (fc00::/7), unspecified (0.0.0.0/::), and
+// the "localhost" hostname. https-only for webhook keeps audit
+// traffic off plaintext.
+//
+// **Necessary but not sufficient**: this only defends against
+// literals + `localhost`. A tenant can still register
+// `attacker.com` whose DNS resolves to `10.0.0.1` at delivery time
+// (DNS rebinding). The deliverers (#354 webhook, #355 syslog) MUST
+// re-check the resolved IP at dial time via a custom `DialContext`
+// or an egress proxy — this file only enforces the registration-
+// time half. Do not remove that requirement when implementing the
+// deliverers.
 func validateEndpoint(kind DestinationKind, endpoint string) error {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
-		return errors.New("endpoint is required")
+		return invalid("endpoint is required")
 	}
 	switch kind {
 	case DestinationWebhook:
 		u, err := url.Parse(endpoint)
 		if err != nil {
-			return fmt.Errorf("endpoint is not a valid URL: %w", err)
+			return invalid("endpoint is not a valid URL: %v", err)
 		}
 		if u.Scheme != "https" {
-			return errors.New("webhook endpoint must use https (plaintext http rejected — audit traffic must not travel unencrypted)")
+			return invalid("webhook endpoint must use https (plaintext http rejected — audit traffic must not travel unencrypted)")
 		}
-		if u.Host == "" {
-			return errors.New("webhook endpoint is missing host")
+		host := u.Hostname()
+		if host == "" {
+			return invalid("webhook endpoint is missing host")
+		}
+		if err := validateHostNotInternal(host); err != nil {
+			return err
 		}
 	case DestinationSyslog:
-		// host:port. url.Parse doesn't like bare host:port; use the
-		// SplitHostPort helper via net after prepending a scheme so
-		// the parser has something to chew on.
-		host, port, err := parseHostPort(endpoint)
+		host, port, err := splitHostPort(endpoint)
 		if err != nil {
-			return fmt.Errorf("syslog endpoint must be host:port: %w", err)
+			return invalid("syslog endpoint must be host:port: %v", err)
 		}
-		if host == "" || port == "" {
-			return errors.New("syslog endpoint must be host:port")
+		if err := validateHostNotInternal(host); err != nil {
+			return err
+		}
+		if p, err := parsePort(port); err != nil || p < 1 || p > 65535 {
+			return invalid("syslog endpoint port must be 1..65535")
 		}
 	}
 	return nil
 }
 
-func parseHostPort(s string) (string, string, error) {
-	// Prepend a scheme so url.Parse fills Host correctly. Any scheme
-	// works — we throw it away.
-	u, err := url.Parse("proto://" + s)
+// validateHostNotInternal rejects hosts that would let a tenant
+// direct the deliverer at an internal target. Applied identically to
+// both kinds — the SSRF surface is symmetric.
+//
+// Two matches:
+//   - Literal "localhost" (case-insensitively) — the common footgun.
+//   - Parseable IPs: loopback, private, link-local, ULA (v6),
+//     unspecified. These are all guaranteed non-public regardless of
+//     any future DNS state.
+//
+// Non-literal hostnames pass through here unchanged — the deliverers
+// bear the DNS-rebinding half of the responsibility (see
+// validateEndpoint header).
+func validateHostNotInternal(host string) error {
+	if strings.EqualFold(host, "localhost") {
+		return invalid("endpoint host may not be localhost — internal targets are not allowed to prevent SSRF into cluster services")
+	}
+	// url.Hostname() strips brackets from IPv6, so ParseIP works.
+	if ip := net.ParseIP(host); ip != nil {
+		switch {
+		case ip.IsLoopback():
+			return invalid("endpoint host may not be a loopback address (SSRF prevention)")
+		case ip.IsUnspecified():
+			return invalid("endpoint host may not be 0.0.0.0 / :: (SSRF prevention)")
+		case ip.IsPrivate():
+			return invalid("endpoint host may not be a private/RFC1918/ULA address (SSRF prevention)")
+		case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+			return invalid("endpoint host may not be a link-local address (SSRF prevention — includes cloud metadata service)")
+		case ip.IsInterfaceLocalMulticast() || ip.IsMulticast():
+			return invalid("endpoint host may not be a multicast address")
+		}
+	}
+	return nil
+}
+
+// splitHostPort accepts "host:port" (or "[v6]:port"). Uses
+// net.SplitHostPort so trailing garbage and userinfo can't ride
+// along undetected the way parse-with-fake-scheme allowed.
+func splitHostPort(s string) (string, string, error) {
+	host, port, err := net.SplitHostPort(s)
 	if err != nil {
 		return "", "", err
 	}
-	return u.Hostname(), u.Port(), nil
+	if host == "" {
+		return "", "", errors.New("host is empty")
+	}
+	if port == "" {
+		return "", "", errors.New("port is empty")
+	}
+	return host, port, nil
+}
+
+func parsePort(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────
@@ -365,8 +454,15 @@ func HandleCreateDestination(pool *pgxpool.Pool, limits *plans.LimitsService, sv
 
 		d, err := svc.Create(r.Context(), projectID, req.Kind, req.Endpoint, req.SecretRef, req.Format, enabled, actorID)
 		if err != nil {
-			slog.Warn("create audit export destination failed", "error", err, "project_id", projectID)
-			httpError(w, http.StatusBadRequest, err.Error())
+			var v *ErrValidation
+			if errors.As(err, &v) {
+				httpError(w, http.StatusBadRequest, v.Error())
+				return
+			}
+			// Real infrastructure error — don't leak SQL / connection
+			// details through the response. slog carries the detail.
+			slog.Error("create audit export destination failed", "error", err, "project_id", projectID)
+			httpError(w, http.StatusInternalServerError, "create failed")
 			return
 		}
 		if auditSvc != nil {
@@ -430,8 +526,13 @@ func HandleUpdateDestination(pool *pgxpool.Pool, limits *plans.LimitsService, sv
 				httpError(w, http.StatusNotFound, "not found")
 				return
 			}
-			slog.Warn("update audit export destination failed", "error", err, "project_id", projectID)
-			httpError(w, http.StatusBadRequest, err.Error())
+			var v *ErrValidation
+			if errors.As(err, &v) {
+				httpError(w, http.StatusBadRequest, v.Error())
+				return
+			}
+			slog.Error("update audit export destination failed", "error", err, "project_id", projectID)
+			httpError(w, http.StatusInternalServerError, "update failed")
 			return
 		}
 

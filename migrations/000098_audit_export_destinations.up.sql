@@ -18,12 +18,14 @@
 --
 -- secret_ref names a key in the tenant vault
 -- (public.vault_secrets.name, tenant-scoped by project_id). NULL is
--- legal — a webhook without an HMAC secret is a design choice the
--- tenant might make (public/read-only sinks); the deliverer treats
--- NULL as "sign with empty key" which still lets the sink verify
--- structural fields (timestamp, event count) even if the signature
--- itself is not a secret. The console UI will nudge toward setting
--- one.
+-- legal but weakens authenticity: without a shared secret the
+-- deliverer OMITS the signature header entirely — an HMAC with a
+-- known/empty key is a checksum, not a signature (anyone who knows
+-- the scheme can forge it), and pretending otherwise would give
+-- the sink a false sense of security. Console UI must nudge hard
+-- toward setting a secret and label NULL-secret destinations
+-- "unauthenticated" so the operator makes the trust choice
+-- knowingly.
 --
 -- UNIQUE (project_id, endpoint, kind) prevents an operator from
 -- registering the same URL twice — accidental duplicate delivery
