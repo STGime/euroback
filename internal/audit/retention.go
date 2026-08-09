@@ -22,8 +22,10 @@ type RetentionConfig struct {
 	// is 0 (Free / Pro today) and for the global chain
 	// (project_id IS NULL — platform-level events). Team / Legal-Team
 	// projects use their plan's per-tier value (365 / 3650) regardless
-	// of this fallback. 0 = never prune the fallback set (matches
-	// pre-#317 default; the WORM dump in #170 is the long-term store).
+	// of this fallback. 0 = never prune the fallback set. Pruned rows
+	// land in public.audit_log_archive (000097) and are subsequently
+	// dumped off-box to S3 Object Lock by the StartAuditArchiveExporter
+	// worker (#170 object-dump), so this is a move, not a destruction.
 	AuditLogRetentionDays int
 
 	// DataAccessLogRetentionMonths: monthly partitions of
