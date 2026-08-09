@@ -589,6 +589,19 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/storage-retention-policies", compliance.HandleListStorageRetentionPolicies(pool, limitsSvc, storageRetentionSvc))
 			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/storage-retention-policies", compliance.HandleRemoveStorageRetentionPolicy(pool, limitsSvc, storageRetentionSvc))
 
+			// SIEM export destinations (#353). Per-tenant sinks —
+			// customer registers a webhook or syslog endpoint; the
+			// deliverers (#354 / #355) forward each audit_log event.
+			// Test endpoint returns 501 until at least one deliverer
+			// ships (routes stay registered so console renders
+			// "Test (coming soon)" not "not found").
+			destSvc := compliance.NewDestinationService(pool)
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export", compliance.HandleCreateDestination(pool, limitsSvc, destSvc, auditSvc))
+			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-export", compliance.HandleListDestinations(pool, limitsSvc, destSvc))
+			r.With(tenant.RequireMinRole("admin")).Patch("/compliance/audit-export/{destID}", compliance.HandleUpdateDestination(pool, limitsSvc, destSvc, auditSvc))
+			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/audit-export/{destID}", compliance.HandleRemoveDestination(pool, limitsSvc, destSvc, auditSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export/{destID}/test", compliance.HandleTestDestination(pool, limitsSvc, destSvc))
+
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names
 			// affected subjects and triggers customer/authority comms.
