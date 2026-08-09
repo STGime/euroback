@@ -62,6 +62,15 @@ const (
 	ActionStorageRetentionPolicySet     = "storage_retention_policy.set"
 	ActionStorageRetentionPolicyRemoved = "storage_retention_policy.removed"
 
+	// SIEM export destination lifecycle (#353). Customer-facing
+	// SIEM sinks (webhook / syslog) get their own audit trail so a
+	// regulator can verify that a "we're forwarding your audit log
+	// to $VENDOR" claim matches when the destination was actually
+	// registered / disabled / changed.
+	ActionAuditExportDestinationCreated = "audit_export_destination.created"
+	ActionAuditExportDestinationUpdated = "audit_export_destination.updated"
+	ActionAuditExportDestinationRemoved = "audit_export_destination.removed"
+
 	// GoBD export (M2b, hard blocker #4). Distinct from
 	// ActionExportRequested so operators can grep tax-audit
 	// exports separately from DSAR exports.
