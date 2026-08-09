@@ -1512,6 +1512,87 @@ export class EurobaseAPI {
 		);
 	}
 
+	// ---- SIEM export destinations (#353) ----
+	//
+	// Per-tenant webhook / syslog sinks that receive the audit_log
+	// stream. All five methods return 402 + code:legal_team_required
+	// for non-Legal-Team projects; the Compliance page's typed
+	// APIError catch maps that to the upgrade card.
+	//
+	// The `test` endpoint returns 501 + code:deliverer_not_available
+	// until the deliverer PRs (#354 webhook, #355 syslog) land — the
+	// UI should render that as "Test (coming soon)" rather than a
+	// red error.
+
+	/** List all destinations for a project. Legal-Team only. */
+	async listAuditExportDestinations(
+		projectId: string,
+	): Promise<{ destinations: AuditExportDestination[]; total: number }> {
+		return this.fetch<{ destinations: AuditExportDestination[]; total: number }>(
+			`/platform/projects/${projectId}/compliance/audit-export`,
+		);
+	}
+
+	/** Create a new destination. Legal-Team only. */
+	async createAuditExportDestination(
+		projectId: string,
+		body: {
+			kind: AuditExportDestinationKind;
+			endpoint: string;
+			secret_ref?: string | null;
+			format?: AuditExportDestinationFormat;
+			enabled?: boolean;
+		},
+	): Promise<AuditExportDestination> {
+		return this.fetch<AuditExportDestination>(
+			`/platform/projects/${projectId}/compliance/audit-export`,
+			{ method: 'POST', body: JSON.stringify(body) },
+		);
+	}
+
+	/**
+	 * Partial update. Only endpoint / secret_ref / format / enabled are
+	 * mutable — kind is immutable (defines the deliverer) and
+	 * last_cursor is deliverer bookkeeping (resetting would double-
+	 * deliver history).
+	 */
+	async updateAuditExportDestination(
+		projectId: string,
+		destID: string,
+		body: {
+			endpoint?: string;
+			secret_ref?: string | null;
+			format?: AuditExportDestinationFormat;
+			enabled?: boolean;
+		},
+	): Promise<AuditExportDestination> {
+		return this.fetch<AuditExportDestination>(
+			`/platform/projects/${projectId}/compliance/audit-export/${destID}`,
+			{ method: 'PATCH', body: JSON.stringify(body) },
+		);
+	}
+
+	/** Remove a destination by ID. */
+	async removeAuditExportDestination(projectId: string, destID: string): Promise<void> {
+		await this.fetch(
+			`/platform/projects/${projectId}/compliance/audit-export/${destID}`,
+			{ method: 'DELETE' },
+		);
+	}
+
+	/**
+	 * Fire a synthetic audit_export.test event at the destination.
+	 * Returns 501 + code:deliverer_not_available until the deliverer
+	 * ships — callers should catch APIError with err.status === 501
+	 * and render "coming soon" rather than a hard error.
+	 */
+	async testAuditExportDestination(projectId: string, destID: string): Promise<void> {
+		await this.fetch(
+			`/platform/projects/${projectId}/compliance/audit-export/${destID}/test`,
+			{ method: 'POST' },
+		);
+	}
+
 	// ---- Team Members ----
 
 	/** List members and pending invitations for a project. */
@@ -2273,6 +2354,47 @@ export interface StorageRetentionPolicy {
 	mode: StorageRetentionMode;
 	retention_years: number;
 	legal_basis: string;
+	created_by?: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+// ---- SIEM export destinations (#353) ----
+
+export type AuditExportDestinationKind = 'webhook' | 'syslog';
+export type AuditExportDestinationFormat = 'json' | 'cef';
+
+export interface AuditExportDestination {
+	id: string;
+	project_id: string;
+	kind: AuditExportDestinationKind;
+	/**
+	 * For `webhook`: full https URL (http rejected by the API — audit
+	 * traffic must not travel unencrypted). For `syslog`: host:port
+	 * (TLS-only at delivery time). Backend also rejects internal
+	 * targets (loopback, RFC1918, link-local incl. 169.254.169.254,
+	 * ULA, localhost) — SSRF prevention. See internal/compliance/
+	 * audit_destinations.go for the full policy.
+	 */
+	endpoint: string;
+	/**
+	 * Name of a vault key that holds the HMAC signing secret (webhook)
+	 * or TLS client cert (syslog). Null → deliverer OMITS the
+	 * signature header entirely; UI should label the destination
+	 * "unauthenticated" so the operator makes the trust choice
+	 * knowingly.
+	 */
+	secret_ref?: string | null;
+	format: AuditExportDestinationFormat;
+	enabled: boolean;
+	/**
+	 * audit_log.seq of the last successfully-delivered event. 0 = never
+	 * delivered yet; the deliverer starts from 0 on first tick and
+	 * fast-forwards past pre-registration history rather than
+	 * back-filling. Read-only from the API — resetting via the CRUD
+	 * would double-deliver history.
+	 */
+	last_cursor: number;
 	created_by?: string | null;
 	created_at: string;
 	updated_at: string;
