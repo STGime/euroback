@@ -113,31 +113,33 @@ func (w *DeliverAuditSyslogWorker) Work(ctx context.Context, job *river.Job[jobs
 		}
 
 		delivered, sendErr := w.Deliverer.DialAndSend(ctx, endpoint, clientCert, events)
-		// Advance cursor to whatever WAS delivered, even on error —
-		// TCP+TLS guarantees ordered delivery, so a partial write
-		// means seq ≤ delivered reached the sink and seq > delivered
-		// did not. Advancing keeps at-least-once without re-shipping
-		// the already-received prefix.
-		if delivered > lastCursor {
-			if _, cerr := w.Pool.Exec(ctx,
-				`UPDATE public.audit_export_destinations
-				    SET last_cursor = $2, updated_at = now()
-				  WHERE id = $1::uuid AND last_cursor < $2`,
-				destID, delivered,
-			); cerr != nil {
-				return fmt.Errorf("advance cursor: %w", cerr)
-			}
-			slog.Info("audit syslog delivered batch",
-				"dest_id", destID, "events", len(events), "cursor", delivered)
-			lastCursor = delivered
-			totalDelivered += len(events)
-		}
 		if sendErr != nil {
+			// Whole batch failed — hold cursor. Syslog has no
+			// per-event ACK, so any error in the batch means we
+			// don't know which events reached the sink and must
+			// re-ship the whole batch on the next attempt. Sinks
+			// dedupe on the seq field in SD-DATA (documented in
+			// audit-export.md) so re-delivery is lossless.
 			slog.Warn("audit syslog delivery failed",
 				"dest_id", destID, "error", sendErr,
 				"batches_this_job", i, "delivered_this_job", totalDelivered)
 			return sendErr
 		}
+		// Full-batch success — CAS-advance cursor to the batch max
+		// (WHERE last_cursor < $2 keeps it monotonic under any
+		// theoretical concurrent runner).
+		if _, cerr := w.Pool.Exec(ctx,
+			`UPDATE public.audit_export_destinations
+			    SET last_cursor = $2, updated_at = now()
+			  WHERE id = $1::uuid AND last_cursor < $2`,
+			destID, delivered,
+		); cerr != nil {
+			return fmt.Errorf("advance cursor: %w", cerr)
+		}
+		slog.Info("audit syslog delivered batch",
+			"dest_id", destID, "events", len(events), "cursor", delivered)
+		lastCursor = delivered
+		totalDelivered += len(events)
 	}
 	if totalDelivered == auditSyslogMaxBatchesPerJob*auditSyslogBatchSize {
 		slog.Warn("audit syslog: batch cap reached, backlog not fully drained this job",

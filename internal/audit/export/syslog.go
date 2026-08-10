@@ -63,6 +63,11 @@ const (
 //
 // Overrideable via SYSLOG_EURO_PEN so ops can flip to the real
 // number without a code push once assigned.
+//
+// Ops note: the env flip is easy; DOWNSTREAM SIEM RULES keyed on
+// `eurobase@99999` will need to be re-written to reference the
+// real PEN. Call out in the release note when the assignment
+// lands + give customers a grace window to update their rules.
 var EurobasePEN = envOr("SYSLOG_EURO_PEN", "99999")
 
 // syslogNoticeActions is the small allow-list of action prefixes
@@ -139,6 +144,14 @@ func FormatSyslog(ev SyslogEvent, hostname string) string {
 	)
 	// PRI VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
 	//   MSG is empty (we put the semantic content into SD).
+	//
+	// MSGID = action. RFC 5424 §6.2.7 says MSGID SHOULD be ≤32
+	// chars; some current actions
+	// (audit_export_destination.updated =32, storage_retention_
+	// policy.removed =32) sit exactly at the limit and any future
+	// action prefix could exceed it. Most receivers tolerate
+	// overflow, but track the char count on new action codes to
+	// avoid running into a strict SIEM parser.
 	return fmt.Sprintf("<%d>1 %s %s eurobase %d %s %s -", pri, ts, hostname, ev.Seq, ev.Action, sd)
 }
 
@@ -212,18 +225,33 @@ func NewSyslogDeliverer() *SyslogDeliverer {
 
 // DialAndSend opens a TLS connection to endpoint (host:port),
 // writes each event as an octet-counted RFC 5424 frame, and
-// closes. Returns the max seq successfully written — the caller
-// uses this to CAS-advance the cursor.
+// closes. Returns (batchMaxSeq, nil) ONLY on full success — every
+// event written AND the connection cleanly closed. Any error at
+// any step → (0, err). The caller advances the cursor only when
+// error is nil.
 //
 // SSRF: net.SplitHostPort → LookupIPAddr → ValidateHostNotInternal
 // on each resolved IP → tls.Dial to the first non-internal one.
 // If all resolved IPs are internal, refuses with an SSRF error.
 //
-// Failure inside the batch loop: the returned cursor is the LAST
-// SUCCESSFULLY-WRITTEN seq (may be 0 if the first write failed),
-// paired with the error. Caller advances cursor to that value and
-// returns the error so River retries — the next attempt picks up
-// where this one stopped, no re-delivery.
+// All-or-nothing rationale (#359 review blocker fix): plain syslog
+// over TLS (RFC 5425/6587) is fire-and-forget — there is no
+// application-layer ACK from the receiver. A successful
+// conn.Write returns nil the moment bytes land in the local
+// kernel/TLS send buffer, NOT when the peer has received or
+// processed them. If the connection subsequently breaks (RST,
+// peer crash, network partition — exactly the failure mode that
+// makes the next Write fail), the un-acked bytes still sitting
+// in the send buffer are discarded. So "wrote seq 1–5 OK, seq 6
+// failed" does not imply seq 1–5 reached the sink; the tail is
+// in fact the most likely to be lost.
+//
+// Advancing the cursor to 5 in that case would silently drop
+// audit events — the exact failure mode a tamper-evident audit
+// pipeline is meant to prevent. Sinks dedupe on the seq field
+// we ship in SD-DATA (documented in audit-export.md), so
+// whole-batch redelivery is safe and lossless — genuine
+// at-least-once, matching the webhook path.
 func (d *SyslogDeliverer) DialAndSend(ctx context.Context, endpoint string, clientCert *tls.Certificate, events []SyslogEvent) (int64, error) {
 	if len(events) == 0 {
 		return 0, nil
@@ -280,35 +308,50 @@ func (d *SyslogDeliverer) DialAndSend(ctx context.Context, endpoint string, clie
 		}
 		return 0, lastErr
 	}
-	defer conn.Close()
+	// Not deferred — we need Close's error to participate in the
+	// success signal. A broken Close after all writes returned nil
+	// can still drop the tail (send buffer never flushed), so
+	// treating Close-error as delivery failure is the honest
+	// signal.
+	closed := false
+	defer func() {
+		if !closed {
+			_ = conn.Close()
+		}
+	}()
 
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "eurobase-worker"
 	}
 
-	var maxSeqDelivered int64
+	var batchMaxSeq int64
 	for _, ev := range events {
 		if err := ctx.Err(); err != nil {
-			return maxSeqDelivered, err
+			return 0, err
 		}
 		frame := FrameOctetCounting(FormatSyslog(ev, hostname))
 		if err := conn.SetWriteDeadline(time.Now().Add(d.WriteTimeout)); err != nil {
-			return maxSeqDelivered, fmt.Errorf("set write deadline: %w", err)
+			return 0, fmt.Errorf("set write deadline: %w", err)
 		}
 		if _, err := conn.Write(frame); err != nil {
-			// Partial-batch failure: the seq we already wrote is
-			// safely on the sink (TCP + TLS = ordered, so any
-			// bytes we successfully wrote reached the peer's
-			// syslog receiver). Return the max we got through
-			// so the caller can advance the cursor to it.
-			return maxSeqDelivered, fmt.Errorf("write event seq=%d: %w", ev.Seq, err)
+			return 0, fmt.Errorf("write event seq=%d: %w", ev.Seq, err)
 		}
-		if ev.Seq > maxSeqDelivered {
-			maxSeqDelivered = ev.Seq
+		if ev.Seq > batchMaxSeq {
+			batchMaxSeq = ev.Seq
 		}
 	}
-	return maxSeqDelivered, nil
+
+	// Close as part of the success signal — if Close returns an
+	// error (e.g. sink RST between the last Write and now), the
+	// batch was NOT fully delivered and the whole batch must
+	// re-ship on the next attempt.
+	if err := conn.Close(); err != nil {
+		closed = true
+		return 0, fmt.Errorf("close syslog conn: %w", err)
+	}
+	closed = true
+	return batchMaxSeq, nil
 }
 
 // tlsConfigFor clones the base TLS config (never mutates the
