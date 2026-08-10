@@ -9,10 +9,12 @@ Legal-Team tier only. Configure destinations in Console → **Compliance
 → Retention → SIEM export**, or via the API under
 `/platform/projects/{id}/compliance/audit-export`.
 
-- **Webhook** (this doc): HMAC-signed POST to your https endpoint.
-- **Syslog**: RFC 5424 over TCP/TLS. See #355 (in progress).
+- **Webhook**: HMAC-signed POST to your https endpoint. See the
+  Webhook section below.
+- **Syslog**: RFC 5424 over TCP/TLS with octet-counting framing.
+  See the Syslog section below.
 
-## Delivery guarantees
+## Delivery guarantees (both kinds)
 
 - **At-least-once.** Every event with `seq > last_cursor` is delivered.
   On any non-2xx or timeout, `last_cursor` stays put and the next tick
@@ -28,6 +30,10 @@ Legal-Team tier only. Configure destinations in Console → **Compliance
   the cursor and retries.
 - **Ordering**: events within a batch are `seq ASC`; batches are
   monotonic in `seq`.
+
+---
+
+# Webhook
 
 ## POST envelope
 
@@ -213,3 +219,143 @@ API: `POST /platform/projects/{id}/compliance/audit-export/{destID}/test`
 returns `{"delivered": true, "status_code": <sink status>}` on 2xx,
 or `{"code": "delivery_failed", "status_code": ..., "detail": "..."}`
 on non-2xx.
+
+---
+
+# Syslog
+
+## Wire format
+
+Each event is one RFC 5424 message wrapped in an RFC 6587 §3.4.1
+octet-counting frame:
+
+```
+73 <134>1 2026-08-10T12:34:56Z eurobase-worker eurobase 42 project.deleted [eurobase@99999 project_id="..." actor_id="..." action="project.deleted" row_hash="abcdef" seq="42"] -
+```
+
+Breakdown:
+- **`73 `** — decimal byte-length of the RFC 5424 message that
+  follows, then a single space. Framer is octet-counting rather
+  than newline (`\n`) because audit metadata may legitimately
+  contain `\n` inside SD values.
+- **`<134>`** — priority (`facility * 8 + severity`). Facility is
+  fixed at `local0` (16); severity is `info` (6) by default →
+  `<134>`, or `notice` (5) → `<133>` for security-relevant
+  actions (retention holds, key rotations, staff-secrecy events,
+  policy changes, deletes — see the code allow-list for the exact
+  set).
+- **`1`** — RFC 5424 version.
+- **`2026-08-10T12:34:56Z`** — timestamp of the audit event (not
+  wall-clock at delivery); UTC, second-precision by default,
+  millisecond precision when the source `created_at` carries it.
+- **`eurobase-worker`** — worker's `os.Hostname()`.
+- **`eurobase`** — APP-NAME (fixed).
+- **`42`** — PROCID = audit_log.seq. Unique within a tenant's
+  chain and monotonic.
+- **`project.deleted`** — MSGID = audit action.
+- **`[eurobase@<PEN> …]`** — RFC 5424 structured data with the
+  full record. `<PEN>` is our IANA Private Enterprise Number
+  (placeholder `99999` until assignment; overridable via the
+  `SYSLOG_EURO_PEN` env var without a code push).
+- **`-`** — empty MSG. Semantic content lives in SD-DATA.
+
+Structured data schema:
+
+| Field        | Type   | Meaning                                          |
+|--------------|--------|--------------------------------------------------|
+| `project_id` | UUID   | Always your project id.                          |
+| `actor_id`   | UUID   | Actor. `-` if the event has none (system).       |
+| `action`     | string | Same as MSGID, duplicated for query convenience. |
+| `row_hash`   | hex    | audit_log chain link — verify integrity later.   |
+| `seq`        | int64  | audit_log.seq — matches PROCID.                  |
+
+## Transport
+
+- **TLS mandatory.** Plain TCP is rejected at registration; the
+  deliverer only calls `tls.Dial`. TLS 1.2 minimum.
+- **ServerName** derived from the endpoint hostname (not the
+  resolved IP), so cert verification happens against the hostname
+  even though the socket connects by IP (SSRF discipline).
+- **Optional client cert.** If `secret_ref` is set, the vault
+  key must hold a PEM bundle containing both `CERTIFICATE` and
+  `PRIVATE KEY` blocks in either order. Additional
+  `CERTIFICATE` blocks are treated as intermediate chain.
+- **Short-lived connection per River job.** The scheduler fires
+  every 30s; a job dials, writes the batch, closes. Keep-alive
+  across jobs would fight River's stateless-worker model — the
+  handshake tax is bounded and the failure semantics are simpler
+  (any error fails the job → River retries → fresh handshake).
+- **Endpoint format**: `host:port`. Same SSRF policy as webhook —
+  loopback, RFC1918, link-local (incl. cloud metadata IPs), ULA,
+  CGNAT, `localhost`, IPv4-mapped IPv6 all rejected. Dial-time
+  re-check against the resolved IP defends against DNS rebinding.
+
+## Rsyslog input example
+
+```
+module(load="imtcp"
+       StreamDriver.Name="gtls"
+       StreamDriver.Mode="1"
+       StreamDriver.Authmode="anon")
+
+input(type="imtcp"
+      port="6514"
+      Ruleset="eurobase-audit")
+
+ruleset(name="eurobase-audit") {
+    action(type="omfile"
+           file="/var/log/eurobase/audit.log"
+           template="RSYSLOG_SyslogProtocol23Format")
+}
+```
+
+Rsyslog understands RFC 6587 octet-counting framing out of the box
+on `imtcp` — no extra config needed.
+
+## Graylog input example
+
+Create **Inputs → Syslog TCP** with:
+- `bind_address`: `0.0.0.0`
+- `port`: `6514`
+- `tls_enable`: on
+- `tls_key_file` / `tls_cert_file`: your sink's server cert
+- `tls_client_auth`: `optional` (or `required` if you enabled
+  mutual TLS with a client cert in the destination `secret_ref`)
+- `expand_structured_data`: on — lifts the SD-DATA fields
+  (`eurobase@<PEN>.project_id`, `.action`, `.seq`, `.row_hash`)
+  into top-level searchable fields.
+
+## Splunk Universal Forwarder
+
+Forward to Splunk via a UF running on the same host as an rsyslog
+receiver (Splunk Enterprise doesn't natively accept TLS syslog),
+or point Splunk directly at an HTTP Event Collector (HEC) if you
+prefer — the webhook destination fits HEC natively.
+
+`inputs.conf` on the UF:
+
+```
+[monitor:///var/log/eurobase/audit.log]
+disabled = false
+sourcetype = eurobase:audit
+index = compliance
+```
+
+Splunk's built-in `syslog` parser handles RFC 5424 including the
+SD-DATA fields.
+
+## Testing your syslog sink
+
+Same UI + API affordance as webhook. Console: Compliance →
+Retention → SIEM export → **Test** button. API:
+`POST /platform/projects/{id}/compliance/audit-export/{destID}/test`
+returns `{"delivered": true}` on a successful dial + write, or
+`{"code": "delivery_failed", "detail": "..."}` on failure.
+
+## Verifying the row_hash chain
+
+Every event carries its `row_hash` from the audit-log hash chain
+(#171). If your sink stores the raw events, you can re-verify the
+chain end-to-end against a snapshot from the platform WORM archive
+(#352) — see `docs/compliance/audit-log.md` for the chain layout.
+

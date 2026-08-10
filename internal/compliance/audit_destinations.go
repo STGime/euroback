@@ -612,7 +612,7 @@ func HandleRemoveDestination(pool *pgxpool.Pool, limits *plans.LimitsService, sv
 	}
 }
 
-// TestDeliverer is the export-side surface the test handler needs.
+// TestDeliverer is the webhook-side surface the test handler needs.
 // Kept as an interface (not a *export.Deliverer) so this file stays
 // free of an audit/export → compliance import cycle (compliance
 // imports audit for action codes; audit/export is fine as a leaf).
@@ -620,14 +620,21 @@ type TestDeliverer interface {
 	PostEnvelope(ctx context.Context, endpoint string, secret []byte, body any) (statusCode int, err error)
 }
 
+// SyslogTestDeliverer is the analogous surface for syslog. Vault
+// value is a PEM bundle (cert + key) rather than an HMAC key, so
+// the adapter parses it internally — the interface stays byte-
+// opaque to keep the same import-cycle discipline.
+type SyslogTestDeliverer interface {
+	SendTestEvent(ctx context.Context, endpoint string, pemBundle []byte, syntheticAction string, projectID string) error
+}
+
 // HandleTestDestination — POST /platform/projects/{id}/compliance/audit-export/{destID}/test.
 //
-// #354 wires the webhook path to actually deliver a synthetic
-// audit_export.test event; syslog stays 501 until #355 ships. The
-// 501 response keeps the 'deliverer_not_available' + tracking-issue
-// shape the console already understands, so the UI's transient note
-// still works.
-func HandleTestDestination(pool *pgxpool.Pool, limits *plans.LimitsService, svc *DestinationService, webhook TestDeliverer, vaultLookup func(ctx context.Context, schemaName, name string) (string, error)) http.HandlerFunc {
+// #354 wired the webhook path; #355 wires syslog. Both dry-run a
+// synthetic audit_export.test event through the same code path a
+// real batch would take, so a sink that verifies test also verifies
+// production.
+func HandleTestDestination(pool *pgxpool.Pool, limits *plans.LimitsService, svc *DestinationService, webhook TestDeliverer, syslog SyslogTestDeliverer, vaultLookup func(ctx context.Context, schemaName, name string) (string, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		destID := chi.URLParam(r, "destID")
@@ -652,10 +659,11 @@ func HandleTestDestination(pool *pgxpool.Pool, limits *plans.LimitsService, svc 
 			return
 		}
 
-		// Syslog deliverer lands in #355 — until then, keep the
-		// 501+code:deliverer_not_available shape so the console UI
-		// stays consistent.
-		if d.Kind != DestinationWebhook || webhook == nil {
+		// Neither deliverer wired (unusual — usually a build/wire
+		// misconfiguration). Keep the 501 shape so the console UI
+		// stays consistent with the pre-#354/#355 behaviour.
+		if (d.Kind == DestinationWebhook && webhook == nil) ||
+			(d.Kind == DestinationSyslog && syslog == nil) {
 			writeJSON(w, http.StatusNotImplemented, map[string]any{
 				"error":          "test delivery is not yet implemented",
 				"code":           "deliverer_not_available",
@@ -684,6 +692,23 @@ func HandleTestDestination(pool *pgxpool.Pool, limits *plans.LimitsService, svc 
 				return
 			}
 			secret = []byte(v)
+		}
+
+		// Syslog: dial + send one synthetic event via the same
+		// deliverer the scheduled worker uses. Report the TCP+TLS
+		// outcome to the caller.
+		if d.Kind == DestinationSyslog {
+			if err := syslog.SendTestEvent(r.Context(), d.Endpoint, secret, "audit_export.test", projectID); err != nil {
+				slog.Warn("test audit export destination: syslog delivery failed", "dest_id", d.ID, "error", err)
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"error":  "sink did not accept the test event",
+					"code":   "delivery_failed",
+					"detail": err.Error(),
+				})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"delivered": true})
+			return
 		}
 
 		// Synthetic event. Not persisted to audit_log — this is the
