@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/audit/export"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/billing"
 	"github.com/eurobase/euroback/internal/breach"
@@ -596,11 +597,29 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// ships (routes stay registered so console renders
 			// "Test (coming soon)" not "not found").
 			destSvc := compliance.NewDestinationService(pool)
+			// Webhook deliverer for the Test endpoint (#354). Same
+			// SSRF-safe HTTP client + signing code path as the
+			// scheduled deliverer worker — one implementation.
+			webhookDeliverer := export.NewDeliverer(export.ClientConfig{})
+			testDelivererAdapter := &webhookTestAdapter{d: webhookDeliverer}
+			// Vault lookup shim for the Test path — closes over
+			// vaultSvc without leaking a *vault.VaultService through
+			// the compliance package.
+			var vaultLookup func(ctx context.Context, schemaName, name string) (string, error)
+			if vaultSvc != nil {
+				vaultLookup = func(ctx context.Context, schemaName, name string) (string, error) {
+					sec, err := vaultSvc.Get(ctx, schemaName, name)
+					if err != nil {
+						return "", err
+					}
+					return sec.Value, nil
+				}
+			}
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export", compliance.HandleCreateDestination(pool, limitsSvc, destSvc, auditSvc))
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-export", compliance.HandleListDestinations(pool, limitsSvc, destSvc))
 			r.With(tenant.RequireMinRole("admin")).Patch("/compliance/audit-export/{destID}", compliance.HandleUpdateDestination(pool, limitsSvc, destSvc, auditSvc))
 			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/audit-export/{destID}", compliance.HandleRemoveDestination(pool, limitsSvc, destSvc, auditSvc))
-			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export/{destID}/test", compliance.HandleTestDestination(pool, limitsSvc, destSvc))
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export/{destID}/test", compliance.HandleTestDestination(pool, limitsSvc, destSvc, testDelivererAdapter, vaultLookup))
 
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names
@@ -1201,4 +1220,31 @@ func devAuthMiddleware(next http.Handler) http.Handler {
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// webhookTestAdapter bridges *export.Deliverer to
+// compliance.TestDeliverer. Kept trivial so the compliance package
+// doesn't need to import audit/export (the interface stays there so
+// the concrete deliverer can move / change without touching the
+// handler signature).
+type webhookTestAdapter struct {
+	d *export.Deliverer
+}
+
+func (a *webhookTestAdapter) PostEnvelope(ctx context.Context, endpoint string, secret []byte, body any) (int, error) {
+	// Marshal here rather than in the deliverer — the test path
+	// hands over an ad-hoc map[string]any (synthetic event), the
+	// scheduled path hands over a typed *export.Envelope, and the
+	// deliverer's PostEnvelope wants a typed *Envelope. Round-trip
+	// through JSON keeps that boundary clean for the test path.
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	var env export.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return 0, err
+	}
+	res := a.d.PostEnvelope(ctx, endpoint, secret, &env)
+	return res.StatusCode, res.Err
 }

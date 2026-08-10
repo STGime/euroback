@@ -151,6 +151,36 @@ func (BackfillRuntimeCredentialArgs) InsertOpts() river.InsertOpts {
 	}
 }
 
+// DeliverAuditWebhookArgs is enqueued (per destination, periodically
+// by the audit_webhook_scheduler sweeper — #354) to POST a batch of
+// new audit_log rows to a tenant's registered webhook sink. Args
+// carry only the destination row ID; the worker reads endpoint,
+// secret_ref, format, enabled, last_cursor from the DB at execution
+// time so a mutated destination row is picked up on the very next
+// tick without job-payload staleness.
+//
+// UniqueOpts.ByArgs prevents a slow-sink destination from stacking
+// up multiple in-flight jobs against the same row (the scheduler
+// fires every 30s; a 60s-slow sink would otherwise queue two by the
+// time the first finishes).
+type DeliverAuditWebhookArgs struct {
+	DestinationID string `json:"destination_id"`
+}
+
+func (DeliverAuditWebhookArgs) Kind() string { return "deliver_audit_webhook" }
+
+// MaxAttempts = 5 with River's exponential backoff. A dead sink
+// should retry a few times before giving up on this batch — River's
+// per-attempt delay ramp keeps the worker from spinning against a
+// broken sink. On terminal failure the last_cursor stays put so the
+// next scheduled tick starts a fresh attempt.
+func (DeliverAuditWebhookArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
+}
+
 // RestoreTeamDatabaseArgs is enqueued when a user triggers a
 // snapshot restore or a PITR restore (Team-tier M3). Carries just
 // the restore_operations row ID — the worker reads every other

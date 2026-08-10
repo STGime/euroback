@@ -14,12 +14,14 @@ import (
 	// image, which ships no /usr/share/zoneinfo (cron schedule timezones).
 	_ "time/tzdata"
 
+	"github.com/eurobase/euroback/internal/audit/export"
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/storage"
+	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -246,6 +248,27 @@ func main() {
 		RuntimePasswordSecret: runtimePwSecret,
 	})
 
+	// #354 audit webhook deliverer. Vault is used to resolve the
+	// tenant's HMAC signing secret (secret_ref → vault key name).
+	// Nil vault is fine — destinations with secret_ref=NULL just
+	// deliver unsigned (see #356 "unauthenticated" semantics).
+	var vaultSvc *vault.VaultService
+	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
+		vs, err := vault.NewVaultService(pool, vaultKey)
+		if err != nil {
+			slog.Warn("worker vault init failed, webhook signing disabled", "error", err)
+		} else {
+			vaultSvc = vs
+		}
+	} else {
+		slog.Warn("VAULT_ENCRYPTION_KEY not set, webhook signing disabled — destinations with secret_ref will fail to deliver")
+	}
+	river.AddWorker(riverWorkers, &workers.DeliverAuditWebhookWorker{
+		Pool:      pool,
+		Deliverer: export.NewDeliverer(export.ClientConfig{}),
+		Vault:     vaultSvc,
+	})
+
 	// ── Create River client in worker mode ──
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
@@ -347,6 +370,12 @@ func main() {
 	// AUDIT_ARCHIVE_EXPORT_BUCKET is unset — archive rows keep
 	// accumulating in the DB until ops flips it on.
 	workers.StartAuditArchiveExporter(ctx, pool, s3Client)
+
+	// #354 webhook scheduler: enqueue one DeliverAuditWebhookArgs
+	// per enabled webhook destination every 30s. UniqueOpts on the
+	// args prevent duplicates for a slow sink; River's exponential
+	// backoff handles per-attempt retry math.
+	workers.StartAuditWebhookScheduler(ctx, pool, riverClient)
 
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)
