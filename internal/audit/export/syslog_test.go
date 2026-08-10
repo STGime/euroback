@@ -1,13 +1,6 @@
 package export
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
 	"net"
 	"strconv"
 	"strings"
@@ -181,92 +174,85 @@ func TestSyslogDeliverer_EmptyBatchNoDial(t *testing.T) {
 // the un-acked buffered bytes are discarded — advancing the cursor
 // past them silently drops audit events.
 //
-// Simulated via a TLS server that reads one frame and then abruptly
-// closes the connection. The second Write on the client side will
-// fail; the test asserts (0, err) is returned so the worker holds
-// the cursor and re-ships the whole batch next attempt.
-func TestSyslogDeliverer_PartialFailureHoldsCursor(t *testing.T) {
-	// In-process TLS listener with a self-signed cert.
-	cert, key := selfSigned(t)
-	pair, err := tls.X509KeyPair(cert, key)
-	if err != nil {
-		t.Fatalf("keypair: %v", err)
-	}
-	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{pair}})
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer listener.Close()
+// Test drives sendFrames directly against a net.Pipe whose far end
+// closes after reading one frame's worth of bytes. The client's
+// second Write then fails; we assert the returned cursor is 0. If
+// the fix regressed to `return maxSeqSuccessfullyWritten, err`, the
+// returned cursor would be events[0].Seq (100) and this test would
+// fail — pinning the actual write-loop contract.
+//
+// Uses sendFrames (not DialAndSend) so the loopback SSRF rejection
+// isn't the exit branch. The end-to-end SSRF check is exercised by
+// the TestSSRFSafeClient_* suite; here we care about the (0, err)
+// return on write failure specifically.
+func TestSendFrames_PartialFailureHoldsCursor(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
 
-	// Server: accept, read one small chunk, close abruptly. That
-	// forces the client's second Write to fail while the "success"
-	// of the first Write is a lie (bytes still in the client's
-	// send buffer, discarded on close).
+	// Server side: read a small chunk (one frame's bytes) then
+	// slam the connection shut. That guarantees the client's
+	// first Write succeeds (into net.Pipe's buffer, read by the
+	// goroutine below) and its second Write fails with a broken-
+	// pipe error.
+	done := make(chan struct{})
 	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		buf := make([]byte, 16)
-		_, _ = conn.Read(buf)
-		_ = conn.Close()
+		defer close(done)
+		buf := make([]byte, 200)
+		_, _ = serverEnd.Read(buf)
+		_ = serverEnd.Close()
 	}()
 
-	// Point the deliverer at 127.0.0.1 — normally rejected by the
-	// SSRF policy, so use the test-only endpoint (listener addr)
-	// via a bypass: temporarily override the resolver by routing
-	// through the real dial. The SSRF check runs on the RESOLVED
-	// IP, and 127.0.0.1 is rejected — so this specific test path
-	// exercises the loopback rejection instead of the write-loop
-	// failure we care about. Skip if that's the case; the test
-	// contract we're really pinning is the (0, err) return on any
-	// write error, which the code shape enforces regardless of
-	// how the connection breaks.
 	d := &SyslogDeliverer{
-		DialTimeout:  2 * time.Second,
 		WriteTimeout: 500 * time.Millisecond,
-		TLSConfig:    &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
 	}
-
-	// Two events so the second Write must succeed for the "partial
-	// success" bug to manifest — if the second Write fails, the
-	// old code returned (events[0].Seq, err), the new code returns
-	// (0, err).
 	events := []SyslogEvent{
 		{ID: "e1", Action: "test.event", CreatedAt: time.Now().UTC().Truncate(time.Second), Seq: 100},
 		{ID: "e2", Action: "test.event", CreatedAt: time.Now().UTC().Truncate(time.Second), Seq: 200},
 	}
-	cursor, err := d.DialAndSend(t.Context(), listener.Addr().String(), nil, events)
+	cursor, err := d.sendFrames(t.Context(), clientEnd, events)
+	<-done
+
 	if err == nil {
-		t.Skip("test setup produced a successful delivery — cannot exercise partial failure; skipping rather than asserting on flaky-shaped state")
+		t.Fatal("expected write error when server closes mid-batch, got nil")
 	}
 	if cursor != 0 {
-		t.Errorf("partial-batch failure MUST return cursor=0 (whole batch re-ships next attempt); got cursor=%d — this silently drops audit events", cursor)
+		t.Errorf("partial-batch failure MUST return cursor=0 (whole batch re-ships next attempt); got cursor=%d — this silently drops audit events",
+			cursor)
 	}
+	_ = clientEnd.Close()
 }
 
-// selfSigned generates a throwaway cert/key for the in-process TLS
-// listener used by the partial-failure test. Not fit for anything
-// else — 1-hour NotAfter, self-CA, no SAN.
-func selfSigned(t *testing.T) (certPEM, keyPEM []byte) {
-	t.Helper()
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+// Positive counterpart: sendFrames returns (batchMaxSeq, nil) when
+// every event writes cleanly. Pins the success-case contract so a
+// future revert can't turn the partial-failure test's (0, err)
+// assertion into an "always returns 0" false-positive.
+func TestSendFrames_FullSuccessReturnsMaxSeq(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Drain everything the client writes so no Write blocks.
+		buf := make([]byte, 4096)
+		for {
+			if _, err := serverEnd.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	d := &SyslogDeliverer{WriteTimeout: 500 * time.Millisecond}
+	events := []SyslogEvent{
+		{ID: "e1", Action: "test.event", CreatedAt: time.Now().UTC().Truncate(time.Second), Seq: 100},
+		{ID: "e2", Action: "test.event", CreatedAt: time.Now().UTC().Truncate(time.Second), Seq: 200},
+		{ID: "e3", Action: "test.event", CreatedAt: time.Now().UTC().Truncate(time.Second), Seq: 300},
+	}
+	cursor, err := d.sendFrames(t.Context(), clientEnd, events)
 	if err != nil {
-		t.Fatalf("gen key: %v", err)
+		t.Fatalf("full-batch success expected, got err=%v", err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test"},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(time.Hour),
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+	if cursor != 300 {
+		t.Errorf("full-batch success cursor should be max(seq)=300, got %d", cursor)
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatalf("cert: %v", err)
-	}
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
-	return
+	_ = clientEnd.Close()
+	<-done
 }

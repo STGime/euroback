@@ -320,6 +320,41 @@ func (d *SyslogDeliverer) DialAndSend(ctx context.Context, endpoint string, clie
 		}
 	}()
 
+	batchMaxSeq, err := d.sendFrames(ctx, conn, events)
+	if err != nil {
+		return 0, err
+	}
+
+	// Close as part of the success signal — if Close returns an
+	// error (e.g. sink RST between the last Write and now), the
+	// batch was NOT fully delivered and the whole batch must
+	// re-ship on the next attempt.
+	if err := conn.Close(); err != nil {
+		closed = true
+		return 0, fmt.Errorf("close syslog conn: %w", err)
+	}
+	closed = true
+	return batchMaxSeq, nil
+}
+
+// sendFrames writes each event as an octet-counted RFC 5424 frame
+// to conn. Returns (batchMaxSeq, nil) on full success; (0, err) on
+// ANY write error — same all-or-nothing contract as DialAndSend
+// (see its header for the "conn.Write success ≠ sink receipt"
+// rationale). Exported at package-visible level so the regression
+// test can drive it with a net.Pipe, sidestepping DialAndSend's
+// SSRF check for testability.
+//
+// Signature takes a net.Conn (not *tls.Conn) for the same reason —
+// net.Pipe returns a plain net.Conn. The TLS handshake is a
+// DialAndSend concern; the write-loop contract is orthogonal.
+//
+// conn may be nil-configured for SetWriteDeadline (net.Pipe
+// supports it); a real *tls.Conn always does. Any deadline-set
+// failure counts as a delivery failure — refusing to set a
+// deadline on a socket we're about to write to would be gambling
+// with a hung sink.
+func (d *SyslogDeliverer) sendFrames(ctx context.Context, conn net.Conn, events []SyslogEvent) (int64, error) {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "eurobase-worker"
@@ -341,16 +376,6 @@ func (d *SyslogDeliverer) DialAndSend(ctx context.Context, endpoint string, clie
 			batchMaxSeq = ev.Seq
 		}
 	}
-
-	// Close as part of the success signal — if Close returns an
-	// error (e.g. sink RST between the last Write and now), the
-	// batch was NOT fully delivered and the whole batch must
-	// re-ship on the next attempt.
-	if err := conn.Close(); err != nil {
-		closed = true
-		return 0, fmt.Errorf("close syslog conn: %w", err)
-	}
-	closed = true
 	return batchMaxSeq, nil
 }
 
