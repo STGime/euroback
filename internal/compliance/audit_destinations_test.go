@@ -34,6 +34,9 @@ func TestValidateEndpoint(t *testing.T) {
 		{"webhook IPv6 loopback rejected", DestinationWebhook, "https://[::1]/audit", "loopback"},
 		{"webhook IPv6 ULA rejected", DestinationWebhook, "https://[fc00::1]/audit", "private"},
 		{"webhook 0.0.0.0 rejected", DestinationWebhook, "https://0.0.0.0/audit", "0.0.0.0"},
+		{"webhook IPv4-mapped IPv6 rejected", DestinationWebhook, "https://[::ffff:10.0.0.1]/audit", "private"},
+		{"webhook CGNAT rejected", DestinationWebhook, "https://100.64.0.1/audit", "CGNAT"},
+		{"webhook CGNAT upper boundary rejected", DestinationWebhook, "https://100.127.255.255/audit", "CGNAT"},
 
 		// Syslog accept
 		{"syslog host:port accepted", DestinationSyslog, "siem.example.com:6514", ""},

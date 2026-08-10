@@ -326,7 +326,7 @@ func validateEndpoint(kind DestinationKind, endpoint string) error {
 		if host == "" {
 			return invalid("webhook endpoint is missing host")
 		}
-		if err := validateHostNotInternal(host); err != nil {
+		if err := ValidateHostNotInternal(host); err != nil {
 			return err
 		}
 	case DestinationSyslog:
@@ -334,7 +334,7 @@ func validateEndpoint(kind DestinationKind, endpoint string) error {
 		if err != nil {
 			return invalid("syslog endpoint must be host:port: %v", err)
 		}
-		if err := validateHostNotInternal(host); err != nil {
+		if err := ValidateHostNotInternal(host); err != nil {
 			return err
 		}
 		if p, err := parsePort(port); err != nil || p < 1 || p > 65535 {
@@ -344,39 +344,69 @@ func validateEndpoint(kind DestinationKind, endpoint string) error {
 	return nil
 }
 
-// validateHostNotInternal rejects hosts that would let a tenant
+// ValidateHostNotInternal rejects hosts that would let a tenant
 // direct the deliverer at an internal target. Applied identically to
 // both kinds — the SSRF surface is symmetric.
 //
-// Two matches:
+// Registration-time (called from validateEndpoint) enforces:
 //   - Literal "localhost" (case-insensitively) — the common footgun.
 //   - Parseable IPs: loopback, private, link-local, ULA (v6),
-//     unspecified. These are all guaranteed non-public regardless of
-//     any future DNS state.
+//     unspecified, multicast.
 //
-// Non-literal hostnames pass through here unchanged — the deliverers
-// bear the DNS-rebinding half of the responsibility (see
-// validateEndpoint header).
-func validateHostNotInternal(host string) error {
+// The deliverers (#354 webhook, #355 syslog) MUST re-invoke this on
+// the RESOLVED IP at dial time — a hostname can pass here and later
+// resolve to 10.0.0.1 (DNS rebinding). Exported for that reuse.
+//
+// Extra classes the reviewer named on #356 that IsPrivate() alone
+// misses, handled here so registration + dial-time apply the same
+// policy:
+//   - **IPv4-mapped IPv6** (::ffff:10.0.0.1): IP.To4() unpacks to
+//     the 4-byte form before the IsPrivate/IsLoopback chain, so
+//     IPv6-form literals get the same treatment as their v4 twins.
+//   - **CGNAT 100.64.0.0/10**: not RFC1918, not in IsPrivate. A
+//     tenant could point a webhook at a CGNAT-space host and reach
+//     other tenants sharing the same NAT — explicit range check.
+func ValidateHostNotInternal(host string) error {
 	if strings.EqualFold(host, "localhost") {
 		return invalid("endpoint host may not be localhost — internal targets are not allowed to prevent SSRF into cluster services")
 	}
-	// url.Hostname() strips brackets from IPv6, so ParseIP works.
-	if ip := net.ParseIP(host); ip != nil {
-		switch {
-		case ip.IsLoopback():
-			return invalid("endpoint host may not be a loopback address (SSRF prevention)")
-		case ip.IsUnspecified():
-			return invalid("endpoint host may not be 0.0.0.0 / :: (SSRF prevention)")
-		case ip.IsPrivate():
-			return invalid("endpoint host may not be a private/RFC1918/ULA address (SSRF prevention)")
-		case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
-			return invalid("endpoint host may not be a link-local address (SSRF prevention — includes cloud metadata service)")
-		case ip.IsInterfaceLocalMulticast() || ip.IsMulticast():
-			return invalid("endpoint host may not be a multicast address")
-		}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	// IPv4-mapped IPv6 → normalise to 4-byte form so the classifier
+	// methods below see it as 10.0.0.1 rather than ::ffff:10.0.0.1
+	// (IsPrivate on the 16-byte form returns false).
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	switch {
+	case ip.IsLoopback():
+		return invalid("endpoint host may not be a loopback address (SSRF prevention)")
+	case ip.IsUnspecified():
+		return invalid("endpoint host may not be 0.0.0.0 / :: (SSRF prevention)")
+	case ip.IsPrivate():
+		return invalid("endpoint host may not be a private/RFC1918/ULA address (SSRF prevention)")
+	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+		return invalid("endpoint host may not be a link-local address (SSRF prevention — includes cloud metadata service)")
+	case ip.IsInterfaceLocalMulticast() || ip.IsMulticast():
+		return invalid("endpoint host may not be a multicast address")
+	case isCGNAT(ip):
+		return invalid("endpoint host may not be in the CGNAT range 100.64.0.0/10 (SSRF prevention)")
 	}
 	return nil
+}
+
+// isCGNAT reports whether ip is inside 100.64.0.0/10 (RFC 6598
+// Carrier-Grade NAT space). Not covered by IP.IsPrivate; explicit
+// check keeps registration and dial-time in lockstep.
+func isCGNAT(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	// 100.64.0.0/10 → first octet 100, second octet in [64, 127].
+	return v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
 }
 
 // splitHostPort accepts "host:port" (or "[v6]:port"). Uses
@@ -582,15 +612,22 @@ func HandleRemoveDestination(pool *pgxpool.Pool, limits *plans.LimitsService, sv
 	}
 }
 
+// TestDeliverer is the export-side surface the test handler needs.
+// Kept as an interface (not a *export.Deliverer) so this file stays
+// free of an audit/export → compliance import cycle (compliance
+// imports audit for action codes; audit/export is fine as a leaf).
+type TestDeliverer interface {
+	PostEnvelope(ctx context.Context, endpoint string, secret []byte, body any) (statusCode int, err error)
+}
+
 // HandleTestDestination — POST /platform/projects/{id}/compliance/audit-export/{destID}/test.
 //
-// The CRUD ships in #353 but the deliverers (webhook #354, syslog
-// #355) are follow-ups. Rather than route the endpoint away entirely
-// (which would give the console a "route does not exist" error and
-// no clue why), return HTTP 501 Not Implemented with a body that
-// names the missing dependency. The console can render a
-// "Test (coming soon)" affordance without a broken-looking failure.
-func HandleTestDestination(pool *pgxpool.Pool, limits *plans.LimitsService, svc *DestinationService) http.HandlerFunc {
+// #354 wires the webhook path to actually deliver a synthetic
+// audit_export.test event; syslog stays 501 until #355 ships. The
+// 501 response keeps the 'deliverer_not_available' + tracking-issue
+// shape the console already understands, so the UI's transient note
+// still works.
+func HandleTestDestination(pool *pgxpool.Pool, limits *plans.LimitsService, svc *DestinationService, webhook TestDeliverer, vaultLookup func(ctx context.Context, schemaName, name string) (string, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		destID := chi.URLParam(r, "destID")
@@ -614,11 +651,75 @@ func HandleTestDestination(pool *pgxpool.Pool, limits *plans.LimitsService, svc 
 			httpError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeJSON(w, http.StatusNotImplemented, map[string]any{
-			"error":   "test delivery is not yet implemented",
-			"code":    "deliverer_not_available",
-			"kind":    string(d.Kind),
-			"tracking_issue": destinationTrackingIssue(d.Kind),
+
+		// Syslog deliverer lands in #355 — until then, keep the
+		// 501+code:deliverer_not_available shape so the console UI
+		// stays consistent.
+		if d.Kind != DestinationWebhook || webhook == nil {
+			writeJSON(w, http.StatusNotImplemented, map[string]any{
+				"error":          "test delivery is not yet implemented",
+				"code":           "deliverer_not_available",
+				"kind":           string(d.Kind),
+				"tracking_issue": destinationTrackingIssue(d.Kind),
+			})
+			return
+		}
+
+		// Resolve schema for the vault lookup.
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM public.projects WHERE id = $1::uuid`, projectID,
+		).Scan(&schemaName); err != nil {
+			slog.Error("test audit export destination: schema lookup failed", "error", err)
+			httpError(w, http.StatusInternalServerError, "schema lookup failed")
+			return
+		}
+
+		var secret []byte
+		if d.SecretRef != nil && *d.SecretRef != "" && vaultLookup != nil {
+			v, err := vaultLookup(r.Context(), schemaName, *d.SecretRef)
+			if err != nil {
+				slog.Warn("test audit export destination: secret resolve failed", "error", err)
+				httpError(w, http.StatusBadRequest, fmt.Sprintf("secret %q could not be resolved: %v", *d.SecretRef, err))
+				return
+			}
+			secret = []byte(v)
+		}
+
+		// Synthetic event. Not persisted to audit_log — this is the
+		// tenant's dry-run against their sink, not a real audit
+		// event. cursor=0 so the sink can tell it apart from a real
+		// batch and skip cursor-advancement asserts.
+		body := map[string]any{
+			"events": []map[string]any{
+				{
+					"id":           "00000000-0000-0000-0000-000000000000",
+					"project_id":   projectID,
+					"actor_email":  "test@eurobase.app",
+					"action":       "audit_export.test",
+					"created_at":   time.Now().UTC().Format(time.RFC3339),
+					"seq":          0,
+					"row_hash":     "",
+				},
+			},
+			"cursor":       0,
+			"delivered_at": time.Now().UTC().Format(time.RFC3339),
+			"test":         true,
+		}
+		status, err := webhook.PostEnvelope(r.Context(), d.Endpoint, secret, body)
+		if err != nil {
+			slog.Warn("test audit export destination: delivery failed", "dest_id", d.ID, "status", status, "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error":       "sink did not accept the test event",
+				"code":        "delivery_failed",
+				"status_code": status,
+				"detail":      err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"delivered":   true,
+			"status_code": status,
 		})
 	}
 }
