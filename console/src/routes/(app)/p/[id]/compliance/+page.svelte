@@ -9,6 +9,9 @@
 		type StorageRetentionPolicy,
 		type StorageRetentionMode,
 		type RetentionHold,
+		type AuditExportDestination,
+		type AuditExportDestinationKind,
+		type AuditExportDestinationFormat,
 	} from '$lib/api.js';
 	import { onMount } from 'svelte';
 
@@ -335,6 +338,7 @@
 
 	let retentionPolicies: StorageRetentionPolicy[] = $state([]);
 	let retentionHolds: RetentionHold[] = $state([]);
+	let auditDestinations: AuditExportDestination[] = $state([]);
 	let retentionLoading = $state(false);
 	let retentionError: string | null = $state(null);
 	let retentionGated = $state(false); // true once we know the project isn't Legal-Team
@@ -348,9 +352,23 @@
 	let policySaving = $state(false);
 	let policyDialogError: string | null = $state(null);
 
+	// New-destination dialog (#353)
+	let destDialogOpen = $state(false);
+	let destKind = $state<AuditExportDestinationKind>('webhook');
+	let destEndpoint = $state('');
+	let destSecretRef = $state('');
+	let destFormat = $state<AuditExportDestinationFormat>('json');
+	let destSaving = $state(false);
+	let destDialogError: string | null = $state(null);
+
 	async function switchToRetention() {
 		activeTab = 'retention';
-		if (retentionPolicies.length === 0 && retentionHolds.length === 0 && !retentionError) {
+		if (
+			retentionPolicies.length === 0 &&
+			retentionHolds.length === 0 &&
+			auditDestinations.length === 0 &&
+			!retentionError
+		) {
 			await loadRetention();
 		}
 	}
@@ -360,12 +378,17 @@
 		retentionError = null;
 		retentionGated = false;
 		try {
-			const [policies, holds] = await Promise.all([
+			// All three lists share the same 402+legal_team_required
+			// gate, so a single Promise.all + one catch keeps the
+			// upgrade card decision at one place.
+			const [policies, holds, destinations] = await Promise.all([
 				api.listStorageRetentionPolicies(projectId),
 				api.listRetentionHolds(projectId),
+				api.listAuditExportDestinations(projectId),
 			]);
 			retentionPolicies = policies.policies ?? [];
 			retentionHolds = holds.holds ?? [];
+			auditDestinations = destinations.destinations ?? [];
 		} catch (err) {
 			// 402 + code:legal_team_required → upgrade card. The
 			// backend can reword the human message any time; the
@@ -467,6 +490,90 @@
 		} catch {
 			return String(hold.target_ref);
 		}
+	}
+
+	// ── SIEM export destinations (#353) ──────────────────────────
+
+	function openDestDialog() {
+		destKind = 'webhook';
+		destEndpoint = '';
+		destSecretRef = '';
+		destFormat = 'json';
+		destDialogError = null;
+		destDialogOpen = true;
+	}
+
+	function closeDestDialog() {
+		destDialogOpen = false;
+	}
+
+	async function saveDest(e: Event) {
+		e.preventDefault();
+		destSaving = true;
+		destDialogError = null;
+		try {
+			await api.createAuditExportDestination(projectId, {
+				kind: destKind,
+				endpoint: destEndpoint.trim(),
+				// Empty string → null so the backend records "no
+				// secret" rather than a literal empty vault key.
+				secret_ref: destSecretRef.trim() === '' ? null : destSecretRef.trim(),
+				format: destFormat,
+				enabled: true,
+			});
+			destDialogOpen = false;
+			await loadRetention();
+		} catch (err) {
+			destDialogError = err instanceof Error ? err.message : 'Failed to create destination';
+		} finally {
+			destSaving = false;
+		}
+	}
+
+	async function toggleDestEnabled(d: AuditExportDestination) {
+		try {
+			await api.updateAuditExportDestination(projectId, d.id, { enabled: !d.enabled });
+			await loadRetention();
+		} catch (err) {
+			retentionError = err instanceof Error ? err.message : 'Failed to update destination';
+		}
+	}
+
+	async function removeDest(d: AuditExportDestination) {
+		// SIEM destinations are ops-configured and typically feed a
+		// compliance auditor's system. Confirming with the endpoint
+		// visible avoids clicking Remove on the wrong row.
+		if (!confirm(`Remove ${d.kind} destination "${d.endpoint}"?\n\nAudit events already delivered stay on the sink. Future events are no longer forwarded.`)) return;
+		try {
+			await api.removeAuditExportDestination(projectId, d.id);
+			await loadRetention();
+		} catch (err) {
+			retentionError = err instanceof Error ? err.message : 'Failed to remove destination';
+		}
+	}
+
+	// Test button surfaces the 501 "deliverer not available" shape as
+	// a friendly one-line note rather than the raw APIError. Once
+	// #354/#355 land the deliverers will succeed here and this branch
+	// falls through to a generic success message.
+	let destTestNote: Record<string, string> = $state({}); // dest.id → transient note
+	async function testDest(d: AuditExportDestination) {
+		destTestNote[d.id] = 'sending…';
+		try {
+			await api.testAuditExportDestination(projectId, d.id);
+			destTestNote[d.id] = '✓ delivered';
+		} catch (err) {
+			if (err instanceof APIError && err.code === 'deliverer_not_available') {
+				destTestNote[d.id] = `not implemented yet (see ${d.kind === 'webhook' ? '#354' : '#355'})`;
+			} else if (err instanceof APIError) {
+				destTestNote[d.id] = err.message;
+			} else {
+				destTestNote[d.id] = 'test failed';
+			}
+		}
+		// Clear the note after a few seconds so the UI doesn't
+		// permanently show stale state.
+		setTimeout(() => { destTestNote[d.id] = ''; }, 6000);
 	}
 </script>
 
@@ -1233,6 +1340,84 @@
 					</div>
 				{/if}
 			</section>
+
+			<!-- SIEM export destinations (#353) -->
+			<section class="space-y-3">
+				<div class="flex items-center justify-between">
+					<div>
+						<h2 class="text-lg font-semibold text-gray-900">SIEM export</h2>
+						<p class="mt-1 text-sm text-gray-500">
+							Forward every audit event to an external SIEM (webhook or syslog). Complements the platform-managed WORM archive by giving your security team the same stream in real time.
+						</p>
+					</div>
+					<button
+						onclick={openDestDialog}
+						class="cursor-pointer inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
+					>
+						<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+						Add destination
+					</button>
+				</div>
+
+				{#if auditDestinations.length === 0}
+					<div class="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-500">
+						No SIEM destinations configured. <span class="font-mono text-[11px]">webhook</span> (HTTPS POST) or <span class="font-mono text-[11px]">syslog</span> (RFC 5424 over TLS) — pick a sink you already run.
+					</div>
+				{:else}
+					<div class="overflow-hidden rounded-lg border border-gray-200">
+						<table class="min-w-full divide-y divide-gray-200">
+							<thead class="bg-gray-50">
+								<tr>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Kind</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Endpoint</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Format</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Secret</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Last delivered (seq)</th>
+									<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+									<th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-gray-200 bg-white">
+								{#each auditDestinations as d}
+									<tr>
+										<td class="px-4 py-2 text-xs">
+											<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-700">{d.kind}</span>
+										</td>
+										<td class="px-4 py-2 text-xs font-mono text-gray-900 max-w-md truncate" title={d.endpoint}>{d.endpoint}</td>
+										<td class="px-4 py-2 text-xs uppercase text-gray-700">{d.format}</td>
+										<td class="px-4 py-2 text-xs">
+											{#if d.secret_ref}
+												<span class="text-gray-700">{d.secret_ref}</span>
+											{:else}
+												<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800" title="No shared secret — the deliverer omits the signature header entirely. The sink cannot authenticate this stream.">unauthenticated</span>
+											{/if}
+										</td>
+										<td class="px-4 py-2 text-xs text-gray-700 font-mono">{d.last_cursor}</td>
+										<td class="px-4 py-2 text-xs">
+											<button
+												onclick={() => toggleDestEnabled(d)}
+												class="cursor-pointer inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium {d.enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'} transition-colors"
+												title="Toggle enabled"
+											>
+												{d.enabled ? 'enabled' : 'disabled'}
+											</button>
+										</td>
+										<td class="px-4 py-2 text-right text-xs">
+											<div class="flex items-center justify-end gap-3">
+												{#if destTestNote[d.id]}
+													<span class="text-[11px] text-gray-500 italic">{destTestNote[d.id]}</span>
+												{/if}
+												<button onclick={() => testDest(d)} class="cursor-pointer text-eurobase-600 hover:text-eurobase-700 font-medium">Test</button>
+												<button onclick={() => removeDest(d)} class="cursor-pointer text-red-600 hover:text-red-700 font-medium">Remove</button>
+											</div>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</section>
 		</div>
 	{/if}
 
@@ -1316,6 +1501,99 @@
 						class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 disabled:opacity-50 disabled:cursor-not-allowed"
 					>
 						{policySaving ? 'Saving…' : 'Save policy'}
+					</button>
+				</div>
+			</form>
+		</div>
+	{/if}
+
+	{#if destDialogOpen}
+		<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+			<button
+				type="button"
+				aria-label="Close dialog"
+				onclick={closeDestDialog}
+				class="absolute inset-0 bg-black/40 cursor-default"
+			></button>
+			<form
+				onsubmit={saveDest}
+				class="relative w-full max-w-md rounded-lg bg-white p-6 shadow-xl space-y-4"
+			>
+				<div>
+					<h3 class="text-lg font-semibold text-gray-900">Add SIEM destination</h3>
+					<p class="mt-1 text-xs text-gray-500">The deliverer starts from the most recent audit event onward — pre-registration history is not back-filled. Existing WORM archive stays authoritative for older records.</p>
+				</div>
+
+				<div class="space-y-3">
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Kind</span>
+						<select
+							bind:value={destKind}
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						>
+							<option value="webhook">Webhook — HMAC-signed POST to an https endpoint</option>
+							<option value="syslog">Syslog — RFC 5424 over TCP/TLS</option>
+						</select>
+					</label>
+
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Endpoint</span>
+						<input
+							type="text"
+							bind:value={destEndpoint}
+							placeholder={destKind === 'webhook' ? 'https://siem.example.com/audit' : 'siem.example.com:6514'}
+							required
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						/>
+						<span class="mt-1 block text-[11px] text-gray-500">
+							{destKind === 'webhook'
+								? 'https only — plaintext http is rejected.'
+								: 'host:port; TLS-only at delivery.'}
+							Internal targets (localhost, RFC1918, link-local, cloud metadata IPs) are rejected — SSRF prevention.
+						</span>
+					</label>
+
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Vault secret name (optional)</span>
+						<input
+							type="text"
+							bind:value={destSecretRef}
+							placeholder={destKind === 'webhook' ? 'siem_hmac_secret' : 'siem_tls_client_cert'}
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						/>
+						<span class="mt-1 block text-[11px] text-gray-500">
+							{destKind === 'webhook'
+								? 'HMAC signing secret. Leave empty to send unsigned — the sink cannot authenticate the stream.'
+								: 'Optional TLS client cert vault key. Leave empty for server-cert-only TLS.'}
+						</span>
+					</label>
+
+					<label class="block">
+						<span class="text-xs font-medium text-gray-700">Format</span>
+						<select
+							bind:value={destFormat}
+							class="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+						>
+							<option value="json">JSON (native envelope)</option>
+							<option value="cef">CEF (Common Event Format — for ArcSight / Splunk / Elastic)</option>
+						</select>
+					</label>
+				</div>
+
+				{#if destDialogError}
+					<div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+						{destDialogError}
+					</div>
+				{/if}
+
+				<div class="flex justify-end gap-2 pt-2">
+					<button type="button" onclick={closeDestDialog} class="cursor-pointer rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
+					<button
+						type="submit"
+						disabled={destSaving}
+						class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						{destSaving ? 'Saving…' : 'Add destination'}
 					</button>
 				</div>
 			</form>
