@@ -28,6 +28,17 @@ const (
 	// that most SIEM sinks don't reject the payload; env-tunable
 	// via AUDIT_WEBHOOK_BATCH_SIZE.
 	auditWebhookBatchSize = 100
+
+	// auditWebhookMaxBatchesPerJob caps the drain loop inside a
+	// single River job invocation, mirroring the #352 archive
+	// exporter's shape. Without the loop, a recovered sink after a
+	// long outage catches up at one batch per 30s scheduler tick;
+	// with it, one job invocation drains up to 20 * 100 = 2000
+	// rows before yielding to the scheduler. Cap keeps a
+	// pathological insert rate from turning one job into an
+	// unbounded upload storm; the next tick picks up whatever's
+	// left.
+	auditWebhookMaxBatchesPerJob = 20
 )
 
 // DeliverAuditWebhookWorker handles jobs.DeliverAuditWebhookArgs.
@@ -73,10 +84,73 @@ func (w *DeliverAuditWebhookWorker) Work(ctx context.Context, job *river.Job[job
 		return nil
 	}
 
-	// Read the next batch. Order by seq ASC so cursor advancement is
-	// monotonic. Filter by project_id — global-chain rows
-	// (project_id IS NULL) are platform events and don't belong on
-	// a tenant SIEM.
+	// Resolve secret once at the top of the drain loop — the vault
+	// value doesn't change across batches inside a single job.
+	// nil-safe: NULL secret_ref → deliverer omits the sig (#356
+	// "unauthenticated" semantics).
+	var secret []byte
+	if secretRef != nil && *secretRef != "" && w.Vault != nil {
+		sec, err := w.Vault.Get(ctx, schemaName, *secretRef)
+		if err != nil {
+			return fmt.Errorf("resolve webhook secret %q: %w", *secretRef, err)
+		}
+		secret = []byte(sec.Value)
+	}
+
+	// Drain-until-empty loop with a bounded cap, mirroring the
+	// #352 archive-exporter shape. Without this, a recovered sink
+	// after a long outage catches up at one batch per 30s tick;
+	// with it, one job invocation drains up to
+	// auditWebhookMaxBatchesPerJob * auditWebhookBatchSize rows.
+	var totalDelivered int
+	for i := 0; i < auditWebhookMaxBatchesPerJob; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		env, err := w.readBatch(ctx, projectID, lastCursor)
+		if err != nil {
+			return err
+		}
+		if env == nil {
+			break // caught up
+		}
+
+		res := w.Deliverer.PostEnvelope(ctx, endpoint, secret, env)
+		if res.Err != nil {
+			slog.Warn("audit webhook delivery failed",
+				"dest_id", destID, "status", res.StatusCode, "error", res.Err,
+				"batches_this_job", i, "delivered_this_job", totalDelivered)
+			return res.Err
+		}
+
+		if _, err := w.Pool.Exec(ctx,
+			`UPDATE public.audit_export_destinations
+			    SET last_cursor = $2, updated_at = now()
+			  WHERE id = $1::uuid AND last_cursor < $2`,
+			destID, env.Cursor,
+		); err != nil {
+			return fmt.Errorf("advance cursor: %w", err)
+		}
+		slog.Info("audit webhook delivered",
+			"dest_id", destID, "events", len(env.Events), "cursor", env.Cursor)
+
+		lastCursor = env.Cursor
+		totalDelivered += len(env.Events)
+	}
+	if totalDelivered == auditWebhookMaxBatchesPerJob*auditWebhookBatchSize {
+		slog.Warn("audit webhook: batch cap reached, backlog not fully drained this job",
+			"dest_id", destID, "delivered", totalDelivered,
+			"next_tick_in", auditWebhookSchedulerInterval.String())
+	}
+	return nil
+}
+
+// readBatch pulls the next auditWebhookBatchSize rows above cursor
+// into an Envelope. Returns (nil, nil) when no rows remain — the
+// caller uses that as the loop-exit signal. Ordering by seq ASC
+// keeps cursor advancement monotonic.
+func (w *DeliverAuditWebhookWorker) readBatch(ctx context.Context, projectID string, cursor int64) (*export.Envelope, error) {
 	rows, err := w.Pool.Query(ctx,
 		`SELECT id::text, project_id::text, actor_id::text, actor_email, action,
 		        target_type, target_id, metadata, ip_address,
@@ -85,11 +159,13 @@ func (w *DeliverAuditWebhookWorker) Work(ctx context.Context, job *river.Job[job
 		  WHERE project_id = $1::uuid AND seq > $2
 		  ORDER BY seq ASC
 		  LIMIT $3`,
-		projectID, lastCursor, auditWebhookBatchSize,
+		projectID, cursor, auditWebhookBatchSize,
 	)
 	if err != nil {
-		return fmt.Errorf("read audit batch: %w", err)
+		return nil, fmt.Errorf("read audit batch: %w", err)
 	}
+	defer rows.Close()
+
 	env := &export.Envelope{DeliveredAt: time.Now().UTC().Truncate(time.Second)}
 	for rows.Next() {
 		var (
@@ -106,8 +182,7 @@ func (w *DeliverAuditWebhookWorker) Work(ctx context.Context, job *river.Job[job
 			&targetType, &targetID, &metadata, &ip,
 			&ev.CreatedAt, &ev.Seq, &rowHash,
 		); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan audit row: %w", err)
+			return nil, fmt.Errorf("scan audit row: %w", err)
 		}
 		ev.ProjectID = projectID
 		ev.ActorID = actorID
@@ -125,48 +200,13 @@ func (w *DeliverAuditWebhookWorker) Work(ctx context.Context, job *river.Job[job
 			env.Cursor = ev.Seq
 		}
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate audit rows: %w", err)
+		return nil, fmt.Errorf("iterate audit rows: %w", err)
 	}
 	if len(env.Events) == 0 {
-		// Nothing new — leave last_cursor alone. Not an error; the
-		// scheduler will re-fire on the next tick.
-		return nil
+		return nil, nil
 	}
-
-	// Resolve secret from the tenant vault (nil-safe — a NULL
-	// secret_ref means "unauthenticated", deliverer omits the sig).
-	var secret []byte
-	if secretRef != nil && *secretRef != "" && w.Vault != nil {
-		sec, err := w.Vault.Get(ctx, schemaName, *secretRef)
-		if err != nil {
-			return fmt.Errorf("resolve webhook secret %q: %w", *secretRef, err)
-		}
-		secret = []byte(sec.Value)
-	}
-
-	res := w.Deliverer.PostEnvelope(ctx, endpoint, secret, env)
-	if res.Err != nil {
-		slog.Warn("audit webhook delivery failed",
-			"dest_id", destID, "status", res.StatusCode, "error", res.Err)
-		return res.Err
-	}
-
-	// CAS-update last_cursor. WHERE last_cursor < env.Cursor prevents
-	// a concurrent tick (shouldn't happen thanks to UniqueOpts, but
-	// belt-and-braces) from moving the cursor backward.
-	if _, err := w.Pool.Exec(ctx,
-		`UPDATE public.audit_export_destinations
-		    SET last_cursor = $2, updated_at = now()
-		  WHERE id = $1::uuid AND last_cursor < $2`,
-		destID, env.Cursor,
-	); err != nil {
-		return fmt.Errorf("advance cursor: %w", err)
-	}
-	slog.Info("audit webhook delivered",
-		"dest_id", destID, "events", len(env.Events), "cursor", env.Cursor)
-	return nil
+	return env, nil
 }
 
 // hexEncode is a tiny helper local to this worker so it doesn't
