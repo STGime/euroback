@@ -269,6 +269,16 @@ func main() {
 		Vault:     vaultSvc,
 	})
 
+	// #355 audit syslog deliverer. Same SSRF-safe dial semantics
+	// as the webhook worker, but writes RFC 5424 frames over TLS
+	// instead of HMAC-signed HTTPS. Vault holds the optional TLS
+	// client cert PEM bundle for mutual-TLS to the sink.
+	river.AddWorker(riverWorkers, &workers.DeliverAuditSyslogWorker{
+		Pool:      pool,
+		Deliverer: export.NewSyslogDeliverer(),
+		Vault:     vaultSvc,
+	})
+
 	// ── Create River client in worker mode ──
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
@@ -371,11 +381,13 @@ func main() {
 	// accumulating in the DB until ops flips it on.
 	workers.StartAuditArchiveExporter(ctx, pool, s3Client)
 
-	// #354 webhook scheduler: enqueue one DeliverAuditWebhookArgs
-	// per enabled webhook destination every 30s. UniqueOpts on the
-	// args prevent duplicates for a slow sink; River's exponential
-	// backoff handles per-attempt retry math.
-	workers.StartAuditWebhookScheduler(ctx, pool, riverClient)
+	// #354 + #355 SIEM delivery scheduler: enqueue one River job
+	// per enabled destination every 30s. Kind-aware — webhook rows
+	// get DeliverAuditWebhookArgs, syslog rows get
+	// DeliverAuditSyslogArgs. UniqueOpts on both prevent duplicates
+	// for slow sinks; River's exponential backoff handles per-attempt
+	// retry math.
+	workers.StartAuditDeliveryScheduler(ctx, pool, riverClient)
 
 	// ── Graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)

@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -597,11 +599,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// ships (routes stay registered so console renders
 			// "Test (coming soon)" not "not found").
 			destSvc := compliance.NewDestinationService(pool)
-			// Webhook deliverer for the Test endpoint (#354). Same
-			// SSRF-safe HTTP client + signing code path as the
-			// scheduled deliverer worker — one implementation.
+			// Webhook + syslog deliverers for the Test endpoint
+			// (#354 / #355). Same code paths as the scheduled
+			// deliverer workers — one implementation per kind.
 			webhookDeliverer := export.NewDeliverer(export.ClientConfig{})
 			testDelivererAdapter := &webhookTestAdapter{d: webhookDeliverer}
+			syslogTestAdapter := &syslogTestAdapter{d: export.NewSyslogDeliverer()}
 			// Vault lookup shim for the Test path — closes over
 			// vaultSvc without leaking a *vault.VaultService through
 			// the compliance package.
@@ -619,7 +622,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-export", compliance.HandleListDestinations(pool, limitsSvc, destSvc))
 			r.With(tenant.RequireMinRole("admin")).Patch("/compliance/audit-export/{destID}", compliance.HandleUpdateDestination(pool, limitsSvc, destSvc, auditSvc))
 			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/audit-export/{destID}", compliance.HandleRemoveDestination(pool, limitsSvc, destSvc, auditSvc))
-			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export/{destID}/test", compliance.HandleTestDestination(pool, limitsSvc, destSvc, testDelivererAdapter, vaultLookup))
+			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export/{destID}/test", compliance.HandleTestDestination(pool, limitsSvc, destSvc, testDelivererAdapter, syslogTestAdapter, vaultLookup))
 
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names
@@ -1247,4 +1250,62 @@ func (a *webhookTestAdapter) PostEnvelope(ctx context.Context, endpoint string, 
 	}
 	res := a.d.PostEnvelope(ctx, endpoint, secret, &env)
 	return res.StatusCode, res.Err
+}
+
+// syslogTestAdapter bridges *export.SyslogDeliverer to
+// compliance.SyslogTestDeliverer. Parses the vault-stored PEM
+// bundle into a tls.Certificate (kept out of compliance to avoid
+// the crypto/tls import there) and dials once with a single
+// synthetic event.
+type syslogTestAdapter struct {
+	d *export.SyslogDeliverer
+}
+
+func (a *syslogTestAdapter) SendTestEvent(ctx context.Context, endpoint string, pemBundle []byte, action string, projectID string) error {
+	var cert *tls.Certificate
+	if len(pemBundle) > 0 {
+		c, err := loadTLSCertFromRouterPEM(pemBundle)
+		if err != nil {
+			return fmt.Errorf("parse client cert: %w", err)
+		}
+		cert = &c
+	}
+	events := []export.SyslogEvent{
+		{
+			ID:        "00000000-0000-0000-0000-000000000000",
+			ProjectID: projectID,
+			Action:    action,
+			CreatedAt: time.Now().UTC().Truncate(time.Second),
+			Seq:       0,
+		},
+	}
+	_, err := a.d.DialAndSend(ctx, endpoint, cert, events)
+	return err
+}
+
+// loadTLSCertFromRouterPEM mirrors the worker's PEM parser —
+// duplicated (rather than exported from workers) because the
+// worker package imports internal/gateway indirectly via chains
+// we don't want to invert. Tiny function; keeping both copies
+// in lockstep is cheaper than the import gymnastics.
+func loadTLSCertFromRouterPEM(bundle []byte) (tls.Certificate, error) {
+	var certPEM, keyPEM []byte
+	rest := bundle
+	for {
+		block, remaining := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		switch block.Type {
+		case "CERTIFICATE":
+			certPEM = append(certPEM, pem.EncodeToMemory(block)...)
+		case "PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY":
+			keyPEM = pem.EncodeToMemory(block)
+		}
+		rest = remaining
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		return tls.Certificate{}, fmt.Errorf("bundle must contain both CERTIFICATE and PRIVATE KEY blocks")
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
 }

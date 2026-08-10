@@ -151,6 +151,23 @@ func (BackfillRuntimeCredentialArgs) InsertOpts() river.InsertOpts {
 	}
 }
 
+// DeliverAuditSyslogArgs is the syslog analogue of
+// DeliverAuditWebhookArgs — enqueued per enabled syslog destination
+// by the shared scheduler. Same idempotency / retry policy: unique
+// by args (destination_id), MaxAttempts=5 with River's exponential
+// backoff.
+type DeliverAuditSyslogArgs struct {
+	DestinationID string `json:"destination_id"`
+}
+
+func (DeliverAuditSyslogArgs) Kind() string { return "deliver_audit_syslog" }
+func (DeliverAuditSyslogArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
+}
+
 // DeliverAuditWebhookArgs is enqueued (per destination, periodically
 // by the audit_webhook_scheduler sweeper — #354) to POST a batch of
 // new audit_log rows to a tenant's registered webhook sink. Args

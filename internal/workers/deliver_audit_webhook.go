@@ -141,7 +141,7 @@ func (w *DeliverAuditWebhookWorker) Work(ctx context.Context, job *river.Job[job
 	if totalDelivered == auditWebhookMaxBatchesPerJob*auditWebhookBatchSize {
 		slog.Warn("audit webhook: batch cap reached, backlog not fully drained this job",
 			"dest_id", destID, "delivered", totalDelivered,
-			"next_tick_in", auditWebhookSchedulerInterval.String())
+			"next_tick_in", auditDeliverySchedulerInterval.String())
 	}
 	return nil
 }
