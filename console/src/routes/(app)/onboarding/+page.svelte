@@ -11,16 +11,34 @@
 	let createError = $state('');
 	let planData = $state<PlanLimits[]>([]);
 
+	// Team-tier closed-beta gate (M2). Populated on mount from the
+	// profile endpoint; controls whether the Team option appears on
+	// this first-project picker. Mirrors the pattern on
+	// routes/(app)/projects/+page.svelte so a user granted
+	// team_beta_access sees the Team option on BOTH create paths
+	// (onboarding + subsequent "New Project" modal). Without this,
+	// a granted user's first project could only be Free/Pro and
+	// they'd have to create-then-upgrade — reported by the founder
+	// after grant-then-onboarding didn't show Team.
+	let hasTeamBeta = $state(false);
+
 	onMount(async () => {
 		try {
-			planData = await api.getPlans();
+			const [plans, profile] = await Promise.all([
+				api.getPlans(),
+				api.getProfile().catch(() => null),
+			]);
+			planData = plans;
+			if (profile) hasTeamBeta = !!profile.team_beta_access;
 		} catch {
-			// Use empty — cards will show hardcoded fallback
+			// Fallbacks handle the empty/errored cases — cards show
+			// hardcoded copy, Team stays hidden if profile failed.
 		}
 	});
 
 	let freePlan = $derived(planData.find(p => p.plan === 'free'));
 	let proPlan = $derived(planData.find(p => p.plan === 'pro'));
+	let teamPlan = $derived(planData.find(p => p.plan === 'team'));
 
 	function formatLimit(mb: number): string {
 		if (mb >= 1024) return (mb / 1024).toFixed(0) + ' GB';
@@ -240,7 +258,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				<fieldset>
 					<legend class="block text-sm font-medium text-gray-700">Plan for this project</legend>
 					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently. You can mix Free and Pro projects. <a href="/pricing" class="text-eurobase-600 hover:text-eurobase-700 underline">See full comparison</a></p>
-					<div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+					<div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" class:lg:grid-cols-3={hasTeamBeta}>
 						<label class="cursor-pointer">
 							<input type="radio" name="onb-plan" value="free" bind:group={plan} class="peer sr-only" />
 							<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50/50 peer-checked:shadow-sm border-gray-200 hover:border-gray-300">
@@ -305,6 +323,45 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 								</ul>
 							</div>
 						</label>
+						{#if hasTeamBeta}
+							<!-- Team-tier closed-beta option (M2). Only rendered
+							     for users with team_beta_access = true. Emerald
+							     styling matches the projects/+page.svelte New
+							     Project modal so the two create paths look the
+							     same to a granted user. -->
+							<label class="cursor-pointer">
+								<input type="radio" name="onb-plan" value="team" bind:group={plan} class="peer sr-only" />
+								<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-emerald-600 peer-checked:bg-emerald-50/50 peer-checked:shadow-sm border-emerald-200 hover:border-emerald-300">
+									<div class="flex items-center justify-between">
+										<p class="text-sm font-semibold text-gray-900">Team</p>
+										<span class="text-xs font-semibold text-emerald-700">Beta · free</span>
+									</div>
+									<p class="mt-1.5 text-xs text-gray-500">Dedicated Postgres, direct <code class="rounded bg-gray-100 px-1 text-[10px]">DATABASE_URL</code>, PITR + backups.</p>
+									<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											{teamPlan ? formatLimit(teamPlan.db_size_mb) : '100 GB'} dedicated database, {teamPlan ? formatLimit(teamPlan.storage_mb) : '500 GB'} file storage
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											{teamPlan ? (teamPlan.mau_limit / 1000).toFixed(0) + 'k' : '1000k'} auth users
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											Direct <code class="rounded bg-gray-100 px-1 text-[10px]">postgres://</code> URL — Payload, Prisma, Drizzle, psql
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											PITR (7d), scheduled backups (30d retention)
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											Provisioning takes 2–5 min after Create
+										</li>
+									</ul>
+								</div>
+							</label>
+						{/if}
 					</div>
 				</fieldset>
 			</div>
