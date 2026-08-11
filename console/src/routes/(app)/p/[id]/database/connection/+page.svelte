@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { onMount, onDestroy } from 'svelte';
-	import { api, type ConnectionInfo, type ConnectionState, type Project } from '$lib/api.js';
+	import { api, APIError, type ConnectionInfo, type ConnectionState, type Project } from '$lib/api.js';
 
 	let projectId = $derived($page.params.id);
 	let project = $state<Project | null>(null);
@@ -108,12 +108,15 @@
 			conn = c;
 			role = withRole;
 		} catch (e: any) {
-			// If /connection 409s ("no active dedicated database"), the
-			// state banner already covers the reason — don't double-
-			// surface the raw string. Any other error still shows.
-			const msg = e?.message ?? 'Failed to load connection';
-			if (!msg.toLowerCase().includes('no active dedicated database')) {
-				error = msg;
+			// Suppress the top-of-page red banner for the
+			// no-active-DB 409 — the state banner already renders
+			// the "provisioning" / "failed" context. Keyed on the
+			// machine-readable `code` (via APIError) rather than
+			// substring-matching the message, so a backend reword
+			// can't re-open the double-surface bug.
+			const code = e instanceof APIError ? e.code : undefined;
+			if (code !== 'no_active_dedicated_db') {
+				error = e?.message ?? 'Failed to load connection';
 			}
 			conn = null;
 		} finally {

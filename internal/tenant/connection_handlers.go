@@ -138,7 +138,15 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 		rec, err := s.repo.GetLiveByProject(r.Context(), projectID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				http.Error(w, `{"error":"project has no active dedicated database"}`, http.StatusConflict)
+				// Console suppresses the top-of-page red banner
+				// when this specific 409 fires (the state banner
+				// already renders the "provisioning" / "failed"
+				// context). Sending a machine-readable `code`
+				// keeps that suppression from depending on
+				// substring-matching the human message — same
+				// pattern as `dedicated_db_required` /
+				// `legal_team_required` elsewhere.
+				http.Error(w, `{"error":"project has no active dedicated database","code":"no_active_dedicated_db"}`, http.StatusConflict)
 				return
 			}
 			slog.Error("connection lookup failed", "error", err, "project_id", projectID)
@@ -363,10 +371,20 @@ func (s *ConnectionService) HandleGetConnectionState() http.HandlerFunc {
 		if err == nil && rec != nil {
 			resp.State = string(rec.State)
 			resp.CreatedAt = rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z")
-			// Any deleted_at != nil → treat as no live DB → retryable.
-			// Otherwise: retryable ONLY on 'failed' — provisioning/
-			// active/restoring must not accept a re-enqueue.
-			if rec.DeletedAt != nil || rec.State == "failed" {
+			// Retryable ONLY when:
+			//   * state='failed' AND the row isn't soft-deleted
+			//     (a MarkDeleted'd failed row is a leftover from a
+			//     retry-in-progress and must not offer another
+			//     Retry click — that's the exact race the reviewer
+			//     caught on the previous round).
+			//   * (see below) no row at all.
+			//
+			// A row with deleted_at != nil is a teardown in flight
+			// (or completed) — terminal, not retryable. Users on a
+			// deleted project should create a fresh project on the
+			// Team plan; the console renders the gray teardown
+			// banner for that case.
+			if rec.State == "failed" && rec.DeletedAt == nil {
 				resp.Retryable = true
 			}
 		} else {
@@ -429,19 +447,38 @@ func (s *ConnectionService) HandleRetryProvisioning() http.HandlerFunc {
 			return
 		}
 
-		// Retryable-state guard: only 'failed' + no-row + soft-deleted.
-		// A live 'provisioning'/'active'/'restoring' means "leave it
-		// alone" — refuse with 409 so a double-click doesn't create
-		// two instances the operator then has to reconcile.
+		// Retryable-state guard. Retry is only valid when:
+		//   * no row exists (rare — enqueue failed at
+		//     CreateProject time), or
+		//   * the current row is state='failed' AND not
+		//     soft-deleted (a `deleting`/`deleted` row is a
+		//     teardown in flight — creating a new project is the
+		//     right recovery, not retrying provision on a torn-
+		//     down project). This also closes the race the
+		//     reviewer caught: request A's MarkDeleted below sets
+		//     deleted_at → request B's GetLatestByProject sees a
+		//     deleted row → previous version treated that as
+		//     retryable → double-enqueue → double-provision.
+		//
+		// The two safety nets working together (this guard +
+		// ProvisionTeamDatabaseArgs UniqueOpts.ByArgs on the
+		// enqueue) mean even a bypassed guard can't produce two
+		// Scaleway instances — River collapses the duplicate.
 		rec, lerr := s.repo.GetLatestByProject(r.Context(), projectID)
 		if lerr != nil && !errors.Is(lerr, pgx.ErrNoRows) {
 			slog.Error("retry provision: state lookup failed", "error", lerr, "project_id", projectID)
 			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
 			return
 		}
-		if rec != nil && rec.DeletedAt == nil && rec.State != "failed" {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, "database already in state "+string(rec.State)+"; retry not applicable"), http.StatusConflict)
-			return
+		if rec != nil {
+			if rec.DeletedAt != nil {
+				http.Error(w, `{"error":"database is being torn down; create a new project on the Team plan to get a fresh instance"}`, http.StatusConflict)
+				return
+			}
+			if rec.State != "failed" {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, "database already in state "+string(rec.State)+"; retry not applicable"), http.StatusConflict)
+				return
+			}
 		}
 
 		// A leftover failed row would violate the
