@@ -256,10 +256,13 @@ func (s *Scaleway) Provision(ctx context.Context, opts ProvisionOpts) (*Instance
 	instanceName := fmt.Sprintf("eurobase-%s-%s", sanitizeSlug(opts.Slug), suffix)
 
 	// Root credentials for the instance. Username is fixed so the
-	// gateway knows what to open the DSN with; password is a fresh
-	// 32-byte random hex the caller seals before writing.
+	// gateway knows what to open the DSN with; password meets
+	// Scaleway RDB's complexity policy (≥1 upper, lower, digit,
+	// special — a plain hex password fails 400 at instance-create,
+	// which is how #362 initially bit). The caller seals before
+	// writing.
 	username := "eurobase_owner"
-	password, err := randomHex(32)
+	password, err := RandomScalewayPassword(32)
 	if err != nil {
 		return nil, err
 	}

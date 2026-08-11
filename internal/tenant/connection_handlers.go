@@ -20,8 +20,6 @@ package tenant
 //       invalidated immediately at the Scaleway side.
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -214,9 +212,13 @@ func (s *ConnectionService) HandleRotateConnection() http.HandlerFunc {
 			return
 		}
 
-		// Generate fresh 32-byte hex password (matches the shape
-		// Scaleway.Provision uses).
-		newPassword, err := randomHexPassword(32)
+		// Generate a fresh password matching Scaleway RDB's
+		// complexity policy (≥1 upper, lower, digit, special).
+		// Same helper the initial-provision path uses so rotation
+		// and provision produce identical shapes — otherwise a
+		// tenant could get a working rotated password today and a
+		// rejected one after a Scaleway policy tightening.
+		newPassword, err := dbprovider.RandomScalewayPassword(32)
 		if err != nil {
 			http.Error(w, `{"error":"password generation failed"}`, http.StatusInternalServerError)
 			return
@@ -304,14 +306,6 @@ func buildPostgresURL(user, password, host string, port int, db string) string {
 	q.Set("sslmode", "require")
 	u.RawQuery = q.Encode()
 	return u.String()
-}
-
-func randomHexPassword(bytes int) (string, error) {
-	b := make([]byte, bytes)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 func writeConnectionAudit(r *http.Request, projectID, action string, metadata map[string]any) {
