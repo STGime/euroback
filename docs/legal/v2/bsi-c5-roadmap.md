@@ -14,9 +14,9 @@ Eurobase is not yet C5-attested. This document sets out the roadmap.
 
 ## Planned path
 
-- **Phase 1 — Gap analysis (Q1 2027).** External assessor performs a Basis-Kriterien gap analysis. Expected effort: 2–3 weeks, cost €5–10k. Output: prioritised remediation list.
+- **Phase 1 — Gap analysis (Q1 2027).** External assessor performs a Basis-Kriterien gap analysis. Expected effort: 2–3 weeks. Output: prioritised remediation list.
 - **Phase 2 — Remediation (Q2 2027).** Close documented gaps. Formal ISMS. Publish security policies.
-- **Phase 3 — Type 1 attestation (Q3 2027).** Auditor confirms the control design is adequate at a point in time. Expected effort: 4–6 weeks, cost €40–80k. Output: signed Type 1 report.
+- **Phase 3 — Type 1 attestation (Q3 2027).** Auditor confirms the control design is adequate at a point in time. Expected effort: 4–6 weeks. Output: signed Type 1 report.
 - **Phase 4 — Type 2 attestation (Q3 2028).** Auditor confirms the controls operated effectively over a 12-month observation window. Ongoing.
 
 ## What Customers can rely on today, in advance of attestation
