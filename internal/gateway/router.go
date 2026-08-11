@@ -38,6 +38,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
 
 // NewRouter creates and configures the chi router.
@@ -562,9 +564,24 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// audited (ActionConnectionURLViewed) — the URL is a
 			// bearer credential once revealed.
 			if connCipher != nil {
-				connSvc := tenant.NewConnectionService(pool, providerRegistry, connCipher, limitsSvc).WithPoolCache(poolCache)
+				// Insert-only River client for the retry-provisioning
+				// endpoint. Nil-safe on ConnectionService: if the
+				// client fails to construct we log + degrade gracefully
+				// (retry endpoint returns 503; every other Connection
+				// tab route still works).
+				var connRiverClient *river.Client[pgx.Tx]
+				if rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{}); err == nil {
+					connRiverClient = rc
+				} else {
+					slog.Warn("connection retry-provisioning disabled: river insert-only client init failed", "error", err)
+				}
+				connSvc := tenant.NewConnectionService(pool, providerRegistry, connCipher, limitsSvc).
+					WithPoolCache(poolCache).
+					WithRiverClient(connRiverClient)
 				r.With(tenant.RequireMinRole("admin")).Get("/connection", connSvc.HandleGetConnection())
+				r.With(tenant.RequireMinRole("viewer")).Get("/connection/state", connSvc.HandleGetConnectionState())
 				r.With(tenant.RequireMinRole("admin")).Post("/connection/rotate", connSvc.HandleRotateConnection())
+				r.With(tenant.RequireMinRole("admin")).Post("/connection/retry-provision", connSvc.HandleRetryProvisioning())
 			}
 
 			// Legal-Team compliance surface (M2b). Gated by

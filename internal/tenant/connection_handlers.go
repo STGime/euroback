@@ -31,10 +31,12 @@ import (
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
+	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 )
 
 // ConnectionService owns the read + rotate endpoints. Depends on the
@@ -54,6 +56,13 @@ type ConnectionService struct {
 	// connections start failing auth within ~30 min (as the pool
 	// cycles past MaxConnLifetime).
 	poolCache *dbprovider.PoolCache
+	// riverClient is used by HandleRetryProvisioning to re-enqueue
+	// ProvisionTeamDatabaseArgs when a tenant's dedicated DB is in
+	// state='failed' or missing entirely. Nil-safe — a service
+	// constructed without one just returns 503 from the retry
+	// endpoint, so ops can boot the process without River in dev
+	// without also breaking every other Connection tab surface.
+	riverClient *river.Client[pgx.Tx]
 }
 
 func NewConnectionService(pool *pgxpool.Pool, registry *dbprovider.Registry, cipher *dbprovider.Cipher, limits *plans.LimitsService) *ConnectionService {
@@ -73,6 +82,14 @@ func NewConnectionService(pool *pgxpool.Pool, registry *dbprovider.Registry, cip
 // entries will keep serving until they cycle past MaxConnLifetime.
 func (s *ConnectionService) WithPoolCache(c *dbprovider.PoolCache) *ConnectionService {
 	s.poolCache = c
+	return s
+}
+
+// WithRiverClient attaches an insert-only River client so
+// HandleRetryProvisioning can re-enqueue the provision job when a
+// tenant's dedicated DB is in state='failed'. Nil-safe.
+func (s *ConnectionService) WithRiverClient(c *river.Client[pgx.Tx]) *ConnectionService {
+	s.riverClient = c
 	return s
 }
 
@@ -286,6 +303,178 @@ func (s *ConnectionService) HandleRotateConnection() http.HandlerFunc {
 			Username: rec.Username,
 			Role:     "readwrite",
 		})
+	}
+}
+
+// ConnectionStateResponse is the shape the console polls to render
+// the Connection tab correctly for every dedicated-DB state — not
+// just 'active'. Without this, a tenant whose provisioning is still
+// in flight (or failed) saw the raw 409 "no active dedicated
+// database" from /connection with no way to distinguish
+// "wait 2 min" from "call support".
+//
+// The state pass-through mirrors dbprovider.State values verbatim so
+// a new state added there (say, 'upgrading') doesn't need a
+// console-side enum change to render — the console falls back to
+// showing the raw state and the operator gets useful info.
+type ConnectionStateResponse struct {
+	// State is one of dbprovider.State: 'provisioning' | 'active' |
+	// 'restoring' | 'failed' | 'deleting' | 'deleted'. Empty when
+	// no project_databases row exists (Free/Pro today, or a Team
+	// project whose provisioning enqueue itself failed — rare).
+	State string `json:"state"`
+	// CreatedAt is when the (latest) row was inserted — the
+	// console renders elapsed-time next to the provisioning
+	// spinner so an operator can see if a "provisioning" state
+	// has been stuck for hours vs. the normal 2-5 min.
+	CreatedAt string `json:"created_at,omitempty"`
+	// Retryable is true when the current state means "no working
+	// DB and no in-flight provisioning" — the console shows the
+	// Retry button. Currently true for state='failed' and for the
+	// no-row case; false for provisioning/active/restoring so the
+	// operator can't accidentally start a second provisioning
+	// job while one is in flight.
+	Retryable bool `json:"retryable"`
+}
+
+// HandleGetConnectionState — GET /platform/projects/{id}/connection/state.
+// Polled by the console every 5s while the Connection tab is open in
+// a provisioning-adjacent state. Cheap: single-row SELECT, no
+// provider calls. Same CheckDedicatedDB gate as /connection so a
+// Free/Pro tenant can't probe.
+func (s *ConnectionService) HandleGetConnectionState() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			http.Error(w, `{"error":"project id required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+		rec, err := s.repo.GetLatestByProject(r.Context(), projectID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("connection state lookup failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		resp := ConnectionStateResponse{}
+		if err == nil && rec != nil {
+			resp.State = string(rec.State)
+			resp.CreatedAt = rec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z")
+			// Any deleted_at != nil → treat as no live DB → retryable.
+			// Otherwise: retryable ONLY on 'failed' — provisioning/
+			// active/restoring must not accept a re-enqueue.
+			if rec.DeletedAt != nil || rec.State == "failed" {
+				resp.Retryable = true
+			}
+		} else {
+			// No row at all → no live DB → retryable (rare; enqueue
+			// failed at CreateProject time). Empty state string
+			// distinguishes "never existed" from "failed" for the
+			// console banner.
+			resp.Retryable = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// HandleRetryProvisioning — POST /platform/projects/{id}/connection/retry-provision.
+// Re-enqueues ProvisionTeamDatabaseArgs for a project whose current
+// dedicated-DB record is missing or state='failed'. Refuses if a live
+// row exists (state IN provisioning|active|restoring) so an operator
+// can't accidentally start a second Scaleway instance while one is in
+// flight or already serving traffic.
+//
+// If the previous attempt left a failed row behind, MarkDeleted is
+// called first so the new job's InsertProvisioning doesn't collide
+// on the (project_id, deleted_at IS NULL) uniqueness the schema
+// enforces.
+func (s *ConnectionService) HandleRetryProvisioning() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			http.Error(w, `{"error":"project id required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+		if s.riverClient == nil {
+			http.Error(w, `{"error":"provisioning worker not configured on this environment"}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		// Look up project slug + plan for the job args, and current
+		// dedicated-DB state. Doing both in one round-trip so the
+		// retry decision + the enqueue are keyed on the same snapshot.
+		var (
+			slug string
+			plan string
+		)
+		if err := s.pool.QueryRow(r.Context(),
+			`SELECT slug, plan FROM public.projects WHERE id = $1::uuid`,
+			projectID,
+		).Scan(&slug, &plan); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			slog.Error("retry provision: project lookup failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Retryable-state guard: only 'failed' + no-row + soft-deleted.
+		// A live 'provisioning'/'active'/'restoring' means "leave it
+		// alone" — refuse with 409 so a double-click doesn't create
+		// two instances the operator then has to reconcile.
+		rec, lerr := s.repo.GetLatestByProject(r.Context(), projectID)
+		if lerr != nil && !errors.Is(lerr, pgx.ErrNoRows) {
+			slog.Error("retry provision: state lookup failed", "error", lerr, "project_id", projectID)
+			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		if rec != nil && rec.DeletedAt == nil && rec.State != "failed" {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, "database already in state "+string(rec.State)+"; retry not applicable"), http.StatusConflict)
+			return
+		}
+
+		// A leftover failed row would violate the
+		// (project_id, deleted_at IS NULL) uniqueness the schema
+		// enforces on InsertProvisioning. Soft-delete first so the
+		// retry job can insert its own row cleanly.
+		if rec != nil && rec.State == "failed" && rec.DeletedAt == nil {
+			if err := s.repo.MarkDeleted(r.Context(), rec.ID); err != nil {
+				slog.Error("retry provision: mark deleted failed", "error", err, "project_id", projectID, "record_id", rec.ID)
+				http.Error(w, `{"error":"failed to clean up prior attempt"}`, http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if _, err := s.riverClient.Insert(r.Context(), jobs.ProvisionTeamDatabaseArgs{
+			ProjectID: projectID,
+			Slug:      slug,
+			Provider:  "scaleway",
+			Region:    "fr-par",
+			Size:      "medium",
+		}, nil); err != nil {
+			slog.Error("retry provision: enqueue failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"failed to enqueue provisioning job"}`, http.StatusInternalServerError)
+			return
+		}
+
+		writeConnectionAudit(r, projectID, audit.ActionConnectionRetryProvisioning, map[string]any{
+			"plan": plan,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"enqueued": true})
 	}
 }
 

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { onMount } from 'svelte';
-	import { api, type ConnectionInfo, type Project } from '$lib/api.js';
+	import { onMount, onDestroy } from 'svelte';
+	import { api, type ConnectionInfo, type ConnectionState, type Project } from '$lib/api.js';
 
 	let projectId = $derived($page.params.id);
 	let project = $state<Project | null>(null);
@@ -22,6 +22,79 @@
 	let typedForRotate = $state('');
 	let rotateMatches = $derived(typedForRotate.trim() === (project?.name ?? ''));
 
+	// State-poll surface. Split from `error` so a transient state
+	// lookup (network blip on the 5s poll) doesn't wipe the connection
+	// UX out from under a working session — `error` is reserved for
+	// the once-per-load /connection call.
+	let dbState = $state<ConnectionState | null>(null);
+	let stateError = $state<string | null>(null);
+	let retryBusy = $state(false);
+	let retryError = $state<string | null>(null);
+
+	// 5s poll cadence — long enough that Scaleway RDB provisioning
+	// (2-5 min typical) doesn't hammer the state endpoint, short
+	// enough that the user sees the ready state within a few seconds
+	// of it landing. Poll only while the DB is provisioning/restoring
+	// (no point polling once active — the URL is stable) and only
+	// while the tab is open (onDestroy clears the interval so a
+	// navigation away doesn't leave a stray timer).
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
+	function stopPoll() {
+		if (pollTimer !== null) {
+			clearInterval(pollTimer);
+			pollTimer = null;
+		}
+	}
+	function startPollIfNeeded() {
+		if (dbState && (dbState.state === 'provisioning' || dbState.state === 'restoring')) {
+			if (pollTimer === null) pollTimer = setInterval(refreshState, 5000);
+		} else {
+			stopPoll();
+		}
+	}
+
+	// Elapsed-time display for the provisioning banner. Derived from
+	// dbState.created_at + a $state ticker that updates every 5s so
+	// the number moves without the whole page re-rendering constantly.
+	let now = $state(Date.now());
+	let tickTimer: ReturnType<typeof setInterval> | null = null;
+	let elapsedSec = $derived.by(() => {
+		if (!dbState?.created_at) return 0;
+		const started = new Date(dbState.created_at).getTime();
+		return Math.max(0, Math.floor((now - started) / 1000));
+	});
+	function elapsedLabel(sec: number): string {
+		if (sec < 60) return `${sec}s`;
+		const m = Math.floor(sec / 60);
+		const s = sec % 60;
+		return s === 0 ? `${m}m` : `${m}m ${s}s`;
+	}
+
+	async function refreshState() {
+		if (!projectId) return;
+		try {
+			const s = await api.getConnectionState(projectId);
+			const wasActive = dbState?.state === 'active';
+			dbState = s;
+			stateError = null;
+			// State transitioned INTO active — load the URL. Load the
+			// project too if it isn't cached yet so the rotate-confirm
+			// modal has the name for its typed-confirmation guard.
+			if (s.state === 'active' && !conn) {
+				await load(role);
+			}
+			// State transitioned OUT of active back to something else
+			// (e.g. rotation ripped the URL out of sight) → drop cached
+			// conn so we re-fetch on the next transition.
+			if (s.state !== 'active' && wasActive) {
+				conn = null;
+			}
+			startPollIfNeeded();
+		} catch (e: any) {
+			stateError = e?.message ?? 'State lookup failed';
+		}
+	}
+
 	async function load(withRole: 'readonly' | 'readwrite') {
 		if (!projectId) return;
 		busy = true;
@@ -35,14 +108,55 @@
 			conn = c;
 			role = withRole;
 		} catch (e: any) {
-			error = e?.message ?? 'Failed to load connection';
+			// If /connection 409s ("no active dedicated database"), the
+			// state banner already covers the reason — don't double-
+			// surface the raw string. Any other error still shows.
+			const msg = e?.message ?? 'Failed to load connection';
+			if (!msg.toLowerCase().includes('no active dedicated database')) {
+				error = msg;
+			}
 			conn = null;
 		} finally {
 			busy = false;
 		}
 	}
 
-	onMount(() => load('readonly'));
+	async function retryProvision() {
+		if (!projectId) return;
+		retryBusy = true;
+		retryError = null;
+		try {
+			await api.retryProvisionConnection(projectId);
+			// Immediate state refresh so the banner flips from
+			// "failed" to "provisioning" without waiting for the next
+			// poll tick.
+			await refreshState();
+		} catch (e: any) {
+			retryError = e?.message ?? 'Retry failed';
+		} finally {
+			retryBusy = false;
+		}
+	}
+
+	onMount(async () => {
+		// Load the project name in parallel with the first state check
+		// so the rotate-confirm modal's typed-confirmation guard has
+		// what it needs before the user could possibly click.
+		if (projectId) {
+			try {
+				project = await api.getProject(projectId);
+			} catch {
+				// Non-fatal — modal falls back to a generic prompt.
+			}
+		}
+		await refreshState();
+		tickTimer = setInterval(() => { now = Date.now(); }, 5000);
+	});
+
+	onDestroy(() => {
+		stopPoll();
+		if (tickTimer !== null) clearInterval(tickTimer);
+	});
 
 	async function copy(text: string) {
 		try {
@@ -84,6 +198,70 @@
 		<div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-800">{error}</div>
 	{/if}
 
+	{#if dbState && dbState.state === 'provisioning'}
+		<!-- Provisioning banner: shown while Scaleway RDB spins up.
+		     Typical window is 2-5 min; if elapsed passes 10 min the
+		     worker's PollTimeout kicks in and the state flips to
+		     'failed', which switches this banner over to the failure
+		     one below. -->
+		<div class="rounded-md border border-eurobase-200 bg-eurobase-50 p-4 text-sm text-eurobase-900">
+			<div class="flex items-center gap-3">
+				<svg class="h-5 w-5 animate-spin text-eurobase-600 shrink-0" fill="none" viewBox="0 0 24 24">
+					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+				</svg>
+				<div>
+					<p class="font-semibold">Provisioning your dedicated Postgres…</p>
+					<p class="mt-0.5 text-xs text-eurobase-800">
+						Scaleway takes 2–5 minutes to bring up a managed instance. Elapsed: <span class="font-mono">{elapsedLabel(elapsedSec)}</span>.
+						This page will update automatically when it's ready — no need to refresh.
+					</p>
+				</div>
+			</div>
+		</div>
+	{:else if dbState && dbState.state === 'restoring'}
+		<div class="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+			<p class="font-semibold">Restore in progress</p>
+			<p class="mt-0.5 text-xs">The dedicated instance is restoring from a snapshot. Connection URL will reappear once the restore completes.</p>
+		</div>
+	{:else if dbState && dbState.retryable}
+		<!-- Retryable = state='failed' or no row at all (rare —
+		     enqueue failed at CreateProject time). Both need the same
+		     user affordance: "click Retry to spin up a fresh Scaleway
+		     instance." -->
+		<div class="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+			<p class="font-semibold">
+				{dbState.state === 'failed' ? 'Provisioning failed' : 'Provisioning was never started'}
+			</p>
+			<p class="mt-0.5 text-xs">
+				{#if dbState.state === 'failed'}
+					The Scaleway managed-PG provisioning didn't complete. Common causes: invalid Scaleway credentials in the worker, the region being at capacity, or a policy rejection at instance-create time. Click <strong>Retry</strong> to enqueue a fresh attempt; the previous failed row is cleaned up server-side.
+				{:else}
+					No provisioning job ever ran for this project (rare — usually means the enqueue failed at project-create time). Click <strong>Retry</strong> to start one now.
+				{/if}
+			</p>
+			{#if retryError}
+				<p class="mt-2 text-xs font-medium text-red-800">{retryError}</p>
+			{/if}
+			<div class="mt-3">
+				<button
+					type="button"
+					onclick={retryProvision}
+					disabled={retryBusy}
+					class="cursor-pointer rounded-md border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed"
+				>
+					{retryBusy ? 'Enqueuing…' : 'Retry provisioning'}
+				</button>
+			</div>
+		</div>
+	{:else if dbState && (dbState.state === 'deleting' || dbState.state === 'deleted')}
+		<div class="rounded-md border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+			<p class="font-semibold">Dedicated database being torn down</p>
+			<p class="mt-0.5 text-xs">This project's dedicated instance is deleting. Create a new project on the Team plan to get a fresh one.</p>
+		</div>
+	{/if}
+
+	{#if dbState && dbState.state === 'active'}
 	<div class="rounded-lg border border-gray-200 bg-white p-6 shadow-sm space-y-4">
 		<div class="flex items-center justify-between">
 			<div class="flex gap-2">
@@ -180,6 +358,7 @@
 			</dl>
 		{/if}
 	</div>
+	{/if}
 
 	<div class="rounded-lg border border-gray-200 bg-white p-6 shadow-sm space-y-4">
 		<h2 class="text-sm font-semibold text-gray-900">Client examples</h2>

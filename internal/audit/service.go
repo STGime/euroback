@@ -113,8 +113,9 @@ const (
 	// the connection string and when — the URL is a bearer credential
 	// once revealed. Rotation is audited separately so ops can
 	// confirm password changes landed.
-	ActionConnectionURLViewed  = "team.connection.url_viewed"
-	ActionConnectionURLRotated = "team.connection.url_rotated"
+	ActionConnectionURLViewed         = "team.connection.url_viewed"
+	ActionConnectionURLRotated        = "team.connection.url_rotated"
+	ActionConnectionRetryProvisioning = "team.connection.retry_provisioning"
 )
 
 // Entry represents a single audit log row.
