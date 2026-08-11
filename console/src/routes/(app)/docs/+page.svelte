@@ -2529,6 +2529,12 @@ claude mcp add --transport http eurobase https://mcp.eurobase.app/mcp \
 				When the SDK / REST / edge-functions / SQL editor / MCP aren't enough — because your stack expects a raw <code class="rounded bg-gray-100 px-1 text-[11px]">postgres://</code> URL.
 			</p>
 
+			<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900 mb-4">
+				<strong>Closed beta — invite only.</strong> Team &amp; Legal Team tiers are not self-serve yet. If you'd like access,
+				email <a href="mailto:contact@eurobase.app" class="underline hover:no-underline">contact@eurobase.app</a> with a
+				one-line description of the workload. Grants are manual during the beta window.
+			</div>
+
 			<div class="rounded-xl border border-gray-200 bg-white p-6 space-y-4">
 				<h3 class="text-base font-semibold text-gray-900">Why this exists</h3>
 				<p class="text-sm text-gray-700">
