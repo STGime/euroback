@@ -248,6 +248,22 @@ export interface ConnectionInfo {
 	readonly_pending?: boolean;
 }
 
+/**
+ * Response shape for GET /platform/projects/{id}/connection/state.
+ * Polled by the console so a tenant whose dedicated DB is still
+ * spinning up (or failed) sees a proper banner instead of the raw
+ * 409 the /connection endpoint returns for non-active states.
+ */
+export interface ConnectionState {
+	/** dbprovider.State value verbatim; empty string means no row exists. */
+	state: '' | 'provisioning' | 'active' | 'restoring' | 'failed' | 'deleting' | 'deleted';
+	/** ISO-8601 UTC — when the current row was inserted. Missing when state is "". */
+	created_at?: string;
+	/** True when the current state means "no working DB, no in-flight
+	 *  provisioning" — safe to POST /connection/retry-provision. */
+	retryable: boolean;
+}
+
 export interface RestoreOperation {
 	id: string;
 	project_id: string;
@@ -1866,6 +1882,38 @@ export class EurobaseAPI {
 	async rotateConnection(projectId: string): Promise<ConnectionInfo> {
 		return this.fetch<ConnectionInfo>(
 			`/platform/projects/${projectId}/connection/rotate`,
+			{ method: 'POST' }
+		);
+	}
+
+	/**
+	 * State of the project's dedicated Postgres — polled every ~5s
+	 * while provisioning is in flight so the console can show a live
+	 * "provisioning" or "failed" banner instead of the raw 409
+	 * getConnection returns for non-active states.
+	 *
+	 * state=""     — no project_databases row exists (rare: enqueue failed at CreateProject time)
+	 * state="provisioning" — Scaleway instance spinning up (2-5 min typical)
+	 * state="active"       — ready; getConnection returns the URL
+	 * state="restoring"    — mid PITR restore (M3 backups)
+	 * state="failed"       — provider rejected or polling timed out
+	 * state="deleting"/"deleted" — teardown in flight
+	 */
+	async getConnectionState(projectId: string): Promise<ConnectionState> {
+		return this.fetch<ConnectionState>(
+			`/platform/projects/${projectId}/connection/state`
+		);
+	}
+
+	/**
+	 * Re-enqueue the ProvisionTeamDatabaseWorker for a project whose
+	 * dedicated DB is in state='failed' or missing entirely. Refuses
+	 * (409) if a live row exists — the server-side guard stops a
+	 * double-click from creating two Scaleway instances.
+	 */
+	async retryProvisionConnection(projectId: string): Promise<void> {
+		await this.fetch(
+			`/platform/projects/${projectId}/connection/retry-provision`,
 			{ method: 'POST' }
 		);
 	}

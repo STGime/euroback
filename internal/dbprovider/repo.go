@@ -298,6 +298,48 @@ func (r *Repo) GetLiveByProject(ctx context.Context, projectID string) (*Record,
 	return &rec, nil
 }
 
+// GetLatestByProject returns the most recent project_databases row
+// for a project regardless of state — even failed / deleting /
+// deleted. Used by the console's state-poll endpoint so a tenant
+// whose provisioning failed sees "Provisioning failed" instead of
+// the generic 409 "no active dedicated database" that
+// GetLiveByProject's state filter forces.
+//
+// Returns pgx.ErrNoRows only when the project genuinely has never
+// had a project_databases row (Free/Pro today, or a Team project
+// whose enqueue failed).
+func (r *Repo) GetLatestByProject(ctx context.Context, projectID string) (*Record, error) {
+	const q = `
+		SELECT id, project_id, provider, provider_instance_id, host, port,
+		       database_name, username, password_ciphertext, password_nonce,
+		       password_key_version,
+		       runtime_username, runtime_password_ciphertext,
+		       runtime_password_nonce, runtime_password_key_version,
+		       region, state,
+		       superseded_by, created_at, updated_at, deleted_at
+		  FROM public.project_databases
+		 WHERE project_id = $1
+	     ORDER BY (state = 'active') DESC,
+	              (state = 'provisioning') DESC,
+	              created_at DESC
+		 LIMIT 1
+	`
+	var rec Record
+	err := r.pool.QueryRow(ctx, q, projectID).Scan(
+		&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
+		&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
+		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+		&rec.Region, &rec.State,
+		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
 // Get returns a single row by primary key.
 func (r *Repo) Get(ctx context.Context, id string) (*Record, error) {
 	const q = `

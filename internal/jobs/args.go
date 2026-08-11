@@ -90,8 +90,22 @@ func (ProvisionTeamDatabaseArgs) Kind() string { return "provision_team_database
 // provisioning can take 2-5 minutes; a network flake during the
 // polling loop shouldn't burn the whole job — we want a few
 // automatic retries before we page ops.
+//
+// UniqueOpts.ByArgs collapses duplicates keyed on (ProjectID, Slug,
+// Provider, Region, Size). Two paths enqueue with those exact
+// args: CreateProject on the create path, and HandleRetryProvisioning
+// on the recovery path. Without dedup, a double-click / two admins
+// / a client-side network retry all produce TWO Scaleway instances
+// (~€50-500/mo each), and the retry handler's check-then-enqueue
+// guard is a TOCTOU on the DB row. River's ByState defaults cover
+// pending + available + running + retryable, so a NEW attempt is
+// still allowed after a prior job COMPLETES or is CANCELLED —
+// exactly the semantics the retry button needs.
 func (ProvisionTeamDatabaseArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{MaxAttempts: 5}
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
 }
 
 // DeprovisionTeamDatabaseArgs is enqueued by the periodic sweep to
