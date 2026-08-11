@@ -130,10 +130,32 @@
 		retryError = null;
 		try {
 			await api.retryProvisionConnection(projectId);
-			// Immediate state refresh so the banner flips from
-			// "failed" to "provisioning" without waiting for the next
-			// poll tick.
-			await refreshState();
+			// Optimistically enter provisioning + start polling.
+			//
+			// The retry handler MarkDeleted's the old failed row
+			// (state='deleting') BEFORE the new River job runs
+			// InsertProvisioning. If we `refreshState()` immediately
+			// here, we catch that transient 'deleting' row and the
+			// template routes to the gray "torn down — create a
+			// new project" banner — the exact opposite message
+			// from "you just clicked Retry, we're provisioning."
+			// Worse: startPollIfNeeded only polls
+			// provisioning/restoring, so 'deleting' stops the poll
+			// and the UI never advances when the real
+			// provisioning row lands.
+			//
+			// Fix: skip the racy refresh and set the local state
+			// optimistically. The next poll tick (5s) picks up the
+			// real row and replaces this stub. If the enqueue
+			// somehow never materialises a row, the poll keeps
+			// showing the spinner — which is the right failure
+			// shape (a genuinely stuck provisioning).
+			dbState = {
+				state: 'provisioning',
+				created_at: new Date().toISOString(),
+				retryable: false,
+			};
+			startPollIfNeeded();
 		} catch (e: any) {
 			retryError = e?.message ?? 'Retry failed';
 		} finally {
