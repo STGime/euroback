@@ -258,7 +258,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				<fieldset>
 					<legend class="block text-sm font-medium text-gray-700">Plan for this project</legend>
 					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently. You can mix Free and Pro projects. <a href="/pricing" class="text-eurobase-600 hover:text-eurobase-700 underline">See full comparison</a></p>
-					<div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" class:lg:grid-cols-3={hasTeamBeta}>
+					<div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
 						<label class="cursor-pointer">
 							<input type="radio" name="onb-plan" value="free" bind:group={plan} class="peer sr-only" />
 							<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50/50 peer-checked:shadow-sm border-gray-200 hover:border-gray-300">
@@ -328,7 +328,18 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 							     for users with team_beta_access = true. Emerald
 							     styling matches the projects/+page.svelte New
 							     Project modal so the two create paths look the
-							     same to a granted user. -->
+							     same to a granted user.
+
+							     Hardcoded fallback numbers (100 GB / 500 GB /
+							     1000k) are intentional — getPlans() returns
+							     free/pro only for non-beta callers, so teamPlan
+							     may be undefined here even when Team is
+							     visible. Kept in sync with plan_limits' team
+							     row (migration 000085) by hand; the values
+							     will only diverge on a plan_limits change,
+							     which is rare and would be caught in the same
+							     PR by anyone reviewing changes to this
+							     section. -->
 							<label class="cursor-pointer">
 								<input type="radio" name="onb-plan" value="team" bind:group={plan} class="peer sr-only" />
 								<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-emerald-600 peer-checked:bg-emerald-50/50 peer-checked:shadow-sm border-emerald-200 hover:border-emerald-300">
