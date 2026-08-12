@@ -55,7 +55,24 @@ type RestoreTeamDatabaseWorker struct {
 const (
 	defaultRestorePollInterval = 10 * time.Second
 	defaultRestorePollTimeout  = 15 * time.Minute
+	// restoreSlack covers Provider.Restore + InsertProvisioning +
+	// verification query + state-machine swap AROUND the pollUntil
+	// core. Same shape and enforcement invariant as provisionSlack
+	// in provision_team_db.go — asserted by
+	// TestRestoreTeamDatabaseWorker_Timeout.
+	restoreSlack = 5 * time.Minute
 )
+
+// Timeout overrides River's 1-minute default. Restore does a fresh
+// Scaleway RDB provision from a snapshot (WAL replay can push past
+// the normal 90 s – 4 min provision floor), then polls Describe up
+// to defaultRestorePollTimeout, then runs a verification query, then
+// swaps the state machine. See sibling comment on
+// ProvisionTeamDatabaseWorker.Timeout for why the River default kills
+// these workflows.
+func (w *RestoreTeamDatabaseWorker) Timeout(*river.Job[jobs.RestoreTeamDatabaseArgs]) time.Duration {
+	return defaultRestorePollTimeout + restoreSlack
+}
 
 func (w *RestoreTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[jobs.RestoreTeamDatabaseArgs]) error {
 	restoreID := job.Args.RestoreOperationID
