@@ -53,22 +53,34 @@ type ProvisionTeamDatabaseWorker struct {
 const (
 	defaultPollInterval = 10 * time.Second
 	defaultPollTimeout  = 10 * time.Minute
+	// provisionSlack is the wall-clock budget the worker needs
+	// AROUND pollUntilActive: Provision + InsertProvisioning +
+	// bootstrapRuntime (which opens a fresh psql connection under
+	// its own 30s inner deadline and applies embedded SQL). 5 min
+	// leaves ample headroom for the empirical <30 s bootstrap while
+	// staying well under a MaxAttempts=5 × Timeout() total burn.
+	//
+	// The invariant `Timeout() >= defaultPollTimeout + provisionSlack`
+	// is enforced by TestProvisionTeamDatabaseWorker_Timeout — a
+	// future refactor that raises defaultPollTimeout without touching
+	// slack (or vice versa) fails the test rather than silently
+	// re-introducing the bug fixed here.
+	provisionSlack = 5 * time.Minute
 )
 
 // Timeout overrides River's 1-minute default. pollUntilActive alone
-// can wait up to 10 minutes for Scaleway RDB to reach `ready`
-// (typically 90 s – 4 min), so the whole Work() invocation needs a
-// comfortably larger ceiling. 15 minutes = 10 min poll + 5 min slack
-// for Provision, InsertProvisioning, and bootstrapRuntime (which
-// itself connects to the fresh instance and runs migrations).
+// can wait up to defaultPollTimeout (10 min) for Scaleway RDB to
+// reach `ready` (typically 90 s – 4 min), so the whole Work()
+// invocation needs a ceiling that fully contains the poll plus the
+// surrounding work.
 //
 // Without this override every attempt died at 60 s inside
 // pollUntilActive → best-effort delete → MarkDeleted → River retry,
-// and MaxAttempts=5 burned through in ~5 minutes without ever giving
-// the instance time to reach `ready`. Root cause of the myteam
-// project provisioning loop that never converged.
+// burning MaxAttempts=5 in ~5 minutes without ever giving one
+// instance time to reach `ready`. Root cause of the myteam project
+// provisioning loop that never converged.
 func (w *ProvisionTeamDatabaseWorker) Timeout(*river.Job[jobs.ProvisionTeamDatabaseArgs]) time.Duration {
-	return 15 * time.Minute
+	return defaultPollTimeout + provisionSlack
 }
 
 func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[jobs.ProvisionTeamDatabaseArgs]) error {
