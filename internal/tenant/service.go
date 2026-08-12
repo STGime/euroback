@@ -76,6 +76,12 @@ type TenantService struct {
 	riverClient *river.Client[pgx.Tx]
 	secrets     SecretStore
 	betaGrants  BetaGrantRecorder
+	// providerRegistry lets DeleteProject best-effort tear down
+	// dedicated Scaleway instances synchronously (in addition to
+	// hard-deleting the project_databases rows). Optional — when nil,
+	// DeleteProject still succeeds by hard-deleting the rows, but a
+	// leaked provider instance stays until manual ops cleanup.
+	providerRegistry *dbprovider.Registry
 }
 
 // NewTenantService creates a new TenantService backed by the given connection pool.
@@ -101,6 +107,17 @@ func NewTenantService(pool *pgxpool.Pool) *TenantService {
 // projects.auth_config JSONB column.
 func (s *TenantService) SetSecretStore(store SecretStore) {
 	s.secrets = store
+}
+
+// SetProviderRegistry wires an optional dbprovider.Registry into the
+// tenant service. When set, DeleteProject best-effort tears down any
+// dedicated Scaleway instances tied to the project synchronously
+// before hard-deleting the project_databases rows. Optional — when
+// nil, DeleteProject still hard-deletes the rows (unblocking the
+// projects.id FK), but a leaked provider instance stays for manual
+// cleanup via the Scaleway console.
+func (s *TenantService) SetProviderRegistry(reg *dbprovider.Registry) {
+	s.providerRegistry = reg
 }
 
 // SetBetaGrantRecorder wires an optional beta-grant recorder
@@ -430,45 +447,113 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 // DeleteProject drops the tenant schema and deletes the project row.
 // The caller must verify ownership before calling this.
 //
-// Team-tier note (M2 review bug_002): if a live project_databases row
-// exists for this project, mark it deleted_at=now() BEFORE the
-// DELETE FROM projects. The FK is ON DELETE RESTRICT (migration
-// 000083) — the delete would otherwise 23503 and leave the tenant
-// schema already dropped by deprovision_tenant but the row still
-// visible. MarkDeleted flips state='deleting' and sets deleted_at,
-// which drops the row out of the unique-live-per-project index and
-// lets the FK-target-side cascade proceed. The DeprovisionTeamDatabaseWorker
-// sweeps the marked row 7 days later + destroys the actual Scaleway
-// instance.
+// Team-tier teardown (extends M2 review bug_002): every
+// project_databases row tied to this project must go before the
+// DELETE FROM projects — the FK is ON DELETE RESTRICT (migration
+// 000083) and doesn't care about deleted_at. Failed provisioning
+// attempts leave soft-deleted rows (state='deleting', deleted_at
+// set) that the 7-day sweeper hasn't yet reaped, and those alone
+// were enough to block the projects delete with 23503 for the
+// myteam repro. Fix: enumerate every row, best-effort provider
+// teardown for any with provider_instance_id, then hard-delete
+// all rows for this project.
+//
+// The 7-day rollback window that deprovision_sweeper enforces is
+// the two-instance-restore rollback (M3): restore creates a fresh
+// instance and marks the old row deleted; if the restore is bad, ops
+// flips deleted_at back within 7 days to re-adopt the original.
+// That contract is scoped to a *live* project. User-initiated project
+// deletion collapses the entire tenant — there's no project row left
+// for a re-adopted row to belong to — so we bypass the window here.
+// Slug-confirm in the console is the guard against accidental delete.
+//
+// Known limitations, tracked as follow-ups (see PR #372 review):
+//   - No advisory lock: a provision worker mid-InsertProvisioning
+//     could race the list-then-delete. Fix: pg_advisory_xact_lock
+//     on hashtext('project:'||projectID) taken by both paths.
+//   - Steps 3-5 run as separate implicit txs: a failure between
+//     HardDeleteAllByProject and DELETE FROM projects leaks the
+//     provider_instance_ids. Fix: wrap in BeginTx.
+//   - If ENV=production and providerRegistry is nil (or its
+//     provider.Delete returns ErrUnauthorized because SCW_SECRET_KEY
+//     is empty), we silently leak Scaleway instances. Fix:
+//     fail-closed in production when the teardown path has no
+//     working provider.
 func (s *TenantService) DeleteProject(ctx context.Context, projectID string) error {
-	// Mark any live project_databases row deleted so the ON DELETE
-	// RESTRICT FK doesn't block the projects row delete. Idempotent
-	// — no live row is fine (Free / Pro projects), returns quickly.
 	repo := dbprovider.NewRepo(s.pool)
-	rec, err := repo.GetLiveByProject(ctx, projectID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("lookup project_databases: %w", err)
-	}
-	if rec != nil {
-		if err := repo.MarkDeleted(ctx, rec.ID); err != nil {
-			return fmt.Errorf("mark project_databases deleted: %w", err)
-		}
-		slog.Info("marked project_databases row deleted before project drop",
-			"project_id", projectID, "project_database_id", rec.ID)
+
+	// 1. Enumerate ALL project_databases rows (live + soft-deleted).
+	rows, err := repo.ListAllByProject(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("list project_databases: %w", err)
 	}
 
-	// Call deprovision_tenant to drop the schema.
-	_, err = s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID)
-	if err != nil {
+	// 2. Best-effort provider teardown for any row that has an
+	// instance ID. Prior worker runs called bestEffortDelete for the
+	// failed-provisioning rows, but that path can silently fail
+	// (Scaleway 5xx during shutdown, etc.) — a second pass here
+	// closes the leak window before we lose the ProviderInstanceID
+	// by hard-deleting the row.
+	//
+	// If the registry isn't wired (dev / tests without SCW creds), or
+	// the provider isn't registered, we skip teardown and log the
+	// leaked instance IDs so ops can clean up manually. This
+	// preserves the ability to delete a project even when the
+	// provider layer is unavailable.
+	if s.providerRegistry != nil {
+		for _, r := range rows {
+			if r.ProviderInstanceID == "" {
+				continue
+			}
+			provider, err := s.providerRegistry.Get(r.Provider)
+			if err != nil {
+				slog.Warn("provider not registered — leaving instance for manual cleanup",
+					"project_id", projectID,
+					"provider", r.Provider,
+					"provider_instance_id", r.ProviderInstanceID,
+					"error", err)
+				continue
+			}
+			if err := provider.Delete(ctx, r.ProviderInstanceID); err != nil {
+				slog.Warn("best-effort provider delete failed during project delete — instance may be orphaned",
+					"project_id", projectID,
+					"provider", r.Provider,
+					"provider_instance_id", r.ProviderInstanceID,
+					"error", err)
+			}
+		}
+	} else if len(rows) > 0 {
+		for _, r := range rows {
+			if r.ProviderInstanceID != "" {
+				slog.Warn("project has provider instance but registry unavailable — instance may leak",
+					"project_id", projectID,
+					"provider", r.Provider,
+					"provider_instance_id", r.ProviderInstanceID)
+			}
+		}
+	}
+
+	// 3. Hard-delete every project_databases row for the project.
+	// Bypasses the 7-day sweeper's rollback window (which is a
+	// safety net for accidental soft-delete, not for user-initiated
+	// project deletion).
+	if n, err := repo.HardDeleteAllByProject(ctx, projectID); err != nil {
+		return fmt.Errorf("hard-delete project_databases rows: %w", err)
+	} else if n > 0 {
+		slog.Info("hard-deleted project_databases rows before project drop",
+			"project_id", projectID, "row_count", n)
+	}
+
+	// 4. Call deprovision_tenant to drop the schema.
+	if _, err := s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID); err != nil {
 		slog.Error("deprovision_tenant failed", "error", err, "project_id", projectID)
 		return fmt.Errorf("deprovision tenant: %w", err)
 	}
 
-	// Delete the project row (cascades to api_keys, webhooks, etc.).
-	// project_databases (Team-tier) is RESTRICT rather than CASCADE —
-	// the MarkDeleted above soft-deletes the row so the RESTRICT sees
-	// no live reference. superseded_by FK on project_databases is
-	// SET NULL so nothing else blocks.
+	// 5. Delete the project row (cascades to api_keys, webhooks,
+	// etc.). project_databases is now clear so the RESTRICT FK
+	// won't block. superseded_by FK on project_databases is SET
+	// NULL, so it never blocked anything either.
 	tag, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
 	if err != nil {
 		return fmt.Errorf("delete project: %w", err)

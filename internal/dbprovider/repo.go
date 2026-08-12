@@ -485,6 +485,71 @@ func (r *Repo) HardDelete(ctx context.Context, id string) error {
 	return nil
 }
 
+// ListAllByProject returns every project_databases row for a project,
+// regardless of state or deleted_at. Used by user-initiated project
+// deletion, where every associated row must be cleared to satisfy
+// the ON DELETE RESTRICT FK on projects.id — including soft-deleted
+// rows from prior failed provisioning attempts (state='deleting',
+// deleted_at IS NOT NULL) that the 7-day sweeper hasn't yet reaped.
+//
+// Ordered newest-first so a caller that only wants the last N rows
+// (rare) can bail early.
+func (r *Repo) ListAllByProject(ctx context.Context, projectID string) ([]Record, error) {
+	const q = `
+		SELECT id, project_id, provider, provider_instance_id, host, port,
+		       database_name, username, password_ciphertext, password_nonce,
+		       password_key_version,
+		       runtime_username, runtime_password_ciphertext,
+		       runtime_password_nonce, runtime_password_key_version,
+		       region, state,
+		       superseded_by, created_at, updated_at, deleted_at
+		  FROM public.project_databases
+		 WHERE project_id = $1::uuid
+		 ORDER BY created_at DESC
+	`
+	rows, err := r.pool.Query(ctx, q, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("dbprovider.Repo.ListAllByProject: %w", err)
+	}
+	defer rows.Close()
+	var out []Record
+	for rows.Next() {
+		var rec Record
+		if err := rows.Scan(
+			&rec.ID, &rec.ProjectID, &rec.Provider, &rec.ProviderInstanceID,
+			&rec.Host, &rec.Port, &rec.DatabaseName, &rec.Username,
+			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
+			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
+			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.Region, &rec.State,
+			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("dbprovider.Repo.ListAllByProject scan: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// HardDeleteAllByProject removes every project_databases row for a
+// project. Returns the number of rows deleted. Called by
+// TenantService.DeleteProject to satisfy the ON DELETE RESTRICT FK
+// on projects.id — including soft-deleted rows the 7-day sweeper
+// hasn't yet reaped.
+//
+// The caller is responsible for provider-side teardown BEFORE
+// invoking this (best-effort delete per row). If a Scaleway instance
+// leaks it's an ops issue, not a correctness one — the row removal
+// here is what unblocks the user's project delete.
+func (r *Repo) HardDeleteAllByProject(ctx context.Context, projectID string) (int64, error) {
+	const q = `DELETE FROM public.project_databases WHERE project_id = $1::uuid`
+	tag, err := r.pool.Exec(ctx, q, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("dbprovider.Repo.HardDeleteAllByProject: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ErrNoLiveInstance is returned by the caller when GetLiveByProject
 // yields pgx.ErrNoRows — a semantic wrapper so callers don't have
 // to import pgx to switch on it.
