@@ -290,8 +290,16 @@ func (s *Scaleway) Provision(ctx context.Context, opts ProvisionOpts) (*Instance
 		IsHaCluster:      false, // beta default; upgrade path is a follow-up
 		DisableBackup:    false, // Scaleway daily backups on by default
 		Tags:             []string{"eurobase", "team-tier", "project:" + opts.ProjectID},
-		VolumeType:       scalewayVolumeType,
-		VolumeSize:       int64(volGB) * 1024 * 1024 * 1024, // GB → bytes
+		VolumeType: scalewayVolumeType,
+		// Scaleway sbs expects volume_size as a decimal-GB multiple
+		// (10⁹ bytes / 5-GB step) — not binary GiB (2³⁰). Our
+		// previous 50 × 2³⁰ = 53,687,091,200 is NOT a multiple of
+		// 5×10⁹ and Scaleway now returns
+		// `400 volume_size: "Invalid volume size"`. Reproduced
+		// against prod worker logs for fe9fd098… retry attempt
+		// after #365's bssd→sbs fix. bssd tolerated binary GiB;
+		// sbs doesn't.
+		VolumeSize:       int64(volGB) * 1_000_000_000, // decimal GB → bytes
 		BackupSameRegion: true,
 	}
 
