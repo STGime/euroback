@@ -288,6 +288,23 @@ func TestProvisionTeamDatabaseWorker_CancelsOnMissingCipher(t *testing.T) {
 	}
 }
 
+// TestProvisionTeamDatabaseWorker_Timeout guards against the latent
+// bug where River's 1-minute default JobTimeout would guillotine
+// pollUntilActive well before Scaleway RDB reaches `ready`
+// (typically 90 s – 4 min). Every attempt would fail at ~60 s with
+// "poll: context deadline exceeded" and MaxAttempts=5 would burn out
+// in ~5 minutes without ever giving the instance time to converge.
+// The Timeout() override must return more than the internal
+// PollTimeout so the outer River context is not the binding limit.
+func TestProvisionTeamDatabaseWorker_Timeout(t *testing.T) {
+	w := &ProvisionTeamDatabaseWorker{}
+	got := w.Timeout(stubJob(jobs.ProvisionTeamDatabaseArgs{}, 1))
+	if got <= defaultPollTimeout {
+		t.Fatalf("Timeout() = %v; want > defaultPollTimeout (%v) so outer River deadline outlasts pollUntilActive",
+			got, defaultPollTimeout)
+	}
+}
+
 const testCipherKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" // 32 zero bytes
 
 // testLogger builds a discard-level slog logger for tests so log

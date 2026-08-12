@@ -57,6 +57,18 @@ const (
 	defaultRestorePollTimeout  = 15 * time.Minute
 )
 
+// Timeout overrides River's 1-minute default. Restore does a fresh
+// Scaleway RDB provision from a snapshot (WAL replay can push past
+// the normal 90 s – 4 min provision floor), then polls Describe up
+// to 15 min, then runs a verification query on the new instance,
+// then swaps the state machine. 20 minutes covers the 15-min poll
+// with slack for surrounding work. See sibling comment on
+// ProvisionTeamDatabaseWorker.Timeout for why the River default kills
+// these workflows.
+func (w *RestoreTeamDatabaseWorker) Timeout(*river.Job[jobs.RestoreTeamDatabaseArgs]) time.Duration {
+	return 20 * time.Minute
+}
+
 func (w *RestoreTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[jobs.RestoreTeamDatabaseArgs]) error {
 	restoreID := job.Args.RestoreOperationID
 	logger := slog.With("restore_operation_id", restoreID)
