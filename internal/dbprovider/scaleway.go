@@ -66,20 +66,27 @@ type Scaleway struct {
 const (
 	scalewayDefaultBaseURL = "https://api.scaleway.com"
 	scalewayEngine         = "PostgreSQL-15"
-	// scalewayVolumeType — Scaleway Block Storage (sbs). The
-	// previous value "bssd" (legacy block SSD) was deprecated
-	// server-side in mid-2026; new RDB instances now reject
-	// bssd with `400: "bssd volume type is deprecated, this
-	// action is no longer supported. Please use sbs volume type"`.
-	// Reproduced against prod worker logs for the founder's second
-	// myteam project (fe9fd098-c923-4ce9-a4e5-95af47f68a4a) after
-	// the password fix (#363) had unblocked the previous failure.
+	// scalewayVolumeType — Scaleway Block Storage IOPS-suffixed
+	// class. Accepted values per the RDB v1 API docs:
+	//   * lssd     — local SSD (per-node, no snapshots)
+	//   * bssd     — legacy block SSD (DEPRECATED mid-2026)
+	//   * sbs_5k   — Scaleway Block Storage, 5k IOPS class
+	//   * sbs_15k  — Scaleway Block Storage, 15k IOPS class
 	//
-	// If Scaleway ever deprecates sbs the same way, wire this
-	// through env — but shipping env plumbing pre-emptively adds
-	// surface without a concrete failure to catch. Third rejection
-	// here is the trigger to make volume_type configurable.
-	scalewayVolumeType = "sbs"
+	// The bssd deprecation error was misleading — it said
+	// "Please use sbs volume type" but plain `sbs` alone is NOT an
+	// accepted value; the API expects one of the IOPS-suffixed
+	// forms. Sending `sbs` produced `400 volume_size: "Invalid
+	// volume size"` with the argument-name pointing at the wrong
+	// field (real cause: volume_type not in enum). Discovered
+	// against prod worker logs for fe9fd098… after the two prior
+	// fix attempts (#365 bssd→sbs, #367 binary→decimal GB).
+	//
+	// Picking 5k as the default: cheaper IOPS tier, no beta
+	// workload has documented an IOPS need above it. A customer
+	// asking for 15k is the trigger for the #366 env-config
+	// follow-up — code shape doesn't need to change.
+	scalewayVolumeType = "sbs_5k"
 	// scalewayDefaultDB is the maintenance database Scaleway creates
 	// on every RDB instance. Also used as the DBName on our Instance
 	// returns; app DBs are created via CREATE DATABASE later.
