@@ -459,8 +459,26 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 // all rows for this project.
 //
 // The 7-day rollback window that deprovision_sweeper enforces is
-// a *safety net for accidental soft-delete*, not for user-initiated
-// project deletion — the user typed the slug to confirm.
+// the two-instance-restore rollback (M3): restore creates a fresh
+// instance and marks the old row deleted; if the restore is bad, ops
+// flips deleted_at back within 7 days to re-adopt the original.
+// That contract is scoped to a *live* project. User-initiated project
+// deletion collapses the entire tenant — there's no project row left
+// for a re-adopted row to belong to — so we bypass the window here.
+// Slug-confirm in the console is the guard against accidental delete.
+//
+// Known limitations, tracked as follow-ups (see PR #372 review):
+//   - No advisory lock: a provision worker mid-InsertProvisioning
+//     could race the list-then-delete. Fix: pg_advisory_xact_lock
+//     on hashtext('project:'||projectID) taken by both paths.
+//   - Steps 3-5 run as separate implicit txs: a failure between
+//     HardDeleteAllByProject and DELETE FROM projects leaks the
+//     provider_instance_ids. Fix: wrap in BeginTx.
+//   - If ENV=production and providerRegistry is nil (or its
+//     provider.Delete returns ErrUnauthorized because SCW_SECRET_KEY
+//     is empty), we silently leak Scaleway instances. Fix:
+//     fail-closed in production when the teardown path has no
+//     working provider.
 func (s *TenantService) DeleteProject(ctx context.Context, projectID string) error {
 	repo := dbprovider.NewRepo(s.pool)
 
