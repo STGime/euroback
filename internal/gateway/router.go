@@ -205,11 +205,43 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// cluster) and point project_databases.username at it before
 	// this flag can be safely flipped. A regression test asserting
 	// RLS isolation on the dedicated instance is the safety gate.
+	// Create the pool cache whenever the connection cipher is available.
+	// The cache is passive — it opens a dedicated pool only when a caller
+	// asks for one — so its mere existence does not change SDK-runtime
+	// behavior. The SDK-runtime routing (poolResolver below) still gates
+	// on TEAM_TIER_ROUTING=1 because that path has the RLS-owner concern
+	// documented in the big warning above. Other callers (usage-tracker,
+	// #372 follow-up) route unconditionally because they issue platform-
+	// side reads (count/sum) that have no RLS-bypass footgun.
 	var poolCache *dbprovider.PoolCache
-	if connCipher != nil && os.Getenv("TEAM_TIER_ROUTING") == "1" {
+	if connCipher != nil {
 		repo := dbprovider.NewRepo(pool)
 		poolCache = dbprovider.NewPoolCache(connCipher, repo, 30*time.Minute, 8)
-		slog.Info("Team-tier routing enabled (TEAM_TIER_ROUTING=1)")
+	}
+	enableSDKRouting := poolCache != nil && os.Getenv("TEAM_TIER_ROUTING") == "1"
+	if enableSDKRouting {
+		slog.Info("Team-tier SDK routing enabled (TEAM_TIER_ROUTING=1)")
+	}
+
+	// Wire the pool cache into LimitsService so tenant-schema queries
+	// (db size / storage / MAU) route to the dedicated instance for
+	// Team-tier projects. Without this, usage-tracker queries hit the
+	// shared platform DB and log SQLSTATE 42P01 ("relation … does not
+	// exist") on every poll for every Team-tier project. Returning nil
+	// on ErrNoRows lets Free/Pro (no project_databases row) transparently
+	// fall through to the shared pool.
+	if poolCache != nil && limitsSvc != nil {
+		limitsSvc.WithPoolResolver(func(ctx context.Context, projectID string) *pgxpool.Pool {
+			p, err := poolCache.Get(ctx, projectID)
+			if err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					slog.Warn("usage: dedicated pool unavailable, falling back to shared",
+						"project_id", projectID, "error", err)
+				}
+				return nil
+			}
+			return p
+		})
 	}
 
 	// poolResolver bridges query.PoolResolver → poolCache without
@@ -217,7 +249,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// every WithTenantTx call. Returning nil = "use shared pool";
 	// the query engine handles the fall-through.
 	poolResolver := query.PoolResolver(func(ctx context.Context) *pgxpool.Pool {
-		if poolCache == nil {
+		if !enableSDKRouting {
 			return nil
 		}
 		pc, ok := auth.ProjectFromContext(ctx)
