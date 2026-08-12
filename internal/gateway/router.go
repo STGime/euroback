@@ -153,6 +153,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		ProjectID:     os.Getenv("SCW_PROJECT_ID"),
 		DefaultRegion: scwRegion,
 	}))
+	// Wire the registry into TenantService so DeleteProject can
+	// synchronously best-effort tear down any dedicated instances
+	// before hard-deleting the project_databases rows. See
+	// TenantService.DeleteProject for why we need this — the FK
+	// on projects.id is ON DELETE RESTRICT and doesn't respect
+	// deleted_at, so soft-deleted rows from prior failed provisioning
+	// alone will block the delete.
+	tenantSvc.SetProviderRegistry(providerRegistry)
 
 	// Cipher for the direct-DATABASE_URL surface (M4). Reuses the
 	// vault master key already required by the vault package.
