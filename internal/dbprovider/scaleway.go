@@ -66,7 +66,20 @@ type Scaleway struct {
 const (
 	scalewayDefaultBaseURL = "https://api.scaleway.com"
 	scalewayEngine         = "PostgreSQL-15"
-	scalewayVolumeType     = "bssd" // block SSD; provider default for RDB
+	// scalewayVolumeType — Scaleway Block Storage (sbs). The
+	// previous value "bssd" (legacy block SSD) was deprecated
+	// server-side in mid-2026; new RDB instances now reject
+	// bssd with `400: "bssd volume type is deprecated, this
+	// action is no longer supported. Please use sbs volume type"`.
+	// Reproduced against prod worker logs for the founder's second
+	// myteam project (fe9fd098-c923-4ce9-a4e5-95af47f68a4a) after
+	// the password fix (#363) had unblocked the previous failure.
+	//
+	// If Scaleway ever deprecates sbs the same way, wire this
+	// through env — but shipping env plumbing pre-emptively adds
+	// surface without a concrete failure to catch. Third rejection
+	// here is the trigger to make volume_type configurable.
+	scalewayVolumeType = "sbs"
 	// scalewayDefaultDB is the maintenance database Scaleway creates
 	// on every RDB instance. Also used as the DBName on our Instance
 	// returns; app DBs are created via CREATE DATABASE later.
