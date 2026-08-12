@@ -18,12 +18,19 @@ type ProjectUsage struct {
 }
 
 // GetUsage queries the current resource usage for a project.
+//
+// Tenant-schema queries (db size / storage / MAU) route through
+// tenantPool so Team-tier projects hit their dedicated Scaleway
+// instance where the tenant schema actually lives. Free/Pro projects
+// stay on the shared platform pool. Platform-table queries (webhooks
+// / projects / edge_functions) always use the shared pool.
 func (s *LimitsService) GetUsage(ctx context.Context, projectID, schemaName string) (*ProjectUsage, error) {
 	usage := &ProjectUsage{}
+	tenantPool := s.tenantPool(ctx, projectID)
 
 	// Database size: sum of all table sizes in the tenant schema.
 	var dbSizeBytes int64
-	err := s.pool.QueryRow(ctx,
+	err := tenantPool.QueryRow(ctx,
 		`SELECT COALESCE(SUM(pg_total_relation_size(quote_ident(schemaname) || '.' || quote_ident(tablename))), 0)
 		 FROM pg_tables WHERE schemaname = $1`, schemaName,
 	).Scan(&dbSizeBytes)
@@ -40,7 +47,7 @@ func (s *LimitsService) GetUsage(ctx context.Context, projectID, schemaName stri
 	escSchema := strings.ReplaceAll(schemaName, `"`, `""`)
 	var storageBytes int64
 	storageQuery := fmt.Sprintf(`SELECT COALESCE(SUM(size_bytes), 0) FROM "%s".storage_objects`, escSchema)
-	if err := s.pool.QueryRow(ctx, storageQuery).Scan(&storageBytes); err != nil {
+	if err := tenantPool.QueryRow(ctx, storageQuery).Scan(&storageBytes); err != nil {
 		slog.Error("get usage: storage size query failed", "project_id", projectID, "schema", schemaName, "error", err)
 		storageBytes = 0
 	}
@@ -48,7 +55,7 @@ func (s *LimitsService) GetUsage(ctx context.Context, projectID, schemaName stri
 
 	// MAU count: number of users in the tenant schema.
 	mauQuery := fmt.Sprintf(`SELECT count(*) FROM "%s".users`, escSchema)
-	err = s.pool.QueryRow(ctx, mauQuery).Scan(&usage.MAUCount)
+	err = tenantPool.QueryRow(ctx, mauQuery).Scan(&usage.MAUCount)
 	if err != nil {
 		slog.Error("get usage: MAU count failed", "project_id", projectID, "schema", schemaName, "error", err)
 		usage.MAUCount = 0

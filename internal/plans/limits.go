@@ -73,11 +73,18 @@ func legacyFreeLimits(current *PlanLimits) *PlanLimits {
 	return &copy
 }
 
+// PoolResolver returns the pool that owns a project's tenant schema:
+// the project's dedicated managed-PG instance for Team-tier, nil for
+// Free/Pro (caller falls back to the shared platform pool). Set via
+// LimitsService.WithPoolResolver from the gateway boot path.
+type PoolResolver func(ctx context.Context, projectID string) *pgxpool.Pool
+
 // LimitsService provides plan limit lookups with in-memory caching.
 type LimitsService struct {
-	pool  *pgxpool.Pool
-	mu    sync.RWMutex
-	cache map[string]*PlanLimits
+	pool         *pgxpool.Pool
+	poolResolver PoolResolver
+	mu           sync.RWMutex
+	cache        map[string]*PlanLimits
 }
 
 // NewLimitsService creates a new LimitsService backed by the given connection pool.
@@ -86,6 +93,28 @@ func NewLimitsService(pool *pgxpool.Pool) *LimitsService {
 		pool:  pool,
 		cache: make(map[string]*PlanLimits),
 	}
+}
+
+// WithPoolResolver wires a Team-tier-aware pool resolver so tenant-
+// schema queries (db size / storage size / MAU count) target the
+// project's dedicated instance instead of the shared platform DB
+// (where the schema does not exist for Team-tier). Free/Pro projects
+// return nil from the resolver and stay on the shared pool.
+func (s *LimitsService) WithPoolResolver(r PoolResolver) *LimitsService {
+	s.poolResolver = r
+	return s
+}
+
+// tenantPool picks the dedicated pool for projectID when the resolver
+// is wired and the project has one, otherwise falls back to the shared
+// platform pool.
+func (s *LimitsService) tenantPool(ctx context.Context, projectID string) *pgxpool.Pool {
+	if s.poolResolver != nil {
+		if p := s.poolResolver(ctx, projectID); p != nil {
+			return p
+		}
+	}
+	return s.pool
 }
 
 // GetLimits returns the limits for the given plan name. Results are cached in memory.
