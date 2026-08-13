@@ -2,10 +2,23 @@
 # Node.js adapter for server-side rendering
 
 FROM node:22-alpine AS builder
-WORKDIR /app
-COPY console/package*.json ./
+# Mirror the repo layout so relative imports from
+# console/src/lib/legal.ts into `../../../docs/legal/v2/*.md?raw`
+# resolve the same way they do on a dev laptop. Without this the
+# Vite build fails with `Could not resolve "../../../docs/legal/v2/
+# dpa.md?raw"` — the earlier console-only WORKDIR had no sibling
+# docs/ tree.
+WORKDIR /repo
+COPY console/package*.json ./console/
+WORKDIR /repo/console
 RUN npm ci
-COPY console/ .
+WORKDIR /repo
+COPY console/ ./console/
+# Legal-doc sources bundled at build time via Vite `?raw`. Scoped
+# to docs/legal/ only — no need to drag the rest of docs/ into
+# the image.
+COPY docs/legal/ ./docs/legal/
+WORKDIR /repo/console
 ENV PUBLIC_API_URL=https://api.eurobase.app
 ARG BUILD_SHA=unknown
 ENV PUBLIC_BUILD_SHA=$BUILD_SHA
@@ -13,8 +26,8 @@ RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
-COPY --from=builder /app/build ./build
-COPY --from=builder /app/package.json .
+COPY --from=builder /repo/console/build ./build
+COPY --from=builder /repo/console/package.json .
 ENV PORT=3000
 ENV ORIGIN=https://console.eurobase.app
 EXPOSE 3000
