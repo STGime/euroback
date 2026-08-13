@@ -259,10 +259,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		})
 	}
 
-	// Shared closure over poolCache for any console handler that
-	// needs (projectID) → *pgxpool.Pool routing outside the query
-	// engine's ctx-based resolver (Users tab, storage metadata,
-	// etc.).
+	// One closure over poolCache.GetOwner used by every console
+	// resolver — enduser, storage, PlatformTenantContext (for DDL
+	// via TenantPoolFromContext), etc. Same body, three named types
+	// (enduser.PoolResolver / tenant.TenantPoolResolver / etc.) —
+	// Go's named-type conversion rules mean we can't `cast` a plain
+	// closure into each, so we build one closure and let each named
+	// type wrap it below.
 	//
 	// Returns the OWNER pool for consistency with the query engine
 	// path: the router-level poolResolver above hands owner pools to
@@ -281,19 +284,25 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// invariants on Team-tier).
 	//
 	// Same nil-on-error contract as the LimitsService resolver above.
-	var enduserPoolResolver enduser.PoolResolver
+	var ownerPoolFor func(ctx context.Context, projectID string) *pgxpool.Pool
 	if poolCache != nil {
-		enduserPoolResolver = func(ctx context.Context, projectID string) *pgxpool.Pool {
+		ownerPoolFor = func(ctx context.Context, projectID string) *pgxpool.Pool {
 			p, err := poolCache.GetOwner(ctx, projectID)
 			if err != nil {
 				if !errors.Is(err, pgx.ErrNoRows) {
-					slog.Warn("enduser: dedicated pool unavailable, falling back to shared",
+					slog.Warn("console: dedicated pool unavailable, falling back to shared",
 						"project_id", projectID, "error", err)
 				}
 				return nil
 			}
 			return p
 		}
+	}
+	var enduserPoolResolver enduser.PoolResolver
+	var tenantPoolResolver tenant.TenantPoolResolver
+	if ownerPoolFor != nil {
+		enduserPoolResolver = ownerPoolFor
+		tenantPoolResolver = ownerPoolFor
 	}
 
 	// poolResolver bridges query.PoolResolver → poolCache without
@@ -590,15 +599,25 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("viewer")).Get("/schema", query.HandleSchemaIntrospection(pool))
 			r.With(tenant.RequireMinRole("viewer")).Get("/schema/changes", query.HandleSchemaChanges(pool))
 			r.With(tenant.RequireMinRole("viewer")).Get("/schema/rls-audit", query.HandleRLSAudit(pool))
-			// DDL on tenant schemas runs against the developer pool so
-			// CREATE/ALTER/REFERENCES on migrator-owned tables works.
-			// withDeveloperRole adds the flag the DDL helpers read inside
-			// runDDL to elevate `SET LOCAL ROLE eurobase_migrator` — without
-			// it, tables would be developer-owned and cross-tool DDL would
-			// fail with "must be owner". (PlatformTenantContext also sets
-			// this flag, but it's only mounted on /data/sql and below.)
-			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
-			r.With(tenant.RequireMinRole("developer"), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
+			// DDL on tenant schemas.
+			//
+			// Free/Pro: the developer pool + SET LOCAL ROLE
+			// eurobase_migrator gives DDL the migrator-owned-tables
+			// invariant (matches CI-applied migrations); withDeveloperRole
+			// carries the flag runDDL reads.
+			//
+			// Team-tier (PR-D): PlatformTenantContext stashes the
+			// dedicated-instance OWNER pool in ctx via
+			// query.ContextWithTenantPool. runDDL reads it first, so
+			// the DDL runs against the dedicated instance as the
+			// owner (no eurobase_migrator role exists there — the
+			// role split is preserved by the *connection* role
+			// instead of a SET LOCAL ROLE swap). PlatformTenantContext
+			// also sets WithDeveloperRole, so withDeveloperRole
+			// becomes redundant but kept for defence-in-depth if the
+			// context middleware ever gets reordered.
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, tenantPoolResolver), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, tenantPoolResolver), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
 			// Tenant-level versioned migrations (#190). Platform auth +
 			// developer role; each migration runs under a per-tenant LOGIN
 			// role the gateway connects as (see MigrationExecutor), so a
@@ -834,7 +853,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// End-user admin is a "settings"-shaped capability (closes #50).
 			r.Route("/users", func(r chi.Router) {
 				r.Use(tenant.RequireMinRole("admin"))
-				r.Use(tenant.PlatformTenantContext(pool))
+				r.Use(tenant.PlatformTenantContext(pool, tenantPoolResolver))
 				r.Mount("/", enduser.PlatformRoutes(pool, enduserPoolResolver, limiter))
 			})
 
@@ -873,7 +892,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// internal/tenant/context.go) still uses the gateway pool —
 			// that's a public.* read.
 			r.Route("/data", func(r chi.Router) {
-				r.Use(tenant.PlatformTenantContext(pool))
+				r.Use(tenant.PlatformTenantContext(pool, tenantPoolResolver))
 
 				queryEngine := query.NewQueryEngine(developerPool)
 				publisher := realtime.NewEventPublisher(nil, hub)

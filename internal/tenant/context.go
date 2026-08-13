@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -31,10 +32,23 @@ func TenantContextFromProject() func(http.Handler) http.Handler {
 	}
 }
 
+// TenantPoolResolver returns the dedicated-instance owner pool for
+// a Team-tier project, or nil when the project has no dedicated
+// instance (Free/Pro or a resolver-nil test build). Same shape as
+// enduser.PoolResolver / plans.PoolResolver / storage.PoolResolver
+// — router.go builds one closure over its PoolCache and hands it to
+// every middleware / handler that needs to route.
+type TenantPoolResolver func(ctx context.Context, projectID string) *pgxpool.Pool
+
 // PlatformTenantContext resolves the tenant project from a chi URL param {id}
 // and the platform auth claims. Used by the console's platform-authenticated
 // data routes so the console never needs an API key.
-func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+//
+// The optional resolver routes tenant-schema queries (Table Editor, SQL
+// Editor, DDL) to the project's dedicated instance for Team-tier by
+// stashing the owner pool in ctx via query.ContextWithTenantPool. Pass
+// nil for Free/Pro-only deployments or tests.
+func PlatformTenantContext(pool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := auth.ClaimsFromContext(r.Context())
@@ -115,6 +129,18 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				HasDedicatedDB:    pdID != nil,
 				ProjectDatabaseID: pdID,
 			})
+			// Stash the dedicated-instance owner pool for handlers
+			// that live outside the query engine's ctx-based resolver
+			// (runDDL / HandleDDL — the console Table Editor's
+			// schema-editing surface). The QueryEngine's resolver
+			// still picks its own pool via `pc.HasDedicatedDB` +
+			// DeveloperRoleFromContext — this is a parallel, not
+			// replacement, signal.
+			if pdID != nil && resolver != nil {
+				if tp := resolver(ctx, projectID); tp != nil {
+					ctx = query.ContextWithTenantPool(ctx, tp)
+				}
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

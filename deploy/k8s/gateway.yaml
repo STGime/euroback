@@ -92,6 +92,19 @@ spec:
               value: "true"
             - name: TLS_MIN
               value: "TLS 1.3"
+            # Team-tier PR-D: SDK runtime traffic on Team-tier projects
+            # routes to the dedicated Scaleway instance instead of the
+            # shared cluster. Safe to flip now: PR-A dropped the
+            # duplicate platform-DB schema, PR-B provisioned the
+            # non-owner runtime + readonly roles + RLS grants on the
+            # dedicated instance, PR-C shipped the console-side
+            # routing + owner/runtime split. See RLS regression test in
+            # internal/dbprovider/rls_isolation_dedicated_test.go —
+            # verifies end-user A cannot see end-user B's rows via the
+            # runtime cred + confirms console-created tables inherit
+            # owner ownership so RLS binds against SDK traffic on them.
+            - name: TEAM_TIER_ROUTING
+              value: "1"
       imagePullSecrets:
         - name: scw-registry
 ---
