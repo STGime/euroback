@@ -65,7 +65,17 @@ type Scaleway struct {
 
 const (
 	scalewayDefaultBaseURL = "https://api.scaleway.com"
-	scalewayEngine         = "PostgreSQL-15"
+	// scalewayEngine pins the Scaleway RDB engine version. Bumped
+	// with each Postgres major release Scaleway supports (they lag
+	// upstream by ~6-12 months). Existing instances stay on their
+	// original major — a bump only affects freshly provisioned
+	// Team-tier projects.
+	//
+	// Policy: keep in sync with the newest PostgreSQL-N Scaleway lists
+	// for fr-par at /rdb/v1/regions/fr-par/database-engines. Issue #382
+	// tracks moving this to a self-updating runtime lookup once we
+	// have enough Team-tier volume to justify the code.
+	scalewayEngine         = "PostgreSQL-16"
 	// scalewayVolumeType — Scaleway Block Storage IOPS-suffixed
 	// class. Accepted values per the RDB v1 API docs:
 	//   * lssd     — local SSD (per-node, no snapshots)

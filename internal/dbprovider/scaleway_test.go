@@ -75,7 +75,7 @@ func TestScaleway_ProvisionHappyPath(t *testing.T) {
 			"id": "rdb-abc-123",
 			"name": "eurobase-mysite-aabb",
 			"status": "provisioning",
-			"engine": "PostgreSQL-15",
+			"engine": "PostgreSQL-16",
 			"node_type": "db-gp-s",
 			"region": "fr-par",
 			"created_at": "2026-08-02T10:00:00Z",
