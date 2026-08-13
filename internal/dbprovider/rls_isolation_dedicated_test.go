@@ -60,17 +60,34 @@ func newTestUUID(t *testing.T) string {
 
 func setupDedicatedTest(t *testing.T) (owner *pgxpool.Pool, gateway *pgxpool.Pool, schema string, cleanup func()) {
 	t.Helper()
+
+	// TEST_DEDICATED_REQUIRE=1 flips every bail-out from `t.Skip` to
+	// `t.Fatal`. CI (rls-isolation workflow + scripts/ops/run-dedicated-
+	// rls-test.sh) sets it so a misconfigured service container /
+	// removed env var / dead port produces a RED check instead of a
+	// vacuous green — the RLS gate must not be satisfiable by not
+	// running. Local dev leaves it unset so `go test ./...` on a
+	// laptop without Postgres still skips cleanly.
+	requireMode := os.Getenv("TEST_DEDICATED_REQUIRE") == "1"
+	bail := func(format string, args ...any) {
+		t.Helper()
+		if requireMode {
+			t.Fatalf("TEST_DEDICATED_REQUIRE=1 but "+format, args...)
+		}
+		t.Skipf(format, args...)
+	}
+
 	if testing.Short() {
-		t.Skip("skipping dedicated-instance RLS test in -short mode")
+		bail("skipping dedicated-instance RLS test in -short mode")
 	}
 
 	host := os.Getenv("TEST_DEDICATED_PGHOST")
 	if host == "" {
-		t.Skip("TEST_DEDICATED_PGHOST unset — dedicated-instance RLS test requires a Scaleway-shape PG; skipping")
+		bail("TEST_DEDICATED_PGHOST unset — dedicated-instance RLS test requires a Scaleway-shape PG")
 	}
 	ownerPassword := os.Getenv("TEST_DEDICATED_OWNER_PW")
 	if ownerPassword == "" {
-		t.Skip("TEST_DEDICATED_OWNER_PW unset — need the eurobase_owner password to bootstrap")
+		bail("TEST_DEDICATED_OWNER_PW unset — need the eurobase_owner password to bootstrap")
 	}
 	dbName := os.Getenv("TEST_DEDICATED_PGDB")
 	if dbName == "" {
@@ -92,11 +109,11 @@ func setupDedicatedTest(t *testing.T) (owner *pgxpool.Pool, gateway *pgxpool.Poo
 		url.QueryEscape(ownerPassword), host, dbName)
 	owner, err := pgxpool.New(ctx, ownerDSN)
 	if err != nil {
-		t.Skipf("cannot open owner pool: %v", err)
+		bail("cannot open owner pool: %v", err)
 	}
 	if err := owner.Ping(ctx); err != nil {
 		owner.Close()
-		t.Skipf("cannot ping as eurobase_owner: %v", err)
+		bail("cannot ping as eurobase_owner: %v", err)
 	}
 
 	// Bootstrap the instance (idempotent — SQL uses IF NOT EXISTS).
