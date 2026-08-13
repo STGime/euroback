@@ -322,44 +322,58 @@
 
 		{#if conn}
 			<div>
-				<label for="conn-url" class="block text-xs font-medium text-gray-500 mb-1">Connection URL</label>
-				<div class="flex gap-2">
-					<input
-						id="conn-url"
-						type={revealed ? 'text' : 'password'}
-						value={conn.url}
-						readonly
-						class="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm font-mono text-gray-800"
-					/>
-					<button
-						type="button"
-						onclick={() => (revealed = !revealed)}
-						class="rounded-md border border-gray-300 bg-white px-3 py-2 text-xs cursor-pointer hover:bg-gray-50"
-					>
-						{revealed ? 'Hide' : 'Reveal'}
-					</button>
-					<button
-						type="button"
-						onclick={() => copy(conn?.url ?? '')}
-						class="rounded-md bg-eurobase-600 px-3 py-2 text-xs font-medium text-white cursor-pointer hover:bg-eurobase-700"
-					>
-						Copy
-					</button>
-				</div>
-				<p class="mt-2 text-xs text-gray-500">
-					Every URL fetch is audited — the URL is a bearer credential once revealed.
-					{#if conn.role === 'readwrite'}
-						<span class="text-red-600">Read/Write access allows destructive queries.</span>
-					{/if}
-				</p>
-
 				{#if conn.readonly_pending}
-					<div class="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-						<strong>Read-only role provisioning.</strong>
-						You requested a read-only URL, but the read-only role isn't ready yet on this project's
-						dedicated instance. The URL above is the <strong>owner (read/write)</strong> credential —
-						treat it as such. Do not hand this out to analysts or read-replica configs.
+					<!-- The dedicated bootstrap hasn't populated the readonly
+					     credential yet (transient — the backfill sweeper or
+					     a fresh provisioning pass typically fills it in
+					     minutes). The backend would fall back to the owner
+					     DSN with `readonly_pending: true`, but rendering it
+					     here — even next to a banner — would let a user
+					     copy owner creds thinking they're readonly. Hide
+					     the URL/Reveal/Copy affordance entirely; keep the
+					     Read/Write toggle so the user can request the
+					     read/write URL explicitly. -->
+					<div class="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+						<p class="font-semibold">Read-only role still provisioning</p>
+						<p class="mt-1 text-xs">
+							This project's dedicated instance is being bootstrapped with a SELECT-only
+							role. That normally completes within a couple of minutes of a fresh
+							provisioning — refresh this page to check. If you need a URL right now,
+							switch to <strong>Read/Write</strong> above; treat that DSN as an owner
+							credential (destructive queries allowed).
+						</p>
 					</div>
+				{:else}
+					<label for="conn-url" class="block text-xs font-medium text-gray-500 mb-1">Connection URL</label>
+					<div class="flex gap-2">
+						<input
+							id="conn-url"
+							type={revealed ? 'text' : 'password'}
+							value={conn.url}
+							readonly
+							class="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm font-mono text-gray-800"
+						/>
+						<button
+							type="button"
+							onclick={() => (revealed = !revealed)}
+							class="rounded-md border border-gray-300 bg-white px-3 py-2 text-xs cursor-pointer hover:bg-gray-50"
+						>
+							{revealed ? 'Hide' : 'Reveal'}
+						</button>
+						<button
+							type="button"
+							onclick={() => copy(conn?.url ?? '')}
+							class="rounded-md bg-eurobase-600 px-3 py-2 text-xs font-medium text-white cursor-pointer hover:bg-eurobase-700"
+						>
+							Copy
+						</button>
+					</div>
+					<p class="mt-2 text-xs text-gray-500">
+						Every URL fetch is audited — the URL is a bearer credential once revealed.
+						{#if conn.role === 'readwrite'}
+							<span class="text-red-600">Read/Write access allows destructive queries.</span>
+						{/if}
+					</p>
 				{/if}
 			</div>
 

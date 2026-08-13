@@ -154,26 +154,41 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 			return
 		}
 
-		password, err := s.cipher.Open(rec.PasswordCiphertext, rec.PasswordNonce, rec.PasswordKeyVersion)
-		if err != nil {
-			slog.Error("connection cipher open failed", "error", err, "project_id", projectID)
+		// Read-only role: the dedicated bootstrap provisions a real
+		// `eurobase_readonly` LOGIN with SELECT-only grants (see
+		// dbprovider/dedicated_bootstrap.sql and 000101). When the
+		// caller asks for `?role=readonly` AND the readonly slot is
+		// populated on this project's row, we hand out that DSN.
+		//
+		// The fallback path (readonly slot NULL — pre-000101 rows
+		// still in the migration window before the backfill sweeper
+		// runs) keeps the old behaviour: return the owner URL and
+		// set `readonly_pending: true` so the console hides the
+		// URL/Copy affordance rather than misleading a user into
+		// pasting owner creds into an analyst tool.
+		var (
+			username        string
+			password        string
+			effectiveRole   string
+			readonlyPending bool
+			openErr         error
+		)
+		if roUser, roCT, roNonce, roVer, ok := rec.ReadonlyCredential(); ok && requestedRole == "readonly" {
+			username = roUser
+			password, openErr = s.cipher.Open(roCT, roNonce, roVer)
+			effectiveRole = "readonly"
+			readonlyPending = false
+		} else {
+			username = rec.Username
+			password, openErr = s.cipher.Open(rec.PasswordCiphertext, rec.PasswordNonce, rec.PasswordKeyVersion)
+			effectiveRole = "readwrite"
+			readonlyPending = requestedRole == "readonly"
+		}
+		if openErr != nil {
+			slog.Error("connection cipher open failed", "error", openErr, "project_id", projectID, "role", effectiveRole)
 			http.Error(w, `{"error":"credential unavailable"}`, http.StatusInternalServerError)
 			return
 		}
-
-		// Read-only role convention: <owner_username>_ro. Not yet
-		// materialised — TODO(m4-follow-up) provisions it on the
-		// dedicated instance. Until then a `?role=readonly` request
-		// still emits the *owner* URL, but we tell the truth in the
-		// JSON body: the effective role is "readwrite" and
-		// `readonly_pending=true`. The console renders both the
-		// destructive-access warning and the "read-only role pending"
-		// banner off that flag — a header-only signal was lost by the
-		// SPA's fetch wrapper (drops res.headers) and could mislead a
-		// customer into handing an owner URL to an analyst.
-		username := rec.Username
-		effectiveRole := "readwrite"
-		readonlyPending := requestedRole == "readonly"
 
 		connURL := buildPostgresURL(username, password, rec.Host, rec.Port, rec.DatabaseName)
 

@@ -58,6 +58,10 @@ type Record struct {
 	RuntimePasswordCiphertext   []byte
 	RuntimePasswordNonce        []byte
 	RuntimePasswordKeyVersion   *int16
+	ReadonlyUsername            *string
+	ReadonlyPasswordCiphertext  []byte
+	ReadonlyPasswordNonce       []byte
+	ReadonlyPasswordKeyVersion  *int16
 	Region                      string
 	State                       State
 	SupersededBy                *string
@@ -103,6 +107,29 @@ func (r *Record) allRuntimeSet() bool {
 		len(r.RuntimePasswordNonce) > 0
 }
 
+// ReadonlyCredential returns the sealed SELECT-only credential for
+// this project's dedicated instance, if bootstrap has populated it.
+// Returned bool is false when the slot is empty (pre-000101 rows or
+// pre-BootstrapDedicated-upgrade instances) — the connection handler
+// falls back to the owner credential + `readonly_pending: true` in
+// that case.
+//
+// Same all-or-none safety-net as EffectiveCredential (see
+// allReadonlySet).
+func (r *Record) ReadonlyCredential() (user string, ciphertext, nonce []byte, version int16, ok bool) {
+	if !r.allReadonlySet() {
+		return "", nil, nil, 0, false
+	}
+	return *r.ReadonlyUsername, r.ReadonlyPasswordCiphertext, r.ReadonlyPasswordNonce, *r.ReadonlyPasswordKeyVersion, true
+}
+
+func (r *Record) allReadonlySet() bool {
+	return r.ReadonlyUsername != nil &&
+		r.ReadonlyPasswordKeyVersion != nil &&
+		len(r.ReadonlyPasswordCiphertext) > 0 &&
+		len(r.ReadonlyPasswordNonce) > 0
+}
+
 // InsertProvisioning writes the initial project_databases row while
 // the worker is still creating the underlying instance. State starts
 // at StateProvisioning; the worker calls MarkActive once the
@@ -130,6 +157,8 @@ func (r *Repo) InsertProvisioning(
 		          password_key_version,
 		          runtime_username, runtime_password_ciphertext,
 		          runtime_password_nonce, runtime_password_key_version,
+		          readonly_username, readonly_password_ciphertext,
+		          readonly_password_nonce, readonly_password_key_version,
 		          region, state,
 		          superseded_by, created_at, updated_at, deleted_at
 	`
@@ -144,6 +173,8 @@ func (r *Repo) InsertProvisioning(
 		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+		&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+		&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 		&rec.Region, &rec.State,
 		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 	)
@@ -238,6 +269,39 @@ func (r *Repo) SetRuntimeCredentials(
 	return true, nil
 }
 
+// SetReadonlyCredentials writes the sealed non-owner readonly login
+// into the readonly_* columns added by migration 000101. Called by
+// ProvisionTeamDatabaseWorker.bootstrapRuntime after BootstrapDedicated
+// returns both credentials.
+//
+// Same CAS-on-NULL contract as SetRuntimeCredentials (see doc block
+// above). All-or-none writes enforced by 000101's CHECK constraint.
+func (r *Repo) SetReadonlyCredentials(
+	ctx context.Context,
+	id string,
+	readonlyUsername string,
+	ciphertext, nonce []byte,
+	keyVersion int16,
+) (bool, error) {
+	const q = `
+		UPDATE public.project_databases
+		   SET readonly_username             = $2,
+		       readonly_password_ciphertext  = $3,
+		       readonly_password_nonce       = $4,
+		       readonly_password_key_version = $5
+		 WHERE id = $1
+		   AND readonly_username IS NULL
+	`
+	tag, err := r.pool.Exec(ctx, q, id, readonlyUsername, ciphertext, nonce, keyVersion)
+	if err != nil {
+		return false, fmt.Errorf("dbprovider.Repo.SetReadonlyCredentials: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	return true, nil
+}
+
 // MarkDeleted flips the row to state='deleting', sets deleted_at.
 // The deprovision sweep picks it up 7 days later.
 func (r *Repo) MarkDeleted(ctx context.Context, id string) error {
@@ -273,6 +337,8 @@ func (r *Repo) GetLiveByProject(ctx context.Context, projectID string) (*Record,
 		       password_key_version,
 		       runtime_username, runtime_password_ciphertext,
 		       runtime_password_nonce, runtime_password_key_version,
+		       readonly_username, readonly_password_ciphertext,
+		       readonly_password_nonce, readonly_password_key_version,
 		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
@@ -289,6 +355,8 @@ func (r *Repo) GetLiveByProject(ctx context.Context, projectID string) (*Record,
 		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+		&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+		&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 		&rec.Region, &rec.State,
 		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 	)
@@ -315,6 +383,8 @@ func (r *Repo) GetLatestByProject(ctx context.Context, projectID string) (*Recor
 		       password_key_version,
 		       runtime_username, runtime_password_ciphertext,
 		       runtime_password_nonce, runtime_password_key_version,
+		       readonly_username, readonly_password_ciphertext,
+		       readonly_password_nonce, readonly_password_key_version,
 		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
@@ -331,6 +401,8 @@ func (r *Repo) GetLatestByProject(ctx context.Context, projectID string) (*Recor
 		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+		&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+		&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 		&rec.Region, &rec.State,
 		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 	)
@@ -348,6 +420,8 @@ func (r *Repo) Get(ctx context.Context, id string) (*Record, error) {
 		       password_key_version,
 		       runtime_username, runtime_password_ciphertext,
 		       runtime_password_nonce, runtime_password_key_version,
+		       readonly_username, readonly_password_ciphertext,
+		       readonly_password_nonce, readonly_password_key_version,
 		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
@@ -360,6 +434,8 @@ func (r *Repo) Get(ctx context.Context, id string) (*Record, error) {
 		&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 		&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 		&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+		&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+		&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 		&rec.Region, &rec.State,
 		&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 	)
@@ -378,6 +454,8 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 		       password_key_version,
 		       runtime_username, runtime_password_ciphertext,
 		       runtime_password_nonce, runtime_password_key_version,
+		       readonly_username, readonly_password_ciphertext,
+		       readonly_password_nonce, readonly_password_key_version,
 		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
@@ -403,6 +481,8 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+			&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {
@@ -414,20 +494,23 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 }
 
 // ListActiveWithoutRuntime returns rows in state='active' that
-// still have the runtime credential slot empty. This is the M2.5
-// part 2b backfill surface — projects provisioned before Part 2b
-// landed have no non-owner runtime login, so SDK routing (once the
-// TEAM_TIER_ROUTING flag flips) would fall back to the owner
-// credential and bypass RLS. The backfill worker walks this list
-// and calls BootstrapDedicated for each.
+// still have EITHER the runtime OR the readonly credential slot
+// empty. This is the M2.5 part 2b / PR-B backfill surface — any
+// project whose bootstrap ran before the readonly role shipped will
+// have runtime_username populated but readonly_username NULL, and
+// filtering on runtime alone would leave them permanently stuck at
+// `readonly_pending: true`. The `OR` covers both migration windows:
+// pre-093 rows (both NULL) and pre-101 rows (readonly NULL only).
 //
 // Bounded LIMIT so a single worker tick doesn't attempt to
 // bootstrap every existing Team project at once. The sweeper drains
 // exactly one batch per hourly tick — a backlog of N projects
 // takes ceil(N/limit) hours to fully drain. Successful backfills
-// exit the result set on the next tick (the runtime_username IS
-// NULL filter), so the query self-limits without any pagination
-// cursor.
+// exit the result set on the next tick (both slots populated), so
+// the query self-limits without any pagination cursor.
+//
+// Name kept as ListActiveWithoutRuntime for API stability; the doc
+// above is the source of truth for the filter shape.
 func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Record, error) {
 	if limit <= 0 {
 		limit = 25
@@ -438,12 +521,14 @@ func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Recor
 		       password_key_version,
 		       runtime_username, runtime_password_ciphertext,
 		       runtime_password_nonce, runtime_password_key_version,
+		       readonly_username, readonly_password_ciphertext,
+		       readonly_password_nonce, readonly_password_key_version,
 		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
 		 WHERE state = 'active'
 		   AND deleted_at IS NULL
-		   AND runtime_username IS NULL
+		   AND (runtime_username IS NULL OR readonly_username IS NULL)
 		 ORDER BY created_at ASC
 		 LIMIT $1
 	`
@@ -461,6 +546,8 @@ func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Recor
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+			&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {
@@ -501,6 +588,8 @@ func (r *Repo) ListAllByProject(ctx context.Context, projectID string) ([]Record
 		       password_key_version,
 		       runtime_username, runtime_password_ciphertext,
 		       runtime_password_nonce, runtime_password_key_version,
+		       readonly_username, readonly_password_ciphertext,
+		       readonly_password_nonce, readonly_password_key_version,
 		       region, state,
 		       superseded_by, created_at, updated_at, deleted_at
 		  FROM public.project_databases
@@ -521,6 +610,8 @@ func (r *Repo) ListAllByProject(ctx context.Context, projectID string) ([]Record
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+			&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {

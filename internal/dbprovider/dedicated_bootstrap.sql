@@ -103,6 +103,34 @@ GRANT EXECUTE ON FUNCTION public.is_internal_auth_path() TO eurobase_gateway;
 GRANT EXECUTE ON FUNCTION public.uuid_generate_v4() TO eurobase_gateway;
 
 -- ============================================================================
+-- 3b. Read-only role
+-- ============================================================================
+--
+-- eurobase_readonly is the SELECT-only login handed out through the
+-- M4 Direct Connection UI's "Read-only" toggle. Same NOLOGIN-here /
+-- LOGIN-set-by-Go-Bootstrapper split as eurobase_gateway (keeps the
+-- password out of source). Owned by nothing (grants only), so it
+-- cannot bypass RLS the way a table owner would.
+--
+-- Grants are added per-tenant in provision_tenant below (SELECT on
+-- every table in the new schema + USAGE on the schema itself + a
+-- default-privileges rule for future tables). The role itself
+-- carries no schema grants — a Team-tier project that hasn't been
+-- provision_tenant'd yet gets zero visibility even if a DSN leaks.
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'eurobase_readonly') THEN
+        CREATE ROLE eurobase_readonly NOLOGIN;
+    END IF;
+END $$;
+
+GRANT EXECUTE ON FUNCTION public.current_end_user_id() TO eurobase_readonly;
+GRANT EXECUTE ON FUNCTION public.is_service_role() TO eurobase_readonly;
+GRANT EXECUTE ON FUNCTION public.is_internal_auth_path() TO eurobase_readonly;
+GRANT EXECUTE ON FUNCTION public.uuid_generate_v4() TO eurobase_readonly;
+
+-- ============================================================================
 -- 4. provision_tenant
 -- ============================================================================
 --
@@ -349,6 +377,17 @@ BEGIN
     -- provision_tenant pass.
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway', v_schema_name);
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO eurobase_gateway', v_schema_name);
+
+    -- Read-only role grants: SELECT-only, no schema CREATE, no
+    -- INSERT/UPDATE/DELETE. Sequences read-only too so cursor-based
+    -- exports (nextval-free SELECT) still work. Default-privileges
+    -- rule covers future tables the same way we do for
+    -- eurobase_gateway.
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO eurobase_readonly', v_schema_name);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO eurobase_readonly', v_schema_name);
+    EXECUTE format('GRANT SELECT ON ALL SEQUENCES IN SCHEMA %I TO eurobase_readonly', v_schema_name);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %I GRANT SELECT ON TABLES TO eurobase_readonly', v_schema_name);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %I GRANT SELECT ON SEQUENCES TO eurobase_readonly', v_schema_name);
 
     SET search_path TO public;
     RETURN v_schema_name;
