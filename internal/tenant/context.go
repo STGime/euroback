@@ -60,12 +60,30 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			var schemaName string
+			// Load enough project metadata to populate a full
+			// ProjectContext, so the router's poolResolver can route
+			// console tenant-schema reads to the dedicated instance
+			// for Team-tier projects (PR-C). The LEFT JOIN keeps this
+			// a single round-trip; a Free/Pro project simply gets
+			// HasDedicatedDB=false / ProjectDatabaseID=NULL and the
+			// resolver falls back to the shared pool.
+			var (
+				schemaName string
+				plan       string
+				pdID       *string
+			)
 			err := pool.QueryRow(r.Context(),
-				`SELECT schema_name FROM projects
-				 WHERE id = $1 AND status = 'active'`,
+				`SELECT p.schema_name, p.plan, pd.id
+				   FROM projects p
+				   LEFT JOIN public.project_databases pd
+				     ON pd.project_id = p.id
+				    AND pd.state IN ('provisioning', 'active', 'restoring')
+				    AND pd.deleted_at IS NULL
+				  WHERE p.id = $1 AND p.status = 'active'
+				  ORDER BY (pd.state = 'active') DESC NULLS LAST, pd.created_at DESC NULLS LAST
+				  LIMIT 1`,
 				projectID,
-			).Scan(&schemaName)
+			).Scan(&schemaName, &plan, &pdID)
 			if err != nil {
 				slog.Error("platform tenant context: project not found",
 					"error", err,
@@ -84,6 +102,19 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			// works against migrator-owned tables and new objects are
 			// owned by the migrator (uniform with CI-applied migrations).
 			ctx = query.WithDeveloperRole(ctx)
+			// ProjectContext lets the router's poolResolver route
+			// tenant-schema reads to the dedicated instance for
+			// Team-tier projects. Post-PR-A there is no tenant schema
+			// on the platform DB for Team-tier, so this MUST route to
+			// avoid a hard 3F000/42P01 in the console.
+			ctx = auth.ContextWithProject(ctx, &auth.ProjectContext{
+				ProjectID:         projectID,
+				SchemaName:        schemaName,
+				Plan:              plan,
+				KeyType:           "secret",
+				HasDedicatedDB:    pdID != nil,
+				ProjectDatabaseID: pdID,
+			})
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -114,12 +145,30 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 				return
 			}
 
-			var slug, schema string
+			// Single round-trip: fetch slug + schema + plan + the live
+			// project_databases id so the ProjectContext downstream
+			// handlers see is Team-tier-routing complete. Without
+			// HasDedicatedDB / ProjectDatabaseID the router's
+			// poolResolver would refuse to route (assertObjectVisible,
+			// storage_objects SELECTs, etc.) and every Team-tier
+			// download / delete / signed-URL would 42P01 on the
+			// shared pool.
+			var (
+				slug, schema, plan string
+				pdID               *string
+			)
 			err := pool.QueryRow(r.Context(),
-				`SELECT slug, schema_name FROM projects
-				 WHERE id = $1 AND status = 'active'`,
+				`SELECT p.slug, p.schema_name, p.plan, pd.id
+				   FROM projects p
+				   LEFT JOIN public.project_databases pd
+				     ON pd.project_id = p.id
+				    AND pd.state IN ('provisioning', 'active', 'restoring')
+				    AND pd.deleted_at IS NULL
+				  WHERE p.id = $1 AND p.status = 'active'
+				  ORDER BY (pd.state = 'active') DESC NULLS LAST, pd.created_at DESC NULLS LAST
+				  LIMIT 1`,
 				projectID,
-			).Scan(&slug, &schema)
+			).Scan(&slug, &schema, &plan, &pdID)
 			if err != nil {
 				slog.Error("platform storage context: project not found",
 					"error", err,
@@ -134,9 +183,13 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 			// ProjectContext only. The X-Project-Slug header is no longer
 			// trusted (advisory GHSA-gvrg-vq6j-j647).
 			ctx := auth.ContextWithProject(r.Context(), &auth.ProjectContext{
-				ProjectID:  projectID,
-				SchemaName: schema,
-				Slug:       slug,
+				ProjectID:         projectID,
+				SchemaName:        schema,
+				Slug:              slug,
+				Plan:              plan,
+				KeyType:           "secret",
+				HasDedicatedDB:    pdID != nil,
+				ProjectDatabaseID: pdID,
 			})
 			// Console traffic operates with service-role access — the
 			// admin is authorised against this project via ResolveRole
@@ -145,6 +198,22 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 			// SELECT is filtered to nothing, so the console returned
 			// 404 on every download/delete (closes #87 second half).
 			ctx = query.ContextWithKeyType(ctx, "secret")
+			// WithDeveloperRole is the signal the router's
+			// poolResolver uses to route console traffic to the
+			// dedicated instance (owner pool). Without it,
+			// h.engine.WithTenantTx inside assertObjectVisible would
+			// stay on the shared pool → 42P01 for Team-tier. On the
+			// shared pool the SET LOCAL ROLE eurobase_migrator is a
+			// no-op because storage handlers don't do DDL — the
+			// service-role marker above is what grants access.
+			ctx = query.WithDeveloperRole(ctx)
+			// Also stash the schema + project_id in the query context
+			// so h.tenantPool(ctx) inside StorageHandler.WithPoolResolver
+			// picks the dedicated pool via ProjectContext (which it
+			// already does — belt + suspenders in case a future
+			// change swaps the lookup order).
+			ctx = query.ContextWithSchema(ctx, schema)
+			ctx = query.ContextWithProjectID(ctx, projectID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

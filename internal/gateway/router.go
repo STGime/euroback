@@ -232,7 +232,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// fall through to the shared pool.
 	if poolCache != nil && limitsSvc != nil {
 		limitsSvc.WithPoolResolver(func(ctx context.Context, projectID string) *pgxpool.Pool {
-			p, err := poolCache.Get(ctx, projectID)
+			// GetOwner (not Get): the usage queries in
+			// internal/plans/usage.go run bare tenant-schema aggregates
+			// (COUNT / SUM on users, storage_objects) with NO
+			// RunAsService wrapper — so no app.end_user_role='service'
+			// GUC is set. The dedicated RLS policies read
+			//   USING (is_service_role() OR id = current_end_user_id())
+			// so without the service marker, a non-owner runtime pool
+			// returns ZERO ROWS → mau_count / storage_size_mb silently
+			// report 0. #377's original Get call was harmless while the
+			// runtime slot was NULL (EffectiveCredential fell back to
+			// owner and bypassed RLS by ownership) — PR-B's backfill
+			// changes that: real runtime creds → real RLS enforcement
+			// → silent zero. Owner pool avoids the trap because the
+			// owner bypasses RLS for owned tables (which every tenant-
+			// schema table is).
+			p, err := poolCache.GetOwner(ctx, projectID)
 			if err != nil {
 				if !errors.Is(err, pgx.ErrNoRows) {
 					slog.Warn("usage: dedicated pool unavailable, falling back to shared",
@@ -244,19 +259,94 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		})
 	}
 
+	// Shared closure over poolCache for any console handler that
+	// needs (projectID) → *pgxpool.Pool routing outside the query
+	// engine's ctx-based resolver (Users tab, storage metadata,
+	// etc.).
+	//
+	// Returns the OWNER pool for consistency with the query engine
+	// path: the router-level poolResolver above hands owner pools to
+	// console traffic (DeveloperRoleFromContext), so a single
+	// console request that touches both the engine (e.g.
+	// assertObjectVisible for storage) and a direct h.pool path
+	// (e.g. storage_objects INSERT) uses the same role end-to-end.
+	// Mixing owner + runtime within one request would be a subtle
+	// inconsistency someone would trip over later.
+	//
+	// Safety: these handlers already run RunAsService / RunAsAuthService
+	// which set app.end_user_role='service', so RLS is bypassed by
+	// design for platform admin traffic — the owner vs runtime
+	// choice doesn't change reachable rows, only who owns any
+	// newly-created objects (relevant for future GRANT/RLS
+	// invariants on Team-tier).
+	//
+	// Same nil-on-error contract as the LimitsService resolver above.
+	var enduserPoolResolver enduser.PoolResolver
+	if poolCache != nil {
+		enduserPoolResolver = func(ctx context.Context, projectID string) *pgxpool.Pool {
+			p, err := poolCache.GetOwner(ctx, projectID)
+			if err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					slog.Warn("enduser: dedicated pool unavailable, falling back to shared",
+						"project_id", projectID, "error", err)
+				}
+				return nil
+			}
+			return p
+		}
+	}
+
 	// poolResolver bridges query.PoolResolver → poolCache without
 	// dragging auth into the query package (cycle). Consulted at
 	// every WithTenantTx call. Returning nil = "use shared pool";
 	// the query engine handles the fall-through.
+	//
+	// Two intents share this resolver:
+	//
+	//   * SDK traffic — gated on TEAM_TIER_ROUTING=1 because the pool
+	//     opens with rec.EffectiveCredential(); if runtime_* is NULL
+	//     that falls back to the owner cred, which bypasses RLS (see
+	//     the loud warning above and the RUNTIME_PASSWORD_SECRET
+	//     bootstrap contract in bootstrap.go). PR-D flips the flag +
+	//     ships the isolation regression test.
+	//
+	//   * Console (platform-authenticated) traffic — routes
+	//     unconditionally. Post-PR-A there IS no tenant schema on
+	//     the platform DB for Team-tier projects, so the shared pool
+	//     hard-fails with 3F000/42P01. The RLS-bypass concern is
+	//     absent here: console traffic runs as service-role (see
+	//     PlatformTenantContext setting KeyType="secret"), and
+	//     applyRLSContext gives it the RLS-bypass branch by design.
+	//     query.DeveloperRoleFromContext is the signal — set by
+	//     PlatformTenantContext / PlatformStorageContext, never by
+	//     APIKeyMiddleware.
 	poolResolver := query.PoolResolver(func(ctx context.Context) *pgxpool.Pool {
-		if !enableSDKRouting {
+		consoleTraffic := query.DeveloperRoleFromContext(ctx)
+		if !consoleTraffic && !enableSDKRouting {
 			return nil
 		}
 		pc, ok := auth.ProjectFromContext(ctx)
 		if !ok || pc == nil || !pc.HasDedicatedDB {
 			return nil
 		}
-		p, err := poolCache.Get(ctx, pc.ProjectID)
+		// Credential split matches the shared-cluster invariant:
+		//   * Console (DeveloperRole) → OWNER pool. Tables created
+		//     via the console SQL editor land as owner-owned, so
+		//     runtime (gateway) traffic has RLS enforced against
+		//     them. Console is already authorized as admin via
+		//     RequireRole → RLS-bypass is intentional.
+		//   * SDK (post-TEAM_TIER_ROUTING flip) → RUNTIME pool.
+		//     Non-owner (eurobase_gateway) so RLS binds for end-user
+		//     traffic — exactly what the loud warning above demands.
+		var (
+			p   *pgxpool.Pool
+			err error
+		)
+		if consoleTraffic {
+			p, err = poolCache.GetOwner(ctx, pc.ProjectID)
+		} else {
+			p, err = poolCache.Get(ctx, pc.ProjectID)
+		}
 		if err != nil {
 			// Stale context (project_databases row deleted between
 			// middleware and handler) or provider transient failure.
@@ -745,7 +835,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Route("/users", func(r chi.Router) {
 				r.Use(tenant.RequireMinRole("admin"))
 				r.Use(tenant.PlatformTenantContext(pool))
-				r.Mount("/", enduser.PlatformRoutes(pool, limiter))
+				r.Mount("/", enduser.PlatformRoutes(pool, enduserPoolResolver, limiter))
 			})
 
 			// Console storage proxy — platform-authenticated access to project storage.
@@ -755,9 +845,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
 					r.Use(tenant.PlatformStorageContext(pool))
-					storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool)).
+					// Console storage: route metadata reads/writes to
+					// the dedicated instance for Team-tier. The inner
+					// QueryEngine gets the same resolver so ownership
+					// checks (assertObjectVisible) also route.
+					storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(poolResolver)).
 						WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
-						WithHoldChecker(compliance.NewHoldService(pool))
+						WithHoldChecker(compliance.NewHoldService(pool)).
+						WithPoolResolver(storage.PoolResolver(enduserPoolResolver))
 					r.With(tenant.RequireMinRole("developer")).Post("/upload", storageHandler.UploadFile)
 					r.With(tenant.RequireMinRole("developer")).Post("/signed-url", storageHandler.GenerateSignedURL)
 					r.With(tenant.RequireMinRole("viewer")).Get("/", storageHandler.ListFiles)

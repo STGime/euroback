@@ -102,18 +102,24 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 // query on the gateway must go through this wrapper so RLS policies can
 // filter by the caller (service / anon / authenticated user).
 //
-// If DeveloperRoleFromContext(ctx) is true, the transaction also runs
-// `SET LOCAL ROLE eurobase_migrator` so DDL on tenant schemas works
-// against migrator-owned tables. This is set only by the platform-route
-// middleware; SDK runtime traffic leaves it off.
+// If DeveloperRoleFromContext(ctx) is true AND we're on the shared
+// pool, the tx runs `SET LOCAL ROLE eurobase_migrator` so DDL on
+// tenant schemas works against migrator-owned tables. On a routed
+// (dedicated) pool the SET ROLE is skipped: the resolver already
+// picked the correct role at connection time (owner for console,
+// gateway for SDK), and the dedicated instance deliberately has no
+// eurobase_migrator role (see dedicated_bootstrap.sql). Attempting
+// SET LOCAL ROLE eurobase_migrator on the dedicated pool would fail
+// with 42704 role-does-not-exist.
 func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
-	tx, err := e.resolvePool(ctx).Begin(ctx)
+	pool, routed := e.pickPool(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if err := applyDeveloperRole(ctx, tx); err != nil {
+	if err := applyDeveloperRole(ctx, tx, routed); err != nil {
 		return err
 	}
 
@@ -131,12 +137,26 @@ func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn fu
 	return tx.Commit(ctx)
 }
 
+// pickPool returns (pool, routed). routed=true means the resolver
+// returned a dedicated-instance pool for this ctx; callers that care
+// about "am I on the shared pool" use this signal to skip work that
+// is meaningful only against shared (SET LOCAL ROLE, currently).
+func (e *QueryEngine) pickPool(ctx context.Context) (*pgxpool.Pool, bool) {
+	if e.resolver != nil {
+		if p := e.resolver(ctx); p != nil {
+			return p, true
+		}
+	}
+	return e.pool, false
+}
+
 // applyDeveloperRole runs `SET LOCAL ROLE eurobase_migrator` if the
-// request context carries the developer-role flag. No-op otherwise.
-// Order matters: must run before any other SET LOCAL or schema-changing
-// query so subsequent statements execute as the elevated role.
-func applyDeveloperRole(ctx context.Context, tx pgx.Tx) error {
-	if !DeveloperRoleFromContext(ctx) {
+// request context carries the developer-role flag AND we're on the
+// shared pool. On a routed pool the connection role is already the
+// intended one (owner for console, gateway for SDK) and the
+// eurobase_migrator role does not exist there — see WithTenantTx.
+func applyDeveloperRole(ctx context.Context, tx pgx.Tx, routedPool bool) error {
+	if !DeveloperRoleFromContext(ctx) || routedPool {
 		return nil
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
@@ -653,7 +673,8 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 	rawSQL = strings.TrimRight(rawSQL, ";")
 	rawSQL = strings.TrimSpace(rawSQL)
 
-	conn, err := e.resolvePool(ctx).Acquire(ctx)
+	pool, routed := e.pickPool(ctx)
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquire connection: %w", err)
 	}
@@ -672,8 +693,9 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 		}
 	}
 
-	// Elevate to migrator role for platform-developer traffic.
-	if err := applyDeveloperRole(ctx, tx); err != nil {
+	// Elevate to migrator role for platform-developer traffic (shared
+	// pool only — see WithTenantTx).
+	if err := applyDeveloperRole(ctx, tx, routed); err != nil {
 		return nil, nil, err
 	}
 
@@ -755,7 +777,8 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	}
 	isReadOnly := len(readOnly) > 0 && readOnly[0]
 
-	conn, err := e.resolvePool(ctx).Acquire(ctx)
+	pool, routed := e.pickPool(ctx)
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire connection: %w", err)
 	}
@@ -767,7 +790,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if err := applyDeveloperRole(ctx, tx); err != nil {
+	if err := applyDeveloperRole(ctx, tx, routed); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
