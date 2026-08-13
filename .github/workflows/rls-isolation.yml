@@ -1,0 +1,77 @@
+name: Team-tier RLS isolation
+
+# Runs the dedicated-instance RLS regression suite
+# (internal/dbprovider/rls_isolation_dedicated_test.go) against a
+# Postgres 16 service container shaped like a Scaleway RDB instance
+# (eurobase_owner as the DB-owning login role). The two real tests
+# prove:
+#
+#   1. TestRLS_UsersTable_EndUserIsolation — SDK end-user traffic
+#      via the eurobase_gateway pool sees only its own rows, never
+#      another end-user's, in the tenant users table.
+#   2. TestRLS_ConsoleCreatedTable_OwnedByOwner — a table created
+#      via the console SQL editor (owner-pool path) is owned by
+#      eurobase_owner and RLS binds against gateway (SDK) traffic
+#      on it, closing the PR-C review's 🟡3 hazard.
+#
+# A green run of this workflow is the sign-off condition for
+# flipping TEAM_TIER_ROUTING=1 in deploy/k8s/gateway.yaml. Keep it
+# green: if it ever fails on main, the flag must come off until the
+# regression is fixed.
+
+on:
+  # Manual runs — used to gate the flag-flip PR + any suspected
+  # regression sweep.
+  workflow_dispatch:
+  # Every PR that touches the routing / bootstrap surface. Cheap
+  # (~1 min including image pull) so scoping it wider would also be
+  # fine; kept narrow so it doesn't dominate the CI board.
+  pull_request:
+    paths:
+      - internal/dbprovider/**
+      - internal/gateway/router.go
+      - internal/query/engine.go
+      - internal/query/ddl.go
+      - internal/tenant/context.go
+      - .github/workflows/rls-isolation.yml
+  # Nightly standing check on main so a subtle drift (e.g. a policy
+  # rewrite that silently no-ops) surfaces within 24h instead of at
+  # the next flag-flip attempt.
+  schedule:
+    - cron: '17 3 * * *'
+
+jobs:
+  rls-isolation:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: eurobase_owner
+          POSTGRES_PASSWORD: rls-ci-ephemeral
+          POSTGRES_DB: rdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eurobase_owner -d rdb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run RLS isolation suite
+        env:
+          TEST_DEDICATED_PGHOST: localhost:5432
+          TEST_DEDICATED_OWNER_PW: rls-ci-ephemeral
+          TEST_DEDICATED_PGDB: rdb
+        run: |
+          # -count=1 disables the Go test-result cache so a bisect
+          # doesn't get a stale PASS from an earlier commit against
+          # the same env vars.
+          go test ./internal/dbprovider/... -v -run TestRLS -count=1
