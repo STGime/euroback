@@ -80,6 +80,30 @@ func DeriveRuntimePassword(secret []byte, projectDatabaseID string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// DeriveReadonlyPassword mirrors DeriveRuntimePassword for the
+// eurobase_readonly login. Same secret input, distinct domain-
+// separator tag so the two derived passwords can never collide even
+// under identical projectDatabaseID. Same retry/idempotency reasoning:
+// deterministic → every ALTER ROLE sets the identical value → the
+// persisted ciphertext always matches Scaleway.
+func DeriveReadonlyPassword(secret []byte, projectDatabaseID string) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("readonly-pw:"))
+	mac.Write([]byte(projectDatabaseID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// BootstrapCredentials bundles the two non-owner credentials the
+// dedicated bootstrap materialises: the runtime cred (read/write, SDK
+// traffic) and the readonly cred (SELECT-only, M4 Direct Connection
+// UI's "Read-only" toggle). Caller seals both passwords through
+// Cipher.Seal and persists each into its own project_databases
+// column set (runtime_* / readonly_*).
+type BootstrapCredentials struct {
+	Runtime  RuntimeCredential
+	Readonly RuntimeCredential
+}
+
 // BootstrapDedicated brings a fresh dedicated instance to the point
 // where it can serve SDK traffic as a non-owner runtime role:
 //
@@ -104,16 +128,20 @@ func DeriveRuntimePassword(secret []byte, projectDatabaseID string) string {
 // the Scaleway/DB mismatch race, and (b) potentially embed a SQL
 // literal in the one DDL statement pgx cannot bind-parameterise.
 //
-// Returns the runtime credential (username fixed = eurobase_gateway,
-// password echoes runtimePassword) and the tenant schema name. The
-// caller seals the password into project_databases.
+// Returns both non-owner credentials the caller must seal + persist:
+// the runtime cred (eurobase_gateway, R/W) and the readonly cred
+// (eurobase_readonly, SELECT-only). Also returns the tenant schema
+// name. Both passwords echo their derived inputs; the SQL layer
+// materialises them via ALTER ROLE and grants happen in
+// provision_tenant.
 func BootstrapDedicated(
 	ctx context.Context,
 	ownerDSN string,
 	projectID, displayName string,
 	runtimePassword string,
+	readonlyPassword string,
 	logger *slog.Logger,
-) (*RuntimeCredential, string, error) {
+) (*BootstrapCredentials, string, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -122,6 +150,12 @@ func BootstrapDedicated(
 	}
 	if !isHexChars(runtimePassword) {
 		return nil, "", errors.New("bootstrap: runtime password is not hex — refusing to inject into DDL")
+	}
+	if readonlyPassword == "" {
+		return nil, "", errors.New("bootstrap: readonly password required — call DeriveReadonlyPassword first")
+	}
+	if !isHexChars(readonlyPassword) {
+		return nil, "", errors.New("bootstrap: readonly password is not hex — refusing to inject into DDL")
 	}
 
 	// Short-lived owner connection. We don't cache this — a fresh
@@ -153,15 +187,27 @@ func BootstrapDedicated(
 	// bootstrap call for the same project sets the identical
 	// value, so concurrent runners can't diverge Scaleway from
 	// the persisted ciphertext.
-	alterRole := fmt.Sprintf(`ALTER ROLE eurobase_gateway WITH LOGIN PASSWORD '%s'`, runtimePassword)
-	if _, err := conn.Exec(ctx, alterRole); err != nil {
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf(`ALTER ROLE eurobase_gateway WITH LOGIN PASSWORD '%s'`, runtimePassword),
+	); err != nil {
 		return nil, "", fmt.Errorf("bootstrap: set eurobase_gateway password: %w", err)
+	}
+
+	// Step 2b: set the readonly password. Same deterministic pattern
+	// as the runtime password, distinct HMAC domain tag → the two
+	// passwords never collide.
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf(`ALTER ROLE eurobase_readonly WITH LOGIN PASSWORD '%s'`, readonlyPassword),
+	); err != nil {
+		return nil, "", fmt.Errorf("bootstrap: set eurobase_readonly password: %w", err)
 	}
 
 	// Step 3: provision the tenant schema. This is a call to the
 	// function defined by step 1's SQL. Idempotent: if the schema
 	// already exists (retry), provision_tenant returns the schema
-	// name and exits early — see the pg_namespace guard.
+	// name and exits early — see the pg_namespace guard. Per-tenant
+	// grants for BOTH eurobase_gateway and eurobase_readonly live at
+	// the end of provision_tenant's body.
 	var schemaName string
 	if err := conn.QueryRow(ctx,
 		`SELECT public.provision_tenant($1::uuid, $2)`,
@@ -173,9 +219,15 @@ func BootstrapDedicated(
 		"project_id", projectID,
 		"schema", schemaName)
 
-	return &RuntimeCredential{
-		Username: "eurobase_gateway",
-		Password: runtimePassword,
+	return &BootstrapCredentials{
+		Runtime: RuntimeCredential{
+			Username: "eurobase_gateway",
+			Password: runtimePassword,
+		},
+		Readonly: RuntimeCredential{
+			Username: "eurobase_readonly",
+			Password: readonlyPassword,
+		},
 	}, schemaName, nil
 }
 

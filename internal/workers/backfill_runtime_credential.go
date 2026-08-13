@@ -81,8 +81,8 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 		logger.Info("skipping backfill — instance is not active", "state", rec.State)
 		return nil
 	}
-	if rec.RuntimeUsername != nil {
-		logger.Info("skipping backfill — runtime credential already populated")
+	if rec.RuntimeUsername != nil && rec.ReadonlyUsername != nil {
+		logger.Info("skipping backfill — both runtime and readonly credentials already populated")
 		return nil
 	}
 
@@ -90,8 +90,9 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 	// path the provision worker uses — the bootstrap SQL is
 	// idempotent so a project whose owner-side state is fine (schema
 	// exists, tenant tables in place, RLS policies set) just gets a
-	// fresh runtime password. Anything the previous provision worker
-	// (M1/M2 era, before Part 2b) couldn't do gets done here.
+	// fresh runtime + readonly password. Anything the previous
+	// provision worker (M1/M2 era, before Part 2b/PR-B) couldn't do
+	// gets done here.
 	ownerPassword, err := w.Cipher.Open(rec.PasswordCiphertext, rec.PasswordNonce, rec.PasswordKeyVersion)
 	if err != nil {
 		return fmt.Errorf("open owner password: %w", err)
@@ -99,31 +100,46 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 	ownerDSN := dbprovider.BuildOwnerDSN(rec.Username, ownerPassword, rec.Host, rec.Port, rec.DatabaseName)
 
 	runtimePassword := dbprovider.DeriveRuntimePassword(w.RuntimePasswordSecret, rec.ID)
-	cred, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, rec.ProjectID, runtimePassword, logger)
+	readonlyPassword := dbprovider.DeriveReadonlyPassword(w.RuntimePasswordSecret, rec.ID)
+	creds, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, rec.ProjectID, runtimePassword, readonlyPassword, logger)
 	if err != nil {
 		return fmt.Errorf("BootstrapDedicated: %w", err)
 	}
 
-	ct, nonce, ver, err := w.Cipher.Seal(cred.Password)
+	// Persist whichever slot(s) are still NULL. SetRuntimeCredentials /
+	// SetReadonlyCredentials both CAS on "column IS NULL", so filling
+	// only one of them (the other having been populated by a prior
+	// runner) is a no-op the CAS gracefully swallows.
+	runtimeCT, runtimeNonce, runtimeVer, err := w.Cipher.Seal(creds.Runtime.Password)
 	if err != nil {
 		return fmt.Errorf("seal runtime password: %w", err)
 	}
-	won, err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, cred.Username, ct, nonce, ver)
+	runtimeWon, err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, creds.Runtime.Username, runtimeCT, runtimeNonce, runtimeVer)
 	if err != nil {
 		return fmt.Errorf("persist runtime credentials: %w", err)
 	}
-	if !won {
-		// A concurrent runner (provision-worker resume path, or an
-		// earlier sweeper tick still finishing) already populated
-		// the slot. Our ALTER ROLE on Scaleway is wasted work but
-		// not harmful — Scaleway ended up with the winner's
-		// password too. Log and exit cleanly.
-		logger.Info("backfill lost the race — runtime credential already populated by a concurrent runner")
-		return nil
+	if !runtimeWon {
+		logger.Info("backfill: runtime credential already populated (concurrent runner)")
+	} else {
+		logger.Info("backfill: runtime credential populated",
+			"runtime_username", creds.Runtime.Username,
+			"schema", schemaName)
 	}
 
-	logger.Info("backfill complete — runtime credential populated",
-		"runtime_username", cred.Username,
-		"schema", schemaName)
+	roCT, roNonce, roVer, err := w.Cipher.Seal(creds.Readonly.Password)
+	if err != nil {
+		return fmt.Errorf("seal readonly password: %w", err)
+	}
+	roWon, err := w.Repo.SetReadonlyCredentials(ctx, rec.ID, creds.Readonly.Username, roCT, roNonce, roVer)
+	if err != nil {
+		return fmt.Errorf("persist readonly credentials: %w", err)
+	}
+	if !roWon {
+		logger.Info("backfill: readonly credential already populated (concurrent runner)")
+	} else {
+		logger.Info("backfill: readonly credential populated",
+			"readonly_username", creds.Readonly.Username,
+			"schema", schemaName)
+	}
 	return nil
 }

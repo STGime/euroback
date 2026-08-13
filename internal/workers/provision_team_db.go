@@ -307,18 +307,19 @@ func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 		return nil
 	}
 	runtimePassword := dbprovider.DeriveRuntimePassword(w.RuntimePasswordSecret, rec.ID)
+	readonlyPassword := dbprovider.DeriveReadonlyPassword(w.RuntimePasswordSecret, rec.ID)
 
-	cred, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, displayName, runtimePassword, logger)
+	creds, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, displayName, runtimePassword, readonlyPassword, logger)
 	if err != nil {
 		return fmt.Errorf("BootstrapDedicated: %w", err)
 	}
 
 	// Seal + persist the runtime credential.
-	ct, nonce, ver, err := w.Cipher.Seal(cred.Password)
+	runtimeCT, runtimeNonce, runtimeVer, err := w.Cipher.Seal(creds.Runtime.Password)
 	if err != nil {
 		return fmt.Errorf("seal runtime password: %w", err)
 	}
-	won, err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, cred.Username, ct, nonce, ver)
+	won, err := w.Repo.SetRuntimeCredentials(ctx, rec.ID, creds.Runtime.Username, runtimeCT, runtimeNonce, runtimeVer)
 	if err != nil {
 		return fmt.Errorf("persist runtime credentials: %w", err)
 	}
@@ -328,13 +329,37 @@ func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 		// populated the slot. Our ALTER ROLE on Scaleway is wasted
 		// work but not harmful — the winner also rotated the same
 		// role. Log and exit cleanly.
-		logger.Info("runtime credential already populated by a concurrent runner — skipping our write")
-		return nil
+		//
+		// Note: we still try to persist the readonly credential
+		// below because 000101 was added AFTER 000093, so a project
+		// whose runtime slot was populated by a pre-000101 runner
+		// may still have a NULL readonly slot that our concurrent-
+		// friendly write can safely fill.
+		logger.Info("runtime credential already populated by a concurrent runner — skipping runtime write")
+	} else {
+		logger.Info("runtime credential populated — SDK traffic can now route as non-owner",
+			"runtime_username", creds.Runtime.Username,
+			"schema", schemaName)
 	}
 
-	logger.Info("runtime credential populated — SDK traffic can now route as non-owner",
-		"runtime_username", cred.Username,
-		"schema", schemaName)
+	// Seal + persist the readonly credential. Same only-if-NULL
+	// concurrency contract as the runtime write (SetReadonly-
+	// Credentials returns won=false if a concurrent runner won).
+	roCT, roNonce, roVer, err := w.Cipher.Seal(creds.Readonly.Password)
+	if err != nil {
+		return fmt.Errorf("seal readonly password: %w", err)
+	}
+	roWon, err := w.Repo.SetReadonlyCredentials(ctx, rec.ID, creds.Readonly.Username, roCT, roNonce, roVer)
+	if err != nil {
+		return fmt.Errorf("persist readonly credentials: %w", err)
+	}
+	if !roWon {
+		logger.Info("readonly credential already populated by a concurrent runner — skipping readonly write")
+	} else {
+		logger.Info("readonly credential populated — /connection?role=readonly can now hand out non-owner DSN",
+			"readonly_username", creds.Readonly.Username,
+			"schema", schemaName)
+	}
 	return nil
 }
 
