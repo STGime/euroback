@@ -481,6 +481,8 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+			&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {
@@ -492,20 +494,23 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 }
 
 // ListActiveWithoutRuntime returns rows in state='active' that
-// still have the runtime credential slot empty. This is the M2.5
-// part 2b backfill surface — projects provisioned before Part 2b
-// landed have no non-owner runtime login, so SDK routing (once the
-// TEAM_TIER_ROUTING flag flips) would fall back to the owner
-// credential and bypass RLS. The backfill worker walks this list
-// and calls BootstrapDedicated for each.
+// still have EITHER the runtime OR the readonly credential slot
+// empty. This is the M2.5 part 2b / PR-B backfill surface — any
+// project whose bootstrap ran before the readonly role shipped will
+// have runtime_username populated but readonly_username NULL, and
+// filtering on runtime alone would leave them permanently stuck at
+// `readonly_pending: true`. The `OR` covers both migration windows:
+// pre-093 rows (both NULL) and pre-101 rows (readonly NULL only).
 //
 // Bounded LIMIT so a single worker tick doesn't attempt to
 // bootstrap every existing Team project at once. The sweeper drains
 // exactly one batch per hourly tick — a backlog of N projects
 // takes ceil(N/limit) hours to fully drain. Successful backfills
-// exit the result set on the next tick (the runtime_username IS
-// NULL filter), so the query self-limits without any pagination
-// cursor.
+// exit the result set on the next tick (both slots populated), so
+// the query self-limits without any pagination cursor.
+//
+// Name kept as ListActiveWithoutRuntime for API stability; the doc
+// above is the source of truth for the filter shape.
 func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Record, error) {
 	if limit <= 0 {
 		limit = 25
@@ -523,7 +528,7 @@ func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Recor
 		  FROM public.project_databases
 		 WHERE state = 'active'
 		   AND deleted_at IS NULL
-		   AND runtime_username IS NULL
+		   AND (runtime_username IS NULL OR readonly_username IS NULL)
 		 ORDER BY created_at ASC
 		 LIMIT $1
 	`
@@ -541,6 +546,8 @@ func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Recor
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+			&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {
@@ -603,6 +610,8 @@ func (r *Repo) ListAllByProject(ctx context.Context, projectID string) ([]Record
 			&rec.PasswordCiphertext, &rec.PasswordNonce, &rec.PasswordKeyVersion,
 			&rec.RuntimeUsername, &rec.RuntimePasswordCiphertext,
 			&rec.RuntimePasswordNonce, &rec.RuntimePasswordKeyVersion,
+			&rec.ReadonlyUsername, &rec.ReadonlyPasswordCiphertext,
+			&rec.ReadonlyPasswordNonce, &rec.ReadonlyPasswordKeyVersion,
 			&rec.Region, &rec.State,
 			&rec.SupersededBy, &rec.CreatedAt, &rec.UpdatedAt, &rec.DeletedAt,
 		); err != nil {
