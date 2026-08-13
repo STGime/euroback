@@ -226,11 +226,39 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 
 	slog.Info("project record inserted", "project_id", projectID, "slug", slug)
 
-	// Call provision_tenant to create the isolated tenant schema.
-	_, err = tx.Exec(ctx,
-		`SELECT provision_tenant($1, $2, $3)`,
-		projectID, req.Name, req.Plan,
-	)
+	// Team-tier / Legal-Team tenant schemas live on the dedicated
+	// Scaleway instance, not the platform DB. The async
+	// ProvisionTeamDatabaseWorker calls provision_tenant() on the
+	// dedicated instance via BootstrapDedicated once the instance is
+	// up. Creating a duplicate schema on the platform DB here would
+	// diverge from the dedicated copy the moment SDK / console traffic
+	// routes there — silent data loss.
+	skipPlatformSchema := req.Plan == "team" || req.Plan == "legal_team"
+
+	if !skipPlatformSchema {
+		// Call provision_tenant to create the isolated tenant schema on
+		// the platform DB (Free / Pro live here). provision_tenant()
+		// also overwrites projects.schema_name with the projectID-based
+		// derivation (`tenant_<projectID_with_underscores>`) as its
+		// final step — the slug-based value inserted above is a
+		// placeholder.
+		_, err = tx.Exec(ctx,
+			`SELECT provision_tenant($1, $2, $3)`,
+			projectID, req.Name, req.Plan,
+		)
+	} else {
+		// Team-tier: mirror provision_tenant()'s final UPDATE so
+		// projects.schema_name matches the projectID-based name the
+		// dedicated-instance provision_tenant() will create. Keeps a
+		// single source of truth for the schema name across every
+		// downstream reader (usage tracker, console handlers, etc.).
+		_, err = tx.Exec(ctx,
+			`UPDATE public.projects
+			    SET schema_name = 'tenant_' || replace(id::text, '-', '_')
+			  WHERE id = $1`,
+			projectID,
+		)
+	}
 
 	var status string
 	var publicKey, secretKey string
