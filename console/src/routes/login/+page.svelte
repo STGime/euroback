@@ -288,7 +288,7 @@
 										/>
 										<span>
 											I accept the
-											<a href="https://www.eurobase.app/terms" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Terms of Service</a>
+											<a href="/legal/terms" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Terms of Service</a>
 											(v{LEGAL_VERSION}).
 										</span>
 									</label>
@@ -301,9 +301,9 @@
 										/>
 										<span>
 											I accept the
-											<a href="https://www.eurobase.app/dpa" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Data Processing Agreement</a>
+											<a href="/legal/dpa" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Data Processing Agreement</a>
 											(v{LEGAL_VERSION}) and have read the
-											<a href="https://www.eurobase.app/privacy" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Privacy Policy</a>.
+											<a href="/legal/privacy" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Privacy Policy</a>.
 										</span>
 									</label>
 								</div>
