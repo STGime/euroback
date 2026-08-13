@@ -1,6 +1,36 @@
 package query
 
-import "context"
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type tenantPoolKey struct{}
+
+// ContextWithTenantPool stashes a per-project dedicated-instance pool
+// on the context. Set by the console middleware (PR-D) when the caller's
+// project has a Team-tier dedicated instance; runDDL and any other
+// handler outside the query engine's `resolver` closure reads it via
+// TenantPoolFromContext to route without threading a resolver arg
+// through every sub-handler signature.
+//
+// SDK / API-key traffic never sets this — SDK routing stays gated by
+// the query engine's own resolver + TEAM_TIER_ROUTING.
+func ContextWithTenantPool(ctx context.Context, pool *pgxpool.Pool) context.Context {
+	if pool == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, tenantPoolKey{}, pool)
+}
+
+// TenantPoolFromContext returns the dedicated-instance pool the
+// middleware picked, or nil if the caller is not on a routed request.
+// runDDL uses this: `if p := TenantPoolFromContext(ctx); p != nil { … }`.
+func TenantPoolFromContext(ctx context.Context) *pgxpool.Pool {
+	p, _ := ctx.Value(tenantPoolKey{}).(*pgxpool.Pool)
+	return p
+}
 
 // schemaContextKey is a type-safe key for the tenant schema in request context.
 type schemaContextKey struct{}

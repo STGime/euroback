@@ -23,23 +23,27 @@ import (
 // queries returned empty column lists for developer-owned tables. See
 // issues #40, #41, #42.
 //
-// TODO(team-tier-pr-d): the DDL handler still receives the shared
-// (developer) pool. For a Team-tier project, the tenant schema lives
-// on the dedicated instance so runDDL against the shared pool will
-// 3F000. Fix in PR-D via the ContextWithTenantPool signal (or a
-// resolver arg on HandleDDL) — must land alongside SDK routing +
-// the RLS-isolation regression test.
+// Team-tier routing (PR-D): if the middleware has stashed a
+// dedicated-instance pool on ctx (see ContextWithTenantPool),
+// runDDL prefers it and skips the SET LOCAL ROLE eurobase_migrator
+// (the dedicated instance has no eurobase_migrator role — the pool
+// already connects as eurobase_owner via poolCache.GetOwner).
+//
+// Free/Pro / any request without the stashed pool: falls back to
+// the shared `pool` argument, exactly the pre-PR-D behaviour.
 func runDDL(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
+	routed := false
+	if p := TenantPoolFromContext(ctx); p != nil {
+		pool = p
+		routed = true
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// runDDL always uses the developer/shared pool today, so the
-	// routedPool flag is always false. When PR-D wires Team-tier
-	// routing for the DDL handler, the caller will pass the flag.
-	if err := applyDeveloperRole(ctx, tx, false); err != nil {
+	if err := applyDeveloperRole(ctx, tx, routed); err != nil {
 		return err
 	}
 	if err := fn(tx); err != nil {

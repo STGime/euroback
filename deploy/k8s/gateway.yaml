@@ -92,6 +92,20 @@ spec:
               value: "true"
             - name: TLS_MIN
               value: "TLS 1.3"
+            # Team-tier SDK routing flag: intentionally NOT set here.
+            # The A→D series shipped the code (dedupe / roles / console
+            # routing / DDL routing / strict-runtime guard / RLS
+            # regression test), but the flip belongs in its own commit
+            # once staging has been run through
+            # internal/dbprovider/rls_isolation_dedicated_test.go
+            # (TEST_DEDICATED_PGHOST + TEST_DEDICATED_OWNER_PW set) and
+            # the two tests pass green. Add:
+            #   - name: TEAM_TIER_ROUTING
+            #     value: "1"
+            # once the staging run is signed off. cmd/gateway/main.go
+            # will fail startup if this is "1" without
+            # RUNTIME_PASSWORD_SECRET set — that guard prevents the
+            # runtime-NULL owner-connection RLS bypass class.
       imagePullSecrets:
         - name: scw-registry
 ---
