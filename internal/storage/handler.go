@@ -91,6 +91,13 @@ type HoldChecker interface {
 }
 
 
+// PoolResolver picks the pool that owns the caller's tenant schema
+// (project's dedicated managed-PG instance for Team-tier; nil for
+// Free/Pro so the caller falls back to shared). Same shape as
+// enduser.PoolResolver / plans.PoolResolver — router.go hands each
+// package the same closure over its PoolCache.
+type PoolResolver func(ctx context.Context, projectID string) *pgxpool.Pool
+
 // StorageHandler holds dependencies for the storage HTTP handlers.
 type StorageHandler struct {
 	s3        *S3Client
@@ -98,6 +105,7 @@ type StorageHandler struct {
 	engine    *query.QueryEngine
 	retention RetentionResolver
 	holds     HoldChecker
+	resolver  PoolResolver
 }
 
 // NewStorageHandler creates a new StorageHandler backed by the given S3Client
@@ -111,6 +119,42 @@ type StorageHandler struct {
 // public.storage_retention_policies.
 func NewStorageHandler(s3 *S3Client, pool *pgxpool.Pool, engine *query.QueryEngine) *StorageHandler {
 	return &StorageHandler{s3: s3, pool: pool, engine: engine}
+}
+
+// WithPoolResolver attaches a Team-tier-aware pool resolver so
+// storage_objects reads / writes route to the project's dedicated
+// instance instead of the shared platform DB (where the schema does
+// not exist for Team-tier post-PR-A). Chainable; nil-safe (Free/Pro
+// or test builds skip routing and keep the shared pool).
+func (h *StorageHandler) WithPoolResolver(r PoolResolver) *StorageHandler {
+	h.resolver = r
+	return h
+}
+
+// tenantPool returns the dedicated pool for the caller's project when
+// the resolver is wired and the project has one, else the shared
+// platform pool. Prefers the ProjectContext (set by
+// PlatformStorageContext for console traffic) over the query-package
+// context helpers so this works for both the SDK path (ProjectContext
+// set by APIKeyMiddleware) and console (set by
+// PlatformStorageContext).
+func (h *StorageHandler) tenantPool(ctx context.Context) *pgxpool.Pool {
+	if h.resolver == nil {
+		return h.pool
+	}
+	var projectID string
+	if pc, ok := auth.ProjectFromContext(ctx); ok && pc != nil {
+		projectID = pc.ProjectID
+	} else {
+		projectID = query.ProjectIDFromContext(ctx)
+	}
+	if projectID == "" {
+		return h.pool
+	}
+	if p := h.resolver(ctx, projectID); p != nil {
+		return p
+	}
+	return h.pool
 }
 
 // WithRetentionResolver attaches a retention resolver so upload paths
@@ -338,7 +382,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			 ON CONFLICT (key) DO UPDATE SET content_type = $2, size_bytes = $3, uploaded_by = $4`,
 			escSchema,
 		)
-		if err := edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+		if err := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, q, key, contentType, size, userID)
 			return err
 		}); err != nil {
@@ -526,7 +570,7 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
 		q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1`, escSchema)
-		if err := edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+		if err := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, q, key)
 			return err
 		}); err != nil {
@@ -754,7 +798,7 @@ func (h *StorageHandler) lookupUploadedAt(r *http.Request, key string) time.Time
 	esc := strings.ReplaceAll(schema, `"`, `""`)
 	q := fmt.Sprintf(`SELECT created_at FROM "%s".storage_objects WHERE key = $1`, esc)
 	var t time.Time
-	if err := edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+	if err := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, key).Scan(&t)
 	}); err != nil {
 		// No row / RLS filter / query error — leave zero so the

@@ -60,12 +60,30 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			var schemaName string
+			// Load enough project metadata to populate a full
+			// ProjectContext, so the router's poolResolver can route
+			// console tenant-schema reads to the dedicated instance
+			// for Team-tier projects (PR-C). The LEFT JOIN keeps this
+			// a single round-trip; a Free/Pro project simply gets
+			// HasDedicatedDB=false / ProjectDatabaseID=NULL and the
+			// resolver falls back to the shared pool.
+			var (
+				schemaName string
+				plan       string
+				pdID       *string
+			)
 			err := pool.QueryRow(r.Context(),
-				`SELECT schema_name FROM projects
-				 WHERE id = $1 AND status = 'active'`,
+				`SELECT p.schema_name, p.plan, pd.id
+				   FROM projects p
+				   LEFT JOIN public.project_databases pd
+				     ON pd.project_id = p.id
+				    AND pd.state IN ('provisioning', 'active', 'restoring')
+				    AND pd.deleted_at IS NULL
+				  WHERE p.id = $1 AND p.status = 'active'
+				  ORDER BY (pd.state = 'active') DESC NULLS LAST, pd.created_at DESC NULLS LAST
+				  LIMIT 1`,
 				projectID,
-			).Scan(&schemaName)
+			).Scan(&schemaName, &plan, &pdID)
 			if err != nil {
 				slog.Error("platform tenant context: project not found",
 					"error", err,
@@ -84,6 +102,19 @@ func PlatformTenantContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			// works against migrator-owned tables and new objects are
 			// owned by the migrator (uniform with CI-applied migrations).
 			ctx = query.WithDeveloperRole(ctx)
+			// ProjectContext lets the router's poolResolver route
+			// tenant-schema reads to the dedicated instance for
+			// Team-tier projects. Post-PR-A there is no tenant schema
+			// on the platform DB for Team-tier, so this MUST route to
+			// avoid a hard 3F000/42P01 in the console.
+			ctx = auth.ContextWithProject(ctx, &auth.ProjectContext{
+				ProjectID:         projectID,
+				SchemaName:        schemaName,
+				Plan:              plan,
+				KeyType:           "secret",
+				HasDedicatedDB:    pdID != nil,
+				ProjectDatabaseID: pdID,
+			})
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

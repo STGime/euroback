@@ -56,19 +56,49 @@ type PlatformUserList struct {
 	Total int            `json:"total"`
 }
 
+// PoolResolver picks the pool that owns the caller's tenant schema:
+// the project's dedicated managed-PG instance for Team-tier (post-
+// PR-A the tenant schema does not exist on shared for Team-tier), nil
+// for Free/Pro (caller falls back to the shared platform pool). Same
+// shape as plans.PoolResolver / query.PoolResolver so router.go can
+// hand every package the same closure over its PoolCache.
+type PoolResolver func(ctx context.Context, projectID string) *pgxpool.Pool
+
 // PlatformRoutes returns a chi.Router with end-user management handlers.
-func PlatformRoutes(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) chi.Router {
+// The optional resolver routes tenant-schema reads / writes to the
+// project's dedicated instance for Team-tier; pass nil for Free/Pro-only
+// deployments or tests.
+func PlatformRoutes(pool *pgxpool.Pool, resolver PoolResolver, limiter *ratelimit.RateLimiter) chi.Router {
 	r := chi.NewRouter()
-	r.Get("/", handleListUsers(pool))
-	r.Post("/", handleCreateUser(pool))
-	r.Get("/{userId}", handleGetUser(pool))
-	r.Patch("/{userId}", handleUpdateUser(pool))
-	r.Delete("/{userId}", handleDeleteUser(pool))
-	r.Post("/{userId}/suspend", handleSuspendUser(pool))
-	r.Delete("/{userId}/suspend", handleUnsuspendUser(pool))
-	r.Post("/{userId}/reset-password", handleResetPassword(pool))
+	r.Get("/", handleListUsers(pool, resolver))
+	r.Post("/", handleCreateUser(pool, resolver))
+	r.Get("/{userId}", handleGetUser(pool, resolver))
+	r.Patch("/{userId}", handleUpdateUser(pool, resolver))
+	r.Delete("/{userId}", handleDeleteUser(pool, resolver))
+	r.Post("/{userId}/suspend", handleSuspendUser(pool, resolver))
+	r.Delete("/{userId}/suspend", handleUnsuspendUser(pool, resolver))
+	r.Post("/{userId}/reset-password", handleResetPassword(pool, resolver))
 	r.Get("/{userId}/export", HandleGDPRExport(pool, limiter))
 	return r
+}
+
+// tenantPool returns the dedicated pool for the caller's project when
+// the resolver is wired and the project has one, else the shared
+// platform pool. Resolver + projectID are read from the request
+// context (set by PlatformTenantContext); handler code doesn't need
+// to know the caller's project ID.
+func tenantPool(ctx context.Context, sharedPool *pgxpool.Pool, resolver PoolResolver) *pgxpool.Pool {
+	if resolver == nil {
+		return sharedPool
+	}
+	projectID := query.ProjectIDFromContext(ctx)
+	if projectID == "" {
+		return sharedPool
+	}
+	if p := resolver(ctx, projectID); p != nil {
+		return p
+	}
+	return sharedPool
 }
 
 func scanUser(rows interface{ Scan(dest ...interface{}) error }) (PlatformUser, error) {
@@ -101,7 +131,7 @@ func isValidEmail(email string) bool {
 	return local != "" && domain != "" && strings.Contains(domain, ".")
 }
 
-func handleListUsers(pool *pgxpool.Pool) http.HandlerFunc {
+func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -156,7 +186,7 @@ func handleListUsers(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var total int
 		users := []PlatformUser{}
-		if err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		if err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			if search != "" {
 				if e := tx.QueryRow(ctx, countQ, args[0]).Scan(&total); e != nil {
 					return fmt.Errorf("count users: %w", e)
@@ -190,7 +220,7 @@ func handleListUsers(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleGetUser(pool *pgxpool.Pool) http.HandlerFunc {
+func handleGetUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -207,7 +237,7 @@ func handleGetUser(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 		q := fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.id = $1`, userCols, qs)
 		var u PlatformUser
-		if err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		if err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			var e error
 			u, e = scanUser(tx.QueryRow(ctx, q, userID))
 			return e
@@ -221,7 +251,7 @@ func handleGetUser(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleCreateUser(pool *pgxpool.Pool) http.HandlerFunc {
+func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -269,7 +299,7 @@ func handleCreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 			qs,
 		)
 		var u PlatformUser
-		err = edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err = edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			var e error
 			u, e = scanUser(tx.QueryRow(ctx, q, email, string(hash), string(metadataJSON)))
 			return e
@@ -292,7 +322,7 @@ func handleCreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleUpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
+func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -357,7 +387,7 @@ func handleUpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		var u PlatformUser
-		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			var e error
 			u, e = scanUser(tx.QueryRow(ctx, q, args...))
 			return e
@@ -383,7 +413,7 @@ func handleUpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleDeleteUser(pool *pgxpool.Pool) http.HandlerFunc {
+func handleDeleteUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -427,7 +457,7 @@ func handleDeleteUser(pool *pgxpool.Pool) http.HandlerFunc {
 
 		q := fmt.Sprintf(`DELETE FROM %s.users WHERE id = $1`, quoteIdent(schema))
 		var rowsAffected int64
-		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			tag, e := tx.Exec(ctx, q, userID)
 			if e != nil {
 				return e
@@ -450,7 +480,7 @@ func handleDeleteUser(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleSuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
+func handleSuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -471,7 +501,7 @@ func handleSuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
 		var u PlatformUser
-		err := edb.RunAsAuthService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err := edb.RunAsAuthService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			var e error
 			u, e = scanUser(tx.QueryRow(ctx, q, userID))
 			if e != nil {
@@ -492,7 +522,7 @@ func handleSuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleUnsuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
+func handleUnsuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -512,7 +542,7 @@ func handleUnsuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 			qs, returnCols,
 		)
 		var u PlatformUser
-		err := edb.RunAsService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			var e error
 			u, e = scanUser(tx.QueryRow(ctx, q, userID))
 			return e
@@ -529,7 +559,7 @@ func handleUnsuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func handleResetPassword(pool *pgxpool.Pool) http.HandlerFunc {
+func handleResetPassword(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -562,7 +592,7 @@ func handleResetPassword(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 		revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schema))
 		var rowsAffected int64
-		err = edb.RunAsAuthService(r.Context(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		err = edb.RunAsAuthService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			tag, e := tx.Exec(ctx, q, string(hash), userID)
 			if e != nil {
 				return e
