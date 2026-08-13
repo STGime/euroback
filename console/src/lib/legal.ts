@@ -78,24 +78,44 @@ function stripReviewerNotes(md: string): string {
 	return md.slice(end + 3).trimStart();
 }
 
+// stripLeadingH1 drops the first `# Title` from the md body so the
+// page-level <h1> in +page.svelte isn't shadowed by an identical one
+// right below it (cosmetic + a11y). Matches only the FIRST heading
+// so any deeper structure is preserved.
+function stripLeadingH1(md: string): string {
+	const trimmed = md.trimStart();
+	if (!trimmed.startsWith('# ')) return md;
+	const nl = trimmed.indexOf('\n');
+	if (nl < 0) return '';
+	return trimmed.slice(nl + 1).trimStart();
+}
+
 function substitute(md: string): string {
 	return md.replace(/\{\{([A-Z_]+)\}\}/g, (match, key) => {
 		return PLACEHOLDERS[key] ?? match;
 	});
 }
 
-// renderLegal returns the sanitized HTML + title for a doc slug.
-// Throws when the slug isn't recognized so the +page.ts load fn
-// can turn that into a 404 (rather than silently blanking).
+// renderLegal returns the rendered HTML + title for a doc slug.
+// Throws when the slug isn't recognized so the +page.server.ts load
+// fn can turn that into a 404 (rather than silently blanking).
+//
+// SECURITY: marked does NOT sanitize HTML by default in v18 — raw
+// tags, event-handler attributes, and even `javascript:` hrefs pass
+// straight through to the {@html} sink. That's acceptable here
+// because the ONLY input is build-time repo markdown (the three
+// `?raw` imports at the top of this file), and those files contain
+// no inline HTML after stripReviewerNotes drops the leading comment
+// block. If a future change ever points this function at user-
+// supplied markdown, swap in DOMPurify (or marked's `renderer`
+// override with tag escaping) BEFORE that change lands — do not
+// trust this function with untrusted input as-is.
 export function renderLegal(slug: string): { title: string; html: string; version: string } {
 	if (!isLegalDoc(slug)) {
 		throw new Error(`unknown legal document: ${slug}`);
 	}
 	const { source, title } = DOC_META[slug];
-	const md = substitute(stripReviewerNotes(source));
-	// marked is safe by default (v18): no raw HTML pass-through,
-	// no unresolved macros. Our .md files don't rely on inline
-	// HTML anyway.
+	const md = substitute(stripLeadingH1(stripReviewerNotes(source)));
 	const html = marked.parse(md, { async: false }) as string;
 	return { title, html, version: LEGAL_VERSION };
 }
