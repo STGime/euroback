@@ -22,6 +22,13 @@ import (
 // ALTER/DROP failed with "must be owner" and gateway-pool introspection
 // queries returned empty column lists for developer-owned tables. See
 // issues #40, #41, #42.
+//
+// TODO(team-tier-pr-d): the DDL handler still receives the shared
+// (developer) pool. For a Team-tier project, the tenant schema lives
+// on the dedicated instance so runDDL against the shared pool will
+// 3F000. Fix in PR-D via the ContextWithTenantPool signal (or a
+// resolver arg on HandleDDL) — must land alongside SDK routing +
+// the RLS-isolation regression test.
 func runDDL(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -29,7 +36,10 @@ func runDDL(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) e
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if err := applyDeveloperRole(ctx, tx); err != nil {
+	// runDDL always uses the developer/shared pool today, so the
+	// routedPool flag is always false. When PR-D wires Team-tier
+	// routing for the DDL handler, the caller will pass the flag.
+	if err := applyDeveloperRole(ctx, tx, false); err != nil {
 		return err
 	}
 	if err := fn(tx); err != nil {

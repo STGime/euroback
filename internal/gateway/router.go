@@ -297,7 +297,24 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		if !ok || pc == nil || !pc.HasDedicatedDB {
 			return nil
 		}
-		p, err := poolCache.Get(ctx, pc.ProjectID)
+		// Credential split matches the shared-cluster invariant:
+		//   * Console (DeveloperRole) → OWNER pool. Tables created
+		//     via the console SQL editor land as owner-owned, so
+		//     runtime (gateway) traffic has RLS enforced against
+		//     them. Console is already authorized as admin via
+		//     RequireRole → RLS-bypass is intentional.
+		//   * SDK (post-TEAM_TIER_ROUTING flip) → RUNTIME pool.
+		//     Non-owner (eurobase_gateway) so RLS binds for end-user
+		//     traffic — exactly what the loud warning above demands.
+		var (
+			p   *pgxpool.Pool
+			err error
+		)
+		if consoleTraffic {
+			p, err = poolCache.GetOwner(ctx, pc.ProjectID)
+		} else {
+			p, err = poolCache.Get(ctx, pc.ProjectID)
+		}
 		if err != nil {
 			// Stale context (project_databases row deleted between
 			// middleware and handler) or provider transient failure.

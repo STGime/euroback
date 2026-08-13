@@ -96,13 +96,47 @@ func (c *PoolCache) Close() {
 	}
 }
 
-// Get returns the pool for projectID, opening it on the first call.
+// Get returns the RUNTIME (non-owner) pool for projectID. This is
+// the SDK-facing pool — connects as eurobase_gateway (or the owner
+// as a fallback until runtime creds are provisioned) so RLS policies
+// bind for end-user traffic.
+//
 // Returns (nil, pgx.ErrNoRows) if the project has no live
 // project_databases row — the caller should fall back to the
 // shared pool.
 func (c *PoolCache) Get(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+	return c.get(ctx, projectID, false)
+}
+
+// GetOwner returns the OWNER pool for projectID — connects as
+// eurobase_owner. Used by console-authenticated DDL / DML on Team-
+// tier so tables created via the console SQL editor are owned by
+// the owner (not by the runtime role) — that preserves the shared-
+// cluster invariant that SDK runtime traffic (as eurobase_gateway,
+// non-owner) has RLS enforced against owner-created tables.
+//
+// SDK / end-user traffic must NEVER call this — see the loud
+// warning in router.go above the poolResolver.
+//
+// Cached separately from the runtime pool (same idle-TTL, same
+// concurrent-open guard, same Evict semantics).
+func (c *PoolCache) GetOwner(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+	return c.get(ctx, projectID, true)
+}
+
+// get is the shared body of Get / GetOwner. `ownerMode=true` picks
+// the owner credential; otherwise the runtime credential (falling
+// back to owner via EffectiveCredential).
+//
+// Cache keys are the projectID (runtime) or projectID+":owner"
+// (owner) so the two variants coexist without collision.
+func (c *PoolCache) get(ctx context.Context, projectID string, ownerMode bool) (*pgxpool.Pool, error) {
+	key := projectID
+	if ownerMode {
+		key = projectID + ":owner"
+	}
 	c.mu.Lock()
-	if cp, ok := c.pools[projectID]; ok {
+	if cp, ok := c.pools[key]; ok {
 		cp.lastUsed = time.Now()
 		p := cp.pool
 		c.mu.Unlock()
@@ -120,14 +154,25 @@ func (c *PoolCache) Get(ctx context.Context, projectID string) (*pgxpool.Pool, e
 		return nil, fmt.Errorf("pool cache: lookup: %w", err)
 	}
 
-	// Prefer the RUNTIME (non-owner) credential over the owner:
-	// the owner bypasses RLS by definition (table owner), so
-	// routing SDK traffic as the owner would leak rows across
-	// end-users. The runtime credential is provisioned by
-	// #338 follow-up work; until it lands for a given project,
-	// EffectiveCredential falls back to the owner and the
-	// TEAM_TIER_ROUTING gate stays off in prod.
-	username, ct, nonce, ver := rec.EffectiveCredential()
+	// Credential selection:
+	//   ownerMode=false → runtime (or owner-fallback via
+	//     EffectiveCredential) — RLS applies for SDK / end-user
+	//     traffic.
+	//   ownerMode=true  → OWNER — used by console DDL so tables
+	//     created via the SQL editor are owner-owned. RLS bypass
+	//     is intentional (console traffic is already authorized
+	//     as admin via RequireRole).
+	var username string
+	var ct, nonce []byte
+	var ver int16
+	if ownerMode {
+		username = rec.Username
+		ct = rec.PasswordCiphertext
+		nonce = rec.PasswordNonce
+		ver = rec.PasswordKeyVersion
+	} else {
+		username, ct, nonce, ver = rec.EffectiveCredential()
+	}
 	password, err := c.cipher.Open(ct, nonce, ver)
 	if err != nil {
 		return nil, fmt.Errorf("pool cache: decrypt: %w", err)
@@ -150,34 +195,37 @@ func (c *PoolCache) Get(ctx context.Context, projectID string) (*pgxpool.Pool, e
 	c.mu.Lock()
 	// Concurrent-open guard: if another goroutine won the race,
 	// prefer its pool and close ours. Otherwise install.
-	if existing, ok := c.pools[projectID]; ok {
+	if existing, ok := c.pools[key]; ok {
 		pool.Close()
 		existing.lastUsed = time.Now()
 		p := existing.pool
 		c.mu.Unlock()
 		return p, nil
 	}
-	c.pools[projectID] = &cachedPool{pool: pool, host: rec.Host, lastUsed: time.Now()}
+	c.pools[key] = &cachedPool{pool: pool, host: rec.Host, lastUsed: time.Now()}
 	c.mu.Unlock()
 
-	slog.Info("dedicated pool opened", "project_id", projectID, "host", rec.Host)
+	slog.Info("dedicated pool opened", "project_id", projectID, "host", rec.Host, "owner_mode", ownerMode)
 	return pool, nil
 }
 
-// Evict closes and removes the cached pool for projectID, if any.
-// Restore cutover calls this so the next request opens against the
-// new host. Safe to call for a project that isn't cached.
+// Evict closes and removes the cached pools for projectID (both
+// runtime and owner variants). Restore cutover calls this so the
+// next request opens against the new host. Safe to call for a
+// project that isn't cached.
 func (c *PoolCache) Evict(projectID string) {
-	c.mu.Lock()
-	cp, ok := c.pools[projectID]
-	if !ok {
+	for _, key := range []string{projectID, projectID + ":owner"} {
+		c.mu.Lock()
+		cp, ok := c.pools[key]
+		if !ok {
+			c.mu.Unlock()
+			continue
+		}
+		delete(c.pools, key)
 		c.mu.Unlock()
-		return
+		cp.pool.Close()
+		slog.Info("dedicated pool evicted", "project_id", projectID, "key", key, "host", cp.host)
 	}
-	delete(c.pools, projectID)
-	c.mu.Unlock()
-	cp.pool.Close()
-	slog.Info("dedicated pool evicted", "project_id", projectID, "host", cp.host)
 }
 
 // Size reports the number of currently-cached pools. For metrics /
