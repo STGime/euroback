@@ -247,12 +247,29 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// Shared closure over poolCache for any console handler that
 	// needs (projectID) → *pgxpool.Pool routing outside the query
 	// engine's ctx-based resolver (Users tab, storage metadata,
-	// etc.). Same nil-on-error contract as the LimitsService
-	// resolver above.
+	// etc.).
+	//
+	// Returns the OWNER pool for consistency with the query engine
+	// path: the router-level poolResolver above hands owner pools to
+	// console traffic (DeveloperRoleFromContext), so a single
+	// console request that touches both the engine (e.g.
+	// assertObjectVisible for storage) and a direct h.pool path
+	// (e.g. storage_objects INSERT) uses the same role end-to-end.
+	// Mixing owner + runtime within one request would be a subtle
+	// inconsistency someone would trip over later.
+	//
+	// Safety: these handlers already run RunAsService / RunAsAuthService
+	// which set app.end_user_role='service', so RLS is bypassed by
+	// design for platform admin traffic — the owner vs runtime
+	// choice doesn't change reachable rows, only who owns any
+	// newly-created objects (relevant for future GRANT/RLS
+	// invariants on Team-tier).
+	//
+	// Same nil-on-error contract as the LimitsService resolver above.
 	var enduserPoolResolver enduser.PoolResolver
 	if poolCache != nil {
 		enduserPoolResolver = func(ctx context.Context, projectID string) *pgxpool.Pool {
-			p, err := poolCache.Get(ctx, projectID)
+			p, err := poolCache.GetOwner(ctx, projectID)
 			if err != nil {
 				if !errors.Is(err, pgx.ErrNoRows) {
 					slog.Warn("enduser: dedicated pool unavailable, falling back to shared",
