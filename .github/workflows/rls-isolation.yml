@@ -33,6 +33,12 @@ on:
       - internal/query/engine.go
       - internal/query/ddl.go
       - internal/tenant/context.go
+      # BootstrapDedicated is invoked from the worker layer; a change
+      # to provision_team_db.go or backfill_runtime_credential.go can
+      # break the runtime/readonly credential contract these tests
+      # depend on. Nightly cron catches it within 24h regardless.
+      - internal/workers/provision_team_db.go
+      - internal/workers/backfill_runtime_credential.go
       - .github/workflows/rls-isolation.yml
   # Nightly standing check on main so a subtle drift (e.g. a policy
   # rewrite that silently no-ops) surfaces within 24h instead of at
@@ -70,6 +76,14 @@ jobs:
           TEST_DEDICATED_PGHOST: localhost:5432
           TEST_DEDICATED_OWNER_PW: rls-ci-ephemeral
           TEST_DEDICATED_PGDB: rdb
+          # TEST_DEDICATED_REQUIRE flips setupDedicatedTest from
+          # `t.Skip` to `t.Fatal` on every bail-out. Without it, a
+          # dead service container / renamed env var / missing image
+          # would produce a vacuous green — CI would pass while
+          # asserting nothing, and this workflow is *the* gate for
+          # flipping TEAM_TIER_ROUTING=1. Require-mode ensures the
+          # gate can only be satisfied by an actual assertion pass.
+          TEST_DEDICATED_REQUIRE: '1'
         run: |
           # -count=1 disables the Go test-result cache so a bisect
           # doesn't get a stale PASS from an earlier commit against

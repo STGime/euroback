@@ -116,7 +116,13 @@ info "3. Running the RLS regression suite"
 TEST_DEDICATED_PGHOST="localhost:${PG_HOST_PORT}" \
 TEST_DEDICATED_OWNER_PW="$OWNER_PASSWORD" \
 TEST_DEDICATED_PGDB=rdb \
+TEST_DEDICATED_REQUIRE=1 \
     go test ./internal/dbprovider/... -v -run TestRLS -count=1
+
+# TEST_DEDICATED_REQUIRE=1 flips setupDedicatedTest from t.Skip to
+# t.Fatal, so a broken container / bad env var here can't produce
+# a green run that proves nothing. Local `go test ./...` on a laptop
+# without this script keeps the friendly skip.
 
 # `count=1` disables Go's test-result cache so a hidden regression
 # in a `git bisect` doesn't get masked by a cached PASS from a
