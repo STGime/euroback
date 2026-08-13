@@ -232,7 +232,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// fall through to the shared pool.
 	if poolCache != nil && limitsSvc != nil {
 		limitsSvc.WithPoolResolver(func(ctx context.Context, projectID string) *pgxpool.Pool {
-			p, err := poolCache.Get(ctx, projectID)
+			// GetOwner (not Get): the usage queries in
+			// internal/plans/usage.go run bare tenant-schema aggregates
+			// (COUNT / SUM on users, storage_objects) with NO
+			// RunAsService wrapper — so no app.end_user_role='service'
+			// GUC is set. The dedicated RLS policies read
+			//   USING (is_service_role() OR id = current_end_user_id())
+			// so without the service marker, a non-owner runtime pool
+			// returns ZERO ROWS → mau_count / storage_size_mb silently
+			// report 0. #377's original Get call was harmless while the
+			// runtime slot was NULL (EffectiveCredential fell back to
+			// owner and bypassed RLS by ownership) — PR-B's backfill
+			// changes that: real runtime creds → real RLS enforcement
+			// → silent zero. Owner pool avoids the trap because the
+			// owner bypasses RLS for owned tables (which every tenant-
+			// schema table is).
+			p, err := poolCache.GetOwner(ctx, projectID)
 			if err != nil {
 				if !errors.Is(err, pgx.ErrNoRows) {
 					slog.Warn("usage: dedicated pool unavailable, falling back to shared",
