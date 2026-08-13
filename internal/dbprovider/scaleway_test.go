@@ -75,7 +75,7 @@ func TestScaleway_ProvisionHappyPath(t *testing.T) {
 			"id": "rdb-abc-123",
 			"name": "eurobase-mysite-aabb",
 			"status": "provisioning",
-			"engine": "PostgreSQL-15",
+			"engine": "PostgreSQL-16",
 			"node_type": "db-gp-s",
 			"region": "fr-par",
 			"created_at": "2026-08-02T10:00:00Z",
@@ -117,6 +117,14 @@ func TestScaleway_ProvisionHappyPath(t *testing.T) {
 	}
 	if seenBody["project_id"] != "scw-proj-test" {
 		t.Errorf("project_id in body: got %v", seenBody["project_id"])
+	}
+	// Engine in the wire request must match the constant the code
+	// uses. Without this, reverting scalewayEngine to an old major
+	// leaves the suite green — the changed test-double response
+	// alone doesn't bind the wire request to the constant. Regression
+	// guard for the PG-15 → PG-16 bump (issue #382).
+	if seenBody["engine"] != scalewayEngine {
+		t.Errorf("engine in body: got %v, want %s", seenBody["engine"], scalewayEngine)
 	}
 }
 

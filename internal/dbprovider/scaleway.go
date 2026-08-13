@@ -65,7 +65,27 @@ type Scaleway struct {
 
 const (
 	scalewayDefaultBaseURL = "https://api.scaleway.com"
-	scalewayEngine         = "PostgreSQL-15"
+	// scalewayEngine pins the Scaleway RDB engine version for
+	// freshly-provisioned Team-tier / Legal-Team instances. Existing
+	// instances stay on their original major — Scaleway major
+	// upgrades are a per-instance ops task (their
+	// `upgrade-postgresql` action), not driven by this constant.
+	//
+	// Policy: keep in sync with the newest PostgreSQL-N that the RLS
+	// CI harness validates against. Both today:
+	//   * .github/workflows/rls-isolation.yml → services.postgres.image
+	//   * scripts/ops/run-dedicated-rls-test.sh → PG_IMAGE default
+	// Bump this constant and both harness images together — that
+	// keeps CI/prod parity as the invariant. The RLS suite is what
+	// proves the version's policy grants/RLS shape works; provisioning
+	// on a version CI hasn't exercised is how the previous 15/16
+	// split ended up silently mismatched. Scaleway lists newer
+	// engines at /rdb/v1/regions/fr-par/database-engines (17 GA as
+	// of 2026), but we only move once the harness moves.
+	//
+	// Issue #382 tracks moving this to a self-updating runtime
+	// lookup once Team-tier volume justifies the code.
+	scalewayEngine         = "PostgreSQL-16"
 	// scalewayVolumeType — Scaleway Block Storage IOPS-suffixed
 	// class. Accepted values per the RDB v1 API docs:
 	//   * lssd     — local SSD (per-node, no snapshots)
