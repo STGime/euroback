@@ -96,14 +96,31 @@ func (c *PoolCache) Close() {
 	}
 }
 
+// ErrRuntimeCredMissing is returned by Get when the project's
+// project_databases row has NULL runtime_* columns. This is the
+// pre-bootstrap window on a fresh Team-tier provisioning, a
+// bootstrap that failed and wasn't backfilled, or an environment
+// with RUNTIME_PASSWORD_SECRET unset (worker skips the bootstrap
+// step). Callers MUST NOT fall back to the owner credential
+// silently — that would connect SDK end-user traffic as the table
+// owner, which bypasses RLS on every owned tenant table and lets
+// every end-user of the app read every other end-user's rows.
+// The right behaviour on this error is to log loudly and return
+// nil from the resolver so the request falls back to the shared
+// pool (visible failure: 42P01) instead of silently leaking rows.
+var ErrRuntimeCredMissing = errors.New("dbprovider: runtime credential not populated on project_databases row")
+
 // Get returns the RUNTIME (non-owner) pool for projectID. This is
-// the SDK-facing pool — connects as eurobase_gateway (or the owner
-// as a fallback until runtime creds are provisioned) so RLS policies
-// bind for end-user traffic.
+// the SDK-facing pool — connects as eurobase_gateway so RLS
+// policies bind for end-user traffic.
 //
-// Returns (nil, pgx.ErrNoRows) if the project has no live
-// project_databases row — the caller should fall back to the
-// shared pool.
+// Returns:
+//   - (nil, pgx.ErrNoRows) if the project has no live
+//     project_databases row — caller falls back to shared pool.
+//   - (nil, ErrRuntimeCredMissing) if the row exists but runtime_*
+//     is NULL — caller MUST refuse to route (falling back to shared
+//     is the right posture; do not attempt owner as a substitute).
+//   - (pool, nil) on success.
 func (c *PoolCache) Get(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
 	return c.get(ctx, projectID, false)
 }
@@ -155,13 +172,22 @@ func (c *PoolCache) get(ctx context.Context, projectID string, ownerMode bool) (
 	}
 
 	// Credential selection:
-	//   ownerMode=false → runtime (or owner-fallback via
-	//     EffectiveCredential) — RLS applies for SDK / end-user
-	//     traffic.
-	//   ownerMode=true  → OWNER — used by console DDL so tables
-	//     created via the SQL editor are owner-owned. RLS bypass
-	//     is intentional (console traffic is already authorized
-	//     as admin via RequireRole).
+	//   ownerMode=false → RUNTIME (non-owner). Errors with
+	//     ErrRuntimeCredMissing when the row's runtime slot is
+	//     NULL — we deliberately do NOT fall back to the owner
+	//     credential here. The old EffectiveCredential fallback
+	//     was safe when the pool was consumed only by usage
+	//     tracker / bootstrap paths where owner-connection was
+	//     desired; once SDK end-user traffic routes through this
+	//     pool (post-TEAM_TIER_ROUTING flip), an owner connection
+	//     bypasses RLS on every owned tenant table and every
+	//     end-user of the app sees every other end-user's rows.
+	//     A missing runtime cred is a bootstrap-hasn't-completed
+	//     signal; caller must refuse to route and let the request
+	//     fall back to the shared pool (loud 42P01 > silent leak).
+	//   ownerMode=true  → OWNER — used by console DDL and
+	//     platform-authenticated reads. RLS bypass is intentional
+	//     (console is already authorized as admin via RequireRole).
 	var username string
 	var ct, nonce []byte
 	var ver int16
@@ -171,6 +197,9 @@ func (c *PoolCache) get(ctx context.Context, projectID string, ownerMode bool) (
 		nonce = rec.PasswordNonce
 		ver = rec.PasswordKeyVersion
 	} else {
+		if !rec.allRuntimeSet() {
+			return nil, ErrRuntimeCredMissing
+		}
 		username, ct, nonce, ver = rec.EffectiveCredential()
 	}
 	password, err := c.cipher.Open(ct, nonce, ver)

@@ -344,9 +344,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		//     runtime (gateway) traffic has RLS enforced against
 		//     them. Console is already authorized as admin via
 		//     RequireRole → RLS-bypass is intentional.
-		//   * SDK (post-TEAM_TIER_ROUTING flip) → RUNTIME pool.
-		//     Non-owner (eurobase_gateway) so RLS binds for end-user
-		//     traffic — exactly what the loud warning above demands.
+		//   * SDK → RUNTIME pool. Non-owner (eurobase_gateway) so
+		//     RLS binds for end-user traffic. Get() now errors with
+		//     ErrRuntimeCredMissing when the runtime slot is NULL
+		//     (pre-bootstrap window, bootstrap failure, or
+		//     RUNTIME_PASSWORD_SECRET unset). MUST NOT fall back to
+		//     owner — that would connect SDK end-user traffic as
+		//     the table owner and bypass RLS on every owned tenant
+		//     table. Loud 42P01 on the shared pool > silent
+		//     cross-user row leak.
 		var (
 			p   *pgxpool.Pool
 			err error
@@ -357,10 +363,23 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			p, err = poolCache.Get(ctx, pc.ProjectID)
 		}
 		if err != nil {
-			// Stale context (project_databases row deleted between
-			// middleware and handler) or provider transient failure.
-			// Fall back to shared pool rather than break the request.
-			if !errors.Is(err, pgx.ErrNoRows) {
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				// Stale context (project_databases row deleted
+				// between middleware and handler). Falling back to
+				// shared is fine — the SDK request will still hit
+				// a valid tenant surface on shared for pre-Team
+				// projects; Team-tier will 42P01 loudly.
+			case errors.Is(err, dbprovider.ErrRuntimeCredMissing):
+				// SAFETY-CRITICAL: runtime cred not yet populated.
+				// Refuse to route. Falling back to shared makes
+				// the SDK request 42P01 for a Team-tier project,
+				// which is the correct fail-loud behaviour. Do NOT
+				// try owner — bypass would leak every end-user's
+				// rows to every other end-user.
+				slog.Error("SDK routing refused: runtime credential missing on project_databases row — falling back to shared pool (loud failure) rather than owner-connect (silent RLS bypass)",
+					"project_id", pc.ProjectID)
+			default:
 				slog.Error("pool cache: dedicated pool unavailable, falling back to shared",
 					"project_id", pc.ProjectID, "error", err)
 			}

@@ -374,6 +374,27 @@ func main() {
 		slog.Warn("FUNCTIONS_RUNNER_HMAC_SECRET not set — gateway will send UNSIGNED requests to the functions runner. Only acceptable in dev/staging while the runner is in soft mode.")
 	}
 
+	// Team-tier SDK routing safety fence.
+	// TEAM_TIER_ROUTING=1 turns on the router's SDK path from the
+	// shared pool to per-project dedicated pools. The dedicated pool
+	// opens as eurobase_gateway (non-owner) so RLS binds for
+	// end-user traffic — but only if the runtime credential has
+	// been provisioned by BootstrapDedicated. That path is gated on
+	// RUNTIME_PASSWORD_SECRET (see internal/workers/provision_team_db.go
+	// which explicitly skips bootstrap and leaves runtime_username
+	// NULL when the secret is empty). If the flag is on and the
+	// secret is empty, EVERY new Team-tier project has NULL runtime
+	// creds and every SDK request would hit the pool cache's
+	// ErrRuntimeCredMissing → shared-pool fallback → loud 42P01,
+	// which is technically safe but a 100% outage. Better to fail
+	// startup so the misconfiguration is caught at deploy time.
+	if os.Getenv("TEAM_TIER_ROUTING") == "1" && len(os.Getenv("RUNTIME_PASSWORD_SECRET")) == 0 {
+		log.Fatal("FATAL: TEAM_TIER_ROUTING=1 requires RUNTIME_PASSWORD_SECRET to be set. " +
+			"Without it, ProvisionTeamDatabaseWorker skips bootstrap and every dedicated instance " +
+			"lands with NULL runtime credentials, and every Team-tier SDK request would fall back " +
+			"to the shared pool (42P01). Generate via `openssl rand -hex 32` and add to eurobase-secrets.")
+	}
+
 	// ── CORS allowlist ──
 	// Always include wildcarded project subdomains + apex of the configured
 	// domain suffix; callers can extend with ALLOWED_ORIGINS (comma-separated).
