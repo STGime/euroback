@@ -684,8 +684,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 
 			// Vault (encrypted secrets storage) — platform-authenticated.
+			// PlatformTenantContext stashes the dedicated owner pool
+			// via query.ContextWithTenantPool for Team-tier projects,
+			// so VaultService.tenantPool(ctx) picks it up (post-PR-A
+			// #378 there IS no vault_secrets on the shared platform
+			// DB for Team-tier). Free/Pro get pool=nil stashed →
+			// tenantPool falls back to shared, unchanged behaviour.
 			if vaultSvc != nil && vaultSvc.Configured() {
-				r.With(tenant.RequireMinRole("admin")).Mount("/vault", vault.Routes(vaultSvc, pool))
+				r.With(tenant.RequireMinRole("admin"), tenant.PlatformTenantContext(pool, tenantPoolResolver)).Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
 
 			// Compliance (DPA report, sub-processor registry, DSAR exports).

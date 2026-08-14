@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -67,6 +68,25 @@ func NewVaultService(pool *pgxpool.Pool, encryptionKey string) (*VaultService, e
 // Configured returns true if the vault service is ready to use.
 func (s *VaultService) Configured() bool {
 	return s != nil && s.provider != nil
+}
+
+// tenantPool returns the pool that owns the caller's tenant schema.
+// For Team-tier projects the tenant schema (with vault_secrets)
+// lives on the dedicated Scaleway instance, not on the shared
+// platform DB — post-PR-A #378 there IS no vault_secrets table on
+// shared. PlatformTenantContext (tenant/context.go) stashes the
+// dedicated owner pool via query.ContextWithTenantPool; we read
+// that here and fall back to the shared s.pool for Free/Pro
+// (where no tenant pool is stashed).
+//
+// Same pattern PR-C used for the query engine's runDDL: check
+// ctx first, fall back to the shared pool. Read the design
+// rationale at internal/query/context.go's ContextWithTenantPool.
+func (s *VaultService) tenantPool(ctx context.Context) *pgxpool.Pool {
+	if p := query.TenantPoolFromContext(ctx); p != nil {
+		return p
+	}
+	return s.pool
 }
 
 // seal encrypts plaintext for a tenant using the provider's current key
@@ -153,7 +173,7 @@ func (s *VaultService) List(ctx context.Context, schemaName string) ([]Secret, e
 	sql := `SELECT id, name, description, created_at, updated_at
 		 FROM ` + vaultTable(schemaName) + ` ORDER BY name`
 	secrets := make([]Secret, 0)
-	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, sql)
 		if err != nil {
 			return fmt.Errorf("list vault secrets: %w", err)
@@ -182,7 +202,7 @@ func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secre
 	var sec Secret
 	var encrypted, nonce []byte
 	var keyVersion int16
-	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name).Scan(
 			&sec.ID, &sec.Name, &encrypted, &nonce, &keyVersion,
 			&sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
@@ -223,7 +243,7 @@ func (s *VaultService) Set(ctx context.Context, schemaName, name, value, descrip
 		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
-	err = db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err = db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name, encrypted, nonce, version, description).Scan(
 			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 		)
@@ -258,7 +278,7 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 			 RETURNING id, name, description, created_at, updated_at`
 
 		var sec Secret
-		err = db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		err = db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, sql, name, encrypted, nonce, version, newDescription).Scan(
 				&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 			)
@@ -280,7 +300,7 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 		 RETURNING id, name, description, created_at, updated_at`
 
 	var sec Secret
-	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name, *newDescription).Scan(
 			&sec.ID, &sec.Name, &sec.Description, &sec.CreatedAt, &sec.UpdatedAt,
 		)
@@ -298,7 +318,7 @@ func (s *VaultService) Update(ctx context.Context, schemaName, name string, newV
 func (s *VaultService) Delete(ctx context.Context, schemaName, name string) error {
 	sql := `DELETE FROM ` + vaultTable(schemaName) + ` WHERE name = $1`
 	var rowsAffected int64
-	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, sql, name)
 		if err != nil {
 			return err
@@ -319,7 +339,7 @@ func (s *VaultService) Delete(ctx context.Context, schemaName, name string) erro
 func (s *VaultService) Count(ctx context.Context, schemaName string) (int, error) {
 	sql := `SELECT count(*) FROM ` + vaultTable(schemaName)
 	var count int
-	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql).Scan(&count)
 	})
 	if err != nil {
@@ -350,7 +370,7 @@ func (s *VaultService) RekeySchema(ctx context.Context, schemaName string) (int,
 		` SET secret = $2, nonce = $3, key_version = $4, updated_at = now() WHERE id = $1`
 
 	var rekeyed int
-	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, selectSQL, target)
 		if err != nil {
 			return fmt.Errorf("select secrets for rekey: %w", err)
@@ -442,7 +462,7 @@ func (s *VaultService) DeleteRaw(ctx context.Context, schemaName, name string) e
 func (s *VaultService) HasRaw(ctx context.Context, schemaName, name string) (bool, error) {
 	sql := `SELECT EXISTS(SELECT 1 FROM ` + vaultTable(schemaName) + ` WHERE name = $1)`
 	var exists bool
-	err := db.RunAsAuthService(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+	err := db.RunAsAuthService(ctx, s.tenantPool(ctx), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, name).Scan(&exists)
 	})
 	if err != nil {
