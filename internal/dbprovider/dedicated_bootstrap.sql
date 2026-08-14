@@ -131,6 +131,35 @@ GRANT EXECUTE ON FUNCTION public.is_internal_auth_path() TO eurobase_readonly;
 GRANT EXECUTE ON FUNCTION public.uuid_generate_v4() TO eurobase_readonly;
 
 -- ============================================================================
+-- 3c. Database CONNECT grants
+-- ============================================================================
+--
+-- Scaleway RDB does NOT grant CONNECT to PUBLIC on the DB by default —
+-- unlike vanilla PG (`docker run postgres`) where the CI RLS harness
+-- runs. That means eurobase_gateway and eurobase_readonly, freshly
+-- created above, can't even open a session (FATAL SQLSTATE 42501
+-- "permission denied for database"). The failure surface is silent
+-- at bootstrap (bootstrap SQL runs as eurobase_owner which does have
+-- CONNECT) and only fires when SDK / console traffic actually tries
+-- to authenticate as one of these roles — which is exactly the case
+-- CI never exercises because postgres:16 is permissive by default.
+--
+-- Grant CONNECT on the current database dynamically via a DO block:
+-- `GRANT CONNECT ON DATABASE …` doesn't accept `current_database()`
+-- directly, so we EXECUTE format it. Idempotent — repeat grants are
+-- no-ops.
+--
+-- Owned-by rationale: bootstrap runs as eurobase_owner which owns
+-- the DB (Scaleway provisioning), so it holds CONNECT WITH GRANT
+-- OPTION and this succeeds.
+
+DO $$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO eurobase_gateway', current_database());
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO eurobase_readonly', current_database());
+END $$;
+
+-- ============================================================================
 -- 4. provision_tenant
 -- ============================================================================
 --
