@@ -180,10 +180,31 @@ section "4. RLS boundaries"
 COUNT=$(readonly_ -tAc "SELECT count(*) FROM $SCHEMA.todos")
 ok "readonly SELECT $SCHEMA.todos → $COUNT rows"
 
-if readonly_ -c "INSERT INTO $SCHEMA.todos (title) VALUES ('rls-fence-test')" 2>&1 | grep -q "permission denied"; then
+# `|| true` swallows psql's non-zero exit (expected on permission
+# denied) so `set -o pipefail` at the top doesn't propagate it and
+# collapse the whole `if` into the else branch — that was the
+# false-positive "readonly INSERT succeeded" bug the diagnostics
+# below caught (has_table_privilege said INSERT=f while this test
+# claimed the INSERT worked).
+INSERT_OUT=$(readonly_ -c "INSERT INTO $SCHEMA.todos (title) VALUES ('rls-fence-test')" 2>&1 || true)
+if echo "$INSERT_OUT" | grep -q "permission denied"; then
     ok "readonly INSERT correctly refused (permission denied)"
 else
-    fail "readonly INSERT succeeded — role is not SELECT-only"
+    warn "readonly INSERT succeeded (or failed with a non-permission error) — diagnosing…"
+    info "raw psql output: $INSERT_OUT"
+    info "--- role memberships of eurobase_readonly ---"
+    owner -c "SELECT r.rolname AS parent_role FROM pg_roles r JOIN pg_auth_members m ON m.roleid=r.oid JOIN pg_roles c ON c.oid=m.member WHERE c.rolname='eurobase_readonly'"
+    info "--- grants on $SCHEMA.todos ---"
+    owner -c "SELECT grantee, privilege_type FROM information_schema.table_privileges WHERE table_schema='$SCHEMA' AND table_name='todos' ORDER BY grantee, privilege_type"
+    info "--- has_table_privilege probes ---"
+    owner -c "SELECT has_table_privilege('eurobase_readonly', '$SCHEMA.todos', 'SELECT') AS sel, has_table_privilege('eurobase_readonly', '$SCHEMA.todos', 'INSERT') AS ins, has_table_privilege('eurobase_readonly', '$SCHEMA.todos', 'UPDATE') AS upd, has_table_privilege('eurobase_readonly', '$SCHEMA.todos', 'DELETE') AS del"
+    info "--- schema-level ACL ---"
+    owner -c "SELECT nspname, nspacl FROM pg_namespace WHERE nspname='$SCHEMA'"
+    info "--- table ACL raw ---"
+    owner -c "SELECT relname, relacl FROM pg_class WHERE relnamespace=(SELECT oid FROM pg_namespace WHERE nspname='$SCHEMA') AND relname='todos'"
+    info "--- default privileges configured ---"
+    owner -c "SELECT defaclrole::regrole AS owner_role, defaclnamespace::regnamespace AS schema, defaclobjtype, defaclacl FROM pg_default_acl WHERE defaclnamespace=(SELECT oid FROM pg_namespace WHERE nspname='$SCHEMA')"
+    fail "readonly is not SELECT-only — see diagnostics above"
 fi
 
 POLICY=$(owner -tAc "SELECT string_agg(polname, ',') FROM pg_policy WHERE polrelid='$SCHEMA.vault_secrets'::regclass")
@@ -194,9 +215,13 @@ echo "$POLICY" | grep -q "vault_secrets_policy" && ok "vault_secrets carries vau
 # ─────────────────────────────────────────────────────────────
 section "5. Owner round-trip on todos (proves DML works via the RW pool)"
 
-INS_ID=$(owner -tAc "INSERT INTO $SCHEMA.todos (title) VALUES ('rw-smoke-'||floor(random()*1e6)) RETURNING id")
+# `head -1` strips psql's "INSERT 0 1"/"DELETE 1" footer that
+# leaks through even in -tA mode for DML-with-RETURNING (which
+# behaves differently from a plain SELECT there — Postgres emits
+# the command tag alongside the RETURNING tuple).
+INS_ID=$(owner -tAc "INSERT INTO $SCHEMA.todos (title) VALUES ('rw-smoke-'||floor(random()*1e6)) RETURNING id" | head -1)
 [ -n "$INS_ID" ] && ok "INSERT returned id $INS_ID" || fail "INSERT returned nothing"
-DEL=$(owner -tAc "DELETE FROM $SCHEMA.todos WHERE id='$INS_ID' RETURNING id")
+DEL=$(owner -tAc "DELETE FROM $SCHEMA.todos WHERE id='$INS_ID' RETURNING id" | head -1)
 [ -n "$DEL" ] && ok "DELETE round-tripped" || fail "DELETE returned nothing"
 
 # ─────────────────────────────────────────────────────────────
@@ -206,18 +231,25 @@ SFX=$RANDOM
 EMAIL="sdk-test-${SFX}@example.com"
 PW="sdk-test-pw-${SFX}"
 
-TODOS=$(curl -s -w "\n%{http_code}" "$BASE/v1/data/todos" -H "apikey: $SECRET_KEY")
-BODY=$(echo "$TODOS" | head -n -1); CODE=$(echo "$TODOS" | tail -n 1)
-[ "$CODE" = "200" ] && ok "GET /v1/data/todos → 200" || fail "GET /v1/data/todos → $CODE  body: $BODY"
+TODOS=$(curl -s -w "\n%{http_code}" "$BASE/v1/db/todos" -H "apikey: $SECRET_KEY")
+# BSD head (macOS) doesn't support `head -n -1`; sed '$d' deletes
+# the last line (portable across GNU + BSD).
+BODY=$(echo "$TODOS" | sed '$d'); CODE=$(echo "$TODOS" | tail -n 1)
+if [ "$CODE" != "200" ]; then
+    info "--- diagnostic curl -v for the 404 ---"
+    curl -sv "$BASE/v1/db/todos" -H "apikey: $SECRET_KEY" 2>&1 | grep -E "^(> |< |\*)" | head -20
+    fail "GET /v1/db/todos → $CODE  body: $BODY"
+fi
+ok "GET /v1/db/todos → 200"
 ROW_COUNT=$(echo "$BODY" | python3 -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
 info "  → $ROW_COUNT rows"
 
-NEW=$(curl -s "$BASE/v1/data/todos" -H "apikey: $SECRET_KEY" -H "Content-Type: application/json" \
+NEW=$(curl -s "$BASE/v1/db/todos" -H "apikey: $SECRET_KEY" -H "Content-Type: application/json" \
     -d "{\"title\":\"sdk-smoke-${SFX}\",\"completed\":false}")
 NEW_ID=$(echo "$NEW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
-[ -n "$NEW_ID" ] && ok "POST /v1/data/todos → id $NEW_ID" || fail "POST /v1/data/todos returned: $NEW"
-curl -s -o /dev/null -X DELETE "$BASE/v1/data/todos/$NEW_ID" -H "apikey: $SECRET_KEY"
-ok "DELETE /v1/data/todos/$NEW_ID (cleanup)"
+[ -n "$NEW_ID" ] && ok "POST /v1/db/todos → id $NEW_ID" || fail "POST /v1/db/todos returned: $NEW"
+curl -s -o /dev/null -X DELETE "$BASE/v1/db/todos/$NEW_ID" -H "apikey: $SECRET_KEY"
+ok "DELETE /v1/db/todos/$NEW_ID (cleanup)"
 
 VN="sdk_smoke_${SFX}"
 V=$(curl -s "$BASE/v1/vault" -H "apikey: $SECRET_KEY" -H "Content-Type: application/json" \
