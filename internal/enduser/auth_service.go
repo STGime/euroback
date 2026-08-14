@@ -15,6 +15,7 @@ import (
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/oauth"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/tenant"
@@ -43,8 +44,43 @@ var ErrAccountExistsLinkRequired = errors.New("account exists — sign in with y
 //
 // The intent GUC is what blocks a prompt-injected `runSQL` via MCP
 // from reading these tables; the generic SQL handler doesn't set it.
+//
+// Pool selection is Team-tier-aware via tenantPool(ctx): the SDK
+// middleware `sdkTenantPoolMw` (gateway/router.go) stashes the
+// dedicated instance's runtime pool via query.ContextWithTenantPool
+// for every /v1/auth/** request AND the OAuth callback route
+// (which sits outside /auth by necessity but carries the middleware
+// per-route). tenantPool prefers the stashed pool; falls back to
+// s.pool for Free/Pro. Same shape as VaultService.tenantPool —
+// see the enumeration in that file for the full list of routes
+// that populate the ctx.
 func (s *AuthService) asService(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
-	return db.RunAsAuthService(ctx, s.pool, fn)
+	return db.RunAsAuthService(ctx, s.tenantPool(ctx), fn)
+}
+
+// tenantPool returns the pool that owns the caller's tenant schema.
+// For Team-tier projects the tenant schema (users / user_identities
+// / refresh_tokens / email_tokens) lives on the dedicated Scaleway
+// instance, not on the shared platform DB — post-PR-A #378 those
+// tables don't exist on shared for Team-tier, so every /v1/auth/**
+// endpoint would 42P01 without this routing.
+//
+// **Every caller of an AuthService method that hits tenant tables
+// MUST be behind a middleware that populates ContextWithTenantPool
+// for Team-tier requests, or Team-tier gets 42P01 on shared.** The
+// routes that do:
+//
+//   * /v1/auth/**                                    — sdkTenantPoolMw (runtime pool)
+//   * /v1/auth/oauth/{provider}/callback (GET/POST)  — sdkTenantPoolMw (runtime pool)
+//
+// Falls back to s.pool for Free/Pro (nothing stashed). If a future
+// caller adds a route that reaches AuthService without one of these
+// middlewares, Team-tier end users of that route break.
+func (s *AuthService) tenantPool(ctx context.Context) *pgxpool.Pool {
+	if p := query.TenantPoolFromContext(ctx); p != nil {
+		return p
+	}
+	return s.pool
 }
 
 // OAuthSecretLookup returns the decrypted client_secret for a given provider
@@ -304,17 +340,34 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, projectID string, config tenant.AuthConfig, rawRefreshToken string) (*AuthResponse, error) {
 	tokenHash := hashSHA256(rawRefreshToken)
 
-	tx, err := s.pool.Begin(ctx)
+	// Direct Begin (not through asService) because this method sets
+	// additional session config beyond the standard service-role
+	// GUCs. Same tenantPool routing rationale as asService — see
+	// its doc comment. Without this, /v1/auth/refresh 42P01s for
+	// Team-tier post-PR-A #378.
+	tx, err := s.tenantPool(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Service role: tenant RLS policies evaluate empty end_user_id and
-	// would filter these queries out. Pre-auth refresh has no end-user
-	// context yet; see migration 000038.
+	// Two GUCs — must mirror db.RunAsAuthService, NOT the plain
+	// service-role wrapper:
+	//   * app.end_user_role='service' — RLS service bypass on the
+	//     tenant tables that key on user identity (000038).
+	//   * app.intent='internal_auth_path' — the ONLY predicate on
+	//     refresh_tokens / email_tokens / vault_secrets since
+	//     migration 000055 narrowed those policies for #164. The
+	//     dedicated instance uses the same policy shape (see
+	//     dedicated_bootstrap.sql). Without this GUC the UPDATE
+	//     below RLS-filters to zero rows and RefreshToken returns
+	//     a misleading "invalid or expired refresh token" — verified
+	//     by reviewer on a live PG16.
 	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
 		return nil, fmt.Errorf("set service role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.intent', 'internal_auth_path', true)"); err != nil {
+		return nil, fmt.Errorf("set internal_auth_path intent: %w", err)
 	}
 
 	// Find and revoke the old refresh token.
