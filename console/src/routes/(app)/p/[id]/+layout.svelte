@@ -169,10 +169,27 @@
 	});
 
 	$effect(() => {
+		// projectId is a reactive read — this effect re-runs on
+		// every project switch. SvelteKit reuses the layout
+		// component across /p/A → /p/B (same route), so anything
+		// derived from the old project's state must be reset here
+		// or it poisons the new project. Concretely: without the
+		// reset, `emptyStateTicks` from a stuck project A carries
+		// over and the very first render of a fresh project B
+		// shows the RED "never provisioned" banner — the same
+		// false-positive the earlier rounds were fixing, reachable
+		// by "look at a broken project for 75s, then open a new
+		// one." dbState also gets nulled so a provisioning → active
+		// transition across project switches doesn't render stale.
+		void projectId; // depend on projectId explicitly
+		dbState = null;
+		emptyStateTicks = 0;
+		stopDbStatePoll();
 		loadProject();
 		// Fetch dedicated-DB state alongside the project. If it comes
-		// back provisioning/restoring, refreshDbState arms the poller
-		// itself so subpages navigating in also inherit the ticker.
+		// back provisioning/restoring/empty, refreshDbState arms the
+		// poller itself so subpages navigating in also inherit the
+		// ticker.
 		refreshDbState();
 	});
 
