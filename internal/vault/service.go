@@ -74,14 +74,31 @@ func (s *VaultService) Configured() bool {
 // For Team-tier projects the tenant schema (with vault_secrets)
 // lives on the dedicated Scaleway instance, not on the shared
 // platform DB — post-PR-A #378 there IS no vault_secrets table on
-// shared. PlatformTenantContext (tenant/context.go) stashes the
-// dedicated owner pool via query.ContextWithTenantPool; we read
-// that here and fall back to the shared s.pool for Free/Pro
-// (where no tenant pool is stashed).
+// shared. Middleware stashes the appropriate pool via
+// query.ContextWithTenantPool; we read that here and fall back to
+// the shared s.pool for Free/Pro (nothing stashed).
 //
-// Same pattern PR-C used for the query engine's runDDL: check
-// ctx first, fall back to the shared pool. Read the design
-// rationale at internal/query/context.go's ContextWithTenantPool.
+// **Every caller of a VaultService method that hits vault_secrets
+// MUST be behind a middleware that populates ContextWithTenantPool
+// for Team-tier requests, or Team-tier gets 42P01 on shared.**
+// The routes that do:
+//
+//   * /platform/projects/{id}/vault/**          — PlatformTenantContext (owner pool)
+//   * /platform/projects/{id} (PATCH)           — PlatformTenantContext (owner) — OAuth write path
+//   * /v1/vault/**                              — sdkTenantPoolMw (runtime pool)
+//   * /v1/auth/**                               — sdkTenantPoolMw (runtime pool) — OAuth secret read
+//
+// Known-not-yet-migrated call sites (tracked as follow-ups; break on Team-tier):
+//
+//   * Compliance audit-export test destination path (vaultLookup closure
+//     at gateway/router.go — needs PlatformTenantContext on
+//     /compliance/audit-export/{destID}/test).
+//   * MigrateOAuthSecretsToVault startup task (main.go) — runs before
+//     any request context; needs a per-project pool-cache handoff
+//     analogous to the token-cleanup follow-up (#392).
+//
+// When you add a new vault caller, mount one of the middlewares
+// above (or add a new one), or your Team-tier users get a hard 500.
 func (s *VaultService) tenantPool(ctx context.Context) *pgxpool.Pool {
 	if p := query.TenantPoolFromContext(ctx); p != nil {
 		return p
