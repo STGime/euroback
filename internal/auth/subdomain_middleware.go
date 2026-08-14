@@ -93,18 +93,41 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
+		// LEFT JOIN project_databases populates HasDedicatedDB /
+		// ProjectDatabaseID so downstream SDK middleware (e.g.
+		// sdkTenantPoolMw in gateway/router.go, which stashes the
+		// dedicated pool for VaultService.tenantPool) can route
+		// Team-tier requests to the dedicated instance. Without
+		// this join, the OAuth callback path — the one caller
+		// that resolves projects by subdomain instead of API key
+		// — would silently see HasDedicatedDB=false and stay on
+		// the shared pool, and the code→token exchange's OAuth
+		// client_secret lookup would 42P01 on shared for every
+		// Team-tier project. Mirrors apikey_middleware.go's
+		// ResolveAPIKey shape (line 30-64).
 		pc := ProjectContext{Slug: slug}
 		var state string
+		var pdID *string
 		err := m.pool.QueryRow(r.Context(),
-			`SELECT id, schema_name, jwt_secret, auth_config, state
-			 FROM projects
-			 WHERE slug = $1 AND status = 'active'`,
+			`SELECT p.id, p.schema_name, p.jwt_secret, p.auth_config, p.state, pd.id
+			   FROM projects p
+			   LEFT JOIN project_databases pd
+			          ON pd.project_id = p.id
+			         AND pd.state IN ('provisioning','active','restoring')
+			         AND pd.deleted_at IS NULL
+			  WHERE p.slug = $1 AND p.status = 'active'
+			  ORDER BY (pd.state = 'active') DESC NULLS LAST, pd.created_at DESC NULLS LAST
+			  LIMIT 1`,
 			slug,
-		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.JWTSecret, &pc.AuthConfig, &state)
+		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.JWTSecret, &pc.AuthConfig, &state, &pdID)
 		if err != nil {
 			slog.Warn("subdomain project not found", "slug", slug, "error", err)
 			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 			return
+		}
+		if pdID != nil {
+			pc.ProjectDatabaseID = pdID
+			pc.HasDedicatedDB = true
 		}
 
 		// Idle-pause lifecycle. If paused, flip the state row back to

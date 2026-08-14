@@ -83,10 +83,16 @@ func (s *VaultService) Configured() bool {
 // for Team-tier requests, or Team-tier gets 42P01 on shared.**
 // The routes that do:
 //
-//   * /platform/projects/{id}/vault/**          — PlatformTenantContext (owner pool)
-//   * /platform/projects/{id} (PATCH)           — PlatformTenantContext (owner) — OAuth write path
-//   * /v1/vault/**                              — sdkTenantPoolMw (runtime pool)
-//   * /v1/auth/**                               — sdkTenantPoolMw (runtime pool) — OAuth secret read
+//   * /platform/projects/{id}/vault/**              — PlatformTenantContext (owner)
+//   * /platform/projects/{id} (PATCH)               — PlatformTenantContext (owner) — OAuth write path
+//   * /v1/vault/**                                  — sdkTenantPoolMw (runtime)
+//   * /v1/auth/**                                   — sdkTenantPoolMw (runtime) — signin / signup / etc.
+//   * /v1/auth/oauth/{provider}/callback (GET/POST) — sdkTenantPoolMw (runtime) — OAuth code→token exchange
+//                                                     path: mounted individually (route sits outside the
+//                                                     /auth group by design, since the provider redirect
+//                                                     strips the API key). Requires subdomain_middleware's
+//                                                     LEFT JOIN of project_databases; otherwise HasDedicatedDB
+//                                                     stays false and the middleware no-ops silently.
 //
 // Known-not-yet-migrated call sites (tracked as follow-ups; break on Team-tier):
 //

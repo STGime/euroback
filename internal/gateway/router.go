@@ -1062,8 +1062,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// OAuth callbacks — no API key needed; project resolved via subdomain.
 		// These must be outside the apiKeyMw group because the OAuth provider
 		// redirects back without forwarding the apikey query parameter.
-		r.Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
-		r.Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
+		//
+		// sdkTenantPoolMw is where the vault routing happens for
+		// this path: HandleOAuthCallback → SignInWithOAuth →
+		// GetOAuthClientSecret → vaultSvc.GetRaw → tenantPool.
+		// Without it the code→token exchange 42P01s on shared for
+		// every Team-tier project. Requires the subdomain
+		// middleware's LEFT JOIN of project_databases (added in
+		// subdomain_middleware.go same-PR); otherwise pc.HasDedicatedDB
+		// stays false and the middleware no-ops.
+		r.With(sdkTenantPoolMw).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
+		r.With(sdkTenantPoolMw).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 
 		// Auth endpoints (only need API key, no end-user JWT).
 		// sdkTenantPoolMw stashes the runtime pool for Team-tier
