@@ -50,14 +50,28 @@
 
 set -uo pipefail
 
-: "${OWNER_DSN:=postgres://eurobase_owner:-S.YwTkXSBKTTNB%3EtpzxFKx~%3E;D4;KkR@51.159.205.20:27697/rdb?sslmode=require}"
-: "${READONLY_DSN:=postgres://eurobase_readonly:b666a78b4acd546efcb23c61b322cbf34b8e39a361078e4769230cb35aebd0f5@51.159.205.20:27697/rdb?sslmode=require}"
+# All credentials are REQUIRED and must come from the environment
+# — never hardcode them here. This repo is public; a previous
+# revision of this file shipped live myteam3 credentials as
+# defaults and they had to be rotated (see PR #395 review).
+# `: "${VAR:?…}"` errors with a helpful message if VAR is unset.
+: "${OWNER_DSN:?OWNER_DSN required: postgres://eurobase_owner:PW@host:port/rdb?sslmode=require}"
+: "${READONLY_DSN:?READONLY_DSN required: postgres://eurobase_readonly:PW@host:port/rdb?sslmode=require}"
+: "${SLUG:?SLUG required (used to build the SDK base URL: https://\$SLUG.eurobase.app)}"
+: "${PUBLIC_KEY:?PUBLIC_KEY required (eb_pk_…) — reveal via the console API tab}"
+: "${SECRET_KEY:?SECRET_KEY required (eb_sk_…) — reveal via the console API tab}"
+
+# Non-secret identifiers — safe as defaults for a myteam3-focused
+# quick check; override for other projects. Also OK to leave here
+# because publishing an instance UUID or project UUID by itself
+# grants nothing.
 : "${PROJECT_ID:=19fac72b-68a1-4e88-9ea2-9fd68a94e200}"
-: "${SLUG:=myteam3}"
-: "${PUBLIC_KEY:=eb_pk_a5eecb0e86cd816d4f51ec1c8b1c2438}"
-: "${SECRET_KEY:=eb_sk_25eecf6cf8c47f4d9638afce036f0ec6}"
 : "${PROVIDER_INSTANCE_ID:=4aa613f3-e354-47eb-8da4-cec3765716df}"
 : "${SCW_REGION:=fr-par}"
+
+# Scaleway API secret — only needed for step 1 (privilege grant).
+# When unset, step 1 skips with an instruction on how to pull it
+# from the k8s Secret.
 : "${SCW_SECRET_KEY:=}"
 
 SCHEMA="tenant_${PROJECT_ID//-/_}"
