@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { api, type Project } from '$lib/api.js';
-	import { setContext } from 'svelte';
+	import { api, APIError, type ConnectionState, type Project } from '$lib/api.js';
+	import { onDestroy, setContext } from 'svelte';
 
 	let { children } = $props();
 
@@ -10,6 +10,132 @@
 	let project: Project | null = $state(null);
 	let loading = $state(true);
 	let error: string | null = $state(null);
+
+	// Dedicated-DB state banner (Team-tier). Poll while the DB
+	// isn't `active` so a user on ANY tab (not just Database →
+	// Connection) sees ambient status.
+	//
+	// Free/Pro projects: the backend gates /connection/state via
+	// CheckDedicatedDB → HTTP 402 { code: "dedicated_db_required" }.
+	// APIError catch below explicitly detects that and silences the
+	// banner (dbState=null, poll stopped). Other errors — transient
+	// network blips, 500s — keep the last known state and keep
+	// polling; without that, one blip would nuke the ambient
+	// awareness this component exists to provide.
+	//
+	// state === '' is the "row not yet inserted" case: CreateProject
+	// commits + enqueues the worker job BEFORE the worker's
+	// InsertProvisioning call lands the project_databases row. That
+	// window is normally seconds but can stretch to minutes under
+	// River retry backoff. Treat it as "provisioning, not yet
+	// recorded" — render the neutral setup banner AND keep polling
+	// so the state transitions get picked up. A previous version
+	// routed '' + retryable=true to the RED "never provisioned"
+	// affordance which latched permanently (no poll re-arm) and was
+	// wrong on the fresh-project happy path.
+	let dbState = $state<ConnectionState | null>(null);
+	let dbStatePollTimer: ReturnType<typeof setInterval> | null = null;
+
+	// Consecutive `state === ''` ticks. The empty state is normal
+	// for a few seconds while CreateProject's enqueue lands the
+	// project_databases row, but the SAME empty response signals a
+	// genuine enqueue failure (retryable=true, no row ever
+	// scheduled). If we keep seeing it past River's retry window
+	// we escalate to the red "provisioning never started" banner
+	// to match what the Connection tab shows for the same case.
+	// 5s × 15 = 75s window — comfortably past River's default
+	// backoff for the provision job's first retries.
+	let emptyStateTicks = $state(0);
+	const EMPTY_STATE_ESCALATE_AFTER = 15;
+
+	function isTransientState(s: ConnectionState | null): boolean {
+		if (!s) return false;
+		return s.state === '' || s.state === 'provisioning' || s.state === 'restoring';
+	}
+
+	function armDbStatePoll() {
+		if (!dbStatePollTimer) dbStatePollTimer = setInterval(refreshDbState, 5000);
+	}
+
+	async function refreshDbState() {
+		if (!projectId) return;
+		try {
+			dbState = await api.getConnectionState(projectId);
+			// Track how long the empty-row window has been open so
+			// isEnqueueStuck() can escalate the banner. Reset on any
+			// non-empty response so a state that flips back to
+			// provisioning (unlikely but possible) doesn't stick.
+			if (dbState.state === '') emptyStateTicks++;
+			else emptyStateTicks = 0;
+		} catch (err) {
+			if (err instanceof APIError && err.status === 402) {
+				// Free/Pro — no dedicated instance by design.
+				// Definitive answer; stop polling.
+				dbState = null;
+				stopDbStatePoll();
+				return;
+			}
+			// Transient (network / 500 / auth blip). Keep the last
+			// known dbState so the banner doesn't vanish mid-
+			// provisioning, and ARM the poll so a blip on the FIRST
+			// fetch doesn't latch silence forever (no other event
+			// re-arms except a projectId change).
+			armDbStatePoll();
+			return;
+		}
+		if (isTransientState(dbState)) {
+			armDbStatePoll();
+		} else {
+			stopDbStatePoll();
+		}
+	}
+
+	// isEnqueueStuck escalates state==='' to a real failure once
+	// we've polled past the "normal enqueue delay" window. Only
+	// meaningful when the backend also reports retryable=true —
+	// i.e. it's the "no row exists" branch, not some new transient
+	// state we haven't handled.
+	let isEnqueueStuck = $derived(
+		dbState?.state === '' &&
+		dbState.retryable === true &&
+		emptyStateTicks >= EMPTY_STATE_ESCALATE_AFTER
+	);
+	function stopDbStatePoll() {
+		if (dbStatePollTimer) {
+			clearInterval(dbStatePollTimer);
+			dbStatePollTimer = null;
+		}
+	}
+	onDestroy(stopDbStatePoll);
+
+	// Elapsed-time display for the provisioning banner. Ticker
+	// only runs while there IS a banner to show — same shape as
+	// the Connection page's own timer.
+	let now = $state(Date.now());
+	let tickTimer: ReturnType<typeof setInterval> | null = null;
+	let elapsedSec = $derived.by(() => {
+		if (!dbState?.created_at) return 0;
+		const started = new Date(dbState.created_at).getTime();
+		return Math.max(0, Math.floor((now - started) / 1000));
+	});
+	function elapsedLabel(sec: number): string {
+		if (sec < 60) return `${sec}s`;
+		const m = Math.floor(sec / 60);
+		const s = sec % 60;
+		return s === 0 ? `${m}m` : `${m}m ${s}s`;
+	}
+	$effect(() => {
+		// Only tick when there's a real created_at to count from
+		// (provisioning/restoring rows have one; state==='' doesn't).
+		const needsTicker = dbState?.state === 'provisioning' || dbState?.state === 'restoring';
+		if (needsTicker && !tickTimer) {
+			tickTimer = setInterval(() => { now = Date.now(); }, 5000);
+		} else if (!needsTicker && tickTimer) {
+			clearInterval(tickTimer);
+			tickTimer = null;
+		}
+	});
+	onDestroy(() => { if (tickTimer) clearInterval(tickTimer); });
 
 	const tabs = [
 		{ label: 'Overview', href: '', icon: 'overview' },
@@ -43,7 +169,28 @@
 	});
 
 	$effect(() => {
+		// projectId is a reactive read — this effect re-runs on
+		// every project switch. SvelteKit reuses the layout
+		// component across /p/A → /p/B (same route), so anything
+		// derived from the old project's state must be reset here
+		// or it poisons the new project. Concretely: without the
+		// reset, `emptyStateTicks` from a stuck project A carries
+		// over and the very first render of a fresh project B
+		// shows the RED "never provisioned" banner — the same
+		// false-positive the earlier rounds were fixing, reachable
+		// by "look at a broken project for 75s, then open a new
+		// one." dbState also gets nulled so a provisioning → active
+		// transition across project switches doesn't render stale.
+		void projectId; // depend on projectId explicitly
+		dbState = null;
+		emptyStateTicks = 0;
+		stopDbStatePoll();
 		loadProject();
+		// Fetch dedicated-DB state alongside the project. If it comes
+		// back provisioning/restoring/empty, refreshDbState arms the
+		// poller itself so subpages navigating in also inherit the
+		// ticker.
+		refreshDbState();
 	});
 
 	async function loadProject() {
@@ -143,6 +290,96 @@
 		{/each}
 	</nav>
 </div>
+
+<!-- Dedicated-DB status banner. Shown across every project subpage
+     while the Team-tier Scaleway instance isn't ready yet — the
+     Connection tab has its own detailed view, this is the ambient
+     awareness so a user doesn't create tables / run SQL / hit the
+     SDK while the backing DB is still spinning up. Free/Pro
+     projects have dbState=null and render nothing.
+
+     role=status + aria-live=polite so screen readers announce the
+     banner when it appears mid-session; decorative SVGs are
+     aria-hidden. -->
+{#if dbState}
+	{#if dbState.state === '' && !isEnqueueStuck}
+		<!-- Row not yet inserted — CreateProject just committed +
+		     enqueued the worker; refresh has been faster than the
+		     worker's InsertProvisioning. Neutral banner + keep
+		     polling. Escalates to the red "never provisioned"
+		     variant below if this drags past EMPTY_STATE_ESCALATE_AFTER
+		     ticks (~75s), matching what the Connection tab shows for
+		     the same case. -->
+		<div role="status" aria-live="polite" class="mb-4 flex items-center gap-3 rounded-md border border-eurobase-200 bg-eurobase-50 px-4 py-3 text-sm text-eurobase-900">
+			<svg aria-hidden="true" class="h-5 w-5 shrink-0 animate-spin text-eurobase-600" fill="none" viewBox="0 0 24 24">
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Setting up your dedicated Postgres…</p>
+				<p class="mt-0.5 text-xs text-eurobase-800">Waiting for the provisioning job to record the instance. This normally takes a few seconds.</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 text-xs font-medium text-eurobase-700 underline hover:text-eurobase-800">Details</a>
+		</div>
+	{:else if isEnqueueStuck}
+		<!-- state==='' for longer than River's normal retry window
+		     — the enqueue itself failed at CreateProject time and
+		     no row will ever land without a manual retry. Same
+		     surface the Connection tab shows for this case. -->
+		<div role="alert" aria-live="assertive" class="mb-4 flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+			<svg aria-hidden="true" class="h-5 w-5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Dedicated Postgres was never provisioned</p>
+				<p class="mt-0.5 text-xs">The provisioning job never landed a project_databases row. Tables / SQL / SDK writes will keep failing until Retry starts a fresh job.</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 rounded-md bg-red-100 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-200">Fix</a>
+		</div>
+	{:else if dbState.state === 'provisioning'}
+		<div role="status" aria-live="polite" class="mb-4 flex items-center gap-3 rounded-md border border-eurobase-200 bg-eurobase-50 px-4 py-3 text-sm text-eurobase-900">
+			<svg aria-hidden="true" class="h-5 w-5 shrink-0 animate-spin text-eurobase-600" fill="none" viewBox="0 0 24 24">
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Provisioning your dedicated Postgres…</p>
+				<p class="mt-0.5 text-xs text-eurobase-800">
+					Scaleway takes 2–5 minutes. Elapsed: <span class="font-mono">{elapsedLabel(elapsedSec)}</span>.
+					Tables, SQL, and SDK writes for this project will fail until it's ready.
+				</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 text-xs font-medium text-eurobase-700 underline hover:text-eurobase-800">Details</a>
+		</div>
+	{:else if dbState.state === 'restoring'}
+		<div role="status" aria-live="polite" class="mb-4 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+			<svg aria-hidden="true" class="h-5 w-5 shrink-0 animate-spin text-blue-600" fill="none" viewBox="0 0 24 24">
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Restore in progress</p>
+				<p class="mt-0.5 text-xs">The dedicated instance is restoring from a snapshot. Elapsed: <span class="font-mono">{elapsedLabel(elapsedSec)}</span>.</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 text-xs font-medium text-blue-700 underline hover:text-blue-800">Details</a>
+		</div>
+	{:else if dbState.state === 'failed'}
+		<!-- Terminal failure — the ONLY case that should route to the
+		     red "Fix" call-to-action. state==='' also carries
+		     retryable=true from the backend but that's the fresh-
+		     project window handled above. -->
+		<div role="alert" aria-live="assertive" class="mb-4 flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+			<svg aria-hidden="true" class="h-5 w-5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Dedicated Postgres provisioning failed</p>
+				<p class="mt-0.5 text-xs">Tables / SQL / SDK writes for this project will keep failing until the instance is up.</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 rounded-md bg-red-100 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-200">Fix</a>
+		</div>
+	{/if}
+{/if}
 
 {#key $page.url.pathname}
 <div>
