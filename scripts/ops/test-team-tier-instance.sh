@@ -44,9 +44,12 @@
 #                          that's already fixed).
 #   SCW_REGION           — Scaleway region (default: fr-par).
 #
-# Everything defaults to myteam3's values so a quick check is a
-# single command; override any one to target a different Team-tier
-# project.
+# Secrets must be supplied via env (see the `:?` guards below);
+# non-secret identifiers (PROJECT_ID / PROVIDER_INSTANCE_ID /
+# SCW_REGION) default to myteam3 for a quick check but the four
+# credentials + SLUG have no defaults — never re-add them to this
+# file, this repo is public (see feedback memory
+# no_secrets_in_scripts.md; PR #395 review).
 
 set -uo pipefail
 
