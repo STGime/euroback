@@ -208,3 +208,24 @@ type PasswordRotator interface {
 	// re-seals and writes it to project_databases.
 	RotatePassword(ctx context.Context, instanceID, username, newPassword string) error
 }
+
+// PrivilegeGranter is an optional capability providers CAN implement
+// so the bootstrap flow can grant CONNECT + DB-level privileges via
+// the provider's control-plane instead of via SQL. Needed by
+// providers whose managed database is not owned by the customer-
+// visible admin user — Scaleway RDB is one: the `rdb` database is
+// owned by `_rdb_superadmin`, so `GRANT CONNECT` from an
+// eurobase_owner session is a silent WARNING-not-error no-op. The
+// provider's control-plane runs the grant as its superadmin,
+// bypassing the ownership limitation.
+//
+// Providers where the customer admin genuinely owns the DB
+// (self-hosted, vanilla docker PG) don't need this — SQL grants
+// suffice — and can omit the interface.
+//
+// Permission values MUST be one of "all" | "readwrite" | "readonly"
+// | "none" — providers are free to map these to whatever their API
+// expects (Scaleway's API uses these exact strings).
+type PrivilegeGranter interface {
+	SetPrivilege(ctx context.Context, instanceID, databaseName, userName, permission string) error
+}

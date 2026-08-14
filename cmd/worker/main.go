@@ -245,6 +245,7 @@ func main() {
 	river.AddWorker(riverWorkers, &workers.BackfillRuntimeCredentialWorker{
 		Cipher:                cipher,
 		Repo:                  providerRepo,
+		Registry:              providerRegistry,
 		RuntimePasswordSecret: runtimePwSecret,
 	})
 

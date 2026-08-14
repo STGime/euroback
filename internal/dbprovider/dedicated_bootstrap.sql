@@ -131,6 +131,37 @@ GRANT EXECUTE ON FUNCTION public.is_internal_auth_path() TO eurobase_readonly;
 GRANT EXECUTE ON FUNCTION public.uuid_generate_v4() TO eurobase_readonly;
 
 -- ============================================================================
+-- 3c. Database CONNECT grants (belt for self-hosted; braces via provider API on Scaleway)
+-- ============================================================================
+--
+-- Scaleway RDB's `rdb` database is owned by `_rdb_superadmin`, NOT
+-- the customer-visible `eurobase_owner`. That means these
+-- `GRANT CONNECT` statements are a **silent WARNING-not-error no-op**
+-- on Scaleway — the psql client prints "WARNING: no privileges were
+-- granted" and the roles still can't open a session. The real
+-- Scaleway grant path is the provider's control-plane
+-- `PUT /rdb/v1/…/privileges` endpoint, which runs as
+-- `_rdb_superadmin` server-side and bypasses the ownership
+-- limitation. See dbprovider.PrivilegeGranter (provider.go),
+-- Scaleway.SetPrivilege (scaleway.go), and the worker call site
+-- in provision_team_db.go / backfill_runtime_credential.go which
+-- fires this after BootstrapDedicated returns.
+--
+-- Keeping the SQL grant here as a belt for self-hosted / vanilla-
+-- PG providers where eurobase_owner genuinely owns the DB — there
+-- the grants take normally and the provider isn't required to
+-- implement PrivilegeGranter. Scaleway ignores this block by
+-- ownership; self-hosted uses it. Same class of dual-code-path
+-- gotcha CLAUDE.md documents for the shared cluster's eurobase_migrator
+-- DB-CONNECT grant.
+
+DO $$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO eurobase_gateway', current_database());
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO eurobase_readonly', current_database());
+END $$;
+
+-- ============================================================================
 -- 4. provision_tenant
 -- ============================================================================
 --

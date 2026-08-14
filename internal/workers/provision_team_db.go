@@ -139,7 +139,7 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 				Region:     existing.Region,
 				State:      existing.State,
 			}
-			if err := w.bootstrapRuntime(ctx, existing, activeInst, logger); err != nil {
+			if err := w.bootstrapRuntime(ctx, provider, existing, activeInst, logger); err != nil {
 				return fmt.Errorf("resume bootstrap dedicated: %w", err)
 			}
 			return nil
@@ -251,7 +251,7 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 	//
 	// Idempotent: BootstrapDedicated is safe to re-run on the same
 	// instance for the same project.
-	if err := w.bootstrapRuntime(ctx, rec, active, logger); err != nil {
+	if err := w.bootstrapRuntime(ctx, provider, rec, active, logger); err != nil {
 		// Loud error, but the row stays in state='active' — the
 		// owner credential is usable; the runtime credential just
 		// isn't populated yet. PoolCache's EffectiveCredential
@@ -268,11 +268,15 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 
 // bootstrapRuntime applies the dedicated-instance bootstrap SQL,
 // creates the non-owner runtime role with a fresh password, calls
-// provision_tenant, and writes the runtime credential into
+// provision_tenant, grants DB-level privileges via the provider's
+// control plane (needed because Scaleway's `rdb` DB is owned by
+// `_rdb_superadmin` — SQL GRANT CONNECT from eurobase_owner is a
+// silent no-op), and writes the runtime credential into
 // project_databases.runtime_*. Plaintext password lives only in
 // this stack frame.
 func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 	ctx context.Context,
+	provider dbprovider.Provider,
 	rec *dbprovider.Record,
 	active *dbprovider.Instance,
 	logger *slog.Logger,
@@ -312,6 +316,49 @@ func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 	creds, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, displayName, runtimePassword, readonlyPassword, logger)
 	if err != nil {
 		return fmt.Errorf("BootstrapDedicated: %w", err)
+	}
+
+	// Grant DB-level privileges via the provider's control plane.
+	// Required because Scaleway RDB's `rdb` database is owned by
+	// `_rdb_superadmin`, not the customer-visible eurobase_owner —
+	// SQL `GRANT CONNECT` from an eurobase_owner session is a
+	// silent WARNING-not-error no-op. The provider's SetPrivilege
+	// runs as its superadmin, bypassing the ownership limitation.
+	// See dbprovider.PrivilegeGranter (provider.go) and Scaleway's
+	// SetPrivilege (scaleway.go).
+	//
+	// Providers that don't implement PrivilegeGranter (e.g. a future
+	// self-hosted provider where eurobase_owner really owns the DB)
+	// skip this step — SQL grants in dedicated_bootstrap.sql cover
+	// their case.
+	if granter, ok := provider.(dbprovider.PrivilegeGranter); ok {
+		for _, g := range []struct {
+			user, perm string
+		}{
+			// Scaleway's `readwrite` = CRUD, no DDL — matches gateway.
+			// Their `readonly` grants MORE than SELECT (verified against
+			// myteam3), so we still call it to get CONNECT + baseline
+			// grants, then LockdownReadonlyGrants below strips the
+			// writes back off. Using `readonly` (rather than `readwrite`)
+			// keeps the audit trail honest about intent.
+			{creds.Runtime.Username, "readwrite"},
+			{creds.Readonly.Username, "readonly"},
+		} {
+			if err := granter.SetPrivilege(ctx, rec.ProviderInstanceID, rec.DatabaseName, g.user, g.perm); err != nil {
+				return fmt.Errorf("SetPrivilege(%s → %s): %w", g.user, g.perm, err)
+			}
+			logger.Info("provider-side DB privilege granted",
+				"user", g.user, "permission", g.perm, "database", rec.DatabaseName)
+		}
+		// Post-grant lockdown: force eurobase_readonly back to
+		// SELECT-only regardless of what the Scaleway `readonly`
+		// permission actually granted. See LockdownReadonlyGrants
+		// doc comment for the empirical justification.
+		if err := dbprovider.LockdownReadonlyGrants(ctx, ownerDSN, schemaName, logger); err != nil {
+			return fmt.Errorf("LockdownReadonlyGrants: %w", err)
+		}
+	} else {
+		logger.Info("provider does not implement PrivilegeGranter — relying on SQL grants alone (safe for self-hosted / vanilla PG)")
 	}
 
 	// Seal + persist the runtime credential.
