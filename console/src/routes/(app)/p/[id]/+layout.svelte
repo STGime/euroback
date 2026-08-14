@@ -36,15 +36,37 @@
 	let dbState = $state<ConnectionState | null>(null);
 	let dbStatePollTimer: ReturnType<typeof setInterval> | null = null;
 
+	// Consecutive `state === ''` ticks. The empty state is normal
+	// for a few seconds while CreateProject's enqueue lands the
+	// project_databases row, but the SAME empty response signals a
+	// genuine enqueue failure (retryable=true, no row ever
+	// scheduled). If we keep seeing it past River's retry window
+	// we escalate to the red "provisioning never started" banner
+	// to match what the Connection tab shows for the same case.
+	// 5s × 15 = 75s window — comfortably past River's default
+	// backoff for the provision job's first retries.
+	let emptyStateTicks = $state(0);
+	const EMPTY_STATE_ESCALATE_AFTER = 15;
+
 	function isTransientState(s: ConnectionState | null): boolean {
 		if (!s) return false;
 		return s.state === '' || s.state === 'provisioning' || s.state === 'restoring';
+	}
+
+	function armDbStatePoll() {
+		if (!dbStatePollTimer) dbStatePollTimer = setInterval(refreshDbState, 5000);
 	}
 
 	async function refreshDbState() {
 		if (!projectId) return;
 		try {
 			dbState = await api.getConnectionState(projectId);
+			// Track how long the empty-row window has been open so
+			// isEnqueueStuck() can escalate the banner. Reset on any
+			// non-empty response so a state that flips back to
+			// provisioning (unlikely but possible) doesn't stick.
+			if (dbState.state === '') emptyStateTicks++;
+			else emptyStateTicks = 0;
 		} catch (err) {
 			if (err instanceof APIError && err.status === 402) {
 				// Free/Pro — no dedicated instance by design.
@@ -55,19 +77,29 @@
 			}
 			// Transient (network / 500 / auth blip). Keep the last
 			// known dbState so the banner doesn't vanish mid-
-			// provisioning, and DON'T stop the poll — the next
-			// tick will retry.
+			// provisioning, and ARM the poll so a blip on the FIRST
+			// fetch doesn't latch silence forever (no other event
+			// re-arms except a projectId change).
+			armDbStatePoll();
 			return;
 		}
-		// Arm the poll while the DB is coming up (including the
-		// "row not yet inserted" state==='' window); stop once
-		// active or a terminal-non-transient state lands.
 		if (isTransientState(dbState)) {
-			if (!dbStatePollTimer) dbStatePollTimer = setInterval(refreshDbState, 5000);
+			armDbStatePoll();
 		} else {
 			stopDbStatePoll();
 		}
 	}
+
+	// isEnqueueStuck escalates state==='' to a real failure once
+	// we've polled past the "normal enqueue delay" window. Only
+	// meaningful when the backend also reports retryable=true —
+	// i.e. it's the "no row exists" branch, not some new transient
+	// state we haven't handled.
+	let isEnqueueStuck = $derived(
+		dbState?.state === '' &&
+		dbState.retryable === true &&
+		emptyStateTicks >= EMPTY_STATE_ESCALATE_AFTER
+	);
 	function stopDbStatePoll() {
 		if (dbStatePollTimer) {
 			clearInterval(dbStatePollTimer);
@@ -253,11 +285,14 @@
      banner when it appears mid-session; decorative SVGs are
      aria-hidden. -->
 {#if dbState}
-	{#if dbState.state === ''}
+	{#if dbState.state === '' && !isEnqueueStuck}
 		<!-- Row not yet inserted — CreateProject just committed +
 		     enqueued the worker; refresh has been faster than the
 		     worker's InsertProvisioning. Neutral banner + keep
-		     polling. -->
+		     polling. Escalates to the red "never provisioned"
+		     variant below if this drags past EMPTY_STATE_ESCALATE_AFTER
+		     ticks (~75s), matching what the Connection tab shows for
+		     the same case. -->
 		<div role="status" aria-live="polite" class="mb-4 flex items-center gap-3 rounded-md border border-eurobase-200 bg-eurobase-50 px-4 py-3 text-sm text-eurobase-900">
 			<svg aria-hidden="true" class="h-5 w-5 shrink-0 animate-spin text-eurobase-600" fill="none" viewBox="0 0 24 24">
 				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -268,6 +303,21 @@
 				<p class="mt-0.5 text-xs text-eurobase-800">Waiting for the provisioning job to record the instance. This normally takes a few seconds.</p>
 			</div>
 			<a href="/p/{projectId}/database/connection" class="shrink-0 text-xs font-medium text-eurobase-700 underline hover:text-eurobase-800">Details</a>
+		</div>
+	{:else if isEnqueueStuck}
+		<!-- state==='' for longer than River's normal retry window
+		     — the enqueue itself failed at CreateProject time and
+		     no row will ever land without a manual retry. Same
+		     surface the Connection tab shows for this case. -->
+		<div role="alert" aria-live="assertive" class="mb-4 flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+			<svg aria-hidden="true" class="h-5 w-5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Dedicated Postgres was never provisioned</p>
+				<p class="mt-0.5 text-xs">The provisioning job never landed a project_databases row. Tables / SQL / SDK writes will keep failing until Retry starts a fresh job.</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 rounded-md bg-red-100 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-200">Fix</a>
 		</div>
 	{:else if dbState.state === 'provisioning'}
 		<div role="status" aria-live="polite" class="mb-4 flex items-center gap-3 rounded-md border border-eurobase-200 bg-eurobase-50 px-4 py-3 text-sm text-eurobase-900">
