@@ -120,6 +120,22 @@ else
         fi
         rm -f /tmp/scw-resp.$$
     done
+
+    # Scaleway's `permission=readonly` grants MORE than SELECT
+    # (verified — the role could INSERT into tenant tables). Lock
+    # it down to SELECT-only via SQL, running as the DB owner.
+    # Same statements as dbprovider.LockdownReadonlyGrants — kept
+    # in sync manually (worth a follow-up to export the SQL for
+    # reuse from the script).
+    owner -tAc "
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA \"$SCHEMA\" FROM eurobase_readonly;
+        REVOKE UPDATE ON ALL SEQUENCES IN SCHEMA \"$SCHEMA\" FROM eurobase_readonly;
+        ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA \"$SCHEMA\" REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLES FROM eurobase_readonly;
+        ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA \"$SCHEMA\" REVOKE UPDATE ON SEQUENCES FROM eurobase_readonly;
+        GRANT SELECT ON ALL TABLES IN SCHEMA \"$SCHEMA\" TO eurobase_readonly;
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA \"$SCHEMA\" TO eurobase_readonly;
+    " >/dev/null && ok "readonly locked down to SELECT-only on $SCHEMA" \
+        || fail "readonly lockdown SQL failed"
 fi
 
 # ─────────────────────────────────────────────────────────────

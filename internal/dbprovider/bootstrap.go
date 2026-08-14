@@ -231,6 +231,73 @@ func BootstrapDedicated(
 	}, schemaName, nil
 }
 
+// LockdownReadonlyGrants forces eurobase_readonly to SELECT-only on
+// the tenant schema. Needed because Scaleway RDB's
+// PUT /rdb/v1/…/privileges endpoint (called by the worker after
+// BootstrapDedicated to get CONNECT) with `permission=readonly` in
+// fact grants MORE than SELECT — verified empirically against
+// myteam3 today: after the API call, eurobase_readonly could
+// INSERT into `tenant_….todos`. Their `readonly` naming is
+// misleading; the effective grant looks like CRUD + a matching
+// ALTER DEFAULT PRIVILEGES rule so future tables inherit it.
+//
+// This function REVOKEs the writes and re-asserts SELECT-only via
+// both `ON ALL TABLES` (existing) and `ALTER DEFAULT PRIVILEGES`
+// (future). Runs as eurobase_owner (the DSN's user), which has
+// grantor rights on schemas it owns — no _rdb_superadmin required.
+//
+// Idempotent: repeat runs converge on the same state.
+//
+// Called from the worker path AFTER SetPrivilege so it always wins
+// against the Scaleway API's implicit grants.
+func LockdownReadonlyGrants(ctx context.Context, ownerDSN, schemaName string, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if schemaName == "" {
+		return errors.New("lockdown readonly: schemaName required")
+	}
+
+	connCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cfg, err := pgx.ParseConfig(ownerDSN)
+	if err != nil {
+		return fmt.Errorf("lockdown readonly: parse owner DSN: %w", err)
+	}
+	conn, err := pgx.ConnectConfig(connCtx, cfg)
+	if err != nil {
+		return fmt.Errorf("lockdown readonly: connect as owner: %w", err)
+	}
+	defer conn.Close(context.Background()) //nolint:errcheck
+
+	stmts := []string{
+		// Existing tables in the tenant schema — REVOKE all writes.
+		fmt.Sprintf(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA %q FROM eurobase_readonly`, schemaName),
+		// Existing sequences — REVOKE UPDATE (which allows nextval/setval writes);
+		// SELECT + USAGE stay so cursor-based reads work.
+		fmt.Sprintf(`REVOKE UPDATE ON ALL SEQUENCES IN SCHEMA %q FROM eurobase_readonly`, schemaName),
+		// Future tables/sequences: reset default privileges from the
+		// Scaleway grant back to SELECT-only. The ALTER DEFAULT
+		// PRIVILEGES calls in provision_tenant already set SELECT;
+		// this REVOKE strips any extras Scaleway added.
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %q REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLES FROM eurobase_readonly`, schemaName),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %q REVOKE UPDATE ON SEQUENCES FROM eurobase_readonly`, schemaName),
+		// Re-assert SELECT to be safe (idempotent; already there from
+		// provision_tenant but explicit is better in a lockdown path).
+		fmt.Sprintf(`GRANT SELECT ON ALL TABLES IN SCHEMA %q TO eurobase_readonly`, schemaName),
+		fmt.Sprintf(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %q TO eurobase_readonly`, schemaName),
+	}
+	for _, s := range stmts {
+		if _, err := conn.Exec(ctx, s); err != nil {
+			return fmt.Errorf("lockdown readonly: %s: %w", s, err)
+		}
+	}
+	logger.Info("readonly role locked down to SELECT-only on tenant schema",
+		"schema", schemaName)
+	return nil
+}
+
 // isHexChars is a belt-and-suspenders check that a candidate
 // password contains only hex characters — the shape DeriveRuntimePassword
 // produces. Guards the one DDL statement pgx cannot bind-

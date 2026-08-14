@@ -335,14 +335,27 @@ func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 		for _, g := range []struct {
 			user, perm string
 		}{
-			{creds.Runtime.Username, "readwrite"},   // eurobase_gateway: CRUD, no DDL
-			{creds.Readonly.Username, "readonly"},   // eurobase_readonly: SELECT-only
+			// Scaleway's `readwrite` = CRUD, no DDL — matches gateway.
+			// Their `readonly` grants MORE than SELECT (verified against
+			// myteam3), so we still call it to get CONNECT + baseline
+			// grants, then LockdownReadonlyGrants below strips the
+			// writes back off. Using `readonly` (rather than `readwrite`)
+			// keeps the audit trail honest about intent.
+			{creds.Runtime.Username, "readwrite"},
+			{creds.Readonly.Username, "readonly"},
 		} {
 			if err := granter.SetPrivilege(ctx, rec.ProviderInstanceID, rec.DatabaseName, g.user, g.perm); err != nil {
 				return fmt.Errorf("SetPrivilege(%s → %s): %w", g.user, g.perm, err)
 			}
 			logger.Info("provider-side DB privilege granted",
 				"user", g.user, "permission", g.perm, "database", rec.DatabaseName)
+		}
+		// Post-grant lockdown: force eurobase_readonly back to
+		// SELECT-only regardless of what the Scaleway `readonly`
+		// permission actually granted. See LockdownReadonlyGrants
+		// doc comment for the empirical justification.
+		if err := dbprovider.LockdownReadonlyGrants(ctx, ownerDSN, schemaName, logger); err != nil {
+			return fmt.Errorf("LockdownReadonlyGrants: %w", err)
 		}
 	} else {
 		logger.Info("provider does not implement PrivilegeGranter — relying on SQL grants alone (safe for self-hosted / vanilla PG)")

@@ -130,6 +130,12 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 					logger.Info("provider-side DB privilege granted",
 						"user", g.user, "permission", g.perm)
 				}
+				// Lock readonly down to SELECT-only after the API
+				// grant (Scaleway's `readonly` grants more than
+				// SELECT — same rationale as provision_team_db.go).
+				if err := dbprovider.LockdownReadonlyGrants(ctx, ownerDSN, schemaName, logger); err != nil {
+					return fmt.Errorf("LockdownReadonlyGrants: %w", err)
+				}
 			}
 		} else {
 			logger.Warn("registry lookup failed — skipping provider-side privilege grant", "provider", rec.Provider, "error", gerr)
