@@ -520,6 +520,60 @@ func (s *Scaleway) RotatePassword(ctx context.Context, instanceID, username, new
 	return s.do(ctx, http.MethodPatch, path, req, nil)
 }
 
+// scalewaySetPrivilegeRequest is the Scaleway RDB PUT-privilege body.
+// Permission values (per Scaleway RDB v1 docs):
+//   * "all"       — full CRUD + DDL on all schemas in the database
+//   * "readwrite" — CRUD, no DDL
+//   * "readonly"  — SELECT only
+//   * "none"      — revoke everything (also implies REVOKE CONNECT)
+type scalewaySetPrivilegeRequest struct {
+	DatabaseName string `json:"database_name"`
+	UserName     string `json:"user_name"`
+	Permission   string `json:"permission"`
+}
+
+// SetPrivilege grants (or revokes, when Permission="none") a role's
+// access on a database. The call runs server-side as Scaleway's
+// _rdb_superadmin, which is what makes it work AT ALL — the
+// customer-visible eurobase_owner user does NOT own the `rdb`
+// database (Scaleway's _rdb_superadmin does), so a plain
+// `GRANT CONNECT` from an eurobase_owner session is a silent
+// WARNING-not-error no-op. Same class of gotcha CLAUDE.md documents
+// for the shared cluster's eurobase_migrator DB-CONNECT grant.
+//
+// Endpoint:
+//   PUT /rdb/v1/regions/{region}/instances/{instance_id}/privileges
+//   {"database_name":"…","user_name":"…","permission":"…"}
+//
+// The Scaleway user_name parameter accepts ANY role visible in
+// pg_roles — SQL-created (CREATE ROLE …) or Scaleway-API-created
+// alike — so our existing NOLOGIN-then-ALTER-to-LOGIN roles are
+// managed identically to a Scaleway-API-created user.
+func (s *Scaleway) SetPrivilege(ctx context.Context, instanceID, databaseName, userName, permission string) error {
+	if instanceID == "" {
+		return fmt.Errorf("%w: instanceID required", ErrInvalidRequest)
+	}
+	if databaseName == "" {
+		return fmt.Errorf("%w: databaseName required", ErrInvalidRequest)
+	}
+	if userName == "" {
+		return fmt.Errorf("%w: userName required", ErrInvalidRequest)
+	}
+	switch permission {
+	case "all", "readwrite", "readonly", "none":
+	default:
+		return fmt.Errorf("%w: permission must be all|readwrite|readonly|none, got %q", ErrInvalidRequest, permission)
+	}
+	path := fmt.Sprintf("/rdb/v1/regions/%s/instances/%s/privileges",
+		s.defaultRegion, instanceID)
+	req := scalewaySetPrivilegeRequest{
+		DatabaseName: databaseName,
+		UserName:     userName,
+		Permission:   permission,
+	}
+	return s.do(ctx, http.MethodPut, path, req, nil)
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 // requestOption tunes a single request — currently only for the

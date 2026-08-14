@@ -33,8 +33,9 @@ import (
 
 type BackfillRuntimeCredentialWorker struct {
 	river.WorkerDefaults[jobs.BackfillRuntimeCredentialArgs]
-	Cipher *dbprovider.Cipher
-	Repo   *dbprovider.Repo
+	Cipher   *dbprovider.Cipher
+	Repo     *dbprovider.Repo
+	Registry *dbprovider.Registry
 	// RuntimePasswordSecret — same value as the provision worker's
 	// field. Both derive `HMAC(secret, project_database_id)` so the
 	// eurobase_gateway password is identical no matter which runner
@@ -104,6 +105,37 @@ func (w *BackfillRuntimeCredentialWorker) Work(ctx context.Context, job *river.J
 	creds, schemaName, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, rec.ProjectID, rec.ProjectID, runtimePassword, readonlyPassword, logger)
 	if err != nil {
 		return fmt.Errorf("BootstrapDedicated: %w", err)
+	}
+
+	// Grant DB-level privileges via the provider's control plane —
+	// same rationale as provision_team_db.go's identical block. Needed
+	// so backfilling a pre-privilege-grant instance actually fixes it
+	// (SQL grants alone don't take on Scaleway's `rdb` because
+	// eurobase_owner isn't the DB owner). Registry lookup is best-
+	// effort here: an older worker binary without Registry wired
+	// would skip the grant with a warning and rely on SQL-only,
+	// which is safe on self-hosted / vanilla-PG.
+	if w.Registry != nil {
+		if provider, gerr := w.Registry.Get(rec.Provider); gerr == nil {
+			if granter, ok := provider.(dbprovider.PrivilegeGranter); ok {
+				for _, g := range []struct {
+					user, perm string
+				}{
+					{creds.Runtime.Username, "readwrite"},
+					{creds.Readonly.Username, "readonly"},
+				} {
+					if err := granter.SetPrivilege(ctx, rec.ProviderInstanceID, rec.DatabaseName, g.user, g.perm); err != nil {
+						return fmt.Errorf("SetPrivilege(%s → %s): %w", g.user, g.perm, err)
+					}
+					logger.Info("provider-side DB privilege granted",
+						"user", g.user, "permission", g.perm)
+				}
+			}
+		} else {
+			logger.Warn("registry lookup failed — skipping provider-side privilege grant", "provider", rec.Provider, "error", gerr)
+		}
+	} else {
+		logger.Warn("backfill worker has no Registry wired — skipping provider-side privilege grant (SQL grants only)")
 	}
 
 	// Persist whichever slot(s) are still NULL. SetRuntimeCredentials /

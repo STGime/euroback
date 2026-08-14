@@ -131,27 +131,29 @@ GRANT EXECUTE ON FUNCTION public.is_internal_auth_path() TO eurobase_readonly;
 GRANT EXECUTE ON FUNCTION public.uuid_generate_v4() TO eurobase_readonly;
 
 -- ============================================================================
--- 3c. Database CONNECT grants
+-- 3c. Database CONNECT grants (belt for self-hosted; braces via provider API on Scaleway)
 -- ============================================================================
 --
--- Scaleway RDB does NOT grant CONNECT to PUBLIC on the DB by default —
--- unlike vanilla PG (`docker run postgres`) where the CI RLS harness
--- runs. That means eurobase_gateway and eurobase_readonly, freshly
--- created above, can't even open a session (FATAL SQLSTATE 42501
--- "permission denied for database"). The failure surface is silent
--- at bootstrap (bootstrap SQL runs as eurobase_owner which does have
--- CONNECT) and only fires when SDK / console traffic actually tries
--- to authenticate as one of these roles — which is exactly the case
--- CI never exercises because postgres:16 is permissive by default.
+-- Scaleway RDB's `rdb` database is owned by `_rdb_superadmin`, NOT
+-- the customer-visible `eurobase_owner`. That means these
+-- `GRANT CONNECT` statements are a **silent WARNING-not-error no-op**
+-- on Scaleway — the psql client prints "WARNING: no privileges were
+-- granted" and the roles still can't open a session. The real
+-- Scaleway grant path is the provider's control-plane
+-- `PUT /rdb/v1/…/privileges` endpoint, which runs as
+-- `_rdb_superadmin` server-side and bypasses the ownership
+-- limitation. See dbprovider.PrivilegeGranter (provider.go),
+-- Scaleway.SetPrivilege (scaleway.go), and the worker call site
+-- in provision_team_db.go / backfill_runtime_credential.go which
+-- fires this after BootstrapDedicated returns.
 --
--- Grant CONNECT on the current database dynamically via a DO block:
--- `GRANT CONNECT ON DATABASE …` doesn't accept `current_database()`
--- directly, so we EXECUTE format it. Idempotent — repeat grants are
--- no-ops.
---
--- Owned-by rationale: bootstrap runs as eurobase_owner which owns
--- the DB (Scaleway provisioning), so it holds CONNECT WITH GRANT
--- OPTION and this succeeds.
+-- Keeping the SQL grant here as a belt for self-hosted / vanilla-
+-- PG providers where eurobase_owner genuinely owns the DB — there
+-- the grants take normally and the provider isn't required to
+-- implement PrivilegeGranter. Scaleway ignores this block by
+-- ownership; self-hosted uses it. Same class of dual-code-path
+-- gotcha CLAUDE.md documents for the shared cluster's eurobase_migrator
+-- DB-CONNECT grant.
 
 DO $$
 BEGIN

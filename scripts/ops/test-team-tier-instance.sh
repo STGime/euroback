@@ -4,37 +4,49 @@
 # End-to-end validation for a Team-tier project's dedicated Scaleway
 # instance + the SDK surface that sits on top of it.
 #
-# Does two orthogonal things:
+# Does three orthogonal things:
 #
-#   1. **Backfill grant.** Applies `GRANT CONNECT ON DATABASE …
-#      TO eurobase_gateway, eurobase_readonly` to catch any
-#      instance provisioned before dedicated_bootstrap.sql's DB-
-#      CONNECT block landed (bootstrap is idempotent; a re-bootstrap
-#      would grant it too, but ops doesn't want to force a re-
-#      bootstrap for a working instance just for this).
+#   1. **Backfill via Scaleway API.** Applies `readwrite` to
+#      eurobase_gateway + `readonly` to eurobase_readonly via
+#      Scaleway's PUT /rdb/v1/…/privileges endpoint (runs as their
+#      `_rdb_superadmin` server-side, bypasses the ownership
+#      limitation that makes SQL `GRANT CONNECT` a silent no-op
+#      when the customer-visible eurobase_owner doesn't actually
+#      own the `rdb` database).
 #
-#   2. **Direct DB smoke.** Connects as eurobase_readonly and
-#      eurobase_owner, verifies role privileges + tenant schema
-#      shape + RLS boundaries + vault policies.
+#      Needed for instances provisioned before the code fix that
+#      wires this into the ProvisionTeamDatabaseWorker path.
 #
-#   3. **SDK smoke.** curl against the project subdomain: data CRUD,
-#      vault round-trip, end-user signup / signin / refresh — the
-#      full A→D + #391 + #394 path.
+#   2. **Direct DB smoke.** psql as eurobase_readonly (RLS fence)
+#      and eurobase_owner (round-trip), verifies tenant schema
+#      shape + policies + PG version.
 #
-# Configure via env — no secrets in argv (they'd leak into ps):
+#   3. **SDK smoke.** curl against the project subdomain: data
+#      CRUD, vault round-trip, end-user signup / signin / refresh —
+#      the full A→D + #391 + #394 path.
 #
-#   OWNER_DSN     — postgres://eurobase_owner:PW@host:port/rdb?sslmode=require
-#   READONLY_DSN  — postgres://eurobase_readonly:PW@host:port/rdb?sslmode=require
-#   PROJECT_ID    — the UUID (used to derive tenant_<id> schema name)
-#   SLUG          — project slug (for the SDK base URL: https://<slug>.eurobase.app)
-#   PUBLIC_KEY    — eb_pk_…  (SDK auth for anonymous / signup)
-#   SECRET_KEY    — eb_sk_…  (SDK auth for service-role writes)
+# Env — no secrets in argv (they'd leak into ps):
 #
-# Everything defaults to the myteam3 values for a quick reproducible
-# check; override any one to point at a different Team-tier project.
+#   OWNER_DSN            — postgres://eurobase_owner:PW@host:port/rdb?sslmode=require
+#   READONLY_DSN         — postgres://eurobase_readonly:PW@host:port/rdb?sslmode=require
+#   PROJECT_ID           — project UUID (derives tenant_<id> schema)
+#   SLUG                 — project slug (SDK base: https://<slug>.eurobase.app)
+#   PUBLIC_KEY           — eb_pk_… (SDK anon / signup)
+#   SECRET_KEY           — eb_sk_… (SDK service-role writes)
+#   PROVIDER_INSTANCE_ID — Scaleway RDB instance UUID (for the API grant)
+#                          Look up in `project_databases.provider_instance_id`
+#                          for this project's row.
+#   SCW_SECRET_KEY       — Scaleway API secret key. Get from:
+#                            kubectl -n eurobase get secret eurobase-secrets \
+#                              -o jsonpath='{.data.SCW_SECRET_KEY}' | base64 -d
+#                          If unset, step 1 is skipped (assumes grants already
+#                          in place — good for a re-run against a project
+#                          that's already fixed).
+#   SCW_REGION           — Scaleway region (default: fr-par).
 #
-# Exits non-zero on the first failure. On success, prints a summary
-# suitable for pasting into a PR body as sign-off evidence.
+# Everything defaults to myteam3's values so a quick check is a
+# single command; override any one to target a different Team-tier
+# project.
 
 set -uo pipefail
 
@@ -44,6 +56,9 @@ set -uo pipefail
 : "${SLUG:=myteam3}"
 : "${PUBLIC_KEY:=eb_pk_a5eecb0e86cd816d4f51ec1c8b1c2438}"
 : "${SECRET_KEY:=eb_sk_25eecf6cf8c47f4d9638afce036f0ec6}"
+: "${PROVIDER_INSTANCE_ID:=4aa613f3-e354-47eb-8da4-cec3765716df}"
+: "${SCW_REGION:=fr-par}"
+: "${SCW_SECRET_KEY:=}"
 
 SCHEMA="tenant_${PROJECT_ID//-/_}"
 BASE="https://${SLUG}.eurobase.app"
@@ -65,7 +80,6 @@ fi
 command -v curl >/dev/null || { echo "FATAL: curl not on PATH"; exit 1; }
 command -v python3 >/dev/null || { echo "FATAL: python3 not on PATH (used for JSON pretty-print)"; exit 1; }
 
-# Colour when TTY
 if [ -t 1 ]; then
     G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; B=$'\033[1;36m'; N=$'\033[0m'
 else G=""; R=""; Y=""; B=""; N=""; fi
@@ -76,17 +90,37 @@ warn()    { printf "  ${Y}⚠${N} %s\n" "$1"; }
 fail()    { printf "  ${R}✗ FAIL:${N} %s\n" "$1"; exit 1; }
 info()    { printf "    %s\n" "$1"; }
 
-owner()   { "$PSQL" "$OWNER_DSN"    "$@"; }
+owner()     { "$PSQL" "$OWNER_DSN"    "$@"; }
 readonly_() { "$PSQL" "$READONLY_DSN" "$@"; }
 
-trap 'echo; echo "aborted at line $LINENO"; exit 1' ERR
-
 # ─────────────────────────────────────────────────────────────
-section "1. Backfill CONNECT grants (fixes pre-bootstrap-grant instances)"
+section "1. Backfill CONNECT + DB privileges (via Scaleway API — runs as _rdb_superadmin)"
 
-owner -tAc "GRANT CONNECT ON DATABASE rdb TO eurobase_gateway, eurobase_readonly" >/dev/null \
-    && ok "GRANT CONNECT applied to eurobase_gateway + eurobase_readonly" \
-    || fail "GRANT CONNECT failed — check OWNER_DSN"
+if [ -z "$SCW_SECRET_KEY" ]; then
+    warn "SCW_SECRET_KEY not set — skipping the provider-side privilege grant"
+    info "If step 2 fails with 'permission denied for database', set SCW_SECRET_KEY and re-run:"
+    info "  export SCW_SECRET_KEY=\$(kubectl -n eurobase get secret eurobase-secrets -o jsonpath='{.data.SCW_SECRET_KEY}' | base64 -d)"
+else
+    # PUT /rdb/v1/regions/{region}/instances/{instance_id}/privileges
+    # Body: {"database_name":"rdb", "user_name":"…", "permission":"…"}
+    for pair in "eurobase_gateway:readwrite" "eurobase_readonly:readonly"; do
+        USER="${pair%%:*}"
+        PERM="${pair##*:}"
+        HTTP=$(curl -s -o /tmp/scw-resp.$$ -w "%{http_code}" \
+            -X PUT "https://api.scaleway.com/rdb/v1/regions/${SCW_REGION}/instances/${PROVIDER_INSTANCE_ID}/privileges" \
+            -H "X-Auth-Token: $SCW_SECRET_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"database_name\":\"rdb\",\"user_name\":\"${USER}\",\"permission\":\"${PERM}\"}")
+        if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+            ok "granted ${USER} → ${PERM} on rdb (HTTP $HTTP)"
+        else
+            cat /tmp/scw-resp.$$
+            rm -f /tmp/scw-resp.$$
+            fail "SetPrivilege ${USER} → ${PERM} failed (HTTP $HTTP)"
+        fi
+        rm -f /tmp/scw-resp.$$
+    done
+fi
 
 # ─────────────────────────────────────────────────────────────
 section "2. Role identity + PG version"
@@ -95,12 +129,12 @@ OWNER_WHO=$(owner -tAc "SELECT current_user")
 [ "$OWNER_WHO" = "eurobase_owner" ] && ok "connected as eurobase_owner" || fail "owner DSN authed as $OWNER_WHO"
 
 RO_WHO=$(readonly_ -tAc "SELECT current_user")
-[ "$RO_WHO" = "eurobase_readonly" ] && ok "connected as eurobase_readonly" || fail "readonly DSN authed as $RO_WHO"
+[ "$RO_WHO" = "eurobase_readonly" ] && ok "connected as eurobase_readonly" || fail "readonly DSN authed as $RO_WHO — did step 1 grant CONNECT?"
 
 PG_VERSION=$(owner -tAc "SHOW server_version" | tr -d ' ')
 info "postgres server version: $PG_VERSION"
 case "$PG_VERSION" in
-    16*) ok "provisioned on PG 16 (per issue #382 fix)" ;;
+    16*) ok "provisioned on PG 16 (per #389)" ;;
     15*) warn "provisioned on PG 15 — pre-#389 instance" ;;
     *)   warn "unexpected PG version: $PG_VERSION" ;;
 esac
@@ -116,7 +150,6 @@ for expected in email_tokens refresh_tokens storage_objects todos user_identitie
         || fail "missing table: $SCHEMA.$expected"
 done
 
-# All tables owner-owned so RLS binds for eurobase_gateway
 LEAK=$(owner -tAc "
     SELECT count(*) FROM pg_class c
     JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -128,19 +161,16 @@ LEAK=$(owner -tAc "
 # ─────────────────────────────────────────────────────────────
 section "4. RLS boundaries"
 
-# readonly can SELECT
 COUNT=$(readonly_ -tAc "SELECT count(*) FROM $SCHEMA.todos")
 ok "readonly SELECT $SCHEMA.todos → $COUNT rows"
 
-# readonly CANNOT INSERT (SELECT-only role)
 if readonly_ -c "INSERT INTO $SCHEMA.todos (title) VALUES ('rls-fence-test')" 2>&1 | grep -q "permission denied"; then
     ok "readonly INSERT correctly refused (permission denied)"
 else
     fail "readonly INSERT succeeded — role is not SELECT-only"
 fi
 
-# vault_secrets has the internal_auth_path policy
-POLICY=$(owner -tAc "SELECT polname FROM pg_policy WHERE polrelid='$SCHEMA.vault_secrets'::regclass" | tr '\n' ',')
+POLICY=$(owner -tAc "SELECT string_agg(polname, ',') FROM pg_policy WHERE polrelid='$SCHEMA.vault_secrets'::regclass")
 info "vault_secrets policies: $POLICY"
 echo "$POLICY" | grep -q "vault_secrets_policy" && ok "vault_secrets carries vault_secrets_policy" \
     || fail "vault_secrets missing vault_secrets_policy"
@@ -160,14 +190,12 @@ SFX=$RANDOM
 EMAIL="sdk-test-${SFX}@example.com"
 PW="sdk-test-pw-${SFX}"
 
-# GET todos as secret key
 TODOS=$(curl -s -w "\n%{http_code}" "$BASE/v1/data/todos" -H "apikey: $SECRET_KEY")
 BODY=$(echo "$TODOS" | head -n -1); CODE=$(echo "$TODOS" | tail -n 1)
 [ "$CODE" = "200" ] && ok "GET /v1/data/todos → 200" || fail "GET /v1/data/todos → $CODE  body: $BODY"
 ROW_COUNT=$(echo "$BODY" | python3 -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
 info "  → $ROW_COUNT rows"
 
-# INSERT + verify + cleanup
 NEW=$(curl -s "$BASE/v1/data/todos" -H "apikey: $SECRET_KEY" -H "Content-Type: application/json" \
     -d "{\"title\":\"sdk-smoke-${SFX}\",\"completed\":false}")
 NEW_ID=$(echo "$NEW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
@@ -175,7 +203,6 @@ NEW_ID=$(echo "$NEW" | python3 -c "import sys,json;print(json.load(sys.stdin).ge
 curl -s -o /dev/null -X DELETE "$BASE/v1/data/todos/$NEW_ID" -H "apikey: $SECRET_KEY"
 ok "DELETE /v1/data/todos/$NEW_ID (cleanup)"
 
-# Vault round-trip
 VN="sdk_smoke_${SFX}"
 V=$(curl -s "$BASE/v1/vault" -H "apikey: $SECRET_KEY" -H "Content-Type: application/json" \
     -d "{\"name\":\"$VN\",\"value\":\"hunter2\",\"description\":\"sdk smoke\"}")
@@ -185,7 +212,6 @@ echo "$GET" | grep -q '"hunter2"' && ok "GET /v1/vault/$VN decrypted value round
 curl -s -o /dev/null -X DELETE "$BASE/v1/vault/$VN" -H "apikey: $SECRET_KEY"
 ok "DELETE /v1/vault/$VN (cleanup)"
 
-# Auth signup / signin / refresh
 SU=$(curl -s "$BASE/v1/auth/signup" -H "apikey: $PUBLIC_KEY" -H "Content-Type: application/json" \
     -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}")
 RT=$(echo "$SU" | python3 -c "import sys,json;print(json.load(sys.stdin).get('refresh_token',''))" 2>/dev/null)
@@ -201,11 +227,10 @@ echo "$RF" | grep -q '"access_token"' \
     && ok "POST /v1/auth/refresh → new access_token (PR-394 GUC fix works)" \
     || fail "refresh: $RF"
 
-# ─────────────────────────────────────────────────────────────
 printf "\n${G}✓ ALL CHECKS PASSED${N}\n"
 printf "\nSign-off evidence:\n"
-printf "  * PG version:  $PG_VERSION\n"
-printf "  * Schema:      $SCHEMA\n"
-printf "  * Base URL:    $BASE\n"
-printf "  * Tables:      %s\n" "$(echo "$TABLE_LIST" | tr ',' ' ')"
-printf "  * Timestamp:   %s\n" "$(date -u +%FT%TZ)"
+printf "  * PG version:      $PG_VERSION\n"
+printf "  * Schema:          $SCHEMA\n"
+printf "  * Base URL:        $BASE\n"
+printf "  * Provider inst.:  $PROVIDER_INSTANCE_ID\n"
+printf "  * Timestamp:       %s\n" "$(date -u +%FT%TZ)"
