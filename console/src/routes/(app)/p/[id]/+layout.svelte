@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { api, type Project } from '$lib/api.js';
-	import { setContext } from 'svelte';
+	import { api, type ConnectionState, type Project } from '$lib/api.js';
+	import { onDestroy, setContext } from 'svelte';
 
 	let { children } = $props();
 
@@ -10,6 +10,68 @@
 	let project: Project | null = $state(null);
 	let loading = $state(true);
 	let error: string | null = $state(null);
+
+	// Dedicated-DB state banner (Team-tier). Poll while
+	// provisioning/restoring so a user on ANY tab (not just
+	// Database → Connection) sees when the DB is or isn't ready.
+	// Free/Pro projects have no project_databases row → 409 with
+	// `no_active_dedicated_db` code → we treat that as "no banner
+	// needed" (dbState stays null).
+	let dbState = $state<ConnectionState | null>(null);
+	let dbStatePollTimer: ReturnType<typeof setInterval> | null = null;
+
+	async function refreshDbState() {
+		if (!projectId) return;
+		try {
+			dbState = await api.getConnectionState(projectId);
+		} catch {
+			// 409 no-dedicated-db, transient network, etc.
+			// Leave dbState null → banner stays hidden.
+			dbState = null;
+		}
+		// Keep polling while the DB is coming up; stop once it
+		// lands in a terminal state (active / failed) — same
+		// cadence + rationale as the Connection tab's own poller.
+		if (dbState && (dbState.state === 'provisioning' || dbState.state === 'restoring')) {
+			if (!dbStatePollTimer) dbStatePollTimer = setInterval(refreshDbState, 5000);
+		} else {
+			stopDbStatePoll();
+		}
+	}
+	function stopDbStatePoll() {
+		if (dbStatePollTimer) {
+			clearInterval(dbStatePollTimer);
+			dbStatePollTimer = null;
+		}
+	}
+	onDestroy(stopDbStatePoll);
+
+	// Elapsed-time display for the provisioning banner. Ticker
+	// only runs while there IS a banner to show — same shape as
+	// the Connection page's own timer.
+	let now = $state(Date.now());
+	let tickTimer: ReturnType<typeof setInterval> | null = null;
+	let elapsedSec = $derived.by(() => {
+		if (!dbState?.created_at) return 0;
+		const started = new Date(dbState.created_at).getTime();
+		return Math.max(0, Math.floor((now - started) / 1000));
+	});
+	function elapsedLabel(sec: number): string {
+		if (sec < 60) return `${sec}s`;
+		const m = Math.floor(sec / 60);
+		const s = sec % 60;
+		return s === 0 ? `${m}m` : `${m}m ${s}s`;
+	}
+	$effect(() => {
+		const active = dbState?.state === 'provisioning' || dbState?.state === 'restoring';
+		if (active && !tickTimer) {
+			tickTimer = setInterval(() => { now = Date.now(); }, 5000);
+		} else if (!active && tickTimer) {
+			clearInterval(tickTimer);
+			tickTimer = null;
+		}
+	});
+	onDestroy(() => { if (tickTimer) clearInterval(tickTimer); });
 
 	const tabs = [
 		{ label: 'Overview', href: '', icon: 'overview' },
@@ -44,6 +106,10 @@
 
 	$effect(() => {
 		loadProject();
+		// Fetch dedicated-DB state alongside the project. If it comes
+		// back provisioning/restoring, refreshDbState arms the poller
+		// itself so subpages navigating in also inherit the ticker.
+		refreshDbState();
 	});
 
 	async function loadProject() {
@@ -143,6 +209,57 @@
 		{/each}
 	</nav>
 </div>
+
+<!-- Dedicated-DB status banner. Shown across every project subpage
+     while the Team-tier Scaleway instance isn't ready yet — the
+     Connection tab has its own detailed view, this is the ambient
+     awareness so a user doesn't create tables / run SQL / hit the
+     SDK while the backing DB is still spinning up. Free/Pro
+     projects have dbState=null and render nothing. -->
+{#if dbState}
+	{#if dbState.state === 'provisioning'}
+		<div class="mb-4 flex items-center gap-3 rounded-md border border-eurobase-200 bg-eurobase-50 px-4 py-3 text-sm text-eurobase-900">
+			<svg class="h-5 w-5 shrink-0 animate-spin text-eurobase-600" fill="none" viewBox="0 0 24 24">
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Provisioning your dedicated Postgres…</p>
+				<p class="mt-0.5 text-xs text-eurobase-800">
+					Scaleway takes 2–5 minutes. Elapsed: <span class="font-mono">{elapsedLabel(elapsedSec)}</span>.
+					Tables, SQL, and SDK writes for this project will fail until it's ready.
+				</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 text-xs font-medium text-eurobase-700 underline hover:text-eurobase-800">Details</a>
+		</div>
+	{:else if dbState.state === 'restoring'}
+		<div class="mb-4 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+			<svg class="h-5 w-5 shrink-0 animate-spin text-blue-600" fill="none" viewBox="0 0 24 24">
+				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">Restore in progress</p>
+				<p class="mt-0.5 text-xs">The dedicated instance is restoring from a snapshot. Elapsed: <span class="font-mono">{elapsedLabel(elapsedSec)}</span>.</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 text-xs font-medium text-blue-700 underline hover:text-blue-800">Details</a>
+		</div>
+	{:else if dbState.state === 'failed' || dbState.retryable}
+		<!-- retryable=true also covers "no project_databases row at all"
+		     (enqueue failed at CreateProject) — same user affordance:
+		     go to Connection and click Retry. -->
+		<div class="mb-4 flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+			<svg class="h-5 w-5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+			</svg>
+			<div class="min-w-0 flex-1">
+				<p class="font-semibold">{dbState.state === 'failed' ? 'Dedicated Postgres provisioning failed' : 'Dedicated Postgres never provisioned'}</p>
+				<p class="mt-0.5 text-xs">Tables / SQL / SDK writes for this project will keep failing until the instance is up.</p>
+			</div>
+			<a href="/p/{projectId}/database/connection" class="shrink-0 rounded-md bg-red-100 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-200">Fix</a>
+		</div>
+	{/if}
+{/if}
 
 {#key $page.url.pathname}
 <div>
