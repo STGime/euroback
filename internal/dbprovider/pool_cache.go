@@ -171,6 +171,20 @@ func (c *PoolCache) get(ctx context.Context, projectID string, ownerMode bool) (
 		return nil, fmt.Errorf("pool cache: lookup: %w", err)
 	}
 
+	// Race guard: between the worker's InsertProvisioning (state
+	// transitions to 'provisioning', host/port not yet known) and
+	// MarkActive (host/port populated from Scaleway's Describe),
+	// GetLiveByProject returns a row with Host="" / Port=0. Building
+	// a DSN out of that produces `postgres://user:pw@:0/db` and
+	// pgxpool.ParseConfig fails with "invalid port (outside range)".
+	// Treat this as "no live pool yet" so callers fall back to the
+	// shared pool exactly like the pre-InsertProvisioning ErrNoRows
+	// case — no functional difference to the caller, one less
+	// spurious ERROR line in the logs.
+	if rec.Host == "" || rec.Port == 0 {
+		return nil, pgx.ErrNoRows
+	}
+
 	// Credential selection:
 	//   ownerMode=false → RUNTIME (non-owner). Errors with
 	//     ErrRuntimeCredMissing when the row's runtime slot is

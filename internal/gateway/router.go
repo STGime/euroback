@@ -305,6 +305,63 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		tenantPoolResolver = ownerPoolFor
 	}
 
+	// SDK-side tenant pool middleware. Analogous to
+	// PlatformTenantContext (console path) but for /v1/* routes
+	// that don't have a chi {id} URL param — instead reads
+	// ProjectContext.HasDedicatedDB (populated by apiKeyMw) and
+	// stashes the RUNTIME (non-owner) pool via
+	// query.ContextWithTenantPool. Callers like VaultService.
+	// tenantPool then pick it up transparently.
+	//
+	// Runtime pool (not GetOwner) because SDK end-user traffic
+	// must have RLS enforced — an owner connection would silently
+	// bypass RLS on every owned tenant table. Same rationale as
+	// the loud warning in the SDK's poolResolver above.
+	//
+	// Gated on enableSDKRouting for the same reason the query
+	// engine's SDK dispatch is: pre-flag, SDK stays on shared for
+	// everything, matching the pre-Team-tier behaviour. Fires no-
+	// op when the flag is off.
+	//
+	// Handles the same three error paths as the query engine's
+	// resolver: ErrNoRows (Free/Pro) → transparent shared fallback;
+	// ErrRuntimeCredMissing (runtime cred not yet populated —
+	// pre-bootstrap window) → refuse to route, let the request
+	// 42P01 loudly on shared, DO NOT owner-connect (SDK RLS-
+	// bypass hazard); transient (network/500) → warn + shared
+	// fallback.
+	sdkTenantPoolMw := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !enableSDKRouting || poolCache == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			pc, ok := auth.ProjectFromContext(r.Context())
+			if !ok || pc == nil || !pc.HasDedicatedDB {
+				next.ServeHTTP(w, r)
+				return
+			}
+			p, err := poolCache.Get(r.Context(), pc.ProjectID)
+			if err != nil {
+				switch {
+				case errors.Is(err, pgx.ErrNoRows):
+					// Stale ctx (row deleted between apiKeyMw and this
+					// middleware). Fall through to shared.
+				case errors.Is(err, dbprovider.ErrRuntimeCredMissing):
+					slog.Error("SDK vault/auth routing refused: runtime credential missing — falling back to shared pool (loud failure) rather than owner-connect (silent RLS bypass)",
+						"project_id", pc.ProjectID)
+				default:
+					slog.Warn("sdk tenant pool: dedicated pool unavailable, falling back to shared",
+						"project_id", pc.ProjectID, "error", err)
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			ctx := query.ContextWithTenantPool(r.Context(), p)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+
 	// poolResolver bridges query.PoolResolver → poolCache without
 	// dragging auth into the query package (cycle). Consulted at
 	// every WithTenantTx call. Returning nil = "use shared pool";
@@ -684,8 +741,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 
 			// Vault (encrypted secrets storage) — platform-authenticated.
+			// PlatformTenantContext stashes the dedicated owner pool
+			// via query.ContextWithTenantPool for Team-tier projects,
+			// so VaultService.tenantPool(ctx) picks it up (post-PR-A
+			// #378 there IS no vault_secrets on the shared platform
+			// DB for Team-tier). Free/Pro get pool=nil stashed →
+			// tenantPool falls back to shared, unchanged behaviour.
 			if vaultSvc != nil && vaultSvc.Configured() {
-				r.With(tenant.RequireMinRole("admin")).Mount("/vault", vault.Routes(vaultSvc, pool))
+				r.With(tenant.RequireMinRole("admin"), tenant.PlatformTenantContext(pool, tenantPoolResolver)).Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
 
 			// Compliance (DPA report, sub-processor registry, DSAR exports).
@@ -953,7 +1016,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 		r.Post("/", tenant.HandleCreateProject(pool, tenantSvc, limitsSvc))
 		r.Get("/", tenant.HandleListProjects(pool, tenantSvc))
-		r.Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
+		// UpdateProject may write OAuth client_secrets to the vault
+		// (auth_config → UpdateAuthConfig → secrets.SetRaw).
+		// PlatformTenantContext stashes the dedicated owner pool
+		// so VaultService.tenantPool routes to the dedicated
+		// instance for Team-tier — otherwise Team-tier admins
+		// configuring OAuth get 500 on save.
+		r.With(tenant.PlatformTenantContext(pool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
 		r.Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 
@@ -993,12 +1062,28 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// OAuth callbacks — no API key needed; project resolved via subdomain.
 		// These must be outside the apiKeyMw group because the OAuth provider
 		// redirects back without forwarding the apikey query parameter.
-		r.Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
-		r.Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
+		//
+		// sdkTenantPoolMw is where the vault routing happens for
+		// this path: HandleOAuthCallback → SignInWithOAuth →
+		// GetOAuthClientSecret → vaultSvc.GetRaw → tenantPool.
+		// Without it the code→token exchange 42P01s on shared for
+		// every Team-tier project. Requires the subdomain
+		// middleware's LEFT JOIN of project_databases (added in
+		// subdomain_middleware.go same-PR); otherwise pc.HasDedicatedDB
+		// stays false and the middleware no-ops.
+		r.With(sdkTenantPoolMw).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
+		r.With(sdkTenantPoolMw).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 
 		// Auth endpoints (only need API key, no end-user JWT).
+		// sdkTenantPoolMw stashes the runtime pool for Team-tier
+		// projects so the OAuth signin path's GetOAuthClientSecret
+		// (via endUserAuthSvc.SetOAuthSecretLookup) → tenantSvc.
+		// GetOAuthClientSecret → vaultSvc.GetRaw resolves against
+		// the dedicated instance's vault_secrets. Without this,
+		// OAuth login is broken for Team-tier end users.
 		r.Route("/auth", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
+			r.Use(sdkTenantPoolMw)
 			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc, limiter))
 			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc, limiter))
 			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc, limiter))
@@ -1102,9 +1187,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		}
 
 		// Vault routes (API key authenticated, secret key only).
+		// sdkTenantPoolMw stashes the runtime pool for Team-tier so
+		// VaultService.tenantPool routes to the dedicated instance —
+		// post-PR-A #378 vault_secrets doesn't exist on shared for
+		// Team-tier.
 		if vaultSvc != nil && vaultSvc.Configured() {
 			r.Route("/vault", func(r chi.Router) {
 				r.Use(apiKeyMw.Handler)
+				r.Use(sdkTenantPoolMw)
 				r.Get("/", vault.HandleSDKList(vaultSvc))
 				r.Get("/{name}", vault.HandleSDKGet(vaultSvc))
 				r.Post("/", vault.HandleSDKSet(vaultSvc, pool))
