@@ -351,11 +351,23 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 	}
 	defer tx.Rollback(ctx)
 
-	// Service role: tenant RLS policies evaluate empty end_user_id and
-	// would filter these queries out. Pre-auth refresh has no end-user
-	// context yet; see migration 000038.
+	// Two GUCs — must mirror db.RunAsAuthService, NOT the plain
+	// service-role wrapper:
+	//   * app.end_user_role='service' — RLS service bypass on the
+	//     tenant tables that key on user identity (000038).
+	//   * app.intent='internal_auth_path' — the ONLY predicate on
+	//     refresh_tokens / email_tokens / vault_secrets since
+	//     migration 000055 narrowed those policies for #164. The
+	//     dedicated instance uses the same policy shape (see
+	//     dedicated_bootstrap.sql). Without this GUC the UPDATE
+	//     below RLS-filters to zero rows and RefreshToken returns
+	//     a misleading "invalid or expired refresh token" — verified
+	//     by reviewer on a live PG16.
 	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
 		return nil, fmt.Errorf("set service role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.intent', 'internal_auth_path', true)"); err != nil {
+		return nil, fmt.Errorf("set internal_auth_path intent: %w", err)
 	}
 
 	// Find and revoke the old refresh token.
