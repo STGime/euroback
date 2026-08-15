@@ -1,7 +1,8 @@
 <script lang="ts">
 	// Per-project billing: current plan, upgrade CTA, cancel
 	// button, invoices scoped to this project. Deep-linked from
-	// usage-alert emails and the paused-project wake screen.
+	// LegacyProModal.svelte via `?plan=pro` (grepped — no other
+	// producer today).
 	import { page } from '$app/stores';
 	import { api, type BillingConfig, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
 	import { onMount } from 'svelte';
@@ -36,7 +37,11 @@
 	//   2. `billingConfig === null` (probe unresolved OR failed)
 	//      disables the Upgrade CTA — an unknown mode is exactly
 	//      when we least want a one-click path to a payment page.
-	let billingConfig: BillingConfig | null = $state(null);
+	// $state<T | null>(null) form, not `: T | null = $state(null)`:
+	// the annotation-on-variable form makes Svelte's language
+	// service infer `never` after `!== null` narrowing, silently
+	// disabling type-check on the property access below.
+	let billingConfig = $state<BillingConfig | null>(null);
 
 	// Auto-open Pro checkout if arrived via ?plan=pro (deep
 	// link from the legacy-Pro modal).
