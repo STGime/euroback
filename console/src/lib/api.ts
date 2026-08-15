@@ -661,15 +661,33 @@ export class EurobaseAPI {
 
 	// ---- Billing (PR 3–7 of the billing stack) ----
 
+	// Cached per-process (the singleton `api` below). Gateway
+	// config only changes on redeploy, so callers on the same page
+	// load — banner + modal + billing page — can share one request.
+	// Failed probes clear the cache so the next call retries.
+	private _billingConfigCache: Promise<BillingConfig> | null = null;
+
 	/**
 	 * Feature-flag + environment probe. The console reads this on
 	 * billing surfaces to decide whether to show the "test mode —
-	 * no card is charged" banner. Never 503s: returns
-	 * {enabled: false, mode: ""} when billing is disabled so the
-	 * caller can still branch on `enabled` to hide upgrade CTAs.
+	 * no card is charged" banner AND whether to enable the Upgrade
+	 * CTA at all (see PR review: an unknown mode is when we least
+	 * want a one-click path to a payment page). Never 503s from the
+	 * gateway: returns {enabled: false, mode: ""} when billing is
+	 * disabled so the caller can still branch on `enabled` to hide
+	 * CTAs. The `''` arm of `mode` is the failed-probe fallback —
+	 * do not "simplify" it away.
 	 */
-	async getBillingConfig(): Promise<{ enabled: boolean; mode: 'test' | 'live' | '' }> {
-		return this.fetch('/platform/billing/config');
+	async getBillingConfig(): Promise<BillingConfig> {
+		if (!this._billingConfigCache) {
+			this._billingConfigCache = this.fetch<BillingConfig>('/platform/billing/config').catch((err) => {
+				// Clear on failure so the next caller can retry
+				// instead of inheriting the rejected promise.
+				this._billingConfigCache = null;
+				throw err;
+			});
+		}
+		return this._billingConfigCache;
 	}
 
 	/**
@@ -2508,6 +2526,16 @@ export interface FunctionMetrics {
 	avg_duration_ms: number;
 	p95_duration_ms: number;
 	period: string;
+}
+
+/** Feature-flag + environment probe returned by
+ * GET /platform/billing/config. `mode` is `'test'` or `'live'` when
+ * the gateway is reachable; `''` is a client-side sentinel for a
+ * failed probe (see api.getBillingConfig()) — treat it as "unknown,
+ * do not offer one-click checkout". */
+export interface BillingConfig {
+	enabled: boolean;
+	mode: 'test' | 'live' | '';
 }
 
 /** Live subscription for a project, returned by

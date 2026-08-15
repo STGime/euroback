@@ -3,7 +3,7 @@
 	// button, invoices scoped to this project. Deep-linked from
 	// usage-alert emails and the paused-project wake screen.
 	import { page } from '$app/stores';
-	import { api, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
+	import { api, type BillingConfig, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import CancelSubscriptionModal from '$lib/CancelSubscriptionModal.svelte';
 	import BillingTestModeBanner from '$lib/BillingTestModeBanner.svelte';
@@ -27,26 +27,52 @@
 	let checkoutInFlight = $state(false);
 	let checkoutError: string | null = $state(null);
 
+	// Billing config probe. Two roles:
+	//   1. `mode === 'test'` skips auto-start on ?plan=pro so the
+	//      user has to click Upgrade *after* seeing the yellow
+	//      BillingTestModeBanner. Without this, the LegacyProModal
+	//      goto to `?plan=pro` would redirect to Mollie before the
+	//      banner's own fetch completes (PR #398 review).
+	//   2. `billingConfig === null` (probe unresolved OR failed)
+	//      disables the Upgrade CTA — an unknown mode is exactly
+	//      when we least want a one-click path to a payment page.
+	let billingConfig: BillingConfig | null = $state(null);
+
 	// Auto-open Pro checkout if arrived via ?plan=pro (deep
-	// link from usage-alert emails, paused-project wake screen,
-	// legacy-Pro modal). Handled on mount after project loads.
+	// link from the legacy-Pro modal).
 	let autoStart = $derived($page.url.searchParams.get('plan') === 'pro');
 	let successBanner = $derived($page.url.searchParams.get('status') === 'success');
+
+	// Gate the Upgrade CTA on a resolved probe. Failed probe →
+	// button disabled; the user can retry by refreshing.
+	let checkoutReady = $derived(billingConfig !== null && billingConfig.enabled);
 
 	onMount(async () => {
 		loading = true;
 		try {
-			project = await api.getProject(projectId);
-			const [list, sub] = await Promise.all([
+			// Fetch config in parallel with the rest — its result
+			// gates auto-start below, so we must await it before
+			// deciding whether to redirect.
+			const [proj, list, sub, cfg] = await Promise.all([
+				api.getProject(projectId),
 				api.listInvoices(),
-				api.getProjectSubscription(projectId)
+				api.getProjectSubscription(projectId),
+				api.getBillingConfig().catch(() => null)
 			]);
+			project = proj;
 			invoices = list.invoices.filter((i) => i.project_id === projectId);
 			subscription = sub;
-			// Kick off checkout if the URL asked and the project
-			// is Pro-eligible (still on Free OR the legacy-Pro
-			// pending-payment case).
-			if (autoStart && project && needsPayment(project)) {
+			billingConfig = cfg;
+			// Auto-start only in live mode. In test mode (or when
+			// the probe failed) the user must click through the
+			// banner deliberately.
+			if (
+				autoStart &&
+				project &&
+				needsPayment(project) &&
+				cfg?.enabled &&
+				cfg?.mode === 'live'
+			) {
 				await startCheckout();
 			}
 		} catch (err) {
@@ -205,7 +231,8 @@
 						<button
 							type="button"
 							onclick={startCheckout}
-							disabled={checkoutInFlight}
+							disabled={checkoutInFlight || !checkoutReady}
+							title={!checkoutReady ? 'Payments unavailable — please refresh' : undefined}
 							class="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
 						>
 							{checkoutInFlight ? 'Redirecting…' : 'Add payment (€19/mo)'}
@@ -214,7 +241,8 @@
 						<button
 							type="button"
 							onclick={startCheckout}
-							disabled={checkoutInFlight}
+							disabled={checkoutInFlight || !checkoutReady}
+							title={!checkoutReady ? 'Payments unavailable — please refresh' : undefined}
 							class="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
 						>
 							{checkoutInFlight ? 'Redirecting…' : 'Upgrade to Pro'}
