@@ -189,21 +189,21 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		// the caller's own tenant schema are still allowed (that's the
 		// whole point of the endpoint).
 		//
-		// SDK path: strict — zero exemptions. Platform path: uses the
-		// PlatformSQLPublicAllowlist so documented RLS/id-default
-		// helpers stay usable. See the allowlist's doc comment for
-		// the rationale on why it differs from the migrations path's
-		// exemption list.
-		var validateErr error
+		// SDK path uses SDKPublicAllowlist (id-default helpers only —
+		// no RLS helpers, SDK doesn't author policies). Platform path
+		// uses PlatformSQLPublicAllowlist (adds the RLS helpers).
+		// Both allowlists deliberately exclude Eurobase-owned table
+		// names so cross-tenant table reads stay blocked. See the
+		// allowlist doc comments in cross_schema.go for the full
+		// rationale.
+		allowlist := PlatformSQLPublicAllowlist
 		if forceReadOnly {
-			validateErr = ValidateNoCrossSchemaRefs(req.SQL, schema)
-		} else {
-			validateErr = ValidateNoCrossSchemaRefsOpts(req.SQL, schema, CrossSchemaOptions{
-				AllowedPublicNames: PlatformSQLPublicAllowlist,
-			})
+			allowlist = SDKPublicAllowlist
 		}
-		if validateErr != nil {
-			jsonError(w, validateErr.Error(), http.StatusBadRequest)
+		if err := ValidateNoCrossSchemaRefsOpts(req.SQL, schema, CrossSchemaOptions{
+			AllowedPublicNames: allowlist,
+		}); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -236,7 +236,15 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		}
 
 		start := time.Now()
-		columns, rows, err := engine.ExecuteSQL(r.Context(), schema, req.SQL, maxRows, readOnly)
+		// forceReadOnly is the SDK-path discriminator, not the
+		// effective readOnly (which is also true when platform-path
+		// MCP opts into read-only). Narrowing search_path on the
+		// platform path would break migrator queries that reference
+		// RLS helpers via `public.*`.
+		columns, rows, err := engine.ExecuteSQLWithOpts(r.Context(), schema, req.SQL, maxRows, ExecOptions{
+			ReadOnly: readOnly,
+			SDKPath:  forceReadOnly,
+		})
 		elapsed := time.Since(start)
 
 		if err != nil {

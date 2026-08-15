@@ -135,6 +135,43 @@ func TestValidateNoCrossSchemaRefsOpts_PlatformAllowlistStillBlocksTables(t *tes
 	}
 }
 
+// SDKPublicAllowlist is strictly smaller than PlatformSQLPublicAllowlist:
+// the SDK path can call the id-default helpers qualified (needed once
+// the SDK path's search_path drops the `, public` fallback), but MUST
+// NOT be able to reference the RLS helpers — the SDK is a data-plane
+// endpoint, not a policy-authoring one, and any `public.<helper>`
+// reference in an SDK query is either a bug or an exfiltration attempt.
+func TestValidateNoCrossSchemaRefsOpts_SDKAllowlistAcceptsIdDefaultsOnly(t *testing.T) {
+	allowed := "tenant_abc"
+	opts := CrossSchemaOptions{AllowedPublicNames: SDKPublicAllowlist}
+
+	// Accepted — id-default helpers only.
+	for _, sql := range []string{
+		"INSERT INTO t (id) VALUES (public.uuid_generate_v4())",
+		"INSERT INTO t (id) VALUES (public.gen_random_uuid())",
+	} {
+		if err := ValidateNoCrossSchemaRefsOpts(sql, allowed, opts); err != nil {
+			t.Errorf("SDK path should allow %q, got %v", sql, err)
+		}
+	}
+
+	// Rejected — RLS helpers not on the SDK list even though they
+	// are on the platform list. Also rejected: every other
+	// cross-tenant table read that was blocked before.
+	for _, sql := range []string{
+		"SELECT public.is_service_role()",
+		"SELECT public.current_end_user_id()",
+		"SELECT public.is_internal_auth_path()",
+		"SELECT * FROM public.subscriptions",
+		"SELECT * FROM public.platform_users",
+		"SELECT * FROM tenant_other.users",
+	} {
+		if err := ValidateNoCrossSchemaRefsOpts(sql, allowed, opts); err == nil {
+			t.Errorf("SDK path should reject %q, got nil", sql)
+		}
+	}
+}
+
 // Nil / empty AllowedPublicNames must behave exactly like the strict
 // zero-arg ValidateNoCrossSchemaRefs — no exemptions, everything under
 // public rejected. Prevents a future refactor from silently opening

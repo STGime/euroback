@@ -143,6 +143,30 @@ var PlatformSQLPublicAllowlist = map[string]bool{
 	"gen_random_uuid":       true,
 }
 
+// SDKPublicAllowlist is the set of `public.<name>` references permitted
+// on the SDK data-plane SQL endpoint (POST /v1/db/sql). Strictly smaller
+// than PlatformSQLPublicAllowlist — the SDK path does not author RLS
+// policies (that's DDL, on a separate endpoint), so the RLS helpers
+// (is_service_role / current_end_user_id / is_internal_auth_path) are
+// not on this list.
+//
+// The two id-default helpers stay because the SDK path's search_path
+// is now narrowed to the caller's tenant schema only (drops the
+// `, public` fallback in ExecuteSQLWithOpts). Without this allowlist an
+// SDK caller who wrote `SELECT public.uuid_generate_v4()` explicitly
+// would hit ValidateNoCrossSchemaRefs. `gen_random_uuid` is functionally
+// a no-op here (it lives in pg_catalog and resolves without search_path
+// help) but is included for symmetry with the platform list.
+//
+// Same table-safety rationale as the platform list: names on this
+// allowlist must never collide with Eurobase-owned table names.
+// `subscriptions`, `invoices`, `platform_users`, `webhooks`, `projects`
+// stay blocked.
+var SDKPublicAllowlist = map[string]bool{
+	"uuid_generate_v4": true,
+	"gen_random_uuid":  true,
+}
+
 // schemaIsForbidden returns true for schema names that an SDK caller has
 // no legitimate reason to reach. The list is conservative: anything not
 // the caller's own schema or pg_temp is suspect, but we explicitly reject
