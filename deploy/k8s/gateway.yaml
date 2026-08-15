@@ -110,6 +110,17 @@ spec:
             # shared pool → zero behaviour change.
             - name: TEAM_TIER_ROUTING
               value: "1"
+            # Billing (Mollie) — enabled in test mode during closed
+            # beta so we can run real end-to-end payment tests in
+            # prod without a staging cluster. MOLLIE_API_KEY_TEST is
+            # supplied via the eurobase-secrets Secret (envFrom
+            # above). Flip MOLLIE_ENV to "live" and swap in
+            # MOLLIE_API_KEY_LIVE on the launch PR — see CLAUDE.md
+            # "Mollie billing" section.
+            - name: BILLING_ENABLED
+              value: "true"
+            - name: MOLLIE_ENV
+              value: "test"
       imagePullSecrets:
         - name: scw-registry
 ---

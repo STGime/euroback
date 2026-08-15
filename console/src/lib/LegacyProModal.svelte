@@ -10,8 +10,23 @@
 	// this cohort needs the nudge.
 	import { goto } from '$app/navigation';
 	import { api, type Project } from '$lib/api.js';
+	import { onMount } from 'svelte';
 
 	let { project }: { project: Project } = $props();
+
+	// Mirror the test-mode signal from BillingTestModeBanner: while
+	// MOLLIE_ENV=test, prepend a warning line to the modal so a
+	// legacy-Pro user doesn't complete a rehearsal payment thinking
+	// it's real. Silent when live or when the probe fails.
+	let billingMode: 'test' | 'live' | '' = $state('');
+	onMount(async () => {
+		try {
+			const cfg = await api.getBillingConfig();
+			billingMode = cfg.enabled ? cfg.mode : '';
+		} catch {
+			// swallow — hides the warning, safer than crashing the modal
+		}
+	});
 
 	// Dismiss state — per-project so a user with two legacy-Pro
 	// projects can silence one and still see the other. $derived
@@ -86,6 +101,11 @@
 				</h2>
 			</div>
 			<div class="px-6 py-5">
+				{#if billingMode === 'test'}
+					<p class="mb-4 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs font-medium text-yellow-900">
+						⚠ Test mode — no card is charged. We're validating the payment flow before opening real billing.
+					</p>
+				{/if}
 				<p class="text-sm text-gray-700">
 					Your Pro project <strong>{project.name}</strong> was created during
 					closed beta, when Pro was free. Public beta opens billing today —

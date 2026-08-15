@@ -106,6 +106,12 @@ type Config struct {
 	// requires an HTTPS URL reachable from the public internet.
 	// Example: "https://api.eurobase.app".
 	WebhookBaseURL string
+
+	// Mode is the Mollie environment string surfaced to the
+	// console via GET /platform/billing/config so it can render
+	// a "test mode — no card is charged" banner. Populated from
+	// MOLLIE_ENV in cmd/gateway/main.go; "test" or "live".
+	Mode string
 }
 
 // NewService constructs the billing service. `enabled=false` makes
@@ -144,6 +150,13 @@ func (s *Service) incFailureMetric(resource string) {
 // work. Exported so the router can register or hide routes at
 // startup depending on the flag.
 func (s *Service) Enabled() bool { return s.enabled }
+
+// Mode reports the Mollie environment ("test" or "live"). Used by
+// the console via GET /platform/billing/config to decide whether to
+// render the "no card is charged" banner. Empty string when Config
+// wasn't populated — the console treats that as unknown and hides
+// the banner (fail-safe: never claim test mode when we don't know).
+func (s *Service) Mode() string { return s.config.Mode }
 
 // CheckoutResult carries the outbound values the handler needs to
 // serialise back to the console. CheckoutURL is what the console
