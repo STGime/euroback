@@ -2,6 +2,7 @@ package query
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -111,6 +112,25 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 			return
 		}
 
+		// Same rationale as the single-statement handler: run the
+		// cross-schema validator on the platform path too, so a
+		// migrator-owned qualified reference to public.* or another
+		// tenant's schema can't slip through. Validate every statement
+		// up-front — a rejection on statement 3 shouldn't leave
+		// statements 1 and 2 committed.
+		//
+		// Uses the exemption-aware variant so RLS policy helpers
+		// (public.is_service_role() etc.) and id-default helpers
+		// (public.uuid_generate_v4()) stay usable — the console docs
+		// and Table Editor actively generate those references.
+		platformOpts := CrossSchemaOptions{AllowedPublicNames: PlatformSQLPublicAllowlist}
+		for i, stmt := range req.Statements {
+			if err := ValidateNoCrossSchemaRefsOpts(stmt, schema, platformOpts); err != nil {
+				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
+				return
+			}
+		}
+
 		start := time.Now()
 		results, err := engine.ExecuteSQLTransaction(r.Context(), schema, req.Statements, req.Limit, req.ReadOnly)
 		elapsed := time.Since(start)
@@ -156,19 +176,41 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		// a prompt-injected query cannot mutate state.
 		readOnly := forceReadOnly || req.ReadOnly
 
+		// Cross-schema validation runs on BOTH paths. Originally only
+		// the SDK (forceReadOnly=true) branch ran this check; the
+		// platform path skipped it, but the platform path runs as
+		// eurobase_migrator (owner of every schema) with no RLS on
+		// public.*, so a qualified reference like
+		// `SELECT * FROM tenant_<other>.users` or
+		// `SELECT * FROM public.subscriptions` from the console SQL
+		// endpoint would succeed. Moving the check outside the branch
+		// closes that: the more-privileged path should have at least
+		// as many guards as the less-privileged one. Qualified refs to
+		// the caller's own tenant schema are still allowed (that's the
+		// whole point of the endpoint).
+		//
+		// SDK path: strict — zero exemptions. Platform path: uses the
+		// PlatformSQLPublicAllowlist so documented RLS/id-default
+		// helpers stay usable. See the allowlist's doc comment for
+		// the rationale on why it differs from the migrations path's
+		// exemption list.
+		var validateErr error
 		if forceReadOnly {
-			// SDK: validate SELECT-only.
+			validateErr = ValidateNoCrossSchemaRefs(req.SQL, schema)
+		} else {
+			validateErr = ValidateNoCrossSchemaRefsOpts(req.SQL, schema, CrossSchemaOptions{
+				AllowedPublicNames: PlatformSQLPublicAllowlist,
+			})
+		}
+		if validateErr != nil {
+			jsonError(w, validateErr.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if forceReadOnly {
+			// SDK: validate SELECT-only. Platform path allows writes
+			// against the caller's own tenant schema.
 			if err := ValidateSelectOnly(req.SQL); err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			// Closes advisory GHSA-5cj5-c9f7-9gcj — without this check the
-			// gateway pool's broad cross-schema grants combined with the
-			// service-role RLS bypass let any caller with a secret API key
-			// read another tenant's data via fully-qualified `tenant_<other>.…`
-			// references. The check rejects qualified references to any
-			// schema other than the caller's tenant schema (and pg_temp).
-			if err := ValidateNoCrossSchemaRefs(req.SQL, schema); err != nil {
 				jsonError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
