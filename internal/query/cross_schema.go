@@ -121,6 +121,15 @@ func ValidateNoCrossSchemaRefsOpts(sql, allowedSchema string, opts CrossSchemaOp
 // Those stay blocked so the exemption can't be used to smuggle a
 // cross-tenant table read past the check.
 //
+// Qualified references to `public` extension **types** (e.g.
+// `col::public.citext`, `col::public.vector`) are also NOT exempted
+// and stay rejected — the check is textual, so any exemption would
+// have to be by trailing name, which reopens the table hole (there's
+// no textual way to tell `public.citext` from `public.subscriptions`).
+// Workaround for users: drop the `public.` qualifier and let it
+// resolve via search_path (`::citext` works because public is in the
+// path).
+//
 // Migrations path (ValidateTenantMigrationSQL in tenant_migrations.go)
 // has its own overlapping list — it excludes uuid_generate_v4 because
 // the per-tenant _ddl role lacks EXECUTE on it; the platform path runs
