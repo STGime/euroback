@@ -563,6 +563,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				} else {
 					r.Use(platformAuth.Handler)
 				}
+				r.Get("/config", billing.HandleGetConfig(billingSvc))
 				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
 				r.Get("/invoices", billing.HandleListInvoices(billingSvc))
 				r.Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))

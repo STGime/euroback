@@ -107,6 +107,34 @@ func HandleCreateCheckout(svc *Service) http.HandlerFunc {
 	}
 }
 
+// configResponse is the JSON body of GET /platform/billing/config.
+// The console reads this once on billing-page mount to decide
+// whether to render the "test mode — no card is charged" banner.
+type configResponse struct {
+	Enabled bool   `json:"enabled"`
+	Mode    string `json:"mode"`
+}
+
+// HandleGetConfig is GET /platform/billing/config. Returns the
+// current billing feature-flag state and Mollie environment so the
+// console can render a test-mode banner on billing surfaces. Kept
+// deliberately shallow — no secrets, no per-user state — so it's
+// cheap to hit on every billing-page mount.
+//
+// Unlike the other billing handlers, this one does NOT 503 when
+// billing is disabled — the console needs to know that fact to
+// decide whether to show the upgrade button at all. Returns
+// {"enabled": false, "mode": ""} when off.
+func HandleGetConfig(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(configResponse{
+			Enabled: svc.Enabled(),
+			Mode:    svc.Mode(),
+		})
+	}
+}
+
 // writeJSONError emits the platform's standard error envelope.
 // Non-500 responses omit the request ID (the user-facing error is
 // already actionable — "invalid_plan", "already_subscribed"); 500

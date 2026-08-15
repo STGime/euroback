@@ -6,6 +6,7 @@
 	import { api, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import CancelSubscriptionModal from '$lib/CancelSubscriptionModal.svelte';
+	import BillingTestModeBanner from '$lib/BillingTestModeBanner.svelte';
 
 	let projectId = $derived($page.params.id as string);
 
@@ -141,6 +142,8 @@
 			{project?.name ?? 'Loading…'}
 		</p>
 	</div>
+
+	<BillingTestModeBanner />
 
 	{#if successBanner}
 		<div class="mb-6 rounded-md border border-green-200 bg-green-50 p-4">

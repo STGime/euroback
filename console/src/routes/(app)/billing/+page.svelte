@@ -5,6 +5,7 @@
 	// accountant's view.
 	import { api, type Invoice, type Project } from '$lib/api.js';
 	import { onMount } from 'svelte';
+	import BillingTestModeBanner from '$lib/BillingTestModeBanner.svelte';
 
 	let invoices: Invoice[] = $state([]);
 	let projects: Project[] = $state([]);
@@ -81,6 +82,8 @@
 			billing tab.
 		</p>
 	</div>
+
+	<BillingTestModeBanner />
 
 	<!-- At-a-glance stats -->
 	<div class="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">

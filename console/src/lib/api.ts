@@ -662,6 +662,17 @@ export class EurobaseAPI {
 	// ---- Billing (PR 3–7 of the billing stack) ----
 
 	/**
+	 * Feature-flag + environment probe. The console reads this on
+	 * billing surfaces to decide whether to show the "test mode —
+	 * no card is charged" banner. Never 503s: returns
+	 * {enabled: false, mode: ""} when billing is disabled so the
+	 * caller can still branch on `enabled` to hide upgrade CTAs.
+	 */
+	async getBillingConfig(): Promise<{ enabled: boolean; mode: 'test' | 'live' | '' }> {
+		return this.fetch('/platform/billing/config');
+	}
+
+	/**
 	 * Start a Mollie checkout for a project. Returns the Mollie
 	 * checkout URL — the console should redirect the browser to
 	 * it. Backend returns 409 already_subscribed if a live sub
