@@ -762,14 +762,21 @@ export class EurobaseAPI {
 	 * rawFetch rather than parsing error strings.
 	 */
 	async getProjectSubscription(projectId: string): Promise<ProjectSubscription | null> {
-		const res = await this.rawFetch(`/platform/billing/projects/${projectId}/subscription`);
-		if (res.status === 404) return null;
-		if (res.status === 503) return null; // billing not enabled → same UX as "no subscription"
-		if (!res.ok) {
-			const body = await res.text();
-			throw new APIError(res.status, body || res.statusText);
+		// rawFetch throws APIError on every non-2xx (including 404),
+		// so the previous "check res.status === 404" branch was
+		// unreachable — every Free-tier user's billing page saw a
+		// red "Subscription_not_found" banner instead of the upgrade
+		// UI. Catch the APIError and branch on .status here.
+		try {
+			return await this.fetch<ProjectSubscription>(`/platform/billing/projects/${projectId}/subscription`);
+		} catch (err) {
+			if (err instanceof APIError && (err.status === 404 || err.status === 503)) {
+				// 404 = no live subscription (Free tier)
+				// 503 = billing feature-flagged off — treat as no subscription
+				return null;
+			}
+			throw err;
 		}
-		return (await res.json()) as ProjectSubscription;
 	}
 
 	/** List all projects (tenants) for the authenticated user. */
