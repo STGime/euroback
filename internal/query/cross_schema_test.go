@@ -145,10 +145,13 @@ func TestValidateNoCrossSchemaRefsOpts_SDKAllowlistAcceptsIdDefaultsOnly(t *test
 	allowed := "tenant_abc"
 	opts := CrossSchemaOptions{AllowedPublicNames: SDKPublicAllowlist}
 
-	// Accepted — id-default helpers only.
+	// Accepted — id-default helpers only. SDK endpoint is SELECT-only
+	// (ValidateSelectOnly runs first, before this validator), so the
+	// exemption only actually bites inside SELECT statements — kept
+	// the test cases realistic to what the endpoint accepts.
 	for _, sql := range []string{
-		"INSERT INTO t (id) VALUES (public.uuid_generate_v4())",
-		"INSERT INTO t (id) VALUES (public.gen_random_uuid())",
+		"SELECT public.uuid_generate_v4()",
+		"SELECT public.gen_random_uuid()",
 	} {
 		if err := ValidateNoCrossSchemaRefsOpts(sql, allowed, opts); err != nil {
 			t.Errorf("SDK path should allow %q, got %v", sql, err)
