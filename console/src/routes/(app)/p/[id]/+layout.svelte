@@ -151,6 +151,7 @@
 		{ label: 'Functions', href: '/functions', icon: 'functions' },
 		{ label: 'Cron & RPC', href: '/cron', icon: 'cron' },
 		{ label: 'Compliance', href: '/compliance', icon: 'compliance' },
+		{ label: 'Billing', href: '/billing', icon: 'billing' },
 		{ label: 'Settings', href: '/settings', icon: 'settings' }
 	];
 
