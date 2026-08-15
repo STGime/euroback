@@ -707,9 +707,20 @@ export class EurobaseAPI {
 		});
 	}
 
-	/** List every invoice for every project the caller owns. */
+	/** List every invoice for every project the caller owns.
+	 *  Returns `{ invoices: [] }` when billing is off (503) —
+	 *  matches the getProjectSubscription 503-null convention so
+	 *  that a page rendering both in one Promise.all can't be
+	 *  blanked by a single degraded endpoint (PR #400 review). */
 	async listInvoices(): Promise<{ invoices: Invoice[] }> {
-		return this.fetch('/platform/billing/invoices');
+		try {
+			return await this.fetch<{ invoices: Invoice[] }>('/platform/billing/invoices');
+		} catch (err) {
+			if (err instanceof APIError && err.status === 503) {
+				return { invoices: [] };
+			}
+			throw err;
+		}
 	}
 
 	/**
@@ -752,24 +763,34 @@ export class EurobaseAPI {
 	 * the per-project billing page can render "Pro until <date>"
 	 * and the cancel modal knows what to POST against.
 	 *
-	 * PR 8 review fix: the previous implementation matched on
-	 * `err.message.includes('subscription_not_found')`. That was
-	 * broken twice over — parseAPIError's regex was capturing
-	 * the wrong span AND the capitalize step made the substring
-	 * check case-mismatch. Result: every Free-tier user visiting
-	 * /billing saw a red error banner instead of an "Upgrade to
-	 * Pro" prompt. Fixed by branching on HTTP status directly via
-	 * rawFetch rather than parsing error strings.
+	 * Regression history — read before "simplifying":
+	 *   1. Original implementation regex-matched
+	 *      `err.message.includes('subscription_not_found')`, broken
+	 *      by parseAPIError's capitalize step.
+	 *   2. "Fixed" by checking `res.status` after `rawFetch`, but
+	 *      rawFetch throws on any non-2xx BEFORE that check can
+	 *      run — so the status branch was dead code and Free-tier
+	 *      users saw the red error card again (PR #400).
+	 *   3. Current shape: use `fetch<T>()`, catch APIError, branch
+	 *      on `.status`. 404 (no live sub) and 503 (billing off)
+	 *      both return null; 500 still propagates.
 	 */
 	async getProjectSubscription(projectId: string): Promise<ProjectSubscription | null> {
-		const res = await this.rawFetch(`/platform/billing/projects/${projectId}/subscription`);
-		if (res.status === 404) return null;
-		if (res.status === 503) return null; // billing not enabled → same UX as "no subscription"
-		if (!res.ok) {
-			const body = await res.text();
-			throw new APIError(res.status, body || res.statusText);
+		// rawFetch throws APIError on every non-2xx (including 404),
+		// so the previous "check res.status === 404" branch was
+		// unreachable — every Free-tier user's billing page saw a
+		// red "Subscription_not_found" banner instead of the upgrade
+		// UI. Catch the APIError and branch on .status here.
+		try {
+			return await this.fetch<ProjectSubscription>(`/platform/billing/projects/${projectId}/subscription`);
+		} catch (err) {
+			if (err instanceof APIError && (err.status === 404 || err.status === 503)) {
+				// 404 = no live subscription (Free tier)
+				// 503 = billing feature-flagged off — treat as no subscription
+				return null;
+			}
+			throw err;
 		}
-		return (await res.json()) as ProjectSubscription;
 	}
 
 	/** List all projects (tenants) for the authenticated user. */
