@@ -664,10 +664,31 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 	return result, nil
 }
 
+// ExecOptions tunes ExecuteSQLWithOpts. Zero value matches the legacy
+// ExecuteSQL(readOnly=false) behaviour (search_path includes public,
+// read-write). Set SDKPath=true on the /v1/db/sql SDK endpoint only —
+// it drops the `public` fallback from search_path so unqualified
+// references can't resolve into `public.*` when the tenant schema has
+// no matching name. Setting SDKPath on any other caller is likely to
+// break migrator queries that reference RLS helpers (public.is_*) or
+// extension functions.
+type ExecOptions struct {
+	ReadOnly bool
+	SDKPath  bool
+}
+
 // ExecuteSQL runs a raw SQL query within the tenant's schema context.
-// It uses a read-only transaction with search_path and statement_timeout.
+// Backward-compatible legacy signature — new callers should use
+// ExecuteSQLWithOpts.
 func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string, maxRows int, readOnly ...bool) ([]string, []map[string]interface{}, error) {
 	isReadOnly := len(readOnly) > 0 && readOnly[0]
+	return e.ExecuteSQLWithOpts(ctx, schemaName, rawSQL, maxRows, ExecOptions{ReadOnly: isReadOnly})
+}
+
+// ExecuteSQLWithOpts is the options-taking form of ExecuteSQL. Prefer
+// this over the legacy variadic ExecuteSQL when the caller has extra
+// context (SDK vs platform path). See ExecOptions for the semantics.
+func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL string, maxRows int, opts ExecOptions) ([]string, []map[string]interface{}, error) {
 	// Strip trailing semicolon so the query can be wrapped in a subquery.
 	rawSQL = strings.TrimSpace(rawSQL)
 	rawSQL = strings.TrimRight(rawSQL, ";")
@@ -687,7 +708,7 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 	defer tx.Rollback(ctx) //nolint:errcheck // read-only tx, rollback is fine
 
 	// Set transaction to read-only for SDK queries.
-	if isReadOnly {
+	if opts.ReadOnly {
 		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
 			return nil, nil, fmt.Errorf("set read only: %w", err)
 		}
@@ -699,8 +720,18 @@ func (e *QueryEngine) ExecuteSQL(ctx context.Context, schemaName, rawSQL string,
 		return nil, nil, err
 	}
 
-	// Isolate to tenant schema.
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+	// Isolate to tenant schema. SDK path drops the `, public` fallback
+	// so unqualified references can't resolve into `public.*` when the
+	// tenant schema has no matching name — closes the vector where
+	// `SELECT * FROM subscriptions` from a tenant's SDK caller would
+	// land on `public.subscriptions`. Platform path keeps `, public`
+	// because migrator queries legitimately reference RLS helpers and
+	// extension functions there.
+	searchPath := quoteIdent(schemaName)
+	if !opts.SDKPath {
+		searchPath += ", public"
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+searchPath); err != nil {
 		return nil, nil, fmt.Errorf("set search_path: %w", err)
 	}
 
