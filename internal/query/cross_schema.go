@@ -5,9 +5,33 @@ import (
 	"strings"
 )
 
+// CrossSchemaOptions tunes the strict cross-schema check for callers
+// whose privilege context allows a small allowlist of qualified
+// `public.<name>` references.
+//
+// AllowedPublicNames is a set of lowercase identifiers that, when they
+// appear immediately after `public.`, are treated as legitimate and
+// skipped by the forbidden-schema scan. Used by the platform SQL path
+// (which runs as migrator and has EXECUTE on RLS helpers like
+// `public.is_service_role()` and id-default helpers like
+// `public.uuid_generate_v4()`).
+//
+// The check is textual, not typed — an entry in AllowedPublicNames
+// exempts any `public.<name>` reference regardless of whether the
+// reference is actually a function call, a type cast, or a table read.
+// Names should therefore be chosen from Eurobase-controlled identifiers
+// that are not also table names. `public.subscriptions` and other
+// billing/tenant tables stay rejected because their names are not in
+// this list.
+type CrossSchemaOptions struct {
+	AllowedPublicNames map[string]bool
+}
+
 // ValidateNoCrossSchemaRefs returns an error if the SQL contains a
 // qualified reference (`schema.relation`) where the schema is not the
-// caller's tenant schema and is not `pg_temp`.
+// caller's tenant schema and is not `pg_temp`. Zero-exemption variant —
+// use ValidateNoCrossSchemaRefsOpts to allowlist specific
+// `public.<name>` references.
 //
 // Closes advisory GHSA-5cj5-c9f7-9gcj — without this check the gateway
 // pool's broad cross-schema grants combined with the service-role RLS
@@ -38,6 +62,13 @@ import (
 // engine, the per-tenant role split planned for a follow-up PR, and the
 // existing `is_service_role()` policy bypass for secret-key callers.
 func ValidateNoCrossSchemaRefs(sql, allowedSchema string) error {
+	return ValidateNoCrossSchemaRefsOpts(sql, allowedSchema, CrossSchemaOptions{})
+}
+
+// ValidateNoCrossSchemaRefsOpts is the exemption-aware variant. See
+// ValidateNoCrossSchemaRefs for the base behaviour and CrossSchemaOptions
+// for the allowlist semantics.
+func ValidateNoCrossSchemaRefsOpts(sql, allowedSchema string, opts CrossSchemaOptions) error {
 	allowed := strings.ToLower(allowedSchema)
 	idents := scanIdentifiersAndDots(sql)
 
@@ -57,11 +88,50 @@ func ValidateNoCrossSchemaRefs(sql, allowedSchema string) error {
 		if schema == allowed || schema == "pg_temp" {
 			continue
 		}
+		if schema == "public" && opts.AllowedPublicNames != nil {
+			trailing := strings.ToLower(idents[i+2].value)
+			if opts.AllowedPublicNames[trailing] {
+				continue
+			}
+		}
 		if schemaIsForbidden(schema) {
 			return fmt.Errorf("references to schema %q are not allowed (only the caller's tenant schema is in scope)", idents[i].value)
 		}
 	}
 	return nil
+}
+
+// PlatformSQLPublicAllowlist is the set of `public.<name>` references
+// permitted on the platform SQL endpoint (POST /platform/.../data/sql
+// and /data/sql/transaction). Kept as a single source of truth so the
+// endpoint's exemption stays in sync with what the console UI and docs
+// actively generate.
+//
+// Contents:
+//   - is_service_role, current_end_user_id, is_internal_auth_path — RLS
+//     policy helpers the console's docs page (rls-authoring) tells users
+//     to reference qualified as `public.is_service_role() OR
+//     public.current_end_user_id() = user_id`.
+//   - uuid_generate_v4, gen_random_uuid — id-default helpers the console
+//     Table Editor generates as `public.uuid_generate_v4()` for new
+//     table primary keys.
+//
+// Deliberately NOT included: names that could also be Eurobase-owned
+// tables (subscriptions, invoices, projects, platform_users, webhooks).
+// Those stay blocked so the exemption can't be used to smuggle a
+// cross-tenant table read past the check.
+//
+// Migrations path (ValidateTenantMigrationSQL in tenant_migrations.go)
+// has its own overlapping list — it excludes uuid_generate_v4 because
+// the per-tenant _ddl role lacks EXECUTE on it; the platform path runs
+// as migrator which does have EXECUTE. Do not simply merge the two
+// lists.
+var PlatformSQLPublicAllowlist = map[string]bool{
+	"is_service_role":       true,
+	"current_end_user_id":   true,
+	"is_internal_auth_path": true,
+	"uuid_generate_v4":      true,
+	"gen_random_uuid":       true,
 }
 
 // schemaIsForbidden returns true for schema names that an SDK caller has

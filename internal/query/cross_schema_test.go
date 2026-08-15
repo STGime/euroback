@@ -69,6 +69,86 @@ func TestValidateNoCrossSchemaRefs_RejectsForbiddenSchemas(t *testing.T) {
 	}
 }
 
+// The platform SQL path (POST /platform/.../data/sql and .../sql/transaction)
+// runs as eurobase_migrator, which has EXECUTE on RLS helper functions
+// (public.is_service_role() etc.) and on public.uuid_generate_v4(). The
+// console docs and Table Editor actively generate references qualified as
+// `public.<helper>` — the strict variant would reject those. The
+// PlatformSQLPublicAllowlist exempts specific well-known names while
+// keeping every other public.* reference blocked, so cross-tenant table
+// reads (public.subscriptions etc.) stay closed.
+func TestValidateNoCrossSchemaRefsOpts_PlatformAllowlistAcceptsDocumentedHelpers(t *testing.T) {
+	allowed := "tenant_abc"
+	opts := CrossSchemaOptions{AllowedPublicNames: PlatformSQLPublicAllowlist}
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{"is_service_role in RLS policy",
+			"CREATE POLICY p ON t USING (public.is_service_role() OR user_id = public.current_end_user_id())"},
+		{"is_internal_auth_path",
+			"CREATE POLICY p ON t USING (public.is_internal_auth_path())"},
+		{"uuid_generate_v4 as column default",
+			"ALTER TABLE t ALTER COLUMN id SET DEFAULT public.uuid_generate_v4()"},
+		{"gen_random_uuid qualified",
+			"INSERT INTO t (id) VALUES (public.gen_random_uuid())"},
+		{"mixed case helper name",
+			"SELECT public.Is_Service_Role()"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateNoCrossSchemaRefsOpts(tc.sql, allowed, opts); err != nil {
+				t.Errorf("ValidateNoCrossSchemaRefsOpts(%q) = %v, want nil (documented helper should be allowed)", tc.sql, err)
+			}
+		})
+	}
+}
+
+// The exemption is name-based and precisely scoped: any public.<name>
+// not in the allowlist must still be rejected, even when the allowlist
+// is populated. Guards against a future exemption-list bug that would
+// silently allow cross-tenant table reads.
+func TestValidateNoCrossSchemaRefsOpts_PlatformAllowlistStillBlocksTables(t *testing.T) {
+	allowed := "tenant_abc"
+	opts := CrossSchemaOptions{AllowedPublicNames: PlatformSQLPublicAllowlist}
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{"public.subscriptions blocked", "SELECT * FROM public.subscriptions"},
+		{"public.invoices blocked", "UPDATE public.invoices SET status = 'paid'"},
+		{"public.platform_users blocked", "SELECT email FROM public.platform_users"},
+		{"public.projects blocked", "SELECT * FROM public.projects"},
+		{"public.webhooks blocked", "SELECT * FROM public.webhooks"},
+		{"other tenant still blocked", "SELECT * FROM tenant_other.users"},
+		{"pg_catalog still blocked", "SELECT * FROM pg_catalog.pg_class"},
+		{"function name that clashes with a table stays blocked if not exempted",
+			"SELECT * FROM public.random_helper()"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateNoCrossSchemaRefsOpts(tc.sql, allowed, opts)
+			if err == nil {
+				t.Fatalf("ValidateNoCrossSchemaRefsOpts(%q) = nil, want error (should reject non-exempt public reference)", tc.sql)
+			}
+		})
+	}
+}
+
+// Nil / empty AllowedPublicNames must behave exactly like the strict
+// zero-arg ValidateNoCrossSchemaRefs — no exemptions, everything under
+// public rejected. Prevents a future refactor from silently opening
+// the SDK path (which passes zero opts).
+func TestValidateNoCrossSchemaRefsOpts_NilOptsMatchesStrict(t *testing.T) {
+	sql := "CREATE POLICY p ON t USING (public.is_service_role())"
+	if err := ValidateNoCrossSchemaRefs(sql, "tenant_abc"); err == nil {
+		t.Fatalf("strict variant should reject public.is_service_role() — no exemptions on the SDK path")
+	}
+	if err := ValidateNoCrossSchemaRefsOpts(sql, "tenant_abc", CrossSchemaOptions{}); err == nil {
+		t.Fatalf("Opts variant with nil allowlist should behave identically to strict")
+	}
+}
+
 func TestValidateNoCrossSchemaRefs_AllowedSchemaIsCaseInsensitive(t *testing.T) {
 	if err := ValidateNoCrossSchemaRefs("SELECT * FROM tenant_xyz.users", "TENANT_XYZ"); err != nil {
 		t.Errorf("case-insensitive match failed: %v", err)

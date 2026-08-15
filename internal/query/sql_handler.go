@@ -118,8 +118,14 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 		// tenant's schema can't slip through. Validate every statement
 		// up-front — a rejection on statement 3 shouldn't leave
 		// statements 1 and 2 committed.
+		//
+		// Uses the exemption-aware variant so RLS policy helpers
+		// (public.is_service_role() etc.) and id-default helpers
+		// (public.uuid_generate_v4()) stay usable — the console docs
+		// and Table Editor actively generate those references.
+		platformOpts := CrossSchemaOptions{AllowedPublicNames: PlatformSQLPublicAllowlist}
 		for i, stmt := range req.Statements {
-			if err := ValidateNoCrossSchemaRefs(stmt, schema); err != nil {
+			if err := ValidateNoCrossSchemaRefsOpts(stmt, schema, platformOpts); err != nil {
 				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
 				return
 			}
@@ -182,8 +188,22 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		// as many guards as the less-privileged one. Qualified refs to
 		// the caller's own tenant schema are still allowed (that's the
 		// whole point of the endpoint).
-		if err := ValidateNoCrossSchemaRefs(req.SQL, schema); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+		//
+		// SDK path: strict — zero exemptions. Platform path: uses the
+		// PlatformSQLPublicAllowlist so documented RLS/id-default
+		// helpers stay usable. See the allowlist's doc comment for
+		// the rationale on why it differs from the migrations path's
+		// exemption list.
+		var validateErr error
+		if forceReadOnly {
+			validateErr = ValidateNoCrossSchemaRefs(req.SQL, schema)
+		} else {
+			validateErr = ValidateNoCrossSchemaRefsOpts(req.SQL, schema, CrossSchemaOptions{
+				AllowedPublicNames: PlatformSQLPublicAllowlist,
+			})
+		}
+		if validateErr != nil {
+			jsonError(w, validateErr.Error(), http.StatusBadRequest)
 			return
 		}
 
