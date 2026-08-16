@@ -11,6 +11,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/billing/mollie"
+	"github.com/go-chi/chi/v5"
 )
 
 func TestCancelHandler_DisabledReturns503(t *testing.T) {
@@ -55,6 +56,47 @@ func TestCancelService_ModeValidation(t *testing.T) {
 	svc2 := NewService(nil, c, Config{}, true)
 	if _, err := svc2.CancelSubscription(context.Background(), "usr_1", "sub_1", CancelMode("moonshot")); !errors.Is(err, ErrInvalidPlan) {
 		t.Errorf("bad mode: want ErrInvalidPlan wrap, got %v", err)
+	}
+}
+
+// TestCancelHandler_ImmediateRejected verifies the policy guard
+// added 2026-08-16: `mode:"immediate"` is rejected with 400 at
+// the HTTP layer BEFORE the service call, regardless of the
+// service's own capability. Non-vacuous: without the guard the
+// enabled service would attempt to run the immediate path (and
+// nil-pool panic here), so a `w.Code == 400 && code ==
+// immediate_cancel_disabled` outcome proves the guard fired.
+//
+// Without this test a future refactor could quietly drop the
+// guard: the disabled-503 test short-circuits on Enabled() before
+// reaching it, and the service-level immediate tests bypass the
+// handler entirely — every existing check would stay green.
+func TestCancelHandler_ImmediateRejected(t *testing.T) {
+	c := mollie.NewClient(mollie.Config{APIKey: "test_x", Env: mollie.EnvTest})
+	svc := NewService(nil, c, Config{}, true) // enabled → guard is the only defense
+
+	req := httptest.NewRequest(http.MethodPost, "/platform/billing/subscriptions/sub_x/cancel", strings.NewReader(`{"mode":"immediate"}`))
+	// httptest doesn't wire chi route context, and the handler
+	// reads `id` via chi.URLParam before hitting the guard —
+	// without setup we'd 400 on missing_subscription_id and
+	// mask the real check.
+	rc := chi.NewRouteContext()
+	rc.URLParams.Add("id", "sub_x")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rc)
+	ctx = auth.ContextWithClaims(ctx, &auth.Claims{Subject: "usr_1"})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	HandleCancelSubscription(svc).ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 (guard blocks immediate), got %d", w.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["code"] != "immediate_cancel_disabled" {
+		t.Errorf("code = %q, want immediate_cancel_disabled (guard fired with wrong code)", body["code"])
 	}
 }
 
