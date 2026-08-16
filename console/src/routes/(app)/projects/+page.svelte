@@ -37,7 +37,18 @@
 	const PENDING_KEY = 'eurobase.pending_project_checkout';
 	let checkoutBanner = $state<{ kind: 'polling' | 'canceled' | 'failed' | 'error'; msg: string } | null>(null);
 
-	function readPendingIntent(): { pendingId: string; name: string; slug: string; region: string; plan: string } | null {
+	// returnTo is set by onboarding's Pro-checkout branch so the
+	// success path lands the user back in the wizard (step 2)
+	// instead of the project dashboard. Absent for /projects
+	// modal-started checkouts, which default to the dashboard.
+	function readPendingIntent(): {
+		pendingId: string;
+		name: string;
+		slug: string;
+		region: string;
+		plan: string;
+		returnTo?: string;
+	} | null {
 		if (typeof sessionStorage === 'undefined') return null;
 		const raw = sessionStorage.getItem(PENDING_KEY);
 		if (!raw) return null;
@@ -52,6 +63,22 @@
 	function clearPendingIntent(): void {
 		if (typeof sessionStorage !== 'undefined') {
 			sessionStorage.removeItem(PENDING_KEY);
+		}
+	}
+
+	// Dismiss the terminal banner (error/canceled/failed). Also
+	// strips ?status= / ?pending= from the URL so a refresh
+	// doesn't reopen the same banner on the same URL. Uses
+	// replaceState instead of goto to avoid a full navigation
+	// cycle — we're just cleaning the address bar.
+	function dismissCheckoutBanner(): void {
+		checkoutBanner = null;
+		clearPendingIntent();
+		if (typeof window !== 'undefined') {
+			const url = new URL(window.location.href);
+			url.searchParams.delete('status');
+			url.searchParams.delete('pending');
+			window.history.replaceState({}, '', url.toString());
 		}
 	}
 
@@ -105,7 +132,15 @@
 			const found = await pollForProject(intent.slug);
 			clearPendingIntent();
 			if (found) {
-				goto(`/p/${found.id}`);
+				// Route based on where the checkout was started.
+				// Onboarding wizard → continue to step 2 (auth
+				// config); modal / other → land on the project
+				// dashboard as before.
+				if (intent.returnTo === '/onboarding') {
+					goto(`/onboarding?resume=${found.id}`);
+				} else {
+					goto(`/p/${found.id}`);
+				}
 				return true;
 			}
 			checkoutBanner = {
@@ -303,10 +338,17 @@
 	<!-- Redirecting to onboarding — show nothing -->
 {:else}
 <div class="mx-auto max-w-6xl">
-	<!-- Mollie checkout return banner (see handleMollieReturn). -->
+	<!-- Mollie checkout return banner (see handleMollieReturn).
+	     Dismissable on every kind EXCEPT 'polling' — while we're
+	     actively awaiting the webhook, the banner is telling the
+	     user something is in progress and closing it would strand
+	     them without feedback. Terminal states (error/canceled/
+	     failed) are freely dismissable. Dismissal also strips the
+	     ?status= URL params so a refresh doesn't reopen the same
+	     banner. -->
 	{#if checkoutBanner}
 		<div
-			class="mb-4 rounded-md border p-4 text-sm {
+			class="mb-4 flex items-start justify-between gap-3 rounded-md border p-4 text-sm {
 				checkoutBanner.kind === 'polling' ? 'border-eurobase-200 bg-eurobase-50 text-eurobase-800'
 				: checkoutBanner.kind === 'canceled' ? 'border-gray-200 bg-gray-50 text-gray-800'
 				: 'border-red-200 bg-red-50 text-red-800'
@@ -321,6 +363,18 @@
 				{/if}
 				<span class="font-medium">{checkoutBanner.msg}</span>
 			</div>
+			{#if checkoutBanner.kind !== 'polling'}
+				<button
+					type="button"
+					aria-label="Dismiss"
+					onclick={dismissCheckoutBanner}
+					class="rounded-md p-1 text-current opacity-60 hover:bg-black/5 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-current"
+				>
+					<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			{/if}
 		</div>
 	{/if}
 

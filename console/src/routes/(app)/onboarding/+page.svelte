@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { api, APIError, type Project, type AuthConfig, type PlanLimits } from '$lib/api.js';
 	import { loadProjects } from '$lib/stores.js';
 
@@ -34,6 +35,41 @@
 			// Fallbacks handle the empty/errored cases — cards show
 			// hardcoded copy, Team stays hidden if profile failed.
 		}
+
+		// Resume-from-payment: /projects Mollie return handler
+		// navigates here with ?resume=<projectId> when the intent
+		// carried returnTo='/onboarding' (Pro checkout started
+		// from the wizard). Load that project, jump to step 2 so
+		// the wizard continues as if the create had been
+		// synchronous. Failure silently falls through to the
+		// normal create step — user can start fresh from there.
+		const resumeId = $page.url.searchParams.get('resume');
+		if (resumeId) {
+			try {
+				const project = await api.getProject(resumeId);
+				createdProject = project;
+				projectName = project.name;
+				plan = project.plan;
+				// Resumed Pro path: gate the key-display panels on
+				// success step, since we can't retrieve the
+				// server-generated keys. See isResumedPro doc
+				// comment.
+				isResumedPro = project.plan === 'pro';
+				step = 'auth';
+				// Tidy the URL — ?resume is a one-shot handoff, no
+				// value in leaving it in the address bar after the
+				// project is loaded.
+				if (typeof window !== 'undefined') {
+					const url = new URL(window.location.href);
+					url.searchParams.delete('resume');
+					window.history.replaceState({}, '', url.toString());
+				}
+			} catch {
+				// project fetch failed — either wrong ID or a race
+				// with a slow webhook. Land on the normal create
+				// step and let user try again.
+			}
+		}
 	});
 
 	let freePlan = $derived(planData.find(p => p.plan === 'free'));
@@ -46,6 +82,19 @@
 	}
 	let createdProject = $state<Project | null>(null);
 	let step = $state<'create' | 'auth' | 'success'>('create');
+
+	// Resumed-Pro projects can't display API keys on the success
+	// step: the webhook created the project server-side and
+	// discarded the plaintext keys, so `createdProject.public_key`
+	// / `secret_key` are undefined on a fetched-back-later load
+	// (getProject uses the list endpoint, which doesn't include
+	// keys anyway — only the CreateProject response ever carries
+	// them, and the webhook never returned that response to a
+	// caller). Rather than render a blank "here are your keys"
+	// panel, we branch on this flag to render an honest "keys
+	// live on the API tab, regenerate to reveal" panel.
+	// See #410 review 🟡.
+	let isResumedPro = $state(false);
 
 	// Auth config state (Step 2)
 	let emailPasswordEnabled = $state(true);
@@ -97,17 +146,18 @@
 		createError = '';
 		try {
 			if (plan === 'pro') {
-				// Payment-first flow (#406). Skip step 2 (auth
-				// config) — Pro users configure auth from the
-				// project's Auth tab after landing. This diverges
-				// from Free's 3-step wizard but keeps this PR
-				// scoped; onboarding-continues-after-payment is a
-				// tracked follow-up.
+				// Payment-first flow (#406). Stash returnTo so the
+				// /projects Mollie return handler navigates BACK to
+				// the wizard instead of dashboard — user continues
+				// with step 2 (auth config) as if the project had
+				// been created synchronously. See the ?resume=<id>
+				// branch in onMount below for the pickup.
 				const intent = {
 					name: projectName.trim(),
 					slug: slug,
 					region: 'fr-par',
 					plan: plan,
+					returnTo: '/onboarding',
 				};
 				const res = await api.startProjectCheckout({
 					name: intent.name,
@@ -661,6 +711,28 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				</p>
 			</div>
 
+			{#if isResumedPro}
+				<!-- Resumed Pro path (#410 review 🟡). The webhook
+				     created this project server-side and discarded
+				     the plaintext keys, so we can't display them
+				     here honestly. Point the user at the API tab
+				     where they can regenerate a fresh pair
+				     deliberately. Avoids the "here are your keys:
+				     <blank>" footgun. -->
+				<div class="mt-6 rounded-lg border border-eurobase-200 bg-eurobase-50 px-4 py-3 flex items-start gap-2.5">
+					<svg class="h-5 w-5 shrink-0 text-eurobase-600 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18 9 11.25l4.306 4.307a11.95 11.95 0 0 1 5.814-5.518l2.74-1.22m0 0-5.94-2.281m5.94 2.28-2.28 5.941" />
+					</svg>
+					<div>
+						<p class="text-sm font-medium text-eurobase-800">Generate your API keys when you're ready</p>
+						<p class="text-xs text-eurobase-700 mt-0.5">
+							Because your project was created by a webhook after payment, no keys were returned to the browser. Head to
+							<a href="/p/{projectId}/settings" class="underline hover:no-underline">Project Settings → API Keys</a>
+							and click Regenerate to mint a fresh pair — copy them somewhere safe as soon as they appear (the secret is only shown once).
+						</p>
+					</div>
+				</div>
+			{:else}
 			<!-- Keys warning -->
 			<div class="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2.5 animate-[pulse-warn_3s_ease-in-out_infinite]">
 			<style>
@@ -717,6 +789,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 					<p class="mt-1 text-xs text-red-500">Never expose in client-side code</p>
 				</div>
 			</div>
+			{/if}
 
 			<!-- IDE Setup -->
 			<a
@@ -737,7 +810,15 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				</svg>
 			</a>
 
-			<!-- Tabs -->
+			{#if !isResumedPro}
+			<!-- Tabs — gated on !isResumedPro because every snippet
+			     (Quick Start / curl / .env) embeds publicKey /
+			     secretKey which are blank for the resumed-Pro
+			     path. See isResumedPro doc comment. Resumed users
+			     get pointed at the API tab in the panel above and
+			     the Connect tab via the IDE Setup link, which is
+			     enough — they'll find the copy-paste snippets
+			     there once they've generated a key pair. -->
 			<div class="mt-6 border-b border-gray-200">
 				<nav class="flex gap-6" aria-label="Tabs">
 					<button
@@ -808,6 +889,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 					</div>
 				{/if}
 			</div>
+			{/if}
 
 			<!-- Actions -->
 			<div class="mt-6">
