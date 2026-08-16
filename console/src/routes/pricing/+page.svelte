@@ -65,59 +65,69 @@
 	// visitors see the tight numbers even before the live-fetch runs.
 	let rows = $derived([
 		{ category: 'Database & storage' },
-		{ label: 'Database size', free: fmt(freePlan?.db_size_mb, '500 MB'), pro: fmt(proPlan?.db_size_mb, '5 GB'), team: 'Coming soon' },
-		{ label: 'File storage', free: fmt(freePlan?.storage_mb, '500 MB'), pro: fmt(proPlan?.storage_mb, '50 GB'), team: 'Coming soon' },
-		{ label: 'Egress bandwidth', free: fmt(freePlan?.bandwidth_mb, '2 GB') + '/mo', pro: fmt(proPlan?.bandwidth_mb, '100 GB') + '/mo', team: 'Coming soon' },
-		{ label: 'Upload size', free: (freePlan?.upload_size_mb ?? 10) + ' MB', pro: (proPlan?.upload_size_mb ?? 50) + ' MB', team: 'Coming soon' },
-		{ label: 'Dedicated Postgres instance', free: false, pro: false, team: 'Coming soon' },
-		{ label: 'Daily backups + point-in-time recovery', free: false, pro: false, team: 'Coming soon' },
+		{ label: 'Database size', free: fmt(freePlan?.db_size_mb, '500 MB'), pro: fmt(proPlan?.db_size_mb, '5 GB'), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'File storage', free: fmt(freePlan?.storage_mb, '500 MB'), pro: fmt(proPlan?.storage_mb, '50 GB'), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Egress bandwidth', free: fmt(freePlan?.bandwidth_mb, '2 GB') + '/mo', pro: fmt(proPlan?.bandwidth_mb, '100 GB') + '/mo', team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Upload size', free: (freePlan?.upload_size_mb ?? 10) + ' MB', pro: (proPlan?.upload_size_mb ?? 50) + ' MB', team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Dedicated Postgres instance', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Daily backups + point-in-time recovery', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Auth & API' },
-		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: 'Coming soon' },
-		{ label: 'API rate limit', free: (freePlan?.rate_limit_rps ?? 100) + ' rps', pro: (proPlan?.rate_limit_rps ?? 1000) + ' rps', team: 'Coming soon' },
-		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: 'Coming soon' },
-		{ label: 'SSO (SAML) for console sign-in', free: false, pro: false, team: 'Coming soon' },
-		{ label: 'RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon' },
+		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'API rate limit', free: (freePlan?.rate_limit_rps ?? 100) + ' rps', pro: (proPlan?.rate_limit_rps ?? 1000) + ' rps', team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'SSO (SAML) for console sign-in', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Automation & integrations' },
-		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: 'Coming soon' },
-		{ label: 'Scheduled jobs (cron)', free: '2', pro: 'Unlimited', team: 'Coming soon' },
-		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: 'Unlimited', team: 'Coming soon' },
-		{ label: 'Custom email templates', free: false, pro: true, team: 'Coming soon' },
-		// Phase B binary Pro-only gates (migration 000075).
-		{ label: 'Custom domain (CNAME your own domain)', free: false, pro: 'Coming soon', team: 'Coming soon' },
-		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: 'Coming soon' },
-		{ label: 'Slack / webhook quota alerts', free: false, pro: true, team: 'Coming soon' },
+		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Scheduled jobs (cron)', free: '2', pro: 'Unlimited', team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: 'Unlimited', team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Custom email templates', free: false, pro: true, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Custom domain (CNAME your own domain)', free: false, pro: 'Coming soon', team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Slack / webhook quota alerts', free: false, pro: true, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Lifecycle' },
-		// Phase B idle-pause on Free (migration 000076 + subdomain middleware wake path).
-		{ label: 'Idle-project pause after 30 days', free: 'Auto', pro: 'Never', team: 'Never' },
+		{ label: 'Idle-project pause after 30 days', free: 'Auto', pro: 'Never', team: 'Never', legal: 'Never' },
 
 		{ category: 'Operations' },
-		{ label: 'Log retention', free: (freePlan?.log_retention_days ?? 1) + ' day', pro: (proPlan?.log_retention_days ?? 30) + ' days', team: 'Coming soon' },
-		{ label: 'Projects per organisation', free: String(freePlan?.project_limit ?? 2), pro: String(proPlan?.project_limit ?? 10), team: 'Coming soon' },
-		{ label: 'Priority email support (24 h SLA)', free: false, pro: false, team: 'Coming soon' },
-		{ label: 'Uptime SLA (99.9 %)', free: false, pro: false, team: 'Coming soon' },
+		{ label: 'Log retention', free: (freePlan?.log_retention_days ?? 1) + ' day', pro: (proPlan?.log_retention_days ?? 30) + ' days', team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Projects per organisation', free: String(freePlan?.project_limit ?? 2), pro: String(proPlan?.project_limit ?? 10), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Priority email support (24 h SLA)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Uptime SLA (99.9 %)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Sovereignty & compliance' },
-		{ label: 'EU-hosted infrastructure (Scaleway, France)', free: true, pro: true, team: true },
-		{ label: 'GDPR by design', free: true, pro: true, team: true },
-		{ label: 'DPA report (Article 30)', free: true, pro: true, team: true },
-		{ label: 'Audit log', free: true, pro: true, team: true },
-		// DSAR is the differentiator: the API is open to everyone (legal-
-		// obligation respect — a free-tier tenant on a statutory 30-day
-		// deadline must still be able to comply by scripting their own
-		// export). The one-click console flow is Pro: that's what saves
-		// the customer a day per request and is the actual upsell story.
-		{ label: 'DSAR API (Article 15 + 20 export endpoints)', free: 'API', pro: 'API', team: 'API' },
-		{ label: 'DSAR console — one-click export', free: false, pro: true, team: true },
-		{ label: 'SOC 2 Type II attestation', free: false, pro: false, team: 'Coming soon' },
+		{ label: 'EU-hosted infrastructure (Scaleway, France)', free: true, pro: true, team: true, legal: true },
+		{ label: 'GDPR by design', free: true, pro: true, team: true, legal: true },
+		{ label: 'DPA report (Article 30)', free: true, pro: true, team: true, legal: true },
+		{ label: 'Audit log', free: true, pro: true, team: true, legal: true },
+		{ label: 'DSAR API (Article 15 + 20 export endpoints)', free: 'API', pro: 'API', team: 'API', legal: 'API' },
+		{ label: 'DSAR console — one-click export', free: false, pro: true, team: true, legal: true },
+		{ label: 'SOC 2 Type II attestation', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
+
+		{ category: 'German legal-tech retention' },
+		// Legal Team ships these today for beta users; GA pricing
+		// TBD. Row cells show "Beta" so a buyer cross-checking the
+		// /legal page (which describes them present-tense) doesn't
+		// see a "Coming soon" that contradicts the pitch. See #417
+		// review 🟡.
+		{ label: 'WORM per-prefix retention (S3 Object Lock)', free: false, pro: false, team: false, legal: 'Beta' },
+		{ label: 'Ad-hoc retention holds (row / object)', free: false, pro: false, team: false, legal: 'Beta' },
+		{ label: 'DSAR erasure respects legal holds', free: false, pro: false, team: false, legal: 'Beta' },
+		{ label: 'Audit-log retention', free: '90 days', pro: '90 days', team: '90 days', legal: '10 years' },
+		{ label: '§50 BRAO / §257 HGB / §147 AO ready', free: false, pro: false, team: false, legal: 'Beta' },
 	]);
 </script>
 
 <svelte:head>
-	<title>Pricing — Eurobase</title>
-	<meta name="description" content="Eurobase pricing — Free for prototypes, Pro for production. EU-sovereign Backend-as-a-Service, made in Berlin." />
+	<title>Pricing — Eurobase · EU-sovereign backend, GDPR-compliant, legal-tech ready</title>
+	<meta name="description" content="Eurobase pricing: Free for prototypes, €19/mo Pro for production, Team for SMBs, Legal Team for German legal-tech startups needing §257 HGB / §50 BRAO / §147 AO retention. EU-sovereign Backend-as-a-Service hosted in France, made in Berlin. GDPR by design, DSAR built-in, no US CLOUD Act exposure." />
+	<meta name="keywords" content="EU sovereign BaaS, GDPR compliant backend, DSGVO Backend-as-a-Service, Backend Deutschland, legal-tech backend, Kanzlei-Software Hosting, §257 HGB retention, WORM Object Storage, Rechtsanwalt SaaS DSGVO, EU alternative Firebase, EU alternative Supabase" />
+	<meta property="og:title" content="Eurobase — EU-sovereign backend for GDPR-conscious startups, including German legal-tech" />
+	<meta property="og:description" content="Free to start, €19/mo Pro, dedicated Postgres on Team, WORM retention + §257 HGB / §50 BRAO / §147 AO compliance on Legal Team. Made in Berlin. Hosted in France. Zero DevOps." />
+	<meta property="og:type" content="website" />
+	<link rel="canonical" href="https://eurobase.app/pricing" />
 </svelte:head>
 
 <div class="min-h-screen bg-gray-50">
@@ -137,14 +147,77 @@
 	</header>
 
 	<!-- Hero -->
-	<section class="mx-auto max-w-6xl px-6 pt-16 pb-8 text-center">
+	<section class="mx-auto max-w-6xl px-6 pt-16 pb-6 text-center">
 		<h1 class="text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl">Simple, transparent pricing.</h1>
-		<p class="mt-4 text-lg text-gray-600">The EU-sovereign Backend-as-a-Service, made in Berlin. Free to start; €19/mo when you go to production; a Team tier for the SMB stack is on the way.</p>
+		<p class="mt-4 text-lg text-gray-600">The EU-sovereign Backend-as-a-Service, made in Berlin. Free to start; €19/mo when you go to production; Team for SMBs; a dedicated Legal Team tier for German legal-tech startups is on the way.</p>
+	</section>
+
+	<!-- Why Eurobase — the differentiators, right under the hero -->
+	<section class="mx-auto max-w-6xl px-6 pb-6">
+		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+			<div class="rounded-xl border border-gray-200 bg-white p-5">
+				<div class="flex items-center gap-2 text-eurobase-700">
+					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+					<p class="text-sm font-semibold text-gray-900">Zero DevOps</p>
+				</div>
+				<p class="mt-2 text-sm text-gray-600">Postgres, storage, auth, edge functions, cron, webhooks — all wired up and monitored. You write app code; we run the boring parts.</p>
+			</div>
+			<div class="rounded-xl border border-gray-200 bg-white p-5">
+				<div class="flex items-center gap-2 text-eurobase-700">
+					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 12l9-9 9 9M4 10v10a1 1 0 001 1h5v-6h4v6h5a1 1 0 001-1V10"/></svg>
+					<p class="text-sm font-semibold text-gray-900">EU-sovereign</p>
+				</div>
+				<p class="mt-2 text-sm text-gray-600">All data on Scaleway (France). No US cloud, no CLOUD Act exposure. Sub-processor list published; DPA (Article 30) report generated per project.</p>
+			</div>
+			<div class="rounded-xl border border-gray-200 bg-white p-5">
+				<div class="flex items-center gap-2 text-eurobase-700">
+					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+					<p class="text-sm font-semibold text-gray-900">GDPR by design</p>
+				</div>
+				<p class="mt-2 text-sm text-gray-600">DSAR export API (Articles 15 + 20) open on every tier — even Free. One-click console export from Pro up. Audit log on every project.</p>
+			</div>
+			<div class="rounded-xl border border-gray-200 bg-white p-5">
+				<div class="flex items-center gap-2 text-eurobase-700">
+					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+					<p class="text-sm font-semibold text-gray-900">Open export</p>
+				</div>
+				<p class="mt-2 text-sm text-gray-600">Your data is yours. <code class="rounded bg-gray-100 px-1 text-[11px]">eurobase db dump</code> gives you a standard <code class="rounded bg-gray-100 px-1 text-[11px]">pg_dump</code> you can migrate anywhere. No lock-in.</p>
+			</div>
+		</div>
+	</section>
+
+	<!-- NEW — recent shipments -->
+	<section class="mx-auto max-w-6xl px-6 pb-6">
+		<div class="rounded-xl border border-emerald-200 bg-emerald-50/60 p-5 sm:p-6">
+			<div class="flex items-center gap-2">
+				<span class="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">New</span>
+				<h2 class="text-base font-semibold text-emerald-900">Recent shipments</h2>
+			</div>
+			<ul class="mt-3 grid grid-cols-1 gap-2 text-sm text-emerald-900 sm:grid-cols-2 lg:grid-cols-4">
+				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Payment-first Pro checkout</strong> — pay via Mollie, project auto-provisions on webhook.</span></li>
+				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Dedicated Postgres on Team</strong> — direct <code class="rounded bg-white/60 px-1 text-[11px]">DATABASE_URL</code> for Payload, Prisma, Drizzle.</span></li>
+				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Test-mode billing rehearsal</strong> — real Mollie flow before public launch.</span></li>
+				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Legal Team preview</strong> — WORM retention + §257 HGB / §50 BRAO / §147 AO holds. <a href="/legal" class="underline hover:no-underline">See the legal-tech page</a>.</span></li>
+			</ul>
+		</div>
+	</section>
+
+	<!-- Who it's for — one honest sentence -->
+	<section class="mx-auto max-w-6xl px-6 pb-10 text-center">
+		<p class="text-sm text-gray-600">
+			<span class="font-semibold text-gray-800">Built for</span>
+			indie developers shipping side projects,
+			startups going to production without hiring a DevOps engineer,
+			agencies handing off EU-hosted backends to their clients,
+			and
+			<a href="/legal" class="text-eurobase-700 hover:text-eurobase-800 underline decoration-eurobase-300 underline-offset-2 font-medium">legal-tech startups in Germany</a>
+			that need §257 HGB / §50 BRAO / §147 AO-grade retention on top of a modern developer stack.
+		</p>
 	</section>
 
 	<!-- Tier cards -->
 	<section class="mx-auto max-w-6xl px-6 pb-12">
-		<div class="grid grid-cols-1 gap-6 md:grid-cols-3">
+		<div class="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-4">
 			<!-- Free -->
 			<div class="rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
 				<h2 class="text-xl font-semibold text-gray-900">Free</h2>
@@ -231,6 +304,33 @@
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SOC 2 Type II attestation</span></li>
 				</ul>
 			</div>
+
+			<!--
+				Legal Team card — separate SKU for German legal-tech
+				startups needing WORM-enforced statutory retention on
+				top of the Team stack. Closed-beta pricing TBD;
+				"Contact us" CTA for now. Cross-links to the dedicated
+				/legal marketing page for SEO landing traffic.
+			-->
+			<div class="relative rounded-2xl border border-dashed border-gray-300 bg-white p-8 shadow-sm">
+				<span class="absolute -top-3 right-6 rounded-full bg-amber-500/20 text-amber-700 border border-amber-400/60 px-3 py-1 text-xs font-semibold shadow">Closed beta</span>
+				<h2 class="text-xl font-semibold text-gray-900">Legal Team</h2>
+				<p class="mt-1 text-sm text-gray-500">For German legal-tech startups needing statutory retention.</p>
+				<div class="mt-6 flex items-baseline gap-1">
+					<span class="text-4xl font-bold text-gray-400">Contact us</span>
+				</div>
+				<a href="/legal" class="mt-6 block rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-center text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors">
+					Learn more &rarr;
+				</a>
+				<ul class="mt-6 space-y-2 text-sm text-gray-600">
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Everything in Team, plus:</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Per-prefix WORM retention</strong> via S3 Object Lock — audit-defensible, admin-key-proof</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Ad-hoc retention holds</strong> — pin rows or objects when a customer cites a legal basis mid-lifetime</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Honest DSAR erasure</strong> — held items refused with basis + purgeable-after date, not silent no-op</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>10-year audit-log retention</strong> matching the statutory data window</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Ready for §50 BRAO, §257 HGB, §147 AO</span></li>
+				</ul>
+			</div>
 		</div>
 	</section>
 
@@ -242,16 +342,17 @@
 				<thead class="bg-gray-50">
 					<tr>
 						<th class="px-6 py-3 text-left font-medium text-gray-700"></th>
-						<th class="px-6 py-3 text-center font-medium text-gray-700 w-28">Free</th>
-						<th class="px-6 py-3 text-center font-medium text-gray-700 w-28">Pro</th>
-						<th class="px-6 py-3 text-center font-medium text-gray-500 w-28">Team <span class="ml-1 text-[10px] uppercase tracking-wide text-amber-600">Soon</span></th>
+						<th class="px-6 py-3 text-center font-medium text-gray-700 w-24">Free</th>
+						<th class="px-6 py-3 text-center font-medium text-gray-700 w-24">Pro</th>
+						<th class="px-6 py-3 text-center font-medium text-gray-500 w-24">Team <span class="ml-1 text-[10px] uppercase tracking-wide text-amber-600">Soon</span></th>
+						<th class="px-6 py-3 text-center font-medium text-gray-500 w-32">Legal Team <span class="ml-1 text-[10px] uppercase tracking-wide text-amber-600">Soon</span></th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-200">
 					{#each rows as r}
 						{#if r.category}
 							<tr class="bg-gray-50">
-								<td colspan="4" class="px-6 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">{r.category}</td>
+								<td colspan="5" class="px-6 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">{r.category}</td>
 							</tr>
 						{:else}
 							<tr>
@@ -281,6 +382,17 @@
 										<span class="text-xs italic text-amber-600">{r.team}</span>
 									{:else}
 										{r.team}
+									{/if}
+								</td>
+								<td class="px-6 py-3 text-center text-gray-500">
+									{#if typeof r.legal === 'boolean'}
+										{#if r.legal}<span class="text-emerald-500">✓</span>{:else}<span class="text-gray-300">—</span>{/if}
+									{:else if r.legal === 'Coming soon'}
+										<span class="text-xs italic text-amber-600">{r.legal}</span>
+									{:else if r.legal === 'Beta'}
+										<span class="text-xs italic text-emerald-700">{r.legal}</span>
+									{:else}
+										{r.legal}
 									{/if}
 								</td>
 							</tr>
