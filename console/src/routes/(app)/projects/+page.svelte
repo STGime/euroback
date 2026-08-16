@@ -91,7 +91,17 @@
 		}
 
 		if (status === 'success') {
-			checkoutBanner = { kind: 'polling', msg: 'Payment received — provisioning your project…' };
+			// Honest banner language. Mollie's redirect fires whether
+			// the user paid, canceled, or bounced — the `?status=`
+			// param is hardcoded by our backend, not derived from
+			// actual payment state (see #406 debugging session
+			// 2026-08-16 when a user picked "Paid" on Mollie's page
+			// but Mollie processed it as `open` and we kept
+			// insisting "Payment received…" while polling for a
+			// project that would never exist). Say "checking
+			// status" until polling confirms a project — the
+			// project's existence IS proof of paid + webhook fired.
+			checkoutBanner = { kind: 'polling', msg: 'Checking payment status…' };
 			const found = await pollForProject(intent.slug);
 			clearPendingIntent();
 			if (found) {
@@ -100,7 +110,7 @@
 			}
 			checkoutBanner = {
 				kind: 'error',
-				msg: 'Payment went through but your project is still provisioning. It should appear in your list within a minute — contact support if not.',
+				msg: 'We haven\'t received payment confirmation yet. If you completed the payment, it should appear in your list within a minute. If you canceled or the payment failed, please try again.',
 			};
 			await loadProjects();
 			return true;
