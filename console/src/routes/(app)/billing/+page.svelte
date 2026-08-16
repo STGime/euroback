@@ -44,7 +44,15 @@
 	let outstanding = $derived(
 		invoices.filter((i) => i.status === 'pending' || i.status === 'failed').length
 	);
-	let proProjects = $derived(projects.filter((p) => p.plan === 'pro').length);
+	// Any project on a non-Free plan: Pro (Mollie-billed), Team +
+	// Legal Team (closed-beta grants). The "Paid projects" wording
+	// covers the fact that both bill (Pro monthly, Team eventually
+	// once it exits beta) — see #411 follow-up. Was
+	// `p.plan === 'pro'` which silently excluded Team projects
+	// from this tile.
+	let paidProjects = $derived(
+		projects.filter((p) => p.plan !== 'free').length
+	);
 
 	function formatEUR(cents: number, currency: string): string {
 		const prefix = currency === 'EUR' ? '€' : `${currency} `;
@@ -130,8 +138,8 @@
 			<p class="mt-1 text-2xl font-semibold text-gray-900">{outstanding}</p>
 		</div>
 		<div class="rounded-lg border border-gray-200 bg-white p-4">
-			<p class="text-sm text-gray-500">Pro projects</p>
-			<p class="mt-1 text-2xl font-semibold text-gray-900">{proProjects}</p>
+			<p class="text-sm text-gray-500">Paid projects</p>
+			<p class="mt-1 text-2xl font-semibold text-gray-900">{paidProjects}</p>
 		</div>
 	</div>
 
