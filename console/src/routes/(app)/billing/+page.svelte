@@ -67,6 +67,24 @@
 				return 'bg-yellow-100 text-yellow-800';
 		}
 	}
+
+	// Two-hop invoice download. See api.getInvoicePDFURL comment.
+	// Opens in a new tab so a browser's PDF viewer (or download
+	// prompt, depending on the user's browser settings) handles
+	// the presigned S3 URL. Errors surface as an alert — a taller
+	// UI treatment could replace this once we see how often it
+	// actually fires (should be near-zero: only when the async
+	// render errors and the on-demand render inside the handler
+	// also fails).
+	async function openInvoicePDF(invoiceId: string): Promise<void> {
+		try {
+			const url = await api.getInvoicePDFURL(invoiceId);
+			window.open(url, '_blank', 'noopener');
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			alert(`Couldn't open invoice: ${msg}`);
+		}
+	}
 </script>
 
 <svelte:head>
@@ -173,14 +191,13 @@
 							</td>
 							<td class="whitespace-nowrap px-4 py-3 text-right text-sm">
 								{#if inv.status === 'paid'}
-									<a
-										href={api.invoicePDFUrl(inv.id)}
-										target="_blank"
-										rel="noopener"
+									<button
+										type="button"
+										onclick={() => openInvoicePDF(inv.id)}
 										class="text-blue-600 hover:underline"
 									>
 										Download
-									</a>
+									</button>
 								{:else}
 									<span class="text-gray-400">—</span>
 								{/if}
