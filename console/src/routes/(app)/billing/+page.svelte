@@ -68,19 +68,33 @@
 		}
 	}
 
-	// Two-hop invoice download. See api.getInvoicePDFURL comment.
-	// Opens in a new tab so a browser's PDF viewer (or download
-	// prompt, depending on the user's browser settings) handles
-	// the presigned S3 URL. Errors surface as an alert — a taller
-	// UI treatment could replace this once we see how often it
-	// actually fires (should be near-zero: only when the async
-	// render errors and the on-demand render inside the handler
-	// also fails).
+	// Two-hop invoice download. See api.getInvoicePDFURL comment
+	// for the auth-header design rationale.
+	//
+	// Popup-blocker note (#411 review 🟡): `window.open(url,
+	// '_blank')` runs *after* an await, which Safari always and
+	// Firefox often block because it's no longer in the
+	// user-gesture stack. The fix is to grab the tab handle
+	// synchronously on click, then point it at the URL once the
+	// fetch resolves. Can't use `noopener` in the flag string
+	// (that returns null and prevents `.location =` on the
+	// handle), so opener nulling happens post-hoc.
 	async function openInvoicePDF(invoiceId: string): Promise<void> {
+		const w = window.open('', '_blank');
 		try {
 			const url = await api.getInvoicePDFURL(invoiceId);
-			window.open(url, '_blank', 'noopener');
+			if (w) {
+				w.opener = null;
+				w.location.assign(url);
+			} else {
+				// Popup blocker still nixed it — fall back to
+				// same-tab navigation. Not ideal (loses the
+				// user's console context) but better than
+				// silently doing nothing.
+				window.location.assign(url);
+			}
 		} catch (err) {
+			if (w) w.close();
 			const msg = err instanceof Error ? err.message : String(err);
 			alert(`Couldn't open invoice: ${msg}`);
 		}

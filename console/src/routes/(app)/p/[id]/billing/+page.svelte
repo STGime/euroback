@@ -162,13 +162,21 @@
 	});
 
 	// Two-hop invoice download — see api.getInvoicePDFURL comment
-	// for why we can't just link directly. Same helper on the
-	// org-wide /billing page.
+	// for why we can't just link directly, and the /billing
+	// page's openInvoicePDF comment for the popup-blocker
+	// rationale on grabbing the tab handle before the await.
 	async function openInvoicePDF(invoiceId: string): Promise<void> {
+		const w = window.open('', '_blank');
 		try {
 			const url = await api.getInvoicePDFURL(invoiceId);
-			window.open(url, '_blank', 'noopener');
+			if (w) {
+				w.opener = null;
+				w.location.assign(url);
+			} else {
+				window.location.assign(url);
+			}
 		} catch (err) {
+			if (w) w.close();
 			const msg = err instanceof Error ? err.message : String(err);
 			alert(`Couldn't open invoice: ${msg}`);
 		}
