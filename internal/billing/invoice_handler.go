@@ -161,8 +161,20 @@ func HandleGetProjectSubscription(svc *Service) http.HandlerFunc {
 
 // HandleDownloadInvoicePDF is GET /platform/billing/invoices/:id/pdf.
 // Verifies the invoice belongs to a project the caller owns, then
-// 302s to a presigned S3 URL (5-min TTL). Two graceful
-// fallbacks:
+// returns `{"url": "<presigned S3 URL, 5-min TTL>"}` as JSON.
+//
+// Design note: an earlier version 302-redirected directly and the
+// console used a plain `<a href>`. That's broken by construction —
+// the endpoint requires the platform JWT in the Authorization
+// header, but a browser navigating to a URL doesn't attach headers
+// from localStorage (the JWT lives there, not in a cookie). Every
+// download attempt errored with `missing authorization header`
+// (surfaced 2026-08-16 by user testing). The fix is a two-hop:
+// the console does an authenticated fetch to get the presigned URL,
+// then navigates or triggers download from the returned URL — which
+// is signed for direct S3 access and needs no auth header.
+//
+// Two graceful fallbacks:
 //
 //   - If the invoice has no pdf_object_key (async render hasn't
 //     completed yet), render on-demand and continue.
@@ -260,6 +272,7 @@ func HandleDownloadInvoicePDF(svc *Service) http.HandlerFunc {
 			return
 		}
 
-		http.Redirect(w, r, url, http.StatusFound)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"url": url})
 	}
 }

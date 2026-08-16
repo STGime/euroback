@@ -67,6 +67,38 @@
 				return 'bg-yellow-100 text-yellow-800';
 		}
 	}
+
+	// Two-hop invoice download. See api.getInvoicePDFURL comment
+	// for the auth-header design rationale.
+	//
+	// Popup-blocker note (#411 review 🟡): `window.open(url,
+	// '_blank')` runs *after* an await, which Safari always and
+	// Firefox often block because it's no longer in the
+	// user-gesture stack. The fix is to grab the tab handle
+	// synchronously on click, then point it at the URL once the
+	// fetch resolves. Can't use `noopener` in the flag string
+	// (that returns null and prevents `.location =` on the
+	// handle), so opener nulling happens post-hoc.
+	async function openInvoicePDF(invoiceId: string): Promise<void> {
+		const w = window.open('', '_blank');
+		try {
+			const url = await api.getInvoicePDFURL(invoiceId);
+			if (w) {
+				w.opener = null;
+				w.location.assign(url);
+			} else {
+				// Popup blocker still nixed it — fall back to
+				// same-tab navigation. Not ideal (loses the
+				// user's console context) but better than
+				// silently doing nothing.
+				window.location.assign(url);
+			}
+		} catch (err) {
+			if (w) w.close();
+			const msg = err instanceof Error ? err.message : String(err);
+			alert(`Couldn't open invoice: ${msg}`);
+		}
+	}
 </script>
 
 <svelte:head>
@@ -173,14 +205,13 @@
 							</td>
 							<td class="whitespace-nowrap px-4 py-3 text-right text-sm">
 								{#if inv.status === 'paid'}
-									<a
-										href={api.invoicePDFUrl(inv.id)}
-										target="_blank"
-										rel="noopener"
+									<button
+										type="button"
+										onclick={() => openInvoicePDF(inv.id)}
 										class="text-blue-600 hover:underline"
 									>
 										Download
-									</a>
+									</button>
 								{:else}
 									<span class="text-gray-400">—</span>
 								{/if}

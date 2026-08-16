@@ -160,6 +160,27 @@
 		const grace = project?.legacy_pro_grace_until;
 		return grace ? daysUntil(grace) : null;
 	});
+
+	// Two-hop invoice download — see api.getInvoicePDFURL comment
+	// for why we can't just link directly, and the /billing
+	// page's openInvoicePDF comment for the popup-blocker
+	// rationale on grabbing the tab handle before the await.
+	async function openInvoicePDF(invoiceId: string): Promise<void> {
+		const w = window.open('', '_blank');
+		try {
+			const url = await api.getInvoicePDFURL(invoiceId);
+			if (w) {
+				w.opener = null;
+				w.location.assign(url);
+			} else {
+				window.location.assign(url);
+			}
+		} catch (err) {
+			if (w) w.close();
+			const msg = err instanceof Error ? err.message : String(err);
+			alert(`Couldn't open invoice: ${msg}`);
+		}
+	}
 </script>
 
 <svelte:head>
@@ -205,7 +226,15 @@
 				<div>
 					<p class="text-xs uppercase tracking-wider text-gray-500">Current plan</p>
 					<p class="mt-1 text-xl font-semibold text-gray-900">
-						{project.plan === 'pro' ? 'Pro (€19/mo)' : 'Free'}
+						{#if project.plan === 'pro'}
+							Pro (€19/mo)
+						{:else if project.plan === 'team'}
+							Team (closed beta)
+						{:else if project.plan === 'legal_team'}
+							Legal Team (closed beta)
+						{:else}
+							Free
+						{/if}
 					</p>
 					{#if project.plan === 'pro' && project.legacy_pro_grace_until}
 						{@const days = graceDaysLeft ?? 0}
@@ -227,6 +256,10 @@
 					{:else if project.plan === 'pro'}
 						<p class="mt-2 text-sm text-gray-600">
 							100k MAU · 100 GB storage · 250 GB bandwidth · never pauses.
+						</p>
+					{:else if project.plan === 'team' || project.plan === 'legal_team'}
+						<p class="mt-2 text-sm text-gray-600">
+							1M MAU · 100 GB dedicated database · 500 GB file storage · never pauses.
 						</p>
 					{/if}
 				</div>
@@ -252,6 +285,14 @@
 						>
 							{checkoutInFlight ? 'Redirecting…' : 'Upgrade to Pro'}
 						</button>
+					{:else if project.plan === 'team' || project.plan === 'legal_team'}
+						<!-- Team / Legal Team run on beta grants — no
+						     self-serve upgrade or cancel; ops manages
+						     these via the admin panel. Just show the
+						     status badge. -->
+						<span class="inline-flex rounded-full bg-eurobase-100 px-3 py-1 text-xs font-medium text-eurobase-800">
+							Beta grant · active
+						</span>
 					{:else}
 						<div class="flex items-center gap-3">
 							<span class="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"
@@ -333,12 +374,13 @@
 								</td>
 								<td class="whitespace-nowrap px-6 py-3 text-right text-sm">
 									{#if inv.status === 'paid'}
-										<a
-											href={api.invoicePDFUrl(inv.id)}
-											target="_blank"
-											rel="noopener"
-											class="text-blue-600 hover:underline">Download</a
+										<button
+											type="button"
+											onclick={() => openInvoicePDF(inv.id)}
+											class="text-blue-600 hover:underline"
 										>
+											Download
+										</button>
 									{:else}
 										<span class="text-gray-400">—</span>
 									{/if}

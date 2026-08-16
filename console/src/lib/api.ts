@@ -755,14 +755,24 @@ export class EurobaseAPI {
 	}
 
 	/**
-	 * The URL of the invoice-PDF download endpoint. Returns a
-	 * URL string rather than fetching directly — the endpoint
-	 * 302s to a presigned S3 URL (5-min TTL), which browsers
-	 * follow correctly via a plain <a href> or window.location.
-	 * Fetch-based downloads would hit CORS on the redirect.
+	 * Fetches a short-lived (5 min) presigned S3 URL for an
+	 * invoice PDF. Console uses this to open the PDF in a new
+	 * tab — the returned URL is signed for direct S3 access
+	 * and needs no auth header.
+	 *
+	 * The old shape was a `<a href>`-friendly URL that the
+	 * backend 302-redirected to S3, but the backend endpoint
+	 * requires the platform JWT via the Authorization header —
+	 * which browsers don't attach on plain link navigation
+	 * (JWT lives in localStorage, not a cookie). Every
+	 * download errored `missing authorization header`. Fixed
+	 * 2026-08-16 by switching to a two-hop: authenticated
+	 * fetch returns the URL, browser then navigates directly
+	 * to S3.
 	 */
-	invoicePDFUrl(invoiceId: string): string {
-		return `${this.baseURL}/platform/billing/invoices/${invoiceId}/pdf`;
+	async getInvoicePDFURL(invoiceId: string): Promise<string> {
+		const res = await this.fetch<{ url: string }>(`/platform/billing/invoices/${invoiceId}/pdf`);
+		return res.url;
 	}
 
 	/**
