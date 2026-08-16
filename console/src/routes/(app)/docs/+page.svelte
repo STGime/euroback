@@ -2648,8 +2648,8 @@ export const db = drizzle(client);</code></pre>
 				</p>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li><strong>§50 BRAO</strong> (Federal Lawyers' Act) — client files retained <strong>6 years</strong> from case end.</li>
-					<li><strong>§257 HGB</strong> (Commercial Code) — invoices, contracts, commercial letters retained <strong>10 years</strong>.</li>
-					<li><strong>§147 AO</strong> (Fiscal Code) — tax-relevant records retained <strong>10 years</strong>.</li>
+					<li><strong>§257 HGB</strong> (Commercial Code) — split by record class: books, inventories, opening balance sheets, annual accounts, and invoices (<em>Buchungsbelege</em>) retained <strong>10 years</strong>; received / sent commercial letters (<em>Handelsbriefe</em>) retained <strong>6 years</strong>.</li>
+					<li><strong>§147 AO</strong> (Fiscal Code) — same split, mirroring §257 HGB: <strong>10 years</strong> for books and accounting records, <strong>6 years</strong> for other tax-relevant business correspondence.</li>
 				</ul>
 				<p class="text-sm text-gray-700">
 					On Free / Pro / plain Team, retention is defence-in-depth (soft delete + audit log) but not statutorily
