@@ -291,6 +291,18 @@ func HandleCancelSubscription(svc *Service) http.HandlerFunc {
 			req.Mode = string(CancelModeEndOfPeriod)
 		}
 
+		// Policy: prorated-refund immediate cancellation was dropped
+		// 2026-08-16 — users always keep Pro through the current
+		// billing period. The service still implements the immediate
+		// mode (kept for a possible future policy re-enable + dead-
+		// code test coverage); guard here so direct API callers
+		// can't bypass what the console modal no longer offers.
+		if req.Mode == string(CancelModeImmediate) {
+			writeJSONError(w, http.StatusBadRequest, "immediate_cancel_disabled",
+				"immediate cancellation with prorated refund is not offered — subscription will end at the current period's end")
+			return
+		}
+
 		res, err := svc.CancelSubscription(r.Context(), claims.Subject, subscriptionID, CancelMode(req.Mode))
 		if err != nil {
 			switch {
