@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { api, type Project } from '$lib/api.js';
+	import { api, APIError, type Project } from '$lib/api.js';
 	import { projects, projectsLoading, projectsError, loadProjects } from '$lib/stores.js';
 
 	// Modal state
@@ -224,24 +224,30 @@
 		}
 	}
 
-	// mapCreateError translates both the classic createProject
-	// error shapes and the new Pro-checkout error codes into
-	// user-facing copy.
+	// mapCreateError translates both classic createProject error
+	// shapes and the new Pro-checkout error codes into user-facing
+	// copy. Branches on APIError.code (the machine-readable field
+	// set from the standard {"error", "code"} envelope) rather
+	// than substring-matching err.message — the message goes
+	// through parseAPIError's capitalize step, which used to
+	// silently defeat the substring check (#408 review, same class
+	// as #400).
 	function mapCreateError(err: unknown): string {
+		if (err instanceof APIError) {
+			switch (err.code) {
+				case 'slug_taken':
+					return 'That project name is already in use — please choose another.';
+				case 'pending_checkout_in_flight':
+					return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
+				case 'billing_disabled':
+					return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
+			}
+		}
 		const msg = err instanceof Error ? err.message : 'Failed to create project';
-		if (msg.includes('slug_taken')) {
-			return 'That project name is already in use — please choose another.';
-		}
-		if (msg.includes('pending_checkout_in_flight')) {
-			return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
-		}
-		if (msg.includes('billing_disabled')) {
-			return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
-		}
 		if (msg.includes('limited to') && msg.includes('project')) {
 			return "You've reached the project limit on your current plan. Upgrade to Pro for more projects.";
 		}
-		return msg.replace(/^API \d+:\s*/, '').replace(/^\{.*"error"\s*:\s*"/, '').replace(/"\s*\}$/, '');
+		return msg;
 	}
 
 	function statusColor(status: string): string {

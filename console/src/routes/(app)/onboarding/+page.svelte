@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { api, type Project, type AuthConfig, type PlanLimits } from '$lib/api.js';
+	import { api, APIError, type Project, type AuthConfig, type PlanLimits } from '$lib/api.js';
 	import { loadProjects } from '$lib/stores.js';
 
 	// State
@@ -142,31 +142,48 @@
 
 	// mapCreateError translates both classic createProject errors
 	// and the new Pro-checkout error codes into user-facing copy.
-	// Keeps the auto-name-retry branch for slug clashes on the
-	// Free/Team path — the Pro path returns 409 slug_taken from
-	// the backend and we render an explicit message rather than
-	// silently mutating the name (payments already involved).
+	// Branches on APIError.code (machine-readable field from the
+	// standard {"error", "code"} envelope) rather than
+	// substring-matching err.message. Free/Team slug-clash still
+	// auto-renames via applyAutoRenameOnSlugClash — kept as a
+	// separate side-effecting helper so this mapper stays pure.
+	// Pro slug-clash returns 409 slug_taken and shows explicit
+	// copy rather than silently mutating a name after payment
+	// intent.
 	function mapCreateError(err: unknown): string {
+		if (err instanceof APIError) {
+			switch (err.code) {
+				case 'slug_taken':
+					return 'That project name is already in use — please choose another.';
+				case 'pending_checkout_in_flight':
+					return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
+				case 'billing_disabled':
+					return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
+			}
+		}
 		const msg = err instanceof Error ? err.message : 'Failed to create project';
-		if (msg.includes('slug_taken')) {
-			return 'That project name is already in use — please choose another.';
-		}
-		if (msg.includes('pending_checkout_in_flight')) {
-			return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
-		}
-		if (msg.includes('billing_disabled')) {
-			return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
-		}
+		// Free/Team slug clash — no code today (tenant handler
+		// doesn't set one on the 23505 branch), so fall back to
+		// substring match on the message.
 		if (msg.includes('409') || msg.includes('already taken')) {
-			const suffix = Math.random().toString(36).slice(2, 6);
-			projectName = projectName.trim() + '-' + suffix;
+			applyAutoRenameOnSlugClash();
 			return `That project URL was taken. We've updated the name — click Create Project to try again, or edit it.`;
 		}
 		if (msg.includes('limited to') && msg.includes('project')) {
 			const limit = freePlan?.project_limit ?? 2;
 			return `You've reached the maximum of ${limit} projects on the Free plan. Upgrade to Pro to create up to ${proPlan?.project_limit ?? 10} projects.`;
 		}
-		return msg.replace(/^API \d+:\s*/, '').replace(/^\{.*"error"\s*:\s*"/, '').replace(/"\s*\}$/, '');
+		return msg;
+	}
+
+	// applyAutoRenameOnSlugClash appends a random 4-char suffix
+	// to projectName so a re-submit doesn't hit the same 23505.
+	// Side-effecting on purpose — extracted from mapCreateError so
+	// the mapper itself stays pure (a mapper named like a mapper
+	// shouldn't quietly mutate form state).
+	function applyAutoRenameOnSlugClash(): void {
+		const suffix = Math.random().toString(36).slice(2, 6);
+		projectName = projectName.trim() + '-' + suffix;
 	}
 
 	async function handleSaveAuthConfig() {
