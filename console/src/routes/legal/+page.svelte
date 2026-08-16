@@ -22,25 +22,18 @@
 	});
 
 	// Structured-data payload rendered as JSON-LD in <svelte:head>.
-	// Two schema.org types: Product for the service itself,
-	// FAQPage so the "who is this for / what does WORM mean"
-	// questions can surface as rich results.
+	// FAQPage schema so the "what is WORM / which statutes / how
+	// is this different from backups / DSAR-with-holds / EU-hosted"
+	// questions can surface as Google rich results.
+	//
+	// Deliberately no Product/Offer node — Google's Rich Results
+	// Test warns "missing field price" without a price or
+	// priceSpecification, and Legal Team is Contact-Us pricing
+	// during the beta window. Add it back with a real
+	// priceSpecification once we have public pricing (#417 review).
 	const jsonLd = {
 		'@context': 'https://schema.org',
 		'@graph': [
-			{
-				'@type': 'Product',
-				name: 'Eurobase Legal Team',
-				description: 'GDPR-compliant Backend-as-a-Service for German legal-tech startups. WORM-enforced retention for §50 BRAO (6y lawyer files), §257 HGB (10y books/invoices), §147 AO (10y tax records). Hosted in France on Scaleway. No US CLOUD Act exposure.',
-				brand: { '@type': 'Brand', name: 'Eurobase' },
-				category: 'Backend-as-a-Service',
-				offers: {
-					'@type': 'Offer',
-					availability: 'https://schema.org/PreOrder',
-					priceCurrency: 'EUR',
-					url: 'https://eurobase.app/legal',
-				},
-			},
 			{
 				'@type': 'FAQPage',
 				mainEntity: [

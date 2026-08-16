@@ -107,11 +107,16 @@
 		{ label: 'SOC 2 Type II attestation', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'German legal-tech retention' },
-		{ label: 'WORM per-prefix retention (S3 Object Lock)', free: false, pro: false, team: false, legal: 'Coming soon' },
-		{ label: 'Ad-hoc retention holds (row / object)', free: false, pro: false, team: false, legal: 'Coming soon' },
-		{ label: 'DSAR erasure respects legal holds', free: false, pro: false, team: false, legal: 'Coming soon' },
+		// Legal Team ships these today for beta users; GA pricing
+		// TBD. Row cells show "Beta" so a buyer cross-checking the
+		// /legal page (which describes them present-tense) doesn't
+		// see a "Coming soon" that contradicts the pitch. See #417
+		// review 🟡.
+		{ label: 'WORM per-prefix retention (S3 Object Lock)', free: false, pro: false, team: false, legal: 'Beta' },
+		{ label: 'Ad-hoc retention holds (row / object)', free: false, pro: false, team: false, legal: 'Beta' },
+		{ label: 'DSAR erasure respects legal holds', free: false, pro: false, team: false, legal: 'Beta' },
 		{ label: 'Audit-log retention', free: '90 days', pro: '90 days', team: '90 days', legal: '10 years' },
-		{ label: '§50 BRAO / §257 HGB / §147 AO ready', free: false, pro: false, team: false, legal: 'Coming soon' },
+		{ label: '§50 BRAO / §257 HGB / §147 AO ready', free: false, pro: false, team: false, legal: 'Beta' },
 	]);
 </script>
 
@@ -384,6 +389,8 @@
 										{#if r.legal}<span class="text-emerald-500">✓</span>{:else}<span class="text-gray-300">—</span>{/if}
 									{:else if r.legal === 'Coming soon'}
 										<span class="text-xs italic text-amber-600">{r.legal}</span>
+									{:else if r.legal === 'Beta'}
+										<span class="text-xs italic text-emerald-700">{r.legal}</span>
 									{:else}
 										{r.legal}
 									{/if}
