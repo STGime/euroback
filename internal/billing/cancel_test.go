@@ -86,7 +86,7 @@ func TestCancelHandler_DefaultMode(t *testing.T) {
 	if w.Code == http.StatusBadRequest {
 		var body map[string]string
 		_ = json.NewDecoder(w.Body).Decode(&body)
-		if body["error"] == "invalid_mode" {
+		if body["code"] == "invalid_mode" {
 			t.Errorf("empty body should default mode, not 400 invalid_mode")
 		}
 	}

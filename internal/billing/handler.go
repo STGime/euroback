@@ -249,25 +249,35 @@ func HandleGetConfig(svc *Service) http.HandlerFunc {
 // already actionable — "invalid_plan", "already_subscribed"); 500
 // responses use writeJSONErrorWithRequestID below so support can
 // correlate.
+//
+// Envelope matches the rest of the platform (tenant, auth, etc.):
+// `{"error": <human>, "code": <machine>}`. The old shape used the
+// opposite convention (`{"error": <code>, "message": <human>}`),
+// which broke every console branch that keyed on err.code — the
+// parseAPIError regex extracted the code into .message and
+// capitalized it, and parseErrorCode found no "code" field so
+// .code stayed undefined. Fixed on #408 review; console callers
+// now branch on APIError.code correctly.
 func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":   code,
-		"message": message,
+		"error": message,
+		"code":  code,
 	})
 }
 
 // writeJSONErrorWithRequestID emits the standard envelope plus a
 // request_id field. Called from the 500 branch so a user pasting
 // their error message into support gives us a token that indexes
-// straight into slog + the ingress log.
+// straight into slog + the ingress log. Envelope shape matches
+// writeJSONError above — see its doc comment.
 func writeJSONErrorWithRequestID(w http.ResponseWriter, status int, code, message, requestID string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	body := map[string]string{
-		"error":   code,
-		"message": message,
+		"error": message,
+		"code":  code,
 	}
 	if requestID != "" {
 		body["request_id"] = requestID

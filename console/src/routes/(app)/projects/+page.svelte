@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { api, type Project } from '$lib/api.js';
+	import { api, APIError, type Project } from '$lib/api.js';
 	import { projects, projectsLoading, projectsError, loadProjects } from '$lib/stores.js';
 
 	// Modal state
@@ -28,6 +28,110 @@
 
 	let redirecting = $state(false);
 
+	// Pro-checkout return handling. Mollie redirects to
+	// /projects?status=success&pending=<id> on success, ?status=
+	// canceled on user-cancel, ?status=failed on payment failure.
+	// sessionStorage carries the form state across the Mollie
+	// roundtrip so we can restore-and-retry on cancel/fail or
+	// navigate to the created project on success. See #406.
+	const PENDING_KEY = 'eurobase.pending_project_checkout';
+	let checkoutBanner = $state<{ kind: 'polling' | 'canceled' | 'failed' | 'error'; msg: string } | null>(null);
+
+	function readPendingIntent(): { pendingId: string; name: string; slug: string; region: string; plan: string } | null {
+		if (typeof sessionStorage === 'undefined') return null;
+		const raw = sessionStorage.getItem(PENDING_KEY);
+		if (!raw) return null;
+		try {
+			return JSON.parse(raw);
+		} catch {
+			sessionStorage.removeItem(PENDING_KEY);
+			return null;
+		}
+	}
+
+	function clearPendingIntent(): void {
+		if (typeof sessionStorage !== 'undefined') {
+			sessionStorage.removeItem(PENDING_KEY);
+		}
+	}
+
+	// Poll listProjects for a project matching the pending slug.
+	// The webhook creates the project after Mollie confirms — it
+	// may lag the redirect by a few seconds. Cap attempts so a
+	// webhook-delivery failure doesn't spin forever.
+	async function pollForProject(slug: string, maxAttempts = 10): Promise<Project | null> {
+		for (let i = 0; i < maxAttempts; i++) {
+			try {
+				const list = await api.listProjects();
+				const found = list.find((p) => p.slug === slug);
+				if (found) return found;
+			} catch {
+				// swallow transient list failures, keep polling
+			}
+			await new Promise((r) => setTimeout(r, 1500));
+		}
+		return null;
+	}
+
+	async function handleMollieReturn(): Promise<boolean> {
+		const status = $page.url.searchParams.get('status');
+		const pendingParam = $page.url.searchParams.get('pending');
+		if (!status || !pendingParam) return false;
+
+		const intent = readPendingIntent();
+		// Missing sessionStorage intent = tab reopened / user cleared
+		// storage / different device. We can still poll if we have
+		// the pending param, but slug matching needs the slug. Fall
+		// back to reloading projects and letting the user see the
+		// (possibly-created) list.
+		if (!intent) {
+			checkoutBanner = { kind: 'error', msg: 'Payment session expired. Refreshing project list.' };
+			await loadProjects();
+			return true;
+		}
+
+		if (status === 'success') {
+			checkoutBanner = { kind: 'polling', msg: 'Payment received — provisioning your project…' };
+			const found = await pollForProject(intent.slug);
+			clearPendingIntent();
+			if (found) {
+				goto(`/p/${found.id}`);
+				return true;
+			}
+			checkoutBanner = {
+				kind: 'error',
+				msg: 'Payment went through but your project is still provisioning. It should appear in your list within a minute — contact support if not.',
+			};
+			await loadProjects();
+			return true;
+		}
+
+		if (status === 'canceled') {
+			// User closed Mollie's tab or picked cancel. sessionStorage
+			// values pre-fill the modal so they can retry without
+			// re-typing.
+			checkoutBanner = { kind: 'canceled', msg: 'Checkout canceled. No payment was taken.' };
+			showNewModal = true;
+			newName = intent.name;
+			newPlan = intent.plan;
+			clearPendingIntent();
+			return true;
+		}
+
+		if (status === 'failed') {
+			checkoutBanner = {
+				kind: 'failed',
+				msg: 'Payment failed. Please try again with a different card, or contact your bank.',
+			};
+			showNewModal = true;
+			newName = intent.name;
+			newPlan = intent.plan;
+			clearPendingIntent();
+			return true;
+		}
+		return false;
+	}
+
 	onMount(async () => {
 		// Load profile in parallel with projects so the Team option
 		// is available immediately when the modal opens. Failure is
@@ -37,6 +141,13 @@
 			api.getProfile().catch(() => null)
 		]);
 		if (profile) hasTeamBeta = !!profile.team_beta_access;
+
+		// Post-Mollie return handling. If we're landing here from a
+		// Pro checkout, this either navigates away (success) or shows
+		// a banner + reopens the modal (canceled/failed).
+		if (await handleMollieReturn()) {
+			return;
+		}
 
 		// Auto-redirect new users (0 projects) to onboarding.
 		if ($projects.length === 0 && !$projectsError) {
@@ -71,6 +182,33 @@
 		creating = true;
 		createError = '';
 		try {
+			if (newPlan === 'pro') {
+				// Payment-first flow (#406). Start Mollie checkout;
+				// project is created by the webhook after payment.
+				// sessionStorage the intent so we can restore the
+				// modal on cancel/fail or navigate to the created
+				// project on success.
+				const intent = {
+					name: newName.trim(),
+					slug: newSlug,
+					region: 'fr-par',
+					plan: newPlan,
+				};
+				const res = await api.startProjectCheckout({
+					name: intent.name,
+					slug: intent.slug,
+					region: intent.region,
+					plan_code: 'pro',
+				});
+				sessionStorage.setItem(
+					PENDING_KEY,
+					JSON.stringify({ pendingId: res.pending_project_id, ...intent })
+				);
+				window.location.href = res.checkout_url;
+				return; // don't reset creating — redirect in flight
+			}
+
+			// Free / Team — existing synchronous path.
 			await api.createProject({
 				name: newName.trim(),
 				slug: newSlug,
@@ -80,15 +218,36 @@
 			showNewModal = false;
 			await loadProjects();
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : 'Failed to create project';
-			if (msg.includes('limited to') && msg.includes('project')) {
-				createError = "You've reached the project limit on your current plan. Upgrade to Pro for more projects.";
-			} else {
-				createError = msg.replace(/^API \d+:\s*/, '').replace(/^\{.*"error"\s*:\s*"/, '').replace(/"\s*\}$/, '');
-			}
+			createError = mapCreateError(err);
 		} finally {
 			creating = false;
 		}
+	}
+
+	// mapCreateError translates both classic createProject error
+	// shapes and the new Pro-checkout error codes into user-facing
+	// copy. Branches on APIError.code (the machine-readable field
+	// set from the standard {"error", "code"} envelope) rather
+	// than substring-matching err.message — the message goes
+	// through parseAPIError's capitalize step, which used to
+	// silently defeat the substring check (#408 review, same class
+	// as #400).
+	function mapCreateError(err: unknown): string {
+		if (err instanceof APIError) {
+			switch (err.code) {
+				case 'slug_taken':
+					return 'That project name is already in use — please choose another.';
+				case 'pending_checkout_in_flight':
+					return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
+				case 'billing_disabled':
+					return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
+			}
+		}
+		const msg = err instanceof Error ? err.message : 'Failed to create project';
+		if (msg.includes('limited to') && msg.includes('project')) {
+			return "You've reached the project limit on your current plan. Upgrade to Pro for more projects.";
+		}
+		return msg;
 	}
 
 	function statusColor(status: string): string {
@@ -134,6 +293,27 @@
 	<!-- Redirecting to onboarding — show nothing -->
 {:else}
 <div class="mx-auto max-w-6xl">
+	<!-- Mollie checkout return banner (see handleMollieReturn). -->
+	{#if checkoutBanner}
+		<div
+			class="mb-4 rounded-md border p-4 text-sm {
+				checkoutBanner.kind === 'polling' ? 'border-eurobase-200 bg-eurobase-50 text-eurobase-800'
+				: checkoutBanner.kind === 'canceled' ? 'border-gray-200 bg-gray-50 text-gray-800'
+				: 'border-red-200 bg-red-50 text-red-800'
+			}"
+		>
+			<div class="flex items-center gap-2">
+				{#if checkoutBanner.kind === 'polling'}
+					<svg class="h-4 w-4 animate-spin text-eurobase-600" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+					</svg>
+				{/if}
+				<span class="font-medium">{checkoutBanner.msg}</span>
+			</div>
+		</div>
+	{/if}
+
 	<!-- Page header -->
 	<div class="flex items-center justify-between">
 		<div>

@@ -46,8 +46,11 @@ func TestHandler_DisabledReturns503(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["error"] != "billing_disabled" {
-		t.Errorf("error code = %q, want billing_disabled", body["error"])
+	// Envelope shape: {"error": <human>, "code": <machine>} — see
+	// writeJSONError comment. Test asserts on the machine-readable
+	// code field, not the human-readable message.
+	if body["code"] != "billing_disabled" {
+		t.Errorf("code = %q, want billing_disabled", body["code"])
 	}
 }
 
@@ -85,8 +88,8 @@ func TestHandler_MissingFieldsReturn400(t *testing.T) {
 			}
 			var body map[string]string
 			_ = json.NewDecoder(w.Body).Decode(&body)
-			if body["error"] != tt.want {
-				t.Errorf("error code = %q, want %q", body["error"], tt.want)
+			if body["code"] != tt.want {
+				t.Errorf("code = %q, want %q", body["code"], tt.want)
 			}
 		})
 	}

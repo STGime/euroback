@@ -707,6 +707,37 @@ export class EurobaseAPI {
 		});
 	}
 
+	/**
+	 * Start a Mollie checkout for a project that DOES NOT YET EXIST.
+	 * Payment-first project creation (#406): the backend inserts a
+	 * pending_projects row and creates a Mollie payment; the actual
+	 * project is created by the webhook once first payment lands.
+	 *
+	 * Console should redirect the browser to `checkout_url`. Mollie
+	 * redirects back to `/projects?status=success&pending=<id>` on
+	 * success; the return-handler polls `listProjects` for the
+	 * newly-created project (matched by slug) then navigates.
+	 *
+	 * Only `pro` is supported today — Free doesn't need billing;
+	 * Team uses the beta-grant flow via the existing createProject.
+	 *
+	 * Error codes the console should surface distinctly:
+	 *   - 409 slug_taken → "please pick a different name"
+	 *   - 409 pending_checkout_in_flight → "another checkout is in
+	 *     progress; complete it or wait a few minutes"
+	 *   - 400 invalid_plan → the LimitsChecker rejected (over quota,
+	 *     unknown plan, missing fields — message is user-facing)
+	 *   - 503 billing_disabled → billing turned off in this env
+	 */
+	async startProjectCheckout(
+		req: { name: string; slug: string; region: string; plan_code: 'pro' }
+	): Promise<{ pending_project_id: string; checkout_url: string }> {
+		return this.fetch('/platform/billing/checkout/new-project', {
+			method: 'POST',
+			body: JSON.stringify(req)
+		});
+	}
+
 	/** List every invoice for every project the caller owns.
 	 *  Returns `{ invoices: [] }` when billing is off (503) —
 	 *  matches the getProjectSubscription 503-null convention so
