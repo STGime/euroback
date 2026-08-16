@@ -86,11 +86,44 @@
 		{ value: '720h', label: '30 days' }
 	];
 
+	// Shared sessionStorage key with /projects (the Mollie return
+	// handler lives on /projects and reads this to resolve the
+	// created project after payment). See #406.
+	const PENDING_KEY = 'eurobase.pending_project_checkout';
+
 	async function handleCreate() {
 		if (!projectName.trim()) return;
 		creating = true;
 		createError = '';
 		try {
+			if (plan === 'pro') {
+				// Payment-first flow (#406). Skip step 2 (auth
+				// config) — Pro users configure auth from the
+				// project's Auth tab after landing. This diverges
+				// from Free's 3-step wizard but keeps this PR
+				// scoped; onboarding-continues-after-payment is a
+				// tracked follow-up.
+				const intent = {
+					name: projectName.trim(),
+					slug: slug,
+					region: 'fr-par',
+					plan: plan,
+				};
+				const res = await api.startProjectCheckout({
+					name: intent.name,
+					slug: intent.slug,
+					region: intent.region,
+					plan_code: 'pro',
+				});
+				sessionStorage.setItem(
+					PENDING_KEY,
+					JSON.stringify({ pendingId: res.pending_project_id, ...intent })
+				);
+				window.location.href = res.checkout_url;
+				return; // redirect in flight — don't reset `creating`
+			}
+
+			// Free / Team — existing synchronous 3-step wizard.
 			const project = await api.createProject({
 				name: projectName.trim(),
 				slug: slug,
@@ -101,21 +134,39 @@
 			await loadProjects();
 			step = 'auth';
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : 'Failed to create project';
-			if (msg.includes('409') || msg.includes('already taken')) {
-				const suffix = Math.random().toString(36).slice(2, 6);
-				projectName = projectName.trim() + '-' + suffix;
-				createError = `That project URL was taken. We've updated the name — click Create Project to try again, or edit it.`;
-			} else if (msg.includes('limited to') && msg.includes('project')) {
-				const limit = freePlan?.project_limit ?? 2;
-				createError = `You've reached the maximum of ${limit} projects on the Free plan. Upgrade to Pro to create up to ${proPlan?.project_limit ?? 10} projects.`;
-			} else {
-				// Strip raw API prefix for cleaner display
-				createError = msg.replace(/^API \d+:\s*/, '').replace(/^\{.*"error"\s*:\s*"/, '').replace(/"\s*\}$/, '');
-			}
+			createError = mapCreateError(err);
 		} finally {
 			creating = false;
 		}
+	}
+
+	// mapCreateError translates both classic createProject errors
+	// and the new Pro-checkout error codes into user-facing copy.
+	// Keeps the auto-name-retry branch for slug clashes on the
+	// Free/Team path — the Pro path returns 409 slug_taken from
+	// the backend and we render an explicit message rather than
+	// silently mutating the name (payments already involved).
+	function mapCreateError(err: unknown): string {
+		const msg = err instanceof Error ? err.message : 'Failed to create project';
+		if (msg.includes('slug_taken')) {
+			return 'That project name is already in use — please choose another.';
+		}
+		if (msg.includes('pending_checkout_in_flight')) {
+			return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
+		}
+		if (msg.includes('billing_disabled')) {
+			return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
+		}
+		if (msg.includes('409') || msg.includes('already taken')) {
+			const suffix = Math.random().toString(36).slice(2, 6);
+			projectName = projectName.trim() + '-' + suffix;
+			return `That project URL was taken. We've updated the name — click Create Project to try again, or edit it.`;
+		}
+		if (msg.includes('limited to') && msg.includes('project')) {
+			const limit = freePlan?.project_limit ?? 2;
+			return `You've reached the maximum of ${limit} projects on the Free plan. Upgrade to Pro to create up to ${proPlan?.project_limit ?? 10} projects.`;
+		}
+		return msg.replace(/^API \d+:\s*/, '').replace(/^\{.*"error"\s*:\s*"/, '').replace(/"\s*\}$/, '');
 	}
 
 	async function handleSaveAuthConfig() {
