@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { api, APIError, type Project, type AuthConfig, type PlanLimits } from '$lib/api.js';
 	import { loadProjects } from '$lib/stores.js';
 
@@ -33,6 +34,27 @@
 		} catch {
 			// Fallbacks handle the empty/errored cases — cards show
 			// hardcoded copy, Team stays hidden if profile failed.
+		}
+
+		// Resume-from-payment: /projects Mollie return handler
+		// navigates here with ?resume=<projectId> when the intent
+		// carried returnTo='/onboarding' (Pro checkout started
+		// from the wizard). Load that project, jump to step 2 so
+		// the wizard continues as if the create had been
+		// synchronous. Failure silently falls through to the
+		// normal create step — user can start fresh from there.
+		const resumeId = $page.url.searchParams.get('resume');
+		if (resumeId) {
+			try {
+				const project = await api.getProject(resumeId);
+				createdProject = project;
+				projectName = project.name;
+				step = 'auth';
+			} catch {
+				// project fetch failed — either wrong ID or a race
+				// with a slow webhook. Land on the normal create
+				// step and let user try again.
+			}
 		}
 	});
 
@@ -97,17 +119,18 @@
 		createError = '';
 		try {
 			if (plan === 'pro') {
-				// Payment-first flow (#406). Skip step 2 (auth
-				// config) — Pro users configure auth from the
-				// project's Auth tab after landing. This diverges
-				// from Free's 3-step wizard but keeps this PR
-				// scoped; onboarding-continues-after-payment is a
-				// tracked follow-up.
+				// Payment-first flow (#406). Stash returnTo so the
+				// /projects Mollie return handler navigates BACK to
+				// the wizard instead of dashboard — user continues
+				// with step 2 (auth config) as if the project had
+				// been created synchronously. See the ?resume=<id>
+				// branch in onMount below for the pickup.
 				const intent = {
 					name: projectName.trim(),
 					slug: slug,
 					region: 'fr-par',
 					plan: plan,
+					returnTo: '/onboarding',
 				};
 				const res = await api.startProjectCheckout({
 					name: intent.name,
