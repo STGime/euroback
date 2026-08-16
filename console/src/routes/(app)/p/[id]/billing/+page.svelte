@@ -87,19 +87,16 @@
 		}
 	});
 
-	function onCancelComplete(result: { mode: string; refundedCents: number }): void {
+	function onCancelComplete(_: { mode: string; refundedCents: number }): void {
+		// Single-mode cancel post-2026-08-16 policy change (see
+		// CancelSubscriptionModal): always end-of-period, no
+		// refund. The `mode`/`refundedCents` args are kept on the
+		// callback shape for a possible future re-enable of the
+		// immediate-cancel branch.
 		cancelModalOpen = false;
-		if (result.mode === 'immediate') {
-			const refund = result.refundedCents > 0
-				? ` A prorated refund of €${(result.refundedCents / 100).toFixed(2)} will land on your card within 5–10 business days.`
-				: '';
-			cancelSuccess = `Your subscription has been canceled and this project is now on the Free plan.${refund}`;
-		} else {
-			cancelSuccess =
-				'Your subscription will end at the end of the current period. You keep Pro features until then.';
-		}
-		// Reload state so plan flip + subscription clear are
-		// visible immediately.
+		cancelSuccess = 'Your subscription will end at the end of the current period. You keep Pro features until then.';
+		// Reload state so the subscription's canceled_at + status
+		// flip are visible immediately.
 		void refresh();
 	}
 
