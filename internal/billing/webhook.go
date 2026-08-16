@@ -443,9 +443,25 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 			return fmt.Errorf("create project: %w", err)
 		}
 	case err == nil:
-		// Project already exists. Adopt only if same owner
-		// (prior attempt of ours). Different owner = real
-		// slug conflict, refund.
+		// Project already exists. Adopt ONLY when:
+		//   (a) same owner (not adopting someone else's project), AND
+		//   (b) no existing subscription (real crashed prior attempt
+		//       of ours — an incomplete new-project checkout never
+		//       reached the sub/invoice insert). See #407 re-review
+		//       🟡: without (b), a user reusing a slug they already
+		//       own would have their new payment bound to the OLD
+		//       project, potentially adding a paid Pro sub to a Free
+		//       project (since adopt skips CreateProject which sets
+		//       plan='pro').
+		//
+		// (a) violation → real slug conflict → refund. Should be
+		// impossible after the pre-Mollie slug check in
+		// NewProjectCheckout, but defence-in-depth.
+		// (b) violation → same-owner slug reuse that slipped past
+		// the pre-Mollie check somehow (race with a concurrent
+		// project creation, etc.) → refund. Better to hand money
+		// back than to silently bill for a project the user
+		// already has.
 		if existingOwner != ownerID {
 			slog.Error("billing.webhook.slug_owned_by_different_user_will_refund",
 				"pending_project_id", pendingID,
@@ -456,6 +472,24 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 			)
 			s.refundOrphanedPayment(ctx, payment, "slug_conflict")
 			return fmt.Errorf("slug %q owned by different user", slug)
+		}
+		var existingSubCount int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT count(*) FROM public.subscriptions WHERE project_id = $1`,
+			projectID,
+		).Scan(&existingSubCount); err != nil {
+			return fmt.Errorf("check subscriptions on adopt candidate: %w", err)
+		}
+		if existingSubCount > 0 {
+			slog.Error("billing.webhook.adopt_target_has_subscription_will_refund",
+				"pending_project_id", pendingID,
+				"mollie_payment_id", payment.ID,
+				"slug", slug,
+				"project_id", projectID,
+				"existing_sub_count", existingSubCount,
+			)
+			s.refundOrphanedPayment(ctx, payment, "adopt_target_not_incomplete")
+			return fmt.Errorf("adopt candidate %s already has %d subscription row(s) — not a crashed-attempt shape", projectID, existingSubCount)
 		}
 		slog.Info("billing.webhook.adopted_existing_project_from_prior_attempt",
 			"pending_project_id", pendingID,

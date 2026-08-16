@@ -75,6 +75,16 @@ var (
 	// payment will be refunded — the webhook branch schedules the
 	// refund before surfacing this error.
 	ErrPendingProjectNotFound = errors.New("billing: pending project not found (may have expired)")
+
+	// ErrSlugTaken is returned by NewProjectCheckout when the
+	// requested slug already identifies an existing project (any
+	// owner — projects.slug is globally UNIQUE). Rejected BEFORE
+	// opening a Mollie payment so the user doesn't pay-then-refund
+	// on a preventable name clash. Also closes an adopt-path bug
+	// (#407 re-review 🟡): without this check, a user reusing a
+	// slug they already own would have their new payment adopted
+	// onto the pre-existing project. Handler returns 409.
+	ErrSlugTaken = errors.New("billing: slug already in use")
 )
 
 // pendingCheckoutCooldown is the window during which a second
@@ -502,7 +512,7 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 		return nil, fmt.Errorf("%w: name, slug, and region are required", ErrInvalidPlan)
 	}
 
-	// 0. Enforce project quota BEFORE opening a Mollie payment
+	// 0a. Enforce project quota BEFORE opening a Mollie payment
 	// (#407 review 🟡 #4). Otherwise a user over their cap can
 	// still pay, and the webhook's CreateProject call has no
 	// LimitsService plumbing so nothing catches it there —
@@ -511,6 +521,24 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 		if err := s.limits.CheckProjectLimit(ctx, userID); err != nil {
 			return nil, fmt.Errorf("%w: %s", ErrInvalidPlan, err.Error())
 		}
+	}
+
+	// 0b. Reject slug clashes BEFORE opening a Mollie payment
+	// (#407 re-review 🟡). Otherwise a user reusing a slug they
+	// already own would have their new payment adopted onto the
+	// pre-existing project by the webhook's find-or-create branch.
+	// projects.slug is globally UNIQUE, so any hit here (regardless
+	// of owner) blocks the checkout — user picks a different name.
+	var slugTaken bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM public.projects WHERE slug = $1)`,
+		req.Slug,
+	).Scan(&slugTaken)
+	if err != nil {
+		return nil, fmt.Errorf("billing: slug availability check: %w", err)
+	}
+	if slugTaken {
+		return nil, ErrSlugTaken
 	}
 
 	price, err := s.resolvePriceCents(ctx, req.Plan)
@@ -538,6 +566,25 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 		userID,
 	); err != nil {
 		return nil, fmt.Errorf("billing: acquire per-owner lock: %w", err)
+	}
+
+	// Reclaim stale unresolved rows for THIS owner before the
+	// guard check (#407 re-review 🟢). If a prior request
+	// crashed after the lock-tx committed but before the Mollie
+	// call set mollie_payment_id, the row lingers as NULL-payment
+	// until expires_at (24h default), self-locking the user out
+	// of new-project checkouts. A NULL-payment row older than
+	// the cooldown window means Mollie was never successfully
+	// called (a successful call sets payment_id in seconds), so
+	// deleting it is safe — no external state references it.
+	if _, err := lockTx.Exec(ctx,
+		`DELETE FROM public.pending_projects
+		  WHERE owner_id = $1::uuid
+		    AND mollie_payment_id IS NULL
+		    AND created_at < now() - $2::interval`,
+		userID, fmt.Sprintf("%d seconds", int(pendingCheckoutCooldown.Seconds())),
+	); err != nil {
+		return nil, fmt.Errorf("billing: reclaim stale unresolved rows: %w", err)
 	}
 
 	// Guard: check for BOTH shapes of in-flight row inside the

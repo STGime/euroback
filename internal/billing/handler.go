@@ -191,6 +191,10 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 				writeJSONError(w, http.StatusBadRequest, "invalid_plan", err.Error())
 			case errors.Is(err, ErrPlanNotPriced):
 				writeJSONError(w, http.StatusBadRequest, "plan_not_priced", "this plan is not available for direct checkout")
+			case errors.Is(err, ErrSlugTaken):
+				writeJSONError(w, http.StatusConflict, "slug_taken", "this project name is already in use — please choose another")
+			case errors.Is(err, ErrPendingCheckoutInFlight):
+				writeJSONError(w, http.StatusConflict, "pending_checkout_in_flight", "another checkout is already in progress for your account — please complete it first or wait a few minutes")
 			default:
 				reqID := middleware.GetReqID(r.Context())
 				slog.Error("billing: new-project checkout failed",
