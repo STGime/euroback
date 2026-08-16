@@ -23,15 +23,15 @@
 BEGIN;
 
 CREATE TABLE public.pending_projects (
-    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_id           UUID        NOT NULL REFERENCES public.platform_users(id) ON DELETE CASCADE,
-    name               TEXT        NOT NULL,
-    slug               TEXT        NOT NULL,
-    region             TEXT        NOT NULL,
-    plan               TEXT        NOT NULL CHECK (plan IN ('pro')),
-    mollie_payment_id  TEXT,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at         TIMESTAMPTZ NOT NULL DEFAULT now() + interval '24 hours'
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id            UUID        NOT NULL REFERENCES public.platform_users(id) ON DELETE CASCADE,
+    name                TEXT        NOT NULL,
+    slug                TEXT        NOT NULL,
+    region              TEXT        NOT NULL,
+    plan                TEXT        NOT NULL CHECK (plan IN ('pro')),
+    mollie_payment_id   TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at          TIMESTAMPTZ NOT NULL DEFAULT now() + interval '24 hours'
 );
 
 -- Owner lookup — sweeper + concurrent-click check both key on this.
@@ -51,6 +51,20 @@ CREATE INDEX idx_pending_projects_expires_unresolved
 CREATE UNIQUE INDEX idx_pending_projects_mollie_payment
     ON public.pending_projects(mollie_payment_id)
     WHERE mollie_payment_id IS NOT NULL;
+
+-- Concurrent-click backstop (#407 review 🔴). NewProjectCheckout
+-- takes an advisory lock keyed on owner_id to serialise the
+-- guard-check + INSERT, but the advisory lock alone would still be
+-- lost across a pod restart between the tx commits. This partial
+-- unique index catches the escape hatch: at most one unresolved
+-- pending row per owner can exist at any point. Two racing INSERTs
+-- would have the second fail with 23505 — the service catches that
+-- and returns ErrPendingCheckoutInFlight. Doesn't block a stale
+-- unresolved row (with a resolved-but-expired mollie_payment_id)
+-- from being INSERTed, but the sweeper deletes those hourly.
+CREATE UNIQUE INDEX idx_pending_projects_owner_unresolved
+    ON public.pending_projects(owner_id)
+    WHERE mollie_payment_id IS NULL;
 
 COMMENT ON TABLE public.pending_projects IS
     'Holds "user clicked Create on Pro + Mollie checkout in flight" state before a real project row exists. See migration 000102 and issue #406.';

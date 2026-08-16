@@ -411,20 +411,59 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 		return fmt.Errorf("resolve price for %s: %w", planCode, err)
 	}
 
-	// Create the project. CreateProject owns its own tx; on
-	// success we commit the subscription/invoice/pending-delete in
-	// a follow-up tx below.
-	projectID, err := s.projectCreator.CreateProjectForBilling(ctx, ownerID, userEmail, name, slug, region, planCode)
-	if err != nil {
-		// Provisioning failed BEFORE we took any billing action —
-		// safe to refund. Log with enough context for support.
-		slog.Error("billing.webhook.create_project_failed_will_refund",
+	// Find-or-create the project. This is the crash-retry
+	// idempotency fix (#407 review 🟡 #2). CreateProject owns
+	// its own tx and commits before the follow-up sub/invoice tx;
+	// if we crash between the two, a retry that just called
+	// CreateProject again would fail with 23505 on projects.slug
+	// (globally UNIQUE per migration 000001) and trigger a refund
+	// of a paid, live project. So look up first — if a project
+	// with our slug already exists AND is owned by our user, it's
+	// our prior attempt: adopt it and continue to the follow-up tx.
+	// A different owner having the same slug is a genuine conflict
+	// (should be extremely rare since we validate slug availability
+	// pre-Mollie, but defensive path exists).
+	var projectID string
+	var existingOwner string
+	err = s.pool.QueryRow(ctx,
+		`SELECT id, owner_id::text FROM public.projects WHERE slug = $1`,
+		slug,
+	).Scan(&projectID, &existingOwner)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Fresh path — no project yet, create one.
+		projectID, err = s.projectCreator.CreateProjectForBilling(ctx, ownerID, userEmail, name, slug, region, planCode)
+		if err != nil {
+			slog.Error("billing.webhook.create_project_failed_will_refund",
+				"pending_project_id", pendingID,
+				"mollie_payment_id", payment.ID,
+				"error", err,
+			)
+			s.refundOrphanedPayment(ctx, payment, "provisioning_failed")
+			return fmt.Errorf("create project: %w", err)
+		}
+	case err == nil:
+		// Project already exists. Adopt only if same owner
+		// (prior attempt of ours). Different owner = real
+		// slug conflict, refund.
+		if existingOwner != ownerID {
+			slog.Error("billing.webhook.slug_owned_by_different_user_will_refund",
+				"pending_project_id", pendingID,
+				"mollie_payment_id", payment.ID,
+				"slug", slug,
+				"existing_owner", existingOwner,
+				"pending_owner", ownerID,
+			)
+			s.refundOrphanedPayment(ctx, payment, "slug_conflict")
+			return fmt.Errorf("slug %q owned by different user", slug)
+		}
+		slog.Info("billing.webhook.adopted_existing_project_from_prior_attempt",
 			"pending_project_id", pendingID,
+			"project_id", projectID,
 			"mollie_payment_id", payment.ID,
-			"error", err,
 		)
-		s.refundOrphanedPayment(ctx, payment, "provisioning_failed")
-		return fmt.Errorf("create project: %w", err)
+	default:
+		return fmt.Errorf("lookup existing project by slug: %w", err)
 	}
 
 	// Create the recurring Mollie subscription. If this fails,
@@ -684,6 +723,30 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 			payment.ID,
 		); err != nil {
 			return fmt.Errorf("mark first invoice failed: %w", err)
+		}
+		// Also clean up any pending_project row this failed payment
+		// belonged to (#407 review 🟡 #3). Without this, an
+		// abandoned Pro checkout leaves the pending row with a
+		// mollie_payment_id set, and the sweeper's stale-resolved
+		// branch would log a false "Mollie took a payment we lost"
+		// warning every hour until expiry. Abandonment is normal
+		// user behaviour, not a webhook delivery failure.
+		if pendingID := payment.Metadata["pending_project_id"]; pendingID != "" {
+			if _, err := s.pool.Exec(ctx,
+				`DELETE FROM public.pending_projects WHERE id = $1`,
+				pendingID,
+			); err != nil {
+				slog.Warn("billing.webhook.pending_cleanup_on_failure_failed",
+					"pending_project_id", pendingID,
+					"mollie_payment_id", payment.ID,
+					"error", err,
+				)
+			} else {
+				slog.Info("billing.webhook.pending_project_cleaned_on_abandonment",
+					"pending_project_id", pendingID,
+					"mollie_payment_id", payment.ID,
+				)
+			}
 		}
 		return nil
 	}

@@ -141,6 +141,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// tenant.CreateProject once Mollie confirms first payment
 		// on a NewProjectCheckout intent. See issue #406.
 		billingSvc.WithProjectCreator(tenantSvc)
+		// Wire the project-limit checker so NewProjectCheckout
+		// enforces the per-owner project cap BEFORE opening a
+		// Mollie payment (#407 review 🟡 #4). Nil-safe on the
+		// billing side, but limitsSvc is expected to be non-nil
+		// here since it's constructed unconditionally upstream.
+		if limitsSvc != nil {
+			billingSvc.WithLimits(limitsSvc)
+		}
 	}
 
 	// Team-tier M3 (backup + PITR). Same provider registry shape as

@@ -123,6 +123,20 @@ type ProjectCreator interface {
 	CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string) (projectID string, err error)
 }
 
+// LimitsChecker is the subset of plans.LimitsService that
+// NewProjectCheckout uses to enforce the per-owner project cap
+// BEFORE opening a Mollie payment. Matched by
+// *plans.LimitsService.CheckProjectLimit. Optional but strongly
+// recommended — without it, a user can exceed their plan's project
+// cap via the paid checkout path (#407 review 🟡 #4).
+//
+// Return non-nil error → NewProjectCheckout aborts before Mollie.
+// The error message surfaces to the user as the 400 body, so it
+// should be user-facing.
+type LimitsChecker interface {
+	CheckProjectLimit(ctx context.Context, ownerID string) error
+}
+
 // Service owns the runtime dependencies for the billing HTTP
 // surface. Constructed once at server startup and re-used across
 // every request — safe because Client, Pool, and the config strings
@@ -136,6 +150,7 @@ type Service struct {
 	storage        invoiceStorage
 	invoiceMailer  invoiceMailer
 	projectCreator ProjectCreator
+	limits         LimitsChecker
 }
 
 // Config holds the settings CreateCheckout reads on every call.
@@ -187,6 +202,14 @@ func (s *Service) WithMetrics(m WebhookMetrics) *Service {
 // customer and logs). See issue #406.
 func (s *Service) WithProjectCreator(pc ProjectCreator) *Service {
 	s.projectCreator = pc
+	return s
+}
+
+// WithLimits attaches the project-limit checker so NewProjectCheckout
+// can enforce the per-owner project cap BEFORE opening a Mollie
+// payment. Optional but strongly recommended — see #407 review 🟡 #4.
+func (s *Service) WithLimits(l LimitsChecker) *Service {
+	s.limits = l
 	return s
 }
 
@@ -479,47 +502,115 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 		return nil, fmt.Errorf("%w: name, slug, and region are required", ErrInvalidPlan)
 	}
 
+	// 0. Enforce project quota BEFORE opening a Mollie payment
+	// (#407 review 🟡 #4). Otherwise a user over their cap can
+	// still pay, and the webhook's CreateProject call has no
+	// LimitsService plumbing so nothing catches it there —
+	// they'd get a refund AFTER paying. Fail-loud upfront.
+	if s.limits != nil {
+		if err := s.limits.CheckProjectLimit(ctx, userID); err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidPlan, err.Error())
+		}
+	}
+
 	price, err := s.resolvePriceCents(ctx, req.Plan)
 	if err != nil {
 		return nil, err
 	}
 
-	// 1. Concurrent-click guard. If the same owner has an
-	// unresolved pending row younger than the cooldown, surface
-	// the existing checkout URL rather than opening a second
-	// Mollie payment. Two rows would mean two possible charges.
-	//
-	// "Unresolved" = mollie_payment_id IS NOT NULL AND expires_at > now().
-	// A row without mollie_payment_id is one where Mollie call
-	// hasn't happened yet (or errored); we'd delete-and-retry
-	// naturally.
-	var existingID, existingPaymentID string
-	err = s.pool.QueryRow(ctx,
+	// 1. Acquire per-owner advisory lock in a short tx that
+	// covers the guard-check + INSERT (#407 review 🔴). Without
+	// this, two racing requests both see "no in-flight row" and
+	// both INSERT (the mollie_payment_id is set later, so the
+	// original guard's IS NOT NULL filter can't see either).
+	// The partial unique index on (owner_id) WHERE
+	// mollie_payment_id IS NULL is the DB-level backstop; the
+	// advisory lock avoids surfacing 23505 to the user in the
+	// common case.
+	lockTx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("billing: begin lock tx: %w", err)
+	}
+	defer func() { _ = lockTx.Rollback(ctx) }()
+
+	if _, err := lockTx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1::text))`,
+		userID,
+	); err != nil {
+		return nil, fmt.Errorf("billing: acquire per-owner lock: %w", err)
+	}
+
+	// Guard: check for BOTH shapes of in-flight row inside the
+	// lock. Resolved-and-recent → return existing URL (idempotent
+	// re-click). Unresolved-any (mollie_payment_id NULL) → another
+	// request just INSERTed but hasn't set the payment ID yet →
+	// treat as in-flight.
+	var existingID string
+	var existingPaymentID *string
+	err = lockTx.QueryRow(ctx,
 		`SELECT id, mollie_payment_id FROM public.pending_projects
 		  WHERE owner_id = $1::uuid
-		    AND mollie_payment_id IS NOT NULL
-		    AND created_at > now() - $2::interval
+		    AND (
+		        (mollie_payment_id IS NOT NULL AND created_at > now() - $2::interval)
+		     OR (mollie_payment_id IS NULL AND expires_at > now())
+		    )
 		  ORDER BY created_at DESC LIMIT 1`,
 		userID, fmt.Sprintf("%d seconds", int(pendingCheckoutCooldown.Seconds())),
 	).Scan(&existingID, &existingPaymentID)
 	if err == nil {
-		existingPayment, perr := s.client.GetPayment(ctx, existingPaymentID)
-		if perr == nil && existingPayment.Links.Checkout != nil && existingPayment.Links.Checkout.Href != "" {
-			return &NewProjectCheckoutResult{
-				PendingProjectID: existingID,
-				CheckoutURL:      existingPayment.Links.Checkout.Href,
-			}, nil
+		if existingPaymentID != nil {
+			// Resolved recent: re-fetch and return existing URL.
+			// Drop the lock tx before the external call.
+			_ = lockTx.Rollback(ctx)
+			existingPayment, perr := s.client.GetPayment(ctx, *existingPaymentID)
+			if perr == nil && existingPayment.Links.Checkout != nil && existingPayment.Links.Checkout.Href != "" {
+				return &NewProjectCheckoutResult{
+					PendingProjectID: existingID,
+					CheckoutURL:      existingPayment.Links.Checkout.Href,
+				}, nil
+			}
+			slog.Warn("billing: found in-flight pending row but couldn't re-fetch Mollie checkout URL — surfacing as in-flight",
+				"user_id", userID, "existing_pending_id", existingID, "error", perr)
+			return nil, ErrPendingCheckoutInFlight
 		}
-		// Fall through to normal path if Mollie can't re-serve the
-		// checkout URL. The pre-existing row will be cleaned up by
-		// the sweeper eventually.
-		slog.Warn("billing: found in-flight pending row but couldn't re-fetch Mollie checkout URL — starting fresh checkout",
-			"user_id", userID, "existing_pending_id", existingID, "error", perr)
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+		// Unresolved row exists — a concurrent request is mid-
+		// checkout. The user should wait a few seconds and retry.
+		return nil, ErrPendingCheckoutInFlight
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("billing: pending-project in-flight check: %w", err)
 	}
 
-	// 2. Get or create the Mollie customer. Identical to
+	// 2. INSERT under the same lock. The partial unique index
+	// backstops a lost-lock scenario (pod restart mid-flight);
+	// on 23505 we surface ErrPendingCheckoutInFlight.
+	var pendingID string
+	err = lockTx.QueryRow(ctx,
+		`INSERT INTO public.pending_projects
+		    (owner_id, name, slug, region, plan)
+		 VALUES ($1::uuid, $2, $3, $4, $5)
+		 RETURNING id`,
+		userID, req.Name, req.Slug, req.Region, req.Plan,
+	).Scan(&pendingID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, ErrPendingCheckoutInFlight
+		}
+		return nil, fmt.Errorf("billing: insert pending_project: %w", err)
+	}
+
+	// Commit + release lock BEFORE the Mollie call. Holding the
+	// per-owner lock across a Mollie network round-trip would
+	// serialize every same-owner request for the full duration
+	// of the outbound HTTP call — not what we want, and the
+	// partial unique index + guard combination already prevents
+	// duplicates.
+	if err := lockTx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("billing: commit lock tx: %w", err)
+	}
+
+	// 3. Get or create the Mollie customer. Identical to
 	// CreateCheckout — stored on platform_users.mollie_customer_id
 	// so subsequent checkouts (new-project or upgrade-existing)
 	// reuse the same Mollie customer.
@@ -530,6 +621,7 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 		userID,
 	).Scan(&userEmail, &mollieCustomerID)
 	if err != nil {
+		s.deletePendingProject(ctx, pendingID)
 		return nil, fmt.Errorf("billing: load platform_user: %w", err)
 	}
 	customerID := ""
@@ -544,6 +636,7 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 			},
 		}, mollie.WithIdempotencyKey("customer:"+userID))
 		if cerr != nil {
+			s.deletePendingProject(ctx, pendingID)
 			return nil, fmt.Errorf("billing: create mollie customer: %w", cerr)
 		}
 		customerID = cust.ID
@@ -554,22 +647,6 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 			slog.Warn("billing: created Mollie customer but failed to persist ID",
 				"user_id", userID, "mollie_customer_id", customerID, "error", uerr)
 		}
-	}
-
-	// 3. Insert the pending_projects row BEFORE the Mollie
-	// payment. The row's PK is the pending_project_id we hand
-	// Mollie as metadata; if the Mollie call fails we DELETE
-	// the row so the sweeper doesn't have to.
-	var pendingID string
-	err = s.pool.QueryRow(ctx,
-		`INSERT INTO public.pending_projects
-		    (owner_id, name, slug, region, plan)
-		 VALUES ($1::uuid, $2, $3, $4, $5)
-		 RETURNING id`,
-		userID, req.Name, req.Slug, req.Region, req.Plan,
-	).Scan(&pendingID)
-	if err != nil {
-		return nil, fmt.Errorf("billing: insert pending_project: %w", err)
 	}
 
 	// 4. Create the first Mollie payment. Metadata carries
