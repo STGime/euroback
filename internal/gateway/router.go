@@ -136,6 +136,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// Mollie config); the project still provisions.
 	if billingSvc != nil {
 		tenantSvc.SetBetaGrantRecorder(billingSvc)
+		// Wire the reverse direction so the billing webhook's
+		// payment-first-project-creation branch can call back into
+		// tenant.CreateProject once Mollie confirms first payment
+		// on a NewProjectCheckout intent. See issue #406.
+		billingSvc.WithProjectCreator(tenantSvc)
 	}
 
 	// Team-tier M3 (backup + PITR). Same provider registry shape as
@@ -565,6 +570,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				}
 				r.Get("/config", billing.HandleGetConfig(billingSvc))
 				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
+				r.Post("/checkout/new-project", billing.HandleNewProjectCheckout(billingSvc))
 				r.Get("/invoices", billing.HandleListInvoices(billingSvc))
 				r.Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
 				r.Post("/subscriptions/{id}/cancel", billing.HandleCancelSubscription(billingSvc))
