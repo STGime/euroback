@@ -724,11 +724,11 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 						<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18 9 11.25l4.306 4.307a11.95 11.95 0 0 1 5.814-5.518l2.74-1.22m0 0-5.94-2.281m5.94 2.28-2.28 5.941" />
 					</svg>
 					<div>
-						<p class="text-sm font-medium text-eurobase-800">API keys are on your project's Settings tab</p>
+						<p class="text-sm font-medium text-eurobase-800">Generate your API keys when you're ready</p>
 						<p class="text-xs text-eurobase-700 mt-0.5">
-							Because your project was created by a webhook after payment, the initial keys weren't returned to the browser. Head to
+							Because your project was created by a webhook after payment, no keys were returned to the browser. Head to
 							<a href="/p/{projectId}/settings" class="underline hover:no-underline">Project Settings → API Keys</a>
-							to view or regenerate them when you're ready. Regenerating invalidates the previous pair.
+							and click Regenerate to mint a fresh pair — copy them somewhere safe as soon as they appear (the secret is only shown once).
 						</p>
 					</div>
 				</div>
