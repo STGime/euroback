@@ -140,6 +140,20 @@ func (s *Service) processPaymentWebhook(ctx context.Context, paymentID string) e
 		return fmt.Errorf("fetch payment %s: %w", paymentID, err)
 	}
 
+	// Observability: log every webhook entry with the fetched
+	// payment status so silent-no-op branches (open / pending /
+	// authorized) don't leave a debugging cliff. Added after the
+	// 2026-08-16 new-project webhook debugging session — we saw
+	// ingress hits with no gateway logs, took 20 min to work out
+	// the status was "open". slog.Info because this is a routine
+	// entry log, not a failure.
+	slog.Info("billing.webhook.received",
+		"id", payment.ID,
+		"status", payment.Status,
+		"sequence_type", payment.SequenceType,
+		"has_pending_project_id", payment.Metadata["pending_project_id"] != "",
+	)
+
 	switch payment.Status {
 	case "paid":
 		if payment.SequenceType == mollie.SequenceTypeFirst {
