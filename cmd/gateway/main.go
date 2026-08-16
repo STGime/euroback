@@ -511,6 +511,14 @@ func main() {
 	if billingEnabled {
 		downgradeSvc := billing.NewDowngradeService(pool, mollieClient, emailService, "hello@eurobase.app")
 		downgradeSvc.StartLoop(ctx)
+
+		// Pending-project sweeper — hourly goroutine that cleans up
+		// pending_projects rows abandoned before Mollie completed
+		// checkout (#406). Same shape as the downgrade sweep;
+		// unresolved rows past 24h are deleted, resolved-but-stale
+		// rows are logged for ops attention.
+		pendingSweeper := billing.NewPendingSweeper(pool)
+		pendingSweeper.StartLoop(ctx)
 	}
 
 	// ── Set up chi router (extracted for testability) ──

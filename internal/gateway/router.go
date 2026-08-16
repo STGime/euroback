@@ -136,6 +136,19 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// Mollie config); the project still provisions.
 	if billingSvc != nil {
 		tenantSvc.SetBetaGrantRecorder(billingSvc)
+		// Wire the reverse direction so the billing webhook's
+		// payment-first-project-creation branch can call back into
+		// tenant.CreateProject once Mollie confirms first payment
+		// on a NewProjectCheckout intent. See issue #406.
+		billingSvc.WithProjectCreator(tenantSvc)
+		// Wire the project-limit checker so NewProjectCheckout
+		// enforces the per-owner project cap BEFORE opening a
+		// Mollie payment (#407 review 🟡 #4). Nil-safe on the
+		// billing side, but limitsSvc is expected to be non-nil
+		// here since it's constructed unconditionally upstream.
+		if limitsSvc != nil {
+			billingSvc.WithLimits(limitsSvc)
+		}
 	}
 
 	// Team-tier M3 (backup + PITR). Same provider registry shape as
@@ -565,6 +578,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				}
 				r.Get("/config", billing.HandleGetConfig(billingSvc))
 				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
+				r.Post("/checkout/new-project", billing.HandleNewProjectCheckout(billingSvc))
 				r.Get("/invoices", billing.HandleListInvoices(billingSvc))
 				r.Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
 				r.Post("/subscriptions/{id}/cancel", billing.HandleCancelSubscription(billingSvc))

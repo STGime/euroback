@@ -120,6 +120,29 @@ func (s *TenantService) SetProviderRegistry(reg *dbprovider.Registry) {
 	s.providerRegistry = reg
 }
 
+// CreateProjectForBilling is the adapter that satisfies
+// billing.ProjectCreator. Called from the billing webhook's
+// new-project-first-payment branch after Mollie confirms payment
+// (issue #406). Wraps CreateProject with a primitives-only
+// signature so the billing package doesn't have to import
+// tenant.CreateProjectRequest.
+//
+// Returns the newly-created project's ID string. The webhook uses
+// it to insert the corresponding subscriptions + invoices rows in
+// the same transaction as the project creation.
+func (s *TenantService) CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string) (string, error) {
+	proj, err := s.CreateProject(ctx, ownerID, email, CreateProjectRequest{
+		Name:   name,
+		Slug:   slug,
+		Region: region,
+		Plan:   plan,
+	})
+	if err != nil {
+		return "", err
+	}
+	return proj.ID, nil
+}
+
 // SetBetaGrantRecorder wires an optional beta-grant recorder
 // (typically *billing.Service) into the tenant service. When set,
 // CreateProject with plan=team writes a beta_grant subscription row

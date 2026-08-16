@@ -180,6 +180,15 @@ func (s *Service) processPaymentWebhook(ctx context.Context, paymentID string) e
 // subscriptions if we call twice), so the pre-check matters —
 // belt-and-suspenders with the invoice paid_at guard below.
 func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.Payment) error {
+	// Branch on metadata shape. New-project checkouts (issue #406)
+	// carry pending_project_id and no subscription_id — the project
+	// (and therefore the subscription) doesn't exist yet, so we
+	// create both from the pending_projects row. Existing-project
+	// upgrades carry the classic subscription_id / project_id pair.
+	if pendingID := payment.Metadata["pending_project_id"]; pendingID != "" {
+		return s.activateNewProjectFromFirstPayment(ctx, payment, pendingID)
+	}
+
 	subscriptionID := payment.Metadata["subscription_id"]
 	projectID := payment.Metadata["project_id"]
 	planCode := payment.Metadata["plan_code"]
@@ -312,6 +321,305 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 		s.enqueueInvoiceRender(invoiceID)
 	}
 	return nil
+}
+
+// activateNewProjectFromFirstPayment is the payment-first sibling
+// of activateFromFirstPayment: the user clicked Create Project on
+// a paid plan, completed Mollie's checkout, and now we (a) create
+// the project, (b) insert the subscription linked to it, (c)
+// register the recurring Mollie subscription, (d) mark the invoice
+// paid, (e) delete the pending_projects row. See issue #406.
+//
+// Idempotency: three overlapping guards.
+//   - If we already inserted a subscription for this mollie_payment_id,
+//     early-return (webhook retry after successful processing).
+//   - The pending_projects row is deleted at the tail of the happy
+//     path; if it's gone AND no subscription exists, the payment
+//     landed after the pending row was swept — we refund via the
+//     Mollie API and log for ops.
+//   - CreateProjectForBilling itself is not idempotent; on retry
+//     after a partial failure we'd get a slug-collision error which
+//     surfaces as an ops-visible failure rather than a duplicate
+//     project.
+func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, payment *mollie.Payment, pendingID string) error {
+	if payment.MandateID == "" {
+		return fmt.Errorf("new-project first-payment webhook has no mandateId (payment %s)", payment.ID)
+	}
+
+	// Idempotency guard 1: has a subscription already been created
+	// for this payment? Webhook retries after a successful
+	// activation should be no-ops.
+	var existingSubID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id FROM public.subscriptions WHERE mollie_payment_id = $1 LIMIT 1`,
+		payment.ID,
+	).Scan(&existingSubID)
+	if err == nil {
+		// Already processed. Make sure the invoice is marked paid.
+		return s.markInvoicePaid(ctx, payment)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("check existing subscription for payment %s: %w", payment.ID, err)
+	}
+
+	// Load the pending intent. If missing, the payment arrived
+	// after the sweeper expired the row — refund and log.
+	var (
+		ownerID   string
+		name      string
+		slug      string
+		region    string
+		planCode  string
+		userEmail string
+	)
+	err = s.pool.QueryRow(ctx,
+		`SELECT pp.owner_id::text, pp.name, pp.slug, pp.region, pp.plan, pu.email
+		   FROM public.pending_projects pp
+		   JOIN public.platform_users pu ON pu.id = pp.owner_id
+		  WHERE pp.id = $1`,
+		pendingID,
+	).Scan(&ownerID, &name, &slug, &region, &planCode, &userEmail)
+	if errors.Is(err, pgx.ErrNoRows) {
+		slog.Error("billing.webhook.pending_project_missing_will_refund",
+			"pending_project_id", pendingID,
+			"mollie_payment_id", payment.ID,
+		)
+		s.refundOrphanedPayment(ctx, payment, "pending_project_expired")
+		return ErrPendingProjectNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load pending_project %s: %w", pendingID, err)
+	}
+
+	if s.projectCreator == nil {
+		// Dev / test env where the projectCreator wasn't wired.
+		// Refund is the safe move — we've taken money but can't
+		// create the resource the customer paid for.
+		slog.Error("billing.webhook.no_project_creator_will_refund",
+			"pending_project_id", pendingID,
+			"mollie_payment_id", payment.ID,
+		)
+		s.refundOrphanedPayment(ctx, payment, "project_creator_unavailable")
+		return fmt.Errorf("no project creator configured — payment %s refunded", payment.ID)
+	}
+
+	// Resolve price BEFORE creating the project so a price-config
+	// glitch doesn't leave us with an orphan project.
+	priceCents, err := s.resolvePriceCents(ctx, planCode)
+	if err != nil {
+		s.refundOrphanedPayment(ctx, payment, "price_resolve_failed")
+		return fmt.Errorf("resolve price for %s: %w", planCode, err)
+	}
+
+	// Find-or-create the project. This is the crash-retry
+	// idempotency fix (#407 review 🟡 #2). CreateProject owns
+	// its own tx and commits before the follow-up sub/invoice tx;
+	// if we crash between the two, a retry that just called
+	// CreateProject again would fail with 23505 on projects.slug
+	// (globally UNIQUE per migration 000001) and trigger a refund
+	// of a paid, live project. So look up first — if a project
+	// with our slug already exists AND is owned by our user, it's
+	// our prior attempt: adopt it and continue to the follow-up tx.
+	// A different owner having the same slug is a genuine conflict
+	// (should be extremely rare since we validate slug availability
+	// pre-Mollie, but defensive path exists).
+	var projectID string
+	var existingOwner string
+	err = s.pool.QueryRow(ctx,
+		`SELECT id, owner_id::text FROM public.projects WHERE slug = $1`,
+		slug,
+	).Scan(&projectID, &existingOwner)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Fresh path — no project yet, create one.
+		projectID, err = s.projectCreator.CreateProjectForBilling(ctx, ownerID, userEmail, name, slug, region, planCode)
+		if err != nil {
+			slog.Error("billing.webhook.create_project_failed_will_refund",
+				"pending_project_id", pendingID,
+				"mollie_payment_id", payment.ID,
+				"error", err,
+			)
+			s.refundOrphanedPayment(ctx, payment, "provisioning_failed")
+			return fmt.Errorf("create project: %w", err)
+		}
+	case err == nil:
+		// Project already exists. Adopt ONLY when:
+		//   (a) same owner (not adopting someone else's project), AND
+		//   (b) no existing subscription (real crashed prior attempt
+		//       of ours — an incomplete new-project checkout never
+		//       reached the sub/invoice insert). See #407 re-review
+		//       🟡: without (b), a user reusing a slug they already
+		//       own would have their new payment bound to the OLD
+		//       project, potentially adding a paid Pro sub to a Free
+		//       project (since adopt skips CreateProject which sets
+		//       plan='pro').
+		//
+		// (a) violation → real slug conflict → refund. Should be
+		// impossible after the pre-Mollie slug check in
+		// NewProjectCheckout, but defence-in-depth.
+		// (b) violation → same-owner slug reuse that slipped past
+		// the pre-Mollie check somehow (race with a concurrent
+		// project creation, etc.) → refund. Better to hand money
+		// back than to silently bill for a project the user
+		// already has.
+		if existingOwner != ownerID {
+			slog.Error("billing.webhook.slug_owned_by_different_user_will_refund",
+				"pending_project_id", pendingID,
+				"mollie_payment_id", payment.ID,
+				"slug", slug,
+				"existing_owner", existingOwner,
+				"pending_owner", ownerID,
+			)
+			s.refundOrphanedPayment(ctx, payment, "slug_conflict")
+			return fmt.Errorf("slug %q owned by different user", slug)
+		}
+		var existingSubCount int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT count(*) FROM public.subscriptions WHERE project_id = $1`,
+			projectID,
+		).Scan(&existingSubCount); err != nil {
+			return fmt.Errorf("check subscriptions on adopt candidate: %w", err)
+		}
+		if existingSubCount > 0 {
+			slog.Error("billing.webhook.adopt_target_has_subscription_will_refund",
+				"pending_project_id", pendingID,
+				"mollie_payment_id", payment.ID,
+				"slug", slug,
+				"project_id", projectID,
+				"existing_sub_count", existingSubCount,
+			)
+			s.refundOrphanedPayment(ctx, payment, "adopt_target_not_incomplete")
+			return fmt.Errorf("adopt candidate %s already has %d subscription row(s) — not a crashed-attempt shape", projectID, existingSubCount)
+		}
+		slog.Info("billing.webhook.adopted_existing_project_from_prior_attempt",
+			"pending_project_id", pendingID,
+			"project_id", projectID,
+			"mollie_payment_id", payment.ID,
+		)
+	default:
+		return fmt.Errorf("lookup existing project by slug: %w", err)
+	}
+
+	// Create the recurring Mollie subscription. If this fails,
+	// we have a project but no recurring charge — the sweeper
+	// (or a manual re-invocation) can fix. Log and continue so
+	// the project + invoice are recorded regardless.
+	mollieSub, msErr := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
+		Amount:      mollie.AmountFromCents(priceCents, "EUR"),
+		Interval:    "1 month",
+		Description: payment.Description,
+		MandateID:   payment.MandateID,
+		WebhookURL:  fmt.Sprintf("%s/platform/billing/webhook", s.config.WebhookBaseURL),
+		Metadata: map[string]string{
+			"project_id": projectID,
+			"plan_code":  planCode,
+		},
+	}, mollie.WithIdempotencyKey("activate-new-project:"+pendingID))
+	var mollieSubID string
+	var nextChargeAt *time.Time
+	if msErr != nil {
+		slog.Error("billing.webhook.create_recurring_subscription_failed",
+			"pending_project_id", pendingID,
+			"project_id", projectID,
+			"mollie_payment_id", payment.ID,
+			"error", msErr,
+		)
+		// Continue — record the first-payment state so the user
+		// sees Pro; a follow-up manual sweep re-tries the recurring
+		// subscription creation.
+	} else {
+		mollieSubID = mollieSub.ID
+		nextChargeAt = parseMollieDate(mollieSub.NextPaymentDate)
+	}
+
+	// Commit the follow-up state in one tx: subscription row,
+	// invoice row, delete pending. Project row already committed.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var subscriptionID string
+	err = tx.QueryRow(ctx,
+		`INSERT INTO public.subscriptions
+		    (project_id, mollie_customer_id, mollie_subscription_id, mollie_payment_id,
+		     plan, price_cents, currency, billing_interval, status, started_at, next_charge_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'EUR', '1 month', 'active', now(), $7)
+		 RETURNING id`,
+		projectID, payment.CustomerID, nullIfEmpty(mollieSubID), payment.ID,
+		planCode, priceCents, nextChargeAt,
+	).Scan(&subscriptionID)
+	if err != nil {
+		return fmt.Errorf("insert subscription: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO public.invoices
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now())`,
+		projectID, subscriptionID, payment.ID, priceCents,
+	); err != nil {
+		return fmt.Errorf("insert invoice: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM public.pending_projects WHERE id = $1`, pendingID,
+	); err != nil {
+		return fmt.Errorf("delete pending_project: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit new-project activation: %w", err)
+	}
+
+	slog.Info("billing.webhook.new_project_activated",
+		"pending_project_id", pendingID,
+		"project_id", projectID,
+		"subscription_id", subscriptionID,
+		"plan_code", planCode,
+		"mollie_subscription_id", mollieSubID,
+		"mollie_payment_id", payment.ID,
+	)
+
+	if invoiceID := s.invoiceIDForPayment(ctx, payment.ID); invoiceID != "" {
+		s.enqueueInvoiceRender(invoiceID)
+	}
+	return nil
+}
+
+// refundOrphanedPayment issues a Mollie refund for a payment we
+// took but can't fulfill (pending row expired, project creation
+// failed, etc.). Best-effort — we log if the refund itself fails,
+// since manual intervention is required for such cases anyway.
+func (s *Service) refundOrphanedPayment(ctx context.Context, payment *mollie.Payment, reason string) {
+	_, err := s.client.CreateRefund(ctx, payment.ID, mollie.RefundCreateRequest{
+		Amount:      payment.Amount,
+		Description: fmt.Sprintf("Auto-refund: %s (payment %s)", reason, payment.ID),
+	}, mollie.WithIdempotencyKey("refund-orphan:"+payment.ID))
+	if err != nil {
+		slog.Error("billing.webhook.refund_orphan_failed",
+			"mollie_payment_id", payment.ID,
+			"reason", reason,
+			"error", err,
+		)
+		return
+	}
+	slog.Warn("billing.webhook.refunded_orphan",
+		"mollie_payment_id", payment.ID,
+		"reason", reason,
+	)
+}
+
+// nullIfEmpty returns a nullable pointer suitable for pgx to marshal
+// as SQL NULL rather than empty string. Used for optional columns
+// like mollie_subscription_id that may not be populated at insert
+// time (recurring-subscription creation deferred to retry).
+func nullIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // recordRecurringPayment handles the happy path of a renewal:
@@ -449,6 +757,30 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 			payment.ID,
 		); err != nil {
 			return fmt.Errorf("mark first invoice failed: %w", err)
+		}
+		// Also clean up any pending_project row this failed payment
+		// belonged to (#407 review 🟡 #3). Without this, an
+		// abandoned Pro checkout leaves the pending row with a
+		// mollie_payment_id set, and the sweeper's stale-resolved
+		// branch would log a false "Mollie took a payment we lost"
+		// warning every hour until expiry. Abandonment is normal
+		// user behaviour, not a webhook delivery failure.
+		if pendingID := payment.Metadata["pending_project_id"]; pendingID != "" {
+			if _, err := s.pool.Exec(ctx,
+				`DELETE FROM public.pending_projects WHERE id = $1`,
+				pendingID,
+			); err != nil {
+				slog.Warn("billing.webhook.pending_cleanup_on_failure_failed",
+					"pending_project_id", pendingID,
+					"mollie_payment_id", payment.ID,
+					"error", err,
+				)
+			} else {
+				slog.Info("billing.webhook.pending_project_cleaned_on_abandonment",
+					"pending_project_id", pendingID,
+					"mollie_payment_id", payment.ID,
+				)
+			}
 		}
 		return nil
 	}
