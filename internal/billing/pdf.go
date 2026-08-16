@@ -67,15 +67,33 @@ func RenderInvoicePDF(d InvoiceData) ([]byte, error) {
 	pdf.SetMargins(20, 20, 20)
 	pdf.AddPage()
 
+	// UTF-8 → cp1252 translator (#411 follow-up on user report:
+	// invoice PDFs rendered with mojibake glyphs for €, §, Ü, —).
+	// PDF core fonts (Helvetica) only speak cp1252; passing a raw
+	// Go string (UTF-8) writes the raw bytes, which the PDF then
+	// mis-decodes as cp1252 producing e.g. "â‚¬" instead of "€".
+	// The translator converts each character to its cp1252
+	// codepoint when one exists. Every character used on this
+	// invoice today (€ U+20AC, § U+00A7, Ü U+00DC, — U+2014) is
+	// in cp1252, so no glyph is dropped. Bundling a UTF-8 TTF via
+	// AddUTF8Font would be needed only for non-cp1252 scripts
+	// (Cyrillic / CJK) — not on the roadmap.
+	//
+	// Every user-facing string below goes through tr(), including
+	// ASCII-only literals — the wrap is a no-op for those but
+	// keeps the pattern uniform so a future add-a-field patch
+	// can't miss it.
+	tr := pdf.UnicodeTranslatorFromDescriptor("")
+
 	// ── Header ────────────────────────────────────────────────
 	pdf.SetFont("Helvetica", "B", 20)
 	pdf.SetTextColor(29, 78, 216) // brand blue (#1d4ed8)
-	pdf.Cell(0, 12, "Eurobase")
+	pdf.Cell(0, 12, tr("Eurobase"))
 	pdf.Ln(10)
 
 	pdf.SetFont("Helvetica", "", 10)
 	pdf.SetTextColor(107, 114, 128) // grey
-	pdf.Cell(0, 5, "Invoice")
+	pdf.Cell(0, 5, tr("Invoice"))
 	pdf.Ln(15)
 
 	// ── Two-column layout: invoice meta (left) + seller info (right) ──
@@ -84,25 +102,25 @@ func RenderInvoicePDF(d InvoiceData) ([]byte, error) {
 	// Left: invoice metadata.
 	pdf.SetTextColor(17, 24, 39) // near-black
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.Cell(90, 6, "Invoice number")
+	pdf.Cell(90, 6, tr("Invoice number"))
 	pdf.Ln(5)
 	pdf.SetFont("Helvetica", "", 10)
-	pdf.Cell(90, 5, d.InvoiceNumber)
+	pdf.Cell(90, 5, tr(d.InvoiceNumber))
 	pdf.Ln(8)
 
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.Cell(90, 6, "Issued")
+	pdf.Cell(90, 6, tr("Issued"))
 	pdf.Ln(5)
 	pdf.SetFont("Helvetica", "", 10)
-	pdf.Cell(90, 5, d.IssuedAt.Format("2 January 2006"))
+	pdf.Cell(90, 5, tr(d.IssuedAt.Format("2 January 2006")))
 	pdf.Ln(8)
 
 	if !d.PaidAt.IsZero() {
 		pdf.SetFont("Helvetica", "B", 11)
-		pdf.Cell(90, 6, "Paid")
+		pdf.Cell(90, 6, tr("Paid"))
 		pdf.Ln(5)
 		pdf.SetFont("Helvetica", "", 10)
-		pdf.Cell(90, 5, d.PaidAt.Format("2 January 2006"))
+		pdf.Cell(90, 5, tr(d.PaidAt.Format("2 January 2006")))
 		pdf.Ln(8)
 	}
 
@@ -110,71 +128,71 @@ func RenderInvoicePDF(d InvoiceData) ([]byte, error) {
 	pdf.SetY(yStart)
 	pdf.SetX(110)
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.Cell(80, 6, "Seller")
+	pdf.Cell(80, 6, tr("Seller"))
 	pdf.Ln(5)
 	pdf.SetX(110)
 	pdf.SetFont("Helvetica", "", 10)
-	pdf.Cell(80, 5, d.SellerLegalName)
+	pdf.Cell(80, 5, tr(d.SellerLegalName))
 	pdf.Ln(5)
 	pdf.SetX(110)
-	pdf.Cell(80, 5, d.SellerAddress)
+	pdf.Cell(80, 5, tr(d.SellerAddress))
 	pdf.Ln(5)
 	pdf.SetX(110)
-	pdf.Cell(80, 5, "Estonia")
+	pdf.Cell(80, 5, tr("Estonia"))
 	pdf.Ln(5)
 	pdf.SetX(110)
-	pdf.Cell(80, 5, "Registry code: "+d.SellerRegistryCode)
+	pdf.Cell(80, 5, tr("Registry code: "+d.SellerRegistryCode))
 	pdf.Ln(5)
 	pdf.SetX(110)
-	pdf.Cell(80, 5, d.SellerEmail)
+	pdf.Cell(80, 5, tr(d.SellerEmail))
 	pdf.Ln(10)
 
 	// ── Buyer ──────────────────────────────────────────────────
 	pdf.Ln(6)
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.Cell(0, 6, "Buyer")
+	pdf.Cell(0, 6, tr("Buyer"))
 	pdf.Ln(5)
 	pdf.SetFont("Helvetica", "", 10)
 	if d.BuyerDisplayName != "" {
-		pdf.Cell(0, 5, d.BuyerDisplayName)
+		pdf.Cell(0, 5, tr(d.BuyerDisplayName))
 		pdf.Ln(5)
 	}
-	pdf.Cell(0, 5, d.BuyerEmail)
+	pdf.Cell(0, 5, tr(d.BuyerEmail))
 	pdf.Ln(15)
 
 	// ── Line items table ───────────────────────────────────────
 	pdf.SetFont("Helvetica", "B", 10)
 	pdf.SetFillColor(243, 244, 246) // light grey (#f3f4f6)
-	pdf.CellFormat(110, 8, "Description", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(30, 8, "Period", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(30, 8, "Amount", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(110, 8, tr("Description"), "1", 0, "L", true, 0, "")
+	pdf.CellFormat(30, 8, tr("Period"), "1", 0, "L", true, 0, "")
+	pdf.CellFormat(30, 8, tr("Amount"), "1", 0, "R", true, 0, "")
 	pdf.Ln(-1)
 
 	pdf.SetFont("Helvetica", "", 10)
-	pdf.CellFormat(110, 8, d.Description, "1", 0, "L", false, 0, "")
+	pdf.CellFormat(110, 8, tr(d.Description), "1", 0, "L", false, 0, "")
 	period := fmt.Sprintf("%s–%s", d.PeriodFrom.Format("2 Jan"), d.PeriodTo.Format("2 Jan 2006"))
-	pdf.CellFormat(30, 8, period, "1", 0, "L", false, 0, "")
-	pdf.CellFormat(30, 8, formatEUR(d.AmountCents, d.Currency), "1", 0, "R", false, 0, "")
+	pdf.CellFormat(30, 8, tr(period), "1", 0, "L", false, 0, "")
+	pdf.CellFormat(30, 8, tr(formatEUR(d.AmountCents, d.Currency)), "1", 0, "R", false, 0, "")
 	pdf.Ln(-1)
 
 	// Total row.
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.CellFormat(140, 10, "Total", "1", 0, "R", false, 0, "")
-	pdf.CellFormat(30, 10, formatEUR(d.AmountCents, d.Currency), "1", 0, "R", false, 0, "")
+	pdf.CellFormat(140, 10, tr("Total"), "1", 0, "R", false, 0, "")
+	pdf.CellFormat(30, 10, tr(formatEUR(d.AmountCents, d.Currency)), "1", 0, "R", false, 0, "")
 	pdf.Ln(15)
 
 	// ── VAT statement ──────────────────────────────────────────
 	pdf.SetFont("Helvetica", "I", 9)
 	pdf.SetTextColor(107, 114, 128)
-	pdf.MultiCell(0, 5, d.SellerVATNote, "", "L", false)
+	pdf.MultiCell(0, 5, tr(d.SellerVATNote), "", "L", false)
 	pdf.Ln(8)
 
 	// ── Footer (bottom of page) ────────────────────────────────
 	pdf.SetY(-30)
 	pdf.SetFont("Helvetica", "", 8)
 	pdf.SetTextColor(156, 163, 175)
-	pdf.CellFormat(0, 4, d.SellerLegalName+" · "+d.SellerAddress+", Estonia", "", 1, "C", false, 0, "")
-	pdf.CellFormat(0, 4, "eurobase.app · "+d.SellerEmail, "", 1, "C", false, 0, "")
+	pdf.CellFormat(0, 4, tr(d.SellerLegalName+" · "+d.SellerAddress+", Estonia"), "", 1, "C", false, 0, "")
+	pdf.CellFormat(0, 4, tr("eurobase.app · "+d.SellerEmail), "", 1, "C", false, 0, "")
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {
