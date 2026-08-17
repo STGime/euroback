@@ -332,7 +332,17 @@
 			const cfg = loadConfig();
 			emailPasswordEnabled = cfg.providers?.email_password?.enabled ?? true;
 			magicLinkEnabled = cfg.providers?.magic_link?.enabled ?? false;
-			phoneEnabled = cfg.providers?.phone?.enabled ?? false;
+			// #329: force phoneEnabled=false on gated (Free) plans so
+			// aria-checked and the toggle position match the enforced
+			// state. A churned Pro project may still have the stale
+			// true in its stored auth_config; save() strips it on the
+			// next save.
+			const storedPhoneEnabled = cfg.providers?.phone?.enabled ?? false;
+			const isGated =
+				projectCtx.project.plan !== 'pro' &&
+				projectCtx.project.plan !== 'team' &&
+				projectCtx.project.plan !== 'legal_team';
+			phoneEnabled = isGated ? false : storedPhoneEnabled;
 			requireEmailConfirmation = cfg.require_email_confirmation;
 			passwordMinLength = cfg.password_min_length;
 			sessionDuration = cfg.session_duration;
@@ -529,8 +539,17 @@
 				microsoftProvider.client_secret = microsoftClientSecret;
 			}
 
+			// #329: on a gated (Free) plan, force phone.enabled=false in
+			// the save payload so a downgraded Pro project — where the
+			// stored config may still carry the legacy phone.enabled=true
+			// from Pro days — flushes the stale flag on first save and
+			// the persisted config matches the grayed-out UI. Without
+			// this, every save would re-post the stale true and the
+			// backend transition gate would still allow it (matches
+			// current state), but the stored config never converges.
+			const effectivePhoneEnabled = phonePaidGate ? false : phoneEnabled;
 			const config: AuthConfig = {
-				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled }, phone: { enabled: phoneEnabled } },
+				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled }, phone: { enabled: effectivePhoneEnabled } },
 				oauth_providers: {
 					google: googleProvider as any,
 					github: githubProvider as any,
