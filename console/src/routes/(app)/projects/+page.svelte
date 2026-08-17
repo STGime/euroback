@@ -15,6 +15,7 @@
 	// profile endpoint; controls whether the Team option appears on
 	// the plan picker.
 	let hasTeamBeta = $state(false);
+	let hasLegalTeamBeta = $state(false);
 
 	// Derived slug from name
 	let newSlug = $derived(
@@ -185,7 +186,10 @@
 			loadProjects(),
 			api.getProfile().catch(() => null)
 		]);
-		if (profile) hasTeamBeta = !!profile.team_beta_access;
+		if (profile) {
+			hasTeamBeta = !!profile.team_beta_access;
+			hasLegalTeamBeta = !!profile.legal_team_beta_access;
+		}
 
 		// Post-Mollie return handling. If we're landing here from a
 		// Pro checkout, this either navigates away (success) or shows
@@ -203,16 +207,25 @@
 
 		// Deep link from pricing page: /projects?new=team opens the
 		// modal pre-set to Team. Only honoured if the user actually
-		// has beta access — otherwise silently ignored.
+		// has beta access — otherwise silently ignored. Same shape
+		// for legal_team.
 		const wantNew = $page.url.searchParams.get('new');
 		if (wantNew === 'team' && hasTeamBeta) {
 			openModal('team');
+		} else if (wantNew === 'legal_team' && hasLegalTeamBeta) {
+			openModal('legal_team');
 		}
 	});
 
 	function openModal(preselectPlan?: string) {
 		newName = '';
-		newPlan = preselectPlan && (preselectPlan === 'team' ? hasTeamBeta : true) ? preselectPlan : 'free';
+		// Only accept preselects the user actually has access to;
+		// otherwise fall back to Free to avoid a silent 403 on submit.
+		const allowedPreselect =
+			preselectPlan === 'team' ? hasTeamBeta :
+			preselectPlan === 'legal_team' ? hasLegalTeamBeta :
+			preselectPlan !== undefined;
+		newPlan = preselectPlan && allowedPreselect ? preselectPlan : 'free';
 		createError = '';
 		showNewModal = true;
 	}
@@ -253,7 +266,11 @@
 				return; // don't reset creating — redirect in flight
 			}
 
-			// Free / Team — existing synchronous path.
+			// Free / Team / Legal Team — synchronous path. Team +
+			// Legal Team are Beta·free during closed beta (price_cents
+			// NULL on both plan_limits rows), so no Mollie checkout.
+			// When Legal Team ships as a paid SKU, mirror the pro
+			// branch above (plan_code:'legal_team').
 			await api.createProject({
 				name: newName.trim(),
 				slug: newSlug,
@@ -552,15 +569,17 @@
 				<fieldset>
 					<legend class="block text-sm font-medium text-gray-700">Plan for this project</legend>
 					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently</p>
-					<div class="mt-2 flex gap-3">
-						<label class="flex-1 cursor-pointer">
+					<!-- 2×2 grid whenever both beta gates are on; flex row
+					     otherwise (up to 3 tiles fit comfortably). -->
+					<div class="mt-2 {hasTeamBeta && hasLegalTeamBeta ? 'grid grid-cols-2 gap-3' : 'flex gap-3'}">
+						<label class="{hasTeamBeta && hasLegalTeamBeta ? '' : 'flex-1'} cursor-pointer">
 							<input type="radio" name="plan" value="free" bind:group={newPlan} class="peer sr-only" />
 							<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50 border-gray-200 hover:border-gray-300">
 								<p class="text-sm font-semibold text-gray-900">Free</p>
 								<p class="text-xs text-gray-500">$0/mo</p>
 							</div>
 						</label>
-						<label class="flex-1 cursor-pointer">
+						<label class="{hasTeamBeta && hasLegalTeamBeta ? '' : 'flex-1'} cursor-pointer">
 							<input type="radio" name="plan" value="pro" bind:group={newPlan} class="peer sr-only" />
 							<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50 border-gray-200 hover:border-gray-300">
 								<p class="text-sm font-semibold text-gray-900">Pro</p>
@@ -571,7 +590,7 @@
 							<!-- Team-tier closed-beta option (M2). Only rendered
 							     for users with team_beta_access = true; everyone
 							     else keeps the two-option Free/Pro picker. -->
-							<label class="flex-1 cursor-pointer">
+							<label class="{hasTeamBeta && hasLegalTeamBeta ? '' : 'flex-1'} cursor-pointer">
 								<input type="radio" name="plan" value="team" bind:group={newPlan} class="peer sr-only" />
 								<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-emerald-600 peer-checked:bg-emerald-50 border-emerald-200 hover:border-emerald-300">
 									<p class="text-sm font-semibold text-gray-900">Team</p>
@@ -579,11 +598,26 @@
 								</div>
 							</label>
 						{/if}
+						{#if hasLegalTeamBeta}
+							<!-- Legal-Team closed-beta option. Same shape as
+							     Team; amber styling matches the /pricing +
+							     /legal + onboarding surfaces. -->
+							<label class="{hasTeamBeta && hasLegalTeamBeta ? '' : 'flex-1'} cursor-pointer">
+								<input type="radio" name="plan" value="legal_team" bind:group={newPlan} class="peer sr-only" />
+								<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-amber-600 peer-checked:bg-amber-50 border-amber-200 hover:border-amber-300">
+									<p class="text-sm font-semibold text-gray-900">Legal Team</p>
+									<p class="text-xs text-amber-700 font-medium">Beta · free</p>
+								</div>
+							</label>
+						{/if}
 					</div>
-					{#if newPlan === 'team'}
+					{#if newPlan === 'team' || newPlan === 'legal_team'}
 						<p class="mt-2 text-xs text-gray-500">
 							Provisions a dedicated Postgres instance in fr-par (Scaleway).
 							Takes 2–5 min after project creation to reach <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px]">active</code>.
+							{#if newPlan === 'legal_team'}
+								Legal Team also enables WORM retention and legal-hold enforcement on storage + audit log.
+							{/if}
 						</p>
 					{/if}
 				</fieldset>
