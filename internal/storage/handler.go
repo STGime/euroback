@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -764,9 +765,39 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 
 // extractWildcardKey extracts the object key from chi's wildcard route param.
 // The key is everything after /v1/storage/ and may contain slashes.
+//
+// URL-decoding is load-bearing. chi/v5 routes on `r.URL.RawPath` when the
+// request URL contained any percent-escape (mux.go:433-434), which means
+// the wildcard captured by `chi.URLParam(r, "*")` comes back **still
+// URL-encoded** — e.g. a console request for `Blätter.jpg` arrives as
+// `Bl%C3%A4tter.jpg` and chi returns that verbatim. The storage_objects
+// row on the other hand was inserted with the decoded name (multipart's
+// header.Filename), so `WHERE key = 'Bl%C3%A4tter.jpg'` finds nothing and
+// every file with non-ASCII, space, comma, `#`, `?`, `+`, or emoji in its
+// name looks like "not found" on delete/download.
+//
+// Decoding here means every downstream consumer (assertObjectVisible SQL,
+// S3 DeleteObject, retention lookup) sees the canonical decoded key.
+//
+// Security note: decoding BEFORE ValidateStorageKey is intentional. Prior
+// to this fix, validation ran on the encoded string, so a caller could
+// smuggle `..` traversal via `%2E%2E%2F` past the `strings.Split(...,
+// "/")` "..-segment" check. Post-decode the check catches it. The
+// ValidateStorageKey rules (no leading `/`, no `..` segment, no control
+// bytes) are what actually enforce path-safety; they only work on the
+// decoded form.
+//
+// PathUnescape failure is treated as "leave the value as-is": chi already
+// matched the route so the wildcard is a well-formed URL segment;
+// PathUnescape only fails on a malformed `%XX` sequence which chi
+// wouldn't have accepted. The fallback keeps the behaviour explicit for
+// a future chi upgrade.
 func extractWildcardKey(r *http.Request) string {
 	key := chi.URLParam(r, "*")
 	key = strings.TrimPrefix(key, "/")
+	if decoded, err := url.PathUnescape(key); err == nil {
+		key = decoded
+	}
 	return key
 }
 
