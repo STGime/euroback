@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -145,7 +146,11 @@ func (s *Service) VerifyOTP(ctx context.Context, schemaName, phone, code string)
 			return fmt.Errorf("lookup phone otp token: %w", e)
 		}
 
-		if storedHash == codeHash {
+		// Constant-time compare — negligible practical benefit given
+		// the 5-attempt cap and that we're comparing hex-encoded
+		// SHA-256 hashes (fixed length, no early-exit exploit), but
+		// it's the free hardening #420 review 🟢 flagged.
+		if subtle.ConstantTimeCompare([]byte(storedHash), []byte(codeHash)) == 1 {
 			markQ := fmt.Sprintf(`UPDATE %s.email_tokens SET used_at = now() WHERE id = $1`, quoteIdent(schemaName))
 			if _, e := tx.Exec(ctx, markQ, tokenID); e != nil {
 				return fmt.Errorf("mark phone otp used: %w", e)
