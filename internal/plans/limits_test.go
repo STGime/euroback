@@ -60,6 +60,26 @@ func TestPlanLimits_FreeDefault(t *testing.T) {
 	}
 }
 
+// TestIsPaidPlan pins the paid-tier set behind the #329 SMS gate.
+// Fail-closed is the whole point: an unknown plan value (schema
+// drift, typo, future tier added without updating this helper)
+// must be treated as unpaid so a hypothetical Free-tier project
+// with a corrupted `plan` column can't accidentally unlock SMS.
+func TestIsPaidPlan(t *testing.T) {
+	paid := []string{"pro", "team", "legal_team"}
+	unpaid := []string{"free", "", "PRO", "trial", "enterprise", "unknown"}
+	for _, p := range paid {
+		if !IsPaidPlan(p) {
+			t.Errorf("IsPaidPlan(%q) = false, want true", p)
+		}
+	}
+	for _, p := range unpaid {
+		if IsPaidPlan(p) {
+			t.Errorf("IsPaidPlan(%q) = true, want false (fail-closed)", p)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

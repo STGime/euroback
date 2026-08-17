@@ -76,6 +76,8 @@
 		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'API rate limit', free: (freePlan?.rate_limit_rps ?? 100) + ' rps', pro: (proPlan?.rate_limit_rps ?? 1000) + ' rps', team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Email + password, magic links, social login (Google / GitHub / LinkedIn / Apple)', free: true, pro: true, team: true, legal: true },
+		{ label: 'Phone (SMS OTP) sign-in', free: false, pro: true, team: true, legal: true },
 		{ label: 'SSO (SAML) for console sign-in', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 

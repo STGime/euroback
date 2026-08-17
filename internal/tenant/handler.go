@@ -316,6 +316,31 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			return
 		}
 
+		// #329: SMS auth is paid-tier-only. Reject a save that tries
+		// to enable `phone` on a Free project — the console grays out
+		// the toggle, this is the defense against a direct API call.
+		// Idempotent: an already-Free project with phone.enabled=false
+		// posted verbatim passes; the flip attempt is what's blocked.
+		if body.AuthConfig.IsPhoneAuthEnabled() {
+			var plan string
+			if err := pool.QueryRow(r.Context(),
+				`SELECT COALESCE(plan, 'free') FROM projects WHERE id = $1`, projectID,
+			).Scan(&plan); err != nil {
+				slog.Error("lookup project plan for phone-auth gate", "error", err, "project_id", projectID)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+			if !plans.IsPaidPlan(plan) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPaymentRequired)
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": "SMS (phone) auth requires a paid plan — upgrade to Pro or higher to enable this provider",
+					"code":  "paid_plan_required",
+				})
+				return
+			}
+		}
+
 		rotated, err := svc.UpdateAuthConfig(r.Context(), projectID, claims.Subject, *body.AuthConfig)
 		if err != nil {
 			slog.Error("update auth config failed", "error", err, "project_id", projectID)

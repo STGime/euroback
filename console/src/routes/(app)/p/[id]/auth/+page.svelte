@@ -46,6 +46,16 @@
 	let emailPasswordEnabled = $state(true);
 	let magicLinkEnabled = $state(false);
 	let phoneEnabled = $state(false);
+	// #329: SMS auth is a paid-plan-only channel because every send
+	// costs real GatewayAPI money. Free projects see the toggle
+	// grayed out with an "available on paid plans" note; the backend
+	// mirrors the gate at PATCH-time (402 paid_plan_required) so a
+	// direct API call can't bypass the UI.
+	let phonePaidGate = $derived(
+		projectCtx.project?.plan !== 'pro' &&
+		projectCtx.project?.plan !== 'team' &&
+		projectCtx.project?.plan !== 'legal_team'
+	);
 	let requireEmailConfirmation = $state(false);
 	let passwordMinLength = $state(8);
 	let sessionDuration = $state('168h');
@@ -872,23 +882,39 @@
 					</div>
 
 					<!-- Phone Auth (SMS OTP) -->
-					<div class="rounded-lg border border-gray-200 px-4 py-3">
+					<div class="rounded-lg border border-gray-200 px-4 py-3 {phonePaidGate ? 'opacity-60' : ''}">
 						<div class="flex items-center justify-between">
 							<div>
-								<p class="text-sm font-medium text-gray-900">Phone (SMS OTP)</p>
+								<div class="flex items-center gap-2">
+									<p class="text-sm font-medium text-gray-900">Phone (SMS OTP)</p>
+									{#if phonePaidGate}
+										<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800 uppercase tracking-wide">Paid plan</span>
+									{/if}
+								</div>
 								<p class="text-xs text-gray-500">Sign in with phone number via SMS verification code</p>
 							</div>
 							<button
 								type="button"
 								role="switch"
 								aria-checked={phoneEnabled}
-								onclick={() => phoneEnabled = !phoneEnabled}
-								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {phoneEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+								disabled={phonePaidGate}
+								title={phonePaidGate ? 'SMS auth is available on paid plans. Upgrade to Pro or higher to enable.' : ''}
+								onclick={() => { if (!phonePaidGate) phoneEnabled = !phoneEnabled; }}
+								class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {phonePaidGate ? 'cursor-not-allowed bg-gray-200' : 'cursor-pointer ' + (phoneEnabled ? 'bg-eurobase-600' : 'bg-gray-200')}"
 							>
-								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {phoneEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {phoneEnabled && !phonePaidGate ? 'translate-x-5' : 'translate-x-0'}"></span>
 							</button>
 						</div>
-						{#if phoneEnabled}
+						{#if phonePaidGate}
+							<div class="mt-3 rounded-lg bg-amber-50 border border-amber-200 p-3">
+								<p class="text-xs text-amber-800 leading-relaxed">
+									SMS authentication is available on <span class="font-medium">paid plans</span>.
+									Every OTP send incurs a per-message cost, so we limit this channel to Pro and above.
+									<a href="/p/{projectCtx.id}/billing" class="font-medium underline hover:text-amber-900">Upgrade this project</a>
+									to enable phone sign-in.
+								</p>
+							</div>
+						{:else if phoneEnabled}
 							<div class="mt-3 rounded-lg bg-eurobase-50 border border-eurobase-100 p-3 space-y-2">
 								<p class="text-xs text-eurobase-700 leading-relaxed">Users enter their phone number and receive a 6-digit code via SMS. The code expires after 10 minutes. Phone-only users are created without an email address.</p>
 								<p class="text-xs font-medium text-eurobase-800 mt-2">REST API</p>
