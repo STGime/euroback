@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -764,9 +765,52 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 
 // extractWildcardKey extracts the object key from chi's wildcard route param.
 // The key is everything after /v1/storage/ and may contain slashes.
+//
+// URL-decoding is conditional on `r.URL.RawPath`, mirroring chi's own
+// branch at mux.go:433-434. The subtlety that a first attempt missed
+// (unconditional decode) and PR #421 review caught:
+//
+//   * When the request URL contains a byte Go's default path-escape
+//     WOULDN'T produce (comma, `+`, `;`, `:`, `@`, `$`, `!`, `*`, `'`,
+//     `(`, `)`), net/url populates `RawPath` and chi routes on it —
+//     so `chi.URLParam(r, "*")` comes back **still URL-encoded**. This
+//     is the case that motivated the fix: a console request to delete
+//     `ChatGPT Image 28. Okt. 2025, 12_13_05.png` arrives as
+//     `…%2C…`, chi returns `…%2C…`, and `WHERE key = '…%2C…'` doesn't
+//     match the row `storage_objects` holds under the decoded name.
+//
+//   * When the URL's characters all round-trip through default
+//     escaping (pure non-ASCII, spaces, a literal `%`), `RawPath` is
+//     empty and chi returns `URL.Path` — **already decoded**.
+//     Unconditional PathUnescape would double-decode: `report_50%20pct.pdf`
+//     (a real filename containing a literal `%20`) is sent as
+//     `report_50%2520pct.pdf`, chi returns `report_50%20pct.pdf`
+//     (single-decoded), and a second decode corrupts it to
+//     `report_50 pct.pdf` — the exact 404-on-lookup bug this fix is
+//     supposed to close, reintroduced in the opposite direction.
+//
+// So: decode only when chi routed on RawPath. Every downstream consumer
+// (assertObjectVisible SQL, S3 DeleteObject, retention lookup) sees the
+// canonical decoded key without any double-decode risk.
+//
+// Security note: decoding BEFORE ValidateStorageKey is intentional. Prior
+// to this fix, validation ran on the encoded string, so a caller could
+// smuggle `..` traversal via `%2E%2E%2F` past the `strings.Split(...,
+// "/")` "..-segment" check. Post-decode the check catches it (RawPath is
+// set for that input — `%2E` is a byte default-escape wouldn't produce).
+// The ValidateStorageKey rules (no leading `/`, no `..` segment, no
+// control bytes) only work on the decoded form.
+//
+// PathUnescape failure is treated as "leave the value as-is": chi already
+// matched the route so the wildcard is a well-formed URL segment.
 func extractWildcardKey(r *http.Request) string {
 	key := chi.URLParam(r, "*")
 	key = strings.TrimPrefix(key, "/")
+	if r.URL.RawPath != "" {
+		if decoded, err := url.PathUnescape(key); err == nil {
+			key = decoded
+		}
+	}
 	return key
 }
 
