@@ -1063,8 +1063,11 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 	phone = strings.TrimSpace(phone)
 	code = strings.TrimSpace(code)
 
-	// Verify the OTP code.
-	userID, err := s.smsService.VerifyOTP(ctx, schemaName, code)
+	// #233: verify is now bound to the phone number, so a wrong-code
+	// attempt only exhausts the guess budget on that specific phone's
+	// active token rather than sweeping the whole tenant's active
+	// phone-OTP set.
+	userID, err := s.smsService.VerifyOTP(ctx, schemaName, phone, code)
 	if err != nil {
 		return nil, err
 	}

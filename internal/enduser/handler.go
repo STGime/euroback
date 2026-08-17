@@ -376,10 +376,12 @@ func HandleVerifyEmail(svc *AuthService, limiter ...*ratelimit.RateLimiter) http
 		// For email-verify, magic-link, and reset-password the token
 		// is high-entropy hex from rand.Read — practically
 		// unguessable, so the per-IP gate is purely volume control.
-		// For phone OTP (6-digit code) the picture is different and
-		// the residual risk is not closed by an IP-keyed limit alone:
-		// see the security issue tracking the VerifyOTP code-only
-		// match + missing per-token attempt counter.
+		// For phone OTP (6-digit code) the picture is different but
+		// the residual risk is now bounded at the token level by
+		// sms.VerifyOTP (#233): each active token accepts at most
+		// maxOTPAttempts wrong hashes before being killed, so the
+		// IP-keyed limit here is defense-in-depth on top of the
+		// per-token cap rather than the only line of defense.
 		//
 		// IP source honours trust_proxy (#228).
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
@@ -828,16 +830,12 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		}
 
 		// Per-project per-IP gate — shares the token_verify knob with
-		// the email and magic-link verify endpoints. This NARROWS but
-		// does not CLOSE phone-OTP brute force: the underlying
-		// VerifyOTP SQL matches the 6-digit code tenant-wide
-		// (`WHERE token_hash = sha256(code)`) with no per-token
-		// attempt counter, so a forged XFF or a modest botnet can
-		// still chip away at the 10^6 code space. The proper fix is
-		// tracked as a separate P1 security issue: bind verify to the
-		// phone (`WHERE phone = $1 AND token_hash = $2`) + a
-		// per-token attempt counter. The per-phone OTP-issue limit
-		// (PhoneOTPLimit) gates the SEND side, not the verify.
+		// the email and magic-link verify endpoints. Since #233 the
+		// SQL side is bound to the phone number and has a per-token
+		// attempt cap (sms.maxOTPAttempts), so this IP gate is now
+		// defense-in-depth on top of the per-token limit rather than
+		// the only line of defense. Together they cap the guess
+		// budget at ~5 tries per issued code per phone.
 		// IP source honours trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
 		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
