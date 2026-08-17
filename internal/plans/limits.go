@@ -212,3 +212,18 @@ func (s *LimitsService) GetEffectiveProjectLimits(ctx context.Context, projectID
 	}
 	return current, nil
 }
+
+// IsPaidPlan reports whether the plan string names a paid tier.
+// Any unknown value is treated as unpaid (fail-closed) so a schema
+// drift or typo can't accidentally unlock paid-only features.
+//
+// Used by the SMS-auth gate (#329): every phone-OTP send costs real
+// money via GatewayAPI, so we lock the channel to paid tiers.
+func IsPaidPlan(plan string) bool {
+	switch plan {
+	case "pro", "team", "legal_team":
+		return true
+	default:
+		return false
+	}
+}

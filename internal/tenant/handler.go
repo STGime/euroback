@@ -25,6 +25,22 @@ type CreateProjectRequest struct {
 	Plan   string `json:"plan,omitempty"`   // defaults to "free"
 }
 
+// smsGateBlocks reports whether an auth-config save should be rejected
+// with 402 for the SMS paid-plan gate (#329). Returns true ONLY on an
+// off→on transition for a Free (non-paid) plan — never on
+// keep-as-is or flip-off, so a churned Pro project with stale
+// phone.enabled=true can still save unrelated auth-config changes.
+//
+// Extracted as a pure function so the table test in handler_test.go
+// pins the transition matrix without a live DB.
+func smsGateBlocks(plan string, currentPhoneEnabled, postedPhoneEnabled bool) bool {
+	if plans.IsPaidPlan(plan) {
+		return false
+	}
+	// Free (or fail-closed unknown) plan: block only the off→on flip.
+	return !currentPhoneEnabled && postedPhoneEnabled
+}
+
 // CreateProjectResponse is the JSON response after project creation.
 type CreateProjectResponse struct {
 	ID        string `json:"id"`
@@ -314,6 +330,46 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
+		}
+
+		// #329: SMS auth is paid-tier-only. Reject a save that tries
+		// to FLIP phone.enabled from off→on on a Free project — the
+		// console grays out the toggle; this is the defense against
+		// a direct API call.
+		//
+		// We check the transition, NOT the posted value alone: a
+		// churned Pro project that persisted phone.enabled=true from
+		// its Pro days keeps it in `auth_config` after the downgrade,
+		// and the console re-posts it on every subsequent save of any
+		// unrelated field (magic link, password length, session
+		// duration). Blocking on the stable-on state would silently
+		// trap those projects — they'd be unable to save ANY auth
+		// setting until someone flipped phone off out-of-band, and
+		// they can't do that in the UI because the toggle is
+		// disabled. So the gate blocks the enable transition only;
+		// the send/verify edges already block the actual SMS spend
+		// regardless. See PR #418 review 🟡.
+		if body.AuthConfig.IsPhoneAuthEnabled() {
+			var plan string
+			var currentPhoneEnabled bool
+			if err := pool.QueryRow(r.Context(),
+				`SELECT COALESCE(plan, 'free'),
+				        COALESCE((auth_config->'providers'->'phone'->>'enabled')::bool, false)
+				   FROM projects WHERE id = $1`, projectID,
+			).Scan(&plan, &currentPhoneEnabled); err != nil {
+				slog.Error("lookup project plan for phone-auth gate", "error", err, "project_id", projectID)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+			if smsGateBlocks(plan, currentPhoneEnabled, true /* posted */) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPaymentRequired)
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": "SMS (phone) auth requires a paid plan — upgrade to Pro or higher to enable this provider",
+					"code":  "paid_plan_required",
+				})
+				return
+			}
 		}
 
 		rotated, err := svc.UpdateAuthConfig(r.Context(), projectID, claims.Subject, *body.AuthConfig)

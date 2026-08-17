@@ -12,6 +12,7 @@ import (
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/oauth"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
@@ -751,6 +752,23 @@ func HandleSendPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) htt
 			return
 		}
 
+		// #329: SMS auth is paid-tier-only. Every send costs real
+		// GatewayAPI money, so Free projects are locked out at the
+		// send edge regardless of what their auth_config says (a
+		// project downgraded from Pro keeps phone.enabled=true — the
+		// gate is here, not in the flag). 402 is the semantic HTTP
+		// code for "payment required to proceed" and cleanly
+		// distinguishes an upgrade-nudge from a config error (400)
+		// or missing auth (401).
+		if !plans.IsPaidPlan(pc.Plan) {
+			writeJSON(w, map[string]any{
+				"error":       "SMS authentication requires a paid plan",
+				"code":        "paid_plan_required",
+				"upgrade_url": fmt.Sprintf("https://console.eurobase.app/p/%s/billing", pc.ProjectID),
+			}, http.StatusPaymentRequired)
+			return
+		}
+
 		var req SendPhoneOTPRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
@@ -792,6 +810,20 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 		if !config.IsPhoneAuthEnabled() {
 			writeJSON(w, map[string]string{"error": "phone authentication is not enabled"}, http.StatusBadRequest)
+			return
+		}
+
+		// #329: match the paid-plan gate on the send endpoint. Without
+		// it, a Free-plan project with a leaked pre-downgrade OTP in
+		// flight could still complete sign-in — and the verify path
+		// also runs an expensive tenant-wide token scan we don't want
+		// Free projects paying for.
+		if !plans.IsPaidPlan(pc.Plan) {
+			writeJSON(w, map[string]any{
+				"error":       "SMS authentication requires a paid plan",
+				"code":        "paid_plan_required",
+				"upgrade_url": fmt.Sprintf("https://console.eurobase.app/p/%s/billing", pc.ProjectID),
+			}, http.StatusPaymentRequired)
 			return
 		}
 

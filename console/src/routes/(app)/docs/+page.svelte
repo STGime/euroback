@@ -555,7 +555,7 @@ await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Email + Password</strong> &mdash; traditional sign-up and sign-in with email and password</li>
 					<li><strong>Magic Links</strong> &mdash; passwordless sign-in via a one-time email link (no password needed)</li>
-					<li><strong>Phone (SMS OTP)</strong> &mdash; sign in with phone number via a 6-digit SMS code (EU-sovereign SMS via GatewayAPI)</li>
+					<li><strong>Phone (SMS OTP)</strong> &mdash; sign in with phone number via a 6-digit SMS code (EU-sovereign SMS via GatewayAPI). <span class="text-amber-700 font-medium">Paid plans only</span> &mdash; every send has a per-message cost.</li>
 					<li><strong>Passkeys</strong> &mdash; coming soon (WebAuthn / FaceID / fingerprint)</li>
 					<li><strong>Social Login</strong> &mdash; Google, GitHub, LinkedIn, Apple (configure in Auth settings)</li>
 				</ul>
@@ -755,6 +755,11 @@ const {'{'} data, error {'}'} = await eb.auth.signInWithMagicLink(token)
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
 					Enable phone auth in <strong>Auth &rarr; Settings &rarr; Phone (SMS OTP)</strong> toggle. The gateway must have <code class="bg-gray-100 border border-gray-200 rounded px-1">GATEWAYAPI_TOKEN</code> configured. SMS is sent via GatewayAPI, an EU-based provider (Denmark) &mdash; no data leaves EU infrastructure.
 				</p>
+				<div class="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+					<p class="text-xs text-amber-800 leading-relaxed">
+						<strong>Paid plan required.</strong> SMS auth is available on <strong>Pro and above</strong> because every OTP send has a per-message cost. Free projects see the toggle grayed out; a direct API call to <code class="bg-white border border-amber-200 rounded px-1">/v1/auth/phone/send-otp</code> from a Free project returns <code class="bg-white border border-amber-200 rounded px-1">402 paid_plan_required</code>.
+					</p>
+				</div>
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-3">
 					<pre><span class="text-gray-500">// 1. Send OTP to phone</span>
