@@ -75,7 +75,7 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// the field doc in internal/tenant/auth_config.go for the
 		// trade-off.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -122,7 +122,7 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		// follow-up issue tracks flipping the default once XFF
 		// behavior is verified empirically.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "signup_signin", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -182,7 +182,7 @@ func HandleRefresh(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Han
 		// clients refresh proactively; tighten via the Rate Limits
 		// page. IP source honours trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_refresh", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenRefreshPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_refresh", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.TokenRefreshPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -332,7 +332,7 @@ func HandleResetPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) ht
 		// tightens reset, and one IP can't burn through the bucket via
 		// /reset-password while the other verify endpoints stay open.
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -386,7 +386,7 @@ func HandleVerifyEmail(svc *AuthService, limiter ...*ratelimit.RateLimiter) http
 		// IP source honours trust_proxy (#228).
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -472,7 +472,7 @@ func HandleSignInWithMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimit
 		// for the brute-force rationale. IP source honours
 		// trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 
@@ -838,7 +838,7 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		// budget at ~5 tries per issued code per phone.
 		// IP source honours trust_proxy (#228).
 		rlCfg := config.EffectiveRateLimits()
-		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "token_verify", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.TokenVerificationPer5MinPerIP, ratelimit.FiveMinutes) {
 			return
 		}
 

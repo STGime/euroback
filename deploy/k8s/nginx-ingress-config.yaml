@@ -73,3 +73,29 @@ data:
   # browser-side OCSP fetch leaking the visited host to the CA (a
   # GDPR-relevant side channel highlighted by EDPS guidance).
   enable-ocsp: "true"
+
+  # ── X-Forwarded-For trust chain (#238) ─────────────────────────────
+  # **Load-bearing invariant.** internal/ratelimit/auth.go's
+  # ClientIPForProject extracts the real client IP from XFF using a
+  # trusted-hop-count model. It assumes the gateway sees EXACTLY
+  # `TrustedProxyHops` XFF entries added by our own infra (default 1),
+  # and picks the entry at position len-TrustedProxyHops.
+  #
+  # `use-forwarded-headers: false` (the default; declared here for
+  # provenance) tells nginx to IGNORE client-supplied XFF and write
+  # its own single-entry header containing the immediate peer IP —
+  # i.e. exactly 1 trusted-hop entry. This matches
+  # DefaultRateLimits().TrustedProxyHops = 1.
+  #
+  # If this ever flips to `true`, nginx APPENDS to the existing XFF
+  # instead of overwriting, and the per-project TrustedProxyHops
+  # setting must be raised to match the real chain length (typically
+  # 2 = LB append + nginx append). Otherwise every per-IP rate limit
+  # becomes header-rotation-bypassable — an attacker prepending
+  # arbitrary entries wins the leftmost slot AND the code's
+  # trusted-hop math (which expects fewer entries).
+  #
+  # The extractor's fail-closed branch (fewer observed entries than
+  # TrustedProxyHops → return TCP peer) is defence-in-depth, but
+  # the primary guarantee is this line staying `false`.
+  use-forwarded-headers: "false"

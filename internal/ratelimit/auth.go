@@ -136,15 +136,8 @@ func ClientIP(r *http.Request) string {
 }
 
 // ClientIPForProject is the per-project sibling that honours
-// auth_config.rate_limits.trust_proxy (#228).
-//
-//   - trustProxy=true  → leftmost X-Forwarded-For (fall back to TCP
-//     peer if XFF is absent). Correct only when exactly one trusted
-//     hop authoritatively overwrites XFF with the real client IP
-//     (nginx-ingress with `use-forwarded-headers: false` is the
-//     canonical example). If anything in the chain APPENDS to XFF
-//     instead of overwriting, leftmost-XFF becomes client-controlled
-//     and the per-IP gate becomes header-rotation-bypassable.
+// auth_config.rate_limits.trust_proxy (#228) and
+// auth_config.rate_limits.trusted_proxy_hops (#238).
 //
 //   - trustProxy=false → TCP peer only; XFF is ignored entirely.
 //     Safe under any XFF configuration. The cost is that when the
@@ -153,19 +146,63 @@ func ClientIP(r *http.Request) string {
 //     same value for every request — the per-IP gate effectively
 //     becomes per-project total.
 //
-// The Eurobase default is `false` for safety until the Scaleway LB ↔
-// nginx-ingress XFF behavior is verified empirically (follow-up issue
-// tracks the verification + the trusted-hop-count hardening that's
-// robust to both modes). Project owners who know their deployment
-// trusts XFF can opt in today; the field comment in
-// internal/tenant/auth_config.go walks through the full decision.
-func ClientIPForProject(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			return leftmostXFF(xff)
-		}
+//   - trustProxy=true → **trusted-hop-count extraction (#238).**
+//     Pick the XFF entry at index `len(entries) - trustedHops`
+//     (0-indexed). Entries to the LEFT of that index are treated as
+//     client-controlled and discarded. This is the difference between
+//     the old leftmost-XFF behaviour (client can prepend arbitrary
+//     entries and win) and the rightmost-with-known-N behaviour
+//     (client-forged entries get pushed out of the trusted window
+//     regardless of how many the attacker prepends).
+//
+//     Two supported shapes:
+//       trustedHops=1 — nginx-ingress `use-forwarded-headers: false`,
+//                       single XFF entry from the trusted proxy
+//                       (via Scaleway LB proxy-protocol v2 or direct).
+//       trustedHops=2 — LB and nginx both append their view of the
+//                       source (LB appends real client, nginx appends
+//                       LB's IP). Requires nginx
+//                       `use-forwarded-headers: true`.
+//
+//     **Fail-closed**: fewer observed XFF entries than trustedHops
+//     → return TCP peer instead of the leftmost entry. Catches
+//     direct-to-gateway requests (shouldn't happen through our infra)
+//     and header-strip attacks. A misconfigured `trustedHops` value
+//     that's higher than the actual chain length becomes an
+//     availability issue (all requests key on one TCP peer), not a
+//     security issue.
+//
+// The Eurobase default is `TrustProxy=false, TrustedProxyHops=1`. See
+// the field comments in internal/tenant/auth_config.go for the full
+// trade-off walkthrough.
+//
+// trustedHops ≤ 0 is treated as 1 (belt + suspenders on top of the
+// EffectiveRateLimits merge that already normalises ≤0 → default).
+// An out-of-range value must not be usable as a bypass primitive.
+func ClientIPForProject(r *http.Request, trustProxy bool, trustedHops int) string {
+	if !trustProxy {
+		return remoteAddrNoPort(r)
 	}
-	return remoteAddrNoPort(r)
+	if trustedHops <= 0 {
+		trustedHops = 1
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return remoteAddrNoPort(r)
+	}
+	entries := splitXFF(xff)
+	// entries indexed 0..len-1, left-to-right. Real client is at
+	// index len-trustedHops (or before it, from the client's own
+	// header). Anything earlier is untrusted.
+	idx := len(entries) - trustedHops
+	if idx < 0 {
+		// Fewer observed entries than expected trusted hops — the
+		// chain doesn't match our config assumption. Fail-closed to
+		// TCP peer rather than trusting whatever leftmost entry
+		// happens to be present.
+		return remoteAddrNoPort(r)
+	}
+	return entries[idx]
 }
 
 // leftmostXFF returns the first entry of an X-Forwarded-For header,
@@ -178,6 +215,30 @@ func leftmostXFF(xff string) string {
 		return trimSpace(xff[:i])
 	}
 	return trimSpace(xff)
+}
+
+// splitXFF returns the comma-separated XFF entries, each trimmed of
+// surrounding whitespace. Empty entries are dropped (an XFF like
+// `"1.2.3.4,,5.6.7.8"` becomes two entries, not three) so a malformed
+// header can't shift the trusted-hop index. `""` returns nil.
+func splitXFF(xff string) []string {
+	if xff == "" {
+		return nil
+	}
+	out := make([]string, 0, 3)
+	start := 0
+	for i := 0; i < len(xff); i++ {
+		if xff[i] == ',' {
+			if v := trimSpace(xff[start:i]); v != "" {
+				out = append(out, v)
+			}
+			start = i + 1
+		}
+	}
+	if v := trimSpace(xff[start:]); v != "" {
+		out = append(out, v)
+	}
+	return out
 }
 
 func indexByte(s string, c byte) int {
