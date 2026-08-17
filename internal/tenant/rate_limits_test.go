@@ -158,6 +158,50 @@ func TestDefaultRateLimits_Numbers(t *testing.T) {
 	if d.TrustProxy == nil || *d.TrustProxy {
 		t.Errorf("default TrustProxy must be false (Supabase parity, safe-by-default), got %v", d.TrustProxy)
 	}
+	// #238: default TrustedProxyHops must be 1 (matches current prod
+	// chain: nginx-ingress with use-forwarded-headers=false writes a
+	// single XFF entry). Zero would index out of bounds in the
+	// extractor; anything ≥2 would incorrectly discard a real client
+	// entry as if it were client-forged.
+	if d.TrustedProxyHops == nil || *d.TrustedProxyHops != 1 {
+		t.Errorf("default TrustedProxyHops must be 1 (single-hop nginx chain), got %v", d.TrustedProxyHops)
+	}
+}
+
+// #238: EffectiveRateLimits must clamp ≤0 TrustedProxyHops values to
+// the default. A saved value of 0 would index out of bounds in the
+// extractor; a saved value of -1 would trigger fail-closed on every
+// request (availability incident). The merge collapses both to the
+// safe default so a UI validation gap can't create a bypass primitive.
+func TestEffectiveRateLimits_TrustedProxyHopsDefaultsAndClamps(t *testing.T) {
+	// nil → default 1
+	cNil := (*AuthConfig)(nil)
+	if got := cNil.EffectiveRateLimits().TrustedProxyHops; got == nil || *got != 1 {
+		t.Errorf("nil config: TrustedProxyHops should default to 1, got %v", got)
+	}
+
+	// empty RateLimits (field absent) → default 1
+	cEmpty := &AuthConfig{RateLimits: &RateLimits{}}
+	if got := cEmpty.EffectiveRateLimits().TrustedProxyHops; got == nil || *got != 1 {
+		t.Errorf("empty rate_limits: TrustedProxyHops should default to 1, got %v", got)
+	}
+
+	// explicit 2 → passes through (2-hop chain: LB + nginx both append)
+	two := 2
+	cTwo := &AuthConfig{RateLimits: &RateLimits{TrustedProxyHops: &two}}
+	if got := cTwo.EffectiveRateLimits().TrustedProxyHops; got == nil || *got != 2 {
+		t.Errorf("explicit hops=2 must pass through, got %v", got)
+	}
+
+	// clamp: 0 and negative fall back to default 1
+	for _, bad := range []int{0, -1, -99} {
+		v := bad
+		c := &AuthConfig{RateLimits: &RateLimits{TrustedProxyHops: &v}}
+		got := c.EffectiveRateLimits().TrustedProxyHops
+		if got == nil || *got != 1 {
+			t.Errorf("hops=%d must be clamped to default 1, got %v", bad, got)
+		}
+	}
 }
 
 // JSON round-trip: a stored auth_config with rate_limits must parse

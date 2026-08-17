@@ -1069,7 +1069,19 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				ctx := audit.WithAccessRecorder(r.Context(), accessRecorder)
-				ctx = audit.WithClientIP(ctx, ratelimit.ClientIP(r))
+				// #420 review 🟢: route audit through the hardened
+				// trusted-hop extractor with platform defaults (trust
+				// XFF, expect the single trusted nginx-ingress hop
+				// per nginx-ingress-config.yaml). Otherwise
+				// audit-logged client IPs are forgeable via
+				// `X-Forwarded-For: 1.2.3.4` on forwarded requests —
+				// not an enforcement vuln but bad enough that an
+				// audit IP cited in an incident might not be the
+				// real actor's IP. This middleware runs before the
+				// project-context middleware, so we can't consult
+				// per-project trust_proxy / hops overrides; the
+				// platform default matches the actual prod chain.
+				ctx = audit.WithClientIP(ctx, ratelimit.ClientIPForProject(r, true, 1))
 				next.ServeHTTP(w, r.WithContext(ctx))
 			})
 		})

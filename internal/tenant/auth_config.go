@@ -185,6 +185,39 @@ type RateLimits struct {
 	// in #229 will surface this choice with the same trade-off
 	// written out.
 	TrustProxy *bool `json:"trust_proxy,omitempty"`
+
+	// TrustedProxyHops is the number of trusted reverse-proxy hops
+	// between the internet and the gateway. Only consulted when
+	// TrustProxy=true. Consumed by ratelimit.ClientIPForProject
+	// (#238).
+	//
+	// The extractor picks the XFF entry at index
+	// `len(entries) - TrustedProxyHops` (0-indexed). Any entries to
+	// the LEFT of that index are treated as client-controlled and
+	// discarded. This is the difference between the old
+	// leftmost-XFF behaviour (client can prepend arbitrary entries
+	// and win) and the rightmost-with-known-N behaviour (client
+	// entries get pushed out of the trusted window).
+	//
+	// Two supported chain shapes for Eurobase:
+	//   * TrustedProxyHops = 1 (default) — canonical shape when
+	//     nginx-ingress runs with `use-forwarded-headers: false` and
+	//     writes a single XFF entry containing the client IP (from
+	//     Scaleway LB proxy-protocol v2 or direct connection).
+	//   * TrustedProxyHops = 2 — when Scaleway LB and nginx both
+	//     append their view of the source to XFF (LB appends the
+	//     real client, nginx appends the LB's IP). Requires
+	//     `use-forwarded-headers: true` on nginx.
+	//
+	// Fewer observed entries than TrustedProxyHops → fail-closed to
+	// TCP peer. This catches direct-to-gateway requests (which
+	// shouldn't happen through our infra) and header-strip attacks.
+	//
+	// *int, not int, for the same "distinguish absent from explicit
+	// zero" reason as TrustProxy. Zero is not a valid value (would
+	// index out of bounds); the merge in EffectiveRateLimits fills
+	// nil with the platform default.
+	TrustedProxyHops *int `json:"trusted_proxy_hops,omitempty"`
 }
 
 // DefaultRateLimits returns the platform-wide defaults applied when a
@@ -214,6 +247,13 @@ type RateLimits struct {
 // path consuming it today; #235 unblocks email enforcement.
 func DefaultRateLimits() RateLimits {
 	falseVal := false
+	// TrustedProxyHops = 1 matches the current prod chain shape
+	// documented in the field comment: nginx-ingress with
+	// `use-forwarded-headers: false` writes exactly one XFF entry.
+	// If prod is ever reconfigured (LB append + nginx append =
+	// 2 hops), projects override via the console. The default stays
+	// on the safer single-hop assumption.
+	oneHop := 1
 	return RateLimits{
 		SignupSigninPer5MinPerIP:      8,
 		TokenRefreshPer5MinPerIP:      150,
@@ -221,6 +261,7 @@ func DefaultRateLimits() RateLimits {
 		EmailsPerHour:                 2,
 		SMSPerHour:                    30,
 		TrustProxy:                    &falseVal,
+		TrustedProxyHops:              &oneHop,
 	}
 }
 
@@ -256,6 +297,14 @@ func (c *AuthConfig) EffectiveRateLimits() RateLimits {
 	}
 	if out.TrustProxy == nil {
 		out.TrustProxy = defaults.TrustProxy
+	}
+	// TrustedProxyHops: nil OR explicit ≤0 both fall back to the
+	// default. Zero would index out of bounds in the extractor; the
+	// extractor also fails-closed for safety, but catching it in the
+	// merge means the operator's console value ("0") gets the safer
+	// interpretation rather than silently falling through.
+	if out.TrustedProxyHops == nil || *out.TrustedProxyHops <= 0 {
+		out.TrustedProxyHops = defaults.TrustedProxyHops
 	}
 	return out
 }

@@ -185,7 +185,7 @@ func TestTrustProxy_ChangesCounterIdentifier(t *testing.T) {
 	r := helperRequest("10.0.0.5:54321", "1.2.3.4")
 	for i := range limit {
 		w := httptest.NewRecorder()
-		id := ClientIPForProject(r, false)
+		id := ClientIPForProject(r, false, 1)
 		if id != "10.0.0.5" {
 			t.Fatalf("trust_proxy=false identifier: got %q, want 10.0.0.5", id)
 		}
@@ -195,15 +195,16 @@ func TestTrustProxy_ChangesCounterIdentifier(t *testing.T) {
 	}
 	// Cap reached against the TCP peer.
 	w := httptest.NewRecorder()
-	if !CheckAuthRateForProject(rl, w, context.Background(), "signup_signin", proj, ClientIPForProject(r, false), limit, window) {
+	if !CheckAuthRateForProject(rl, w, context.Background(), "signup_signin", proj, ClientIPForProject(r, false, 1), limit, window) {
 		t.Fatal("trust_proxy=false: over-cap request should be blocked")
 	}
 
 	// Now flip the project's trust_proxy. The identifier switches to
-	// the leftmost XFF (1.2.3.4) — a different counter — so the next
-	// request must pass even though the project + TCP-peer counter is
-	// at cap.
-	id := ClientIPForProject(r, true)
+	// the XFF-derived value at position len-trustedHops (with hops=1
+	// and a single-entry header "1.2.3.4", that's "1.2.3.4") — a
+	// different counter — so the next request must pass even though
+	// the project + TCP-peer counter is at cap.
+	id := ClientIPForProject(r, true, 1)
 	if id != "1.2.3.4" {
 		t.Fatalf("trust_proxy=true identifier: got %q, want 1.2.3.4", id)
 	}
