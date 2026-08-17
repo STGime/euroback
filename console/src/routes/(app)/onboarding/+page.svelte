@@ -22,6 +22,13 @@
 	// they'd have to create-then-upgrade — reported by the founder
 	// after grant-then-onboarding didn't show Team.
 	let hasTeamBeta = $state(false);
+	// Legal-Team closed-beta gate. Symmetric with hasTeamBeta —
+	// populated from profile.legal_team_beta_access. Backend
+	// CreateProject enforces the same gate (ErrLegalTeamBetaRequired
+	// → 403 legal_team_beta_required), so this control just decides
+	// UI visibility; a user without access sending the plan directly
+	// still gets a clean 403.
+	let hasLegalTeamBeta = $state(false);
 
 	onMount(async () => {
 		try {
@@ -30,7 +37,10 @@
 				api.getProfile().catch(() => null),
 			]);
 			planData = plans;
-			if (profile) hasTeamBeta = !!profile.team_beta_access;
+			if (profile) {
+				hasTeamBeta = !!profile.team_beta_access;
+				hasLegalTeamBeta = !!profile.legal_team_beta_access;
+			}
 		} catch {
 			// Fallbacks handle the empty/errored cases — cards show
 			// hardcoded copy, Team stays hidden if profile failed.
@@ -75,6 +85,17 @@
 	let freePlan = $derived(planData.find(p => p.plan === 'free'));
 	let proPlan = $derived(planData.find(p => p.plan === 'pro'));
 	let teamPlan = $derived(planData.find(p => p.plan === 'team'));
+	let legalTeamPlan = $derived(planData.find(p => p.plan === 'legal_team'));
+
+	// 4 visible tiers → 2×2 grid; 3 → 3-col; ≤2 → 2-col. Keeps
+	// each card wide enough to fit its bullet list without cramping.
+	let planGridClass = $derived(
+		hasTeamBeta && hasLegalTeamBeta
+			? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-2'
+			: (hasTeamBeta || hasLegalTeamBeta)
+				? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
+				: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-2'
+	);
 
 	function formatLimit(mb: number): string {
 		if (mb >= 1024) return (mb / 1024).toFixed(0) + ' GB';
@@ -173,7 +194,11 @@
 				return; // redirect in flight — don't reset `creating`
 			}
 
-			// Free / Team — existing synchronous 3-step wizard.
+			// Free / Team / Legal Team — synchronous 3-step wizard.
+			// Both Team and Legal Team are Beta·free during closed
+			// beta (price_cents NULL on both plan_limits rows), so
+			// no Mollie checkout. When Legal Team ships paid, mirror
+			// the pro branch (plan_code:'legal_team').
 			const project = await api.createProject({
 				name: projectName.trim(),
 				slug: slug,
@@ -376,7 +401,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				<fieldset>
 					<legend class="block text-sm font-medium text-gray-700">Plan for this project</legend>
 					<p class="text-xs text-gray-400 mt-0.5">Each project is billed independently. You can mix Free and Pro projects. <a href="/pricing" class="text-eurobase-600 hover:text-eurobase-700 underline">See full comparison</a></p>
-					<div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+					<div class="mt-2 grid gap-3 {planGridClass}">
 						<label class="cursor-pointer">
 							<input type="radio" name="onb-plan" value="free" bind:group={plan} class="peer sr-only" />
 							<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50/50 peer-checked:shadow-sm border-gray-200 hover:border-gray-300">
@@ -486,6 +511,53 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 										<li class="flex items-center gap-1.5">
 											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
 											Provisioning takes 2–5 min after Create
+										</li>
+									</ul>
+								</div>
+							</label>
+						{/if}
+						{#if hasLegalTeamBeta}
+							<!-- Legal-Team closed-beta option. Separate SKU
+							     from Team — same dedicated-Postgres infra
+							     (per migration 000087, price_cents NULL
+							     during beta = Beta·free treatment) plus
+							     German legal-tech compliance features
+							     (WORM S3 Object Lock, §257 HGB / §50 BRAO
+							     / §147 AO retention, 10y audit log).
+
+							     Amber styling matches the /pricing and
+							     /legal pages so a granted user recognises
+							     the same tier across surfaces. Fallback
+							     numbers mirror the team plan's numeric
+							     caps (both provision dedicated Postgres). -->
+							<label class="cursor-pointer">
+								<input type="radio" name="onb-plan" value="legal_team" bind:group={plan} class="peer sr-only" />
+								<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-amber-600 peer-checked:bg-amber-50/50 peer-checked:shadow-sm border-amber-200 hover:border-amber-300">
+									<div class="flex items-center justify-between">
+										<p class="text-sm font-semibold text-gray-900">Legal Team</p>
+										<span class="text-xs font-semibold text-amber-700">Beta · free</span>
+									</div>
+									<p class="mt-1.5 text-xs text-gray-500">Dedicated Postgres + German legal-tech retention (§257 HGB / §50 BRAO / §147 AO).</p>
+									<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											{legalTeamPlan ? formatLimit(legalTeamPlan.db_size_mb) : '100 GB'} dedicated database, {legalTeamPlan ? formatLimit(legalTeamPlan.storage_mb) : '500 GB'} file storage
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											WORM per-prefix retention + ad-hoc holds
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											10-year audit log retention
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											PITR (7d), scheduled backups (30d retention)
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											DSAR erasure respects legal holds
 										</li>
 									</ul>
 								</div>

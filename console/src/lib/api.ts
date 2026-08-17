@@ -132,6 +132,13 @@ export interface PlatformProfile {
 	// shows a live "Create Team project" CTA instead of "Coming soon".
 	// Flipped per-user by superadmin via /platform/admin/team-beta.
 	team_beta_access: boolean;
+	// Legal-Team closed-beta gate. Same shape as team_beta_access.
+	// Flipped per-user by superadmin via /platform/admin/legal-team-beta.
+	// The two flags are independent — a user can hold one, both, or
+	// neither. Onboarding + projects/+page.svelte use this to render
+	// the Legal Team plan card; backend CreateProject enforces the
+	// same gate (ErrLegalTeamBetaRequired → 403 legal_team_beta_required).
+	legal_team_beta_access: boolean;
 }
 
 export interface TeamBetaEntry {
