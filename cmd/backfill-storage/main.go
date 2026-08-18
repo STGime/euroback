@@ -81,10 +81,10 @@ func main() {
 		queryArgs    []any
 	)
 	if projectFilter != "" {
-		projectQuery = `SELECT id, slug, schema_name FROM projects WHERE status = 'active' AND id = $1`
+		projectQuery = `SELECT id, slug, schema_name, COALESCE(plan, 'free') FROM projects WHERE status = 'active' AND id = $1`
 		queryArgs = []any{projectFilter}
 	} else {
-		projectQuery = `SELECT id, slug, schema_name FROM projects WHERE status = 'active'`
+		projectQuery = `SELECT id, slug, schema_name, COALESCE(plan, 'free') FROM projects WHERE status = 'active'`
 	}
 	rows, err := pool.Query(ctx, projectQuery, queryArgs...)
 	if err != nil {
@@ -93,12 +93,12 @@ func main() {
 	defer rows.Close()
 
 	type project struct {
-		id, slug, schema string
+		id, slug, schema, plan string
 	}
 	var projects []project
 	for rows.Next() {
 		var p project
-		if err := rows.Scan(&p.id, &p.slug, &p.schema); err != nil {
+		if err := rows.Scan(&p.id, &p.slug, &p.schema, &p.plan); err != nil {
 			log.Fatalf("scan project: %v", err)
 		}
 		projects = append(projects, p)
@@ -183,11 +183,35 @@ func main() {
 		// physically rename the S3 object to NFC so both sides
 		// speak the same bytes. Server-side copy + delete keeps
 		// bytes off the wire.
-		inserted, skipped, errCount, renamed, renameErr := 0, 0, 0, 0, 0
+		// WORM guard: Legal Team buckets use S3 Object Lock for
+		// §257 HGB / §147 AO retention. `CopyObject` does NOT
+		// inherit source-object retention — a naive rename would
+		// produce an unprotected NFC copy while the locked NFD
+		// original stays behind, silently defeating the WORM
+		// guarantee. Until we implement retention-preserving copy
+		// (Get retention on source → set ObjectLockMode +
+		// ObjectLockRetainUntilDate + LegalHoldStatus on the
+		// CopyObjectInput), refuse to rename on legal_team
+		// projects. Report the non-NFC keys so an operator can
+		// handle them manually (or wait for the retention-aware
+		// path). The tracking-row insert is also skipped for those
+		// specific keys — inserting the NFC row would create a
+		// broken pointer since S3 still holds the NFD object.
+		//
+		// NFC-clean objects in legal_team buckets are unaffected
+		// — normal insert path runs. This only skips the rename
+		// (and the coupled insert) for the NFD subset.
+		skipRenameForWORM := p.plan == "legal_team"
+		inserted, skipped, errCount, renamed, renameErr, wormSkipped := 0, 0, 0, 0, 0, 0
 		for _, obj := range allObjects {
 			nfcKey := storage.NormalizeStorageKey(obj.Key)
 
 			if nfcKey != obj.Key {
+				if skipRenameForWORM {
+					fmt.Printf("    SKIP-WORM %q would need rename to %q — legal_team bucket, retention-preserving copy not yet implemented. Handle manually.\n", obj.Key, nfcKey)
+					wormSkipped++
+					continue
+				}
 				// NFD (or otherwise non-canonical) S3 key. Rename
 				// to NFC before inserting the tracking row.
 				if dryRun {
@@ -253,8 +277,11 @@ func main() {
 			}
 		}
 
-		fmt.Printf("  inserted=%d already-tracked=%d renamed=%d rename-errors=%d insert-errors=%d\n",
-			inserted, skipped, renamed, renameErr, errCount)
+		fmt.Printf("  inserted=%d already-tracked=%d renamed=%d rename-errors=%d insert-errors=%d worm-skipped=%d\n",
+			inserted, skipped, renamed, renameErr, errCount, wormSkipped)
+		if wormSkipped > 0 {
+			fmt.Printf("  ⚠ %d non-NFC keys skipped on this WORM (legal_team) bucket. These files stay broken until the retention-preserving rename lands; see issue tracker.\n", wormSkipped)
+		}
 		totalInserted += inserted
 		totalSkipped += skipped
 		totalErrors += errCount + renameErr
