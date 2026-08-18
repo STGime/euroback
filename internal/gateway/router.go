@@ -625,6 +625,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))
 			r.Delete("/allowlist/{email}", tenant.AdminRemoveAllowlist(pool))
 			r.Post("/allowlist/email", tenant.AdminSendAllowlistEmail(pool, emailService))
+			// Broadcast audience — the deduped union of
+			// platform_allowlist ∪ platform_users. Used by the
+			// Compose Broadcast modal in /admin so a superadmin can
+			// see counts + preview before sending. The send itself
+			// still goes through /allowlist/email (validation was
+			// widened in-place to accept either source).
+			r.Get("/broadcast/audience", tenant.AdminListBroadcastAudience(pool))
 			// Team-tier closed-beta grants (M2, issue #308).
 			r.Get("/team-beta", tenant.AdminListTeamBetaUsers(pool))
 			r.Post("/team-beta/{id}", tenant.AdminGrantTeamBeta(pool))

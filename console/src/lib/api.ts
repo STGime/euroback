@@ -215,6 +215,17 @@ export interface AllowlistEntry {
 	created_at: string;
 }
 
+// One row on GET /platform/admin/broadcast/audience — the deduped
+// union of platform_allowlist ∪ platform_users. Fields annotate the
+// source(s) so the Compose modal can render "N invited, M signed up,
+// K in both" without re-fetching either list.
+export interface BroadcastRecipient {
+	email: string;
+	on_allowlist: boolean;
+	has_account: boolean;
+	signed_up_at: string | null;
+}
+
 // Team-tier backup + restore (M3).
 
 export interface BackupSnapshot {
@@ -2093,9 +2104,14 @@ export class EurobaseAPI {
 	}
 
 	/**
-	 * Send an HTML email to one or more allowlist entries. When more than
-	 * one recipient is supplied the server uses BCC, so recipients do not
-	 * see each other. Superadmin only.
+	 * Send an HTML email to one or more recipients. Server validates each
+	 * address is either on public.platform_allowlist OR has a
+	 * public.platform_users account (widened from the original
+	 * allowlist-only rule in the broadcast feature). BCC on >1 recipient.
+	 * Superadmin only.
+	 *
+	 * URL retained (`/allowlist/email`) for backwards-compat; the server
+	 * handler was renamed internally but the wire path is stable.
 	 */
 	async adminSendAllowlistEmail(
 		emails: string[],
@@ -2112,6 +2128,22 @@ export class EurobaseAPI {
 			method: 'POST',
 			body: JSON.stringify({ emails, subject, body_html: bodyHtml })
 		});
+	}
+
+	/**
+	 * Deduped union of platform_allowlist ∪ platform_users. Each entry is
+	 * annotated with `on_allowlist` / `has_account` / `signed_up_at` so
+	 * the Compose Broadcast modal can render a preview count without
+	 * client-side merging. Superadmin only.
+	 */
+	async adminGetBroadcastAudience(): Promise<{
+		recipients: BroadcastRecipient[];
+		total: number;
+		total_allowlist_only: number;
+		total_users_only: number;
+		total_both: number;
+	}> {
+		return this.fetch('/platform/admin/broadcast/audience');
 	}
 
 	/** Get request logs for a project. */

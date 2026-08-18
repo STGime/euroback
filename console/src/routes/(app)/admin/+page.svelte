@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry, type SignupUserEntry } from '$lib/api.js';
+	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
 	let allowlist = $state<AllowlistEntry[]>([]);
@@ -39,6 +39,67 @@
 	// didn't go out and retry just those — much better than the
 	// pre-fix "send 9, deselect, send next 9, lather, rinse" loop.
 	let composeFailures = $state<{ recipients: string[]; error: string }[]>([]);
+
+	// Broadcast state — sends to the deduped union of platform_allowlist
+	// ∪ platform_users. Distinct from the "email selected rows" flow
+	// above because the audience is server-computed and filtered by a
+	// dropdown, not by manual per-row selection. Reuses the same
+	// send endpoint (validation was widened server-side to accept
+	// either source).
+	//
+	// composeMode toggles which recipient set the send button uses:
+	//   'selected' — the manually-picked rows in the allowlist table
+	//                (existing behavior).
+	//   'audience' — the broadcast audience filtered by audienceFilter.
+	// When mode='audience' the recipient list comes from
+	// broadcastAudience; the manual `selected` set is ignored.
+	type ComposeMode = 'selected' | 'audience';
+	type AudienceFilter = 'everyone' | 'allowlist_only' | 'users_only' | 'both';
+	let composeMode = $state<ComposeMode>('selected');
+	let audienceFilter = $state<AudienceFilter>('everyone');
+	let broadcastAudience = $state<BroadcastRecipient[]>([]);
+	let broadcastLoaded = $state(false);
+	let broadcastLoading = $state(false);
+	let broadcastError = $state<string | null>(null);
+
+	// Derived recipient set for the audience mode. Filters
+	// broadcastAudience by the dropdown selection, extracts emails,
+	// stays a `string[]` so it drops into the existing send call
+	// unchanged. Empty when mode !== 'audience' so the send path can
+	// still consult it uniformly.
+	let audienceRecipients = $derived.by(() => {
+		if (composeMode !== 'audience') return [] as string[];
+		return broadcastAudience
+			.filter((r) => {
+				switch (audienceFilter) {
+					case 'everyone':
+						return true;
+					case 'allowlist_only':
+						return r.on_allowlist && !r.has_account;
+					case 'users_only':
+						return r.has_account && !r.on_allowlist;
+					case 'both':
+						return r.on_allowlist && r.has_account;
+				}
+			})
+			.map((r) => r.email);
+	});
+	let audienceRecipientCount = $derived(audienceRecipients.length);
+
+	// Preview breakdown for the modal — reads directly off
+	// broadcastAudience so the counts match what would be sent for
+	// each filter option.
+	let audienceCounts = $derived.by(() => {
+		const allowlistOnly = broadcastAudience.filter((r) => r.on_allowlist && !r.has_account).length;
+		const usersOnly = broadcastAudience.filter((r) => r.has_account && !r.on_allowlist).length;
+		const both = broadcastAudience.filter((r) => r.on_allowlist && r.has_account).length;
+		return {
+			total: broadcastAudience.length,
+			allowlistOnly,
+			usersOnly,
+			both
+		};
+	});
 
 	const INVITATION_TEMPLATE = {
 		subject: "You're invited to Eurobase (closed beta)",
@@ -251,7 +312,35 @@
 	function openCompose() {
 		composeError = null;
 		composeSuccess = null;
+		composeMode = 'selected';
 		composeOpen = true;
+	}
+
+	// Open the compose modal in broadcast mode. Fetches the audience
+	// lazily on first open so the /admin page load isn't blocked on
+	// a query that's only needed if the operator clicks Broadcast.
+	// Subsequent opens reuse the cached audience — a superadmin
+	// doing multiple sends in one session doesn't re-hit the DB
+	// unless they refresh the page.
+	async function openBroadcast() {
+		composeError = null;
+		composeSuccess = null;
+		composeMode = 'audience';
+		audienceFilter = 'everyone';
+		composeOpen = true;
+		if (!broadcastLoaded && !broadcastLoading) {
+			broadcastLoading = true;
+			broadcastError = null;
+			try {
+				const res = await api.adminGetBroadcastAudience();
+				broadcastAudience = res.recipients;
+				broadcastLoaded = true;
+			} catch (e: any) {
+				broadcastError = e?.message ?? 'Failed to load broadcast audience';
+			} finally {
+				broadcastLoading = false;
+			}
+		}
 	}
 
 	function applyTemplate(tpl: { subject: string; body: string }) {
@@ -262,18 +351,32 @@
 	async function sendCompose() {
 		composeError = null;
 		composeSuccess = null;
-		const recipients = Array.from(selected);
+		// Recipient set depends on mode:
+		//   'selected' — manual per-row picks from the allowlist table.
+		//   'audience' — the server-computed union filtered by the dropdown.
+		// Both flows POST to the same endpoint; the server-side
+		// validation was widened to accept either source in the same
+		// PR that shipped the audience endpoint.
+		const recipients =
+			composeMode === 'audience' ? audienceRecipients : Array.from(selected);
 		if (recipients.length === 0) {
-			composeError = 'No recipients selected';
+			composeError =
+				composeMode === 'audience'
+					? 'Broadcast filter matches no recipients'
+					: 'No recipients selected';
 			return;
 		}
 		if (!composeSubject.trim() || !composeBody.trim()) {
 			composeError = 'Subject and body are required';
 			return;
 		}
+		const audienceLabel =
+			composeMode === 'audience'
+				? ` (broadcast · ${filterLabel(audienceFilter)})`
+				: '';
 		if (
 			!confirm(
-				`Send to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}${recipients.length > 1 ? ' (BCC)' : ''}?`
+				`Send to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}${recipients.length > 1 ? ' (BCC)' : ''}${audienceLabel}?`
 			)
 		)
 			return;
@@ -288,18 +391,39 @@
 			if (res.status === 'partial') {
 				composeSuccess = `Partial: ${res.sent} sent, ${res.failed} failed${res.bcc ? ' (BCC)' : ''}.`;
 				composeFailures = res.errors ?? [];
-				// Keep the failed addresses selected so the operator
-				// can click Email again to retry just them.
-				selected = new Set(composeFailures.flatMap((e) => e.recipients));
+				// Only relevant to the 'selected' flow — audience mode
+				// doesn't consult `selected`, so re-selecting the
+				// failures there would silently do nothing on the next
+				// send. Leave the failures visible in the modal
+				// instead so the operator can copy-paste for a manual
+				// retry.
+				if (composeMode === 'selected') {
+					selected = new Set(composeFailures.flatMap((e) => e.recipients));
+				}
 			} else {
 				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.`;
-				selected = new Set();
+				if (composeMode === 'selected') {
+					selected = new Set();
+				}
 			}
 			// Leave modal open so the user can see confirmation; they close manually.
 		} catch (e: any) {
 			composeError = e?.message ?? 'Send failed';
 		} finally {
 			composeBusy = false;
+		}
+	}
+
+	function filterLabel(f: AudienceFilter): string {
+		switch (f) {
+			case 'everyone':
+				return 'everyone';
+			case 'allowlist_only':
+				return 'allowlist only';
+			case 'users_only':
+				return 'signed-up only';
+			case 'both':
+				return 'allowlist ∩ signed-up';
 		}
 	}
 
@@ -327,8 +451,9 @@
 		<h2 class="text-lg font-semibold text-gray-900">Signup Allowlist</h2>
 		<div class="flex gap-2 items-end">
 			<div class="flex-1">
-				<label class="text-xs text-gray-500 block mb-1">Email</label>
+				<label for="allowlist-new-email" class="text-xs text-gray-500 block mb-1">Email</label>
 				<input
+					id="allowlist-new-email"
 					type="email"
 					bind:value={newEmail}
 					placeholder="user@example.com"
@@ -336,8 +461,9 @@
 				/>
 			</div>
 			<div class="flex-1">
-				<label class="text-xs text-gray-500 block mb-1">Note (optional)</label>
+				<label for="allowlist-new-note" class="text-xs text-gray-500 block mb-1">Note (optional)</label>
 				<input
+					id="allowlist-new-note"
 					type="text"
 					bind:value={newNote}
 					placeholder="beta tester, investor, …"
@@ -354,16 +480,26 @@
 
 		<div class="flex items-center justify-between">
 			<div class="text-xs text-gray-500">
-				{selected.size === 0 ? 'Select recipients with the checkboxes to send an email.' : `${selected.size} selected`}
+				{selected.size === 0 ? 'Select recipients with the checkboxes to send to a subset — or use Compose broadcast to reach the deduped union of allowlist + signed-up users.' : `${selected.size} selected`}
 			</div>
-			<button
-				type="button"
-				onclick={openCompose}
-				disabled={selected.size === 0}
-				class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-			>
-				Email {selected.size > 0 ? `(${selected.size})` : ''}
-			</button>
+			<div class="flex gap-2">
+				<button
+					type="button"
+					onclick={openBroadcast}
+					class="rounded-md border border-eurobase-300 bg-white px-3 py-1.5 text-xs font-medium text-eurobase-700 hover:bg-eurobase-50 cursor-pointer"
+					title="Reach every allowlisted + signed-up user (dedup'd by email). Filter by audience in the modal."
+				>
+					Compose broadcast
+				</button>
+				<button
+					type="button"
+					onclick={openCompose}
+					disabled={selected.size === 0}
+					class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+				>
+					Email {selected.size > 0 ? `(${selected.size})` : ''}
+				</button>
+			</div>
 		</div>
 
 		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
@@ -653,9 +789,21 @@
 		<div class="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
 			<div class="flex items-center justify-between border-b border-gray-200 px-5 py-3">
 				<div>
-					<h3 class="text-base font-semibold text-gray-900">Email recipients</h3>
+					<h3 class="text-base font-semibold text-gray-900">
+						{composeMode === 'audience' ? 'Compose broadcast' : 'Email recipients'}
+					</h3>
 					<p class="text-xs text-gray-500 mt-0.5">
-						{selected.size} selected{selected.size > 1 ? ' · delivered via BCC' : ''}
+						{#if composeMode === 'audience'}
+							{#if broadcastLoading}
+								Loading audience…
+							{:else if broadcastError}
+								<span class="text-red-600">Audience load failed: {broadcastError}</span>
+							{:else}
+								{audienceRecipientCount} recipient{audienceRecipientCount === 1 ? '' : 's'}{audienceRecipientCount > 1 ? ' · delivered via BCC' : ''}
+							{/if}
+						{:else}
+							{selected.size} selected{selected.size > 1 ? ' · delivered via BCC' : ''}
+						{/if}
 					</p>
 				</div>
 				<button
@@ -669,6 +817,36 @@
 			</div>
 
 			<div class="p-5 space-y-4">
+				<!-- Audience picker — only shown in broadcast mode.
+				     Reuses broadcastAudience (fetched on open) so the
+				     count preview updates instantly on filter change,
+				     no re-fetch. -->
+				{#if composeMode === 'audience'}
+					<div class="rounded-md border border-eurobase-200 bg-eurobase-50/40 p-3 space-y-2">
+						<label for="audience-filter" class="block text-xs font-medium text-eurobase-800">Audience</label>
+						<select
+							id="audience-filter"
+							bind:value={audienceFilter}
+							disabled={broadcastLoading || !broadcastLoaded}
+							class="w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm bg-white"
+						>
+							<option value="everyone">Everyone — allowlist ∪ signed-up users (deduped)</option>
+							<option value="allowlist_only">Allowlist only — invited but not signed up</option>
+							<option value="users_only">Signed-up only — signed up, not on allowlist</option>
+							<option value="both">Both — on allowlist AND signed up</option>
+						</select>
+						{#if broadcastLoaded}
+							<p class="text-xs text-gray-600 leading-relaxed">
+								Universe: <strong>{audienceCounts.total}</strong> unique email{audienceCounts.total === 1 ? '' : 's'}
+								— {audienceCounts.allowlistOnly} allowlist-only, {audienceCounts.usersOnly} signed-up-only, {audienceCounts.both} in both.
+								<br />
+								This send will reach <strong>{audienceRecipientCount}</strong> address{audienceRecipientCount === 1 ? '' : 'es'}.
+								Each address gets exactly one email regardless of source overlap.
+							</p>
+						{/if}
+					</div>
+				{/if}
+
 				<div class="flex gap-2 text-xs">
 					<span class="text-gray-500">Presets:</span>
 					<button
@@ -697,8 +875,9 @@
 				</div>
 
 				<div>
-					<label class="block text-xs text-gray-500 mb-1">Subject</label>
+					<label for="compose-subject" class="block text-xs text-gray-500 mb-1">Subject</label>
 					<input
+						id="compose-subject"
 						type="text"
 						bind:value={composeSubject}
 						placeholder="You're invited to Eurobase"
@@ -706,8 +885,9 @@
 					/>
 				</div>
 				<div>
-					<label class="block text-xs text-gray-500 mb-1">Body (HTML)</label>
+					<label for="compose-body" class="block text-xs text-gray-500 mb-1">Body (HTML)</label>
 					<textarea
+						id="compose-body"
 						bind:value={composeBody}
 						rows="12"
 						placeholder="<p>Hi,</p><p>…</p>"

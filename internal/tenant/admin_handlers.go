@@ -192,32 +192,82 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			return
 		}
 
-		// Validate every recipient is actually on the allowlist. Use
-		// ANY($1) so a single round-trip returns rows we can diff.
+		// Validate every recipient is either on the allowlist or has
+		// a platform_users account — the widened audience for the
+		// broadcast flow (was allowlist-only pre-widening). Same
+		// security fence purpose: a compromised superadmin token
+		// can't use this as a generic mail relay; recipients are
+		// bounded to people with a pre-existing relationship. Also
+		// tracks each recipient's source (allowlist / users / both)
+		// so the audit log records who reached what.
+		//
+		// `lower(trim(email))` normalization matches
+		// AdminListBroadcastAudience — round-trip is byte-consistent
+		// between the audience listing and the send validation.
+		type source struct{ onAllowlist, hasAccount bool }
+		validSet := make(map[string]source, len(recipients))
 		rows, err := pool.Query(r.Context(),
-			`SELECT email FROM public.platform_allowlist WHERE email = ANY($1::text[])`,
+			`SELECT lower(trim(email)) AS email,
+			        BOOL_OR(source = 'allowlist') AS on_allowlist,
+			        BOOL_OR(source = 'user')      AS has_account
+			   FROM (
+			       SELECT email, 'allowlist' AS source FROM public.platform_allowlist
+			       UNION ALL
+			       SELECT email, 'user'      AS source FROM public.platform_users
+			   ) s
+			   WHERE lower(trim(email)) = ANY($1::text[])
+			   GROUP BY lower(trim(email))`,
 			recipients,
 		)
 		if err != nil {
-			http.Error(w, `{"error":"allowlist lookup failed"}`, http.StatusInternalServerError)
+			slog.Error("broadcast recipient lookup failed", "error", err)
+			http.Error(w, `{"error":"recipient lookup failed"}`, http.StatusInternalServerError)
 			return
 		}
-		valid := make(map[string]struct{})
 		for rows.Next() {
 			var e string
-			if err := rows.Scan(&e); err == nil {
-				valid[e] = struct{}{}
+			var onAllow, hasAcct bool
+			if err := rows.Scan(&e, &onAllow, &hasAcct); err == nil {
+				validSet[e] = source{onAllowlist: onAllow, hasAccount: hasAcct}
 			}
 		}
 		rows.Close()
+		// validSet is keyed by the DB-normalized form (`lower(trim)`),
+		// so we look up recipients under the same normalization —
+		// otherwise `Foo@X.com` in an API caller's request array
+		// misses the `foo@x.com` DB row and gets silently dropped
+		// even though it's a valid recipient. Also dedups a
+		// duplicated request payload (belt: keeps the "each
+		// exactly once" guarantee even if the caller's list
+		// contained a case-variant collision).
 		final := recipients[:0]
+		seenNorm := make(map[string]struct{}, len(recipients))
+		var allowlistOnly, usersOnly, both int
 		for _, e := range recipients {
-			if _, ok := valid[e]; ok {
-				final = append(final, e)
+			norm := strings.ToLower(strings.TrimSpace(e))
+			s, ok := validSet[norm]
+			if !ok {
+				continue
+			}
+			if _, dup := seenNorm[norm]; dup {
+				continue
+			}
+			seenNorm[norm] = struct{}{}
+			final = append(final, e)
+			switch {
+			case s.onAllowlist && s.hasAccount:
+				both++
+			case s.onAllowlist:
+				allowlistOnly++
+			case s.hasAccount:
+				usersOnly++
 			}
 		}
 		if len(final) == 0 {
-			http.Error(w, `{"error":"no recipients are on the allowlist"}`, http.StatusBadRequest)
+			// Widened message: could be allowlist OR user; a "not on
+			// allowlist" refusal would mislead an operator whose
+			// intent was to reach a signed-up user only.
+			http.Error(w, `{"error":"no valid recipients — every address must be on the allowlist or have a platform_users account"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -242,12 +292,22 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 
 		if svc := audit.FromContext(r.Context()); svc != nil {
 			actorID, actorEmail := audit.ActorFromContext(r.Context())
-			svc.Log(r.Context(), "", actorID, actorEmail, audit.ActionAllowlistEmailed,
+			// Log as ActionBroadcastEmailed (not ActionAllowlistEmailed)
+			// now that the audience is widened. Legacy action constant
+			// is retained in internal/audit/service.go for historical
+			// row parsing. The three counters make it possible to
+			// reconstruct the exact audience shape at send time —
+			// useful when an operator later asks "who did we tell
+			// about the release?"
+			svc.Log(r.Context(), "", actorID, actorEmail, audit.ActionBroadcastEmailed,
 				audit.WithMetadata(map[string]any{
-					"recipient_count": len(final),
-					"sent":            result.Sent,
-					"failed":          result.Failed,
-					"subject":         req.Subject,
+					"recipient_count":      len(final),
+					"allowlist_only_count": allowlistOnly,
+					"users_only_count":     usersOnly,
+					"both_count":           both,
+					"sent":                 result.Sent,
+					"failed":               result.Failed,
+					"subject":              req.Subject,
 				}),
 				audit.WithIP(r.RemoteAddr))
 		}

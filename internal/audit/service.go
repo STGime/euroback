@@ -33,7 +33,16 @@ const (
 	ActionFunctionDeleted     = "function.deleted"
 	ActionAllowlistAdded      = "allowlist.added"
 	ActionAllowlistRemoved    = "allowlist.removed"
-	ActionAllowlistEmailed    = "allowlist.emailed"
+	// ActionAllowlistEmailed is the legacy action for the pre-widening
+	// send flow that only reached rows on public.platform_allowlist.
+	// Retained so historical audit rows keep parsing; new sends log
+	// ActionBroadcastEmailed instead.
+	ActionAllowlistEmailed = "allowlist.emailed"
+	// ActionBroadcastEmailed covers the widened audience (allowlist ∪
+	// platform_users, deduped by lower(email)). Distinct from the
+	// legacy action so an operator can filter historical narrow sends
+	// separately from broadcast sends.
+	ActionBroadcastEmailed = "broadcast.emailed"
 	// Team-tier closed-beta grants (Team-tier M2, milestone #2).
 	// Superadmin flips team_beta_access on a specific platform_user
 	// so they can create Team-tier projects during the closed beta.
