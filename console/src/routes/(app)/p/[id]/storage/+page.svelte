@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, getContext } from 'svelte';
+	import { onMount, onDestroy, getContext } from 'svelte';
 	import { page } from '$app/stores';
 	import { api, type FileInfo } from '$lib/api.js';
 	import { formatBytes, formatRelativeTime, getFileIcon, inferContentType } from '$lib/utils.js';
@@ -43,10 +43,25 @@
 		if (toastTimer) clearTimeout(toastTimer);
 		toastTimer = setTimeout(() => { toast = null; toastTimer = null; }, ms);
 	}
+	// Clear the pending timer if the component unmounts while a
+	// toast is showing (e.g. user navigates away right after Copy
+	// Link). Svelte 5 is tolerant of $state writes on a torn-down
+	// component so the impact is negligible, but this is the right
+	// hygiene and matches how other pages handle interval/timeout
+	// state.
+	onDestroy(() => {
+		if (toastTimer) clearTimeout(toastTimer);
+	});
 
 	// Project slug from layout context
 	const projectCtx = getContext<{ id: string; project: import('$lib/api.js').Project | null }>('projectId');
-	let projectId = $derived($page.params.id);
+	// `$page.params.id` is typed `string | undefined` but this route
+	// is `/p/[id]/storage` — the SvelteKit matcher guarantees `id`
+	// is present, so a `!` non-null assertion is safe. Narrows once
+	// here so every downstream `api.generateSignedUrl(projectId, …)`
+	// etc. sees a `string`. Same class as #11 (repo-wide sweep), fixed
+	// locally so this file's new call doesn't add to the baseline.
+	let projectId = $derived($page.params.id!);
 	let projectSlug = $derived(projectCtx.project?.slug ?? projectId);
 
 	// Breadcrumb segments
