@@ -36,6 +36,25 @@ func isForeignKeyViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
+// NormalizeStorageKey composes a storage key to Unicode NFC.
+//
+// Load-bearing invariant across three call sites — Upload, Extract
+// (read path), and the offline backfill script. All three MUST use
+// the same function so the byte sequence stored in
+// storage_objects.key exactly matches what a subsequent lookup
+// produces. A hand-copied `norm.NFC.String(...)` in one place and
+// not another silently breaks the "same visual filename" case:
+// macOS Finder + Chrome multipart uploads often produce NFD
+// filenames (`a` + U+0308 for ä), while later requests / manually-
+// typed URLs / different clients typically send NFC (single
+// codepoint U+00E4). `WHERE key = $1` sees different bytes → 404.
+//
+// Exported for `cmd/backfill-storage` to reuse the same
+// normalization when reconciling S3 → tracking rows.
+func NormalizeStorageKey(key string) string {
+	return norm.NFC.String(key)
+}
+
 
 // recordDownload emits a GDPR personal-data access-log event for a successful
 // storage download. Fire-and-forget via the context recorder (nil-safe).
@@ -383,15 +402,11 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	if key == "" {
 		key = header.Filename
 	}
-	// Normalize to Unicode NFC so a filename like "Blätter.jpg"
-	// stored by one client as NFD (a + combining diaeresis, common on
-	// macOS) matches later requests that arrive as NFC (single
-	// codepoint ä), and vice versa. Without this, `WHERE key = $1`
-	// against storage_objects sees different byte sequences for the
-	// same visual filename and 404s. Symmetric with the same
-	// normalization in extractWildcardKey; the two sides MUST agree
-	// for lookups to work.
-	key = norm.NFC.String(key)
+	// Normalize to Unicode NFC via the shared helper. Same call
+	// point as extractWildcardKey (read path) and the offline
+	// backfill script — the three MUST agree or lookups 404. See
+	// the NormalizeStorageKey doc for the full story.
+	key = NormalizeStorageKey(key)
 	if err := ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
@@ -432,10 +447,24 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	// See the doc comment on uploaderForInsert for the full story.
 	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
+		// COALESCE guards the day-1-adjacent hazard the #427 review
+		// flagged: a console re-upload (uploader = NULL) over a
+		// key an end-user already owns must NOT clear the
+		// attribution. The RLS policy on storage_objects is
+		// `is_service_role() OR uploaded_by = current_end_user_id()`,
+		// so overwriting `uploaded_by = NULL` would strip the
+		// original end-user's SDK access to their own file. Also
+		// makes the retry-with-NULL branch below safe against a
+		// racing already-attributed row. Explicit end-user uploads
+		// (uploader != NULL) still win via `EXCLUDED.uploaded_by
+		// IS NOT NULL`.
 		q := fmt.Sprintf(
 			`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (key) DO UPDATE SET content_type = $2, size_bytes = $3, uploaded_by = $4`,
+			 ON CONFLICT (key) DO UPDATE
+			   SET content_type = EXCLUDED.content_type,
+			       size_bytes   = EXCLUDED.size_bytes,
+			       uploaded_by  = COALESCE(EXCLUDED.uploaded_by, storage_objects.uploaded_by)`,
 			escSchema,
 		)
 		uploader := uploaderForInsert(r)
@@ -888,14 +917,11 @@ func extractWildcardKey(r *http.Request) string {
 			key = decoded
 		}
 	}
-	// NFC-normalize so a browser sending `Bla%CC%88tter` (NFD:
-	// 'a' + combining diaeresis) matches a storage_objects row
-	// stored as `Blätter` (NFC: single codepoint ä). Load-bearing
-	// invariant: UploadFile also normalizes to NFC before the
-	// INSERT — if either side drifts to a different form the
-	// lookup silently 404s.
-	key = norm.NFC.String(key)
-	return key
+	// NFC-normalize via the shared helper. Symmetric with
+	// UploadFile's normalization before INSERT — if either side
+	// drifts to a different form the lookup silently 404s. See
+	// NormalizeStorageKey.
+	return NormalizeStorageKey(key)
 }
 
 // schemaForRequest resolves the tenant schema name from the authenticated

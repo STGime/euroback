@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -348,6 +349,32 @@ func (e *ErrObjectLocked) Error() string {
 }
 
 func (e *ErrObjectLocked) Unwrap() error { return e.Cause }
+
+// CopyObject creates a server-side copy of an object at a new key
+// within the same bucket. Preserves ContentType and other object
+// metadata (MetadataDirective defaults to COPY). Used by the
+// offline backfill to rename non-NFC keys → NFC without shuffling
+// bytes over the wire (S3 copy is server-internal). Callers are
+// responsible for the subsequent DeleteObject on the old key.
+//
+// NOTE: this bypasses any per-prefix retention policy applied to
+// the destination key by the retention resolver — the copy is a
+// pure S3 op and callers should only use it for administrative
+// reshuffling (backfill), not for tenant-facing operations.
+func (s *S3Client) CopyObject(ctx context.Context, bucketName, srcKey, dstKey string) error {
+	slog.Info("copying object", "bucket", bucketName, "src", srcKey, "dst", dstKey)
+	// S3 CopySource requires "bucket/key" URL-escaped.
+	copySource := url.PathEscape(bucketName) + "/" + url.PathEscape(srcKey)
+	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(dstKey),
+		CopySource: aws.String(copySource),
+	})
+	if err != nil {
+		return fmt.Errorf("copy object %s/%s → %s: %w", bucketName, srcKey, dstKey, err)
+	}
+	return nil
+}
 
 // DeleteObject removes an object from the bucket. Returns an
 // *ErrObjectLocked (which callers can detect via errors.As) if S3

@@ -39,7 +39,6 @@ import (
 
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/text/unicode/norm"
 )
 
 func main() {
@@ -169,19 +168,75 @@ func main() {
 			escSchema,
 		)
 
-		inserted, skipped, errCount := 0, 0, 0
+		// Pre-scan: which S3 keys are non-NFC and need to be
+		// renamed BEFORE we insert their tracking rows? Handled
+		// separately so the counts are honest (renamed vs
+		// plain-insert) and the rename failure mode is visible.
+		//
+		// Why the S3-side rename is load-bearing: the read path
+		// NFC-normalizes the URL key AND fetches S3 with that
+		// same NFC key. If S3 stored the object under an NFD
+		// name (macOS Chrome multipart uploads often do this),
+		// inserting an NFC tracking row makes assertObjectVisible
+		// pass but DownloadObject(bucket, NFCkey) misses S3 →
+		// still a 404 for the user. Only complete fix is to
+		// physically rename the S3 object to NFC so both sides
+		// speak the same bytes. Server-side copy + delete keeps
+		// bytes off the wire.
+		inserted, skipped, errCount, renamed, renameErr := 0, 0, 0, 0, 0
 		for _, obj := range allObjects {
-			// NFC-normalize keys we backfill so subsequent
-			// lookups (which also NFC-normalize) find them.
-			// If S3 stored an NFD key and we insert it NFD,
-			// the lookup NFC-form won't match. Compose here.
-			key := norm.NFC.String(obj.Key)
+			nfcKey := storage.NormalizeStorageKey(obj.Key)
+
+			if nfcKey != obj.Key {
+				// NFD (or otherwise non-canonical) S3 key. Rename
+				// to NFC before inserting the tracking row.
+				if dryRun {
+					fmt.Printf("    [dry] would RENAME s3 %q → %q\n", obj.Key, nfcKey)
+					renamed++
+				} else {
+					if err := s3Client.CopyObject(ctx, bucket, obj.Key, nfcKey); err != nil {
+						fmt.Printf("  error copying %q → %q: %v\n", obj.Key, nfcKey, err)
+						renameErr++
+						continue // skip insert — S3 still has only the old key
+					}
+					if err := s3Client.DeleteObject(ctx, bucket, obj.Key); err != nil {
+						// Delete failed after copy succeeded. Both
+						// objects exist now — the runtime read path
+						// will hit the NFC one (that's the goal), but
+						// storage cost is doubled until manual
+						// cleanup. Object Lock is one common cause;
+						// bucket policy misconfig is another. Log
+						// loudly, don't fail the whole run.
+						fmt.Printf("  WARN copy ok but delete failed for %q (both keys now in S3, needs manual cleanup): %v\n", obj.Key, err)
+						renameErr++
+					}
+					fmt.Printf("    renamed %q → %q\n", obj.Key, nfcKey)
+					renamed++
+				}
+			}
+
+			key := nfcKey
 			contentType := guessContentType(key)
 
 			if dryRun {
-				fmt.Printf("    [dry] would insert key=%q content_type=%s size=%d created_at=%s\n",
-					key, contentType, obj.Size, obj.LastModified.Format("2006-01-02T15:04:05Z"))
-				inserted++
+				// Distinguish "would insert new" vs "already
+				// tracked" for the DRY_RUN summary — reviewer
+				// flagged the pre-fix version over-counted.
+				var exists bool
+				existQ := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`, escSchema)
+				if err := pool.QueryRow(ctx, existQ, key).Scan(&exists); err != nil {
+					fmt.Printf("  [dry] existence check failed for %q: %v\n", key, err)
+					errCount++
+					continue
+				}
+				if exists {
+					fmt.Printf("    [dry] already tracked: %q\n", key)
+					skipped++
+				} else {
+					fmt.Printf("    [dry] would insert key=%q content_type=%s size=%d created_at=%s\n",
+						key, contentType, obj.Size, obj.LastModified.Format("2006-01-02T15:04:05Z"))
+					inserted++
+				}
 				continue
 			}
 
@@ -198,10 +253,11 @@ func main() {
 			}
 		}
 
-		fmt.Printf("  inserted=%d already-tracked=%d errors=%d\n", inserted, skipped, errCount)
+		fmt.Printf("  inserted=%d already-tracked=%d renamed=%d rename-errors=%d insert-errors=%d\n",
+			inserted, skipped, renamed, renameErr, errCount)
 		totalInserted += inserted
 		totalSkipped += skipped
-		totalErrors += errCount
+		totalErrors += errCount + renameErr
 	}
 
 	fmt.Printf("\nDone. inserted=%d already-tracked=%d errors=%d\n",
