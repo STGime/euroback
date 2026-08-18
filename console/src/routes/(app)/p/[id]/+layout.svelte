@@ -6,7 +6,13 @@
 
 	let { children } = $props();
 
-	let projectId = $derived($page.params.id);
+	// `!` non-null assertion: route matcher on /p/[id]/* guarantees
+	// `id` is present. Same pattern the storage page uses (#431).
+	// Narrows once here so every downstream consumer
+	// (api.getProject, navigator.clipboard.writeText, etc.) sees a
+	// `string` — clears the #11 baseline errors on this file rather
+	// than leaving them un-narrowed like on peer pages.
+	let projectId = $derived($page.params.id!);
 	let project: Project | null = $state(null);
 	let loading = $state(true);
 	let error: string | null = $state(null);
