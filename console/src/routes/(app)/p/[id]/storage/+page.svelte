@@ -31,6 +31,19 @@
 	// Actions dropdown
 	let openDropdown = $state<string | null>(null);
 
+	// Toast: a small transient confirmation for one-click actions
+	// (Copy Link mainly). The pre-fix "Copy URL" was silent — user
+	// clicked, saw nothing, and often didn't realize the clipboard
+	// was populated. A 3-second banner gives explicit feedback
+	// without dragging in a full toast library.
+	let toast = $state<string | null>(null);
+	let toastTimer: ReturnType<typeof setTimeout> | null = null;
+	function showToast(msg: string, ms: number = 3000) {
+		toast = msg;
+		if (toastTimer) clearTimeout(toastTimer);
+		toastTimer = setTimeout(() => { toast = null; toastTimer = null; }, ms);
+	}
+
 	// Project slug from layout context
 	const projectCtx = getContext<{ id: string; project: import('$lib/api.js').Project | null }>('projectId');
 	let projectId = $derived($page.params.id);
@@ -218,16 +231,31 @@
 		}
 	}
 
-	async function handleCopyUrl(file: FileInfo) {
-		const slug = projectCtx.project?.slug ?? projectSlug;
-		const encoded = file.key.split('/').map(encodeURIComponent).join('/');
-		const url = `https://${slug}.eurobase.app/v1/storage/${encoded}`;
-		try {
-			await navigator.clipboard.writeText(url);
-		} catch {
-			prompt('Copy this URL:', url);
-		}
+	// "Copy Link" — one-click "give me a shareable URL right now".
+	// Pre-fix this pasted the internal /v1/storage/... path which
+	// requires `apikey` on every request and therefore fails in a
+	// browser tab, an <img src>, or when sent to a colleague — 100%
+	// of clicks produced a broken paste. Now it mints a 1h signed
+	// URL (same call the Generate Signed URL section below uses,
+	// just with a fixed default) and puts THAT on the clipboard.
+	// Matches Dropbox / GDrive / Notion pattern: Copy = a link I
+	// can share now. The section below stays for custom expiry.
+	async function handleCopyLink(file: FileInfo) {
 		openDropdown = null;
+		try {
+			const res = await api.generateSignedUrl(projectId, file.key, 'download', 3600);
+			try {
+				await navigator.clipboard.writeText(res.url);
+				showToast('Link copied — expires in 1 hour');
+			} catch {
+				// clipboard blocked (Safari without user gesture,
+				// http:// contexts). Fall back to a prompt so the
+				// user can select and copy manually.
+				prompt('Copy this signed URL (expires in 1 hour):', res.url);
+			}
+		} catch (err) {
+			showToast(err instanceof Error ? `Copy Link failed: ${err.message}` : 'Copy Link failed');
+		}
 	}
 
 	async function handleGenerateSignedUrl(file: FileInfo, expiresIn: number) {
@@ -581,14 +609,14 @@
 														Download
 													</button>
 													<button
-														onclick={(e) => { e.stopPropagation(); handleCopyUrl(file); }}
+														onclick={(e) => { e.stopPropagation(); handleCopyLink(file); }}
 														class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
-														title="Permanent URL — requires authentication via API key or session"
+														title="Copies a signed URL that expires in 1 hour"
 													>
 														<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 															<path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
 														</svg>
-														Copy URL
+														Copy Link
 													</button>
 													<button
 														onclick={(e) => { e.stopPropagation(); selectFile(file); openDropdown = null; }}
@@ -744,14 +772,14 @@
 							Download
 						</button>
 						<button
-							onclick={() => handleCopyUrl(selectedFile!)}
+							onclick={() => handleCopyLink(selectedFile!)}
 							class="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors cursor-pointer"
-							title="Permanent URL — requires authentication via API key or session"
+							title="Copies a signed URL that expires in 1 hour"
 						>
 							<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
 							</svg>
-							Copy URL
+							Copy Link
 						</button>
 						<button
 							onclick={() => handleDelete(selectedFile!)}
@@ -946,5 +974,22 @@
 				>Delete{showDeleteFolderConfirm.fileCount > 0 ? ` (${showDeleteFolderConfirm.fileCount} files)` : ''}</button>
 			</div>
 		</div>
+	</div>
+{/if}
+
+<!-- Ephemeral toast for one-click actions (Copy Link).
+     Fixed bottom-right, aria-live so screen readers announce.
+     Auto-dismisses after 3s via the showToast helper; no
+     interaction needed. -->
+{#if toast}
+	<div
+		role="status"
+		aria-live="polite"
+		class="fixed bottom-6 right-6 z-50 rounded-lg bg-gray-900 text-white shadow-lg px-4 py-3 text-sm flex items-center gap-2 max-w-sm"
+	>
+		<svg class="h-4 w-4 shrink-0 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+			<path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+		</svg>
+		<span>{toast}</span>
 	</div>
 {/if}
