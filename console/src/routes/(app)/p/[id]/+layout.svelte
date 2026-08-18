@@ -6,7 +6,13 @@
 
 	let { children } = $props();
 
-	let projectId = $derived($page.params.id);
+	// `!` non-null assertion: route matcher on /p/[id]/* guarantees
+	// `id` is present. Same pattern the storage page uses (#431).
+	// Narrows once here so every downstream consumer
+	// (api.getProject, navigator.clipboard.writeText, etc.) sees a
+	// `string` — clears the #11 baseline errors on this file rather
+	// than leaving them un-narrowed like on peer pages.
+	let projectId = $derived($page.params.id!);
 	let project: Project | null = $state(null);
 	let loading = $state(true);
 	let error: string | null = $state(null);
@@ -15,13 +21,23 @@
 	// isn't `active` so a user on ANY tab (not just Database →
 	// Connection) sees ambient status.
 	//
-	// Free/Pro projects: the backend gates /connection/state via
-	// CheckDedicatedDB → HTTP 402 { code: "dedicated_db_required" }.
-	// APIError catch below explicitly detects that and silences the
-	// banner (dbState=null, poll stopped). Other errors — transient
-	// network blips, 500s — keep the last known state and keep
-	// polling; without that, one blip would nuke the ambient
-	// awareness this component exists to provide.
+	// Free/Pro projects: **skip the poll entirely** rather than
+	// hitting the endpoint and swallowing the 402. The prior shape
+	// fired a request, caught the `dedicated_db_required` 402, and
+	// stopped — correct behavior but the request still landed in
+	// every project's audit log, looking like a real error to
+	// customers who happened to look. A Bertram support email
+	// (2026-08-18) mistook these 402s for a real bug affecting his
+	// app. The 402-catch below stays as a belt-and-suspenders
+	// (project.plan reads as "" during the load window, or a plan
+	// column gets renamed, etc.), but the primary control is now
+	// "don't ask a question whose answer is always the same."
+	//
+	// Team-tier (dedicated_db=true per plan_limits) is currently
+	// only 'team' and 'legal_team'; the check tracks those two
+	// values explicitly rather than pulling the flag from
+	// plan_limits so a fresh page load doesn't need to await a
+	// second network round-trip before it can start polling.
 	//
 	// state === '' is the "row not yet inserted" case: CreateProject
 	// commits + enqueues the worker job BEFORE the worker's
@@ -53,12 +69,31 @@
 		return s.state === '' || s.state === 'provisioning' || s.state === 'restoring';
 	}
 
+	// Only Team-tier and above have a dedicated DB → only they need
+	// /connection/state polled. Returns false while `project` is
+	// still loading (nil) so we don't fire a speculative request; the
+	// dedicated $effect below re-triggers refreshDbState the moment
+	// project resolves and passes the check.
+	function planUsesConnectionState(p: Project | null): boolean {
+		if (!p) return false;
+		return p.plan === 'team' || p.plan === 'legal_team';
+	}
+
 	function armDbStatePoll() {
 		if (!dbStatePollTimer) dbStatePollTimer = setInterval(refreshDbState, 5000);
 	}
 
 	async function refreshDbState() {
 		if (!projectId) return;
+		// Primary guard: don't call the endpoint for tiers that
+		// don't have a dedicated DB. If project is still loading,
+		// bail — the follow-up $effect will re-fire once project
+		// resolves.
+		if (!planUsesConnectionState(project)) {
+			dbState = null;
+			stopDbStatePoll();
+			return;
+		}
 		try {
 			dbState = await api.getConnectionState(projectId);
 			// Track how long the empty-row window has been open so
@@ -187,11 +222,21 @@
 		emptyStateTicks = 0;
 		stopDbStatePoll();
 		loadProject();
-		// Fetch dedicated-DB state alongside the project. If it comes
-		// back provisioning/restoring/empty, refreshDbState arms the
-		// poller itself so subpages navigating in also inherit the
-		// ticker.
-		refreshDbState();
+		// refreshDbState is fired by the plan-watch $effect below
+		// once `project` resolves, so we don't fire a speculative
+		// pre-load call here — that was the source of the
+		// per-Free-project 402 in every user's audit log.
+	});
+
+	// Fire the dedicated-DB refresh only after `project` loads and
+	// only for tiers that have one. Re-runs on plan change (rare —
+	// upgrade flow) so an upgrade to Team starts the poll without
+	// a page reload.
+	$effect(() => {
+		void project?.plan; // reactive dep
+		if (planUsesConnectionState(project)) {
+			refreshDbState();
+		}
 	});
 
 	async function loadProject() {
