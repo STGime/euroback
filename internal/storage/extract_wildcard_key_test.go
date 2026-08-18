@@ -122,6 +122,55 @@ func TestExtractWildcardKey_LiteralPercentMustNotDoubleDecode(t *testing.T) {
 	}
 }
 
+// NFC normalization regression. The visible motivator: a file
+// uploaded from macOS Finder / Chrome-on-Mac sometimes carries an NFD
+// (decomposed) filename in the multipart header. If the download URL
+// then arrives in a different form (NFC single-codepoint ä from a
+// different client, or a manually-typed URL), `WHERE key = $1` sees
+// different byte sequences for the same visual filename and 404s.
+//
+// The extractor NFC-normalizes AFTER PathUnescape. UploadFile
+// symmetrically NFC-normalizes before the storage_objects INSERT.
+// The two sides MUST agree — this test pins the extract half.
+//
+// Concrete case: `Bla%CC%88tter.jpg` = "Bl" + "a" + combining
+// diaeresis U+0308 + "tter.jpg" (NFD, 3 UTF-8 bytes for the umlaut
+// half). NFC compose → "Blätter.jpg" (single codepoint U+00E4, 2
+// UTF-8 bytes). Rows stored by any client are NFC-normalized on
+// insert, so extract must return the NFC form to match.
+func TestExtractWildcardKey_NormalizesNFDtoNFC(t *testing.T) {
+	cases := []struct {
+		name       string
+		encodedURL string
+		wantKey    string // NFC form
+	}{
+		{
+			name:       "NFD ä (a + U+0308) → NFC ä",
+			encodedURL: "/storage/Bla%CC%88tter.jpg",
+			wantKey:    "Blätter.jpg", // "Blätter.jpg" precomposed
+		},
+		{
+			name:       "NFC ä survives (idempotent normalize)",
+			encodedURL: "/storage/Bl%C3%A4tter.jpg",
+			wantKey:    "Blätter.jpg",
+		},
+		{
+			name:       "NFD ö on Björn (a + U+0308-style but for o + U+0308)",
+			encodedURL: "/storage/Bjo%CC%88rn.png",
+			wantKey:    "Björn.png",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runWildcardRoute(t, tc.encodedURL)
+			if got != tc.wantKey {
+				t.Errorf("NFC normalization broken:\n  extracted: %q (bytes %x)\n  wanted:    %q (bytes %x)",
+					got, []byte(got), tc.wantKey, []byte(tc.wantKey))
+			}
+		})
+	}
+}
+
 // Filenames where chi returns the wildcard already-decoded (empty
 // `RawPath`). Kept only as a positive contract on the extractor's
 // output shape — these subtests would stay green even without the

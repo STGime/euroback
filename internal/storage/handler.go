@@ -19,8 +19,41 @@ import (
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/text/unicode/norm"
 )
+
+// isForeignKeyViolation reports whether err (or a wrapped error) is a
+// Postgres 23503 foreign_key_violation. Used by the upload path to
+// distinguish "FK refused this uploader" from "connection issue" so
+// only the former triggers the retry-with-NULL branch.
+func isForeignKeyViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+}
+
+// NormalizeStorageKey composes a storage key to Unicode NFC.
+//
+// Load-bearing invariant across three call sites — Upload, Extract
+// (read path), and the offline backfill script. All three MUST use
+// the same function so the byte sequence stored in
+// storage_objects.key exactly matches what a subsequent lookup
+// produces. A hand-copied `norm.NFC.String(...)` in one place and
+// not another silently breaks the "same visual filename" case:
+// macOS Finder + Chrome multipart uploads often produce NFD
+// filenames (`a` + U+0308 for ä), while later requests / manually-
+// typed URLs / different clients typically send NFC (single
+// codepoint U+00E4). `WHERE key = $1` sees different bytes → 404.
+//
+// Exported for `cmd/backfill-storage` to reuse the same
+// normalization when reconciling S3 → tracking rows.
+func NormalizeStorageKey(key string) string {
+	return norm.NFC.String(key)
+}
 
 
 // recordDownload emits a GDPR personal-data access-log event for a successful
@@ -216,6 +249,29 @@ func isAuthenticated(r *http.Request) (string, bool) {
 	return "", false
 }
 
+// uploaderForInsert returns the value to store in
+// storage_objects.uploaded_by for the current request.
+//
+// The column FKs to the TENANT users table (migration 000063). SDK
+// uploads carry an end-user JWT whose UserID is a real row in that
+// table → we store it. Console uploads carry platform claims whose
+// Subject is a platform_users.id — a UUID that does NOT exist in the
+// tenant users table, so writing it FK-violates and the tracking row
+// is lost (which then 404s every subsequent download/delete because
+// assertObjectVisible finds no row).
+//
+// The column is nullable, so returning nil on the platform path stores
+// NULL and passes the FK check. This is the only supported "no
+// end-user" signal — we don't want to synthesize a placeholder UUID
+// (would collide with a real end-user with the same ID; hides the
+// distinction in downstream queries).
+func uploaderForInsert(r *http.Request) any {
+	if eu, ok := auth.EndUserClaimsFromContext(r.Context()); ok && eu != nil && eu.UserID != "" {
+		return eu.UserID
+	}
+	return nil
+}
+
 // ValidateStorageKey rejects object keys that would be unsafe to round-
 // trip through any future code path that joins them into a filesystem
 // path or local URL. Closes #61. Today's S3 client treats keys as opaque
@@ -346,6 +402,11 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	if key == "" {
 		key = header.Filename
 	}
+	// Normalize to Unicode NFC via the shared helper. Same call
+	// point as extractWildcardKey (read path) and the offline
+	// backfill script — the three MUST agree or lookups 404. See
+	// the NormalizeStorageKey doc for the full story.
+	key = NormalizeStorageKey(key)
 	if err := ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
@@ -374,22 +435,67 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record the upload in storage_objects so usage tracking works.
+	// Record the upload in storage_objects. Load-bearing: every
+	// downstream operation (download, delete, preview, per-user
+	// ownership check) reads THIS table, not S3, so a missing row
+	// silently bricks the file — it stays in the S3 list but every
+	// action 404s. That was the day-1 bug on the console path: the
+	// INSERT FK-violated on platform uploads because uploaded_by
+	// tried to store a platform_users.id in a column that FKs
+	// tenant.users. uploaderForInsert() returns nil (→ SQL NULL)
+	// for the platform path; the column is nullable, FK check passes.
+	// See the doc comment on uploaderForInsert for the full story.
 	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
+		// COALESCE guards the day-1-adjacent hazard the #427 review
+		// flagged: a console re-upload (uploader = NULL) over a
+		// key an end-user already owns must NOT clear the
+		// attribution. The RLS policy on storage_objects is
+		// `is_service_role() OR uploaded_by = current_end_user_id()`,
+		// so overwriting `uploaded_by = NULL` would strip the
+		// original end-user's SDK access to their own file. Also
+		// makes the retry-with-NULL branch below safe against a
+		// racing already-attributed row. Explicit end-user uploads
+		// (uploader != NULL) still win via `EXCLUDED.uploaded_by
+		// IS NOT NULL`.
 		q := fmt.Sprintf(
 			`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (key) DO UPDATE SET content_type = $2, size_bytes = $3, uploaded_by = $4`,
+			 ON CONFLICT (key) DO UPDATE
+			   SET content_type = EXCLUDED.content_type,
+			       size_bytes   = EXCLUDED.size_bytes,
+			       uploaded_by  = COALESCE(EXCLUDED.uploaded_by, storage_objects.uploaded_by)`,
 			escSchema,
 		)
-		if err := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, q, key, contentType, size, userID)
+		uploader := uploaderForInsert(r)
+		insertErr := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, q, key, contentType, size, uploader)
 			return err
-		}); err != nil {
-			// Non-fatal: the file is already in S3, just log the tracking failure.
+		})
+		// Belt: if we tried to attribute to a specific end-user
+		// but the FK check refused (23503 foreign_key_violation),
+		// retry once with NULL. Covers a race where the end-user
+		// was deleted between JWT issue and upload — the file
+		// still needs a tracking row so downstream operations work.
+		if insertErr != nil && isForeignKeyViolation(insertErr) && uploader != nil {
+			slog.Warn("storage upload: uploaded_by FK failed, retrying with NULL",
+				"schema", schema, "key", key, "attempted_user", uploader)
+			insertErr = edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, q, key, contentType, size, nil)
+				return err
+			})
+		}
+		if insertErr != nil {
+			// Fatal (was "non-fatal" pre-fix, which is exactly how
+			// the day-1 bug hid for months). A missing tracking row
+			// bricks every subsequent op; better to fail fast so the
+			// caller retries than to ship a broken-state 200. The
+			// orphan S3 object is a small cost (backfill script
+			// cleans up) compared to a silently-broken file.
 			slog.Error("storage: failed to record upload in storage_objects",
-				"error", err, "schema", schema, "key", key)
+				"error", insertErr, "schema", schema, "key", key)
+			http.Error(w, `{"error":"failed to record upload"}`, http.StatusInternalServerError)
+			return
 		}
 	}
 
@@ -811,7 +917,11 @@ func extractWildcardKey(r *http.Request) string {
 			key = decoded
 		}
 	}
-	return key
+	// NFC-normalize via the shared helper. Symmetric with
+	// UploadFile's normalization before INSERT — if either side
+	// drifts to a different form the lookup silently 404s. See
+	// NormalizeStorageKey.
+	return NormalizeStorageKey(key)
 }
 
 // schemaForRequest resolves the tenant schema name from the authenticated
