@@ -226,7 +226,7 @@ type RateLimits struct {
 // Most numbers mirror Supabase's published defaults. Two deliberate
 // divergences:
 //
-//   * SignupSigninPer5MinPerIP = 8 (not 30): held at the interim
+//   - SignupSigninPer5MinPerIP = 8 (not 30): held at the interim
 //     ~96/h floor while EmailsPerHour enforcement is parked behind
 //     the BYO-SMTP feature in #235. Bumps to 30 when that lands.
 //
@@ -375,6 +375,12 @@ func (c *AuthConfig) Validate() error {
 	}
 
 	for _, raw := range c.CORSOrigins {
+		// Loopback port wildcard ("http://localhost:*" et al.) is a valid
+		// entry but doesn't parse as a URL (":*" is not a valid port), so
+		// accept it before url.Parse. See parseLoopbackPortWildcard.
+		if _, ok := parseLoopbackPortWildcard(raw); ok {
+			continue
+		}
 		// CORS origin format: scheme://host[:port], no path. Browsers
 		// send the Origin header in this exact shape; mismatches don't
 		// match.
@@ -576,6 +582,11 @@ func (c *AuthConfig) GetOAuthProvider(name string) (OAuthProviderConfig, bool) {
 // is exact on scheme+host+port — the spec requires browsers to send
 // the Origin in canonical form, so substring matches and trailing
 // slashes are not accepted.
+//
+// The single exception is a loopback port wildcard entry
+// ("http://localhost:*" and the 127.0.0.1 / [::1] spellings), which
+// matches its scheme+host on ANY port. See parseLoopbackPortWildcard
+// for why that widening is loopback-only and not remote-exploitable.
 func (c *AuthConfig) IsCORSOriginAllowed(origin string) bool {
 	if origin == "" {
 		return false
@@ -584,11 +595,83 @@ func (c *AuthConfig) IsCORSOriginAllowed(origin string) bool {
 		// Trim a trailing slash someone may have stored — purely a
 		// quality-of-life fix, the Validate() above also strips it on
 		// write. Browsers themselves never send a trailing slash.
-		if strings.TrimRight(allowed, "/") == origin {
+		allowed = strings.TrimRight(strings.TrimSpace(allowed), "/")
+		if allowed == origin {
+			return true
+		}
+		if prefix, ok := parseLoopbackPortWildcard(allowed); ok && originMatchesLoopbackPrefix(origin, prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+// loopbackHosts are the three spellings of the loopback interface that
+// browsers treat as distinct origins (each must be allowlisted
+// separately). A cors_origins entry of "<scheme>://<loopback>:*" matches
+// that host on any port.
+var loopbackHosts = map[string]bool{
+	"localhost": true,
+	"127.0.0.1": true,
+	"[::1]":     true,
+}
+
+// parseLoopbackPortWildcard reports whether raw is a loopback port
+// wildcard ("http://localhost:*", "https://127.0.0.1:*", "http://[::1]:*",
+// …) and, when so, returns its "scheme://host" prefix with the ":*"
+// stripped.
+//
+// The wildcard is restricted to loopback hosts on purpose. A remote web
+// page can never carry a loopback Origin: the browser sets the Origin
+// header from where the page was actually served, and DNS rebinding
+// changes the request's target Host, not its Origin. So "any port on
+// localhost" only ever widens trust to software already running on the
+// developer's own machine — the standard carve-out local dev servers
+// need (e.g. a tool that binds a fresh random port each run) without
+// opening a remote-exploitable hole. Anything non-loopback must use an
+// exact origin.
+func parseLoopbackPortWildcard(raw string) (prefix string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasSuffix(raw, ":*") {
+		return "", false
+	}
+	base := raw[:len(raw)-len(":*")]
+	i := strings.Index(base, "://")
+	if i <= 0 {
+		return "", false
+	}
+	scheme, host := base[:i], base[i+len("://"):]
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	if !loopbackHosts[host] {
+		return "", false
+	}
+	return scheme + "://" + host, true
+}
+
+// originMatchesLoopbackPrefix reports whether a browser Origin matches a
+// "scheme://loopbackhost" prefix on any (or no) port. The tail after the
+// prefix must be empty or ":"+digits, so a look-alike host such as
+// "http://localhost.evil.com" or a bogus "http://localhost:1.evil.com"
+// can never match.
+func originMatchesLoopbackPrefix(origin, prefix string) bool {
+	if origin == prefix {
+		return true // default-port origin, no explicit :port
+	}
+	if !strings.HasPrefix(origin, prefix+":") {
+		return false
+	}
+	port := origin[len(prefix)+1:]
+	if port == "" {
+		return false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // IsRedirectURLAllowed checks whether the given URL is in the allowed redirect list.
