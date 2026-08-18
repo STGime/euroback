@@ -232,13 +232,27 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			}
 		}
 		rows.Close()
+		// validSet is keyed by the DB-normalized form (`lower(trim)`),
+		// so we look up recipients under the same normalization —
+		// otherwise `Foo@X.com` in an API caller's request array
+		// misses the `foo@x.com` DB row and gets silently dropped
+		// even though it's a valid recipient. Also dedups a
+		// duplicated request payload (belt: keeps the "each
+		// exactly once" guarantee even if the caller's list
+		// contained a case-variant collision).
 		final := recipients[:0]
+		seenNorm := make(map[string]struct{}, len(recipients))
 		var allowlistOnly, usersOnly, both int
 		for _, e := range recipients {
-			s, ok := validSet[e]
+			norm := strings.ToLower(strings.TrimSpace(e))
+			s, ok := validSet[norm]
 			if !ok {
 				continue
 			}
+			if _, dup := seenNorm[norm]; dup {
+				continue
+			}
+			seenNorm[norm] = struct{}{}
 			final = append(final, e)
 			switch {
 			case s.onAllowlist && s.hasAccount:

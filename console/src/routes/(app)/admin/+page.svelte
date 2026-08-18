@@ -451,8 +451,9 @@
 		<h2 class="text-lg font-semibold text-gray-900">Signup Allowlist</h2>
 		<div class="flex gap-2 items-end">
 			<div class="flex-1">
-				<label class="text-xs text-gray-500 block mb-1">Email</label>
+				<label for="allowlist-new-email" class="text-xs text-gray-500 block mb-1">Email</label>
 				<input
+					id="allowlist-new-email"
 					type="email"
 					bind:value={newEmail}
 					placeholder="user@example.com"
@@ -460,8 +461,9 @@
 				/>
 			</div>
 			<div class="flex-1">
-				<label class="text-xs text-gray-500 block mb-1">Note (optional)</label>
+				<label for="allowlist-new-note" class="text-xs text-gray-500 block mb-1">Note (optional)</label>
 				<input
+					id="allowlist-new-note"
 					type="text"
 					bind:value={newNote}
 					placeholder="beta tester, investor, …"
@@ -873,8 +875,9 @@
 				</div>
 
 				<div>
-					<label class="block text-xs text-gray-500 mb-1">Subject</label>
+					<label for="compose-subject" class="block text-xs text-gray-500 mb-1">Subject</label>
 					<input
+						id="compose-subject"
 						type="text"
 						bind:value={composeSubject}
 						placeholder="You're invited to Eurobase"
@@ -882,8 +885,9 @@
 					/>
 				</div>
 				<div>
-					<label class="block text-xs text-gray-500 mb-1">Body (HTML)</label>
+					<label for="compose-body" class="block text-xs text-gray-500 mb-1">Body (HTML)</label>
 					<textarea
+						id="compose-body"
 						bind:value={composeBody}
 						rows="12"
 						placeholder="<p>Hi,</p><p>…</p>"

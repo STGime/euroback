@@ -49,6 +49,19 @@ type BroadcastRecipient struct {
 // deliberate action requiring a code change.
 func AdminListBroadcastAudience(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Within-source dedup MUST happen inside each subquery
+		// BEFORE the join. platform_allowlist.email is a
+		// case-sensitive TEXT PRIMARY KEY (migration 000034), so a
+		// superadmin can insert `Foo@X.com` AND `foo@x.com` as two
+		// distinct rows — a naive FULL OUTER JOIN would produce two
+		// output rows for the same normalized address, breaking the
+		// "each exactly once" guarantee at the audience level and
+		// at the send level. `SELECT DISTINCT lower(trim(email))`
+		// on the allowlist side collapses those. Users side uses
+		// GROUP BY (rather than DISTINCT) because we also need a
+		// deterministic created_at from potentially multiple rows —
+		// MAX(created_at) picks the latest so the audience is sorted
+		// by the user's most-recent presence.
 		const q = `
 			SELECT
 			    COALESCE(u_email, a_email)     AS email,
@@ -56,11 +69,13 @@ func AdminListBroadcastAudience(pool *pgxpool.Pool) http.HandlerFunc {
 			    u_email IS NOT NULL            AS has_account,
 			    u_signed_up_at                 AS signed_up_at
 			FROM (
-			    SELECT lower(trim(email)) AS a_email FROM public.platform_allowlist
+			    SELECT DISTINCT lower(trim(email)) AS a_email
+			      FROM public.platform_allowlist
 			) a
 			FULL OUTER JOIN (
-			    SELECT lower(trim(email)) AS u_email, created_at AS u_signed_up_at
+			    SELECT lower(trim(email)) AS u_email, max(created_at) AS u_signed_up_at
 			      FROM public.platform_users
+			     GROUP BY lower(trim(email))
 			) u ON a.a_email = u.u_email
 			WHERE COALESCE(u_email, a_email) IS NOT NULL
 			ORDER BY u_signed_up_at DESC NULLS LAST, COALESCE(u_email, a_email)

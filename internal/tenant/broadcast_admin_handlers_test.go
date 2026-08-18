@@ -196,6 +196,121 @@ func TestAdminSendAllowlistEmail_AcceptsWidenedAudience(t *testing.T) {
 	}
 }
 
+// TestAdminListBroadcastAudience_DedupesWithinAllowlist is the
+// gap the #433 review caught: platform_allowlist.email is a
+// case-sensitive TEXT PRIMARY KEY, so a superadmin can insert
+// `Foo@X.com` AND `foo@x.com` as two rows. Pre-fix the FULL OUTER
+// JOIN would produce two output rows for the same normalized
+// address → the send handler would double-BCC the address → the
+// "each exactly once" preview would lie.
+//
+// The fix is `SELECT DISTINCT lower(trim(email))` inside the
+// allowlist subquery (and GROUP BY on the users side for
+// symmetry). This test would fail on the pre-fix SQL.
+func TestAdminListBroadcastAudience_DedupesWithinAllowlist(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	// Clean + seed two case-variant allowlist rows for the same
+	// visual address. Bypass the shared fixture so we know exactly
+	// what's in the audience for the assertion.
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_allowlist WHERE email LIKE '%@test.eurobase.local'`)
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email LIKE '%@test.eurobase.local'`)
+	defer func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_allowlist WHERE email LIKE '%@test.eurobase.local'`)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email LIKE '%@test.eurobase.local'`)
+	}()
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO platform_allowlist (email, note) VALUES
+		    ('Dup@test.eurobase.local',   'first entry, mixed case'),
+		    ('dup@test.eurobase.local',   'second entry, lower case'),
+		    ('  dup@test.eurobase.local  ', 'third entry, padded (edge)')
+		ON CONFLICT (email) DO NOTHING
+	`)
+	if err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/platform/admin/broadcast/audience", nil)
+	AdminListBroadcastAudience(pool).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	var body struct {
+		Recipients []BroadcastRecipient `json:"recipients"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Count fixture rows in the audience — MUST be exactly 1
+	// (three case-variant allowlist entries collapse to one row).
+	count := 0
+	for _, r := range body.Recipients {
+		if strings.HasSuffix(r.Email, "@test.eurobase.local") {
+			count++
+			if r.Email != "dup@test.eurobase.local" {
+				t.Errorf("audience email not normalized: got %q, want %q", r.Email, "dup@test.eurobase.local")
+			}
+			if !r.OnAllowlist {
+				t.Errorf("audience row missing on_allowlist=true: %+v", r)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("dedup broken: expected 1 audience row for the three case-variant allowlist entries, got %d", count)
+	}
+}
+
+// TestAdminSendAllowlistEmail_DedupsCaseVariantRequest confirms the
+// send-side belt: a caller passing `Foo@X.com` twice (or with a
+// case-variant of a known DB email) is deduped BEFORE SendBulkBCC.
+// Otherwise the same recipient could receive multiple copies of
+// the same broadcast — the exact "each exactly once" ask.
+func TestAdminSendAllowlistEmail_DedupsCaseVariantRequest(t *testing.T) {
+	pool := setupTestDB(t)
+	cleanup := setupBroadcastFixture(t, pool)
+	defer cleanup()
+
+	mailer := &stubBulkEmailer{}
+
+	// Caller sends the same signed-up user THREE ways: lowercased,
+	// mixed-case, and with trailing whitespace. Must collapse to
+	// ONE forwarded recipient.
+	body := `{
+		"emails": [
+			"signup-only@test.eurobase.local",
+			"Signup-Only@test.eurobase.local",
+			"  signup-only@test.eurobase.local  "
+		],
+		"subject": "test",
+		"body_html": "<p>hi</p>"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/platform/admin/allowlist/email", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	// Count how many times signup-only appears in the forwarded set.
+	// Any form of the normalized `signup-only@…` counts.
+	count := 0
+	for _, e := range mailer.seen {
+		if strings.EqualFold(strings.TrimSpace(e), "signup-only@test.eurobase.local") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("caller passed 3 variants of the same address; expected 1 forwarded, got %d (seen: %v)", count, mailer.seen)
+	}
+}
+
 // TestAdminSendAllowlistEmail_RejectsIfNoValidRecipients confirms
 // the endpoint isn't a generic mail relay — every address filtered
 // out → 400, no send attempt. Same fence as pre-widening, just with
