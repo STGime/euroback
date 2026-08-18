@@ -1304,11 +1304,12 @@
 					<div>
 						<label for="cors-origins" class="block text-sm font-medium text-gray-700">Allowed CORS origins</label>
 						<p class="text-xs text-gray-400 mt-0.5">Browser origins permitted to call this project's API. One per line, in the form <code class="bg-gray-100 border border-gray-200 rounded px-1">scheme://host[:port]</code> with no path or trailing slash (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">http://localhost:3000</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">https://app.example.com</code>). Eurobase platform origins (<code class="bg-gray-100 border border-gray-200 rounded px-1">*.eurobase.app</code>) are always allowed — this list is additive for your own apps. Leave empty if you only call the API from a server.</p>
+						<p class="text-xs text-gray-400 mt-1">💡 <strong>Local dev on a shifting port?</strong> Add <code class="bg-gray-100 border border-gray-200 rounded px-1">http://localhost:*</code> to match any port. Also works for <code class="bg-gray-100 border border-gray-200 rounded px-1">http://127.0.0.1:*</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">http://[::1]:*</code> — each spelling is a distinct browser origin, so add whichever your tool uses. Wildcards are loopback-only; a non-loopback host with <code class="bg-gray-100 border border-gray-200 rounded px-1">:*</code> is rejected.</p>
 						<textarea
 							id="cors-origins"
 							bind:value={corsOrigins}
 							rows="3"
-							placeholder="http://localhost:3000&#10;https://app.example.com"
+							placeholder="http://localhost:*&#10;https://app.example.com"
 							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 						></textarea>
 					</div>
