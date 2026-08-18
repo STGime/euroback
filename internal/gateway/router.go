@@ -958,6 +958,19 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// Reads → viewer; uploads/deletes → developer (closes #50).
 			// We bypass storageHandler.Routes() here so each method gets
 			// its own gate; the SDK mount keeps using Routes() unchanged.
+			//
+			// The QueryEngine + tenantPool BOTH use `developerPool` (not
+			// gateway `pool`), symmetric with the /data route below.
+			// PlatformStorageContext sets `WithDeveloperRole` which
+			// triggers `SET LOCAL ROLE eurobase_migrator` on every tx;
+			// the gateway role has no membership in migrator so that
+			// statement fails 42501, which surfaces as
+			// `assertObjectVisible → 404 "not found"` on every console
+			// download/delete. Only the developer role (member of
+			// migrator with INHERIT — per CLAUDE.md) can execute the
+			// role change. Kept the retention + hold resolvers on `pool`
+			// because they only read `public.*` metadata which any role
+			// can see.
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
 					r.Use(tenant.PlatformStorageContext(pool))
@@ -965,7 +978,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					// the dedicated instance for Team-tier. The inner
 					// QueryEngine gets the same resolver so ownership
 					// checks (assertObjectVisible) also route.
-					storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(poolResolver)).
+					storageHandler := storage.NewStorageHandler(s3Client, developerPool, query.NewQueryEngine(developerPool).WithPoolResolver(poolResolver)).
 						WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
 						WithHoldChecker(compliance.NewHoldService(pool)).
 						WithPoolResolver(storage.PoolResolver(enduserPoolResolver))
