@@ -343,7 +343,8 @@ func TestAdminListBroadcastAudience_ExcludesReservedTLDs(t *testing.T) {
 		    ('probe-a@example.invalid', 'RFC 2606'),
 		    ('probe-b@somewhere.test',  'RFC 2606'),
 		    ('probe-c@thing.example',   'RFC 2606'),
-		    ('probe-d@localhost',       'RFC 6762')
+		    ('probe-d@localhost',       'RFC 6762 (bare)'),
+		    ('probe-e@app.localhost',   'RFC 6762 (subdomain — #434 review)')
 		ON CONFLICT (email) DO NOTHING
 	`)
 	if err != nil {
@@ -394,6 +395,7 @@ func TestAdminListBroadcastAudience_ExcludesReservedTLDs(t *testing.T) {
 		"probe-b@somewhere.test",
 		"probe-c@thing.example",
 		"probe-d@localhost",
+		"probe-e@app.localhost", // subdomain form — added post-review
 		"signup-notify-test-999@example.invalid",
 		"signup-probe-999@localhost",
 	} {
