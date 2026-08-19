@@ -9,6 +9,27 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// reservedEmailFilterSQL is the WHERE-clause fragment that excludes
+// RFC 2606 reserved TLDs (`.invalid`, `.test`, `.example`) and RFC
+// 6762 `.localhost` from broadcast targets. These addresses are
+// never deliverable by design and appear in platform_users via
+// automated signup probes (see internal/auth/signup_notify.go).
+//
+// Load-bearing: Scaleway TEM validates recipient format server-side
+// and rejects the ENTIRE chunk if any address has a reserved TLD
+// (observed 2026-08-18 — one probe address killed 9 real customer
+// sends in the same chunk). The split-and-retry in
+// internal/email/client.go is the belt; this filter is the primary
+// defense that keeps probes out of the audience in the first place.
+//
+// Format: bare fragment, drop into a WHERE via `AND` after the
+// caller's own predicates. `lower()` matches the trim/normalize
+// pattern used everywhere else in these SQLs.
+const reservedEmailFilterSQL = `lower(email) NOT LIKE '%.invalid'
+	AND lower(email) NOT LIKE '%.test'
+	AND lower(email) NOT LIKE '%.example'
+	AND lower(email) NOT LIKE '%@localhost'`
+
 // BroadcastRecipient is one row on GET /platform/admin/broadcast/audience.
 // The endpoint returns the deduped union of platform_allowlist.email and
 // platform_users.email; each entry annotates its provenance so the
@@ -62,7 +83,11 @@ func AdminListBroadcastAudience(pool *pgxpool.Pool) http.HandlerFunc {
 		// deterministic created_at from potentially multiple rows —
 		// MAX(created_at) picks the latest so the audience is sorted
 		// by the user's most-recent presence.
-		const q = `
+		// Reserved-TLD filter applied INSIDE each subquery so the
+		// row is dropped before the dedup join sees it. Putting the
+		// filter on the outer COALESCE would still work but scans
+		// more rows; inline is a strict improvement.
+		q := `
 			SELECT
 			    COALESCE(u_email, a_email)     AS email,
 			    a_email IS NOT NULL            AS on_allowlist,
@@ -71,10 +96,12 @@ func AdminListBroadcastAudience(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM (
 			    SELECT DISTINCT lower(trim(email)) AS a_email
 			      FROM public.platform_allowlist
+			     WHERE ` + reservedEmailFilterSQL + `
 			) a
 			FULL OUTER JOIN (
 			    SELECT lower(trim(email)) AS u_email, max(created_at) AS u_signed_up_at
 			      FROM public.platform_users
+			     WHERE ` + reservedEmailFilterSQL + `
 			     GROUP BY lower(trim(email))
 			) u ON a.a_email = u.u_email
 			WHERE COALESCE(u_email, a_email) IS NOT NULL

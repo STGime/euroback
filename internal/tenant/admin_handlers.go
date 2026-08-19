@@ -206,14 +206,24 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 		// between the audience listing and the send validation.
 		type source struct{ onAllowlist, hasAccount bool }
 		validSet := make(map[string]source, len(recipients))
+		// Same reserved-TLD filter as AdminListBroadcastAudience —
+		// a malicious/buggy caller can't force a probe address
+		// through even if the audience endpoint were somehow
+		// bypassed. Also protects against the case where a probe
+		// address is on the allowlist directly (rare but possible
+		// if someone manually inserted one).
 		rows, err := pool.Query(r.Context(),
 			`SELECT lower(trim(email)) AS email,
 			        BOOL_OR(source = 'allowlist') AS on_allowlist,
 			        BOOL_OR(source = 'user')      AS has_account
 			   FROM (
-			       SELECT email, 'allowlist' AS source FROM public.platform_allowlist
+			       SELECT email, 'allowlist' AS source
+			         FROM public.platform_allowlist
+			        WHERE `+reservedEmailFilterSQL+`
 			       UNION ALL
-			       SELECT email, 'user'      AS source FROM public.platform_users
+			       SELECT email, 'user' AS source
+			         FROM public.platform_users
+			        WHERE `+reservedEmailFilterSQL+`
 			   ) s
 			   WHERE lower(trim(email)) = ANY($1::text[])
 			   GROUP BY lower(trim(email))`,

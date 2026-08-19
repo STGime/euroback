@@ -174,23 +174,25 @@ func (c *EmailClient) SendBulk(ctx context.Context, bccRecipients []string, subj
 	chunkSize := maxBCCPerMessage()
 	chunks := chunkRecipients(bccRecipients, chunkSize)
 
+	// Split-and-retry per chunk. If a chunk fails (Scaleway TEM is
+	// all-or-nothing per POST — one bad recipient rejects the whole
+	// batch), sendChunkWithRetry recurses on halves down to size 1
+	// so one bad address only loses itself, not the other 9 real
+	// customers who shared the chunk. Reserved-TLD probes on the
+	// audience side (tenant/broadcast_admin_handlers.go) are the
+	// primary defense; this is the belt for any format-invalid
+	// address that slips past — e.g. a manually-inserted allowlist
+	// row with a typo.
 	for i, chunk := range chunks {
-		if err := c.sendBulkChunk(ctx, chunk, subject, htmlBody); err != nil {
-			res.Failed += len(chunk)
-			res.Errors = append(res.Errors, BulkChunkError{
-				Recipients: chunk,
-				Error:      err.Error(),
-			})
-			slog.Error("bulk email chunk failed",
-				"chunk_index", i,
-				"chunk_size", len(chunk),
-				"total_chunks", len(chunks),
-				"error", err,
-				"subject", subject,
-			)
-			continue
-		}
-		res.Sent += len(chunk)
+		before := res.Sent + res.Failed
+		c.sendChunkWithRetry(ctx, chunk, subject, htmlBody, &res)
+		after := res.Sent + res.Failed
+		slog.Debug("bulk email chunk done",
+			"chunk_index", i,
+			"chunk_size", len(chunk),
+			"total_chunks", len(chunks),
+			"processed", after-before,
+		)
 	}
 
 	slog.Info("bulk email completed",
@@ -204,6 +206,62 @@ func (c *EmailClient) SendBulk(ctx context.Context, bccRecipients []string, subj
 		return res, fmt.Errorf("every chunk failed: %d recipients, %d errors", len(bccRecipients), len(res.Errors))
 	}
 	return res, nil
+}
+
+// sendChunkWithRetry attempts a single TEM POST for `chunk`; on
+// failure, splits into halves and recurses so the search converges
+// on the specific bad address(es).
+//
+// Complexity: O(chunk_size) API calls in the pathological case
+// (every address bad), O(log chunk_size) when 0 or 1 are bad — which
+// is the realistic case. Cheap by construction; TEM's per-call
+// overhead is small compared to the alternative of losing a whole
+// chunk to one typo.
+//
+// Design decision: split on ANY failure (not just format errors).
+// If the underlying issue is a 5xx / network blip, the singletons
+// all fail too and get recorded individually — the operator sees
+// exactly which addresses didn't go out. If we gated on error
+// class we'd need to parse TEM's error format, which is fragile
+// (Scaleway can change the wording without notice). Amplification
+// risk on a 429 is bounded because the outer for-loop is sequential
+// and each singleton retry only re-hits TEM once.
+//
+// Successful sends append to res.Sent; each failed singleton
+// appends to res.Failed + res.Errors so the operator sees the
+// specific bad address in the console, not a batch of 10.
+func (c *EmailClient) sendChunkWithRetry(ctx context.Context, chunk []string, subject, htmlBody string, res *BulkResult) {
+	if len(chunk) == 0 {
+		return
+	}
+	if err := c.sendBulkChunk(ctx, chunk, subject, htmlBody); err == nil {
+		res.Sent += len(chunk)
+		return
+	} else if len(chunk) == 1 {
+		// Bottom of the recursion — this specific address is bad.
+		// Log at Warn (individual bad address = normal) rather than
+		// Error (would flood logs during a batch of typos).
+		slog.Warn("bulk email: recipient failed after isolation",
+			"recipient", chunk[0],
+			"error", err,
+			"subject", subject,
+		)
+		res.Failed++
+		res.Errors = append(res.Errors, BulkChunkError{
+			Recipients: chunk,
+			Error:      err.Error(),
+		})
+		return
+	} else {
+		slog.Info("bulk email chunk failed, splitting to isolate bad recipient(s)",
+			"chunk_size", len(chunk),
+			"error", err,
+			"subject", subject,
+		)
+	}
+	mid := len(chunk) / 2
+	c.sendChunkWithRetry(ctx, chunk[:mid], subject, htmlBody, res)
+	c.sendChunkWithRetry(ctx, chunk[mid:], subject, htmlBody, res)
 }
 
 // sendBulkChunk issues one TEM POST for a single chunk of recipients.

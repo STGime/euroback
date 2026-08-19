@@ -311,6 +311,145 @@ func TestAdminSendAllowlistEmail_DedupsCaseVariantRequest(t *testing.T) {
 	}
 }
 
+// TestAdminListBroadcastAudience_ExcludesReservedTLDs pins the
+// 2026-08-18 fix: RFC 2606 reserved TLDs (.invalid, .test,
+// .example) and .localhost are excluded from the audience so
+// automated probe accounts (created by internal/auth/signup_notify)
+// don't contaminate broadcast sends. Motivating incident: a
+// single `@example.invalid` address in a chunk of 10 killed 9
+// real customer sends because Scaleway TEM validates format
+// server-side and rejects the whole batch on any RFC-invalid
+// recipient.
+//
+// The split-retry in internal/email/client.go is the belt for any
+// address that slips past this filter; this test locks in the
+// primary defense.
+func TestAdminListBroadcastAudience_ExcludesReservedTLDs(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_allowlist WHERE email LIKE '%@test.eurobase.local' OR email LIKE '%.invalid' OR email LIKE '%.test' OR email LIKE '%.example' OR email LIKE '%@localhost'`)
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email LIKE '%@test.eurobase.local' OR email LIKE '%.invalid' OR email LIKE '%.test' OR email LIKE '%.example' OR email LIKE '%@localhost'`)
+	defer func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_allowlist WHERE email LIKE '%@test.eurobase.local' OR email LIKE '%.invalid' OR email LIKE '%.test' OR email LIKE '%.example' OR email LIKE '%@localhost'`)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email LIKE '%@test.eurobase.local' OR email LIKE '%.invalid' OR email LIKE '%.test' OR email LIKE '%.example' OR email LIKE '%@localhost'`)
+	}()
+
+	// Seed one real address (must appear) + four reserved-TLD
+	// variants (must NOT appear) on each side.
+	_, err := pool.Exec(ctx, `
+		INSERT INTO platform_allowlist (email, note) VALUES
+		    ('real-allow@test.eurobase.local', 'must appear'),
+		    ('probe-a@example.invalid', 'RFC 2606'),
+		    ('probe-b@somewhere.test',  'RFC 2606'),
+		    ('probe-c@thing.example',   'RFC 2606'),
+		    ('probe-d@localhost',       'RFC 6762')
+		ON CONFLICT (email) DO NOTHING
+	`)
+	if err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO platform_users (email, password_hash, email_confirmed_at) VALUES
+		    ('real-user@test.eurobase.local', 'x', now()),
+		    ('signup-notify-test-999@example.invalid', 'x', now()),
+		    ('signup-probe-999@localhost',            'x', now())
+	`)
+	if err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/platform/admin/broadcast/audience", nil)
+	AdminListBroadcastAudience(pool).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	var body struct {
+		Recipients []BroadcastRecipient `json:"recipients"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Bucket the fixture rows.
+	seen := map[string]bool{}
+	for _, r := range body.Recipients {
+		seen[r.Email] = true
+	}
+
+	// Real addresses MUST appear.
+	for _, want := range []string{
+		"real-allow@test.eurobase.local",
+		"real-user@test.eurobase.local",
+	} {
+		if !seen[want] {
+			t.Errorf("real address %q missing from audience", want)
+		}
+	}
+	// Reserved-TLD addresses MUST NOT appear.
+	for _, banned := range []string{
+		"probe-a@example.invalid",
+		"probe-b@somewhere.test",
+		"probe-c@thing.example",
+		"probe-d@localhost",
+		"signup-notify-test-999@example.invalid",
+		"signup-probe-999@localhost",
+	} {
+		if seen[banned] {
+			t.Errorf("reserved-TLD address %q leaked into audience (RFC 2606 filter broken)", banned)
+		}
+	}
+}
+
+// TestAdminSendAllowlistEmail_RejectsReservedTLDInSend is the
+// send-side mirror. Even if the caller manages to include a
+// reserved-TLD address in the request payload (bypassing the
+// audience endpoint), the send handler's own validation must
+// filter it. Defence in depth for the "Scaleway TEM rejects the
+// whole chunk on any RFC-invalid address" hazard.
+func TestAdminSendAllowlistEmail_RejectsReservedTLDInSend(t *testing.T) {
+	pool := setupTestDB(t)
+	cleanup := setupBroadcastFixture(t, pool)
+	defer cleanup()
+
+	// Seed a valid signed-up user + inject an .invalid entry into
+	// platform_allowlist. The valid one must be forwarded; the
+	// .invalid one must be filtered by the send-side validation.
+	ctx := context.Background()
+	_, _ = pool.Exec(ctx, `INSERT INTO platform_allowlist (email, note) VALUES ('probe@example.invalid', 'should be filtered') ON CONFLICT (email) DO NOTHING`)
+	defer pool.Exec(ctx, `DELETE FROM platform_allowlist WHERE email = 'probe@example.invalid'`)
+
+	mailer := &stubBulkEmailer{}
+	body := `{
+		"emails": [
+			"signup-only@test.eurobase.local",
+			"probe@example.invalid"
+		],
+		"subject": "test",
+		"body_html": "<p>hi</p>"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/platform/admin/allowlist/email", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	seen := map[string]bool{}
+	for _, e := range mailer.seen {
+		seen[e] = true
+	}
+	if !seen["signup-only@test.eurobase.local"] {
+		t.Errorf("real address missing from forwarded set: %v", mailer.seen)
+	}
+	if seen["probe@example.invalid"] {
+		t.Errorf(".invalid address leaked past send validation: %v", mailer.seen)
+	}
+}
+
 // TestAdminSendAllowlistEmail_RejectsIfNoValidRecipients confirms
 // the endpoint isn't a generic mail relay — every address filtered
 // out → 400, no send attempt. Same fence as pre-widening, just with
