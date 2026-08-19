@@ -25,10 +25,16 @@ import (
 // Format: bare fragment, drop into a WHERE via `AND` after the
 // caller's own predicates. `lower()` matches the trim/normalize
 // pattern used everywhere else in these SQLs.
+//
+// `.localhost` catches BOTH the bare form `foo@localhost` AND the
+// subdomain form `foo@app.localhost` — the RFC 6762 reserved zone
+// covers the whole `.localhost.` subtree, and `%@localhost` alone
+// would miss subdomain uses. #434 review 🟢.
 const reservedEmailFilterSQL = `lower(email) NOT LIKE '%.invalid'
 	AND lower(email) NOT LIKE '%.test'
 	AND lower(email) NOT LIKE '%.example'
-	AND lower(email) NOT LIKE '%@localhost'`
+	AND lower(email) NOT LIKE '%@localhost'
+	AND lower(email) NOT LIKE '%.localhost'`
 
 // BroadcastRecipient is one row on GET /platform/admin/broadcast/audience.
 // The endpoint returns the deduped union of platform_allowlist.email and
