@@ -91,14 +91,19 @@ func TestMaxBCCPerMessage(t *testing.T) {
 	}
 }
 
-// TestSendBulk_ChunksAndContinuesOnError wires a fake TEM server that
-// fails one specific chunk and succeeds the rest, asserts the
-// per-chunk failure didn't abort the loop, and confirms the
-// BulkResult tallies recipient counts (not chunk counts).
-func TestSendBulk_ChunksAndContinuesOnError(t *testing.T) {
-	// 25 recipients with chunk size 9 → chunks of 9, 9, 7.
-	// We'll fail chunk #2 (the second 9) and let chunks #1 and #3 succeed.
-	addrs := makeAddrs(25)
+// TestSendBulk_TransientChunkErrorRecoversViaSplitRetry pins the
+// split-and-retry recovery path introduced 2026-08-18. Scenario: the
+// FIRST attempt at chunk #2 fails (e.g. a transient TEM 5xx or a
+// rate-limit blip that clears immediately), but subsequent smaller
+// requests succeed. Pre-fix this class of failure lost all 9
+// recipients in the chunk. Post-fix the split-retry re-runs the
+// two halves, both succeed, all 25 recipients are delivered.
+//
+// If a future refactor reverts to fail-fast-per-chunk behavior, this
+// test fails loudly. The retry semantics are load-bearing for the
+// "1 bad probe address doesn't kill 9 real customers" invariant.
+func TestSendBulk_TransientChunkErrorRecoversViaSplitRetry(t *testing.T) {
+	addrs := makeAddrs(25) // chunks of 9, 9, 7 (at chunk size 9)
 	var seen [][]string
 	var hits int32
 
@@ -116,7 +121,8 @@ func TestSendBulk_ChunksAndContinuesOnError(t *testing.T) {
 		seen = append(seen, rcpts)
 		n := atomic.AddInt32(&hits, 1)
 		if n == 2 {
-			// Simulate TEM 403 quota error on chunk #2.
+			// Fail the FIRST attempt at chunk #2 only. Subsequent
+			// requests (the split halves + chunk #3) succeed.
 			http.Error(w, `{"details":[{"resource":"TemEmailsMaxRecipients"}]}`, http.StatusForbidden)
 			return
 		}
@@ -128,40 +134,73 @@ func TestSendBulk_ChunksAndContinuesOnError(t *testing.T) {
 	c := newClientPointingAt(srv.URL)
 	res, err := c.SendBulk(context.Background(), addrs, "subj", "<p>hi</p>")
 	if err != nil {
-		t.Fatalf("unexpected error from SendBulk (some chunks should have succeeded): %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
+	// All 25 should now land — chunk #2's transient failure is
+	// recovered by the split-retry.
+	if res.Sent != 25 {
+		t.Errorf("Sent: got %d, want 25 (split-retry should recover the transient chunk failure)", res.Sent)
+	}
+	if res.Failed != 0 {
+		t.Errorf("Failed: got %d, want 0", res.Failed)
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("Errors: got %d entries, want 0", len(res.Errors))
+	}
+	// API call count: 1 (chunk 1 success) + 1 (chunk 2 first-attempt
+	// fail) + 2 (chunk 2 split halves succeed) + 1 (chunk 3 success)
+	// = 5 hits.
+	if hits != 5 {
+		t.Errorf("expected 5 TEM POSTs (1+1+2+1), got %d", hits)
+	}
+}
 
-	wantSent := 9 + 7   // chunk 1 + chunk 3
-	wantFailed := 9     // chunk 2
-	if res.Sent != wantSent {
-		t.Errorf("Sent: got %d, want %d", res.Sent, wantSent)
+// TestSendBulk_BadAddressIsolatedByRetry — the motivating scenario
+// from the 2026-08-18 support incident. One specific recipient is
+// format-invalid (TEM rejects the whole chunk it's in). Pre-fix all
+// 9 recipients in the batch were reported as failed. Post-fix the
+// split-retry isolates the bad one; the other 8 succeed.
+//
+// Fake TEM: fails any request whose BCC list contains
+// "bad@example.invalid". Succeeds all others.
+func TestSendBulk_BadAddressIsolatedByRetry(t *testing.T) {
+	// 9 recipients: 8 valid + 1 bad in the middle.
+	addrs := []string{
+		"u0@example.com", "u1@example.com", "u2@example.com",
+		"u3@example.com", "bad@example.invalid", "u5@example.com",
+		"u6@example.com", "u7@example.com", "u8@example.com",
 	}
-	if res.Failed != wantFailed {
-		t.Errorf("Failed: got %d, want %d", res.Failed, wantFailed)
-	}
-	if len(res.Errors) != 1 {
-		t.Fatalf("Errors: got %d entries, want 1", len(res.Errors))
-	}
-	if len(res.Errors[0].Recipients) != 9 {
-		t.Errorf("Errors[0].Recipients: got %d, want 9", len(res.Errors[0].Recipients))
-	}
-	if hits != 3 {
-		t.Errorf("expected 3 TEM POSTs, got %d (regression: SendBulk aborted on chunk failure)", hits)
-	}
-	if len(seen) != 3 {
-		t.Fatalf("expected 3 captured payloads, got %d", len(seen))
-	}
-	// Order property: chunk N contains recipients[(N-1)*9 : N*9].
-	for i, chunk := range seen {
-		startIdx := i * 9
-		endIdx := startIdx + 9
-		if endIdx > len(addrs) {
-			endIdx = len(addrs)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body temRequest
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-		wantChunk := addrs[startIdx:endIdx]
-		if !reflect.DeepEqual(chunk, wantChunk) {
-			t.Errorf("chunk %d: got %v, want %v", i, chunk, wantChunk)
+		for _, a := range body.Bcc {
+			if a.Email == "bad@example.invalid" {
+				http.Error(w, `{"type":"invalid_arguments","message":"Invalid email recipient address: \"\""}`, http.StatusBadRequest)
+				return
+			}
 		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"emails":[]}`))
+	}))
+	defer srv.Close()
+
+	c := newClientPointingAt(srv.URL)
+	res, err := c.SendBulk(context.Background(), addrs, "subj", "<p>hi</p>")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Sent != 8 {
+		t.Errorf("Sent: got %d, want 8 (only the bad address should fail)", res.Sent)
+	}
+	if res.Failed != 1 {
+		t.Errorf("Failed: got %d, want 1", res.Failed)
+	}
+	if len(res.Errors) != 1 || len(res.Errors[0].Recipients) != 1 || res.Errors[0].Recipients[0] != "bad@example.invalid" {
+		t.Errorf("Errors: got %+v, want single-entry Recipients=[bad@example.invalid]", res.Errors)
 	}
 }
 
