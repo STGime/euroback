@@ -114,13 +114,21 @@
 </svelte:head>
 
 <div class="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
-	<div class="mb-8">
-		<h1 class="text-2xl font-bold text-gray-900">Billing</h1>
-		<p class="mt-2 text-sm text-gray-600">
-			Every invoice across every project you own. Per-project
-			billing actions (upgrade, cancel) live on the project's
-			billing tab.
-		</p>
+	<div class="mb-8 flex items-start justify-between gap-4">
+		<div>
+			<h1 class="text-2xl font-bold text-gray-900">Billing</h1>
+			<p class="mt-2 text-sm text-gray-600">
+				Every invoice across every project you own. Per-project
+				billing actions (upgrade, cancel) live on the project's
+				billing tab.
+			</p>
+		</div>
+		<a
+			href="/billing/profile"
+			class="inline-flex items-center whitespace-nowrap rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+		>
+			Billing details
+		</a>
 	</div>
 
 	<BillingTestModeBanner />

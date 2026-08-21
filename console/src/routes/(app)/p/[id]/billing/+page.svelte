@@ -3,8 +3,9 @@
 	// button, invoices scoped to this project. Deep-linked from
 	// LegacyProModal.svelte via `?plan=pro` (grepped — no other
 	// producer today).
+	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { api, type BillingConfig, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
+	import { api, APIError, type BillingConfig, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import CancelSubscriptionModal from '$lib/CancelSubscriptionModal.svelte';
 	import BillingTestModeBanner from '$lib/BillingTestModeBanner.svelte';
@@ -127,12 +128,28 @@
 		checkoutInFlight = true;
 		checkoutError = null;
 		try {
+			// Client-side gate: if no billing profile, bounce to the
+			// form BEFORE hitting Mollie. Backend enforces the same
+			// with a 409 billing_profile_required (caught below) so a
+			// stale tab can't skip the form.
+			const profile = await api.getBillingProfile();
+			if (!profile) {
+				await goto(`/billing/profile?next=/p/${projectId}/billing?plan=pro`);
+				return;
+			}
 			const res = await api.startBillingCheckout(projectId, 'pro');
 			// Full-page redirect to Mollie — DO NOT open in a new
 			// tab. Mollie's success/cancel handling relies on us
 			// controlling the parent window's location.
 			window.location.href = res.checkout_url;
 		} catch (err) {
+			// Belt-and-braces: backend 409 lands here if the client
+			// gate above raced with a profile deletion. Route to the
+			// form the same way.
+			if (err instanceof APIError && err.code === 'billing_profile_required') {
+				await goto(`/billing/profile?next=/p/${projectId}/billing?plan=pro`);
+				return;
+			}
 			checkoutError = err instanceof Error ? err.message : String(err);
 			checkoutInFlight = false;
 		}

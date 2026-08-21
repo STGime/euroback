@@ -153,6 +153,14 @@ type LimitsChecker interface {
 // are read-only after construction.
 type Service struct {
 	pool           *pgxpool.Pool
+	// developerPool is the eurobase_developer connection used for
+	// billing-PII paths (billing_profiles reads/writes + invoice
+	// render JOIN). Migration 000106 REVOKEs public.billing_profiles
+	// from eurobase_gateway, so the gateway `pool` will 42501 on
+	// those queries — see PR #443 review for the trace. Non-PII
+	// paths (subscriptions, invoices, projects, platform_users)
+	// stay on `pool` to avoid a broader migration + separate audit.
+	developerPool  *pgxpool.Pool
 	client         *mollie.Client
 	config         Config
 	enabled        bool
@@ -203,6 +211,39 @@ func NewService(pool *pgxpool.Pool, client *mollie.Client, cfg Config, enabled b
 func (s *Service) WithMetrics(m WebhookMetrics) *Service {
 	s.metrics = m
 	return s
+}
+
+// WithDeveloperPool attaches the eurobase_developer pool used
+// for billing-PII paths (see the Service.developerPool field
+// comment). REQUIRED in prod — without it, GetProfile /
+// UpsertProfile / the invoice-render profile JOIN will fail
+// 42501 because 000106 REVOKEs billing_profiles from gateway.
+// Optional at construction time only so tests using an in-memory
+// or single-role fixture can still exercise non-PII paths.
+func (s *Service) WithDeveloperPool(p *pgxpool.Pool) *Service {
+	s.developerPool = p
+	return s
+}
+
+// pgxPoolQuerier is the tiny subset of *pgxpool.Pool that the
+// billing-PII code paths need. Kept minimal so the pii()
+// selector can fall back to the shared pool for dev environments
+// without a developer role split.
+type pgxPoolQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// pii returns the pool that must be used for billing-PII queries.
+// Prefers developerPool when configured (production); falls back
+// to the shared pool for dev/test rigs that use one role. The
+// fallback path only works if the shared role holds SELECT on
+// billing_profiles — in prod (000106 REVOKE) it will not, which
+// is the intended fail-loud shape.
+func (s *Service) pii() pgxPoolQuerier {
+	if s.developerPool != nil {
+		return s.developerPool
+	}
+	return s.pool
 }
 
 // WithProjectCreator attaches the tenant-side project creator so
@@ -294,6 +335,15 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	}
 	if err != nil {
 		return nil, fmt.Errorf("billing: ownership check: %w", err)
+	}
+
+	// 1a. Require a billing profile BEFORE opening any Mollie work.
+	// Estonian VAT Act §37 + Accounting Act need buyer name +
+	// address on every invoice. Placed after the ownership check so
+	// a random user probing project IDs still gets 404 rather than
+	// leaking that they exist as a platform user. See internal/billing/profile.go.
+	if err := s.requireProfile(ctx, userID); err != nil {
+		return nil, err
 	}
 
 	// 2. Pre-check for an existing live subscription. The unique
@@ -510,6 +560,14 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 	}
 	if req.Name == "" || req.Slug == "" || req.Region == "" {
 		return nil, fmt.Errorf("%w: name, slug, and region are required", ErrInvalidPlan)
+	}
+
+	// 0. Require a billing profile BEFORE any Mollie work. Same
+	// rationale as CreateCheckout — Estonian invoice minimums need
+	// buyer identity. No project exists yet, so no info-leak
+	// concern about placement here.
+	if err := s.requireProfile(ctx, userID); err != nil {
+		return nil, err
 	}
 
 	// 0a. Enforce project quota BEFORE opening a Mollie payment

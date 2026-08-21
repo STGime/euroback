@@ -577,6 +577,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					r.Use(platformAuth.Handler)
 				}
 				r.Get("/config", billing.HandleGetConfig(billingSvc))
+				// Billing profile — Estonian VAT Act §37 / Accounting
+				// Act need buyer name + address on invoices. These
+				// endpoints intentionally work even when billing is
+				// off so a user can pre-fill before the launch flip.
+				r.Get("/profile", billing.HandleGetBillingProfile(billingSvc))
+				r.Put("/profile", billing.HandleUpsertBillingProfile(billingSvc))
 				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
 				r.Post("/checkout/new-project", billing.HandleNewProjectCheckout(billingSvc))
 				r.Get("/invoices", billing.HandleListInvoices(billingSvc))

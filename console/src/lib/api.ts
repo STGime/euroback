@@ -432,6 +432,16 @@ function parseErrorCode(body: string): string | undefined {
 	return match ? match[1] : undefined;
 }
 
+// parseErrorField extracts the "field" name a validation handler
+// sets alongside "code" — e.g. {"error":"…","code":"invalid_field",
+// "field":"vat_number"}. Callers use it to highlight the exact
+// input that failed. Same regex shape as parseErrorCode so a body
+// with unusual whitespace / key ordering still works.
+function parseErrorField(body: string): string | undefined {
+	const match = body.match(/"field":"([^"]+)"/);
+	return match ? match[1] : undefined;
+}
+
 /**
  * APIError is the typed rejection thrown by every EurobaseAPI method.
  * Carrying `status` + `code` alongside the human message lets callers
@@ -445,12 +455,14 @@ function parseErrorCode(body: string): string | undefined {
 export class APIError extends Error {
 	readonly status: number;
 	readonly code?: string;
+	readonly field?: string;
 	readonly body: string;
 	constructor(status: number, body: string) {
 		super(parseAPIError(status, body));
 		this.name = 'APIError';
 		this.status = status;
 		this.code = parseErrorCode(body);
+		this.field = parseErrorField(body);
 		this.body = body;
 	}
 }
@@ -753,6 +765,38 @@ export class EurobaseAPI {
 		return this.fetch('/platform/billing/checkout/new-project', {
 			method: 'POST',
 			body: JSON.stringify(req)
+		});
+	}
+
+	/**
+	 * Loads the caller's billing profile (Estonian VAT §37 buyer
+	 * fields). Returns `null` for 404 profile_not_found — this
+	 * lets the caller distinguish "never set" from network error
+	 * without a try/catch on every consumer.
+	 *
+	 * The endpoint works even when billing is disabled so a user
+	 * can pre-fill before the launch flip.
+	 */
+	async getBillingProfile(): Promise<BillingProfile | null> {
+		try {
+			return await this.fetch<BillingProfile>('/platform/billing/profile');
+		} catch (err) {
+			if (err instanceof APIError && err.status === 404 && err.code === 'profile_not_found') {
+				return null;
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * Upserts the caller's billing profile. On 400 invalid_field,
+	 * the thrown APIError carries `.field` (the JSON field name to
+	 * highlight, e.g. "vat_number") alongside `.code` and `.message`.
+	 */
+	async upsertBillingProfile(input: BillingProfileInput): Promise<BillingProfile> {
+		return this.fetch('/platform/billing/profile', {
+			method: 'PUT',
+			body: JSON.stringify(input)
 		});
 	}
 
@@ -2649,6 +2693,39 @@ export interface ProjectSubscription {
 	currency: string;
 	next_charge_at?: string | null;
 	canceled_at?: string | null;
+}
+
+/** Buyer identity + address for Estonian VAT Act §37 invoice
+ * compliance. One row per platform_users, upserted via
+ * PUT /platform/billing/profile. Registry code + VAT number are
+ * optional. All strings on the wire are trimmed + normalised
+ * server-side (country + vat_number uppercased). */
+export interface BillingProfile {
+	id: string;
+	platform_user_id: string;
+	entity_type: 'individual' | 'business';
+	legal_name: string;
+	street_address: string;
+	postal_code: string;
+	city: string;
+	/** ISO 3166-1 alpha-2, uppercase. */
+	country: string;
+	registry_code?: string;
+	vat_number?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+/** Write shape for PUT /platform/billing/profile. */
+export interface BillingProfileInput {
+	entity_type: 'individual' | 'business';
+	legal_name: string;
+	street_address: string;
+	postal_code: string;
+	city: string;
+	country: string;
+	registry_code?: string;
+	vat_number?: string;
 }
 
 /** Invoice row returned by GET /platform/billing/invoices. */

@@ -252,6 +252,21 @@
 					region: 'fr-par',
 					plan: newPlan,
 				};
+				// Client-side gate: no billing profile ⇒ persist the
+				// intent and bounce to the profile form. On save, the
+				// form's ?next redirects the user back to /projects,
+				// and this branch picks the intent up from
+				// sessionStorage-equivalent (see PENDING_KEY resume
+				// path). Backend also enforces (409 → catch below).
+				const profile = await api.getBillingProfile();
+				if (!profile) {
+					sessionStorage.setItem(
+						PENDING_KEY,
+						JSON.stringify({ pendingId: '', ...intent })
+					);
+					await goto('/billing/profile?next=/projects?resume=1');
+					return;
+				}
 				const res = await api.startProjectCheckout({
 					name: intent.name,
 					slug: intent.slug,
@@ -303,6 +318,12 @@
 					return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
 				case 'billing_disabled':
 					return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
+				case 'billing_profile_required':
+					// Should be unreachable because the click handler
+					// gates on getBillingProfile() before hitting this
+					// endpoint. Kept as belt-and-braces for a race with
+					// profile deletion.
+					return 'Add your billing details first, then try again.';
 			}
 		}
 		const msg = err instanceof Error ? err.message : 'Failed to create project';
