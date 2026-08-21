@@ -205,7 +205,16 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 	// invoice was originally issued for. LEFT JOIN falls back to
 	// "any subscription for this project" only for pre-000081
 	// historical rows where subscription_id may still be NULL.
-	err := s.pool.QueryRow(ctx,
+	//
+	// Runs on the developer pool (s.pii()) because the JOIN pulls
+	// public.billing_profiles, which 000106 REVOKEs from gateway.
+	// The other JOINed tables (invoices / projects / platform_users
+	// / subscriptions) still allow gateway access, so promoting
+	// the whole query to developer is strictly a widening of
+	// privilege for those reads — acceptable because this is a
+	// platform-authenticated developer-traffic path (console
+	// downloading its own invoice), not SDK runtime traffic.
+	err := s.pii().QueryRow(ctx,
 		`SELECT i.created_at, i.paid_at, i.amount_cents, i.currency,
 		        i.invoice_number,
 		        s.started_at, s.next_charge_at, s.plan,

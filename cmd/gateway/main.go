@@ -493,11 +493,18 @@ func main() {
 	if platformBaseURL == "" {
 		platformBaseURL = "https://api.eurobase.app"
 	}
+	// billing.NewService takes the gateway pool for its non-PII
+	// paths (subscriptions, invoices, projects, platform_users);
+	// WithDeveloperPool attaches the eurobase_developer pool for
+	// the billing-PII paths (public.billing_profiles reads +
+	// writes, and the invoice-render JOIN on it). Migration 000106
+	// REVOKEs billing_profiles from gateway, so those queries will
+	// fail 42501 without this — see PR #443 review.
 	billingSvc := billing.NewService(pool, mollieClient, billing.Config{
 		ConsoleBaseURL: consoleBaseURL,
 		WebhookBaseURL: platformBaseURL,
 		Mode:           string(mollieEnv),
-	}, billingEnabled).WithMetrics(metricsReg).WithStorage(s3Client).WithInvoiceMailer(emailService)
+	}, billingEnabled).WithMetrics(metricsReg).WithStorage(s3Client).WithInvoiceMailer(emailService).WithDeveloperPool(developerPool)
 	if billingEnabled {
 		slog.Info("billing: enabled", "mollie_env", mollieEnv)
 	} else {

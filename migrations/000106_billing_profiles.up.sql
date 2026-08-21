@@ -103,4 +103,30 @@ CREATE TRIGGER trg_billing_profiles_touch_updated_at
 -- must not leak through /v1/*. Migrator owns by default.
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.billing_profiles TO eurobase_developer;
 
+-- IMPORTANT — undo the ALTER DEFAULT PRIVILEGES from 000037.
+--
+-- Migration 000037_role_split.up.sql:59-62 sets
+--     ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA public
+--         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eurobase_gateway;
+-- which means every table migrator creates in public.* is
+-- auto-granted to gateway. Without the REVOKE below, the "no
+-- grant to eurobase_gateway" comment above is a *lie* — the SDK
+-- runtime role would silently hold DML on billing PII (legal
+-- names, addresses, VAT numbers). This is the exact class of
+-- issue that comment aims to avoid.
+--
+-- The REVOKE is per-table (not a DEFAULT PRIVILEGES tweak) so
+-- future migrator-created tables continue to inherit the default
+-- grant. That default is load-bearing for the platform's shared
+-- tables (projects, platform_users, etc. — all read/written by
+-- the SDK gateway pool). Only PII-carrying tables should opt out;
+-- this migration is the pattern.
+--
+-- Verification: scripts/verify-billing-profile-isolation.sh
+-- reproduces this against a throwaway Postgres and asserts
+-- has_table_privilege('eurobase_gateway','public.billing_profiles',
+-- 'SELECT') = false.
+REVOKE ALL ON public.billing_profiles FROM eurobase_gateway;
+REVOKE ALL ON public.billing_profiles FROM PUBLIC;
+
 COMMIT;

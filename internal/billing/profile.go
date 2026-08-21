@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/jackc/pgx/v5"
@@ -105,27 +106,33 @@ func (e *ProfileValidationError) Error() string {
 // Validate checks the input against the DB CHECK constraints plus
 // the code-only "EE business ⇒ registry_code required" rule.
 // Assumes Normalise has already run — caller's responsibility.
+//
+// Uses utf8.RuneCountInString instead of len() so the bounds
+// match Postgres length() (which counts characters, not bytes).
+// Without this, "OÜ" (2 chars, 3 bytes) at the 2-char lower
+// bound would pass Go's byte-count but violate the DB CHECK and
+// surface as an opaque 500 instead of a clean 400 invalid_field.
 func (in *ProfileInput) Validate() error {
 	if in.EntityType != "individual" && in.EntityType != "business" {
 		return &ProfileValidationError{Field: "entity_type", Message: "must be 'individual' or 'business'"}
 	}
-	if n := len(in.LegalName); n < 2 || n > 200 {
+	if n := utf8.RuneCountInString(in.LegalName); n < 2 || n > 200 {
 		return &ProfileValidationError{Field: "legal_name", Message: "must be 2–200 characters"}
 	}
-	if n := len(in.StreetAddress); n < 2 || n > 200 {
+	if n := utf8.RuneCountInString(in.StreetAddress); n < 2 || n > 200 {
 		return &ProfileValidationError{Field: "street_address", Message: "must be 2–200 characters"}
 	}
-	if n := len(in.PostalCode); n < 1 || n > 20 {
+	if n := utf8.RuneCountInString(in.PostalCode); n < 1 || n > 20 {
 		return &ProfileValidationError{Field: "postal_code", Message: "must be 1–20 characters"}
 	}
-	if n := len(in.City); n < 1 || n > 100 {
+	if n := utf8.RuneCountInString(in.City); n < 1 || n > 100 {
 		return &ProfileValidationError{Field: "city", Message: "must be 1–100 characters"}
 	}
 	if !countryRegex.MatchString(in.Country) {
 		return &ProfileValidationError{Field: "country", Message: "must be an ISO 3166-1 alpha-2 country code (e.g. EE, DE, FR)"}
 	}
 	if in.RegistryCode != "" {
-		if n := len(in.RegistryCode); n < 2 || n > 40 {
+		if n := utf8.RuneCountInString(in.RegistryCode); n < 2 || n > 40 {
 			return &ProfileValidationError{Field: "registry_code", Message: "must be 2–40 characters"}
 		}
 	}
@@ -151,7 +158,10 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 		registryCode *string
 		vatNumber    *string
 	)
-	err := s.pool.QueryRow(ctx,
+	// PII path — MUST use the developer pool. Migration 000106
+	// REVOKEs public.billing_profiles from eurobase_gateway, so
+	// running this on the gateway pool would 42501 in prod.
+	err := s.pii().QueryRow(ctx,
 		`SELECT id::text, platform_user_id::text, entity_type, legal_name,
 		        street_address, postal_code, city, country,
 		        registry_code, vat_number, created_at, updated_at
@@ -206,7 +216,8 @@ func (s *Service) UpsertProfile(ctx context.Context, userID string, in ProfileIn
 		outRegistry *string
 		outVAT      *string
 	)
-	err := s.pool.QueryRow(ctx,
+	// PII path — see GetProfile comment for the pool rationale.
+	err := s.pii().QueryRow(ctx,
 		`INSERT INTO public.billing_profiles
 		    (platform_user_id, entity_type, legal_name, street_address,
 		     postal_code, city, country, registry_code, vat_number)

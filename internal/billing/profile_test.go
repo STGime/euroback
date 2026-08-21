@@ -93,6 +93,30 @@ func TestProfileInput_Validate(t *testing.T) {
 		}
 	})
 
+	// Regression: len() vs utf8.RuneCountInString. "OÜ" is 2
+	// runes but 3 bytes; the DB CHECK counts characters. Without
+	// utf8.RuneCountInString these two cases would return 400
+	// invalid_field vs an opaque 500.
+	t.Run("accepts 2-rune multibyte name at lower bound", func(t *testing.T) {
+		in := base()
+		in.LegalName = "OÜ" // 2 runes / 3 bytes — DB length()=2 passes
+		if err := in.Validate(); err != nil {
+			t.Fatalf("2-rune multibyte name rejected: %v", err)
+		}
+	})
+	t.Run("rejects 201-rune multibyte name at upper bound", func(t *testing.T) {
+		in := base()
+		in.LegalName = strings.Repeat("Ü", 201) // 201 runes / 402 bytes
+		err := in.Validate()
+		if err == nil {
+			t.Fatalf("201-rune multibyte name accepted")
+		}
+		var vErr *ProfileValidationError
+		if !errors.As(err, &vErr) || vErr.Field != "legal_name" {
+			t.Fatalf("wrong error: %v", err)
+		}
+	})
+
 	rejectCases := []struct {
 		name      string
 		mutate    func(*ProfileInput)
