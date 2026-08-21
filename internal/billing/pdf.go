@@ -33,11 +33,24 @@ type InvoiceData struct {
 	SellerVATNote      string // "Not VAT-registered (below Estonian €40,000 threshold)"
 	SellerEmail        string
 
-	// Buyer — the platform user who owns the project. We only
-	// hold their email; a proper business address would come
-	// from a future "billing profile" feature on the account.
-	BuyerEmail       string
-	BuyerDisplayName string
+	// Buyer — the platform user who owns the project. Email and
+	// display name are always populated. The other Buyer* fields
+	// come from public.billing_profiles when present and satisfy
+	// Estonian VAT Act §37 + Accounting Act invoice minimums.
+	// Empty strings on the profile fields mean "no billing profile
+	// on file" (legacy invoices issued before migration 000106);
+	// the renderer falls back to the email + display line and logs
+	// a warning so ops can spot it.
+	BuyerEmail         string
+	BuyerDisplayName   string
+	BuyerEntityType    string // 'individual' | 'business' | ""
+	BuyerLegalName     string
+	BuyerStreetAddress string
+	BuyerPostalCode    string
+	BuyerCity          string
+	BuyerCountry       string // ISO 3166-1 alpha-2
+	BuyerRegistryCode  string
+	BuyerVATNumber     string
 
 	// Line item — Eurobase invoices have exactly one line
 	// today: the subscription for the billing period.
@@ -150,15 +163,50 @@ func RenderInvoicePDF(d InvoiceData) ([]byte, error) {
 	// ── Buyer ──────────────────────────────────────────────────
 	pdf.Ln(6)
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.Cell(0, 6, tr("Buyer"))
+	buyerLabel := "Buyer"
+	if d.BuyerEntityType == "business" {
+		buyerLabel = "Bill to"
+	}
+	pdf.Cell(0, 6, tr(buyerLabel))
 	pdf.Ln(5)
 	pdf.SetFont("Helvetica", "", 10)
-	if d.BuyerDisplayName != "" {
-		pdf.Cell(0, 5, tr(d.BuyerDisplayName))
+	if d.BuyerLegalName != "" {
+		// Full compliant billing block: legal name, street, postal
+		// + city, country, optional registry code + VAT number,
+		// then contact email as the last line.
+		pdf.Cell(0, 5, tr(d.BuyerLegalName))
 		pdf.Ln(5)
+		pdf.Cell(0, 5, tr(d.BuyerStreetAddress))
+		pdf.Ln(5)
+		pdf.Cell(0, 5, tr(d.BuyerPostalCode+" "+d.BuyerCity))
+		pdf.Ln(5)
+		if d.BuyerCountry != "" {
+			pdf.Cell(0, 5, tr(d.BuyerCountry))
+			pdf.Ln(5)
+		}
+		if d.BuyerRegistryCode != "" {
+			pdf.Cell(0, 5, tr("Registry code: "+d.BuyerRegistryCode))
+			pdf.Ln(5)
+		}
+		if d.BuyerVATNumber != "" {
+			pdf.Cell(0, 5, tr("VAT: "+d.BuyerVATNumber))
+			pdf.Ln(5)
+		}
+		pdf.Cell(0, 5, tr(d.BuyerEmail))
+		pdf.Ln(15)
+	} else {
+		// Legacy fallback for invoices issued before migration
+		// 000106 (or if a profile was somehow deleted). Renders
+		// the pre-profile shape so the PDF still comes out.
+		// invoice_render.go logs a warning on this path so ops
+		// can spot the drift.
+		if d.BuyerDisplayName != "" {
+			pdf.Cell(0, 5, tr(d.BuyerDisplayName))
+			pdf.Ln(5)
+		}
+		pdf.Cell(0, 5, tr(d.BuyerEmail))
+		pdf.Ln(15)
 	}
-	pdf.Cell(0, 5, tr(d.BuyerEmail))
-	pdf.Ln(15)
 
 	// ── Line items table ───────────────────────────────────────
 	pdf.SetFont("Helvetica", "B", 10)

@@ -188,6 +188,17 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		projectName      string
 		ownerEmail       string
 		ownerDisplayName *string
+		// Billing profile fields (migration 000106). NULL columns
+		// on the LEFT JOIN mean "no profile on file" — the
+		// renderer's legacy fallback kicks in and we log a warning.
+		bpEntityType    *string
+		bpLegalName     *string
+		bpStreetAddress *string
+		bpPostalCode    *string
+		bpCity          *string
+		bpCountry       *string
+		bpRegistryCode  *string
+		bpVATNumber     *string
 	)
 	// Prefer the invoice.subscription_id link (migration 000081)
 	// so a re-render always resolves to the SAME subscription the
@@ -198,10 +209,14 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		`SELECT i.created_at, i.paid_at, i.amount_cents, i.currency,
 		        i.invoice_number,
 		        s.started_at, s.next_charge_at, s.plan,
-		        p.name, u.email, u.display_name
+		        p.name, u.email, u.display_name,
+		        bp.entity_type, bp.legal_name, bp.street_address,
+		        bp.postal_code, bp.city, bp.country,
+		        bp.registry_code, bp.vat_number
 		   FROM public.invoices i
 		   JOIN public.projects p ON p.id = i.project_id
 		   JOIN public.platform_users u ON u.id = p.owner_id
+		   LEFT JOIN public.billing_profiles bp ON bp.platform_user_id = u.id
 		   LEFT JOIN public.subscriptions s ON s.id = COALESCE(
 		          i.subscription_id,
 		          (SELECT id FROM public.subscriptions
@@ -215,7 +230,10 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 	).Scan(&invoiceCreatedAt, &paidAt, &amountCents, &currency,
 		&invoiceNumber,
 		&periodStart, &periodEnd, &planCode,
-		&projectName, &ownerEmail, &ownerDisplayName)
+		&projectName, &ownerEmail, &ownerDisplayName,
+		&bpEntityType, &bpLegalName, &bpStreetAddress,
+		&bpPostalCode, &bpCity, &bpCountry,
+		&bpRegistryCode, &bpVATNumber)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InvoiceData{}, "", fmt.Errorf("invoice %s: %w", invoiceID, ErrInvoiceNotFound)
 	}
@@ -267,6 +285,31 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		ProjectName:        projectName,
 	}
 
+	// Overlay billing-profile fields when present. bpLegalName is
+	// the sentinel — every row that has a profile has all of
+	// entity_type/legal_name/street/postal/city/country populated
+	// (DB CHECK constraints on migration 000106). Missing profile
+	// leaves the fields empty; the renderer's legacy fallback
+	// takes over. Log a warning so ops sees any invoice issued
+	// after the launch-flip that somehow slipped past the
+	// checkout gate — should not happen once BILLING_PROFILE_REQUIRED
+	// is live in prod.
+	if bpLegalName != nil {
+		data.BuyerEntityType = strPtrOr(bpEntityType, "")
+		data.BuyerLegalName = *bpLegalName
+		data.BuyerStreetAddress = strPtrOr(bpStreetAddress, "")
+		data.BuyerPostalCode = strPtrOr(bpPostalCode, "")
+		data.BuyerCity = strPtrOr(bpCity, "")
+		data.BuyerCountry = strPtrOr(bpCountry, "")
+		data.BuyerRegistryCode = strPtrOr(bpRegistryCode, "")
+		data.BuyerVATNumber = strPtrOr(bpVATNumber, "")
+	} else {
+		slog.Warn("billing: invoice rendered without billing profile — legacy fallback path",
+			"invoice_id", invoiceID,
+			"owner_email", ownerEmail,
+		)
+	}
+
 	// Object key derived from the invoice UUID. Grouped by first
 	// two hex chars for a wider fan-out under S3's key hash — a
 	// bucket with N invoices distributes across up to 256
@@ -278,6 +321,15 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 // ErrInvoiceNotFound is returned when an invoice UUID doesn't
 // exist. Handlers translate to 404.
 var ErrInvoiceNotFound = errors.New("billing: invoice not found")
+
+// strPtrOr dereferences a nullable string column, returning
+// fallback when the pointer is nil.
+func strPtrOr(s *string, fallback string) string {
+	if s == nil {
+		return fallback
+	}
+	return *s
+}
 
 // formatInvoiceNumber renders the sequence + year as
 // EB-YYYY-NNNNNN. Year comes from the invoice's created_at so

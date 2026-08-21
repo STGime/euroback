@@ -79,6 +79,8 @@ func HandleCreateCheckout(svc *Service) http.HandlerFunc {
 				writeJSONError(w, http.StatusNotFound, "project_not_found", "project not found")
 			case errors.Is(err, ErrAlreadySubscribed):
 				writeJSONError(w, http.StatusConflict, "already_subscribed", "project already has an active or pending subscription")
+			case errors.Is(err, ErrBillingProfileRequired):
+				writeJSONError(w, http.StatusConflict, "billing_profile_required", "please add your billing details before continuing")
 			case errors.Is(err, ErrInvalidPlan):
 				writeJSONError(w, http.StatusBadRequest, "invalid_plan", err.Error())
 			default:
@@ -195,6 +197,8 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 				writeJSONError(w, http.StatusConflict, "slug_taken", "this project name is already in use — please choose another")
 			case errors.Is(err, ErrPendingCheckoutInFlight):
 				writeJSONError(w, http.StatusConflict, "pending_checkout_in_flight", "another checkout is already in progress for your account — please complete it first or wait a few minutes")
+			case errors.Is(err, ErrBillingProfileRequired):
+				writeJSONError(w, http.StatusConflict, "billing_profile_required", "please add your billing details before continuing")
 			default:
 				reqID := middleware.GetReqID(r.Context())
 				slog.Error("billing: new-project checkout failed",

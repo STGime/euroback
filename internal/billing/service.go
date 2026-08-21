@@ -296,6 +296,15 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 		return nil, fmt.Errorf("billing: ownership check: %w", err)
 	}
 
+	// 1a. Require a billing profile BEFORE opening any Mollie work.
+	// Estonian VAT Act §37 + Accounting Act need buyer name +
+	// address on every invoice. Placed after the ownership check so
+	// a random user probing project IDs still gets 404 rather than
+	// leaking that they exist as a platform user. See internal/billing/profile.go.
+	if err := s.requireProfile(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	// 2. Pre-check for an existing live subscription. The unique
 	// partial index enforces this at insert time; the pre-check
 	// just gives a cleaner error path for the common (non-race)
@@ -510,6 +519,14 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 	}
 	if req.Name == "" || req.Slug == "" || req.Region == "" {
 		return nil, fmt.Errorf("%w: name, slug, and region are required", ErrInvalidPlan)
+	}
+
+	// 0. Require a billing profile BEFORE any Mollie work. Same
+	// rationale as CreateCheckout — Estonian invoice minimums need
+	// buyer identity. No project exists yet, so no info-leak
+	// concern about placement here.
+	if err := s.requireProfile(ctx, userID); err != nil {
+		return nil, err
 	}
 
 	// 0a. Enforce project quota BEFORE opening a Mollie payment
