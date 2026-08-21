@@ -234,6 +234,7 @@ func (s *DowngradeService) findLegacyProGraceElapsed(ctx context.Context) ([]dow
 		  WHERE p.plan = 'pro'
 		    AND p.legacy_pro_grace_until IS NOT NULL
 		    AND p.legacy_pro_grace_until < now()
+		    AND (p.comped_until IS NULL OR p.comped_until < now())
 		    AND NOT EXISTS (
 		         SELECT 1 FROM public.subscriptions s
 		          WHERE s.project_id = p.id
