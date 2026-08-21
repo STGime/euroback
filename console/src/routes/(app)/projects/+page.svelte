@@ -264,7 +264,7 @@
 						PENDING_KEY,
 						JSON.stringify({ pendingId: '', ...intent })
 					);
-					await goto('/billing/profile?next=/projects?resume=1');
+					await goto('/billing/profile?next=' + encodeURIComponent('/projects?resume=1'));
 					return;
 				}
 				const res = await api.startProjectCheckout({

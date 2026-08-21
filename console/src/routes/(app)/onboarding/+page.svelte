@@ -232,7 +232,7 @@
 				const profile = await api.getBillingProfile();
 				if (!profile) {
 					sessionStorage.setItem(PROFILE_RESUME_KEY, JSON.stringify(intent));
-					await goto('/billing/profile?next=/onboarding?resume_checkout=1');
+					await goto('/billing/profile?next=' + encodeURIComponent('/onboarding?resume_checkout=1'));
 					return;
 				}
 				const res = await api.startProjectCheckout({

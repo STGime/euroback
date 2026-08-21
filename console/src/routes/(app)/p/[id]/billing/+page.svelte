@@ -134,7 +134,7 @@
 			// stale tab can't skip the form.
 			const profile = await api.getBillingProfile();
 			if (!profile) {
-				await goto(`/billing/profile?next=/p/${projectId}/billing?plan=pro`);
+				await goto('/billing/profile?next=' + encodeURIComponent(`/p/${projectId}/billing?plan=pro`));
 				return;
 			}
 			const res = await api.startBillingCheckout(projectId, 'pro');
@@ -147,7 +147,7 @@
 			// gate above raced with a profile deletion. Route to the
 			// form the same way.
 			if (err instanceof APIError && err.code === 'billing_profile_required') {
-				await goto(`/billing/profile?next=/p/${projectId}/billing?plan=pro`);
+				await goto('/billing/profile?next=' + encodeURIComponent(`/p/${projectId}/billing?plan=pro`));
 				return;
 			}
 			checkoutError = err instanceof Error ? err.message : String(err);
