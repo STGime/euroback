@@ -46,6 +46,40 @@
 			// hardcoded copy, Team stays hidden if profile failed.
 		}
 
+		// Resume-from-profile-form: /billing/profile?next=
+		// /onboarding?resume_checkout=1 lands here after the user
+		// saved the billing details we needed for the Pro checkout.
+		// Restore the intent from sessionStorage, re-populate the
+		// wizard fields, then trigger handleCreate() to continue
+		// straight to Mollie — user sees no extra click.
+		const resumeCheckout = $page.url.searchParams.get('resume_checkout');
+		if (resumeCheckout === '1') {
+			const raw = sessionStorage.getItem(PROFILE_RESUME_KEY);
+			if (raw) {
+				try {
+					const intent = JSON.parse(raw) as {
+						name: string; slug: string; region: string; plan: string;
+					};
+					projectName = intent.name;
+					plan = intent.plan;
+					sessionStorage.removeItem(PROFILE_RESUME_KEY);
+					if (typeof window !== 'undefined') {
+						const url = new URL(window.location.href);
+						url.searchParams.delete('resume_checkout');
+						window.history.replaceState({}, '', url.toString());
+					}
+					// Fire the checkout on the next tick so the state
+					// mutations above are applied before handleCreate
+					// reads them.
+					queueMicrotask(() => void handleCreate());
+					return;
+				} catch {
+					// Fall through to the normal create step.
+					sessionStorage.removeItem(PROFILE_RESUME_KEY);
+				}
+			}
+		}
+
 		// Resume-from-payment: /projects Mollie return handler
 		// navigates here with ?resume=<projectId> when the intent
 		// carried returnTo='/onboarding' (Pro checkout started
@@ -161,6 +195,14 @@
 	// created project after payment). See #406.
 	const PENDING_KEY = 'eurobase.pending_project_checkout';
 
+	// Separate key for the BEFORE-Mollie profile-form round trip
+	// (PR #443). Distinct from PENDING_KEY so a post-payment resume
+	// and a post-profile-form resume can't collide: PENDING_KEY
+	// carries a real Mollie pending_project_id, this one carries
+	// only the intent to be reused when the user comes back from
+	// filling in their billing details.
+	const PROFILE_RESUME_KEY = 'eurobase.onboarding_pending_checkout';
+
 	async function handleCreate() {
 		if (!projectName.trim()) return;
 		creating = true;
@@ -180,6 +222,19 @@
 					plan: plan,
 					returnTo: '/onboarding',
 				};
+				// Client-side gate: no billing profile ⇒ persist the
+				// intent under PROFILE_RESUME_KEY and bounce to the
+				// form. Backend also enforces (409 → catch below); the
+				// two together are belt-and-braces against a stale
+				// tab. Distinct from PENDING_KEY so a post-payment
+				// resume and this post-profile-form resume can't
+				// collide (see key comments above).
+				const profile = await api.getBillingProfile();
+				if (!profile) {
+					sessionStorage.setItem(PROFILE_RESUME_KEY, JSON.stringify(intent));
+					await goto('/billing/profile?next=/onboarding?resume_checkout=1');
+					return;
+				}
 				const res = await api.startProjectCheckout({
 					name: intent.name,
 					slug: intent.slug,
@@ -234,6 +289,10 @@
 					return 'Another checkout is already in progress for your account. Complete it or wait a few minutes and try again.';
 				case 'billing_disabled':
 					return 'Paid plans are temporarily unavailable. Create a Free project or contact support.';
+				case 'billing_profile_required':
+					// Unreachable via the click handler (which gates on
+					// getBillingProfile first). Kept as a race backstop.
+					return 'Add your billing details first, then try again.';
 			}
 		}
 		const msg = err instanceof Error ? err.message : 'Failed to create project';
