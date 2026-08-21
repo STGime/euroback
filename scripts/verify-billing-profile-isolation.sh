@@ -58,8 +58,11 @@ ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA public
 SQL
 
 # ── Apply migration 000106 (the actual PR file) ─────────────────
-# Migrator must own new objects, so we SET ROLE first.
-docker cp /Users/stefangimeson/euroback/migrations/000106_billing_profiles.up.sql \
+# Migrator must own new objects, so we SET ROLE first. Path is
+# resolved relative to the repo root so this runs on any checkout
+# (CI, another dev's machine) — not just Stefan's laptop.
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+docker cp "$REPO_ROOT/migrations/000106_billing_profiles.up.sql" \
     "$CNAME:/tmp/000106.sql" >/dev/null
 psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 SET ROLE eurobase_migrator;
