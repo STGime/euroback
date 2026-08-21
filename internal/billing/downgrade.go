@@ -234,6 +234,7 @@ func (s *DowngradeService) findLegacyProGraceElapsed(ctx context.Context) ([]dow
 		  WHERE p.plan = 'pro'
 		    AND p.legacy_pro_grace_until IS NOT NULL
 		    AND p.legacy_pro_grace_until < now()
+		    AND (p.comped_until IS NULL OR p.comped_until < now())
 		    AND NOT EXISTS (
 		         SELECT 1 FROM public.subscriptions s
 		          WHERE s.project_id = p.id
@@ -310,13 +311,23 @@ func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidat
 		}
 	}
 
+	// The comp guard is defence-in-depth: Branch B already excludes
+	// comped rows at the SELECT, but Branches A (past_due) and C
+	// (end_of_period) don't — a comped project that somehow acquired
+	// a subscription (e.g. a future superadmin/UI comp on a paying
+	// project) must not silently drop to Free on cancel or churn.
+	// Enforce comp at the choke-point so every branch, present and
+	// future, is honoured. 0-row-affected below covers both the
+	// "another sweep got here first" AND the "under active comp"
+	// cases; log message reflects both.
 	projectRes, err := tx.Exec(ctx,
 		`UPDATE public.projects
 		    SET plan = 'free',
 		        legacy_pro_grace_until = NULL,
 		        last_active_at = now()
 		  WHERE id = $1
-		    AND plan = 'pro'`,
+		    AND plan = 'pro'
+		    AND (comped_until IS NULL OR comped_until < now())`,
 		c.ProjectID,
 	)
 	if err != nil {
@@ -339,7 +350,7 @@ func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidat
 	// mail twice). Skip both here; the winning actor has already
 	// done them.
 	if projectRes.RowsAffected() == 0 {
-		slog.Debug("billing: downgrade skipped — project already Free (concurrent sweep)",
+		slog.Debug("billing: downgrade skipped — project already Free (concurrent sweep) or under active comp",
 			"project_id", c.ProjectID)
 		return
 	}
