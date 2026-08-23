@@ -206,6 +206,23 @@ func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
 			http.Error(w, `{"error":"limits lookup failed"}`, http.StatusInternalServerError)
 			return
 		}
+		// Defence-in-depth against the exact regression this PR is
+		// closing: plan_limits.backup_retention_days DEFAULTs to 0
+		// (see migration 000085) and Team/Legal-Team explicitly set
+		// 30. If a future dedicated-DB plan (or an edited row) ever
+		// leaves the default 0, the Scaleway request omits expires_at
+		// and on-demand backups pile up forever. That's the specific
+		// hazard this whole PR exists to eliminate, so refuse the
+		// backup here rather than let a config regression silently
+		// re-open the leak. Loud slog so ops sees it in seconds.
+		if limits.BackupRetentionDays <= 0 {
+			slog.Error("backup: refusing to snapshot with zero retention — plan_limits.backup_retention_days must be > 0 for any dedicated-DB plan",
+				"project_id", projectID,
+				"plan_backup_retention_days", limits.BackupRetentionDays)
+			http.Error(w, `{"error":"backup retention not configured for this plan — contact support","code":"backup_retention_not_configured"}`,
+				http.StatusInternalServerError)
+			return
+		}
 		retention := time.Duration(limits.BackupRetentionDays) * 24 * time.Hour
 
 		snap, err := provider.Snapshot(r.Context(), rec.ProviderInstanceID, dbprovider.SnapshotOpts{
