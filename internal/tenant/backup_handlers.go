@@ -194,7 +194,40 @@ func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
 			return
 		}
 
-		snap, err := provider.Snapshot(r.Context(), rec.ProviderInstanceID)
+		// Retention comes from plan_limits.backup_retention_days —
+		// 30 days for Team today. WITHOUT this the Scaleway backup
+		// has no expires_at and accumulates indefinitely: 5/day on-
+		// demand cap × 365 days = up to 1,825 permanent backups per
+		// project × DB size × storage cost. See issue background in
+		// the deprovision-sweeper PR (#455).
+		limits, err := s.limits.GetProjectLimits(r.Context(), projectID)
+		if err != nil {
+			slog.Error("backup: limits lookup failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"limits lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		// Defence-in-depth against the exact regression this PR is
+		// closing: plan_limits.backup_retention_days DEFAULTs to 0
+		// (see migration 000085) and Team/Legal-Team explicitly set
+		// 30. If a future dedicated-DB plan (or an edited row) ever
+		// leaves the default 0, the Scaleway request omits expires_at
+		// and on-demand backups pile up forever. That's the specific
+		// hazard this whole PR exists to eliminate, so refuse the
+		// backup here rather than let a config regression silently
+		// re-open the leak. Loud slog so ops sees it in seconds.
+		if limits.BackupRetentionDays <= 0 {
+			slog.Error("backup: refusing to snapshot with zero retention — plan_limits.backup_retention_days must be > 0 for any dedicated-DB plan",
+				"project_id", projectID,
+				"plan_backup_retention_days", limits.BackupRetentionDays)
+			http.Error(w, `{"error":"backup retention not configured for this plan — contact support","code":"backup_retention_not_configured"}`,
+				http.StatusInternalServerError)
+			return
+		}
+		retention := time.Duration(limits.BackupRetentionDays) * 24 * time.Hour
+
+		snap, err := provider.Snapshot(r.Context(), rec.ProviderInstanceID, dbprovider.SnapshotOpts{
+			Retention: retention,
+		})
 		if err != nil {
 			slog.Error("backup: provider snapshot failed", "error", err, "project_id", projectID)
 			http.Error(w, fmt.Sprintf(`{"error":"provider snapshot failed: %v"}`, err), http.StatusBadGateway)

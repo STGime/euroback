@@ -48,7 +48,7 @@ func (m *mockProvider) Name() string { return m.name }
 func (m *mockProvider) Provision(ctx context.Context, opts dbprovider.ProvisionOpts) (*dbprovider.Instance, error) {
 	return m.provisionFn(ctx, opts)
 }
-func (m *mockProvider) Snapshot(ctx context.Context, id string) (*dbprovider.Snapshot, error) {
+func (m *mockProvider) Snapshot(ctx context.Context, id string, _ dbprovider.SnapshotOpts) (*dbprovider.Snapshot, error) {
 	return m.snapshotFn(ctx, id)
 }
 func (m *mockProvider) ListSnapshots(ctx context.Context, id string) ([]dbprovider.Snapshot, error) {
