@@ -130,9 +130,16 @@ SELECT bs.provider_snapshot_id, bs.created_at, bs.project_id, bs.name
 SQL
 
 echo "── Investigation: pre-#456 on-demand backups (cutoff $PR456_MERGE_TS) ──"
-psql "$DATABASE_URL_DEVELOPER" -v ON_ERROR_STOP=1 -F ' | ' -A -c "$LIST_SQL" > /tmp/backfill-list.$$.tsv
-COUNT=$(($(wc -l < /tmp/backfill-list.$$.tsv) - 2)) # header + trailing "(N rows)"
-if [[ "$COUNT" -lt 0 ]]; then COUNT=0; fi
+# -t (tuples only, no header + no footer) + -A (unaligned) + -F '|'
+# (single-char delimiter). This kills three bugs from the review:
+#   * no header line to skip (Bug 3 stripping was fragile against
+#     `~/.psqlrc` overrides).
+#   * no "(N rows)" footer to trim (same).
+#   * single-char '|' delimiter means IFS='|' actually works (Bug 2:
+#     the previous ' | ' was a SET of delimiters {space, pipe}, and
+#     the space inside `created_at` values split them mid-field).
+psql "$DATABASE_URL_DEVELOPER" -v ON_ERROR_STOP=1 -t -A -F '|' -c "$LIST_SQL" > /tmp/backfill-list.$$.tsv
+COUNT=$(wc -l < /tmp/backfill-list.$$.tsv | tr -d ' ')
 echo "  → matched $COUNT rows"
 
 if [[ "$COUNT" -eq 0 ]]; then
@@ -143,7 +150,7 @@ fi
 
 echo
 echo "First 10 rows (backup_id | created_at | project | name):"
-head -12 /tmp/backfill-list.$$.tsv
+head -10 /tmp/backfill-list.$$.tsv
 echo
 echo "Mode:            $MODE"
 echo "Dry-run:         $DRY_RUN"
@@ -173,12 +180,19 @@ fi
 # ── PATCH loop ─────────────────────────────────────────────────────
 # 1 req/sec to stay well under Scaleway's rate limits. Idempotent —
 # re-patching an already-set expires_at is a no-op at Scaleway.
+#
+# Bug 1 fix: process substitution `< <(cat …)` runs the `while` in
+# the CURRENT shell, so UPDATED/FAILED increments persist past the
+# loop. The previous `cat … | while … done` shape put the while in
+# a subshell — counters looked incremented, then vanished, so the
+# final "Updated / Failed" line always reported 0 and the re-run
+# hint never fired.
 UPDATED=0
 FAILED=0
 
-# Skip psql's header (line 1) + trailing "(N rows)" summary.
-tail -n +2 /tmp/backfill-list.$$.tsv | head -n -1 | while IFS=' | ' read -r BACKUP_ID CREATED_AT PROJECT_ID NAME; do
-    # Skip empty lines that can arise from the header block.
+while IFS='|' read -r BACKUP_ID CREATED_AT PROJECT_ID NAME; do
+    # Skip empty lines (defensive — tuples-only psql should never
+    # emit one, but be paranoid about trailing newlines).
     [[ -z "$BACKUP_ID" ]] && continue
 
     # Compute expiry based on --mode.
@@ -209,7 +223,7 @@ tail -n +2 /tmp/backfill-list.$$.tsv | head -n -1 | while IFS=' | ' read -r BACK
     fi
     rm -f /tmp/backfill-resp.$$
     sleep 1
-done
+done < /tmp/backfill-list.$$.tsv
 
 echo
 echo "── Done ──"
