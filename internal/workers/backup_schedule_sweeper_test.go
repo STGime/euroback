@@ -14,9 +14,9 @@ import (
 // deprovision-sweeper test.
 func TestRunBackupScheduleSweeper_EnqueuesOnePerRow(t *testing.T) {
 	rows := []dbprovider.BackupScheduleCandidate{
-		{ID: "id-1", Plan: "team"},
-		{ID: "id-2", Plan: "team"},
-		{ID: "id-3", Plan: "legal_team"},
+		{ID: "id-1"},
+		{ID: "id-2"},
+		{ID: "id-3"},
 	}
 
 	var listLimit int
@@ -89,9 +89,9 @@ func TestRunBackupScheduleSweeper_ListErrorPropagates(t *testing.T) {
 // not delay 99 legitimate rows by a full hour.
 func TestRunBackupScheduleSweeper_OneBadEnqueueDoesNotAbortBatch(t *testing.T) {
 	rows := []dbprovider.BackupScheduleCandidate{
-		{ID: "id-a", Plan: "team"},
-		{ID: "id-b", Plan: "team"},
-		{ID: "id-c", Plan: "team"},
+		{ID: "id-a"},
+		{ID: "id-b"},
+		{ID: "id-c"},
 	}
 	list := func(context.Context, int) ([]dbprovider.BackupScheduleCandidate, error) {
 		return rows, nil

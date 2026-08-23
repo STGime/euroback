@@ -559,21 +559,20 @@ func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Recor
 }
 
 // BackupScheduleCandidate is the minimal shape the reconcile-schedule
-// sweeper needs to enqueue a job — id + project's plan (used to
-// resolve retention days). Kept slim so the sweeper's query is
-// cheap and JOIN-only-what-you-need friendly.
+// sweeper needs to enqueue a job — just the project_databases row
+// id. The worker re-resolves the project's plan via
+// plans.LimitsService rather than reading a snapshot from the
+// sweep query, so a plan change between enqueue and execution
+// (rare) applies the CURRENT retention, not a stale one.
 type BackupScheduleCandidate struct {
-	ID       string
-	Plan     string
+	ID string
 }
 
-// ListNeedsBackupSchedule returns active dedicated-DB rows where
+// ListNeedsBackupSchedule returns active dedicated-DB row IDs where
 // backup_schedule_applied_at IS NULL — the sweeper's work queue.
-// Joins projects for the plan so the sweeper can resolve retention
-// via plans.LimitsService in one round trip per row rather than a
-// second query.
-//
-// The partial index idx_project_databases_backup_schedule_unapplied
+// No JOIN to projects: the worker re-resolves the plan
+// authoritatively (see BackupScheduleCandidate doc), and the
+// partial index idx_project_databases_backup_schedule_unapplied
 // (migration 000107) covers this WHERE — index-only scan once the
 // initial backlog drains.
 func (r *Repo) ListNeedsBackupSchedule(ctx context.Context, limit int) ([]BackupScheduleCandidate, error) {
@@ -581,13 +580,12 @@ func (r *Repo) ListNeedsBackupSchedule(ctx context.Context, limit int) ([]Backup
 		limit = 100
 	}
 	const q = `
-		SELECT pd.id, p.plan
-		  FROM public.project_databases pd
-		  JOIN public.projects p ON p.id = pd.project_id
-		 WHERE pd.state = 'active'
-		   AND pd.deleted_at IS NULL
-		   AND pd.backup_schedule_applied_at IS NULL
-		 ORDER BY pd.created_at ASC
+		SELECT id
+		  FROM public.project_databases
+		 WHERE state = 'active'
+		   AND deleted_at IS NULL
+		   AND backup_schedule_applied_at IS NULL
+		 ORDER BY created_at ASC
 		 LIMIT $1
 	`
 	rows, err := r.pool.Query(ctx, q, limit)
@@ -598,7 +596,7 @@ func (r *Repo) ListNeedsBackupSchedule(ctx context.Context, limit int) ([]Backup
 	out := make([]BackupScheduleCandidate, 0, 16)
 	for rows.Next() {
 		var c BackupScheduleCandidate
-		if err := rows.Scan(&c.ID, &c.Plan); err != nil {
+		if err := rows.Scan(&c.ID); err != nil {
 			return nil, fmt.Errorf("dbprovider.Repo.ListNeedsBackupSchedule: scan: %w", err)
 		}
 		out = append(out, c)
