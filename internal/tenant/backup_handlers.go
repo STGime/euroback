@@ -194,7 +194,23 @@ func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
 			return
 		}
 
-		snap, err := provider.Snapshot(r.Context(), rec.ProviderInstanceID)
+		// Retention comes from plan_limits.backup_retention_days —
+		// 30 days for Team today. WITHOUT this the Scaleway backup
+		// has no expires_at and accumulates indefinitely: 5/day on-
+		// demand cap × 365 days = up to 1,825 permanent backups per
+		// project × DB size × storage cost. See issue background in
+		// the deprovision-sweeper PR (#455).
+		limits, err := s.limits.GetProjectLimits(r.Context(), projectID)
+		if err != nil {
+			slog.Error("backup: limits lookup failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"limits lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		retention := time.Duration(limits.BackupRetentionDays) * 24 * time.Hour
+
+		snap, err := provider.Snapshot(r.Context(), rec.ProviderInstanceID, dbprovider.SnapshotOpts{
+			Retention: retention,
+		})
 		if err != nil {
 			slog.Error("backup: provider snapshot failed", "error", err, "project_id", projectID)
 			http.Error(w, fmt.Sprintf(`{"error":"provider snapshot failed: %v"}`, err), http.StatusBadGateway)

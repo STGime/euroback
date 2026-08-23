@@ -372,7 +372,15 @@ func (s *Scaleway) getInstance(ctx context.Context, instanceID, region string) (
 
 // Snapshot — see Provider. Creates an on-demand backup of the
 // maintenance DB `rdb` (which is where the tenant's schema lives).
-func (s *Scaleway) Snapshot(ctx context.Context, instanceID string) (*Snapshot, error) {
+//
+// opts.Retention → absolute expires_at on the Scaleway request.
+// Passing zero omits expires_at, so Scaleway falls back to its
+// own default retention (which historically means "keep forever
+// until manually deleted" for on-demand backups on managed-PG,
+// billing storage indefinitely). Handlers MUST supply a
+// plan-derived retention — see internal/tenant/backup_handlers.go
+// where plan_limits.backup_retention_days is read.
+func (s *Scaleway) Snapshot(ctx context.Context, instanceID string, opts SnapshotOpts) (*Snapshot, error) {
 	name, err := randomHex(6)
 	if err != nil {
 		return nil, err
@@ -381,6 +389,13 @@ func (s *Scaleway) Snapshot(ctx context.Context, instanceID string) (*Snapshot, 
 		InstanceID:   instanceID,
 		DatabaseName: scalewayDefaultDB,
 		Name:         "eurobase-ondemand-" + name,
+	}
+	if opts.Retention > 0 {
+		// Compute against the caller's clock (not the provider's)
+		// so a lagging Scaleway clock doesn't shrink the window.
+		// The provider stores the absolute value verbatim.
+		expiry := time.Now().Add(opts.Retention).UTC()
+		req.ExpiresAt = &expiry
 	}
 	var out scalewayBackup
 	path := fmt.Sprintf("/rdb/v1/regions/%s/backups", s.defaultRegion)

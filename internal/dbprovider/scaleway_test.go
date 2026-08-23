@@ -44,7 +44,7 @@ func TestScaleway_UnauthorizedWhenNoSecret(t *testing.T) {
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("Health want ErrUnauthorized, got %v", err)
 	}
-	_, err = p.Snapshot(ctx, "id")
+	_, err = p.Snapshot(ctx, "id", SnapshotOpts{})
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("Snapshot want ErrUnauthorized, got %v", err)
 	}
@@ -195,7 +195,7 @@ func TestScaleway_Snapshot(t *testing.T) {
 			"expires_at":"2026-08-09T10:00:00Z","same_region":true
 		}`))
 	})
-	snap, err := p.Snapshot(context.Background(), "rdb-1")
+	snap, err := p.Snapshot(context.Background(), "rdb-1", SnapshotOpts{})
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -205,13 +205,62 @@ func TestScaleway_Snapshot(t *testing.T) {
 	if snap.SizeMB != 10 {
 		t.Errorf("SizeMB: got %d, want 10", snap.SizeMB)
 	}
-	// merged_bug_001: request body must carry a non-empty
-	// database_name and must NOT ship a zero-value expires_at.
+	// merged_bug_001 (retained): request body must carry a non-empty
+	// database_name, and — when the caller passes zero Retention —
+	// must still omit expires_at so Scaleway doesn't 400 or
+	// immediately expire the backup. The zero-Retention path is
+	// legal for dev/tests; handlers pass a plan-derived retention.
 	if seenBody["database_name"] != "rdb" {
 		t.Errorf("database_name in body: got %v, want \"rdb\"", seenBody["database_name"])
 	}
 	if v, ok := seenBody["expires_at"]; ok {
 		t.Errorf("expires_at should be omitted when zero (else Scaleway may 400 or immediately expire), got %v", v)
+	}
+}
+
+// TestScaleway_SnapshotSendsExpiresAtWhenRetentionSet — closes the
+// "backups accumulate indefinitely" hole. When the handler passes a
+// non-zero Retention (plan_limits.backup_retention_days for Team),
+// the Scaleway request body MUST carry a matching expires_at so the
+// provider deletes it on schedule. Regression coverage: without
+// this, a code path that silently drops the retention would let
+// on-demand backups pile up (150/month per project at the 5/day
+// cap × unbounded time × storage cost) before anyone noticed.
+func TestScaleway_SnapshotSendsExpiresAtWhenRetentionSet(t *testing.T) {
+	var seenBody map[string]any
+	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &seenBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{
+			"id":"bkp-2","instance_id":"rdb-1","name":"eurobase-ondemand-xyz",
+			"status":"exporting","size":10485760,"created_at":"2026-08-02T10:00:00Z",
+			"expires_at":"2026-09-01T10:00:00Z","same_region":true
+		}`))
+	})
+	before := time.Now()
+	_, err := p.Snapshot(context.Background(), "rdb-1", SnapshotOpts{
+		Retention: 30 * 24 * time.Hour, // Team plan default
+	})
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	raw, ok := seenBody["expires_at"].(string)
+	if !ok || raw == "" {
+		t.Fatalf("expires_at missing from request body, want a timestamp derived from now+Retention. body=%v", seenBody)
+	}
+	got, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		t.Fatalf("expires_at not RFC3339: %v (raw=%q)", err, raw)
+	}
+	// Must fall within [before + 30d, after + 30d] to prove it was
+	// derived from the caller's clock at request time, not a
+	// stale/wrong value.
+	minExp := before.Add(30 * 24 * time.Hour).Add(-time.Second)
+	maxExp := after.Add(30 * 24 * time.Hour).Add(time.Second)
+	if got.Before(minExp) || got.After(maxExp) {
+		t.Errorf("expires_at = %s, want within [%s, %s]", got, minExp, maxExp)
 	}
 }
 

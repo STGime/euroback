@@ -16,7 +16,9 @@ func (s *stubProvider) Name() string { return s.name }
 func (s *stubProvider) Provision(context.Context, ProvisionOpts) (*Instance, error) {
 	return nil, nil
 }
-func (s *stubProvider) Snapshot(context.Context, string) (*Snapshot, error)          { return nil, nil }
+func (s *stubProvider) Snapshot(context.Context, string, SnapshotOpts) (*Snapshot, error) {
+	return nil, nil
+}
 func (s *stubProvider) ListSnapshots(context.Context, string) ([]Snapshot, error)    { return nil, nil }
 func (s *stubProvider) Restore(context.Context, string, RestoreSource) (*Instance, error) {
 	return nil, nil

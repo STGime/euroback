@@ -111,6 +111,24 @@ type ProvisionOpts struct {
 	IdempotencyKey string
 }
 
+// SnapshotOpts carries provider-side backup options — currently
+// just the retention window. Passed to Provider.Snapshot so the
+// application layer (which knows the tenant's plan) can dictate
+// how long an on-demand backup persists at the provider.
+//
+// Retention is duration-typed, not a timestamp, so a lagging
+// clock between the caller and the provider doesn't skew expiry.
+// Providers translate to whatever their API expects (Scaleway
+// takes an absolute expires_at derived from now + Retention).
+//
+// Zero Retention is a "provider default" signal — meaningful in
+// dev / tests, but a real hazard in production because on-demand
+// backups then accumulate indefinitely and bill storage forever.
+// Handlers must pass a plan-derived Retention.
+type SnapshotOpts struct {
+	Retention time.Duration
+}
+
 // Size is a coarse hint mapped to provider SKUs at Provision time.
 type Size string
 
@@ -160,7 +178,14 @@ type Provider interface {
 	// Snapshot triggers an on-demand backup of an existing instance.
 	// Returns the provider-assigned snapshot; snapshot itself may
 	// still be running (call ListSnapshots to check state).
-	Snapshot(ctx context.Context, instanceID string) (*Snapshot, error)
+	//
+	// opts.Retention sets the desired provider-side expiry (Scaleway
+	// honours this via the /backups create request's expires_at
+	// field). Zero means "provider default" — do NOT rely on this
+	// path in production; without a caller-supplied retention,
+	// on-demand backups accumulate on Scaleway indefinitely and
+	// bill storage forever.
+	Snapshot(ctx context.Context, instanceID string, opts SnapshotOpts) (*Snapshot, error)
 
 	// ListSnapshots enumerates every snapshot (scheduled +
 	// on-demand) for an instance. Pagination is handled internally.
