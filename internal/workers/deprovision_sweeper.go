@@ -52,7 +52,13 @@ import (
 
 const (
 	deprovisionSweeperInterval = 1 * time.Hour
-	deprovisionRollbackWindow  = 7 * 24 * time.Hour
+	// deprovisionRollbackWindow is the SHARED 7-day rollback window
+	// used by both this sweeper (as the eligibility query bound)
+	// and the DeprovisionTeamDatabaseWorker (as its defence-in-depth
+	// cancel-guard when RollbackWindow is zero on the worker struct).
+	// One constant so the two can't drift — a mismatch would be safe
+	// (worker cancels early enqueues) but noisy.
+	deprovisionRollbackWindow = 7 * 24 * time.Hour
 )
 
 // StartDeprovisionSweeper launches the once-per-hour sweeper.
@@ -84,7 +90,33 @@ func StartDeprovisionSweeper(ctx context.Context, pool *pgxpool.Pool, riverClien
 
 func runDeprovisionSweeper(ctx context.Context, pool *pgxpool.Pool, riverClient *river.Client[pgx.Tx]) error {
 	repo := dbprovider.NewRepo(pool)
-	rows, err := repo.ListDeprovisionCandidates(ctx, deprovisionRollbackWindow)
+	return runDeprovisionSweeperWithDeps(ctx,
+		func(ctx context.Context, window time.Duration) ([]dbprovider.Record, error) {
+			return repo.ListDeprovisionCandidates(ctx, window)
+		},
+		func(ctx context.Context, projectDatabaseID string) error {
+			_, err := riverClient.Insert(ctx, jobs.DeprovisionTeamDatabaseArgs{
+				ProjectDatabaseID: projectDatabaseID,
+			}, nil)
+			return err
+		},
+		deprovisionRollbackWindow,
+	)
+}
+
+// runDeprovisionSweeperWithDeps is the pool-and-River-less inner
+// loop. Split out so the enqueue fan-out can be unit-tested
+// without a live Postgres or River client — the two dependencies
+// come in as function values (lister + enqueuer), which fakes can
+// satisfy with a couple of lines each. `runDeprovisionSweeper`
+// above is the thin wrapper that wires the real implementations.
+func runDeprovisionSweeperWithDeps(
+	ctx context.Context,
+	list func(ctx context.Context, window time.Duration) ([]dbprovider.Record, error),
+	enqueue func(ctx context.Context, projectDatabaseID string) error,
+	window time.Duration,
+) error {
+	rows, err := list(ctx, window)
 	if err != nil {
 		return err
 	}
@@ -95,11 +127,9 @@ func runDeprovisionSweeper(ctx context.Context, pool *pgxpool.Pool, riverClient 
 	}
 	slog.Info("deprovision sweeper: enqueuing",
 		"count", len(rows),
-		"rollback_window", deprovisionRollbackWindow)
+		"rollback_window", window)
 	for _, r := range rows {
-		if _, err := riverClient.Insert(ctx, jobs.DeprovisionTeamDatabaseArgs{
-			ProjectDatabaseID: r.ID,
-		}, nil); err != nil {
+		if err := enqueue(ctx, r.ID); err != nil {
 			slog.Error("deprovision sweeper: enqueue failed",
 				"project_database_id", r.ID, "error", err)
 			// keep going — one bad enqueue shouldn't stop the batch
