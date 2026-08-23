@@ -11,6 +11,11 @@ package workers
 //
 // Not a River job — same reasoning as StartAuditRetention: this is
 // fixed-cadence housekeeping with no upstream trigger.
+//
+// Related but separate: superseded project_databases rows past
+// their 7-day rollback window are torn down by StartDeprovisionSweeper
+// (deprovision_sweeper.go), NOT here. This sweeper only touches
+// backup_snapshots + the provider snapshot list.
 
 import (
 	"context"

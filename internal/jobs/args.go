@@ -120,8 +120,19 @@ func (DeprovisionTeamDatabaseArgs) Kind() string { return "deprovision_team_data
 
 // MaxAttempts = 5 — provider deletes are idempotent (404 is treated
 // as success), so retries are safe.
+//
+// UniqueOpts.ByArgs collapses double-enqueues from the periodic
+// sweeper (two overlapping ticks could otherwise queue the same
+// project_database_id twice). River's ByState defaults cover
+// pending + available + running + retryable — a completed or
+// cancelled prior run doesn't block a fresh sweep, which matches
+// the sweeper's "keep retrying until the row is hard-deleted"
+// intent.
 func (DeprovisionTeamDatabaseArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{MaxAttempts: 5}
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
 }
 
 // BackfillRuntimeCredentialArgs is enqueued (one job per project)

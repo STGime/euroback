@@ -352,10 +352,20 @@ func main() {
 	// ── Backup sweeper (M3) ──
 	// 6-hour ticker: refreshes backup_snapshots cache from
 	// Provider.ListSnapshots for every Team project, prunes rows
-	// past expires_at. Also cleans up superseded project_databases
-	// rows past the 7-day rollback window via the existing
-	// deprovision-eligible query.
+	// past expires_at.
 	workers.StartBackupSweeper(ctx, pool, providerRegistry)
+
+	// ── Deprovision sweeper (M3) ──
+	// Hourly ticker: fans out DeprovisionTeamDatabaseArgs jobs
+	// (100/tick) for project_databases rows past the 7-day
+	// rollback window (deleted_at IS NOT NULL AND deleted_at <
+	// now() - 7d). Without this, every restore permanently leaves
+	// the OLD Scaleway RDB instance running (~€60/mo each) —
+	// the DeprovisionTeamDatabaseWorker exists but nothing was
+	// enqueuing jobs against it. Idempotent via ByArgs
+	// uniqueness + worker-side rollback-window guard + provider
+	// 404-as-success.
+	workers.StartDeprovisionSweeper(ctx, pool, riverClient)
 
 	// ── Backfill sweeper (M2.5 part 2b) ──
 	// Hourly ticker: fans out BackfillRuntimeCredentialArgs jobs
