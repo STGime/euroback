@@ -9,6 +9,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/riverqueue/river"
 )
 
@@ -41,6 +42,13 @@ type ProvisionTeamDatabaseWorker struct {
 	// and SDK routing falls back to shared (safe posture until the
 	// secret is configured).
 	RuntimePasswordSecret []byte
+	// Limits resolves plan_limits for the project (used to derive
+	// backup retention days for the SetBackupSchedule call). Nil-
+	// safe — the schedule step is skipped with a warning if unset,
+	// and the reconcile sweeper picks up the row on the next tick.
+	// Same defensive posture as the bootstrap step's nil-cipher
+	// handling.
+	Limits *plans.LimitsService
 	// PollInterval is the delay between Describe() checks during the
 	// active-wait loop. Defaults to 10s if zero — Scaleway RDB
 	// typically reaches 'ready' within 90s to 4 minutes.
@@ -238,6 +246,24 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 		return fmt.Errorf("mark active: %w", err)
 	}
 	logger.Info("team-tier database ready", "host", active.Host, "port", active.Port)
+
+	// Team-tier M3 follow-up (#457) — set the Scaleway backup schedule
+	// so `autobackup_*` retention matches plan_limits.backup_retention_days
+	// instead of Scaleway's undocumented default. Best-effort:
+	//   - Nil Limits (dev/tests without a plans service) → skip; the
+	//     sweeper picks it up once the service is wired in prod.
+	//   - Zero retention (misconfigured plan) → log-loud and skip;
+	//     the sweeper worker will JobCancel the same way if a stale
+	//     row reaches it, so ops sees the config bug immediately.
+	//   - Provider error (e.g. Scaleway warmup 503) → log-warn and
+	//     continue; MarkBackupScheduleApplied is NOT called, so the
+	//     reconcile sweeper enqueues a retry on its next tick. This
+	//     is the specific self-heal the reviewer flagged as
+	//     mandatory on #457.
+	//
+	// On success, MarkBackupScheduleApplied stamps the row so the
+	// sweeper stops seeing it.
+	w.applyBackupSchedule(ctx, provider, rec, logger)
 
 	// Team-tier M2.5 part 2b — bootstrap the fresh instance so it
 	// can safely serve SDK traffic as a non-owner runtime role.
@@ -488,4 +514,61 @@ func isNonRetryable(err error) bool {
 	return errors.Is(err, dbprovider.ErrUnauthorized) ||
 		errors.Is(err, dbprovider.ErrInvalidRequest) ||
 		errors.Is(err, dbprovider.ErrProviderNotRegistered)
+}
+
+// applyBackupSchedule is the inline provision-time call to Scaleway's
+// set-backup-schedule endpoint (#457). All failure paths are
+// non-fatal — the reconcile sweeper picks up any row where
+// MarkBackupScheduleApplied didn't fire.
+func (w *ProvisionTeamDatabaseWorker) applyBackupSchedule(
+	ctx context.Context,
+	provider dbprovider.Provider,
+	rec *dbprovider.Record,
+	logger *slog.Logger,
+) {
+	if w.Limits == nil {
+		// Dev/test rig without a plans service. Sweeper handles it
+		// in prod (where Limits is always wired).
+		logger.Warn("backup schedule: skipped (plans service not configured; reconcile sweeper will handle)")
+		return
+	}
+	limits, err := w.Limits.GetProjectLimits(ctx, rec.ProjectID)
+	if err != nil {
+		logger.Warn("backup schedule: plan lookup failed at provision time — leaving to reconcile sweeper",
+			"error", err)
+		return
+	}
+	if limits.BackupRetentionDays <= 0 {
+		// Config bug — the plan itself is misconfigured. Loud but
+		// non-fatal. The sweeper's worker will JobCancel a stale row
+		// the same way, so ops sees this in slog + River UI.
+		logger.Error("backup schedule: refusing to configure with zero retention — plan_limits.backup_retention_days must be > 0 for a dedicated-DB plan",
+			"plan", limits.Plan,
+			"backup_retention_days", limits.BackupRetentionDays)
+		return
+	}
+	opts := dbprovider.SetBackupScheduleOpts{
+		FrequencyHours: backupScheduleFrequencyHours,
+		RetentionDays:  limits.BackupRetentionDays,
+	}
+	if err := provider.SetBackupSchedule(ctx, rec.ProviderInstanceID, opts); err != nil {
+		// The reviewer's specific concern: a Scaleway warmup rejection
+		// here would previously (without a sweeper) leave the instance
+		// permanently on provider defaults. Now: log-warn and continue;
+		// the reconcile sweeper enqueues a retry on its next tick,
+		// which drains through the warmup window via River backoff.
+		logger.Warn("backup schedule: inline SetBackupSchedule failed — reconcile sweeper will retry",
+			"error", err)
+		return
+	}
+	if err := w.Repo.MarkBackupScheduleApplied(ctx, rec.ID); err != nil {
+		// Scaleway is correctly configured; local bookkeeping failed.
+		// Sweeper will re-enqueue and re-apply idempotently.
+		logger.Warn("backup schedule: MarkBackupScheduleApplied failed — reconcile sweeper will retry",
+			"error", err)
+		return
+	}
+	logger.Info("backup schedule applied at provision time",
+		"retention_days", limits.BackupRetentionDays,
+		"frequency_hours", backupScheduleFrequencyHours)
 }

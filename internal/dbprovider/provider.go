@@ -129,6 +129,27 @@ type SnapshotOpts struct {
 	Retention time.Duration
 }
 
+// SetBackupScheduleOpts is the input to Provider.SetBackupSchedule.
+// FrequencyHours is the interval between scheduled backups (24 for
+// daily, matching Scaleway RDB's default cadence). RetentionDays is
+// how long the provider keeps each scheduled backup before deletion.
+//
+// Callers should derive RetentionDays from
+// plan_limits.backup_retention_days — the same source
+// HandleCreateBackup uses for on-demand snapshots, so both paths
+// enforce the same tenant-visible promise.
+//
+// Zero RetentionDays is a "provider default" signal — legal at the
+// provider layer for dev/tests but a production hazard, since the
+// whole point of this method is to end reliance on undocumented
+// provider defaults. Callers MUST supply a positive value; the
+// provision worker + reconcile sweeper both refuse to call with
+// retention <= 0 (matches #456's HandleCreateBackup floor).
+type SetBackupScheduleOpts struct {
+	FrequencyHours int
+	RetentionDays  int
+}
+
 // Size is a coarse hint mapped to provider SKUs at Provision time.
 type Size string
 
@@ -215,6 +236,22 @@ type Provider interface {
 	// host/port right at the state=active transition, since some
 	// providers populate the endpoint only at that moment.
 	Describe(ctx context.Context, instanceID string) (*Instance, error)
+
+	// SetBackupSchedule configures the provider's automatic backup
+	// cadence + retention for the instance. Called once at
+	// provision time and re-called by the reconcile sweeper for any
+	// row where project_databases.backup_schedule_applied_at IS NULL
+	// (covers pre-#457 rows + failed inline calls at provision).
+	//
+	// Idempotent — Scaleway accepts the same schedule value on
+	// repeat calls without side effects, so the sweeper can retry
+	// safely without a pre-check.
+	//
+	// This method is what #457 wired up to end reliance on
+	// undocumented Scaleway defaults for scheduled backups —
+	// prior to it, we called neither this endpoint nor set a
+	// backup schedule at all.
+	SetBackupSchedule(ctx context.Context, instanceID string, opts SetBackupScheduleOpts) error
 }
 
 // PasswordRotator is an optional capability providers CAN implement

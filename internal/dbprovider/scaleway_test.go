@@ -56,6 +56,15 @@ func TestScaleway_UnauthorizedWhenNoSecret(t *testing.T) {
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("Delete want ErrUnauthorized, got %v", err)
 	}
+	// SetBackupSchedule (#457) needs to fail-closed the same way —
+	// otherwise a dev environment without SCW_SECRET_KEY would silently
+	// accept the call from the reconcile sweeper and log a misleading
+	// success. Valid inputs (24h/30d) here so the ErrUnauthorized guard
+	// fires before the ErrInvalidRequest floor.
+	err = p.SetBackupSchedule(ctx, "id", SetBackupScheduleOpts{FrequencyHours: 24, RetentionDays: 30})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("SetBackupSchedule want ErrUnauthorized, got %v", err)
+	}
 }
 
 // TestScaleway_ProvisionHappyPath checks the request shape (auth
@@ -261,6 +270,70 @@ func TestScaleway_SnapshotSendsExpiresAtWhenRetentionSet(t *testing.T) {
 	maxExp := after.Add(30 * 24 * time.Hour).Add(time.Second)
 	if got.Before(minExp) || got.After(maxExp) {
 		t.Errorf("expires_at = %s, want within [%s, %s]", got, minExp, maxExp)
+	}
+}
+
+// TestScaleway_SetBackupSchedule_HappyPath — verifies the request
+// hits POST /rdb/v1/regions/{region}/instances/{id}/set-backup-schedule
+// with a body carrying frequency + retention. Regression guard on the
+// wire shape (Scaleway's docs use {frequency, retention} for this
+// action, distinct from the instance's {backup_schedule_frequency,
+// backup_schedule_retention} GET response fields — mixing them up
+// would silently 400).
+func TestScaleway_SetBackupSchedule_HappyPath(t *testing.T) {
+	var seenPath, seenMethod string
+	var seenBody map[string]any
+	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &seenBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"rdb-1","status":"ready","backup_schedule_frequency":24,"backup_schedule_retention":30,"endpoints":[]}`))
+	})
+	err := p.SetBackupSchedule(context.Background(), "rdb-1", SetBackupScheduleOpts{
+		FrequencyHours: 24,
+		RetentionDays:  30,
+	})
+	if err != nil {
+		t.Fatalf("SetBackupSchedule: %v", err)
+	}
+	if seenMethod != http.MethodPost {
+		t.Errorf("method: got %s, want POST", seenMethod)
+	}
+	wantPath := "/rdb/v1/regions/fr-par/instances/rdb-1/set-backup-schedule"
+	if seenPath != wantPath {
+		t.Errorf("path: got %q, want %q", seenPath, wantPath)
+	}
+	// JSON numbers unmarshal into float64.
+	if seenBody["frequency"].(float64) != 24 {
+		t.Errorf("frequency in body: got %v, want 24", seenBody["frequency"])
+	}
+	if seenBody["retention"].(float64) != 30 {
+		t.Errorf("retention in body: got %v, want 30", seenBody["retention"])
+	}
+}
+
+// TestScaleway_SetBackupSchedule_RejectsZero — the whole feature
+// exists to end reliance on Scaleway defaults, so the provider
+// method itself refuses zero-value inputs even before hitting the
+// network. Handlers + workers ALSO check upstream (double-layer);
+// this is the last line of defence.
+func TestScaleway_SetBackupSchedule_RejectsZero(t *testing.T) {
+	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call Scaleway when inputs are zero")
+	})
+	cases := []SetBackupScheduleOpts{
+		{FrequencyHours: 0, RetentionDays: 30},   // zero frequency
+		{FrequencyHours: 24, RetentionDays: 0},   // zero retention (the DEFAULT-0 hazard)
+		{FrequencyHours: -1, RetentionDays: 30},  // negative frequency
+		{FrequencyHours: 24, RetentionDays: -1},  // negative retention
+	}
+	for _, opts := range cases {
+		err := p.SetBackupSchedule(context.Background(), "rdb-1", opts)
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("opts=%+v: want ErrInvalidRequest, got %v", opts, err)
+		}
 	}
 }
 

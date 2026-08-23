@@ -558,6 +558,74 @@ func (r *Repo) ListActiveWithoutRuntime(ctx context.Context, limit int) ([]Recor
 	return out, rows.Err()
 }
 
+// BackupScheduleCandidate is the minimal shape the reconcile-schedule
+// sweeper needs to enqueue a job — id + project's plan (used to
+// resolve retention days). Kept slim so the sweeper's query is
+// cheap and JOIN-only-what-you-need friendly.
+type BackupScheduleCandidate struct {
+	ID       string
+	Plan     string
+}
+
+// ListNeedsBackupSchedule returns active dedicated-DB rows where
+// backup_schedule_applied_at IS NULL — the sweeper's work queue.
+// Joins projects for the plan so the sweeper can resolve retention
+// via plans.LimitsService in one round trip per row rather than a
+// second query.
+//
+// The partial index idx_project_databases_backup_schedule_unapplied
+// (migration 000107) covers this WHERE — index-only scan once the
+// initial backlog drains.
+func (r *Repo) ListNeedsBackupSchedule(ctx context.Context, limit int) ([]BackupScheduleCandidate, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	const q = `
+		SELECT pd.id, p.plan
+		  FROM public.project_databases pd
+		  JOIN public.projects p ON p.id = pd.project_id
+		 WHERE pd.state = 'active'
+		   AND pd.deleted_at IS NULL
+		   AND pd.backup_schedule_applied_at IS NULL
+		 ORDER BY pd.created_at ASC
+		 LIMIT $1
+	`
+	rows, err := r.pool.Query(ctx, q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("dbprovider.Repo.ListNeedsBackupSchedule: %w", err)
+	}
+	defer rows.Close()
+	out := make([]BackupScheduleCandidate, 0, 16)
+	for rows.Next() {
+		var c BackupScheduleCandidate
+		if err := rows.Scan(&c.ID, &c.Plan); err != nil {
+			return nil, fmt.Errorf("dbprovider.Repo.ListNeedsBackupSchedule: scan: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// MarkBackupScheduleApplied stamps backup_schedule_applied_at=now()
+// on a row. Called by the provision worker after a successful
+// SetBackupSchedule call, and by the reconcile worker on the same
+// event. The row-existence check via RowsAffected is caller's
+// responsibility; a missed row means the sweeper will pick it up
+// on the next tick.
+func (r *Repo) MarkBackupScheduleApplied(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE public.project_databases
+		    SET backup_schedule_applied_at = now(),
+		        updated_at = now()
+		  WHERE id = $1::uuid`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("dbprovider.Repo.MarkBackupScheduleApplied: %w", err)
+	}
+	return nil
+}
+
 // HardDelete removes a row entirely — called by the deprovision
 // worker AFTER the provider-side instance has been destroyed.
 func (r *Repo) HardDelete(ctx context.Context, id string) error {
