@@ -32,13 +32,12 @@ type DeprovisionTeamDatabaseWorker struct {
 	Registry *dbprovider.Registry
 	Repo     *dbprovider.Repo
 	// RollbackWindow is the minimum age (based on deleted_at) before
-	// a row is eligible for hard delete. Defaults to 7 days if zero
-	// — matches the plan. Guard against callers enqueuing a job for
-	// a row still inside its rollback window.
+	// a row is eligible for hard delete. Defaults to the shared
+	// deprovisionRollbackWindow constant (see deprovision_sweeper.go)
+	// if zero — matches the plan. Guard against callers enqueuing
+	// a job for a row still inside its rollback window.
 	RollbackWindow time.Duration
 }
-
-const defaultRollbackWindow = 7 * 24 * time.Hour
 
 func (w *DeprovisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[jobs.DeprovisionTeamDatabaseArgs]) error {
 	logger := slog.With("project_database_id", job.Args.ProjectDatabaseID)
@@ -65,7 +64,7 @@ func (w *DeprovisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job
 	// job could arrive too early — a defence-in-depth check.
 	window := w.RollbackWindow
 	if window == 0 {
-		window = defaultRollbackWindow
+		window = deprovisionRollbackWindow
 	}
 	// Wrap invariant violations in river.JobCancel so River doesn't
 	// retry all 5 attempts against a condition that cannot heal
