@@ -55,8 +55,9 @@ Everything Pro has, plus:
 
 **Data guarantees (the "sleep at night" bundle):**
 - **Dedicated database instance** — separate Postgres per project, not a shared cluster. Isolated compute; noisy-neighbour immunity.
-- **Automatic daily backups** — 30-day retention (Pro gets 7, Free gets none).
+- **Automatic daily backups** — 7-day retention. (Free + Pro share the pooled cluster; no per-project backups. Legal Team retains 30 days as part of the compliance premium.)
 - **Point-in-time recovery** — 7-day PITR window. One-click restore from console.
+- **1 restore per calendar month included** — snapshot-based OR PITR, either counts against the same cap. Additional restores are a support conversation while pricing is finalised; usage-based billing lands when Team crosses ~20 users.
 - **Uptime SLA** — 99.9% with credits.
 
 **Environments (the "we ship on Fridays" bundle):**
@@ -113,7 +114,7 @@ Supabase's overage model ($0.00325 per MAU, $0.125 per GB DB, etc.) works becaus
 
 ### Phase D — Team-tier features (parallel-track, longer)
 - Dedicated DB instance — Scaleway provisioning + connection routing.
-- Backups + PITR — pg_dump + Scaleway Object Storage cold tier.
+- Backups + PITR — Scaleway RDB native scheduled backups (7d) + native PITR (7d window). No pg_dump path; retention set via `SetBackupSchedule` at provision time and reconciled hourly (see #459). On-demand snapshots removed (#461) — PITR-to-just-before covers the "before-migration" use case at zero storage cost.
 - SSO SAML — likely gluu/keycloak or a hosted SaaS as identity broker.
 - RBAC — role column on `project_members` + middleware check.
 - SOC 2 audit — externally scheduled, ~4 months calendar.

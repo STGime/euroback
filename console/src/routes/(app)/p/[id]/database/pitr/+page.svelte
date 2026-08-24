@@ -77,6 +77,9 @@
 				<p class="mt-1 text-xs text-gray-500">
 					Restore your dedicated managed-PG instance to any second within the last {pitrDays} days.
 					A new instance is provisioned; the old one is retained for 7 days.
+					<span class="text-gray-600">Includes 1 restore per calendar month</span>
+					— shared with snapshot-based restores from the
+					<a href={`/p/${projectId}/database/backups`} class="text-eurobase-700 hover:underline">Backups</a> tab.
 				</p>
 			</div>
 			{#if quota}
