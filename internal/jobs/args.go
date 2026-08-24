@@ -176,6 +176,30 @@ func (BackfillRuntimeCredentialArgs) InsertOpts() river.InsertOpts {
 	}
 }
 
+// ReconcileBackupScheduleArgs is enqueued by StartBackupScheduleSweeper
+// (one job per project_databases row still needing a Scaleway
+// set-backup-schedule call). The worker looks up the project's plan
+// to resolve retention days, calls Provider.SetBackupSchedule, and
+// on success stamps project_databases.backup_schedule_applied_at.
+//
+// UniqueOpts.ByArgs collapses double-enqueues from overlapping
+// sweep ticks — matches the DeprovisionTeamDatabaseArgs pattern in
+// #455. MaxAttempts=5 covers Scaleway warmup rejections (a fresh
+// instance may 5xx set-backup-schedule for a few minutes before
+// the backup subsystem accepts writes; River's exponential backoff
+// drains through the warmup window).
+type ReconcileBackupScheduleArgs struct {
+	ProjectDatabaseID string `json:"project_database_id"`
+}
+
+func (ReconcileBackupScheduleArgs) Kind() string { return "reconcile_backup_schedule" }
+func (ReconcileBackupScheduleArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 5,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
+}
+
 // DeliverAuditSyslogArgs is the syslog analogue of
 // DeliverAuditWebhookArgs — enqueued per enabled syslog destination
 // by the shared scheduler. Same idempotency / retry policy: unique

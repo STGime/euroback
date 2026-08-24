@@ -496,6 +496,49 @@ func (s *Scaleway) Restore(ctx context.Context, instanceID string, source Restor
 	return mapScalewayInstance(&out, region, "eurobase_owner", ""), nil
 }
 
+// scalewaySetBackupScheduleRequest is the body Scaleway RDB accepts
+// on POST /rdb/v1/regions/{region}/instances/{id}/set-backup-schedule.
+// Fields verified against Scaleway's public RDB v1 API docs
+// (2026-08). If Scaleway later adds a `disabled: bool` requirement
+// or renames these to `backup_schedule_*`, adjust here — but a
+// simple {frequency, retention} body has been the shape since
+// managed-PG launched.
+type scalewaySetBackupScheduleRequest struct {
+	Frequency int `json:"frequency"` // hours between backups
+	Retention int `json:"retention"` // days to keep each backup
+}
+
+// SetBackupSchedule — see Provider. Configures Scaleway's automatic
+// backup cadence + retention. Called at provision time (once) and
+// by the reconcile sweeper for any row where
+// project_databases.backup_schedule_applied_at IS NULL.
+//
+// Idempotent — Scaleway returns the updated schedule on both first
+// and subsequent identical calls. That's the property the sweeper
+// depends on for "retry until it sticks" semantics.
+//
+// Empty secret returns ErrUnauthorized without hitting the network,
+// matching the pattern of the other methods.
+func (s *Scaleway) SetBackupSchedule(ctx context.Context, instanceID string, opts SetBackupScheduleOpts) error {
+	if opts.FrequencyHours <= 0 || opts.RetentionDays <= 0 {
+		// Guard against the provider hazard the whole feature exists
+		// to close. Handlers/workers should be checking before calling,
+		// but a bare-metal caller (test, ops CLI) that skipped the
+		// check would otherwise send a body Scaleway may either 400
+		// on or (worse) interpret as "disable backups." Fail loud.
+		return fmt.Errorf("%w: SetBackupSchedule requires FrequencyHours > 0 and RetentionDays > 0 (got %+v)",
+			ErrInvalidRequest, opts)
+	}
+	req := scalewaySetBackupScheduleRequest{
+		Frequency: opts.FrequencyHours,
+		Retention: opts.RetentionDays,
+	}
+	// The Scaleway RDB action returns the updated instance body; we
+	// don't parse it. A 2xx is all we need.
+	path := fmt.Sprintf("/rdb/v1/regions/%s/instances/%s/set-backup-schedule", s.defaultRegion, instanceID)
+	return s.do(ctx, http.MethodPost, path, req, nil)
+}
+
 // Delete — see Provider. Idempotent — 404 counts as success.
 func (s *Scaleway) Delete(ctx context.Context, instanceID string) error {
 	path := fmt.Sprintf("/rdb/v1/regions/%s/instances/%s", s.defaultRegion, instanceID)

@@ -28,6 +28,9 @@ func (s *stubProvider) Health(context.Context, string) (State, error) { return S
 func (s *stubProvider) Describe(context.Context, string) (*Instance, error) {
 	return &Instance{State: StateActive}, nil
 }
+func (s *stubProvider) SetBackupSchedule(context.Context, string, SetBackupScheduleOpts) error {
+	return nil
+}
 
 func TestRegistry_RegisterAndGet(t *testing.T) {
 	r := NewRegistry()

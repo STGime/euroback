@@ -20,6 +20,7 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
@@ -219,15 +220,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Shared plans.LimitsService — resolves plan_limits from the
+	// projects join for workers that need retention days /
+	// dedicated-DB flags. Currently used by the provision worker's
+	// backup-schedule step (#457) and the reconcile-backup-schedule
+	// worker. In-memory cached per plan for process lifetime.
+	limitsService := plans.NewLimitsService(pool)
+
 	river.AddWorker(riverWorkers, &workers.ProvisionTeamDatabaseWorker{
 		Registry:              providerRegistry,
 		Cipher:                cipher,
 		Repo:                  providerRepo,
 		RuntimePasswordSecret: runtimePwSecret,
+		Limits:                limitsService,
 	})
 	river.AddWorker(riverWorkers, &workers.DeprovisionTeamDatabaseWorker{
 		Registry: providerRegistry,
 		Repo:     providerRepo,
+	})
+	// M3 follow-up (#457) — reconcile-backup-schedule worker.
+	// Enqueued by StartBackupScheduleSweeper for rows where
+	// project_databases.backup_schedule_applied_at IS NULL.
+	river.AddWorker(riverWorkers, &workers.ReconcileBackupScheduleWorker{
+		Registry: providerRegistry,
+		Repo:     providerRepo,
+		Limits:   limitsService,
 	})
 	// M3 restore worker — same cipher + registry + repo as
 	// provisioning, plus the pool for state-machine writes on
@@ -366,6 +383,21 @@ func main() {
 	// uniqueness + worker-side rollback-window guard + provider
 	// 404-as-success.
 	workers.StartDeprovisionSweeper(ctx, pool, riverClient)
+
+	// ── Backup-schedule reconcile sweeper (M3 follow-up, #457) ──
+	// Hourly ticker: fans out ReconcileBackupScheduleArgs jobs
+	// (100/tick) for project_databases rows where
+	// backup_schedule_applied_at IS NULL. Two feed sources:
+	//   1. Instances provisioned BEFORE #457 landed (defaults
+	//      leaked from Scaleway; we never called set-backup-
+	//      schedule). First sweep after deploy drains these.
+	//   2. New provisions where the inline SetBackupSchedule call
+	//      failed transiently (Scaleway warmup rejection). Sweeper
+	//      is the self-heal path — otherwise a warmup race would
+	//      permanently leave that instance on provider defaults.
+	// Idempotent via ByArgs uniqueness + provider-side idempotency
+	// on set-backup-schedule.
+	workers.StartBackupScheduleSweeper(ctx, pool, riverClient)
 
 	// ── Backfill sweeper (M2.5 part 2b) ──
 	// Hourly ticker: fans out BackfillRuntimeCredentialArgs jobs

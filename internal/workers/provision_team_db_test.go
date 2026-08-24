@@ -33,15 +33,16 @@ func stubJob[T river.JobArgs](args T, id int64) *river.Job[T] {
 // Behaviour is controlled by per-method function fields — tests set
 // only the ones they need.
 type mockProvider struct {
-	name         string
-	provisionFn  func(ctx context.Context, opts dbprovider.ProvisionOpts) (*dbprovider.Instance, error)
-	describeFn   func(ctx context.Context, id string) (*dbprovider.Instance, error)
-	deleteFn     func(ctx context.Context, id string) error
-	snapshotFn   func(ctx context.Context, id string) (*dbprovider.Snapshot, error)
-	listSnapsFn  func(ctx context.Context, id string) ([]dbprovider.Snapshot, error)
-	restoreFn    func(ctx context.Context, id string, src dbprovider.RestoreSource) (*dbprovider.Instance, error)
-	healthFn     func(ctx context.Context, id string) (dbprovider.State, error)
-	describeHits atomic.Int32
+	name                string
+	provisionFn         func(ctx context.Context, opts dbprovider.ProvisionOpts) (*dbprovider.Instance, error)
+	describeFn          func(ctx context.Context, id string) (*dbprovider.Instance, error)
+	deleteFn            func(ctx context.Context, id string) error
+	snapshotFn          func(ctx context.Context, id string) (*dbprovider.Snapshot, error)
+	listSnapsFn         func(ctx context.Context, id string) ([]dbprovider.Snapshot, error)
+	restoreFn           func(ctx context.Context, id string, src dbprovider.RestoreSource) (*dbprovider.Instance, error)
+	healthFn            func(ctx context.Context, id string) (dbprovider.State, error)
+	setBackupScheduleFn func(ctx context.Context, id string, opts dbprovider.SetBackupScheduleOpts) error
+	describeHits        atomic.Int32
 }
 
 func (m *mockProvider) Name() string { return m.name }
@@ -66,6 +67,12 @@ func (m *mockProvider) Health(ctx context.Context, id string) (dbprovider.State,
 func (m *mockProvider) Describe(ctx context.Context, id string) (*dbprovider.Instance, error) {
 	m.describeHits.Add(1)
 	return m.describeFn(ctx, id)
+}
+func (m *mockProvider) SetBackupSchedule(ctx context.Context, id string, opts dbprovider.SetBackupScheduleOpts) error {
+	if m.setBackupScheduleFn == nil {
+		return nil
+	}
+	return m.setBackupScheduleFn(ctx, id, opts)
 }
 
 // TestPollUntilActive_HappyPath — state=active + endpoint populated
