@@ -95,10 +95,12 @@
 				<h1 class="text-lg font-semibold text-gray-900">Backups</h1>
 				<p class="mt-1 text-xs text-gray-500">
 					Automatic daily snapshots of your dedicated managed-PG instance.
-					Retention follows your plan (Team: 7 days).
+					Retention: 7 days (Team) / 30 days (Legal Team).
 					For a specific point in time within the last 7 days, use
 					<a href={`/p/${projectId}/database/pitr`} class="text-eurobase-700 hover:underline">
 						Point-in-time restore</a>.
+					<span class="text-gray-600">Includes 1 restore per calendar month</span>
+					— snapshot-based or PITR, either counts against the same cap.
 				</p>
 			</div>
 			{#if quota}
