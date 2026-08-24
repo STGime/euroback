@@ -558,11 +558,20 @@ func (s *BackupService) enforceRestoreQuota(ctx context.Context, w http.Response
 		return nil
 	}
 	if limits.IncludedRestoresPerMonth <= 0 {
-		// Feature disabled for this plan (Free/Pro have no restore
-		// surface at all — CheckDedicatedDB should have already
-		// blocked). Defensive.
-		http.Error(w, `{"error":"restore not available on this plan","code":"dedicated_db_required"}`, http.StatusPaymentRequired)
-		return fmt.Errorf("restore quota check: plan has no restore surface")
+		// Unreachable via normal traffic: Free/Pro are already
+		// blocked by CheckDedicatedDB above, and Team/Legal-Team
+		// both set IncludedRestoresPerMonth=1 in migration 000108.
+		// This branch fires only if a plan_limits row was
+		// misconfigured (dedicated_db=true + included_restores=0).
+		// Matches #456's `backup_retention_not_configured` pattern:
+		// 500 + loud slog so ops sees the config bug immediately;
+		// distinct code so monitoring can page on it.
+		slog.Error("restore quota: refusing with zero included_restores_per_month — plan_limits misconfigured for dedicated-DB plan",
+			"project_id", projectID,
+			"plan", limits.Plan,
+			"included_restores_per_month", limits.IncludedRestoresPerMonth)
+		http.Error(w, `{"error":"restore not configured for this plan — contact support","code":"restore_not_configured"}`, http.StatusInternalServerError)
+		return fmt.Errorf("restore quota check: plan %q has included_restores_per_month=0", limits.Plan)
 	}
 	used, err := s.countMonthlyRestores(ctx, projectID)
 	if err != nil {

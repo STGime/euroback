@@ -50,11 +50,13 @@ ALTER TABLE public.plan_limits
     -- (Free / Pro — no dedicated DB, no restore surface).
     ADD COLUMN IF NOT EXISTS included_restores_per_month INT NOT NULL DEFAULT 0,
 
-    -- on_demand_backups_enabled → feature flag, read by the router
-    -- and (defensively) by HandleCreateBackup. Distinct from
-    -- "no route registered" so a future rollback path can flip it
-    -- back without a code deploy. Kept FALSE for all plans in this
-    -- migration; there is no user-visible on-demand button anymore.
+    -- on_demand_backups_enabled → feature flag held for a future
+    -- rollback path. Today the router simply DOES NOT register
+    -- POST /backups (unconditionally removed in this same PR), so
+    -- the column is inert — it exists so a re-enable can be a
+    -- data-only change plus a router flip, without a fresh migration.
+    -- Kept FALSE for all plans; there is no user-visible on-demand
+    -- button anymore.
     ADD COLUMN IF NOT EXISTS on_demand_backups_enabled BOOLEAN NOT NULL DEFAULT false;
 
 -- ── Data: Team gets a real price, tighter retention, quota ──────
