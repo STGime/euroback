@@ -22,21 +22,31 @@ Estonian business IBAN (Eurobase OÜ). If it says "pending
 verification", Mollie hasn't finished KYC yet — stop here and
 resume this runbook when it clears.
 
-### 3. Patch `eurobase-secrets` with the three billing keys
+### 3. Patch `eurobase-secrets` with the live Mollie key
+
+**Only `MOLLIE_API_KEY_LIVE` goes in the Secret.** `MOLLIE_ENV`
+and `BILLING_ENABLED` live in `deploy/k8s/gateway.yaml`'s `env:`
+block — and Kubernetes `env:` **overrides** `envFrom:` for the
+same key, so patching those two into the Secret is silently
+ignored. This was a bug in the previous version of this runbook,
+fixed in the same PR that flipped `MOLLIE_ENV` in the yaml.
 
 ```bash
 kubectl -n eurobase patch secret eurobase-secrets --type merge -p '{
   "stringData": {
-    "MOLLIE_API_KEY_LIVE": "live_XXXXXXXX_paste_from_dashboard",
-    "MOLLIE_ENV":          "live",
-    "BILLING_ENABLED":     "true"
+    "MOLLIE_API_KEY_LIVE": "live_XXXXXXXX_paste_from_dashboard"
   }
 }'
 ```
 
 **Don't restart the pod yet** — restart is Step 8 below (T-0).
-This step just gets the values into the Secret so the next
-restart picks them up atomically.
+This step just gets the key into the Secret so the next restart
+picks it up atomically alongside the merged-in yaml change from
+the cutover PR (which flips `MOLLIE_ENV` to `"live"`).
+
+**Never commit the live key** — the repo is public. Store it in
+a password manager; paste it directly into the `kubectl patch`
+line above at cutover time.
 
 ### 4. Verify the migrations landed in prod
 
