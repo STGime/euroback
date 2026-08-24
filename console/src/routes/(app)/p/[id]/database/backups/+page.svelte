@@ -1,17 +1,17 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
-	import { api, type BackupSnapshot, type Project } from '$lib/api.js';
+	import { api, type BackupSnapshot, type Project, type RestoreQuota } from '$lib/api.js';
 	import RestoreConfirmModal from '../RestoreConfirmModal.svelte';
 	import RestoreProgressPanel from '../RestoreProgressPanel.svelte';
 
 	let projectId = $derived($page.params.id);
 	let project = $state<Project | null>(null);
 	let backups = $state<BackupSnapshot[]>([]);
+	let quota = $state<RestoreQuota | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	let creating = $state(false);
 	let selectedSnapshotId = $state<string | null>(null);
 	let confirmOpen = $state(false);
 	let confirmBusy = $state(false);
@@ -23,12 +23,17 @@
 		loading = true;
 		error = null;
 		try {
-			const [p, b] = await Promise.all([
+			// Quota fetched in parallel with the list — a stale/failing
+			// quota shouldn't block the backup list from rendering, but
+			// a fresh badge on load is nicer UX than "…" for two seconds.
+			const [p, b, q] = await Promise.all([
 				api.getProject(projectId),
-				api.listBackups(projectId)
+				api.listBackups(projectId),
+				api.getRestoreQuota(projectId).catch(() => null),
 			]);
 			project = p;
 			backups = b.backups;
+			quota = q;
 		} catch (e: any) {
 			error = e?.message ?? 'Failed to load backups';
 		} finally {
@@ -37,20 +42,6 @@
 	}
 
 	onMount(refresh);
-
-	async function createOnDemand() {
-		if (creating) return;
-		creating = true;
-		error = null;
-		try {
-			await api.createBackup(projectId);
-			await refresh();
-		} catch (e: any) {
-			error = e?.message ?? 'Backup failed';
-		} finally {
-			creating = false;
-		}
-	}
 
 	function openRestoreConfirm(id: string) {
 		selectedSnapshotId = id;
@@ -67,6 +58,9 @@
 			activeRestoreId = r.restore_id;
 			confirmOpen = false;
 			selectedSnapshotId = null;
+			// Re-fetch the quota so the badge reflects the new usage
+			// before the user sees the restore-progress panel.
+			quota = await api.getRestoreQuota(projectId).catch(() => quota);
 		} catch (e: any) {
 			confirmError = e?.message ?? 'Restore failed';
 		} finally {
@@ -86,30 +80,55 @@
 	function humanKind(k: string): string {
 		return k === 'ondemand' ? 'On-demand' : 'Scheduled';
 	}
+
+	// Restore CTAs disabled when the monthly quota is exhausted.
+	// `quota === null` (fetch failed) leaves the button enabled —
+	// the server-side check in HandleCreateRestore is the source of
+	// truth; the badge is display-only.
+	let restoreDisabled = $derived(quota?.exhausted === true || activeRestoreId !== null);
 </script>
 
 <div class="space-y-6">
-	<header class="flex items-start justify-between">
-		<div>
-			<h1 class="text-lg font-semibold text-gray-900">Backups</h1>
-			<p class="mt-1 text-xs text-gray-500">
-				Automatic daily snapshots + on-demand backups of your dedicated managed-PG instance.
-				Retention follows your plan (Team: 30 days).
-			</p>
+	<header>
+		<div class="flex items-start justify-between gap-4">
+			<div>
+				<h1 class="text-lg font-semibold text-gray-900">Backups</h1>
+				<p class="mt-1 text-xs text-gray-500">
+					Automatic daily snapshots of your dedicated managed-PG instance.
+					Retention follows your plan (Team: 7 days).
+					For a specific point in time within the last 7 days, use
+					<a href={`/p/${projectId}/database/pitr`} class="text-eurobase-700 hover:underline">
+						Point-in-time restore</a>.
+				</p>
+			</div>
+			{#if quota}
+				<div class="shrink-0 rounded-md border border-gray-200 bg-white px-3 py-2 text-right">
+					<div class="text-xs text-gray-500">Monthly restores</div>
+					<div class="text-sm font-semibold {quota.exhausted ? 'text-red-700' : 'text-gray-900'}">
+						{quota.used} of {quota.included} used
+					</div>
+					{#if quota.exhausted}
+						<div class="mt-1 text-xs text-red-600">
+							Resets {new Date(quota.resets_at).toLocaleDateString()}
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
-		<button
-			type="button"
-			onclick={createOnDemand}
-			disabled={creating}
-			class="rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-semibold text-white hover:bg-eurobase-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-		>
-			{creating ? 'Creating…' : 'Create backup now'}
-		</button>
 	</header>
 
 	{#if error}
 		<div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-800">
 			{error}
+		</div>
+	{/if}
+
+	{#if quota?.exhausted}
+		<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900">
+			<strong>Restore quota reached.</strong>
+			You've used {quota.used} of {quota.included} monthly restores.
+			The counter resets on {new Date(quota.resets_at).toLocaleDateString()}.
+			If you need an additional restore before then, contact support.
 		</div>
 	{/if}
 
@@ -142,8 +161,7 @@
 				{:else if backups.length === 0}
 					<tr>
 						<td colspan="6" class="px-4 py-6 text-center text-gray-400">
-							No backups yet. Scaleway automatic backups appear within 24 h; or click
-							<em>Create backup now</em> above.
+							No backups yet. Scaleway automatic backups appear within 24 h.
 						</td>
 					</tr>
 				{:else}
@@ -162,7 +180,8 @@
 								<button
 									type="button"
 									onclick={() => openRestoreConfirm(b.id)}
-									disabled={activeRestoreId !== null}
+									disabled={restoreDisabled}
+									title={quota?.exhausted ? 'Monthly restore quota reached — contact support' : undefined}
 									class="text-xs text-red-600 hover:text-red-800 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
 								>
 									Restore from this

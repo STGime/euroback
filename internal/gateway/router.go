@@ -811,9 +811,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// membership sense (destructive by nature).
 			backupSvc := tenant.NewBackupService(pool, providerRegistry, limitsSvc)
 			r.With(tenant.RequireMinRole("viewer")).Get("/backups", backupSvc.HandleListBackups())
-			r.With(tenant.RequireMinRole("admin")).Post("/backups", backupSvc.HandleCreateBackup())
+			// POST /backups (on-demand snapshot) removed in migration 000108
+			// as part of the backup-cost model rework. PITR-to-just-before
+			// covers the "snapshot before a risky migration" use case with
+			// the same semantics and no additional storage cost. Handler
+			// kept in backup_handlers.go for one release as a rollback
+			// window; no route registration.
 			r.With(tenant.RequireMinRole("admin")).Post("/restore", backupSvc.HandleCreateRestore())
 			r.With(tenant.RequireMinRole("viewer")).Get("/restore/{restoreId}", backupSvc.HandleGetRestore())
+			// Restore quota badge on the console Backups tab
+			// (migration 000108 / #457's cost-model rework).
+			r.With(tenant.RequireMinRole("viewer")).Get("/restore-quota", backupSvc.HandleGetRestoreQuota())
 
 			// Team-tier direct-DATABASE_URL surface (M4).
 			// Emits a real postgres:// URL for Payload / Prisma /

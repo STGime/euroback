@@ -50,6 +50,17 @@ type PlanLimits struct {
 	PITRDays              int  `json:"pitr_days"`
 	BackupRetentionDays   int  `json:"backup_retention_days"`
 	AuditLogRetentionDays int  `json:"audit_log_retention_days"`
+
+	// Migration 000108 (backup cost model rework):
+	//   IncludedRestoresPerMonth — hard cap enforced by
+	//     HandleCreateRestore. Once reached, further restores return
+	//     402 restore_quota_exceeded until the calendar month rolls
+	//     over. 0 = feature disabled (Free/Pro have no restore surface).
+	//   OnDemandBackupsEnabled — false on all plans today; kept as a
+	//     column (not a code const) so a future rollback path can
+	//     flip it without a deploy.
+	IncludedRestoresPerMonth int  `json:"included_restores_per_month"`
+	OnDemandBackupsEnabled   bool `json:"on_demand_backups_enabled"`
 }
 
 // legacyFreeLimits returns a PlanLimits struct with the pre-Phase-B
@@ -135,7 +146,8 @@ func (s *LimitsService) GetLimits(ctx context.Context, plan string) (*PlanLimits
 		        project_limit, log_retention_days, custom_templates, edge_function_limit,
 		        dsar_console_ui, custom_domain, byo_smtp, quota_alerts,
 		        price_cents, dedicated_db, pitr_days, backup_retention_days,
-		        audit_log_retention_days
+		        audit_log_retention_days,
+		        included_restores_per_month, on_demand_backups_enabled
 		 FROM plan_limits WHERE plan = $1`, plan,
 	).Scan(
 		&l.Plan, &l.DBSizeMB, &l.StorageMB, &l.BandwidthMB, &l.MAULimit,
@@ -144,6 +156,7 @@ func (s *LimitsService) GetLimits(ctx context.Context, plan string) (*PlanLimits
 		&l.DSARConsoleUI, &l.CustomDomain, &l.BYOSMTP, &l.QuotaAlerts,
 		&l.PriceCents, &l.DedicatedDB, &l.PITRDays, &l.BackupRetentionDays,
 		&l.AuditLogRetentionDays,
+		&l.IncludedRestoresPerMonth, &l.OnDemandBackupsEnabled,
 	)
 	if err != nil {
 		slog.Error("failed to load plan limits", "plan", plan, "error", err)

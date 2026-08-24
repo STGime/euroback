@@ -9,6 +9,7 @@ package tenant
 // gobd_export); backups are baseline dedicated-DB functionality.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -290,6 +291,20 @@ func (s *BackupService) HandleCreateRestore() http.HandlerFunc {
 			return
 		}
 
+		// Monthly restore quota (migration 000108). Enforced BEFORE
+		// PITR-window validation so a quota-exhausted user gets a
+		// clean 402 with the reset time, rather than a 400 about
+		// their target_time that's actually rejected by quota anyway.
+		//
+		// The count query mirrors the same shape used by the
+		// restore-quota endpoint below — kept inline (not extracted
+		// yet) because it's the only two callers and a helper would
+		// obscure the WHERE clauses that matter.
+		if err := s.enforceRestoreQuota(r.Context(), w, projectID); err != nil {
+			// enforceRestoreQuota has already written the response.
+			return
+		}
+
 		var req RestoreRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
@@ -493,5 +508,126 @@ func writeBackupAudit(r *http.Request, projectID, action string, metadata map[st
 	svc.Log(r.Context(), projectID, actorID, actorEmail, action,
 		audit.WithMetadata(metadata),
 		audit.WithIP(r.RemoteAddr))
+}
+
+// RestoreQuota is the shape returned by GET /platform/projects/{id}/
+// restore-quota AND used internally by enforceRestoreQuota to build
+// the 402 response body. Kept in one type so console + handler can't
+// drift.
+type RestoreQuota struct {
+	Included  int       `json:"included"`
+	Used      int       `json:"used"`
+	ResetsAt  time.Time `json:"resets_at"`
+	Exhausted bool      `json:"exhausted"`
+}
+
+// countMonthlyRestores returns the number of restore_operations
+// created for `projectID` since the start of the current calendar
+// month, excluding terminal-failure states so a broken restore
+// attempt doesn't count against the user's quota. See migration
+// 000108 for the design rationale — this is the single source of
+// truth for restore-quota counting.
+func (s *BackupService) countMonthlyRestores(ctx context.Context, projectID string) (int, error) {
+	var used int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM public.restore_operations
+		  WHERE project_id = $1::uuid
+		    AND created_at >= date_trunc('month', now())
+		    AND state <> 'failed'`,
+		projectID,
+	).Scan(&used)
+	return used, err
+}
+
+// enforceRestoreQuota resolves the project's plan limit, counts
+// this month's non-failed restores, and 402s if the quota is
+// exhausted. Returns a non-nil error ONLY when the caller must
+// stop processing (which it should because a response was already
+// written). Returns nil when the quota check passed OR failed
+// open (see comment below on error posture).
+func (s *BackupService) enforceRestoreQuota(ctx context.Context, w http.ResponseWriter, projectID string) error {
+	limits, err := s.limits.GetProjectLimits(ctx, projectID)
+	if err != nil {
+		// Fail open: if we can't resolve limits, let the restore
+		// proceed rather than blocking a user for a transient DB
+		// blip. The subsequent handler steps will fail cleanly if
+		// the project is really broken. Matches the shape used by
+		// other CheckX helpers that swallow transient errors.
+		slog.Warn("restore quota: plan limits lookup failed — allowing restore",
+			"project_id", projectID, "error", err)
+		return nil
+	}
+	if limits.IncludedRestoresPerMonth <= 0 {
+		// Feature disabled for this plan (Free/Pro have no restore
+		// surface at all — CheckDedicatedDB should have already
+		// blocked). Defensive.
+		http.Error(w, `{"error":"restore not available on this plan","code":"dedicated_db_required"}`, http.StatusPaymentRequired)
+		return fmt.Errorf("restore quota check: plan has no restore surface")
+	}
+	used, err := s.countMonthlyRestores(ctx, projectID)
+	if err != nil {
+		slog.Warn("restore quota: count failed — allowing restore",
+			"project_id", projectID, "error", err)
+		return nil
+	}
+	if used < limits.IncludedRestoresPerMonth {
+		return nil
+	}
+	// Exhausted. Compute reset time = first day of next month, UTC.
+	// Keeping it UTC (not the tenant's local) so the response is
+	// unambiguous and matches how the count query filters
+	// (date_trunc respects the session TZ, which for platform pool
+	// is UTC).
+	now := time.Now().UTC()
+	resetsAt := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+	body, _ := json.Marshal(map[string]any{
+		"error":     fmt.Sprintf("restore quota exceeded (%d/%d this month) — contact support for additional restores", used, limits.IncludedRestoresPerMonth),
+		"code":      "restore_quota_exceeded",
+		"included":  limits.IncludedRestoresPerMonth,
+		"used":      used,
+		"resets_at": resetsAt.Format(time.RFC3339),
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusPaymentRequired)
+	_, _ = w.Write(body)
+	return fmt.Errorf("restore quota exceeded")
+}
+
+// HandleGetRestoreQuota — GET /platform/projects/{id}/restore-quota.
+// Cheap read the console polls on the Backups tab to render the
+// "0 of 1 monthly restores used" badge. Same auth + plan gate as
+// the other backup routes.
+func (s *BackupService) HandleGetRestoreQuota() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		if projectID == "" {
+			http.Error(w, `{"error":"project id required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+		limits, err := s.limits.GetProjectLimits(r.Context(), projectID)
+		if err != nil {
+			http.Error(w, `{"error":"limits lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		used, err := s.countMonthlyRestores(r.Context(), projectID)
+		if err != nil {
+			http.Error(w, `{"error":"count failed"}`, http.StatusInternalServerError)
+			return
+		}
+		now := time.Now().UTC()
+		resetsAt := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+		q := RestoreQuota{
+			Included:  limits.IncludedRestoresPerMonth,
+			Used:      used,
+			ResetsAt:  resetsAt,
+			Exhausted: used >= limits.IncludedRestoresPerMonth,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(q)
+	}
 }
 
