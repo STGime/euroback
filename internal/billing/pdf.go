@@ -209,24 +209,35 @@ func RenderInvoicePDF(d InvoiceData) ([]byte, error) {
 	}
 
 	// ── Line items table ───────────────────────────────────────
+	// Column widths sum to 170mm — the A4 usable width after the
+	// 20mm side margins from SetMargins(20, 20, 20). Previous
+	// allocation (110/30/30) left the Period column too narrow:
+	// "24 Aug–24 Sep 2026" at 10pt Helvetica needs ~40mm, so the
+	// year overflowed into the Amount column border (user-reported
+	// 2026-08-24). Rebalanced: Description 100 / Period 45 / Amount
+	// 25 — Period fits any single-month or spans-a-year range with
+	// slack; Amount fits €19.00 through €9999.99 at 10pt.
 	pdf.SetFont("Helvetica", "B", 10)
 	pdf.SetFillColor(243, 244, 246) // light grey (#f3f4f6)
-	pdf.CellFormat(110, 8, tr("Description"), "1", 0, "L", true, 0, "")
-	pdf.CellFormat(30, 8, tr("Period"), "1", 0, "L", true, 0, "")
-	pdf.CellFormat(30, 8, tr("Amount"), "1", 0, "R", true, 0, "")
+	pdf.CellFormat(100, 8, tr("Description"), "1", 0, "L", true, 0, "")
+	pdf.CellFormat(45, 8, tr("Period"), "1", 0, "L", true, 0, "")
+	pdf.CellFormat(25, 8, tr("Amount"), "1", 0, "R", true, 0, "")
 	pdf.Ln(-1)
 
 	pdf.SetFont("Helvetica", "", 10)
-	pdf.CellFormat(110, 8, tr(d.Description), "1", 0, "L", false, 0, "")
+	pdf.CellFormat(100, 8, tr(d.Description), "1", 0, "L", false, 0, "")
 	period := fmt.Sprintf("%s–%s", d.PeriodFrom.Format("2 Jan"), d.PeriodTo.Format("2 Jan 2006"))
-	pdf.CellFormat(30, 8, tr(period), "1", 0, "L", false, 0, "")
-	pdf.CellFormat(30, 8, tr(formatEUR(d.AmountCents, d.Currency)), "1", 0, "R", false, 0, "")
+	pdf.CellFormat(45, 8, tr(period), "1", 0, "L", false, 0, "")
+	pdf.CellFormat(25, 8, tr(formatEUR(d.AmountCents, d.Currency)), "1", 0, "R", false, 0, "")
 	pdf.Ln(-1)
 
-	// Total row.
+	// Total row — label spans Description+Period columns (145mm),
+	// value cell matches the Amount column (25mm) so the right
+	// border lines up. 145+25 = 170 mm total, same as the header
+	// row above.
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.CellFormat(140, 10, tr("Total"), "1", 0, "R", false, 0, "")
-	pdf.CellFormat(30, 10, tr(formatEUR(d.AmountCents, d.Currency)), "1", 0, "R", false, 0, "")
+	pdf.CellFormat(145, 10, tr("Total"), "1", 0, "R", false, 0, "")
+	pdf.CellFormat(25, 10, tr(formatEUR(d.AmountCents, d.Currency)), "1", 0, "R", false, 0, "")
 	pdf.Ln(15)
 
 	// ── VAT statement ──────────────────────────────────────────
