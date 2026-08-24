@@ -297,6 +297,21 @@ export interface RestoreOperation {
 	completed_at?: string | null;
 }
 
+/**
+ * Monthly restore quota for a Team/Legal-Team project. Returned by
+ * `GET /platform/projects/{id}/restore-quota` and derived from
+ * `plan_limits.included_restores_per_month` × count of this month's
+ * non-failed `restore_operations`. See migration 000108 for the
+ * cost-model rationale.
+ */
+export interface RestoreQuota {
+	included: number;
+	used: number;
+	/** RFC3339 UTC — first of next month. */
+	resets_at: string;
+	exhausted: boolean;
+}
+
 export interface Project {
 	id: string;
 	name: string;
@@ -1980,11 +1995,25 @@ export class EurobaseAPI {
 		);
 	}
 
-	/** Trigger an on-demand backup. Rate-limited (5/day/project). */
-	async createBackup(projectId: string): Promise<BackupSnapshot> {
-		return this.fetch<BackupSnapshot>(`/platform/projects/${projectId}/backups`, {
-			method: 'POST'
-		});
+	// On-demand backups were removed in migration 000108 as part of
+	// the backup-cost model rework: PITR-to-just-before covers the
+	// "snapshot before a risky migration" use case with the same
+	// semantics and no additional storage cost. The route
+	// `POST /platform/projects/{id}/backups` is no longer registered
+	// server-side; any residual caller gets 404. Method deliberately
+	// omitted so a TypeScript miscompile catches stale call sites.
+
+	/**
+	 * Fetch the caller's restore-quota for this project. The
+	 * console renders `{used}/{included} restores used this month`
+	 * on the Backups + PITR pages; when `exhausted` is true, the
+	 * restore CTAs are disabled with a support-conversation upsell.
+	 * Server enforces the same cap on POST /restore — this endpoint
+	 * is display-only so the button state matches what the backend
+	 * will accept.
+	 */
+	async getRestoreQuota(projectId: string): Promise<RestoreQuota> {
+		return this.fetch<RestoreQuota>(`/platform/projects/${projectId}/restore-quota`);
 	}
 
 	/** Trigger a snapshot restore. Returns the restore-operation id for polling. */
