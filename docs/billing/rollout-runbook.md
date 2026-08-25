@@ -22,21 +22,31 @@ Estonian business IBAN (Eurobase OÜ). If it says "pending
 verification", Mollie hasn't finished KYC yet — stop here and
 resume this runbook when it clears.
 
-### 3. Patch `eurobase-secrets` with the three billing keys
+### 3. Patch `eurobase-secrets` with the live Mollie key
+
+**Only `MOLLIE_API_KEY_LIVE` goes in the Secret.** `MOLLIE_ENV`
+and `BILLING_ENABLED` live in `deploy/k8s/gateway.yaml`'s `env:`
+block — and Kubernetes `env:` **overrides** `envFrom:` for the
+same key, so patching those two into the Secret is silently
+ignored. This was a bug in the previous version of this runbook,
+fixed in the same PR that flipped `MOLLIE_ENV` in the yaml.
 
 ```bash
 kubectl -n eurobase patch secret eurobase-secrets --type merge -p '{
   "stringData": {
-    "MOLLIE_API_KEY_LIVE": "live_XXXXXXXX_paste_from_dashboard",
-    "MOLLIE_ENV":          "live",
-    "BILLING_ENABLED":     "true"
+    "MOLLIE_API_KEY_LIVE": "live_XXXXXXXX_paste_from_dashboard"
   }
 }'
 ```
 
 **Don't restart the pod yet** — restart is Step 8 below (T-0).
-This step just gets the values into the Secret so the next
-restart picks them up atomically.
+This step just gets the key into the Secret so the next restart
+picks it up atomically alongside the merged-in yaml change from
+the cutover PR (which flips `MOLLIE_ENV` to `"live"`).
+
+**Never commit the live key** — the repo is public. Store it in
+a password manager; paste it directly into the `kubectl patch`
+line above at cutover time.
 
 ### 4. Verify the migrations landed in prod
 
@@ -172,17 +182,32 @@ Verify **all three** before proceeding to the smoke test:
 If any of the three fails, roll the flag back (rollback
 section) before opening the door wider.
 
-### T+5m — smoke test
+### T+5m — smoke test with real money
 
-Stefan pays €0.01 on his own account (using a Mollie sandbox
-card in live-mode test — see Mollie docs). Verify:
-- Webhook arrives (`kubectl logs | grep billing.webhook`).
-- Subscription flips to `active`.
-- Invoice PDF renders + lands on `billing@eurobase.app`.
-- Console `/billing` page shows the invoice + PDF download.
+**In live mode there is no €0.01 test.** Mollie charges the
+plan's `price_cents` value — Pro is €19/mo. Do a real €19
+Pro subscription on your own project, then refund + cancel
+immediately after verification. Total: €19 out, €19 back,
+~5 minutes end-to-end.
 
-If everything's green, upgrade to a real €19 sub on Stefan's
-personal Pro project as the final smoke test.
+1. **Checkout:** Console → your project → Billing tab →
+   Upgrade to Pro. Complete the €19 payment with a real card.
+2. **Verify the loop:**
+   - Webhook arrived: `kubectl -n eurobase logs -l app=gateway
+     --tail=200 | grep billing.webhook` shows a paid event.
+   - Subscription active: console Billing tab or
+     `SELECT status FROM subscriptions WHERE project_id = $YOUR_PROJECT`.
+   - Invoice PDF renders + lands on `billing@eurobase.app`.
+   - Console `/billing` page shows the invoice with a working
+     PDF download button.
+3. **Refund + cancel:** `my.mollie.com` → Customers → yourself
+   → Payments → Refund the €19 charge. Then Subscriptions →
+   Cancel. Refund lands on the card within 2-3 business days.
+
+Note: the earlier "€0.01 sandbox card" wording in this file
+was a leftover from test-mode drafts — Mollie's sandbox cards
+only work while `MOLLIE_ENV=test`. Once live is on, the
+smallest real charge is whatever the plan says.
 
 ### T+15m — announce
 
@@ -219,6 +244,23 @@ If something fatal shows up:
    `kubectl -n eurobase set env deploy/gateway BILLING_ENABLED=false`
    then `kubectl rollout restart deploy/gateway`. Endpoints
    revert to 503 `billing_disabled` within seconds.
+
+   **⚠️ ALSO revert the yaml, or the next CI apply re-arms billing.**
+   `BILLING_ENABLED: "true"` lives in `deploy/k8s/gateway.yaml`'s
+   `env:` block (which overrides `envFrom:` for the same key —
+   same mechanic that caused the original `MOLLIE_ENV` bug).
+   `kubectl set env` mutates the live Deployment but the next
+   `kubectl apply -f gateway.yaml` from CI silently restores
+   `BILLING_ENABLED: "true"` from the file. Two ways to make the
+   disable durable:
+   - **Revert or amend the cutover PR in git** (set the yaml
+     value to `"false"`, or revert PR #465 entirely). Merging
+     that revert re-deploys with billing off. Preferred path.
+   - **Freeze deploys** — pause the deploy workflow in GitHub
+     Actions AND leave a big note in Slack / Discord `#ops`
+     ("no merges to main until incident cleared"). Only use as
+     a stopgap while the revert PR is being written; a merge
+     from anyone else during the freeze re-arms billing.
 
 2. **Cancel existing Mollie subscriptions.** They'll keep
    charging users until explicitly stopped — our webhooks are

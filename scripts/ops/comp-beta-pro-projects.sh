@@ -18,7 +18,7 @@
 # Usage:
 #   ./scripts/ops/comp-beta-pro-projects.sh \
 #     --uuids <uuid1>,<uuid2> \
-#     --until 2027-08-21 \
+#     --until 2026-12-31 \
 #     [--dry-run]
 
 set -euo pipefail
