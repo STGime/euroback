@@ -402,7 +402,7 @@ func (s *DowngradeService) sendDowngradeMail(ctx context.Context, c downgradeCan
             Nothing is deleted. Your database, storage, functions and users are all still there. The Free plan caps you at 5,000 monthly active users, 512 MB storage, 2 GB bandwidth, 50 realtime connections. The project also auto-pauses after 30 days of inactivity; the first request after that wakes it up in ~30 seconds.
           </p>
           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#374151;">
-            If this wasn't intentional, or you'd like to re-enable Pro (&euro;19/mo per project), reply to this mail or head to <a href="https://console.eurobase.app/projects/%s/billing" style="color:#1d4ed8;">the project's billing page</a>.
+            If this wasn't intentional, or you'd like to re-enable Pro (&euro;19/mo per project), reply to this mail or head to <a href="https://console.eurobase.app/p/%s/billing" style="color:#1d4ed8;">the project's billing page</a>.
           </p>
           <p style="margin:20px 0 6px;font-size:14px;color:#374151;">Thanks,<br><strong>Stefan</strong></p>
         </td></tr>
