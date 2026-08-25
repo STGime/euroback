@@ -230,6 +230,23 @@ If something fatal shows up:
    then `kubectl rollout restart deploy/gateway`. Endpoints
    revert to 503 `billing_disabled` within seconds.
 
+   **⚠️ ALSO revert the yaml, or the next CI apply re-arms billing.**
+   `BILLING_ENABLED: "true"` lives in `deploy/k8s/gateway.yaml`'s
+   `env:` block (which overrides `envFrom:` for the same key —
+   same mechanic that caused the original `MOLLIE_ENV` bug).
+   `kubectl set env` mutates the live Deployment but the next
+   `kubectl apply -f gateway.yaml` from CI silently restores
+   `BILLING_ENABLED: "true"` from the file. Two ways to make the
+   disable durable:
+   - **Revert or amend the cutover PR in git** (set the yaml
+     value to `"false"`, or revert PR #465 entirely). Merging
+     that revert re-deploys with billing off. Preferred path.
+   - **Freeze deploys** — pause the deploy workflow in GitHub
+     Actions AND leave a big note in Slack / Discord `#ops`
+     ("no merges to main until incident cleared"). Only use as
+     a stopgap while the revert PR is being written; a merge
+     from anyone else during the freeze re-arms billing.
+
 2. **Cancel existing Mollie subscriptions.** They'll keep
    charging users until explicitly stopped — our webhooks are
    now silently 200'ing (see PR 4), so we won't record the
