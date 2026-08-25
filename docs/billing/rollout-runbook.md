@@ -182,17 +182,32 @@ Verify **all three** before proceeding to the smoke test:
 If any of the three fails, roll the flag back (rollback
 section) before opening the door wider.
 
-### T+5m — smoke test
+### T+5m — smoke test with real money
 
-Stefan pays €0.01 on his own account (using a Mollie sandbox
-card in live-mode test — see Mollie docs). Verify:
-- Webhook arrives (`kubectl logs | grep billing.webhook`).
-- Subscription flips to `active`.
-- Invoice PDF renders + lands on `billing@eurobase.app`.
-- Console `/billing` page shows the invoice + PDF download.
+**In live mode there is no €0.01 test.** Mollie charges the
+plan's `price_cents` value — Pro is €19/mo. Do a real €19
+Pro subscription on your own project, then refund + cancel
+immediately after verification. Total: €19 out, €19 back,
+~5 minutes end-to-end.
 
-If everything's green, upgrade to a real €19 sub on Stefan's
-personal Pro project as the final smoke test.
+1. **Checkout:** Console → your project → Billing tab →
+   Upgrade to Pro. Complete the €19 payment with a real card.
+2. **Verify the loop:**
+   - Webhook arrived: `kubectl -n eurobase logs -l app=gateway
+     --tail=200 | grep billing.webhook` shows a paid event.
+   - Subscription active: console Billing tab or
+     `SELECT status FROM subscriptions WHERE project_id = $YOUR_PROJECT`.
+   - Invoice PDF renders + lands on `billing@eurobase.app`.
+   - Console `/billing` page shows the invoice with a working
+     PDF download button.
+3. **Refund + cancel:** `my.mollie.com` → Customers → yourself
+   → Payments → Refund the €19 charge. Then Subscriptions →
+   Cancel. Refund lands on the card within 2-3 business days.
+
+Note: the earlier "€0.01 sandbox card" wording in this file
+was a leftover from test-mode drafts — Mollie's sandbox cards
+only work while `MOLLIE_ENV=test`. Once live is on, the
+smallest real charge is whatever the plan says.
 
 ### T+15m — announce
 
