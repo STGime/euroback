@@ -448,7 +448,7 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	payment, err := s.client.CreatePayment(ctx, mollie.PaymentCreateRequest{
 		Amount:       mollie.AmountFromCents(price, "EUR"),
 		Description:  fmt.Sprintf("Eurobase %s — %s", planCode, projectName),
-		RedirectURL:  fmt.Sprintf("%s/projects/%s/billing?status=success", s.config.ConsoleBaseURL, projectID),
+		RedirectURL:  fmt.Sprintf("%s/p/%s/billing?status=success", s.config.ConsoleBaseURL, projectID),
 		WebhookURL:   fmt.Sprintf("%s/platform/billing/webhook", s.config.WebhookBaseURL),
 		CustomerID:   customerID,
 		SequenceType: mollie.SequenceTypeFirst,

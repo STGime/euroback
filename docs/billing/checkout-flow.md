@@ -40,7 +40,7 @@ Console                Gateway                DB                     Mollie
    │                                                                   mandate /
    │                                                                   card 3DS
    │                                                                    │
-   │◄────── redirect to /projects/{id}/billing?status=success ──────────│
+   │◄────── redirect to /p/{id}/billing?status=success ─────────────────│
 ```
 
 The Mollie subscription itself is *not* created here — that happens
