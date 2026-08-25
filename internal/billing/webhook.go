@@ -761,8 +761,12 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 	if payment.SubscriptionID == "" {
 		// A failed first payment (before mandate capture) doesn't
 		// belong to a Mollie subscription yet — the user just
-		// abandoned checkout. Their local 'incomplete' row will
-		// be swept by PR 5's grace cron; nothing to do here.
+		// abandoned checkout. Mark the local 'incomplete' row
+		// canceled so the retry guard (service.go: status IN
+		// ('incomplete','active','past_due')) lets them try again
+		// immediately. We keep the row rather than delete so
+		// invoices.subscription_id (FK ON DELETE SET NULL) retains
+		// the audit link back to what happened.
 		slog.Info("billing.webhook.first_payment_failed", "id", payment.ID)
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE public.invoices
@@ -771,6 +775,27 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 			payment.ID,
 		); err != nil {
 			return fmt.Errorf("mark first invoice failed: %w", err)
+		}
+		if subID := payment.Metadata["subscription_id"]; subID != "" {
+			if _, err := s.pool.Exec(ctx,
+				`UPDATE public.subscriptions
+				    SET status = 'canceled',
+				        canceled_at = now()
+				  WHERE id = $1
+				    AND status = 'incomplete'`,
+				subID,
+			); err != nil {
+				slog.Warn("billing.webhook.subscription_cancel_on_abandonment_failed",
+					"subscription_id", subID,
+					"mollie_payment_id", payment.ID,
+					"error", err,
+				)
+			} else {
+				slog.Info("billing.webhook.subscription_canceled_on_abandonment",
+					"subscription_id", subID,
+					"mollie_payment_id", payment.ID,
+				)
+			}
 		}
 		// Also clean up any pending_project row this failed payment
 		// belonged to (#407 review 🟡 #3). Without this, an
