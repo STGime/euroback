@@ -49,15 +49,18 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, string, string) {
 		t.Skip("migrations not applied; run setup-local.sh first")
 	}
 
-	// Create a test platform user.
-	hankoUserID := fmt.Sprintf("test-query-engine-%d", os.Getpid())
+	// Create a test platform user. platform_users lost the hanko_user_id
+	// column when Hanko was ripped out of the platform-auth path; email
+	// is the natural unique identifier now. The unique index on email
+	// is partial (WHERE email <> '') so it can't be used as an ON CONFLICT
+	// target — clear any residue from a crashed prior run first, then
+	// plain INSERT.
+	testEmail := fmt.Sprintf("query-engine-test-%d@eurobase.app", os.Getpid())
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, testEmail)
 	var ownerID string
 	err = pool.QueryRow(ctx,
-		`INSERT INTO platform_users (hanko_user_id, email)
-		 VALUES ($1, $2)
-		 ON CONFLICT (hanko_user_id) DO UPDATE SET email = EXCLUDED.email
-		 RETURNING id`,
-		hankoUserID, "querytest@eurobase.app",
+		`INSERT INTO platform_users (email) VALUES ($1) RETURNING id`,
+		testEmail,
 	).Scan(&ownerID)
 	if err != nil {
 		pool.Close()
@@ -85,7 +88,7 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, string, string) {
 	if err != nil {
 		// Clean up on failure.
 		_, _ = pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
-		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE hanko_user_id = $1`, hankoUserID)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, testEmail)
 		pool.Close()
 		t.Skipf("cannot provision tenant: %v", err)
 	}
@@ -95,7 +98,7 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, string, string) {
 	if err != nil {
 		_, _ = pool.Exec(ctx, `SELECT deprovision_tenant($1)`, projectID)
 		_, _ = pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
-		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE hanko_user_id = $1`, hankoUserID)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, testEmail)
 		pool.Close()
 		t.Skipf("cannot activate project: %v", err)
 	}
@@ -115,7 +118,7 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, string, string) {
 			slog.Warn("deprovision_tenant cleanup failed", "project_id", projectID, "error", err)
 		}
 		_, _ = pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
-		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE hanko_user_id = $1`, hankoUserID)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, testEmail)
 		pool.Close()
 	})
 
