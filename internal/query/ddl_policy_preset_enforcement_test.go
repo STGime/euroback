@@ -58,6 +58,15 @@ func mkRuntimeRole(t *testing.T, pool *pgxpool.Pool, schema, table string) (stri
 	pw := "irrelevant"
 	sqls := []string{
 		fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", roleName, pw),
+		// PG16: a CREATEROLE non-superuser CAN create a role but
+		// CANNOT SET ROLE to it without an explicit membership +
+		// SET option. Grant the connecting session role membership
+		// with the SET privilege so `SET LOCAL ROLE <throwaway>`
+		// below works regardless of whether the test DB connects
+		// as a superuser or as eurobase_api. Without this the tests
+		// silently only run on superuser connections and give a
+		// false sense of coverage everywhere else.
+		fmt.Sprintf("GRANT %s TO CURRENT_USER WITH SET TRUE", roleName),
 		fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", quoteIdent(schema), roleName),
 		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO %s", qualifiedTable(schema, table), roleName),
 		// The is_service_role() lookup lives in public — the role
