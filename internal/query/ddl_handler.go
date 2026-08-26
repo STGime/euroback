@@ -326,6 +326,19 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 		// apply owner_access; otherwise we leave the table policy-less
 		// (deny-all to end-users — safe, but opaque to clients until the
 		// developer picks a preset). "none" explicitly skips auto-preset.
+		//
+		// If a REQUESTED preset fails to apply we roll back the table and
+		// return the error. Previously (customer-reported): the WARN was
+		// swallowed and the client got a 200 with the table left in an
+		// RLS-enabled-but-policy-less state — indistinguishable from a
+		// working table until the first SELECT/INSERT came back with
+		// "row-level security policy denied this operation" and no clear
+		// hint that the preset silently failed.
+		//
+		// AUTO-preset failure (no preset requested) is still a WARN + soft
+		// fail: the table stays created with default deny-all RLS, which
+		// is the safe posture. That's a legitimate outcome for tables
+		// without a detectable owner column.
 		appliedPreset := ""
 		if req.RLSPreset != "" && req.RLSPreset != "none" {
 			userIDCol := req.RLSUserIDColum
@@ -336,14 +349,21 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 				userIDCol = "user_id"
 			}
 			if err := ApplyPolicyPreset(r.Context(), pool, schemaName, req.Name, req.RLSPreset, userIDCol); err != nil {
-				slog.Warn("apply default rls preset failed", "error", err, "table", req.Name, "preset", req.RLSPreset)
-			} else {
-				appliedPreset = req.RLSPreset
+				slog.Error("requested rls preset failed — rolling back table",
+					"error", err, "table", req.Name, "preset", req.RLSPreset, "user_id_column", userIDCol)
+				if dropErr := DropTable(r.Context(), pool, schemaName, req.Name); dropErr != nil {
+					slog.Warn("rollback drop after preset failure also failed",
+						"error", dropErr, "table", req.Name)
+				}
+				jsonError(w, fmt.Sprintf("rls preset %q failed to apply: %v", req.RLSPreset, err), http.StatusBadRequest)
+				return
 			}
+			appliedPreset = req.RLSPreset
 		} else if req.RLSPreset == "" {
 			if owner := detectOwnerColumn(req.Columns); owner != "" {
 				if err := ApplyPolicyPreset(r.Context(), pool, schemaName, req.Name, "owner_access", owner); err != nil {
-					slog.Warn("auto-apply owner_access preset failed", "error", err, "table", req.Name, "owner_column", owner)
+					slog.Warn("auto-apply owner_access preset failed — table left with default deny-all RLS",
+						"error", err, "table", req.Name, "owner_column", owner)
 				} else {
 					appliedPreset = "owner_access"
 				}

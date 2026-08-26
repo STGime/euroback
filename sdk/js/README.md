@@ -222,7 +222,28 @@ await eb.db.schema.createTable('announcements', {
 })
 ```
 
-Available presets: `owner_access`, `public_read_owner_write`, `authenticated_read_owner_write`, `full_access`, `read_only`, `none`.
+### RLS presets
+
+Under every preset except `full_access`, the **secret key (`ebsk_`) bypasses the row filter** via `public.is_service_role()` — your server-side backend can read/write the table regardless of the end-user check. The **public key (`ebpk_`)** gets whatever the preset name implies.
+
+| Preset | Public-key SELECT | Public-key INSERT/UPDATE/DELETE | Secret-key access |
+|---|---|---|---|
+| `owner_access` | end-user must own row | end-user must own row | full |
+| `public_read_owner_write` | anyone | end-user must own row | full |
+| `authenticated_read_owner_write` | any signed-in end-user | end-user must own row | full |
+| `service_only` | denied | denied | full |
+| `read_only` | anyone | denied | full (read + write) |
+| `full_access` | anyone | anyone | full (no distinction from public — opt-in only for genuinely public data) |
+| `none` | skips preset entirely; RLS stays enabled with **no policies** → deny-all for everyone including the secret key. Use only if you'll `CREATE POLICY` yourself. |
+
+**`service_only`** is the right choice when a table is server-side-only — e.g. lookup tables migrated from another provider, PII the browser SDK must never reach, or webhooks tables written by your Next.js/Express backend. The public key structurally cannot touch these rows regardless of end-user auth state:
+
+```ts
+await eb.db.schema.createTable('internal_admin_lookups', {
+  columns: [/* ... */],
+  rlsPreset: 'service_only',
+})
+```
 
 ## Storage
 
