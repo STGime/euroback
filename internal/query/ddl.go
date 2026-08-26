@@ -1295,8 +1295,29 @@ func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tabl
 			fmt.Sprintf("CREATE POLICY allow_all ON %s FOR ALL USING (true)", qt),
 		}
 	case "read_only":
+		// Public callers can SELECT; only the secret key can
+		// INSERT/UPDATE/DELETE. The previous version omitted the
+		// service-write policy and left the table effectively frozen
+		// (no one could write, including our own backend). Customer-
+		// reported (#TBD): "we picked read_only expecting anon reads
+		// + secret writes, but our secret-key backend also got denied".
+		// Policies OR together (permissive), so the SELECT branch of
+		// FOR ALL is a no-op when a broader FOR SELECT USING (true)
+		// exists — safe to keep both.
 		sqls = []string{
-			fmt.Sprintf("CREATE POLICY read_only ON %s FOR SELECT USING (true)", qt),
+			fmt.Sprintf("CREATE POLICY read_only_public_read ON %s FOR SELECT USING (true)", qt),
+			fmt.Sprintf("CREATE POLICY read_only_service_ops ON %s FOR ALL USING (%s)", qt, srv),
+		}
+	case "service_only":
+		// Locks the table down to the secret key only. Anon (public
+		// key) callers are denied every operation; the secret key
+		// bypasses via is_service_role(). Intended for tables your
+		// own backend touches via the service key exclusively — e.g.
+		// admin lookup tables migrated from another auth provider,
+		// or PII tables that should never be reachable from the
+		// browser SDK regardless of end-user auth state.
+		sqls = []string{
+			fmt.Sprintf("CREATE POLICY service_only ON %s FOR ALL USING (%s)", qt, srv),
 		}
 	default:
 		return fmt.Errorf("unknown policy preset: %s", preset)

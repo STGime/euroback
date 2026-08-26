@@ -18,10 +18,28 @@ export interface ColumnDefinition {
   primary_key?: boolean
 }
 
+/**
+ * RLS policy preset applied to the table on creation. Under every
+ * preset except 'full_access', the secret (ebsk_) key bypasses the
+ * row filter via public.is_service_role(); the public (ebpk_) key
+ * gets whatever the preset name implies.
+ *
+ * - 'owner_access'                — anon: denied; end-user: owner-only; secret: all
+ * - 'public_read_owner_write'     — anon: read only; end-user: read all + owner-write; secret: all
+ * - 'authenticated_read_owner_write' — anon: denied; any signed-in end-user: read; owner: write; secret: all
+ * - 'service_only'                — anon: denied; end-user: denied; secret: all
+ *                                    (use for server-only tables — the browser SDK physically cannot reach these rows)
+ * - 'read_only'                   — anon: read only; end-user: read only; secret: read + write
+ * - 'full_access'                 — anon: full read/write; no secret-key distinction (opt-in only for genuinely public data)
+ * - 'none'                        — skip preset application entirely. RLS stays enabled with NO policies,
+ *                                    which is Postgres-default deny-all for everyone including the secret key.
+ *                                    Use only if you plan to CREATE POLICY yourself immediately after.
+ */
 export type RLSPreset =
   | 'owner_access'
   | 'public_read_owner_write'
   | 'authenticated_read_owner_write'
+  | 'service_only'
   | 'full_access'
   | 'read_only'
   | 'none'
@@ -32,7 +50,8 @@ export interface CreateTableOptions {
   /**
    * RLS policy preset to apply after table creation. If omitted, the
    * gateway auto-detects an owner-style column (user_id, owner_id, created_by)
-   * and applies "owner_access". Pass "none" to skip the auto-preset.
+   * and applies "owner_access". Pass "none" to skip the auto-preset
+   * (leaves the table deny-all until you attach a custom policy).
    */
   rlsPreset?: RLSPreset
   /** Column to use as the owner identifier for the preset. */
