@@ -94,7 +94,7 @@ type onboardingTemplate struct {
 var onboardingTemplates = []onboardingTemplate{
 	// Step 0 — Day 0 — Welcome
 	{
-		subject: "Welcome to Eurobase (beta)",
+		subject: "Welcome to Eurobase",
 		body:    onboardingLayout(`
 			<h2 style="margin:16px 0 4px; font-size:17px; color:#111827;">👋 Welcome to Eurobase</h2>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
@@ -116,7 +116,7 @@ var onboardingTemplates = []onboardingTemplate{
 			  </ul>
 			</div>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  This is beta — features move, occasionally break, and the SLA is best-effort. If you catch something rough, tell us.
+			  If you catch something rough, tell us — reply lands in my inbox.
 			</p>
 		`),
 	},
