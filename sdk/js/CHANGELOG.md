@@ -2,6 +2,22 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.0 — 2026-08-26
+
+### Added — `service_only` RLS preset (#469)
+
+- **New `rlsPreset: 'service_only'`** on `eb.db.schema.createTable()`. Locks a table down to the **secret (`ebsk_`) key only** — the public (`ebpk_`) key is denied every operation regardless of end-user auth state. Intended for tables your own backend touches via the service key exclusively (admin lookups migrated from another provider, PII the browser SDK must never reach, webhook-backing tables written by your Next.js/Express backend). Verified end-to-end against Postgres 16 on the standard non-owner runtime shape.
+- Comprehensive doc comment on the `RLSPreset` union type mapping every preset's anon/end-user/secret contract in one place, and a new preset behaviour table in the README.
+
+### Fixed — `read_only` preset now allows secret-key writes
+
+- The `rlsPreset: 'read_only'` preset previously emitted only a `FOR SELECT USING (true)` policy, and Postgres RLS deny-by-default meant INSERT/UPDATE/DELETE were blocked for **everyone including the secret key**. The name implied "public reads, service writes" but the effect was "no one writes ever." Fixed to emit a companion `FOR ALL USING (public.is_service_role())` policy so the secret key can now INSERT/UPDATE/DELETE while anon-key reads still work.
+- **Forward-only fix.** The preset applies at table-**creation** time, so any table you already created with the old `read_only` preset keeps the frozen-writes behaviour until it's recreated (or its policies are dropped and re-applied via the console DDL surface).
+
+### Fixed — silent-failure at table creation now surfaces as HTTP 400
+
+- Previously, if a requested `rlsPreset` failed to apply at CREATE TABLE time (e.g. the auto-detected user-id column didn't exist on your table), the response was a silent 200 with `rls_enabled: true` but no actual policies attached — indistinguishable from a working table until the first query came back with `"row-level security policy denied this operation"`. Now the request fails loudly (HTTP 400) with the underlying Postgres error, and the just-created table is dropped so retrying with a corrected preset is idempotent. This closes a class of "the preset silently broke the table" bug reports.
+
 ## 0.5.0 — 2026-07-03
 
 ### Added — end-user email flows (part of umbrella #257)
