@@ -13,11 +13,11 @@ Customer-requested (MoltenCoffeeBean, Discord support 2026-08-27):
 Ships an authoritative type surface for `req`, `ctx`, and the handler shape as a **types-only subpath** at `@eurobase/sdk/functions`. Zero runtime code is emitted; consumers use a type-only import in their function source:
 
 ```ts
-import type { EdgeHandler, EdgeContext } from '@eurobase/sdk/functions'
+import type { EdgeHandler } from '@eurobase/sdk/functions'
 
 const handler: EdgeHandler = async (req, ctx) => {
   const { orderId } = (await req.json()) as { orderId: string }
-  const { rows } = await ctx.db.sql<{ id: string; total: number }>(
+  const rows = await ctx.db.sql<{ id: string; total: number }>(
     'SELECT id, total FROM orders WHERE id = $1',
     [orderId],
   )

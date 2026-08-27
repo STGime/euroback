@@ -12,11 +12,11 @@
  * elide it cleanly at build time:
  *
  * ```ts
- * import type { EdgeHandler, EdgeContext } from '@eurobase/sdk/functions'
+ * import type { EdgeHandler } from '@eurobase/sdk/functions'
  *
  * const handler: EdgeHandler = async (req, ctx) => {
  *   const { orderId } = (await req.json()) as { orderId: string }
- *   const { rows } = await ctx.db.sql<{ id: string; total: number }>(
+ *   const rows = await ctx.db.sql<{ id: string; total: number }>(
  *     'SELECT id, total FROM orders WHERE id = $1',
  *     [orderId],
  *   )
@@ -48,35 +48,16 @@ export interface EdgeUser {
 }
 
 /**
- * Result of `ctx.db.sql(...)`. `TRow` narrows the row shape so
- * `rows[0].foo` typechecks in the caller:
- *
- * ```ts
- * const { rows } = await ctx.db.sql<{ id: string }>('SELECT id FROM t')
- * ```
- */
-export interface EdgeQueryResult<TRow = Record<string, unknown>> {
-  /** Result rows in query order. Empty array for statements that
-   *  return no rows (INSERT/UPDATE/DELETE without RETURNING). */
-  rows: TRow[]
-  /** Number of rows affected (INSERT/UPDATE/DELETE) or returned
-   *  (SELECT with RETURNING). Matches `pg`'s command tag. */
-  rowCount: number
-}
-
-/**
- * Payload from `ctx.storage.upload(...)`.
+ * Payload from `ctx.storage.upload(...)`. The host handler returns
+ * only these two fields on success — do not add speculative
+ * `contentType` / `etag` fields; the underlying gateway response
+ * (`internal_storage_handler.go`) does not carry them.
  */
 export interface EdgeStorageUploadResult {
   /** Object key in tenant object storage — echoed from the upload call. */
   key: string
   /** Size of the uploaded object in bytes. */
   size: number
-  /** MIME type stored on the object (from `opts.contentType`, or
-   *  auto-detected server-side when omitted). */
-  contentType: string
-  /** Server-generated ETag; useful for `If-Match` / `If-None-Match`. */
-  etag: string
 }
 
 /**
@@ -151,11 +132,23 @@ export interface EdgeContext {
      * Execute a parameterised SQL query. Values in `params` bind to
      * `$1`, `$2`, … placeholders; do not string-interpolate values
      * into `query` (SQL injection).
+     *
+     * Resolves to the bare rows array — `await ctx.db.sql(...)` is
+     * `TRow[]`, not an object with a `rows` property. Do not
+     * destructure with `const { rows } = ...`; use
+     * `const rows = await ctx.db.sql(...)` directly.
+     * (This mirrors the runner's `db.sql.result` RPC, which
+     * resolves to `msg.rows` — see
+     * `functions-runner/worker_bootstrap.js:46-48`.)
+     *
+     * INSERT/UPDATE/DELETE without `RETURNING` resolve to an empty
+     * array. There is no row-count field on the return; use
+     * `RETURNING id` if you need to see what changed.
      */
     sql<TRow = Record<string, unknown>>(
       query: string,
       params?: unknown[],
-    ): Promise<EdgeQueryResult<TRow>>
+    ): Promise<TRow[]>
   }
 
   /**
@@ -183,7 +176,12 @@ export interface EdgeContext {
       operation: 'upload' | 'download',
       opts?: EdgeStorageSignedUrlOptions,
     ): Promise<EdgeSignedUrlResult>
-    delete(key: string): Promise<{ deleted: boolean }>
+    /**
+     * Delete an object by key. Resolves with no meaningful value on
+     * success — the underlying gateway response is `204 No Content`
+     * (see `internal_storage_handler.go`). Errors reject the promise.
+     */
+    delete(key: string): Promise<void>
   }
 
   /**
@@ -231,4 +229,4 @@ export interface EdgeContext {
 export type EdgeHandler = (
   req: Request,
   ctx: EdgeContext,
-) => Response | Promise<Response> | unknown | Promise<unknown>
+) => unknown | Promise<unknown>
