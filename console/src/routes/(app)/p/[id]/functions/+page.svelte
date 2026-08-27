@@ -504,15 +504,18 @@ module.exports = async (req, ctx) => {
 							<div class="flex items-center gap-2">
 								<button
 									onclick={() => loadMetrics()}
-									class="cursor-pointer rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showMetrics ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
+									aria-pressed={showMetrics}
 								>Metrics</button>
 								<button
 									onclick={loadVersions}
-									class="cursor-pointer rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showVersions ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
+									aria-pressed={showVersions}
 								>Versions</button>
 								<button
 									onclick={loadLogs}
-									class="cursor-pointer rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showLogs ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
+									aria-pressed={showLogs}
 								>Logs</button>
 								<button
 									onclick={() => { showDeleteConfirm = selectedFn?.name ?? null; }}
