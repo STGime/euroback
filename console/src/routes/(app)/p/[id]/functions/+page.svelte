@@ -196,7 +196,8 @@ module.exports = async (req, ctx) => {
   const body = await req.json().catch(() => ({}));
 
   // Example: query the database (scoped to your project schema).
-  // const { rows } = await ctx.db.sql(
+  // ctx.db.sql resolves to the rows array directly — don't destructure.
+  // const rows = await ctx.db.sql(
   //   "SELECT * FROM your_table WHERE id = $1",
   //   [body.id]
   // );
