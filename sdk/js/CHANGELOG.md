@@ -2,6 +2,36 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.0 — 2026-08-27
+
+### Added — TypeScript types for the Edge Function runtime
+
+Customer-requested (MoltenCoffeeBean, Discord support 2026-08-27):
+
+> The documentation provides some description of the API available for Edge functions. However, I think it would be good DX to have typescript types available for edge functions, too. Perhaps exported from the SDK?
+
+Ships an authoritative type surface for `req`, `ctx`, and the handler shape as a **types-only subpath** at `@eurobase/sdk/functions`. Zero runtime code is emitted; consumers use a type-only import in their function source:
+
+```ts
+import type { EdgeHandler, EdgeContext } from '@eurobase/sdk/functions'
+
+const handler: EdgeHandler = async (req, ctx) => {
+  const { orderId } = (await req.json()) as { orderId: string }
+  const { rows } = await ctx.db.sql<{ id: string; total: number }>(
+    'SELECT id, total FROM orders WHERE id = $1',
+    [orderId],
+  )
+  return Response.json(rows[0])
+}
+export default handler
+```
+
+Types cover the full `ctx` surface — `ctx.db.sql`, `ctx.vault.get`, `ctx.storage.upload / createSignedUrl / delete`, `ctx.env`, `ctx.user`, `ctx.requestId`, `ctx.log.{info,warn,error}` — tracked 1:1 with the runner's `makeCtx()` in `functions-runner/worker_bootstrap.js`. Consumers get editor autocomplete + type-checking on every helper.
+
+The subpath has **no `import` field** in `package.json` `exports`, only `types` — a consumer that tries to value-import from `@eurobase/sdk/functions` gets a clean bundler error instead of silently pulling in bytes, which reinforces that the module is for types only.
+
+No breaking changes; the base `@eurobase/sdk` import surface is unchanged. Existing consumers can upgrade without touching any code.
+
 ## 0.6.0 — 2026-08-26
 
 ### Added — `service_only` RLS preset (#469)
