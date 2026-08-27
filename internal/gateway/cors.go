@@ -74,13 +74,39 @@ func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 
 			if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", strings.Join([]string{
-					"Authorization",
-					"Content-Type",
-					"X-Project-Id",
-					"X-Project-Slug",
-					"apikey",
-				}, ", "))
+				// Reflect the browser's requested headers back so custom
+				// headers on function invocations, storage uploads, RPC
+				// calls, etc. pass the preflight. The docs promise
+				// "custom headers... are forwarded as sent" — the
+				// hardcoded fallback list we shipped previously silently
+				// blocked every X-Signature / X-Webhook-Id / X-Api-Key
+				// call from a browser at preflight time, contradicting
+				// the docs.
+				//
+				// Reflection is safe here because the origin check on
+				// line ~47 has already established the origin is
+				// allowlisted (global or per-project). The security
+				// boundary in CORS is the origin, not the header set;
+				// once an origin is trusted, header-allowlisting adds
+				// no additional protection and only creates footguns
+				// for legitimate custom-header use cases.
+				//
+				// Fallback list is retained for clients that don't send
+				// Access-Control-Request-Headers (some non-browser
+				// preflighting tools) or for browsers on simple-header
+				// requests that still triggered a preflight for other
+				// reasons.
+				if acrh := r.Header.Get("Access-Control-Request-Headers"); acrh != "" {
+					w.Header().Set("Access-Control-Allow-Headers", acrh)
+				} else {
+					w.Header().Set("Access-Control-Allow-Headers", strings.Join([]string{
+						"Authorization",
+						"Content-Type",
+						"X-Project-Id",
+						"X-Project-Slug",
+						"apikey",
+					}, ", "))
+				}
 				w.Header().Set("Access-Control-Max-Age", "86400")
 				w.WriteHeader(http.StatusNoContent)
 				return

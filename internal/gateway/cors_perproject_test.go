@@ -132,6 +132,58 @@ func TestCORS_PreflightSetsAllowMethodsAndHeaders(t *testing.T) {
 	}
 }
 
+// Regression coverage for the customer-reported bug: browsers sending
+// a custom header (X-Signature, X-Webhook-Id, x-custom-path, etc.)
+// via Access-Control-Request-Headers on a preflight would get back a
+// hardcoded 5-header allowlist that did not include the requested
+// header, so the real request never left the browser. Docs promised
+// custom-header forwarding; the CORS layer silently blocked it.
+//
+// Fix: when the browser sends Access-Control-Request-Headers on the
+// preflight, reflect that value back in Access-Control-Allow-Headers.
+// Safe because the origin allowlist check has already passed at this
+// point — the security boundary in CORS is the origin, not the header
+// set.
+func TestCORS_PreflightReflectsRequestedCustomHeaders(t *testing.T) {
+	cors := newPlatformGlobalCORS()
+	ctx := ctxWithProjectCORS("http://localhost:3000")
+	rr := httptest.NewRecorder()
+	handler := cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+
+	req := makeReq(http.MethodOptions, "http://localhost:3000", ctx)
+	req.Header.Set("Access-Control-Request-Headers", "content-type, x-custom-path, x-signature")
+	handler.ServeHTTP(rr, req)
+
+	got := rr.Header().Get("Access-Control-Allow-Headers")
+	// The reflected value must include every header the browser asked
+	// for, exactly as sent — the spec compares case-insensitively, so
+	// we don't need to normalise case here.
+	for _, want := range []string{"content-type", "x-custom-path", "x-signature"} {
+		if !contains(got, want) {
+			t.Errorf("Access-Control-Allow-Headers should reflect %q from Access-Control-Request-Headers; got %q", want, got)
+		}
+	}
+}
+
+// If the browser sends no Access-Control-Request-Headers, we still
+// emit the fallback list so non-browser preflighting tools and old
+// clients don't regress.
+func TestCORS_PreflightFallsBackToStaticListWhenNoACRH(t *testing.T) {
+	cors := newPlatformGlobalCORS()
+	ctx := ctxWithProjectCORS("http://localhost:3000")
+	rr := httptest.NewRecorder()
+	handler := cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	// makeReq() does NOT set Access-Control-Request-Headers.
+	handler.ServeHTTP(rr, makeReq(http.MethodOptions, "http://localhost:3000", ctx))
+
+	got := rr.Header().Get("Access-Control-Allow-Headers")
+	for _, want := range []string{"Authorization", "Content-Type", "apikey"} {
+		if !contains(got, want) {
+			t.Errorf("fallback ACAH should include %q; got %q", want, got)
+		}
+	}
+}
+
 func contains(haystack, needle string) bool {
 	for i := 0; i+len(needle) <= len(haystack); i++ {
 		if haystack[i:i+len(needle)] == needle {
