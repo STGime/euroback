@@ -812,8 +812,19 @@ module.exports = async (req, ctx) => {
 												{#each logs as log}
 													{@const hasLines = Array.isArray(log.log_lines) && log.log_lines.length > 0}
 													{@const isOpen = expandedLogId === log.id}
-													<tr class="{hasLines ? 'cursor-pointer hover:bg-gray-50' : ''}"
-														onclick={() => { if (hasLines) expandedLogId = isOpen ? null : log.id; }}>
+													<tr
+														class="{hasLines ? 'cursor-pointer hover:bg-gray-50' : ''}"
+														role={hasLines ? 'button' : undefined}
+														tabindex={hasLines ? 0 : undefined}
+														aria-expanded={hasLines ? isOpen : undefined}
+														onclick={() => { if (hasLines) expandedLogId = isOpen ? null : log.id; }}
+														onkeydown={(e) => {
+															if (!hasLines) return;
+															if (e.key === 'Enter' || e.key === ' ') {
+																e.preventDefault();
+																expandedLogId = isOpen ? null : log.id;
+															}
+														}}>
 														<td class="px-4 py-1.5 align-top">
 															{#if hasLines}
 																<svg class="h-3 w-3 text-gray-400 transition-transform {isOpen ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
