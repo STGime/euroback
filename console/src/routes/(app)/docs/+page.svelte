@@ -1792,8 +1792,24 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 				</ul>
 				<p class="text-sm text-gray-700 mt-2">Withheld from your function so platform credentials don't leak: the auth that authenticates your call to Eurobase — the <code>Authorization</code>, <code>apikey</code>, <code>Cookie</code> headers <em>and</em> the <code>?apikey=</code> query param — plus Eurobase's internal <code>X-Eurobase-*</code> / <code>X-Project-*</code> / <code>X-Function-*</code> / <code>X-User-*</code> headers. For end-user identity on a <code>verify_jwt</code> function, use <code>ctx.user</code>. Put a partner's auth token in any other custom header (e.g. <code>X-Api-Key</code>, <code>X-Signature</code>) or query param (e.g. <code>?token=</code>).</p>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">TypeScript types (autocomplete + type-checking)</h3>
+				<p class="text-sm text-gray-700">The full <code>req</code> and <code>ctx</code> shapes are shipped from the SDK as a types-only subpath. Import in your function source with a <code>type</code>-only import (bundlers elide it at build time):</p>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto whitespace-pre">import type &#123; EdgeHandler &#125; from '@eurobase/sdk/functions'
+
+const handler: EdgeHandler = async (req, ctx) =&gt; &#123;
+  const &#123; orderId &#125; = (await req.json()) as &#123; orderId: string &#125;
+  const rows = await ctx.db.sql&lt;&#123; id: string; total: number &#125;&gt;(
+    "SELECT id, total FROM orders WHERE id = $1",
+    [orderId],
+  )
+  return Response.json(rows[0])
+&#125;
+
+export default handler</pre>
+				<p class="text-sm text-gray-700 mt-2">Requires <code>@eurobase/sdk@0.7.0</code> or later. The exported types (<code>EdgeContext</code>, <code>EdgeHandler</code>, <code>EdgeUser</code>, <code>EdgeStorageUploadResult</code>, <code>EdgeSignedUrlResult</code>, <code>EdgeLogger</code>) mirror the runtime <code>ctx</code> the runner passes to your handler, so autocomplete and type-checking cover every helper. Note: <code>ctx.db.sql(...)</code> resolves to the bare row array — assign directly with <code>const rows = ...</code>, not destructured with <code>const &#123; rows &#125; = ...</code>.</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Example handler</h3>
-				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto whitespace-pre">module.exports = async (req, ctx) =&gt; {"{"}{"\n"}  // Parse the incoming request{"\n"}  const {"{"} orderId {"}"} = await req.json();{"\n"}{"\n"}  // Query the database (scoped to your project){"\n"}  const {"{"} rows {"}"} = await ctx.db.sql({"\n"}    "SELECT * FROM orders WHERE id = $1",{"\n"}    [orderId]{"\n"}  );{"\n"}  const order = rows[0];{"\n"}{"\n"}  // Read a secret from Vault{"\n"}  const apiKey = await ctx.vault.get("PAYMENT_API_KEY");{"\n"}{"\n"}  // Call an external API{"\n"}  const payment = await fetch("https://api.mollie.com/v2/payments", {"{"}{"\n"}    method: "POST",{"\n"}    headers: {"{"} Authorization: `Bearer ${"{"} apiKey {"}"}` {"}"},{"\n"}    body: JSON.stringify({"{"} amount: order.total {"}"}){"\n"}  {"}"});{"\n"}{"\n"}  // Return a response{"\n"}  return new Response(JSON.stringify({"{"} status: "ok" {"}"}), {"{"}{"\n"}    status: 200,{"\n"}    headers: {"{"} "Content-Type": "application/json" {"}"},{"\n"}  {"}"});{"\n"}{"}"};</pre>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto whitespace-pre">module.exports = async (req, ctx) =&gt; {"{"}{"\n"}  // Parse the incoming request{"\n"}  const {"{"} orderId {"}"} = await req.json();{"\n"}{"\n"}  // Query the database (scoped to your project){"\n"}  // ctx.db.sql resolves to the rows array directly.{"\n"}  const rows = await ctx.db.sql({"\n"}    "SELECT * FROM orders WHERE id = $1",{"\n"}    [orderId]{"\n"}  );{"\n"}  const order = rows[0];{"\n"}{"\n"}  // Read a secret from Vault{"\n"}  const apiKey = await ctx.vault.get("PAYMENT_API_KEY");{"\n"}{"\n"}  // Call an external API{"\n"}  const payment = await fetch("https://api.mollie.com/v2/payments", {"{"}{"\n"}    method: "POST",{"\n"}    headers: {"{"} Authorization: `Bearer ${"{"} apiKey {"}"}` {"}"},{"\n"}    body: JSON.stringify({"{"} amount: order.total {"}"}){"\n"}  {"}"});{"\n"}{"\n"}  // Return a response{"\n"}  return new Response(JSON.stringify({"{"} status: "ok" {"}"}), {"{"}{"\n"}    status: 200,{"\n"}    headers: {"{"} "Content-Type": "application/json" {"}"},{"\n"}  {"}"});{"\n"}{"}"};</pre>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Context API</h3>
 				<div class="overflow-x-auto">
