@@ -1,6 +1,8 @@
 package functions
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -151,8 +153,9 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 		start := time.Now()
 
 		if runnerURL == "" {
-			// No runner configured — log and return 501.
-			svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, 501, 0, "function runner not configured", r.Method)
+			// No runner configured — log and return 501. No log_lines
+			// possible when we never called the runner.
+			svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, 501, 0, "function runner not configured", r.Method, nil)
 			jsonError(w, "edge functions runtime not available", http.StatusNotImplemented)
 			return
 		}
@@ -205,7 +208,7 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 		resp, err := client.Do(proxyReq)
 		if err != nil {
 			durationMs := int(time.Since(start).Milliseconds())
-			svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, 502, durationMs, err.Error(), r.Method)
+			svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, 502, durationMs, err.Error(), r.Method, nil)
 			slog.Error("function runner request failed", "function", functionName, "error", err)
 			jsonError(w, "function execution failed", http.StatusBadGateway)
 			return
@@ -214,18 +217,29 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 
 		durationMs := int(time.Since(start).Milliseconds())
 
+		// Extract log lines the runner captured via ctx.log.* (see
+		// functions-runner/server.ts encodeLogLinesHeader). Header
+		// is base64-encoded JSON so it stays ASCII-safe over HTTP
+		// even when user log messages contain unicode. Missing /
+		// unparseable header → nil log lines; the invocation summary
+		// still lands in edge_function_logs, just without the
+		// per-line payload. Strip the header before forwarding so
+		// caller browsers never see internal metadata.
+		logLines := decodeFunctionLogsHeader(resp.Header.Get("X-Function-Logs"))
+		resp.Header.Del("X-Function-Logs")
+
 		// Log the invocation.
 		if resp.StatusCode >= 500 {
 			body, _ := io.ReadAll(resp.Body)
 			errMsg := string(body)
-			svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, resp.StatusCode, durationMs, errMsg, r.Method)
+			svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, resp.StatusCode, durationMs, errMsg, r.Method, logLines)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
 			w.Write(body)
 			return
 		}
 
-		svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, resp.StatusCode, durationMs, "", r.Method)
+		svc.LogInvocation(r.Context(), fn.ID, projectCtx.ProjectID, resp.StatusCode, durationMs, "", r.Method, logLines)
 
 		// Forward response.
 		for k, v := range resp.Header {
@@ -234,4 +248,45 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
 	}
+}
+
+// decodeFunctionLogsHeader parses the X-Function-Logs response header
+// from the runner into the structured shape we persist in
+// edge_function_logs.log_lines. Returns nil (not an empty slice) on
+// any decoding problem so LogInvocation writes SQL NULL rather than
+// an empty JSON array, keeping the "no calls made" and "calls made
+// but header malformed" cases distinguishable in the DB.
+//
+// Errors are logged at WARN and swallowed — a broken header on the
+// wire must never cause the invocation summary itself to fail to
+// record.
+func decodeFunctionLogsHeader(raw string) []byte {
+	if raw == "" {
+		return nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		slog.Warn("function logs header base64-decode failed", "error", err)
+		return nil
+	}
+	// Round-trip through json.RawMessage so we validate that what
+	// the runner sent is well-formed JSON before we hand it to the
+	// DB. Cheap; the payload is capped at LOG_OUTPUT_LIMIT bytes.
+	if !json.Valid(decoded) {
+		slog.Warn("function logs header not valid JSON",
+			"bytes", len(decoded), "sample", safeSample(decoded))
+		return nil
+	}
+	return decoded
+}
+
+// safeSample returns the first 120 bytes of a potentially-untrusted
+// byte slice as a string for log messages. Prevents a monster payload
+// from filling a log line.
+func safeSample(b []byte) string {
+	const max = 120
+	if len(b) > max {
+		return string(b[:max]) + "…"
+	}
+	return string(b)
 }

@@ -28,15 +28,25 @@ type EdgeFunction struct {
 }
 
 // EdgeFunctionLog represents a single function invocation log entry.
+//
+// LogLines is the JSONB payload the runner captured via ctx.log.*
+// during the invocation. Marshalled as json.RawMessage so we can
+// serve it straight through to the console UI without re-parsing.
+// nil = the runner didn't attach an X-Function-Logs header (either
+// the invocation made no ctx.log.* calls or the header failed to
+// decode); an explicit empty array [] would mean "calls were made
+// but all truncated" — the runner shape doesn't produce that today
+// because the truncation sentinel is itself a line.
 type EdgeFunctionLog struct {
-	ID            string    `json:"id"`
-	FunctionID    string    `json:"function_id"`
-	ProjectID     string    `json:"project_id"`
-	Status        int       `json:"status"`
-	DurationMs    int       `json:"duration_ms"`
-	Error         *string   `json:"error"`
-	RequestMethod string    `json:"request_method"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string          `json:"id"`
+	FunctionID    string          `json:"function_id"`
+	ProjectID     string          `json:"project_id"`
+	Status        int             `json:"status"`
+	DurationMs    int             `json:"duration_ms"`
+	Error         *string         `json:"error"`
+	RequestMethod string          `json:"request_method"`
+	CreatedAt     time.Time       `json:"created_at"`
+	LogLines      json.RawMessage `json:"log_lines,omitempty"`
 }
 
 // Service provides CRUD operations for edge functions.
@@ -408,7 +418,7 @@ func (s *Service) GetLogs(ctx context.Context, projectID, name string, limit int
 	}
 
 	rows, err := s.pool.Query(ctx,
-		`SELECT l.id, l.function_id, l.project_id, l.status, l.duration_ms, l.error, l.request_method, l.created_at
+		`SELECT l.id, l.function_id, l.project_id, l.status, l.duration_ms, l.error, l.request_method, l.created_at, l.log_lines
 		 FROM edge_function_logs l
 		 JOIN edge_functions f ON f.id = l.function_id
 		 WHERE f.project_id = $1 AND f.name = $2
@@ -422,7 +432,7 @@ func (s *Service) GetLogs(ctx context.Context, projectID, name string, limit int
 	var logs []EdgeFunctionLog
 	for rows.Next() {
 		var log EdgeFunctionLog
-		if err := rows.Scan(&log.ID, &log.FunctionID, &log.ProjectID, &log.Status, &log.DurationMs, &log.Error, &log.RequestMethod, &log.CreatedAt); err != nil {
+		if err := rows.Scan(&log.ID, &log.FunctionID, &log.ProjectID, &log.Status, &log.DurationMs, &log.Error, &log.RequestMethod, &log.CreatedAt, &log.LogLines); err != nil {
 			return nil, fmt.Errorf("scan function log: %w", err)
 		}
 		logs = append(logs, log)
@@ -434,15 +444,29 @@ func (s *Service) GetLogs(ctx context.Context, projectID, name string, limit int
 }
 
 // LogInvocation records a function invocation in the logs table.
-func (s *Service) LogInvocation(ctx context.Context, functionID, projectID string, status, durationMs int, errMsg string, method string) {
+//
+// logLines is the pre-validated (base64-decoded + json.Valid checked)
+// JSONB payload the runner produced via ctx.log.*. Nil means no
+// header was attached or it failed to decode — SQL NULL persisted.
+// The gateway checks json.Valid before passing so the DB write can't
+// blow up on garbage bytes from a compromised runner (#492).
+func (s *Service) LogInvocation(ctx context.Context, functionID, projectID string, status, durationMs int, errMsg string, method string, logLines []byte) {
 	var errPtr *string
 	if errMsg != "" {
 		errPtr = &errMsg
 	}
+	// Pass nil (not empty []byte) to keep NULL semantics — an empty
+	// slice would round-trip as JSONB `null` via pgx, which is
+	// distinguishable from SQL NULL and would corrupt the "no lines
+	// captured" vs "explicit null log entry" distinction.
+	var linesArg any
+	if len(logLines) > 0 {
+		linesArg = logLines
+	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO edge_function_logs (function_id, project_id, status, duration_ms, error, request_method)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		functionID, projectID, status, durationMs, errPtr, method)
+		`INSERT INTO edge_function_logs (function_id, project_id, status, duration_ms, error, request_method, log_lines)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		functionID, projectID, status, durationMs, errPtr, method, linesArg)
 	if err != nil {
 		slog.Error("failed to log function invocation", "function_id", functionID, "error", err)
 	}

@@ -19,6 +19,7 @@ import type {
 import { newVerifier, type Verifier } from "./hmac.ts";
 import { openSealed, resolveVaultSecret } from "./vault.ts";
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
+import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
 // `eurobase_function_runner`, a role with no direct grants on any tenant
@@ -221,38 +222,6 @@ async function resolveEnvVars(row: {
   return legacy as Record<string, string>;
 }
 
-// ── Log capture with truncation ──
-
-function createLogCapture(projectId: string) {
-  let totalBytes = 0;
-  const logs: string[] = [];
-  let truncated = false;
-
-  function capture(level: string, msg: string, data?: Record<string, unknown>) {
-    if (truncated) return;
-    const line = `[fn:${projectId}] ${level}: ${msg}${data ? " " + JSON.stringify(data) : ""}`;
-    const lineBytes = new TextEncoder().encode(line).length;
-    if (totalBytes + lineBytes > LOG_OUTPUT_LIMIT) {
-      truncated = true;
-      logs.push(`[fn:${projectId}] WARN: Log output truncated at ${LOG_OUTPUT_LIMIT} bytes`);
-      return;
-    }
-    totalBytes += lineBytes;
-    logs.push(line);
-    // Still emit to server console
-    if (level === "ERROR") console.error(line);
-    else if (level === "WARN") console.warn(line);
-    else console.log(line);
-  }
-
-  return {
-    info: (msg: string, data?: Record<string, unknown>) => capture("INFO", msg, data),
-    warn: (msg: string, data?: Record<string, unknown>) => capture("WARN", msg, data),
-    error: (msg: string, data?: Record<string, unknown>) => capture("ERROR", msg, data),
-    getLogs: () => logs,
-  };
-}
-
 // ── Execute function ──
 
 async function executeFunction(
@@ -291,7 +260,7 @@ async function executeFunction(
   const setRoleSQL = "SET LOCAL ROLE " + quoteIdent(funcRole);
   const setPathSQL = "SET LOCAL search_path TO " + quoteIdent(schemaName);
   const db = await getDB();
-  const logCapture = createLogCapture(projectId);
+  const logCapture = createLogCapture(projectId, LOG_OUTPUT_LIMIT);
 
   // deno-lint-ignore no-explicit-any
   async function runDBSql(query: string, params: unknown[]): Promise<any> {
@@ -418,24 +387,40 @@ async function runUserHandlerInWorker(opts: {
       }
     };
 
+    // Attaches captured log lines to the response header the
+    // gateway parses in HandleInvoke to persist into
+    // edge_function_logs.log_lines. Header omitted when the
+    // invocation emitted no ctx.log.* calls (nothing to persist).
+    // Base64 because header values must be ASCII-safe and log
+    // messages/data are user-supplied UTF-8.
+    const attachLogsHeader = (headers: Headers) => {
+      const encoded = encodeLogLinesHeader(logCapture.getLines());
+      if (encoded) headers.set("X-Function-Logs", encoded);
+    };
+
     const respondError = (status: number, message: string) => {
       cleanup();
-      resolve(jsonResponse({ error: message, requestId }, status));
+      const errResponse = jsonResponse({ error: message, requestId }, status);
+      attachLogsHeader(errResponse.headers);
+      resolve(errResponse);
     };
 
     const respondResponse = (serialized: SerializedResponse) => {
       cleanup();
       if (serialized.body.byteLength > RESPONSE_SIZE_LIMIT) {
-        resolve(jsonResponse({
+        const tooLarge = jsonResponse({
           error: "Response too large",
           limit: `${RESPONSE_SIZE_LIMIT / 1024 / 1024}MB`,
           requestId,
-        }, 413));
+        }, 413);
+        attachLogsHeader(tooLarge.headers);
+        resolve(tooLarge);
         return;
       }
       const headers = new Headers();
       for (const [k, v] of serialized.headers) headers.set(k, v);
       headers.set("X-Request-ID", requestId);
+      attachLogsHeader(headers);
       resolve(new Response(serialized.body, {
         status: serialized.status,
         headers,
