@@ -22,6 +22,10 @@
 	let saving = $state(false);
 	let logs: EdgeFunctionLog[] = $state([]);
 	let showLogs = $state(false);
+	// Per-row toggle for the ctx.log.* structured lines row (#492).
+	// Keyed by log.id — flipping doesn't refetch, the lines arrive in
+	// the initial getEdgeFunctionLogs payload.
+	let expandedLogId: string | null = $state(null);
 
 	// Code editor ref
 	let codeEditor: CodeEditor | undefined = $state(undefined);
@@ -259,6 +263,32 @@ module.exports = async (req, ctx) => {
 		if (status < 300) return 'text-green-600';
 		if (status < 400) return 'text-yellow-600';
 		return 'text-red-600';
+	}
+
+	// Colour palette for ctx.log.* level badges. Chosen to match the
+	// status-column contrast so a page-full of INFO lines doesn't drown
+	// out the WARN/ERROR ones (#492).
+	function logLevelBadge(level: string): string {
+		switch (level) {
+			case 'ERROR': return 'bg-red-50 text-red-700 border-red-200';
+			case 'WARN':  return 'bg-yellow-50 text-yellow-700 border-yellow-200';
+			default:      return 'bg-gray-50 text-gray-600 border-gray-200';
+		}
+	}
+
+	// Render ctx.log.*'s optional `data` payload. The runner already
+	// enforces a 10 KB total cap; we just pretty-print small objects
+	// inline and fall back to a single line for scalars. Uses
+	// try/JSON.stringify because a log may contain a value that
+	// isn't structured-cloneable (e.g. a BigInt would throw).
+	function formatLogData(data: unknown): string {
+		if (data === undefined) return '';
+		try {
+			const s = JSON.stringify(data, null, 2);
+			return s ?? String(data);
+		} catch {
+			return String(data);
+		}
 	}
 
 	// ── Triggers ──
@@ -766,10 +796,11 @@ module.exports = async (req, ctx) => {
 								{#if logs.length === 0}
 									<p class="px-4 py-6 text-center text-xs text-gray-500">No invocations yet</p>
 								{:else}
-									<div class="max-h-60 overflow-y-auto">
+									<div class="max-h-96 overflow-y-auto">
 										<table class="w-full text-xs">
 											<thead class="bg-gray-50 text-gray-500">
 												<tr>
+													<th class="px-4 py-2 text-left font-medium w-6"></th>
 													<th class="px-4 py-2 text-left font-medium">Method</th>
 													<th class="px-4 py-2 text-left font-medium">Status</th>
 													<th class="px-4 py-2 text-left font-medium">Duration</th>
@@ -779,13 +810,60 @@ module.exports = async (req, ctx) => {
 											</thead>
 											<tbody class="divide-y divide-gray-100">
 												{#each logs as log}
-													<tr>
-														<td class="px-4 py-1.5 font-mono">{log.request_method}</td>
+													{@const hasLines = Array.isArray(log.log_lines) && log.log_lines.length > 0}
+													{@const isOpen = expandedLogId === log.id}
+													<tr
+														class="{hasLines ? 'cursor-pointer hover:bg-gray-50' : ''}"
+														role={hasLines ? 'button' : undefined}
+														tabindex={hasLines ? 0 : undefined}
+														aria-expanded={hasLines ? isOpen : undefined}
+														onclick={() => { if (hasLines) expandedLogId = isOpen ? null : log.id; }}
+														onkeydown={(e) => {
+															if (!hasLines) return;
+															if (e.key === 'Enter' || e.key === ' ') {
+																e.preventDefault();
+																expandedLogId = isOpen ? null : log.id;
+															}
+														}}>
+														<td class="px-4 py-1.5 align-top">
+															{#if hasLines}
+																<svg class="h-3 w-3 text-gray-400 transition-transform {isOpen ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+																	<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+																</svg>
+															{/if}
+														</td>
+														<td class="px-4 py-1.5 font-mono">
+															{log.request_method}
+															{#if hasLines}
+																<span class="ml-1 text-[10px] text-gray-400">({log.log_lines?.length})</span>
+															{/if}
+														</td>
 														<td class="px-4 py-1.5 font-mono {statusColor(log.status)}">{log.status}</td>
 														<td class="px-4 py-1.5">{log.duration_ms}ms</td>
 														<td class="px-4 py-1.5 text-red-600 align-top whitespace-pre-wrap break-words max-w-xl"><code class="text-[11px] leading-snug">{log.error || ''}</code></td>
 														<td class="px-4 py-1.5 text-gray-500">{new Date(log.created_at).toLocaleString()}</td>
 													</tr>
+													{#if isOpen && hasLines}
+														<tr class="bg-gray-50">
+															<td></td>
+															<td colspan="5" class="px-4 py-2">
+																<div class="space-y-1">
+																	{#each log.log_lines ?? [] as line}
+																		<div class="flex gap-2 items-start text-[11px] font-mono leading-snug">
+																			<span class="shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider {logLevelBadge(line.level)}">{line.level}</span>
+																			<span class="shrink-0 text-gray-400">{new Date(line.ts).toLocaleTimeString()}</span>
+																			<div class="flex-1 min-w-0">
+																				<div class="whitespace-pre-wrap break-words">{line.msg}</div>
+																				{#if line.data !== undefined}
+																					<pre class="mt-0.5 whitespace-pre-wrap break-words text-gray-500 text-[10px]">{formatLogData(line.data)}</pre>
+																				{/if}
+																			</div>
+																		</div>
+																	{/each}
+																</div>
+															</td>
+														</tr>
+													{/if}
 												{/each}
 											</tbody>
 										</table>

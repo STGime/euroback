@@ -2673,6 +2673,18 @@ export interface EdgeFunctionLog {
 	error: string | null;
 	request_method: string;
 	created_at: string;
+	// Structured lines the function emitted via ctx.log.* — capped at
+	// LOG_OUTPUT_LIMIT (10 KB) per invocation by the runner. Absent when
+	// the runner didn't attach the X-Function-Logs header (invocation
+	// made no ctx.log.* calls, or the header failed to decode).
+	log_lines?: EdgeFunctionLogLine[];
+}
+
+export interface EdgeFunctionLogLine {
+	level: 'INFO' | 'WARN' | 'ERROR';
+	msg: string;
+	data?: unknown;
+	ts: string;
 }
 
 export interface FunctionTrigger {

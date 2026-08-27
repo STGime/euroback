@@ -103,21 +103,17 @@ export interface EdgeStorageSignedUrlOptions {
 
 /**
  * Structured-log surface. Every call emits a JSON line to the runner
- * pod's stdout, tagged with the invocation's project id + log level.
- *
- * **Current limitation (August 2026):** these log lines are **not**
- * yet persisted to the tenant-visible audit trail — the console's
- * Functions → Logs view shows per-invocation summaries only (method,
- * status, duration, error). Wiring `ctx.log.*` output into that view
- * is tracked in the issue tracker; for now, for debugging you can
- * either return log data in the response body or use `console.log`
- * (same runner-stdout destination). This JSDoc will describe the
- * console-visible behaviour once that ships.
+ * pod's stdout AND is captured into a per-invocation buffer that the
+ * gateway persists to `edge_function_logs.log_lines` — the console's
+ * Functions → Logs view shows them under each expandable invocation
+ * row (level badge, timestamp, message, optional `data` payload).
  *
  * `data` is arbitrary JSON — objects, arrays, primitives. Deeply
  * nested values are logged as-is; large payloads may be truncated
  * at the runner's log-output limit (10 KB per invocation total; see
- * `functions-runner/server.ts` `LOG_OUTPUT_LIMIT`).
+ * `functions-runner/server.ts` `LOG_OUTPUT_LIMIT`). When the cap is
+ * hit, subsequent lines are replaced with a truncation sentinel and
+ * the buffer stops growing — the invocation itself is unaffected.
  */
 export interface EdgeLogger {
   info(msg: string, data?: unknown): void
