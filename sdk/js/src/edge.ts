@@ -115,8 +115,9 @@ export interface EdgeStorageSignedUrlOptions {
  * console-visible behaviour once that ships.
  *
  * `data` is arbitrary JSON — objects, arrays, primitives. Deeply
- * nested values are logged as-is; very large payloads may be truncated
- * at the runner's log-output limit (default ~64 KB per invocation).
+ * nested values are logged as-is; large payloads may be truncated
+ * at the runner's log-output limit (10 KB per invocation total; see
+ * `functions-runner/server.ts` `LOG_OUTPUT_LIMIT`).
  */
 export interface EdgeLogger {
   info(msg: string, data?: unknown): void
