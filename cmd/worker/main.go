@@ -366,6 +366,12 @@ func main() {
 	// internal/workers/audit_retention.go.
 	workers.StartAuditRetention(ctx, pool)
 
+	// ── Edge function logs retention (follow-up from #492) ──
+	// Daily sweep of public.edge_function_logs. With log_lines JSONB
+	// (up to 10 KB/row) the table grew unbounded. Default 30-day
+	// window; set EDGE_FUNCTION_LOGS_RETENTION_DAYS=0 to disable.
+	workers.StartEdgeFunctionLogsRetention(ctx, pool)
+
 	// ── Backup sweeper (M3) ──
 	// 6-hour ticker: refreshes backup_snapshots cache from
 	// Provider.ListSnapshots for every Team project, prunes rows
