@@ -39,18 +39,21 @@ const (
 //
 // Config (env, read once at startup):
 //   - EDGE_FUNCTION_LOGS_RETENTION_DAYS
-//     Default 30. Set to 0 to disable (keeps rows forever — same
-//     convention AUDIT_LOG_RETENTION_DAYS uses). Negative = disabled.
+//     Default 30. 0 or any negative value disables the sweep (keeps
+//     rows forever) — matches the 0-disables semantic in
+//     AUDIT_LOG_RETENTION_DAYS. Unparseable values fall through to
+//     the default 30 rather than silently disabling.
 func StartEdgeFunctionLogsRetention(ctx context.Context, pool *pgxpool.Pool) {
 	days := edgeFunctionLogsRetentionDefault
 	if v := os.Getenv("EDGE_FUNCTION_LOGS_RETENTION_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		if n, err := strconv.Atoi(v); err == nil {
 			days = n
 		}
 	}
 
-	if days == 0 {
-		slog.Info("edge_function_logs retention disabled (EDGE_FUNCTION_LOGS_RETENTION_DAYS=0)")
+	if days <= 0 {
+		slog.Info("edge_function_logs retention disabled",
+			"EDGE_FUNCTION_LOGS_RETENTION_DAYS", days)
 		return
 	}
 
@@ -78,15 +81,25 @@ func StartEdgeFunctionLogsRetention(ctx context.Context, pool *pgxpool.Pool) {
 	}()
 }
 
-// sweepEdgeFunctionLogs deletes rows past the retention horizon. One
-// bulk statement rather than a chunked loop: existing indexes on
+// sweepEdgeFunctionLogs deletes rows past the retention horizon.
+// One bulk statement rather than a chunked loop: this is a daily
+// maintenance job off the hot path, so a seq scan is fine at
+// current volumes. (The existing indexes on
 // (function_id, created_at DESC) and (project_id, created_at DESC)
-// make the created_at scan cheap, and typical volumes for the first
-// weeks post-#492 are small enough that a single DELETE won't hold a
-// lock long enough to matter. If that changes (this shows up in slow
-// query logs, or the delete rowcount jumps into the millions), swap
-// to a chunked `DELETE … WHERE id = ANY(SELECT id … LIMIT 5000)`
-// loop.
+// do NOT accelerate this — created_at is the non-leading column,
+// so btree can't range-seek on it; EXPLAIN picks a seq scan and
+// forcing the index is more expensive.)
+//
+// If volumes grow enough that the daily DELETE starts showing up
+// in slow-query logs, the real escapes are:
+//   1. Add a standalone index on created_at (or an expression index
+//      on the retention predicate).
+//   2. Partition edge_function_logs by month (listed as a non-goal
+//      above) and drop old partitions instead of DELETE.
+//
+// A chunked `DELETE ... WHERE id = ANY(SELECT id ... LIMIT 5000)`
+// loop wouldn't help — same non-leading-column problem, same seq
+// scan per chunk.
 func sweepEdgeFunctionLogs(ctx context.Context, pool *pgxpool.Pool, days int) {
 	start := time.Now()
 	// $1 is interpolated as an interval via make_interval so we don't
