@@ -20,10 +20,12 @@ package billing
 // exercises the actual constraint semantics: pass a wrong-status row,
 // the UPDATE no-ops, the assertion catches it.
 //
-// Test gating matches the existing repo idiom (see
-// internal/audit/access_test.go): skipped under -short, skipped if no
-// DATABASE_URL / can't reach a DB. Auto-graduates to CI when #475
-// (Postgres in test-go) lands. Runs today against a local dev DB via
+// Test gating matches the current DB-fixture idiom (see
+// internal/query/engine_test.go, post-#476 — not access_test.go, which
+// still uses the pre-000008 hanko_user_id column and skip-greens on any
+// correctly-migrated DB). Skipped under -short, skipped if DATABASE_URL
+// unset or DB unreachable. Auto-graduates to CI when #475 (Postgres in
+// test-go) lands. Runs today against a local dev DB via
 // `go test ./internal/billing/... -run TestMarkPaymentFailure`.
 
 import (
@@ -76,20 +78,22 @@ func setupPaymentFailureFixture(t *testing.T) *paymentFailureFixture {
 		t.Skipf("cannot ping test database: %v", err)
 	}
 
-	// Fixture PKs derived from PID + goroutine timestamp so parallel
-	// package tests don't collide. We only need uniqueness, not
-	// human-readability.
+	// Fixture keys derived from PID + timestamp so parallel package
+	// tests don't collide. Uniqueness only; not human-readable.
 	unique := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
-	hankoUserID := "test-billwh-" + unique
 	slug := "test-billwh-" + unique
+	testEmail := "billwh-" + unique + "@eurobase.app"
 
+	// platform_users lost the hanko_user_id column in migration 000008
+	// ("email is the natural unique identifier"). The email unique index
+	// is partial (WHERE email <> ''), so it can't be an ON CONFLICT arbiter
+	// — clear any residue from a crashed prior run, then plain INSERT.
+	// Same pattern engine_test.go uses.
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, testEmail)
 	var ownerID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO platform_users (hanko_user_id, email)
-		 VALUES ($1, $2)
-		 ON CONFLICT (hanko_user_id) DO UPDATE SET email = EXCLUDED.email
-		 RETURNING id`,
-		hankoUserID, "billwh-"+unique+"@eurobase.app",
+		`INSERT INTO platform_users (email) VALUES ($1) RETURNING id`,
+		testEmail,
 	).Scan(&ownerID); err != nil {
 		pool.Close()
 		t.Skipf("cannot create test platform user: %v", err)

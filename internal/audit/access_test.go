@@ -120,14 +120,20 @@ func setupAccessTest(t *testing.T) (*pgxpool.Pool, string) {
 		t.Skipf("cannot ping test database: %v", err)
 	}
 
-	hankoUserID := fmt.Sprintf("test-access-%d", os.Getpid())
+	// platform_users lost hanko_user_id in migration 000008 ("email is
+	// the natural unique identifier"). The email index is partial
+	// (WHERE email <> ''), so it can't be an ON CONFLICT arbiter —
+	// DELETE-then-INSERT by email. Same pattern engine_test.go uses.
+	// (This function used the pre-000008 idiom until #468 review caught
+	// it: the hanko_user_id INSERT threw a "column does not exist"
+	// error that Skipf silently swallowed, so this test was skip-green
+	// on any correctly-migrated database.)
+	testEmail := fmt.Sprintf("access-%d@eurobase.app", os.Getpid())
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, testEmail)
 	var ownerID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO platform_users (hanko_user_id, email)
-		 VALUES ($1, $2)
-		 ON CONFLICT (hanko_user_id) DO UPDATE SET email = EXCLUDED.email
-		 RETURNING id`,
-		hankoUserID, "accesstest@eurobase.app",
+		`INSERT INTO platform_users (email) VALUES ($1) RETURNING id`,
+		testEmail,
 	).Scan(&ownerID); err != nil {
 		pool.Close()
 		t.Skipf("cannot create test platform user: %v", err)
@@ -149,7 +155,7 @@ func setupAccessTest(t *testing.T) (*pgxpool.Pool, string) {
 		ctx := context.Background()
 		_, _ = pool.Exec(ctx, `DELETE FROM public.data_access_log WHERE project_id = $1`, projectID)
 		_, _ = pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
-		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE hanko_user_id = $1`, hankoUserID)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, testEmail)
 		pool.Close()
 	})
 
