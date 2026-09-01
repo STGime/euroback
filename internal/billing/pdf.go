@@ -216,7 +216,7 @@ func RenderInvoicePDF(d InvoiceData) ([]byte, error) {
 	// year overflowed into the Amount column border (user-reported
 	// 2026-08-24). Rebalanced: Description 100 / Period 45 / Amount
 	// 25 — Period fits any single-month or spans-a-year range with
-	// slack; Amount fits €19.00 through €9999.99 at 10pt.
+	// slack; Amount fits €25.00 through €9999.99 at 10pt.
 	pdf.SetFont("Helvetica", "B", 10)
 	pdf.SetFillColor(243, 244, 246) // light grey (#f3f4f6)
 	pdf.CellFormat(100, 8, tr("Description"), "1", 0, "L", true, 0, "")
