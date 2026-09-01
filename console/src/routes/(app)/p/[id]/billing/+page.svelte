@@ -241,7 +241,7 @@
 					<p class="text-xs uppercase tracking-wider text-gray-500">Current plan</p>
 					<p class="mt-1 text-xl font-semibold text-gray-900">
 						{#if project.plan === 'pro'}
-							Pro (€19/mo)
+							Pro (€25/mo)
 						{:else if project.plan === 'team'}
 							Team (closed beta)
 						{:else if project.plan === 'legal_team'}
@@ -287,7 +287,7 @@
 							title={!checkoutReady ? 'Payments unavailable — please refresh' : undefined}
 							class="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
 						>
-							{checkoutInFlight ? 'Redirecting…' : 'Add payment (€19/mo)'}
+							{checkoutInFlight ? 'Redirecting…' : 'Add payment (€25/mo)'}
 						</button>
 					{:else if project.plan === 'free'}
 						<button

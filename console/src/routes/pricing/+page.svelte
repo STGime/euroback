@@ -124,10 +124,10 @@
 
 <svelte:head>
 	<title>Pricing — Eurobase · EU-sovereign backend, GDPR-compliant, legal-tech ready</title>
-	<meta name="description" content="Eurobase pricing: Free for prototypes, €19/mo Pro for production, Team for SMBs, Legal Team for German legal-tech startups needing §257 HGB / §50 BRAO / §147 AO retention. EU-sovereign Backend-as-a-Service hosted in France, made in Berlin. GDPR by design, DSAR built-in, no US CLOUD Act exposure." />
+	<meta name="description" content="Eurobase pricing: Free for personal + development use, €25/mo Pro for commercial, Team for SMBs, Legal Team for German legal-tech startups needing §257 HGB / §50 BRAO / §147 AO retention. EU-sovereign Backend-as-a-Service hosted in France, made in Berlin. GDPR by design, DSAR built-in, no US CLOUD Act exposure." />
 	<meta name="keywords" content="EU sovereign BaaS, GDPR compliant backend, DSGVO Backend-as-a-Service, Backend Deutschland, legal-tech backend, Kanzlei-Software Hosting, §257 HGB retention, WORM Object Storage, Rechtsanwalt SaaS DSGVO, EU alternative Firebase, EU alternative Supabase" />
 	<meta property="og:title" content="Eurobase — EU-sovereign backend for GDPR-conscious startups, including German legal-tech" />
-	<meta property="og:description" content="Free to start, €19/mo Pro, dedicated Postgres on Team, WORM retention + §257 HGB / §50 BRAO / §147 AO compliance on Legal Team. Made in Berlin. Hosted in France. Zero DevOps." />
+	<meta property="og:description" content="Free to start, €25/mo Pro, dedicated Postgres on Team, WORM retention + §257 HGB / §50 BRAO / §147 AO compliance on Legal Team. Made in Berlin. Hosted in France. Zero DevOps." />
 	<meta property="og:type" content="website" />
 	<link rel="canonical" href="https://eurobase.app/pricing" />
 </svelte:head>
@@ -151,7 +151,7 @@
 	<!-- Hero -->
 	<section class="mx-auto max-w-6xl px-6 pt-16 pb-6 text-center">
 		<h1 class="text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl">Simple, transparent pricing.</h1>
-		<p class="mt-4 text-lg text-gray-600">The EU-sovereign Backend-as-a-Service, made in Berlin. Free to start; €19/mo when you go to production; Team for SMBs; a dedicated Legal Team tier for German legal-tech startups is on the way.</p>
+		<p class="mt-4 text-lg text-gray-600">The EU-sovereign Backend-as-a-Service, made in Berlin. Free to start; €25/mo when you go to production; Team for SMBs; a dedicated Legal Team tier for German legal-tech startups is on the way.</p>
 	</section>
 
 	<!-- Why Eurobase — the differentiators, right under the hero -->
@@ -223,7 +223,7 @@
 			<!-- Free -->
 			<div class="rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
 				<h2 class="text-xl font-semibold text-gray-900">Free</h2>
-				<p class="mt-1 text-sm text-gray-500">For prototypes, side projects, and learning.</p>
+				<p class="mt-1 text-sm text-gray-500">For personal projects, learning, and development. Non-commercial use only.</p>
 				<div class="mt-6 flex items-baseline gap-1">
 					<span class="text-4xl font-bold text-gray-900">€0</span>
 					<span class="text-sm text-gray-500">/mo</span>
@@ -244,9 +244,9 @@
 			<div class="relative rounded-2xl border-2 border-eurobase-600 bg-white p-8 shadow-lg">
 				<span class="absolute -top-3 right-6 rounded-full bg-eurobase-600 px-3 py-1 text-xs font-semibold text-white shadow">For production</span>
 				<h2 class="text-xl font-semibold text-gray-900">Pro</h2>
-				<p class="mt-1 text-sm text-gray-500">When your project ships to real users.</p>
+				<p class="mt-1 text-sm text-gray-500">Commercial use — production apps, side businesses, agency work, internal tools.</p>
 				<div class="mt-6 flex items-baseline gap-1">
-					<span class="text-4xl font-bold text-gray-900">€19</span>
+					<span class="text-4xl font-bold text-gray-900">€25</span>
 					<span class="text-sm text-gray-500">/mo per project</span>
 				</div>
 				<a href="/login" class="mt-6 block rounded-lg bg-eurobase-600 px-4 py-2.5 text-center text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Get Pro</a>

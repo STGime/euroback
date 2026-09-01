@@ -468,7 +468,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 									<p class="text-sm font-semibold text-gray-900">Free</p>
 									<span class="text-xs font-medium text-gray-400">$0/mo</span>
 								</div>
-								<p class="mt-1.5 text-xs text-gray-500">For prototypes &amp; side projects.</p>
+								<p class="mt-1.5 text-xs text-gray-500">Personal, learning &amp; development. Non-commercial only.</p>
 								<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
@@ -498,9 +498,9 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 							<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50/50 peer-checked:shadow-sm border-gray-200 hover:border-gray-300">
 								<div class="flex items-center justify-between">
 									<p class="text-sm font-semibold text-gray-900">Pro</p>
-									<span class="text-sm font-semibold text-eurobase-700">&euro;19/mo per project</span>
+									<span class="text-sm font-semibold text-eurobase-700">&euro;25/mo per project</span>
 								</div>
-								<p class="mt-1.5 text-xs text-gray-500">For production workloads.</p>
+								<p class="mt-1.5 text-xs text-gray-500">Commercial use — production apps, agencies, internal tools.</p>
 								<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>

@@ -265,7 +265,7 @@ const key = ctx.env.STRIPE_KEY</pre>
 			</ul>
 
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  That's the last of the drip. If Eurobase is starting to feel small — you're hitting the Free-tier caps, or your project's real users need production guarantees — Pro is €19/mo per project, everything unlocks. If not, keep prototyping; Free stays.
+			  That's the last of the drip. If Eurobase is starting to feel small — you're hitting the Free-tier caps, or your project's real users need production guarantees, or you're using it commercially — Pro is €25/mo per project, everything unlocks. If not, keep prototyping; Free stays.
 			</p>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
 			  Reply to this mail with anything you'd want us to build. We read replies.

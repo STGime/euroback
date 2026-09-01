@@ -143,7 +143,7 @@
 <p>What changed today:</p>
 <ul>
   <li><strong>Signup is open to everyone</strong> at <a href="https://console.eurobase.app">console.eurobase.app</a>. Feel free to share.</li>
-  <li><strong>Pro tier is live</strong> — €19/mo per project, upgrade any time from the console. Free stays free.</li>
+  <li><strong>Pro tier is live</strong> — €25/mo per project, upgrade any time from the console. Free stays free (personal + development use only).</li>
   <li>Full write-up: <a href="https://eurobase.app/blog/public-beta-open">eurobase.app/blog/public-beta-open</a></li>
 </ul>
 <p>The closed-beta framing is over, but the practical reality is the same as yesterday: your data stays in EU jurisdiction (Scaleway, France), the SDK / CLI / MCP haven't changed, and <code>eurobase db dump</code> still gives you a standard <code>pg_dump</code> you can migrate anywhere.</p>

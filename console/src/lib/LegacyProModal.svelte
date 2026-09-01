@@ -109,7 +109,7 @@
 				<p class="text-sm text-gray-700">
 					Your Pro project <strong>{project.name}</strong> was created during
 					closed beta, when Pro was free. Public beta opens billing today —
-					Pro is <strong>€19/mo per project</strong>.
+					Pro is <strong>€25/mo per project</strong>.
 				</p>
 				<p class="mt-4 text-sm {graceDaysLeft <= 3 ? 'font-medium text-red-700' : 'text-gray-700'}">
 					{#if graceDaysLeft === 0}
@@ -147,7 +147,7 @@
 					onclick={goToBilling}
 					class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700"
 				>
-					Add payment (€19/mo)
+					Add payment (€25/mo)
 				</button>
 			</div>
 		</div>
