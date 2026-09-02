@@ -14,13 +14,13 @@ REVIEWER NOTES — read before publication (v2)
      publication (currently aliased to founder).
   4. CSAM clause: legally required to cooperate with hotlines (INHOPE,
      national reporters). Do NOT remove without lawyer review.
-  5. Entity strings ({{LEGAL_ENTITY}}) still placeholders until
+  5. Entity strings (Eurobase OÜ) still placeholders until
      formation completes.
 -->
 
 # Acceptable Use Policy
 
-**Version 2.0 — effective {{EFFECTIVE_DATE}}**
+**Version 2.1 — effective 2 October 2026**
 
 This Acceptable Use Policy ("**AUP**") sets out what you may not do with the Eurobase service. It is incorporated into the **Terms of Service** at /legal/terms. Breach of this AUP is breach of those Terms, and may lead to suspension, termination, and reporting to law enforcement.
 
@@ -95,4 +95,4 @@ We may update this AUP from time to time. Material changes are announced 30 days
 - General abuse reports: **abuse@eurobase.app**
 - Security vulnerability reports: **security@eurobase.app**
 - Data protection: **dpo@eurobase.app**
-- Legal notices: **{{NOTICES_EMAIL}}**
+- Legal notices: **contact@eurobase.app**

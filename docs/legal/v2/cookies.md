@@ -22,7 +22,7 @@ REVIEWER NOTES — read before publication (v2)
 
 # Cookie & Storage Notice
 
-**Version 2.0 — effective {{EFFECTIVE_DATE}}**
+**Version 2.1 — effective 2 October 2026**
 
 This page tells you exactly what Eurobase stores in your browser and what data leaves your device while you use eurobase.app. We have built the platform to be friendly to your privacy by default: **no analytics, no marketing pixels, no third-party tracking, and no cookies set by Eurobase.**
 
@@ -78,4 +78,6 @@ If you think this notice is inaccurate or misses something, please email **dpo@e
 
 ## Changelog
 
-- v1.0 ({{EFFECTIVE_DATE}}) — Initial publication.
+- v2.1 (2 October 2026) — Doc-set version bumped in step with terms.md v2.1 (Free-tier non-commercial clause added in Terms §5). No content change to this cookies notice.
+- v2.0 (22 July 2026) — Estonia re-incorporation; entity switched to Eurobase OÜ.
+- v1.0 — Initial publication under the pre-2026 entity.
