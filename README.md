@@ -38,7 +38,7 @@ git clone https://github.com/STGime/euroback.git
 cd euroback
 ./scripts/setup-local.sh   # spins up Postgres + Redis + MinIO via docker-compose, applies migrations
 ```
-Detailed local-dev walkthrough is in the `docs/` directory (a proper `eb dev up` command lands with the [Local Dev Experience plan](https://app.notion.com/p/3c37383ff7d18198ac89cec6b4f09445)).
+Detailed local-dev walkthrough is in the `docs/` directory. A proper `eb dev up` command that packages the whole local stack into one CLI is planned; watch the [public issue tracker](https://github.com/STGime/euroback/issues) for progress.
 
 ## Contributing
 
