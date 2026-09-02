@@ -2,6 +2,7 @@
   "name": "@eurobase/mcp-server",
   "version": "1.0.0",
   "description": "Eurobase MCP server for Claude Code integration",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
