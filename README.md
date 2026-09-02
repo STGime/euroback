@@ -4,7 +4,7 @@
 
 - **Website + pricing:** [eurobase.app](https://eurobase.app)
 - **Console:** [console.eurobase.app](https://console.eurobase.app)
-- **Docs:** [docs.eurobase.app](https://docs.eurobase.app)
+- **Docs:** [console.eurobase.app/docs](https://console.eurobase.app/docs)
 - **Security & compliance:** [eurobase.app/security](https://eurobase.app/security)
 
 ## Repository layout
@@ -30,7 +30,7 @@
 ```bash
 npm install @eurobase/sdk
 ```
-See [docs.eurobase.app](https://docs.eurobase.app) for the SDK reference and quickstarts.
+See [console.eurobase.app/docs](https://console.eurobase.app/docs) for the SDK reference and quickstarts.
 
 **As a contributor or self-hoster** (running the platform locally):
 ```bash
