@@ -5,10 +5,20 @@ Parameters
 Licensor:             Eurobase OÜ, Ahtri 12, Tallinn 15551, Estonia
                       (Estonian commercial register code: 17557586)
 Licensed Work:        Eurobase — the source code in this repository,
-                      excluding the sdk/ and mcp-server/ subdirectories,
-                      which are licensed under the MIT License (see each
-                      subdirectory's LICENSE file). See LICENSING.md at
-                      the repository root for the full split.
+                      excluding the following, which are separately
+                      governed:
+                        - sdk/ (MIT License; see sdk/LICENSE)
+                        - mcp-server/ (MIT License; see
+                          mcp-server/LICENSE)
+                        - docs/legal/ (published legal documents —
+                          Terms, Privacy, DPA, AUP, sub-processors,
+                          compliance dossier — each of which is a
+                          contract or notice governed by its own
+                          text, versioning, and change-notice rules;
+                          the BUSL grant below does not apply to
+                          those documents).
+                      See LICENSING.md at the repository root for the
+                      full split.
 Additional Use Grant: You may make production use of the Licensed Work,
                       provided such use does not include offering the
                       Licensed Work (or a modified version of it) to
@@ -22,12 +32,18 @@ Additional Use Grant: You may make production use of the Licensed Work,
                       client engagements where the Licensed Work is
                       operated by or on behalf of a single customer is
                       expressly permitted.
-Change Date:          Four years from the date the Licensed Work is
-                      published under this License, evaluated per
-                      published Git commit. The Change Date for any
-                      particular version of the Licensed Work is the
-                      four-year anniversary of the first public release
-                      of that version.
+Change Date:          For any individual portion of the Licensed Work,
+                      the Change Date is the four-year anniversary of
+                      the date that portion was first pushed to the
+                      public repository at
+                      https://github.com/STGime/euroback. Each Git
+                      commit's contents convert to the Change License
+                      four years after that commit is first published,
+                      evaluated per line via `git blame` against the
+                      public repository history. This monorepo has no
+                      tagged backend releases; the per-commit rule
+                      makes the timer unambiguous for continuously-
+                      deployed source.
 Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the
