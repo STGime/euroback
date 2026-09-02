@@ -107,7 +107,7 @@ const pendingCheckoutCooldown = 5 * time.Minute
 // Grandfathering was dropped from the launch scope (see
 // docs/billing/stacked-pr-plan.md); every user pays the same price.
 var planPriceCents = map[string]int{
-	"pro": 1900, // €19/mo per project
+	"pro": 2500, // €25/mo per project (migration 000110)
 }
 
 // WebhookMetrics is the surface the webhook handler uses to record

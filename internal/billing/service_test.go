@@ -83,8 +83,8 @@ func TestService_InvalidPlan(t *testing.T) {
 // The DB-lookup path is exercised in integration tests + by the
 // non-beta Team checkout scenario once we lock in a price.
 func TestPlanPriceCents(t *testing.T) {
-	if planPriceCents["pro"] != 1900 {
-		t.Errorf("Pro price drifted: got %d cents, want 1900 (€19)", planPriceCents["pro"])
+	if planPriceCents["pro"] != 2500 {
+		t.Errorf("Pro price drifted: got %d cents, want 2500 (€25)", planPriceCents["pro"])
 	}
 	if _, ok := planPriceCents["team"]; ok {
 		t.Error("team must not appear in planPriceCents — it lives on plan_limits.price_cents (nullable during beta)")

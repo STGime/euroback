@@ -597,14 +597,16 @@
 							<input type="radio" name="plan" value="free" bind:group={newPlan} class="peer sr-only" />
 							<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50 border-gray-200 hover:border-gray-300">
 								<p class="text-sm font-semibold text-gray-900">Free</p>
-								<p class="text-xs text-gray-500">$0/mo</p>
+								<p class="text-xs text-gray-500">&euro;0/mo</p>
+								<p class="mt-1 text-[10px] text-gray-500 leading-tight">Personal, learning &amp; development. Non-commercial only.</p>
 							</div>
 						</label>
 						<label class="{hasTeamBeta && hasLegalTeamBeta ? '' : 'flex-1'} cursor-pointer">
 							<input type="radio" name="plan" value="pro" bind:group={newPlan} class="peer sr-only" />
 							<div class="rounded-lg border-2 p-3 text-center transition-colors peer-checked:border-eurobase-600 peer-checked:bg-eurobase-50 border-gray-200 hover:border-gray-300">
 								<p class="text-sm font-semibold text-gray-900">Pro</p>
-								<p class="text-xs text-eurobase-600 font-medium">&euro;19/mo</p>
+								<p class="text-xs text-eurobase-600 font-medium">&euro;25/mo</p>
+								<p class="mt-1 text-[10px] text-gray-500 leading-tight">Commercial use &mdash; production apps, agencies, internal tools.</p>
 							</div>
 						</label>
 						{#if hasTeamBeta}
