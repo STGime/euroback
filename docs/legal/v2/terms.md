@@ -66,7 +66,7 @@ We provide an EU-hosted backend platform: managed PostgreSQL, authentication, ob
 
 ## 3. Account creation and access
 
-You must register an account to use the Service. During the current early-access period, account creation may be gated by waitlist or invitation. You agree to provide accurate information at signup and to keep it current. **[CONSUMER]** When signing up as a consumer, you confirm you are at least 16 years old. You are responsible for keeping your credentials confidential and for activity under your account.
+You must register an account to use the Service. You agree to provide accurate information at signup and to keep it current. **[CONSUMER]** When signing up as a consumer, you confirm you are at least 16 years old. You are responsible for keeping your credentials confidential and for activity under your account.
 
 ## 4. Right of withdrawal **[CONSUMER]**
 
@@ -79,7 +79,7 @@ If you ask us to begin performance of the Service during the withdrawal period a
 The Service is offered in multiple tiers, described on the pricing page at eurobase.app/pricing. All prices are stated in Euros (EUR) and are exclusive of applicable value-added tax (VAT) unless stated otherwise.
 
 - **Free tier — non-commercial use only.** The Free tier is provided at no charge for personal projects, learning, and development purposes. Commercial use — including production applications with paying users, revenue-generating businesses, agency or client work, and internal tools of a commercial entity — requires a Pro or higher subscription. If we identify commercial use on a Free project, we will notify the account owner by email and provide 14 days to upgrade before restricting the project. Subject to usage limits and idle-pause after 30 days without activity.
-- **Paid tiers** are billed monthly or annually; payment is due in advance. Pro is priced per project (€25/mo per project as of v2.1). Team and Legal Team tiers are priced per project and per capability as published on the pricing page.
+- Paid tiers: billed monthly or annually; payment due in advance. Pro is priced per project.
 - **No metered overage billing.** Every tier has fixed usage caps published on the pricing page. Requests beyond a tier's caps are rejected or throttled (writes may enter a soft-grace window before hard caps engage); the account is never billed above the tier's flat monthly price without an explicit upgrade to a higher tier.
 - Subscriptions renew automatically unless cancelled before the renewal date. **[CONSUMER]** Consumers may cancel a renewing subscription at any time effective at the end of the current billing period.
 - Refunds are issued only as required by law or this section.
@@ -98,7 +98,7 @@ Where Customer Data includes personal data, you act as **controller** and we act
 
 ## 8. Service levels and support
 
-During early access we provide best-effort availability and email support at **contact@eurobase.app**. A formal Service Level Agreement and target uptime will be published at **/legal/sla** before paid plans launch. Planned maintenance is announced in advance via the console. Emergency security patches may be deployed without prior notice (see our incident handling at **/legal/security**).
+We provide best-effort availability and email support at **contact@eurobase.app**. A formal Service Level Agreement and target uptime for higher tiers will be published at **/legal/sla** as those tiers launch. Planned maintenance is announced in advance via the console. Emergency security patches may be deployed without prior notice (see our incident handling at **/legal/security**).
 
 ## 9. Suspension and termination
 

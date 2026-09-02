@@ -78,4 +78,6 @@ If you think this notice is inaccurate or misses something, please email **dpo@e
 
 ## Changelog
 
-- v1.0 (2 October 2026) — Initial publication.
+- v2.1 (2 October 2026) — Doc-set version bumped in step with terms.md v2.1 (Free-tier non-commercial clause added in Terms §5). No content change to this cookies notice.
+- v2.0 (22 July 2026) — Estonia re-incorporation; entity switched to Eurobase OÜ.
+- v1.0 — Initial publication under the pre-2026 entity.

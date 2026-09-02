@@ -95,4 +95,6 @@ These only process data when you enable the corresponding feature on your Projec
 
 ## Changelog
 
-- **v1.0 (2 October 2026)** — Initial publication: Scaleway, GatewayAPI, Mollie, Google, GitHub.
+- **v2.1 (2 October 2026)** — Doc-set version bumped in step with terms.md v2.1 (Free-tier non-commercial clause added in Terms §5). No sub-processor change.
+- **v2.0 (22 July 2026)** — Estonia re-incorporation; entity switched to Eurobase OÜ.
+- **v1.0** — Initial publication under the pre-2026 entity: Scaleway, GatewayAPI, Mollie, Google, GitHub.
