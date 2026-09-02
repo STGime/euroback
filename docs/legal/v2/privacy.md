@@ -12,8 +12,8 @@ REVIEWER NOTES — read before publication (v2)
          reflecting the choice to incorporate in Estonia. Direct
          result of the Terms §16 governing-law change; no separate
          review decision needed.
-  3. Entity strings ({{LEGAL_ENTITY}}, {{REGISTERED_ADDRESS}},
-     {{EFFECTIVE_DATE}}) are still placeholders until formation
+  3. Entity strings (Eurobase OÜ, Ahtri 12, Tallinn 15551,
+     2 October 2026) are still placeholders until formation
      completes. Fill in one follow-up commit; do NOT publish with
      placeholders left in.
   4. The retention table cites concrete code paths so engineering can
@@ -30,17 +30,17 @@ REVIEWER NOTES — read before publication (v2)
 
 # Privacy Policy
 
-**Version 2.0 — effective {{EFFECTIVE_DATE}}**
+**Version 2.1 — effective 2 October 2026**
 
-This policy explains how **{{LEGAL_ENTITY}}** ("**Eurobase**", "**we**") handles personal data of people who use the Eurobase platform — visitors to our website, sign-ups, account holders, billing contacts, and people who write to us. If you are an end-user of an application *built on* Eurobase, your data is controlled by that application's operator, not by us; please contact them. (Technical detail of how their data flows through Eurobase is in the **Data Processing Agreement** at /legal/dpa.)
+This policy explains how **Eurobase OÜ** ("**Eurobase**", "**we**") handles personal data of people who use the Eurobase platform — visitors to our website, sign-ups, account holders, billing contacts, and people who write to us. If you are an end-user of an application *built on* Eurobase, your data is controlled by that application's operator, not by us; please contact them. (Technical detail of how their data flows through Eurobase is in the **Data Processing Agreement** at /legal/dpa.)
 
 ## 1. Who is the controller
 
-**{{LEGAL_ENTITY}}**
-{{REGISTERED_ADDRESS}}
-Registry: {{REGISTRY_NUMBER}}
-VAT: {{VAT_NUMBER}}
-Email: **{{CONTACT_EMAIL}}**
+**Eurobase OÜ**
+Ahtri 12, Tallinn 15551
+Registry: 17557586
+VAT: Not VAT-registered (below Estonian €40,000 threshold)
+Email: **contact@eurobase.app**
 Data protection contact: **dpo@eurobase.app**
 
 You can reach our data protection contact for any question about this policy or to exercise your rights (Section 6).
@@ -121,6 +121,6 @@ If we change this policy in a material way we will post the new version at **/le
 For any privacy question or to exercise your rights:
 
 **Email:** dpo@eurobase.app
-**Postal:** {{LEGAL_ENTITY}}, {{REGISTERED_ADDRESS}}
+**Postal:** Eurobase OÜ, Ahtri 12, Tallinn 15551
 
 We respond in writing within one calendar month. Where the request is complex we may extend by two further months and we will tell you why.

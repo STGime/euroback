@@ -20,7 +20,7 @@ REVIEWER NOTES — read before publication
 
 # Legal Team addendum — German legal-tech compliance
 
-**Effective {{EFFECTIVE_DATE}}. Applies to Customers on the Legal Team tier only.**
+**Effective 2 October 2026. Applies to Customers on the Legal Team tier only.**
 
 This addendum extends the Data Processing Agreement (DPA v2) with commitments specific to German legal-tech, Steuerberater, and legal-ops customers whose own regulatory framework — the Bundesrechtsanwaltsordnung (BRAO), the Berufsordnung für Rechtsanwälte (BORA), the Strafgesetzbuch §203 (Berufsgeheimnis), the Abgabenordnung (AO), and the Handelsgesetzbuch (HGB) — imposes obligations that flow through to their processors.
 
@@ -61,5 +61,5 @@ Where this addendum conflicts with the DPA v2 or the Terms of Service, this adde
 
 ---
 
-**{{LEGAL_ENTITY}}, {{REGISTERED_ADDRESS}}**
+**Eurobase OÜ, Ahtri 12, Tallinn 15551**
 Signatory: DPO — dpo@eurobase.app
