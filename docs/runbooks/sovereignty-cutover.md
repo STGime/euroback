@@ -42,15 +42,51 @@ Recommendation: **Serverless Containers** (not Kapsule). The marketing site is a
   curl -sI https://<container-id>.fnc.fr-par.scw.cloud/ | head -5
   curl -s https://<container-id>.fnc.fr-par.scw.cloud/ | grep -c '<title>Eurobase'
   ```
-- [ ] **Attach custom domains `eurobase.app` + `www.eurobase.app` to the container** and wait for Scaleway's managed Let's Encrypt cert to issue for both names. This must be done **now**, in Phase 1, because after the Phase 3b NS flip these names resolve directly to the container (no CF cert in front any more) and the container must serve a valid cert for them from the first request. Verify:
+- [ ] **Attach custom domains `eurobase.app` + `www.eurobase.app` to the container** and wait for Scaleway's managed Let's Encrypt cert to issue for both names. This must be done **now**, in Phase 1, because after the Phase 3b NS flip these names resolve directly to the container (no CF cert in front any more) and the container must serve a valid cert for them from the first request.
+
+  **Actual working procedure** (Scaleway's custom-domain verification requires DNS to already resolve to the container; the "attach then wait" flow with orange-cloud CF DNS *does not* work — Scaleway's DNS check sees CF IPs, not the container hostname):
+
+  1. Register the pending attachments on Scaleway:
+     ```sh
+     scw container domain create hostname=www.eurobase.app \
+       container-id=<container-id> region=fr-par
+     scw container domain create hostname=eurobase.app \
+       container-id=<container-id> region=fr-par
+     ```
+     Both come back `status=pending` with a domain-id.
+  2. In Cloudflare DNS, lower TTL on `www.eurobase.app` and `eurobase.app` to 300s. Wait 24h if the current TTL is high.
+  3. Grey-cloud `www.eurobase.app` first (least visitor traffic) and change target:
+     - Record type: `CNAME`
+     - Target: `<container-id>.fnc.fr-par.scw.cloud` (or the specific `<name>a<hash>-<name>.functions.fnc.fr-par.scw.cloud` for named containers)
+     - Proxy status: **DNS only (grey cloud)** — must be off for Scaleway's DNS check to see the CNAME
+  4. Verify propagation across public resolvers:
+     ```sh
+     for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short CNAME www.eurobase.app @$r; done
+     # Expect all three to return the *.scw.cloud hostname.
+     ```
+  5. **Delete + recreate the domain attachment** — Scaleway caches the initial "DNS not resolving" failure and won't retry cert issuance automatically. Recreation with DNS now correct issues the cert on first attempt:
+     ```sh
+     scw container domain delete <old-pending-id> region=fr-par
+     scw container domain create hostname=www.eurobase.app \
+       container-id=<container-id> region=fr-par
+     # Note the NEW id from the output.
+     ```
+  6. Poll for `ready` (use `scripts/scw-domain-wait.sh <new-id>` in the eurobase repo — exits 0 on ready, 1 on error, 2 on timeout).
+  7. Repeat steps 3–6 for the apex. CF's CNAME-flattening handles apex CNAMEs; still grey-cloud.
+
+  Post-attach verify:
   ```sh
-  # From the Scaleway console, custom-domain rows show "Certificate: valid".
-  # From the CLI, hit the container hostname with the target Host header:
-  curl -sI --resolve eurobase.app:443:$(dig +short <container-id>.fnc.fr-par.scw.cloud | tail -1) \
-    https://eurobase.app/ | grep -iE 'HTTP|server'
-  # Expect 200 + Server: nginx (not CF), served over TLS with a cert whose SAN
-  # includes eurobase.app + www.eurobase.app.
+  for host in eurobase.app www.eurobase.app; do
+    echo "=== $host ==="
+    curl -sI https://$host/ | head -3
+    echo | openssl s_client -servername $host -connect $host:443 2>/dev/null \
+      | openssl x509 -noout -issuer -subject -dates | head -4
+  done
+  # Expect 200, issuer Let's Encrypt, subject CN matches hostname, notAfter ~90 days out.
   ```
+
+  **Visitor-impact trade-off during this step:** grey-clouding `www.eurobase.app` and later the apex means Cloudflare is no longer proxying those hostnames from the moment of the DNS change. Between DNS propagation and Scaleway cert issuance (typically <2 min), visitors see the Scaleway container with no valid cert for that name → browser TLS warning. Communicated in the pre-cutover announcement (see Comms).
+
 - [ ] Note: **Serverless Containers have no stable IP.** They expose a `*.scw.cloud` hostname and route incoming traffic by SNI/Host header. Downstream steps (Phase 2a, Phase 3) must use a CNAME (or CF's CNAME-flattening at apex), never an A record.
 
 ### 1b. Provision Mailbox.org tenancy
