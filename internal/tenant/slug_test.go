@@ -5,7 +5,7 @@ import "testing"
 // Closes #49: tenant slugs collide with platform-reserved subdomains.
 
 func TestSlugIsReserved(t *testing.T) {
-	for _, s := range []string{"www", "admin", "api", "app", "auth", "console", "superadmin", "eurobase", "mail", "static"} {
+	for _, s := range []string{"www", "admin", "api", "app", "auth", "console", "mcp", "superadmin", "eurobase", "mail", "static"} {
 		if !slugIsReserved(s) {
 			t.Errorf("slugIsReserved(%q) = false, want true", s)
 		}

@@ -95,6 +95,7 @@ var reservedSlugs = map[string]bool{
 	"login":       true,
 	"mail":        true,
 	"marketing":   true,
+	"mcp":         true,
 	"oauth":       true,
 	"public":      true,
 	"security":    true,
