@@ -36,12 +36,22 @@ Recommendation: **Serverless Containers** (not Kapsule). The marketing site is a
 
 - [ ] Create Scaleway Container Registry namespace: `rg.fr-par.scw.cloud/eurobase-marketing`.
 - [ ] Add GitHub Actions workflow `.github/workflows/marketing-deploy.yml` in the `eurobase` repo — mirror of `cloudbuild.yaml` but pushing to Scaleway CR and deploying to Serverless Containers.
-- [ ] Deploy to a private hostname (`marketing-preview.fnc.fr-par.scw.cloud` — the Scaleway-issued endpoint). Do NOT wire it to `eurobase.app` yet.
+- [ ] Deploy to the Scaleway-issued endpoint (`<container-id>.fnc.fr-par.scw.cloud`). Do NOT wire it to `eurobase.app` yet.
 - [ ] Smoke-test the Scaleway origin directly:
   ```sh
-  curl -sI https://marketing-preview.fnc.fr-par.scw.cloud/ | head -5
-  curl -s https://marketing-preview.fnc.fr-par.scw.cloud/ | grep -c '<title>Eurobase'
+  curl -sI https://<container-id>.fnc.fr-par.scw.cloud/ | head -5
+  curl -s https://<container-id>.fnc.fr-par.scw.cloud/ | grep -c '<title>Eurobase'
   ```
+- [ ] **Attach custom domains `eurobase.app` + `www.eurobase.app` to the container** and wait for Scaleway's managed Let's Encrypt cert to issue for both names. This must be done **now**, in Phase 1, because after the Phase 3b NS flip these names resolve directly to the container (no CF cert in front any more) and the container must serve a valid cert for them from the first request. Verify:
+  ```sh
+  # From the Scaleway console, custom-domain rows show "Certificate: valid".
+  # From the CLI, hit the container hostname with the target Host header:
+  curl -sI --resolve eurobase.app:443:$(dig +short <container-id>.fnc.fr-par.scw.cloud | tail -1) \
+    https://eurobase.app/ | grep -iE 'HTTP|server'
+  # Expect 200 + Server: nginx (not CF), served over TLS with a cert whose SAN
+  # includes eurobase.app + www.eurobase.app.
+  ```
+- [ ] Note: **Serverless Containers have no stable IP.** They expose a `*.scw.cloud` hostname and route incoming traffic by SNI/Host header. Downstream steps (Phase 2a, Phase 3) must use a CNAME (or CF's CNAME-flattening at apex), never an A record.
 
 ### 1b. Provision Mailbox.org tenancy
 
@@ -55,6 +65,7 @@ Recommendation: **Serverless Containers** (not Kapsule). The marketing site is a
 
 - [ ] Create zone `eurobase.app` on Scaleway DNS.
 - [ ] Mirror every record from the current Cloudflare zone (A, AAAA, CNAME, MX, TXT, CAA). Keep any `_acme-challenge` automation config the Scaleway ACME issuer will need.
+- [ ] **CAA sanity-check** — the mirrored CAA record must authorize Let's Encrypt for *both* issuance paths that will be active post-cutover: (a) cert-manager's DNS-01 wildcard for `*.eurobase.app` and (b) the Scaleway-managed cert for the Serverless Container's `eurobase.app` + `www.eurobase.app` custom domains. Simplest safe value: `0 issue "letsencrypt.org"` (covers both). Any tighter policy (`issuewild` restrictions, account-URI pinning) must be reviewed before Phase 3 or Scaleway's managed cert renewal will silently fail once CF's CA is out of the path.
 - [ ] Do NOT change registrar NS records yet. Scaleway zone is dormant until Phase 3.
 - [ ] Verify parity:
   ```sh
@@ -73,13 +84,18 @@ Recommendation: **Serverless Containers** (not Kapsule). The marketing site is a
 
 Every change in Phase 2 happens in the Cloudflare control panel or via CF API. NS records untouched — visitors still resolve through Cloudflare, so the failure blast radius is one record edit away from rollback.
 
-### 2a. Repoint the marketing A record → Scaleway origin
+### 2a. Repoint the marketing origin → Scaleway Serverless Container
 
-- [ ] Lower the A record's TTL to 300s in Cloudflare 24 hours before the swap.
-- [ ] Change the A record's origin from the Cloud Run IP → the Scaleway Serverless Container endpoint. **Keep the CF proxy status "orange-cloud"** — CF stays as the TLS termination + edge cache.
-- [ ] Verify from outside CF (add a Host header to bypass the CF edge and hit the origin directly):
+Serverless Containers route by SNI/Host header and have no stable IP, so this is a **CNAME**, not an A record. At the apex, use Cloudflare's CNAME-flattening (which returns the resolved A record to clients at query time — the record type inside CF is CNAME, on the wire it's an A). `www` is a straight CNAME.
+
+- [ ] Lower TTL to 300s in Cloudflare on both `eurobase.app` (apex, CNAME-flattened) and `www.eurobase.app` (CNAME) 24 hours before the swap.
+- [ ] Update both records to target the Serverless Container hostname (`<container-id>.fnc.fr-par.scw.cloud`). **Keep CF proxy status "orange-cloud"** — CF stays as the TLS termination + edge cache during Phase 2.
+- [ ] Verify against the direct Scaleway origin (bypassing CF), using hostname resolution — **not** `--resolve :<ip>`, because a bare IP hit doesn't carry the container's SNI:
   ```sh
-  curl -sI --resolve eurobase.app:443:<scaleway-origin-ip> https://eurobase.app/ | head -5
+  curl -sI --resolve eurobase.app:443:$(dig +short <container-id>.fnc.fr-par.scw.cloud | tail -1) \
+    https://eurobase.app/ | head -5
+  # Or the simpler indirect check: hit the container hostname with a Host override.
+  curl -sI -H 'Host: eurobase.app' https://<container-id>.fnc.fr-par.scw.cloud/ | head -5
   ```
 - [ ] Verify through CF (visitor perspective):
   ```sh
@@ -88,7 +104,7 @@ Every change in Phase 2 happens in the Cloudflare control panel or via CF API. N
   ```
 - [ ] Monitor CF Analytics for 5xx rate — should stay near zero.
 
-**Rollback:** revert the A record to Cloud Run IP. TTL is 300s → full recovery in ≤5 min.
+**Rollback:** revert the CNAME target to the Cloud Run hostname. TTL is 300s → full recovery in ≤5 min.
 
 ### 2b. Swap MX records → Mailbox.org
 
@@ -119,6 +135,8 @@ This is the only phase with real customer-visible risk. The NS change at the reg
 
 ### 3a. Pre-flight
 
+Two independent cert stories must both be healthy before the NS flip — one for the Kapsule ingress hostnames (`api`/`console`/`mcp`/`*.eurobase.app`), one for the marketing apex + `www` (Serverless Container managed cert). If either is not ready, do not flip NS.
+
 - [ ] Verify the dormant Scaleway `ClusterIssuer` and `scaleway-credentials` Secret are healthy (they've been declared but idle since #220):
   ```sh
   kubectl -n eurobase get clusterissuer letsencrypt-prod-dns -o yaml \
@@ -126,8 +144,9 @@ This is the only phase with real customer-visible risk. The NS change at the reg
   kubectl -n cert-manager get secret scaleway-credentials -o yaml \
     | yq '.data | keys'
   ```
+- [ ] **Re-verify the Serverless Container's managed cert for `eurobase.app` + `www.eurobase.app`** (provisioned in Phase 1a) — Scaleway auto-renews these, but check the console dashboard's "Certificate: valid" line and `notAfter` explicitly. The wildcard `*.eurobase.app` does NOT cover the bare apex; the Serverless Container's own cert is the only thing keeping the apex + `www` TLS-valid the moment DNS resolves off Cloudflare.
 - [ ] Confirm the Scaleway zone (from Phase 1c) is complete and current — one more diff run.
-- [ ] Note: current wildcard cert (from CF-solver era) is valid until its `notAfter` date. Renewal need not happen in this window; the swap is for the *next* renewal.
+- [ ] Note: the current wildcard cert (from the CF-solver era, covering `*.eurobase.app` on Kapsule) stays valid until its `notAfter`. Renewal need not happen in this window; the Phase 3c issuer swap is for the *next* renewal.
 
 ### 3b. Registrar NS swap
 
