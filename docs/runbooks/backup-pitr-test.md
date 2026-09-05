@@ -293,32 +293,33 @@ promise is broken, launch blocked.
 
 ### T7 — Restore quota enforcement (platform code, not Scaleway)
 
-Team tier: **1 restore/month included, further restores metered or
-paywalled**. Scaleway does not enforce this — it's our billing/platform
-code. So the test is against our code, not Scaleway.
+Team tier: **1 restore/month included; further restores return 402
+with an upsell message** (decision locked in migration
+`000108_team_pricing_and_restore_quota.up.sql`). Enforcement is our
+platform code — `internal/tenant/backup_handlers.go` →
+`enforceRestoreQuota` calls `countMonthlyRestores` and compares
+against `plan_limits.included_restores_per_month`.
 
 **Setup:**
-- A test project on Team tier in staging billing environment
-  (`BILLING_ENABLED=true`, `MOLLIE_ENV=test`).
-- Zero restores used this billing period.
+- A test project on Team tier in staging.
+- Zero restores used this billing period (or delete existing rows
+  in `public.restore_operations` for the project first).
 
 **Action:**
-1. Trigger restore #1 via the customer-facing endpoint (`POST
-   /platform/projects/{id}/restore` — build this endpoint if it does
-   not exist yet; see follow-up).
-2. Verify: succeeds, `project_restore_events` table shows one row,
-   `restores_used_this_period=1`.
+1. Trigger restore #1 via `POST /platform/projects/{id}/restore`
+   (admin role).
+2. Verify: succeeds → new row in `public.restore_operations`,
+   `GET /restore-quota` returns `used=1, included=1`.
 3. Trigger restore #2 immediately.
-4. Verify: either (a) returns 402 with a clear message about the
-   quota + upgrade path, or (b) succeeds and inserts a Mollie invoice
-   line item for the overage — pick one, document, ship consistently.
+4. Verify: `POST /restore` returns HTTP 402 with body
+   `{"error":"restore_quota_exceeded", ...}`; no new row inserted.
 
-**Expected:** either explicit soft-fail with clear billing signal OR
-successful metered overage — never a silent success that costs the
-customer money without an invoice line.
+**Expected:** 402 with `restore_quota_exceeded` on the second attempt,
+no silent success. Failed restore attempts (terminal-error state) do
+NOT count against the quota — `countMonthlyRestores` excludes them.
 
-**Fail case:** restore #2 silently succeeds with no billing record →
-customer surprise on next invoice; blocking.
+**Fail case:** restore #2 silently succeeds → quota enforcement bug;
+blocking.
 
 ### T8 — Backup ciphertext location + encryption
 
@@ -364,13 +365,19 @@ Customer impact: zero, because the source was never modified. This
 is a nice property of Scaleway's restore model — worth surfacing in
 the customer-facing restore UI.
 
-## Follow-ups (out of scope for this runbook but required before GA)
+## Already shipped (reference — not follow-ups)
 
-- **Console restore UI** — no UI today. Need `POST /platform/projects/{id}/restore` endpoint + a "Restore" tab on the Team-tier project settings that lets the customer pick a timestamp (calendar picker for the last 7 days). File as a separate issue.
-- **`project_restore_events` table** — new schema needed. Records who triggered the restore, when, target timestamp, source backup id, clone instance id, quota-period ordinal (1st / 2nd / ...). Migration in the same PR as the endpoint.
-- **Mollie overage line-item** — if T7 chooses the metered path over the paywalled path. `internal/billing/overages.go` doesn't exist today.
-- **Status page: RTO/RPO published numbers** — derived from T4 + T5 measurements. Copy into `/security` page + DPA.
-- **Automated recurring test** — this runbook is a one-shot pre-launch gate. Post-launch, a monthly cron that runs T3 + T4 against a synthetic project would catch Scaleway regressions before customers do. Separate issue.
+The first draft of this runbook listed these as follow-ups; a code
+sweep confirmed they're already in main:
+
+- **Restore endpoint + console UI** — `POST /platform/projects/{id}/restore`, `GET /restore/{id}`, `GET /restore-quota` in `internal/tenant/backup_handlers.go`, wired at `internal/gateway/router.go:820-824`. Console UI at `console/src/routes/(app)/p/[id]/database/pitr/+page.svelte` (PITR calendar picker) + `RestoreProgressPanel.svelte` (5s polling).
+- **Restore-history table** — `public.restore_operations` (migration `000091_restore_operations.up.sql`), including a partial unique index that enforces one live restore per project.
+- **Quota shape** — Team price + `included_restores_per_month=1` + hard-cap-with-402-upsell decision locked in migration `000108_team_pricing_and_restore_quota.up.sql`. `countMonthlyRestores` excludes terminal-failure states so a broken attempt does not burn the quota.
+
+## Follow-ups (still required before Team-tier GA)
+
+- **Status page: RTO/RPO published numbers** — derived from T4 + T5 measurements. Copy into `/security` page + DPA. See [euroback#512](https://github.com/STGime/euroback/issues/512).
+- **Automated recurring test** — this runbook is a one-shot pre-launch gate. Post-launch, a monthly cron that runs T3 + T4 against a synthetic project would catch Scaleway regressions before customers do. See [euroback#513](https://github.com/STGime/euroback/issues/513).
 
 ## Refs
 
