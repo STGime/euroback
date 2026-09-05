@@ -80,6 +80,11 @@ CLONE_ID=""
 TEARDOWN_DONE=""   # guard so INT/TERM + EXIT don't double-run
 
 teardown() {
+  # Capture the real exit status FIRST — before the re-entrancy
+  # guard's `TEARDOWN_DONE=1` assignment clobbers $? to 0. Otherwise
+  # the TEARDOWN_ON_FAILURE=false debug knob is inert.
+  local rc=$?
+
   # Re-entrancy guard — trap fires on EXIT and also on INT/TERM (the
   # k8s deadline SIGTERM path is exactly what activeDeadlineSeconds
   # exists to invoke, and without the signal traps the bash EXIT
@@ -87,9 +92,8 @@ teardown() {
   [ -n "$TEARDOWN_DONE" ] && return
   TEARDOWN_DONE=1
 
-  local rc=$?
   set +e
-  if [ "$TEARDOWN_ON_FAILURE" = "false" ] && [ $rc -ne 0 ]; then
+  if [ "$TEARDOWN_ON_FAILURE" = "false" ] && [ "$rc" -ne 0 ]; then
     echo "TEARDOWN_ON_FAILURE=false — leaving $INSTANCE_ID / $CLONE_ID for inspection"
     return
   fi
@@ -111,7 +115,17 @@ teardown() {
     exit 4
   fi
 }
-trap teardown EXIT INT TERM
+# On normal exit: teardown runs via EXIT. On signal (SIGINT /
+# SIGTERM, including the k8s activeDeadlineSeconds kill): teardown
+# runs AND we then exit 143 explicitly. Without the explicit exit,
+# bash resumes the main script after the signal handler returns —
+# with `set +e` (from inside teardown) still in effect shell-globally
+# — so subsequent psql/scw failures against the now-deleted instance
+# are silently ignored and the script can fall through to the
+# post_discord OK line, producing a false "monthly test passed"
+# after teardown already deleted everything.
+trap teardown EXIT
+trap 'teardown; exit 143' INT TERM
 
 # ── Provision throwaway instance ──────────────────────────────────────
 echo "creating $INSTANCE_NAME …"
