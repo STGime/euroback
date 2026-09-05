@@ -91,14 +91,27 @@ SQL
 # runbook's T3 scenario runs its own INSERT/DELETE between checkpoints).
 
 if [ "$CHECKPOINT" = "baseline" ]; then
-  echo "seeding baseline dataset: ${SCALE} users, $((SCALE * 5)) documents, $((SCALE * 20)) events…"
+  # Baseline is NOT idempotent: a re-run would duplicate `documents`
+  # and `events` (which have no natural conflict key) and
+  # ON CONFLICT DO UPDATE on `test_manifest` would silently overwrite
+  # the good checksum with the corrupted one. Hard-fail instead of
+  # silently corrupting the reference state.
+  existing=$(psql "$DB_URL" -tA -c "
+    SELECT (SELECT count(*) FROM users) + (SELECT count(*) FROM documents)
+  ")
+  if [ "$existing" -gt 0 ]; then
+    echo "refusing to re-seed baseline: users+documents already contain $existing rows." >&2
+    echo "if this is intentional, TRUNCATE users, documents, events, test_manifest first." >&2
+    exit 1
+  fi
+
+  echo "seeding baseline dataset: ${SCALE} users, $((SCALE * 5)) documents (incl. 100 'to-delete-*'), $((SCALE * 20)) events…"
 
   # Users
   psql "$DB_URL" -v ON_ERROR_STOP=1 -v n="$SCALE" <<'SQL'
 INSERT INTO users (email)
 SELECT 'user-' || gs::text || '@test'
-FROM generate_series(1, :n) gs
-ON CONFLICT (email) DO NOTHING;
+FROM generate_series(1, :n) gs;
 SQL
 
   # Documents — 5 per user, deterministic body content so the checksum
@@ -111,6 +124,19 @@ SELECT
   'body-' || u.email || '-' || d.n || '-lorem-ipsum'
 FROM (SELECT id, email FROM users LIMIT :n) u,
      LATERAL generate_series(1, 5) d(n);
+SQL
+
+  # 100 explicitly-named documents that the T3 PITR scenario will
+  # DELETE at T_B — the assertion "documents deleted at T_B are absent
+  # on the clone restored to T_B" only proves something if such
+  # documents actually exist in the seeded state.
+  psql "$DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+INSERT INTO documents (owner_id, title, body)
+SELECT
+  (SELECT id FROM users ORDER BY email LIMIT 1),
+  'to-delete-' || d.n,
+  'to-delete-body-' || d.n
+FROM generate_series(1, 100) d(n);
 SQL
 
   # Events — 20 per user, with staggered timestamps so PITR windows

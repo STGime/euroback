@@ -34,7 +34,9 @@ if [ -z "$DB_URL" ]; then
 fi
 
 # Pull the expected values from the manifest row.
-expected=$(psql "$DB_URL" -tA -F'|' <<SQL
+# Use psql -v binding (matches seed-*.sh) so the checkpoint name is
+# passed as a bound parameter, not string-interpolated into SQL.
+expected=$(psql "$DB_URL" -tA -F'|' -v cp="$CHECKPOINT" <<'SQL'
 SELECT
   row_count_users,
   row_count_documents,
@@ -42,7 +44,7 @@ SELECT
   checksum_documents,
   taken_at
 FROM test_manifest
-WHERE checkpoint_name = '$CHECKPOINT';
+WHERE checkpoint_name = :'cp';
 SQL
 )
 

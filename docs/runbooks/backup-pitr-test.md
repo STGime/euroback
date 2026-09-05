@@ -40,6 +40,19 @@ C1–C6 are Scaleway-plumbing tests. C7 is our platform-code test.
 - A test project on Team tier in staging (or a placeholder that lets us
   wire the console restore UI once it exists — see the "Follow-ups"
   section at the bottom).
+- **Verify the `scw` subcommand surface before running T3 / T4** —
+  Scaleway's RDB CLI has shifted across versions. Confirm against the
+  installed 2.62.x binary:
+  ```sh
+  scw rdb backup list --help          # T1
+  scw rdb backup create --help        # T2
+  scw rdb backup restore --help       # T2
+  scw rdb instance clone --help       # T3 (must accept point-in-time=)
+  scw rdb instance get --help         # T4 (JSON must include
+                                      #     restore_from_time / restore_to_time)
+  ```
+  If a flag or JSON field has been renamed, patch the runbook commands
+  before executing; do not "wing it".
 
 ## Test data model
 
@@ -85,7 +98,7 @@ CREATE TABLE test_manifest (
 );
 ```
 
-`scripts/ops/seed-test-data.sh` in the euroback repo populates these
+`scripts/ops/seed-backup-pitr-test-data.sh` in the euroback repo populates these
 and stamps `test_manifest` after each mutation phase.
 `scripts/ops/verify-restore.sh` compares the current DB state against
 a named manifest row.
@@ -99,7 +112,7 @@ final state.
 ### T1 — Baseline: automatic scheduled backup exists
 
 **Setup:**
-1. Fresh RDB instance, seeded via `scripts/ops/seed-test-data.sh` with
+1. Fresh RDB instance, seeded via `scripts/ops/seed-backup-pitr-test-data.sh` with
    1,000 users, 5,000 documents, 20,000 events. Stamp manifest row
    `checkpoint_name='baseline'`.
 2. Wait > 24 h so at least one scheduled backup has run.
