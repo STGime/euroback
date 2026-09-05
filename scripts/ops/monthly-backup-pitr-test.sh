@@ -206,7 +206,15 @@ psql "$DATABASE_URL" -c "
 "$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-C "$DATABASE_URL"
 sleep 10
 
-echo "T3 — cloning to T_TARGET ($T_TARGET) …"
+echo "T3/T5 — cloning to T_TARGET ($T_TARGET) …"
+# Clock the clone from create → ready. This IS the T5 RTO
+# measurement for the seeded data volume (~5 MB at SCALE=200). The
+# /security-page + DPA RTO number is extrapolated from this: Postgres
+# restore scales roughly linearly with data volume, so
+# RTO(N-MB) ≈ RTO(5-MB) × (N/5). Larger workloads (Legal Team, or a
+# Team customer with a >1 GB dataset) get a bespoke measurement on
+# request rather than a marketing number.
+CLONE_START=$(date -u +%s)
 CLONE_JSON=$(scw rdb instance clone "$INSTANCE_ID" \
   name="${INSTANCE_NAME}-clone" \
   node-type="$NODE_TYPE" \
@@ -228,6 +236,9 @@ done
   post_discord CRITICAL "clone $CLONE_ID did not reach ready in 10min (last status=$s)"
   exit 1
 }
+CLONE_END=$(date -u +%s)
+RTO_SECONDS=$((CLONE_END - CLONE_START))
+echo "T5 — RTO (clone create → ready) = ${RTO_SECONDS}s at ~5 MB seeded volume"
 
 CLONE_HOST=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.ip // .endpoint.hostname')
 CLONE_PORT=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.port // 51000')
@@ -265,5 +276,5 @@ else
 fi
 
 # ── Success ───────────────────────────────────────────────────────────
-post_discord OK "monthly test passed — T3 clone matched batch-B manifest, T4 RPO gap ${RPO_GAP:-n/a}s (≤${MAX_RPO_SECONDS}s)"
+post_discord OK "monthly test passed — T3 clone matched batch-B manifest, T4 RPO gap ${RPO_GAP:-n/a}s (≤${MAX_RPO_SECONDS}s), T5 RTO ${RTO_SECONDS}s at ~5 MB (extrapolate for larger volumes)"
 echo "all good — teardown pending in trap"

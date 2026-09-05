@@ -254,24 +254,31 @@ either a real explicit-in-writing SLA number or a claim update.
 
 ### T5 — RTO measurement: how long does a restore take?
 
-**Setup:** an instance seeded with a scale-representative dataset (see
-below).
+**Setup:** the same throwaway RDB instance from T3/T4, already seeded
+with ~5 MB (SCALE=200 default).
 
-**Action:**
-- Time three full-restore cycles at three data sizes:
-  - **Small:** 100 MB (typical Free/Pro moving to Team on day 1).
-  - **Medium:** 1 GB (mid-sized Team-tier customer).
-  - **Large:** 10 GB (upper bound of what a single Team-tier project
-    would carry before splitting).
+**Action:** `scripts/ops/monthly-backup-pitr-test.sh` already clocks
+the T3 clone from create → ready and prints the number as
+`T5 — RTO … = Xs at ~5 MB seeded volume`. That IS the T5 measurement
+for the small-data case.
 
-For each: capture wall-clock time from `scw rdb backup restore` return
-to `instance status=ready`.
+**Extrapolate for the published number.** Postgres restore scales
+roughly linearly with data volume, so `RTO(N-MB) ≈ RTO(5-MB) × (N/5)`
+for order-of-magnitude estimates. That's honest enough for a
+prospectus / DPA number in the "typical customer under 100 MB" band.
 
-**Expected:** median < 15 min for small, < 30 min for medium, < 90 min
-for large. Numbers become the honest customer-facing RTO in the DPA /
-status page.
+Larger workloads (Team-tier customer with >1 GB, or Legal Team
+customers with 10+ GB of case files) get a **bespoke measurement on
+request** rather than a marketing extrapolation. This is called out
+explicitly on the /security page and in the DPA — sets the right
+expectation and lets us keep the runbook light.
 
-**Fail case:** > 30 min for small → block launch, investigate with
+**Expected:** RTO at ~5 MB seeded volume < 5 min (Scaleway's ready-
+to-ready overhead is a fixed ~2-3 min for the instance plumbing
+plus a linear data-size component that is trivial at this scale).
+Rejecting > 5 min at 5 MB → open a ticket with Scaleway.
+
+**Fail case:** > 10 min at 5 MB → block launch, investigate with
 Scaleway.
 
 ### T6 — Cross-project isolation
