@@ -11,9 +11,11 @@
 # (in-cluster) or ad-hoc from an operator laptop for spot-checks.
 #
 # Exit codes:
-#   0 — T3 + T4 both passed
+#   0 — T3 + T4 + T5 all passed
 #   1 — T3 assertion failed (PITR did not respect the target timestamp)
-#   2 — T4 assertion failed (RPO gap exceeded MAX_RPO_SECONDS)
+#   2 — measurement threshold exceeded (T4 RPO > MAX_RPO_SECONDS OR
+#       T5 RTO > MAX_RTO_SECONDS). Distinguish which via the Discord
+#       CRITICAL message body if triage matters.
 #   3 — scw / psql setup or CLI mismatch
 #   4 — teardown failed (leaked resources — investigate)
 #
@@ -287,5 +289,5 @@ else
 fi
 
 # ── Success ───────────────────────────────────────────────────────────
-post_discord OK "monthly test passed — T3 clone matched batch-B manifest, T4 RPO gap ${RPO_GAP:-n/a}s (≤${MAX_RPO_SECONDS}s), T5 RTO ${RTO_SECONDS}s at ~5 MB (extrapolate for larger volumes)"
+post_discord OK "monthly test passed — T3 clone matched batch-B manifest, T4 RPO gap ${RPO_GAP:-n/a}s (≤${MAX_RPO_SECONDS}s), T5 RTO ${RTO_SECONDS}s at ~5 MB (bespoke measurement on request for larger volumes)"
 echo "all good — teardown pending in trap"
