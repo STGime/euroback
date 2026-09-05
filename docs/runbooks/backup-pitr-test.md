@@ -257,29 +257,41 @@ either a real explicit-in-writing SLA number or a claim update.
 **Setup:** the same throwaway RDB instance from T3/T4, already seeded
 with ~5 MB (SCALE=200 default).
 
-**Action:** `scripts/ops/monthly-backup-pitr-test.sh` already clocks
-the T3 clone from create → ready and prints the number as
+**Action:** `scripts/ops/monthly-backup-pitr-test.sh` clocks the T3
+clone from create → ready and prints the number as
 `T5 — RTO … = Xs at ~5 MB seeded volume`. That IS the T5 measurement
-for the small-data case.
+for the small-data case. It also checks against `MAX_RTO_SECONDS`
+(default 600) and posts CRITICAL to Discord + exits 2 on breach.
 
-**Extrapolate for the published number.** Postgres restore scales
-roughly linearly with data volume, so `RTO(N-MB) ≈ RTO(5-MB) × (N/5)`
-for order-of-magnitude estimates. That's honest enough for a
-prospectus / DPA number in the "typical customer under 100 MB" band.
+**What we publish.** The measured number captures Scaleway's fixed
+restore-overhead (instance provisioning + plumbing), which dominates
+at 5 MB. On /security + DPA:
 
-Larger workloads (Team-tier customer with >1 GB, or Legal Team
-customers with 10+ GB of case files) get a **bespoke measurement on
-request** rather than a marketing extrapolation. This is called out
-explicitly on the /security page and in the DPA — sets the right
-expectation and lets us keep the runbook light.
+> Measured RTO at ~5 MB dataset: **~X min** (fixed overhead of a
+> new-instance restore). Restore time increases with database size;
+> for workloads above ~100 MB we provide a bespoke measurement on
+> request.
+
+**Do NOT publish a linear extrapolation from this one point.** The
+Postgres restore model is affine — `RTO ≈ FIXED + k·data_size` — and
+one measurement pins only the intercept, not the slope. Multiplying
+a fixed-overhead-dominated 5-MB number by (N/5) produces figures
+that are order-of-magnitude wrong (a 3-minute measurement × 200 =
+10 hours at 1 GB, vs. a realistic ~15-30 min). If a customer needs
+a specific RTO number at their real data size, we take a bespoke
+measurement — that is honest, and cheap enough with our existing
+provisioning story.
+
+If we ever want a published 1 GB or 10 GB number, anchor it with a
+one-off larger measurement (not the monthly job) so both FIXED and
+k are pinned, then publish both points as a range.
 
 **Expected:** RTO at ~5 MB seeded volume < 5 min (Scaleway's ready-
-to-ready overhead is a fixed ~2-3 min for the instance plumbing
-plus a linear data-size component that is trivial at this scale).
-Rejecting > 5 min at 5 MB → open a ticket with Scaleway.
+to-ready overhead is a fixed ~2-3 min for the instance plumbing plus
+a data-size component that is trivial at this scale).
 
-**Fail case:** > 10 min at 5 MB → block launch, investigate with
-Scaleway.
+**Fail case:** > 10 min at 5 MB → block launch (or auto-alert on
+the monthly CronJob after launch), investigate with Scaleway.
 
 ### T6 — Cross-project isolation
 

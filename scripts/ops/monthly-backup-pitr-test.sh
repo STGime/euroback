@@ -29,6 +29,8 @@
 #   VOLUME_SIZE_GB       (default: 5)
 #   ENGINE_VERSION       (default: PostgreSQL-16)
 #   MAX_RPO_SECONDS      (default: 300 — matches published claim)
+#   MAX_RTO_SECONDS      (default: 600 — 10 min at ~5 MB seeded volume;
+#                         matches the runbook T5 block threshold)
 #   TEARDOWN_ON_FAILURE  (default: true — set false when debugging)
 
 set -euo pipefail
@@ -40,6 +42,7 @@ VOLUME_TYPE="${VOLUME_TYPE:-bssd}"
 VOLUME_SIZE_GB="${VOLUME_SIZE_GB:-5}"
 ENGINE_VERSION="${ENGINE_VERSION:-PostgreSQL-16}"
 MAX_RPO_SECONDS="${MAX_RPO_SECONDS:-300}"
+MAX_RTO_SECONDS="${MAX_RTO_SECONDS:-600}"
 TEARDOWN_ON_FAILURE="${TEARDOWN_ON_FAILURE:-true}"
 
 STAMP=$(date -u +%Y%m%d-%H%M%S)
@@ -208,12 +211,16 @@ sleep 10
 
 echo "T3/T5 — cloning to T_TARGET ($T_TARGET) …"
 # Clock the clone from create → ready. This IS the T5 RTO
-# measurement for the seeded data volume (~5 MB at SCALE=200). The
-# /security-page + DPA RTO number is extrapolated from this: Postgres
-# restore scales roughly linearly with data volume, so
-# RTO(N-MB) ≈ RTO(5-MB) × (N/5). Larger workloads (Legal Team, or a
-# Team customer with a >1 GB dataset) get a bespoke measurement on
-# request rather than a marketing number.
+# measurement for the ~5 MB seeded volume (SCALE=200). It captures
+# Scaleway's fixed provisioning overhead + the small data-restore
+# component; the fixed overhead dominates at this scale.
+#
+# Do NOT publish this as a linear extrapolation to larger data
+# volumes. RTO ≈ FIXED + k·data_size is an affine model; a single
+# measurement can't pin the k slope, only the FIXED intercept.
+# The runbook T5 policy: publish the measured small-band number as
+# the fixed-overhead baseline; larger workloads (>1 GB, Legal Team)
+# get a bespoke measurement on request.
 CLONE_START=$(date -u +%s)
 CLONE_JSON=$(scw rdb instance clone "$INSTANCE_ID" \
   name="${INSTANCE_NAME}-clone" \
@@ -238,7 +245,11 @@ done
 }
 CLONE_END=$(date -u +%s)
 RTO_SECONDS=$((CLONE_END - CLONE_START))
-echo "T5 — RTO (clone create → ready) = ${RTO_SECONDS}s at ~5 MB seeded volume"
+echo "T5 — RTO (clone create → ready) = ${RTO_SECONDS}s at ~5 MB seeded volume (max allowed ${MAX_RTO_SECONDS}s)"
+if [ "$RTO_SECONDS" -gt "$MAX_RTO_SECONDS" ]; then
+  post_discord CRITICAL "T5 RTO ${RTO_SECONDS}s exceeds MAX_RTO_SECONDS=${MAX_RTO_SECONDS} at ~5 MB — Scaleway restore overhead has drifted"
+  exit 2
+fi
 
 CLONE_HOST=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.ip // .endpoint.hostname')
 CLONE_PORT=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.port // 51000')
