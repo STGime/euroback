@@ -152,7 +152,10 @@ The exact subset that applies to a given Project depends on the features the Cus
 **Availability and resilience**
 - Managed PostgreSQL with automated failover (when Customer enables HA).
 - Kubernetes Kapsule cluster with multi-node redundancy and auto-healing.
-- Periodic backup restore tests.
+- Periodic backup restore tests (see `docs/runbooks/backup-pitr-test.md` and the monthly automated regression at `deploy/k8s/backup-pitr-monthly-test-cronjob.yaml`).
+- **Recovery objectives (measured, not aspirational).** Placeholders below are filled after each monthly regression run of `scripts/ops/monthly-backup-pitr-test.sh` — same three tokens are used in the marketing `/security` page, one `sed` invocation updates both files:
+    - **RPO** — measured maximum data loss on unplanned failover: **{{RPO_MEASURED_SECONDS}} seconds** (continuous WAL archiving). Test executed {{MEASURED_DATE}}.
+    - **RTO** — measured restore time at ~5 MB dataset: **{{RTO_MEASURED_SECONDS}} seconds** (fixed provisioning + plumbing overhead — dominates at small data volumes). Restore time increases with database size; for Team-tier workloads above ~100 MB, Eurobase provides a bespoke measurement on request rather than a linear extrapolation. Test executed {{MEASURED_DATE}}.
 
 **Process**
 - Vulnerability monitoring and timely patching (e.g. CVE-2026-31431 mitigated within hours of disclosure).
