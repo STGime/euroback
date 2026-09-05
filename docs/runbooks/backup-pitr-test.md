@@ -311,8 +311,11 @@ against `plan_limits.included_restores_per_month`.
 2. Verify: succeeds → new row in `public.restore_operations`,
    `GET /restore-quota` returns `used=1, included=1`.
 3. Trigger restore #2 immediately.
-4. Verify: `POST /restore` returns HTTP 402 with body
-   `{"error":"restore_quota_exceeded", ...}`; no new row inserted.
+4. Verify: `POST /restore` returns HTTP 402 with body of the shape
+   `{"error":"<human sentence>","code":"restore_quota_exceeded","included":1,"used":1,"resets_at":"..."}`;
+   no new row inserted. (Machine assertion should key on
+   `code == "restore_quota_exceeded"`, not on `error` — `error` is a
+   human-readable message that may change wording.)
 
 **Expected:** 402 with `restore_quota_exceeded` on the second attempt,
 no silent success. Failed restore attempts (terminal-error state) do
