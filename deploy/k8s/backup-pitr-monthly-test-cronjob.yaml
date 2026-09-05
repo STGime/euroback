@@ -1,0 +1,122 @@
+##############################################################################
+# Team-tier backup + PITR monthly regression test → Discord #alerts
+#
+# Provisions a throwaway Scaleway RDB instance on the 1st of every month,
+# runs runbook scenarios T3 (PITR to a specific timestamp) and T4 (RPO
+# measurement), tears the instance down, posts pass/fail to Discord.
+#
+# Post-launch hedge for the Team tier — catches Scaleway RDB regressions
+# the day they land, not the day a customer needs to restore. See
+# docs/runbooks/backup-pitr-test.md and issue #513.
+#
+# Cost per run: ~€0.15 for a DB-DEV-S + a clone for ~10 min.
+#
+# Alert channel: DISCORD_ALERTS_WEBHOOK from the eurobase-secrets Secret
+# (same one used by cert-monitor / health-monitor). Optional — if unset,
+# the script logs to pod logs.
+#
+# Required Scaleway credentials in eurobase-secrets: SCW_ACCESS_KEY,
+# SCW_SECRET_KEY, SCW_DEFAULT_ORGANIZATION_ID, SCW_DEFAULT_PROJECT_ID.
+##############################################################################
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-pitr-monthly-test
+  namespace: eurobase
+  labels:
+    app: backup-pitr-monthly-test
+    component: observability
+spec:
+  # 03:00 UTC on the 1st of every month. Off-peak; if the run bleeds
+  # 30-60 min it does not overlap normal maintenance windows.
+  schedule: "0 3 1 * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  # Skip a run if k8s can't start it within an hour (typical starting-
+  # deadline pattern for infrequent jobs).
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      # No k8s-level retry — the script owns provisioning + teardown; a
+      # retry would leak the first attempt's throwaway instance if
+      # teardown ran late. Failure posts to Discord + fails the Job so
+      # the successfulJobsHistoryLimit signal moves.
+      backoffLimit: 0
+      # 90 min budget — provision (10) + T3 (15) + T4 (2) + clone (10)
+      # + verify (2) + teardown (5) + slack.
+      activeDeadlineSeconds: 5400
+      template:
+        metadata:
+          labels:
+            app: backup-pitr-monthly-test
+        spec:
+          restartPolicy: Never
+          # Same service account as the migrate Job — has k8s API rights
+          # if we later fetch the seed/verify scripts from a ConfigMap,
+          # but for now the scripts are baked into the image build.
+          containers:
+            - name: test
+              # Postgres client + scw CLI + bash + curl + jq needed. The
+              # existing platform image is closest — the migrator Job
+              # already uses it and it has psql. If the platform image
+              # does not ship scw, add the CLI in a small image-build
+              # step alongside the migrator image, or use a purpose-
+              # built ops image (open follow-up if the CronJob first
+              # run reveals this gap).
+              #
+              # Pinned by digest per the cert-monitor precedent; bump via:
+              #   crane manifest --platform linux/amd64 <image>:<tag> \
+              #     | sha256sum
+              # Placeholder tag left below; replace with the actual ops
+              # image once the CI job that builds it merges.
+              image: TODO-eurobase/ops:latest
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+              env:
+                - name: MAX_RPO_SECONDS
+                  value: "300"
+                - name: INSTANCE_NAME_PREFIX
+                  value: "monthly-pitr-test"
+                - name: NODE_TYPE
+                  value: "DB-DEV-S"
+                - name: VOLUME_TYPE
+                  value: "bssd"
+                - name: VOLUME_SIZE_GB
+                  value: "5"
+                - name: SCW_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: eurobase-secrets
+                      key: SCW_ACCESS_KEY
+                - name: SCW_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: eurobase-secrets
+                      key: SCW_SECRET_KEY
+                - name: SCW_DEFAULT_ORGANIZATION_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: eurobase-secrets
+                      key: SCW_DEFAULT_ORGANIZATION_ID
+                - name: SCW_DEFAULT_PROJECT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: eurobase-secrets
+                      key: SCW_DEFAULT_PROJECT_ID
+                - name: SCW_DEFAULT_REGION
+                  value: "fr-par"
+                - name: DISCORD_ALERTS_WEBHOOK
+                  valueFrom:
+                    secretKeyRef:
+                      name: eurobase-secrets
+                      key: DISCORD_ALERTS_WEBHOOK
+                      optional: true
+              command:
+                - /usr/local/bin/monthly-backup-pitr-test.sh
