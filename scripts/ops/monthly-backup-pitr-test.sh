@@ -11,9 +11,11 @@
 # (in-cluster) or ad-hoc from an operator laptop for spot-checks.
 #
 # Exit codes:
-#   0 — T3 + T4 both passed
+#   0 — T3 + T4 + T5 all passed
 #   1 — T3 assertion failed (PITR did not respect the target timestamp)
-#   2 — T4 assertion failed (RPO gap exceeded MAX_RPO_SECONDS)
+#   2 — measurement threshold exceeded (T4 RPO > MAX_RPO_SECONDS OR
+#       T5 RTO > MAX_RTO_SECONDS). Distinguish which via the Discord
+#       CRITICAL message body if triage matters.
 #   3 — scw / psql setup or CLI mismatch
 #   4 — teardown failed (leaked resources — investigate)
 #
@@ -29,6 +31,8 @@
 #   VOLUME_SIZE_GB       (default: 5)
 #   ENGINE_VERSION       (default: PostgreSQL-16)
 #   MAX_RPO_SECONDS      (default: 300 — matches published claim)
+#   MAX_RTO_SECONDS      (default: 600 — 10 min at ~5 MB seeded volume;
+#                         matches the runbook T5 block threshold)
 #   TEARDOWN_ON_FAILURE  (default: true — set false when debugging)
 
 set -euo pipefail
@@ -40,6 +44,7 @@ VOLUME_TYPE="${VOLUME_TYPE:-bssd}"
 VOLUME_SIZE_GB="${VOLUME_SIZE_GB:-5}"
 ENGINE_VERSION="${ENGINE_VERSION:-PostgreSQL-16}"
 MAX_RPO_SECONDS="${MAX_RPO_SECONDS:-300}"
+MAX_RTO_SECONDS="${MAX_RTO_SECONDS:-600}"
 TEARDOWN_ON_FAILURE="${TEARDOWN_ON_FAILURE:-true}"
 
 STAMP=$(date -u +%Y%m%d-%H%M%S)
@@ -206,7 +211,19 @@ psql "$DATABASE_URL" -c "
 "$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-C "$DATABASE_URL"
 sleep 10
 
-echo "T3 — cloning to T_TARGET ($T_TARGET) …"
+echo "T3/T5 — cloning to T_TARGET ($T_TARGET) …"
+# Clock the clone from create → ready. This IS the T5 RTO
+# measurement for the ~5 MB seeded volume (SCALE=200). It captures
+# Scaleway's fixed provisioning overhead + the small data-restore
+# component; the fixed overhead dominates at this scale.
+#
+# Do NOT publish this as a linear extrapolation to larger data
+# volumes. RTO ≈ FIXED + k·data_size is an affine model; a single
+# measurement can't pin the k slope, only the FIXED intercept.
+# The runbook T5 policy: publish the measured small-band number as
+# the fixed-overhead baseline; larger workloads (>1 GB, Legal Team)
+# get a bespoke measurement on request.
+CLONE_START=$(date -u +%s)
 CLONE_JSON=$(scw rdb instance clone "$INSTANCE_ID" \
   name="${INSTANCE_NAME}-clone" \
   node-type="$NODE_TYPE" \
@@ -228,6 +245,13 @@ done
   post_discord CRITICAL "clone $CLONE_ID did not reach ready in 10min (last status=$s)"
   exit 1
 }
+CLONE_END=$(date -u +%s)
+RTO_SECONDS=$((CLONE_END - CLONE_START))
+echo "T5 — RTO (clone create → ready) = ${RTO_SECONDS}s at ~5 MB seeded volume (max allowed ${MAX_RTO_SECONDS}s)"
+if [ "$RTO_SECONDS" -gt "$MAX_RTO_SECONDS" ]; then
+  post_discord CRITICAL "T5 RTO ${RTO_SECONDS}s exceeds MAX_RTO_SECONDS=${MAX_RTO_SECONDS} at ~5 MB — Scaleway restore overhead has drifted"
+  exit 2
+fi
 
 CLONE_HOST=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.ip // .endpoint.hostname')
 CLONE_PORT=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.port // 51000')
@@ -265,5 +289,5 @@ else
 fi
 
 # ── Success ───────────────────────────────────────────────────────────
-post_discord OK "monthly test passed — T3 clone matched batch-B manifest, T4 RPO gap ${RPO_GAP:-n/a}s (≤${MAX_RPO_SECONDS}s)"
+post_discord OK "monthly test passed — T3 clone matched batch-B manifest, T4 RPO gap ${RPO_GAP:-n/a}s (≤${MAX_RPO_SECONDS}s), T5 RTO ${RTO_SECONDS}s at ~5 MB (bespoke measurement on request for larger volumes)"
 echo "all good — teardown pending in trap"
