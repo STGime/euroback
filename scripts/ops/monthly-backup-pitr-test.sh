@@ -77,24 +77,41 @@ done
 # ── Teardown trap ─────────────────────────────────────────────────────
 INSTANCE_ID=""
 CLONE_ID=""
+TEARDOWN_DONE=""   # guard so INT/TERM + EXIT don't double-run
 
 teardown() {
+  # Re-entrancy guard — trap fires on EXIT and also on INT/TERM (the
+  # k8s deadline SIGTERM path is exactly what activeDeadlineSeconds
+  # exists to invoke, and without the signal traps the bash EXIT
+  # handler doesn't run on SIGTERM, leaking the throwaway instance).
+  [ -n "$TEARDOWN_DONE" ] && return
+  TEARDOWN_DONE=1
+
   local rc=$?
   set +e
   if [ "$TEARDOWN_ON_FAILURE" = "false" ] && [ $rc -ne 0 ]; then
     echo "TEARDOWN_ON_FAILURE=false — leaving $INSTANCE_ID / $CLONE_ID for inspection"
     return
   fi
+
+  # Attempt both deletes; do NOT exit on the first failure. If the
+  # clone delete fails first, we still want to try the (larger)
+  # instance so a single stuck delete cannot strand the other.
+  local failed=""
   for id in "$CLONE_ID" "$INSTANCE_ID"; do
     [ -n "$id" ] || continue
     echo "tearing down $id …"
     if ! scw rdb instance delete "$id" region=fr-par >/dev/null 2>&1; then
-      post_discord CRITICAL "teardown of $id failed — check Scaleway console for leaked resources"
-      exit 4
+      failed="$failed $id"
     fi
   done
+
+  if [ -n "$failed" ]; then
+    post_discord CRITICAL "teardown of$failed failed — check Scaleway console for leaked resources"
+    exit 4
+  fi
 }
-trap teardown EXIT
+trap teardown EXIT INT TERM
 
 # ── Provision throwaway instance ──────────────────────────────────────
 echo "creating $INSTANCE_NAME …"
@@ -143,37 +160,43 @@ export DATABASE_URL="postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/rdb?
 echo "T3 — seeding baseline …"
 "$SCRIPT_DIR/seed-backup-pitr-test-data.sh" baseline "$DATABASE_URL" 200
 
-echo "T3 — batch-A at T_A …"
-T_A=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "T3 — batch-A writes + manifest …"
 psql "$DATABASE_URL" -c "
   INSERT INTO events (actor_email, action) VALUES
     ('alice@monthly-test', 'batch-A-event-1'),
     ('alice@monthly-test', 'batch-A-event-2');
 "
 "$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-A "$DATABASE_URL"
-sleep 30
+sleep 5
 
-echo "T3 — batch-B at T_B (also DELETE to-delete-*) …"
-T_B=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "T3 — batch-B writes + manifest (INSERT bob + DELETE to-delete-*) …"
 psql "$DATABASE_URL" -c "
   INSERT INTO events (actor_email, action) VALUES ('bob@monthly-test', 'batch-B-event');
   DELETE FROM documents WHERE title LIKE 'to-delete-%';
 "
 "$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-B "$DATABASE_URL"
-sleep 30
 
-echo "T3 — batch-C at T_C …"
+# T_TARGET is captured HERE — after batch-B's writes AND manifest stamp
+# are durable (WAL-archived), and BEFORE any batch-C writes. PITR
+# restores state at-or-before the target timestamp, so capturing before
+# the batch-B writes would land the clone in a pre-batch-B state and
+# make verify --manifest=batch-B fail deterministically every month.
+sleep 30   # give Scaleway WAL archiving time to catch up past batch-B
+T_TARGET=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "T3 — T_TARGET=$T_TARGET (post-batch-B, pre-batch-C)"
+
+echo "T3 — batch-C writes + manifest …"
 psql "$DATABASE_URL" -c "
   INSERT INTO events (actor_email, action) VALUES ('carol@monthly-test', 'batch-C-event');
 "
 "$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-C "$DATABASE_URL"
 sleep 10
 
-echo "T3 — cloning to T_B ($T_B) …"
+echo "T3 — cloning to T_TARGET ($T_TARGET) …"
 CLONE_JSON=$(scw rdb instance clone "$INSTANCE_ID" \
   name="${INSTANCE_NAME}-clone" \
   node-type="$NODE_TYPE" \
-  point-in-time="$T_B" \
+  point-in-time="$T_TARGET" \
   region=fr-par -o json)
 CLONE_ID=$(echo "$CLONE_JSON" | jq -r .id)
 [ -n "$CLONE_ID" ] && [ "$CLONE_ID" != "null" ] || {
@@ -216,10 +239,7 @@ if [ -z "$RESTORE_TO" ]; then
   echo "warn: instance JSON lacks .restore_to_time — Scaleway CLI may have changed the field name"
   post_discord WARN "T4 could not read .restore_to_time; skipping RPO measurement"
 else
-  LATEST_TICK=$(psql "$DATABASE_URL" -tA -c "
-    SELECT extract(epoch FROM now() - max(at)) FROM events WHERE actor_email='rpo-test';
-  ")
-  # RESTORE_TO is the newest restorable moment; gap = now - RESTORE_TO
+  # RESTORE_TO is the newest restorable moment; RPO gap = now - RESTORE_TO.
   RESTORE_TO_EPOCH=$(date -u -d "$RESTORE_TO" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$RESTORE_TO" +%s)
   NOW_EPOCH=$(date -u +%s)
   RPO_GAP=$((NOW_EPOCH - RESTORE_TO_EPOCH))

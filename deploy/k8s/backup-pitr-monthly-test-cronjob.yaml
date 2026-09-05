@@ -58,19 +58,22 @@ spec:
           # but for now the scripts are baked into the image build.
           containers:
             - name: test
-              # Postgres client + scw CLI + bash + curl + jq needed. The
-              # existing platform image is closest — the migrator Job
-              # already uses it and it has psql. If the platform image
-              # does not ship scw, add the CLI in a small image-build
-              # step alongside the migrator image, or use a purpose-
-              # built ops image (open follow-up if the CronJob first
-              # run reveals this gap).
+              # Postgres client + scw CLI + bash + curl + jq needed,
+              # plus the seed/verify/monthly-test scripts baked in at
+              # /usr/local/bin. The existing platform image is closest
+              # (migrator Job already uses it, has psql); if it does
+              # not ship scw, add the CLI in a small image-build step
+              # alongside the migrator image, or use a purpose-built
+              # ops image.
               #
-              # Pinned by digest per the cert-monitor precedent; bump via:
+              # Placeholder below — CronJob apply will fail with
+              # ImagePullBackOff until the real image exists (that is
+              # the intended "build me" signal). When the real image
+              # ships, replace with a digest-pinned reference per the
+              # cert-monitor precedent:
               #   crane manifest --platform linux/amd64 <image>:<tag> \
               #     | sha256sum
-              # Placeholder tag left below; replace with the actual ops
-              # image once the CI job that builds it merges.
+              #   image: <registry>/<name>:<tag>@sha256:<digest>
               image: TODO-eurobase/ops:latest
               resources:
                 requests:
