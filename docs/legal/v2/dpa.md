@@ -147,12 +147,15 @@ The exact subset that applies to a given Project depends on the features the Cus
 **Integrity**
 - Bcrypt password hashing (cost 12).
 - Audit log of administrative actions in the platform console.
-- Database backups managed by Scaleway, point-in-time recovery available.
+- Database backups managed by Scaleway, restore-from-backup and on-demand-snapshot paths available (see Recovery objectives below).
 
 **Availability and resilience**
 - Managed PostgreSQL with automated failover (when Customer enables HA).
 - Kubernetes Kapsule cluster with multi-node redundancy and auto-healing.
-- Periodic backup restore tests.
+- Periodic backup restore tests (see `docs/runbooks/backup-pitr-test.md` and the monthly automated regression at `deploy/k8s/backup-pitr-monthly-test-cronjob.yaml`).
+- **Recovery objectives (measured, not aspirational).** Numbers below come from `scripts/ops/monthly-backup-pitr-test.sh` runs against a throwaway Scaleway RDB instance; procedure documented in the runbook. Same runbook, same script re-measures on the 1st of every month once the monthly CronJob's ops image lands.
+    - **RTO** — measured restore time at ~5 MB dataset: **16 seconds** (fixed provisioning + plumbing overhead — dominates at small data volumes). Restore time increases with database size; for Team-tier workloads above ~100 MB, Eurobase provides a bespoke measurement on request rather than a linear extrapolation. Test executed 2026-09-06 via the customer-facing `backup create → backup restore` path.
+    - **RPO** — **up to 24 hours** between the scheduled backups Scaleway RDB takes automatically. Team-tier customers can take on-demand snapshots at any point to reduce this window to a duration of their own choosing — a snapshot taken immediately before a risky migration reduces the RPO on that specific recovery to seconds. Tighter default guarantees (continuous replication to a warm standby) are a deliberate future scope-out on cost grounds, not a technical limit.
 
 **Process**
 - Vulnerability monitoring and timely patching (e.g. CVE-2026-31431 mitigated within hours of disclosure).
