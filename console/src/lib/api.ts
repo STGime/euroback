@@ -236,6 +236,9 @@ export interface BackupSnapshot {
 	name: string;
 	size_mb: number;
 	kind: 'scheduled' | 'ondemand';
+	/** Optional user-provided label attached to on-demand snapshots.
+	 *  NULL / undefined for scheduled snapshots and untagged on-demand ones. */
+	tag?: string | null;
 	created_at: string;
 	expires_at: string;
 }
@@ -1995,13 +1998,29 @@ export class EurobaseAPI {
 		);
 	}
 
-	// On-demand backups were removed in migration 000108 as part of
-	// the backup-cost model rework: PITR-to-just-before covers the
-	// "snapshot before a risky migration" use case with the same
-	// semantics and no additional storage cost. The route
-	// `POST /platform/projects/{id}/backups` is no longer registered
-	// server-side; any residual caller gets 404. Method deliberately
-	// omitted so a TypeScript miscompile catches stale call sites.
+	/**
+	 * Create an on-demand snapshot of the Team-tier project's dedicated
+	 * database. Optional `tag` (≤64 printable chars) attaches a
+	 * user-visible label to the snapshot for later lookup in the
+	 * Backups tab ("pre-migration-v2", "before-cleanup"). Rate-limited
+	 * to 5/day/project.
+	 *
+	 * On-demand snapshots are the intended path for "snapshot before a
+	 * risky migration" — take one here, do the migration, restore from
+	 * this snapshot if it goes wrong. Restoring costs one of the
+	 * included monthly restores (see restoreFromSnapshot).
+	 */
+	async createBackup(
+		projectId: string,
+		opts: { tag?: string } = {}
+	): Promise<BackupSnapshot> {
+		const body: Record<string, string> = {};
+		if (opts.tag) body.tag = opts.tag;
+		return this.fetch<BackupSnapshot>(`/platform/projects/${projectId}/backups`, {
+			method: 'POST',
+			body: JSON.stringify(body)
+		});
+	}
 
 	/**
 	 * Fetch the caller's restore-quota for this project. The
@@ -2027,16 +2046,13 @@ export class EurobaseAPI {
 		});
 	}
 
-	/** Trigger a PITR restore. target_time must be inside plan_limits.team.pitr_days. */
-	async restoreFromPITR(
-		projectId: string,
-		targetTime: string
-	): Promise<{ restore_id: string; state: string }> {
-		return this.fetch(`/platform/projects/${projectId}/restore`, {
-			method: 'POST',
-			body: JSON.stringify({ source: 'pitr', target_time: targetTime })
-		});
-	}
+	// PITR-to-timestamp was removed in September 2026 alongside
+	// Scaleway RDB dropping `instance clone --point-in-time` from
+	// their CLI + REST API (see euroback#520). Restore surface is
+	// snapshot-only now — take an on-demand snapshot before a risky
+	// migration via createBackup() above, then restoreFromSnapshot()
+	// if you need to roll back. Method deliberately omitted so a
+	// TypeScript miscompile catches stale call sites.
 
 	/** Poll a restore-operation for progress. */
 	async getRestoreOperation(projectId: string, restoreId: string): Promise<RestoreOperation> {

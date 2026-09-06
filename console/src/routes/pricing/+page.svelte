@@ -70,7 +70,7 @@
 		{ label: 'Egress bandwidth', free: fmt(freePlan?.bandwidth_mb, '2 GB') + '/mo', pro: fmt(proPlan?.bandwidth_mb, '100 GB') + '/mo', team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Upload size', free: (freePlan?.upload_size_mb ?? 10) + ' MB', pro: (proPlan?.upload_size_mb ?? 50) + ' MB', team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Dedicated Postgres instance', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Daily backups + point-in-time recovery', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Daily backups + on-demand snapshots (7-day retention)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Auth & API' },
 		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: 'Coming soon', legal: 'Coming soon' },
@@ -299,7 +299,7 @@
 				<ul class="mt-6 space-y-2 text-sm text-gray-600">
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Everything in Pro, plus:</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Dedicated Postgres instance</strong> per project — direct <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px] font-mono">DATABASE_URL</code> for Payload / Prisma / Drizzle</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Daily backups + 7-day PITR</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Daily backups + on-demand snapshots (7-day retention) — 1 restore/month included</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SSO (SAML) for console sign-in</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>RBAC — Owner / Admin / Developer / Read-only</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Priority email support (24 h SLA)</span></li>
