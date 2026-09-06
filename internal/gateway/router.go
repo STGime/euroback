@@ -811,12 +811,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// membership sense (destructive by nature).
 			backupSvc := tenant.NewBackupService(pool, providerRegistry, limitsSvc)
 			r.With(tenant.RequireMinRole("viewer")).Get("/backups", backupSvc.HandleListBackups())
-			// POST /backups (on-demand snapshot) removed in migration 000108
-			// as part of the backup-cost model rework. PITR-to-just-before
-			// covers the "snapshot before a risky migration" use case with
-			// the same semantics and no additional storage cost. Handler
-			// kept in backup_handlers.go for one release as a rollback
-			// window; no route registration.
+			// POST /backups — on-demand snapshot with optional tag.
+			// Rate-limited to 5/day/project inside the handler.
+			// Was temporarily unregistered when the backup cost model
+			// bet on PITR-to-just-before (removed in migration 000108),
+			// but Scaleway then dropped PITR-to-timestamp from the CLI
+			// + API entirely (see euroback#520). On-demand snapshots
+			// are re-exposed as the customer-facing "before a risky
+			// migration" primitive; migration 000111 adds the tag
+			// column that the handler persists here.
+			r.With(tenant.RequireMinRole("admin")).Post("/backups", backupSvc.HandleCreateBackup())
 			r.With(tenant.RequireMinRole("admin")).Post("/restore", backupSvc.HandleCreateRestore())
 			r.With(tenant.RequireMinRole("viewer")).Get("/restore/{restoreId}", backupSvc.HandleGetRestore())
 			// Restore quota badge on the console Backups tab

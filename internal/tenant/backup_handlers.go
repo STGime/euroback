@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
@@ -165,7 +166,7 @@ func validateSnapshotTag(raw string) (string, error) {
 	if t == "" {
 		return "", nil
 	}
-	if len(t) > maxSnapshotTagLen {
+	if utf8.RuneCountInString(t) > maxSnapshotTagLen {
 		return "", fmt.Errorf("tag must be %d characters or fewer", maxSnapshotTagLen)
 	}
 	for _, r := range t {
