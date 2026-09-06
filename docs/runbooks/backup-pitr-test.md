@@ -387,6 +387,49 @@ Customer impact: zero, because the source was never modified. This
 is a nice property of Scaleway's restore model — worth surfacing in
 the customer-facing restore UI.
 
+## Publishing measured numbers on /security + DPA
+
+After each `scripts/ops/monthly-backup-pitr-test.sh` run, the two
+numbers reach the /security page + DPA v2 Annex 2 by replacing three
+placeholder tokens that appear identically in both files:
+
+    {{RPO_MEASURED_SECONDS}}
+    {{RTO_MEASURED_SECONDS}}
+    {{MEASURED_DATE}}
+
+Note: this fill workflow is **not** written into the placeholder
+blocks themselves (they'd self-corrupt because the sed patterns
+would match their own documentation). This runbook is the single
+canonical location.
+
+**Procedure:**
+
+1. Note the two numbers from the script log:
+    - `T4 — RPO gap = <RPO>s`
+    - `T5 — RTO (clone create → ready) = <RTO>s at ~5 MB seeded volume`
+2. Run the fill from a shell that can reach both repo checkouts:
+    ```sh
+    # GNU sed (Linux):
+    sed -i \
+      -e "s/{{RPO_MEASURED_SECONDS}}/<RPO>/g" \
+      -e "s/{{RTO_MEASURED_SECONDS}}/<RTO>/g" \
+      -e "s/{{MEASURED_DATE}}/$(date -u +%Y-%m-%d)/g" \
+      /path/to/eurobase/src/pages/SecurityPage.vue \
+      /path/to/euroback/docs/legal/v2/dpa.md
+
+    # BSD sed (macOS): same, but `sed -i ''`
+    ```
+3. Commit each repo separately (they're independent PRs). One-liner
+   suggested commit message: `docs: publish measured RTO/RPO from
+   YYYY-MM-DD run`.
+4. Merge — /security auto-deploys via the Scaleway workflow.
+
+**Sequencing rule for the legal doc.** `docs/legal/v2/` is the
+diffable source of truth for the DPA (see #498). Do not merge a DPA
+change that leaves visible `{{…}}` tokens in main — always land the
+placeholder-add and the number-fill together in one PR, or on the
+same day at latest.
+
 ## Already shipped (reference — not follow-ups)
 
 The first draft of this runbook listed these as follow-ups; a code
