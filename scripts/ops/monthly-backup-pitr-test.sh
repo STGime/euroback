@@ -82,6 +82,7 @@ done
 # ── Teardown trap ─────────────────────────────────────────────────────
 INSTANCE_ID=""
 CLONE_ID=""
+BACKUP_ID=""       # Scaleway backup persists independent of the source instance — must be deleted explicitly by teardown
 TEARDOWN_DONE=""   # guard so INT/TERM + EXIT don't double-run
 
 teardown() {
@@ -99,17 +100,31 @@ teardown() {
 
   set +e
   if [ "$TEARDOWN_ON_FAILURE" = "false" ] && [ "$rc" -ne 0 ]; then
-    echo "TEARDOWN_ON_FAILURE=false — leaving $INSTANCE_ID / $CLONE_ID for inspection"
+    echo "TEARDOWN_ON_FAILURE=false — leaving $INSTANCE_ID / $CLONE_ID / $BACKUP_ID for inspection"
     return
   fi
 
-  # Attempt both deletes; do NOT exit on the first failure. If the
-  # clone delete fails first, we still want to try the (larger)
-  # instance so a single stuck delete cannot strand the other.
-  # Scaleway refuses to delete instances in transient states
+  # Delete the manual backup FIRST, before the source instance goes
+  # away — Scaleway may or may not allow backup deletion after the
+  # source is gone, and even if it does, the order is safer this way.
+  # Backups persist independently of the source instance (that's the
+  # point of a backup), so without this every monthly run would leak
+  # one `t3-backup-*` — 12+/year of accumulating backup storage,
+  # silently.
+  local failed=""
+  if [ -n "$BACKUP_ID" ]; then
+    echo "tearing down backup $BACKUP_ID …"
+    if ! scw rdb backup delete "$BACKUP_ID" region=fr-par >/dev/null 2>&1; then
+      failed="$failed backup:$BACKUP_ID"
+    fi
+  fi
+
+  # Then the instances. Attempt both deletes; do NOT exit on the first
+  # failure — if the clone delete fails first, we still want to try
+  # the (larger) instance so a single stuck delete cannot strand the
+  # other. Scaleway refuses to delete instances in transient states
   # (provisioning, upgrading, etc.), so wait up to ~5 min per resource
   # for the state to settle before attempting delete.
-  local failed=""
   for id in "$CLONE_ID" "$INSTANCE_ID"; do
     [ -n "$id" ] || continue
     echo "tearing down $id …"
