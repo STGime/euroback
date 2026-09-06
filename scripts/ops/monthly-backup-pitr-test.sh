@@ -40,7 +40,7 @@ set -euo pipefail
 # ── Config ────────────────────────────────────────────────────────────
 INSTANCE_NAME_PREFIX="${INSTANCE_NAME_PREFIX:-monthly-pitr-test}"
 NODE_TYPE="${NODE_TYPE:-DB-DEV-S}"
-VOLUME_TYPE="${VOLUME_TYPE:-bssd}"
+VOLUME_TYPE="${VOLUME_TYPE:-sbs_5k}"  # Scaleway RDB accepts [lssd bssd sbs_5k sbs_15k]; bssd deprecated; lssd has no scheduled backups (defeats the test); sbs_5k is cheapest option that supports the backup + PITR features under test.
 VOLUME_SIZE_GB="${VOLUME_SIZE_GB:-5}"
 ENGINE_VERSION="${ENGINE_VERSION:-PostgreSQL-16}"
 MAX_RPO_SECONDS="${MAX_RPO_SECONDS:-300}"
@@ -82,6 +82,7 @@ done
 # ── Teardown trap ─────────────────────────────────────────────────────
 INSTANCE_ID=""
 CLONE_ID=""
+BACKUP_ID=""       # Scaleway backup persists independent of the source instance — must be deleted explicitly by teardown
 TEARDOWN_DONE=""   # guard so INT/TERM + EXIT don't double-run
 
 teardown() {
@@ -99,17 +100,42 @@ teardown() {
 
   set +e
   if [ "$TEARDOWN_ON_FAILURE" = "false" ] && [ "$rc" -ne 0 ]; then
-    echo "TEARDOWN_ON_FAILURE=false — leaving $INSTANCE_ID / $CLONE_ID for inspection"
+    echo "TEARDOWN_ON_FAILURE=false — leaving $INSTANCE_ID / $CLONE_ID / $BACKUP_ID for inspection"
     return
   fi
 
-  # Attempt both deletes; do NOT exit on the first failure. If the
-  # clone delete fails first, we still want to try the (larger)
-  # instance so a single stuck delete cannot strand the other.
+  # Delete the manual backup FIRST, before the source instance goes
+  # away — Scaleway may or may not allow backup deletion after the
+  # source is gone, and even if it does, the order is safer this way.
+  # Backups persist independently of the source instance (that's the
+  # point of a backup), so without this every monthly run would leak
+  # one `t3-backup-*` — 12+/year of accumulating backup storage,
+  # silently.
   local failed=""
+  if [ -n "$BACKUP_ID" ]; then
+    echo "tearing down backup $BACKUP_ID …"
+    if ! scw rdb backup delete "$BACKUP_ID" region=fr-par >/dev/null 2>&1; then
+      failed="$failed backup:$BACKUP_ID"
+    fi
+  fi
+
+  # Then the instances. Attempt both deletes; do NOT exit on the first
+  # failure — if the clone delete fails first, we still want to try
+  # the (larger) instance so a single stuck delete cannot strand the
+  # other. Scaleway refuses to delete instances in transient states
+  # (provisioning, upgrading, etc.), so wait up to ~5 min per resource
+  # for the state to settle before attempting delete.
   for id in "$CLONE_ID" "$INSTANCE_ID"; do
     [ -n "$id" ] || continue
     echo "tearing down $id …"
+    # Wait for a non-transient terminal state (ready/error/deleted).
+    for _ in $(seq 1 30); do
+      state=$(scw rdb instance get "$id" region=fr-par -o json 2>/dev/null | jq -r '.status // "unknown"')
+      case "$state" in
+        provisioning|upgrading|initializing|configuring|snapshotting|backuping|restoring|autohealing) sleep 10; continue ;;
+        *) break ;;
+      esac
+    done
     if ! scw rdb instance delete "$id" region=fr-par >/dev/null 2>&1; then
       failed="$failed $id"
     fi
@@ -133,6 +159,20 @@ trap teardown EXIT
 trap 'teardown; exit 143' INT TERM
 
 # ── Provision throwaway instance ──────────────────────────────────────
+# Note: Scaleway CLI dropped backup-schedule-frequency / retention
+# args from `instance create` (they moved to a separate management
+# surface). New instances get the account-default schedule, which
+# for RDB is daily + 7-day retention — same as what the runbook
+# assumes. If your account default differs, set it explicitly after
+# provisioning via the console or `scw rdb backup-schedule`
+# subcommands, and update this comment.
+# Capture credentials in shell variables BEFORE the create call so we
+# can use them later — Scaleway's `instance create` response no longer
+# echoes back the password we passed in (the field is either omitted
+# or masked), so parsing it out of $INSTANCE_JSON returns null.
+DB_USER="tester"
+DB_PASS="Monthly-test-$(openssl rand -hex 16)"
+
 echo "creating $INSTANCE_NAME …"
 INSTANCE_JSON=$(scw rdb instance create \
   name="$INSTANCE_NAME" \
@@ -141,10 +181,8 @@ INSTANCE_JSON=$(scw rdb instance create \
   volume-type="$VOLUME_TYPE" \
   volume-size="${VOLUME_SIZE_GB}GB" \
   is-ha-cluster=false \
-  backup-schedule-frequency=24 \
-  backup-schedule-retention=7 \
-  user-name=tester \
-  password="Monthly-test-$(openssl rand -hex 16)" \
+  user-name="$DB_USER" \
+  password="$DB_PASS" \
   region=fr-par -o json)
 
 INSTANCE_ID=$(echo "$INSTANCE_JSON" | jq -r .id)
@@ -155,8 +193,25 @@ INSTANCE_ID=$(echo "$INSTANCE_JSON" | jq -r .id)
 echo "instance_id=$INSTANCE_ID"
 
 # Wait for status=ready (up to 10 min).
+# `scw rdb instance get` may return a non-zero exit + JSON error body
+# while an instance is still transitioning (recent CLI behavior); under
+# `set -e` that kills the script mid-loop and fires teardown against a
+# still-provisioning resource that Scaleway then refuses to delete.
+# `|| true` on the API call keeps the loop alive; jq's `// "unknown"`
+# handles empty JSON.
+s=""
 for i in $(seq 1 60); do
-  s=$(scw rdb instance get "$INSTANCE_ID" region=fr-par -o json | jq -r .status)
+  # `|| true` preserves scw's stdout JSON even when it exits non-zero
+  # (transient-state responses do that — the useful `.error.current_state`
+  # lives in the JSON body). Empty-output safety net kicks in only if
+  # scw itself is missing / catastrophically broken.
+  json=$(scw rdb instance get "$INSTANCE_ID" region=fr-par -o json 2>/dev/null || true)
+  [ -z "$json" ] && json='{}'
+  # Fallback chain: `.status` on success, `.error.current_state` on
+  # transient-state error (Scaleway RDB returns exit 1 + an error
+  # JSON containing current_state while an instance is initializing /
+  # provisioning / etc — captured via the `|| echo '{}'` above).
+  s=$(echo "$json" | jq -r '.status // .error.current_state // "unknown"')
   echo "  provisioning: $s"
   [ "$s" = "ready" ] && break
   sleep 10
@@ -166,13 +221,11 @@ done
   exit 1
 }
 
-# Build the DATABASE_URL — user/pass from the create call, host from
-# get, port from the same. Password is echoed by scw only on create, so
-# grab it now.
-DB_USER=$(echo "$INSTANCE_JSON" | jq -r .user_name)
-DB_PASS=$(echo "$INSTANCE_JSON" | jq -r .password)
-DB_HOST=$(scw rdb instance get "$INSTANCE_ID" region=fr-par -o json | jq -r '.endpoint.ip // .endpoint.hostname')
-DB_PORT=$(scw rdb instance get "$INSTANCE_ID" region=fr-par -o json | jq -r '.endpoint.port // 51000')
+# Build DATABASE_URL. DB_USER + DB_PASS are already captured above
+# (Scaleway doesn't echo the password back in the create response).
+# Host + port come from a fresh get now that the instance is ready.
+DB_HOST=$(scw rdb instance get "$INSTANCE_ID" region=fr-par -o json | jq -r '.endpoint.ip // .endpoint.hostname // (.endpoints[0].ip // .endpoints[0].hostname)')
+DB_PORT=$(scw rdb instance get "$INSTANCE_ID" region=fr-par -o json | jq -r '.endpoint.port // (.endpoints[0].port) // 51000')
 export DATABASE_URL="postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/rdb?sslmode=require"
 
 # ── T3: PITR to a specific timestamp ─────────────────────────────────
@@ -201,65 +254,104 @@ psql "$DATABASE_URL" -c "
 # the batch-B writes would land the clone in a pre-batch-B state and
 # make verify --manifest=batch-B fail deterministically every month.
 sleep 30   # give Scaleway WAL archiving time to catch up past batch-B
-T_TARGET=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-echo "T3 — T_TARGET=$T_TARGET (post-batch-B, pre-batch-C)"
+# Take an explicit backup right after batch-B commits. This is the
+# state the T3 verify step will assert against.
+#
+# Note: PITR-to-arbitrary-timestamp via `scw rdb instance clone
+# --point-in-time` was removed from the Scaleway CLI. The surviving
+# customer-facing restore path is `backup create` + `backup restore
+# into a destination instance` — which is what Team-tier customers
+# actually hit for their "1 restore/month included" flow. This test
+# exercises that exact path.
+echo "T3 — creating backup after batch-B …"
+BACKUP_JSON=$(scw rdb backup create \
+  instance-id="$INSTANCE_ID" \
+  database-name=rdb \
+  name="t3-backup-${STAMP}" \
+  region=fr-par --wait -o json)
+BACKUP_ID=$(echo "$BACKUP_JSON" | jq -r .id)
+[ -n "$BACKUP_ID" ] && [ "$BACKUP_ID" != "null" ] || {
+  post_discord CRITICAL "backup create returned no id — payload: $BACKUP_JSON"
+  exit 1
+}
+echo "T3 — backup_id=$BACKUP_ID (ready)"
 
 echo "T3 — batch-C writes + manifest …"
 psql "$DATABASE_URL" -c "
   INSERT INTO events (actor_email, action) VALUES ('carol@monthly-test', 'batch-C-event');
 "
 "$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-C "$DATABASE_URL"
-sleep 10
+sleep 5
 
-echo "T3/T5 — cloning to T_TARGET ($T_TARGET) …"
-# Clock the clone from create → ready. This IS the T5 RTO
-# measurement for the ~5 MB seeded volume (SCALE=200). It captures
-# Scaleway's fixed provisioning overhead + the small data-restore
-# component; the fixed overhead dominates at this scale.
-#
-# Do NOT publish this as a linear extrapolation to larger data
-# volumes. RTO ≈ FIXED + k·data_size is an affine model; a single
-# measurement can't pin the k slope, only the FIXED intercept.
-# The runbook T5 policy: publish the measured small-band number as
-# the fixed-overhead baseline; larger workloads (>1 GB, Legal Team)
-# get a bespoke measurement on request.
-CLONE_START=$(date -u +%s)
-CLONE_JSON=$(scw rdb instance clone "$INSTANCE_ID" \
-  name="${INSTANCE_NAME}-clone" \
+# Provision a fresh destination instance for the restore. Scaleway
+# requires the target of `backup restore` to already exist — the
+# customer restore UI creates this instance behind the scenes; here
+# we mirror that.
+echo "T3 — provisioning destination instance for restore …"
+DEST_NAME="${INSTANCE_NAME}-restore"
+DEST_JSON=$(scw rdb instance create \
+  name="$DEST_NAME" \
+  engine="$ENGINE_VERSION" \
   node-type="$NODE_TYPE" \
-  point-in-time="$T_TARGET" \
+  volume-type="$VOLUME_TYPE" \
+  volume-size="${VOLUME_SIZE_GB}GB" \
+  is-ha-cluster=false \
+  user-name="$DB_USER" \
+  password="$DB_PASS" \
   region=fr-par -o json)
-CLONE_ID=$(echo "$CLONE_JSON" | jq -r .id)
+CLONE_ID=$(echo "$DEST_JSON" | jq -r .id)   # reuse CLONE_ID → teardown sees it
 [ -n "$CLONE_ID" ] && [ "$CLONE_ID" != "null" ] || {
-  post_discord CRITICAL "clone create returned no id — payload: $CLONE_JSON"
+  post_discord CRITICAL "destination instance create returned no id — payload: $DEST_JSON"
   exit 1
 }
+echo "T3 — dest_instance_id=$CLONE_ID"
 
+# Wait for destination ready (same set-e-safe pattern).
+s=""
 for i in $(seq 1 60); do
-  s=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r .status)
-  echo "  clone: $s"
+  json=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json 2>/dev/null || true)
+  [ -z "$json" ] && json='{}'
+  s=$(echo "$json" | jq -r '.status // .error.current_state // "unknown"')
+  echo "  destination: $s"
   [ "$s" = "ready" ] && break
   sleep 10
 done
 [ "$s" = "ready" ] || {
-  post_discord CRITICAL "clone $CLONE_ID did not reach ready in 10min (last status=$s)"
+  post_discord CRITICAL "destination $CLONE_ID did not reach ready in 10min (last status=$s)"
   exit 1
 }
+
+# ── T3/T5: restore backup into destination, time it (RTO measurement).
+#
+# This IS the T5 RTO for the ~5 MB seeded volume. Captures Scaleway's
+# fixed restore-overhead (backup fetch + replay into a fresh DB); at
+# 5 MB the fixed component dominates. Do NOT extrapolate linearly to
+# larger volumes — RTO ≈ FIXED + k·data_size is affine; one point
+# pins only the intercept, not the slope. Larger workloads get a
+# bespoke measurement on request per the runbook T5 policy.
+echo "T3/T5 — restoring backup $BACKUP_ID into destination $CLONE_ID …"
+CLONE_START=$(date -u +%s)
+if ! scw rdb backup restore "$BACKUP_ID" \
+  instance-id="$CLONE_ID" \
+  region=fr-par --wait >/dev/null; then
+  post_discord CRITICAL "T3 backup restore failed — check Scaleway console for backup=$BACKUP_ID dest=$CLONE_ID"
+  exit 1
+fi
 CLONE_END=$(date -u +%s)
 RTO_SECONDS=$((CLONE_END - CLONE_START))
-echo "T5 — RTO (clone create → ready) = ${RTO_SECONDS}s at ~5 MB seeded volume (max allowed ${MAX_RTO_SECONDS}s)"
+echo "T5 — RTO (backup restore → ready) = ${RTO_SECONDS}s at ~5 MB seeded volume (max allowed ${MAX_RTO_SECONDS}s)"
 if [ "$RTO_SECONDS" -gt "$MAX_RTO_SECONDS" ]; then
   post_discord CRITICAL "T5 RTO ${RTO_SECONDS}s exceeds MAX_RTO_SECONDS=${MAX_RTO_SECONDS} at ~5 MB — Scaleway restore overhead has drifted"
   exit 2
 fi
 
-CLONE_HOST=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.ip // .endpoint.hostname')
-CLONE_PORT=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.port // 51000')
+CLONE_HOST=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.ip // .endpoint.hostname // (.endpoints[0].ip // .endpoints[0].hostname)')
+CLONE_PORT=$(scw rdb instance get "$CLONE_ID" region=fr-par -o json | jq -r '.endpoint.port // (.endpoints[0].port) // 51000')
 export CLONE_URL="postgres://${DB_USER}:${DB_PASS}@${CLONE_HOST}:${CLONE_PORT}/rdb?sslmode=require"
 
-echo "T3 — verifying clone against manifest batch-B …"
+echo "T3 — verifying restored destination against manifest batch-B …"
 "$SCRIPT_DIR/verify-restore.sh" batch-B "$CLONE_URL" || {
-  post_discord CRITICAL "T3 assertion failed — PITR clone does not match batch-B manifest"
+  post_discord CRITICAL "T3 assertion failed — restored destination does not match batch-B manifest"
   exit 1
 }
 

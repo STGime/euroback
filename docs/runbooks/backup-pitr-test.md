@@ -45,12 +45,17 @@ C1–C6 are Scaleway-plumbing tests. C7 is our platform-code test.
   installed 2.62.x binary:
   ```sh
   scw rdb backup list --help          # T1
-  scw rdb backup create --help        # T2
-  scw rdb backup restore --help       # T2
-  scw rdb instance clone --help       # T3 (must accept point-in-time=)
-  scw rdb instance get --help         # T4 (JSON must include
-                                      #     restore_from_time / restore_to_time)
+  scw rdb backup create --help        # T3 (must accept instance-id + database-name + name; support --wait)
+  scw rdb backup restore --help       # T3 (must accept <backup-id> + instance-id=<destination>; support --wait)
+  scw rdb instance get --help         # T4 — see the note below about PITR field removal
   ```
+  **PITR CLI note.** As of the 2026-09-06 run, `scw rdb instance clone
+  --point-in-time` was removed and the `.restore_to_time` field on
+  instance JSON is no longer present. T3 now uses `backup create` +
+  `backup restore`; T4 gracefully skips RPO measurement pending
+  clarification on what continuous-WAL / PITR capability Scaleway
+  still exposes to customers (see [#520](https://github.com/STGime/euroback/issues/520)).
+
   If a flag or JSON field has been renamed, patch the runbook commands
   before executing; do not "wing it".
 
@@ -170,63 +175,67 @@ the state it was at any chosen moment in the last 7 days.
 
 **Setup:** state from T2 (source instance still has the baseline data).
 
+**Note.** The original T3 draft used `scw rdb instance clone --point-in-time=<timestamp>`. As of 2026-09-06 that flag no longer exists in the Scaleway CLI — the surviving customer-visible restore path is `backup create` + `backup restore into destination`. That is what Team-tier customers will hit for their "1 restore/month" flow, so it's the right thing to measure. `scripts/ops/monthly-backup-pitr-test.sh` automates all of this.
+
 **Action:**
 ```sh
-# 1. Record timestamp T_A. Seed a small mutation batch.
-T_A=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-psql "$SOURCE_URL" -c "
-  INSERT INTO events (actor_email, action) VALUES
-    ('alice@test', 'batch-A-event-1'),
-    ('alice@test', 'batch-A-event-2');
-  INSERT INTO test_manifest ...  -- checkpoint 'batch-A'
-"
+# 1. Seed baseline + batch-A + batch-B on the source instance
+#    (seed script stamps each manifest row).
+"$SCRIPT_DIR/seed-backup-pitr-test-data.sh" baseline "$SOURCE_URL" 200
+psql "$SOURCE_URL" -c "INSERT INTO events (actor_email, action) VALUES
+    ('alice@test', 'batch-A-event-1'), ('alice@test', 'batch-A-event-2');"
+"$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-A "$SOURCE_URL"
 
-sleep 30  # give WAL archiving time to catch up
+psql "$SOURCE_URL" -c "INSERT INTO events (actor_email, action) VALUES ('bob@test', 'batch-B-event-1');
+  DELETE FROM documents WHERE title LIKE 'to-delete-%';"
+"$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-B "$SOURCE_URL"
 
-# 2. Record T_B. Second mutation batch.
-T_B=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-psql "$SOURCE_URL" -c "
-  INSERT INTO events (actor_email, action) VALUES
-    ('bob@test', 'batch-B-event-1');
-  DELETE FROM documents WHERE title LIKE 'to-delete-%';
-  INSERT INTO test_manifest ...  -- checkpoint 'batch-B'
-"
+# 2. Take a manual backup RIGHT NOW. The backup captures exactly the
+#    batch-B state (`--wait` blocks until the backup is durable).
+scw rdb backup create instance-id=<source-id> database-name=rdb \
+  name=t3-backup-<STAMP> region=fr-par --wait
+BACKUP_ID=<from output>
 
-sleep 30
+# 3. Continue mutating the source (batch-C) — proves the backup
+#    doesn't include batch-C.
+psql "$SOURCE_URL" -c "INSERT INTO events (actor_email, action) VALUES ('carol@test', 'batch-C-event');"
+"$SCRIPT_DIR/seed-backup-pitr-test-data.sh" batch-C "$SOURCE_URL"
 
-# 3. Record T_C. Third batch.
-T_C=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-psql "$SOURCE_URL" -c "..."  # checkpoint 'batch-C'
+# 4. Provision a fresh destination instance (Scaleway requires the
+#    restore target to already exist — the customer restore UI
+#    creates this behind the scenes).
+scw rdb instance create name=<source-id>-restore engine=PostgreSQL-16 \
+  node-type=DB-DEV-S volume-type=sbs_5k volume-size=5GB \
+  is-ha-cluster=false user-name=tester password=<gen> region=fr-par
+DEST_ID=<from output>
+# … wait for DEST_ID to reach ready via `scw rdb instance get`.
 
-# 4. PITR restore to T_B (between batches A and B, before C).
-scw rdb instance clone <source-id> \
-  point-in-time="$T_B" \
-  region=fr-par
-CLONE_ID=<from output>
+# 5. Restore the backup INTO the destination. This is T5's RTO window.
+scw rdb backup restore <BACKUP_ID> instance-id=<DEST_ID> region=fr-par --wait
 ```
 
-**Expected on the CLONE:**
+**Expected on the destination after restore:**
 - `batch-A` events present (both alice@test rows).
 - `batch-B` events present (bob@test row).
-- `batch-C` events **absent**.
-- `documents` where `title LIKE 'to-delete-%'` **absent** (deleted at T_B).
-- `test_manifest` has rows for `baseline`, `batch-A`, `batch-B` but not
-  `batch-C`.
+- `batch-C` events **absent** (post-backup mutations don't travel).
+- `documents` where `title LIKE 'to-delete-%'` **absent** (deleted at batch-B).
+- `test_manifest` has rows for `baseline`, `batch-A`, `batch-B` but not `batch-C`.
 
-Verified via `verify-restore.sh --manifest=batch-B`.
+Verified via `verify-restore.sh batch-B <DEST_URL>`.
 
 **Fail case:**
-- If C rows appear on the clone → PITR is not respecting the
-  timestamp; blocker.
-- If B rows are missing → WAL archiving lag > 30s (bad); either
-  investigate + fix or advertise RPO honestly (e.g. "≤ 2 min").
+- If C rows appear on the destination → backup was taken after batch-C (script ordering bug); blocker.
+- If B rows are missing → backup captured too early; blocker.
+- If backup restore fails outright → Scaleway restore path broken; block launch.
 
 ### T4 — RPO measurement: how much data can we lose?
 
-**Setup:** state from T3 clone; abandon the clone, work on source
-instance.
+**Status: measurement pending (see [#520](https://github.com/STGime/euroback/issues/520)).** The 2026-09-06 run couldn't measure RPO cleanly — Scaleway restructured their CLI and the `.restore_to_time` field on `scw rdb instance get` output disappeared alongside `instance clone --point-in-time`. `scripts/ops/monthly-backup-pitr-test.sh` has a graceful-skip branch: `warn: instance JSON lacks .restore_to_time`, T4 skipped, script exits 0.
 
-**Action:**
+Before publishing an RPO number on /security + DPA, we need to clarify with Scaleway whether continuous WAL archiving / arbitrary-timestamp PITR is still exposed to customers (console UI? REST API? support-ticket only?), or whether the customer-visible restore is truly limited to daily-scheduled-backup granularity (worst-case RPO ~24h). See #520 for the investigation checklist and the impact on the pricing card + DPA wording.
+
+**Original method (kept for reference, revive if the CLI restores the field):**
+
 ```sh
 # Insert one row per second for 60 s, each stamped with its wall-clock
 # timestamp.
@@ -240,7 +249,7 @@ done
 scw rdb instance get <source-id> region=fr-par -o json \
   | jq '{restorable_from: .restore_from_time, restorable_until: .restore_to_time}'
 
-# Now clone to the *most recent* restorable timestamp minus 5 s and
+# Now restore to the *most recent* restorable timestamp minus 5 s and
 # compare "highest 'tick' row" between source and clone.
 ```
 
