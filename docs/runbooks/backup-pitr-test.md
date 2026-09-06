@@ -404,31 +404,46 @@ canonical location.
 
 **Procedure:**
 
-1. Note the two numbers from the script log:
+1. Note the two numbers from the script log and the timestamp of
+   the run (the actual measurement moment, not now):
     - `T4 — RPO gap = <RPO>s`
     - `T5 — RTO (clone create → ready) = <RTO>s at ~5 MB seeded volume`
-2. Run the fill from a shell that can reach both repo checkouts:
+    - The run timestamp is in the Discord post or the script's
+      first log line (`creating monthly-pitr-test-<STAMP>`); use it
+      as `<RUN_DATE>` in `YYYY-MM-DD` form. **Do not use `date +…`
+      at fill time** — the published "Test executed" date must be
+      the measurement date, and if the fill lags the run by a day
+      the two would drift.
+2. For the marketing `/security` page (safe to sed against `main`,
+   placeholders visible for a short window are acceptable —
+   already shipped that way):
     ```sh
     # GNU sed (Linux):
     sed -i \
       -e "s/{{RPO_MEASURED_SECONDS}}/<RPO>/g" \
       -e "s/{{RTO_MEASURED_SECONDS}}/<RTO>/g" \
-      -e "s/{{MEASURED_DATE}}/$(date -u +%Y-%m-%d)/g" \
-      /path/to/eurobase/src/pages/SecurityPage.vue \
-      /path/to/euroback/docs/legal/v2/dpa.md
+      -e "s/{{MEASURED_DATE}}/<RUN_DATE>/g" \
+      /path/to/eurobase/src/pages/SecurityPage.vue
 
-    # BSD sed (macOS): same, but `sed -i ''`
+    # BSD sed (macOS): same command, but `sed -i ''` instead of `sed -i`.
     ```
-3. Commit each repo separately (they're independent PRs). One-liner
-   suggested commit message: `docs: publish measured RTO/RPO from
-   YYYY-MM-DD run`.
-4. Merge — /security auto-deploys via the Scaleway workflow.
+3. **Do NOT run this sed against `docs/legal/v2/dpa.md` in `main`.**
+   The DPA's placeholder bullet must be added and filled in the
+   **same PR** — see the sequencing rule below. When re-adding the
+   DPA bullet in a legal-doc PR, substitute the numbers by hand or
+   by sed **on the PR branch only**, and merge the finished bullet
+   in one atomic commit.
+4. Commit each repo separately (independent PRs). Suggested commit:
+   `docs: publish measured RTO/RPO from <RUN_DATE> run`. Merge —
+   /security auto-deploys via the Scaleway workflow.
 
 **Sequencing rule for the legal doc.** `docs/legal/v2/` is the
 diffable source of truth for the DPA (see #498). Do not merge a DPA
 change that leaves visible `{{…}}` tokens in main — always land the
 placeholder-add and the number-fill together in one PR, or on the
-same day at latest.
+same day at latest. The `/security` marketing page has a lower bar
+(placeholders are visible source, not a contract), so a same-day fill
+after merge is fine there.
 
 ## Already shipped (reference — not follow-ups)
 
