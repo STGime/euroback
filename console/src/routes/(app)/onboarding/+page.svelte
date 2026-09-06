@@ -549,7 +549,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 										<p class="text-sm font-semibold text-gray-900">Team</p>
 										<span class="text-xs font-semibold text-emerald-700">Beta · free</span>
 									</div>
-									<p class="mt-1.5 text-xs text-gray-500">Dedicated Postgres, direct <code class="rounded bg-gray-100 px-1 text-[10px]">DATABASE_URL</code>, PITR + backups.</p>
+									<p class="mt-1.5 text-xs text-gray-500">Dedicated Postgres, direct <code class="rounded bg-gray-100 px-1 text-[10px]">DATABASE_URL</code>, daily backups + on-demand snapshots.</p>
 									<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
 										<li class="flex items-center gap-1.5">
 											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
@@ -565,7 +565,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 										</li>
 										<li class="flex items-center gap-1.5">
 											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-											PITR (7d), scheduled backups (30d retention)
+											Daily scheduled backups (7d retention Team / 30d Legal Team) + on-demand snapshots
 										</li>
 										<li class="flex items-center gap-1.5">
 											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
@@ -612,7 +612,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 										</li>
 										<li class="flex items-center gap-1.5">
 											<svg class="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-											PITR (7d), scheduled backups (30d retention)
+											Daily scheduled backups (7d retention Team / 30d Legal Team) + on-demand snapshots
 										</li>
 										<li class="flex items-center gap-1.5">
 											<svg class="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>

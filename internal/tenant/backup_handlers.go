@@ -15,7 +15,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
@@ -39,7 +42,8 @@ type BackupSnapshot struct {
 	ProviderSnapshotID string    `json:"provider_snapshot_id"`
 	Name               string    `json:"name"`
 	SizeMB             int64     `json:"size_mb"`
-	Kind               string    `json:"kind"`     // 'scheduled' | 'ondemand'
+	Kind               string    `json:"kind"`          // 'scheduled' | 'ondemand'
+	Tag                *string   `json:"tag,omitempty"` // user-provided label on on-demand snapshots; NULL for scheduled + untagged
 	CreatedAt          time.Time `json:"created_at"`
 	ExpiresAt          time.Time `json:"expires_at"`
 }
@@ -106,7 +110,7 @@ func (s *BackupService) HandleListBackups() http.HandlerFunc {
 
 		rows, err := s.pool.Query(r.Context(),
 			`SELECT id, project_id, project_database_id, provider_snapshot_id,
-			        name, size_mb, kind, created_at, expires_at
+			        name, size_mb, kind, tag, created_at, expires_at
 			   FROM public.backup_snapshots
 			  WHERE project_id = $1::uuid
 			    AND expires_at > now()
@@ -124,7 +128,7 @@ func (s *BackupService) HandleListBackups() http.HandlerFunc {
 		for rows.Next() {
 			var b BackupSnapshot
 			if err := rows.Scan(&b.ID, &b.ProjectID, &b.ProjectDatabaseID, &b.ProviderSnapshotID,
-				&b.Name, &b.SizeMB, &b.Kind, &b.CreatedAt, &b.ExpiresAt); err != nil {
+				&b.Name, &b.SizeMB, &b.Kind, &b.Tag, &b.CreatedAt, &b.ExpiresAt); err != nil {
 				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
 				return
 			}
@@ -141,6 +145,38 @@ func (s *BackupService) HandleListBackups() http.HandlerFunc {
 // (kind='ondemand', created_at > now() - '24h').
 const onDemandBackupRateLimit = 5
 
+// maxSnapshotTagLen — hard cap on the user-provided tag on an on-demand
+// snapshot. Keeps the console table readable (renders without
+// truncation ellipsis) and matches migration 000111's application-
+// layer guarantee.
+const maxSnapshotTagLen = 64
+
+// CreateBackupRequest is the JSON body for POST /backups. The body
+// is optional (empty body creates an untagged snapshot); tag is the
+// only field today.
+type CreateBackupRequest struct {
+	Tag string `json:"tag,omitempty"`
+}
+
+// validateSnapshotTag enforces the tag surface: ≤64 chars after
+// TrimSpace, printable-only, no control chars. Returns the cleaned
+// tag (may be empty) or an error suitable for a 400 response.
+func validateSnapshotTag(raw string) (string, error) {
+	t := strings.TrimSpace(raw)
+	if t == "" {
+		return "", nil
+	}
+	if utf8.RuneCountInString(t) > maxSnapshotTagLen {
+		return "", fmt.Errorf("tag must be %d characters or fewer", maxSnapshotTagLen)
+	}
+	for _, r := range t {
+		if !unicode.IsPrint(r) {
+			return "", fmt.Errorf("tag contains an unprintable character")
+		}
+	}
+	return t, nil
+}
+
 // HandleCreateBackup — POST /platform/projects/{id}/backups.
 // Triggers an on-demand snapshot. Rate-limited to 5/day/project.
 // Runs synchronously (provider returns fast; the snapshot itself
@@ -154,6 +190,22 @@ func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
 		}
 		if err := s.limits.CheckDedicatedDB(r.Context(), projectID); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"dedicated_db_required"}`, err.Error()), http.StatusPaymentRequired)
+			return
+		}
+
+		// Optional JSON body — empty body is legal (means "untagged
+		// on-demand snapshot"). Tag surface capped at maxSnapshotTagLen
+		// printable chars; validation enforces both.
+		var body CreateBackupRequest
+		if r.ContentLength > 0 {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+				return
+			}
+		}
+		tag, err := validateSnapshotTag(body.Tag)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q,"code":"invalid_tag"}`, err.Error()), http.StatusBadRequest)
 			return
 		}
 
@@ -228,6 +280,7 @@ func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
 
 		snap, err := provider.Snapshot(r.Context(), rec.ProviderInstanceID, dbprovider.SnapshotOpts{
 			Retention: retention,
+			Tag:       tag,
 		})
 		if err != nil {
 			slog.Error("backup: provider snapshot failed", "error", err, "project_id", projectID)
@@ -235,26 +288,36 @@ func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
 			return
 		}
 
-		// Cache the row so it appears in list-endpoint output immediately.
+		// Cache the row so it appears in list-endpoint output
+		// immediately. Tag stored as NULL when empty (matches the
+		// migration's DEFAULT NULL).
+		var tagArg any
+		if tag != "" {
+			tagArg = tag
+		}
 		var out BackupSnapshot
 		err = s.pool.QueryRow(r.Context(),
 			`INSERT INTO public.backup_snapshots
-			    (project_id, project_database_id, provider_snapshot_id, name, size_mb, kind, created_at, expires_at)
-			 VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)
-			 RETURNING id, project_id, project_database_id, provider_snapshot_id, name, size_mb, kind, created_at, expires_at`,
-			projectID, rec.ID, snap.ProviderID, snap.Name, snap.SizeMB, string(snap.Kind), snap.CreatedAt, snap.ExpiresAt,
+			    (project_id, project_database_id, provider_snapshot_id, name, size_mb, kind, tag, created_at, expires_at)
+			 VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
+			 RETURNING id, project_id, project_database_id, provider_snapshot_id, name, size_mb, kind, tag, created_at, expires_at`,
+			projectID, rec.ID, snap.ProviderID, snap.Name, snap.SizeMB, string(snap.Kind), tagArg, snap.CreatedAt, snap.ExpiresAt,
 		).Scan(&out.ID, &out.ProjectID, &out.ProjectDatabaseID, &out.ProviderSnapshotID,
-			&out.Name, &out.SizeMB, &out.Kind, &out.CreatedAt, &out.ExpiresAt)
+			&out.Name, &out.SizeMB, &out.Kind, &out.Tag, &out.CreatedAt, &out.ExpiresAt)
 		if err != nil {
 			slog.Error("cache new backup row failed", "error", err, "project_id", projectID)
 			http.Error(w, `{"error":"snapshot created at provider but cache write failed — refresh to see it"}`, http.StatusInternalServerError)
 			return
 		}
 
-		writeBackupAudit(r, projectID, audit.ActionExportRequested, map[string]any{
+		auditMeta := map[string]any{
 			"kind":                 "on_demand_backup",
 			"provider_snapshot_id": snap.ProviderID,
-		})
+		}
+		if tag != "" {
+			auditMeta["tag"] = tag
+		}
+		writeBackupAudit(r, projectID, audit.ActionExportRequested, auditMeta)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -262,13 +325,20 @@ func (s *BackupService) HandleCreateBackup() http.HandlerFunc {
 	}
 }
 
-// RestoreRequest is the JSON body for POST /restore. Exactly one of
-// `snapshot_id` or `target_time` must be set (validated at handler
-// time; Provider.Restore also validates via RestoreSource.Valid()).
+// RestoreRequest is the JSON body for POST /restore. Only snapshot-
+// based restore is supported today — Scaleway RDB dropped the CLI +
+// REST-API PITR-to-timestamp surface in mid-2026 (see euroback#520
+// for the investigation record + PR #519 for the runbook + monthly
+// test alignment). The `source` field is kept for forward-compat but
+// currently must be "snapshot" (default) if provided at all.
+//
+// TargetTime remains only as a legacy field to reject with a clear
+// 400 if any client library still sends it — surfaces the change
+// louder than silently ignoring the parameter.
 type RestoreRequest struct {
-	Source     string     `json:"source"` // "snapshot" | "pitr"
-	SnapshotID string     `json:"snapshot_id,omitempty"`
-	TargetTime *time.Time `json:"target_time,omitempty"`
+	Source     string     `json:"source,omitempty"` // must be empty or "snapshot"
+	SnapshotID string     `json:"snapshot_id"`
+	TargetTime *time.Time `json:"target_time,omitempty"` // rejected — PITR removed, see doc comment
 }
 
 // HandleCreateRestore — POST /platform/projects/{id}/restore.
@@ -310,19 +380,24 @@ func (s *BackupService) HandleCreateRestore() http.HandlerFunc {
 			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
 			return
 		}
-		// Validate source.
-		hasSnap := req.SnapshotID != ""
-		hasPITR := req.TargetTime != nil && !req.TargetTime.IsZero()
-		if hasSnap == hasPITR {
-			http.Error(w, `{"error":"exactly one of snapshot_id or target_time must be set"}`, http.StatusBadRequest)
+		// Reject any PITR-shaped request louder than silently ignoring
+		// it — Scaleway dropped PITR-to-timestamp mid-2026 and the
+		// customer-visible restore surface is snapshot-only. A client
+		// sending target_time is running against a stale API contract
+		// and needs a clear 400 to update.
+		if req.TargetTime != nil && !req.TargetTime.IsZero() {
+			http.Error(w, `{"error":"point-in-time restore has been removed; use snapshot_id (create an on-demand snapshot first if you need one)","code":"pitr_removed"}`, http.StatusBadRequest)
 			return
 		}
-		if hasPITR && req.Source != "pitr" {
-			req.Source = "pitr"
+		if req.Source != "" && req.Source != "snapshot" {
+			http.Error(w, fmt.Sprintf(`{"error":"unsupported source %q; only 'snapshot' is supported","code":"unsupported_source"}`, req.Source), http.StatusBadRequest)
+			return
 		}
-		if hasSnap && req.Source != "snapshot" {
-			req.Source = "snapshot"
+		if req.SnapshotID == "" {
+			http.Error(w, `{"error":"snapshot_id is required"}`, http.StatusBadRequest)
+			return
 		}
+		req.Source = "snapshot"
 
 		// Look up the live project_databases row — this is the
 		// "old" instance the restore replaces.
@@ -337,67 +412,38 @@ func (s *BackupService) HandleCreateRestore() http.HandlerFunc {
 			return
 		}
 
-		// PITR window check — must fall within the plan's pitr_days.
-		if hasPITR {
-			limits, err := s.limits.GetProjectLimits(r.Context(), projectID)
-			if err != nil {
-				http.Error(w, `{"error":"limits lookup failed"}`, http.StatusInternalServerError)
-				return
-			}
-			window := time.Duration(limits.PITRDays) * 24 * time.Hour
-			if window <= 0 {
-				http.Error(w, `{"error":"pitr not available on this plan","code":"pitr_disabled"}`, http.StatusPaymentRequired)
-				return
-			}
-			earliest := time.Now().Add(-window)
-			if req.TargetTime.Before(earliest) || req.TargetTime.After(time.Now()) {
-				http.Error(w, fmt.Sprintf(`{"error":"target_time must be within the last %d days","code":"pitr_out_of_window"}`, limits.PITRDays), http.StatusBadRequest)
-				return
-			}
-		}
-
 		// Resolve source_ref.
 		//
-		// Snapshot restores: SECURITY — the client-supplied
-		// SnapshotID is untrusted. Scaleway addresses backups by
-		// GLOBAL ID (not per-instance), so passing the raw client
-		// value to Provider.Restore would let any Team admin
-		// restore ANOTHER tenant's snapshot into their own project
-		// (M3 review blocker #1). Look up through the project-
-		// scoped backup_snapshots cache and use only the verified
-		// provider_snapshot_id. 404 for anything not owned by this
-		// project (or expired). Accepts either our internal cache
-		// row ID OR the provider_snapshot_id — both are per-project
-		// unique.
-		//
-		// PITR restores: source_ref is the target timestamp; the
-		// PITR API path in the Scaleway provider hits
-		// /instances/{oldInstanceID}/renew-pitr, so the source
-		// instance is enforced by the URL — no cross-tenant vector.
+		// SECURITY — the client-supplied SnapshotID is untrusted.
+		// Scaleway addresses backups by GLOBAL ID (not per-instance),
+		// so passing the raw client value to Provider.Restore would
+		// let any Team admin restore ANOTHER tenant's snapshot into
+		// their own project (M3 review blocker #1). Look up through
+		// the project-scoped backup_snapshots cache and use only the
+		// verified provider_snapshot_id. 404 for anything not owned
+		// by this project (or expired). Accepts either our internal
+		// cache row ID OR the provider_snapshot_id — both are per-
+		// project unique.
 		var sourceRef string
-		if hasSnap {
-			var verifiedProviderID string
-			err := s.pool.QueryRow(r.Context(),
-				`SELECT provider_snapshot_id
-				   FROM public.backup_snapshots
-				  WHERE (id::text = $1 OR provider_snapshot_id = $1)
-				    AND project_id = $2::uuid
-				    AND expires_at > now()`,
-				req.SnapshotID, projectID,
-			).Scan(&verifiedProviderID)
-			if errors.Is(err, pgx.ErrNoRows) {
-				http.Error(w, `{"error":"snapshot not found for this project","code":"snapshot_not_found"}`, http.StatusNotFound)
-				return
-			}
-			if err != nil {
-				slog.Error("resolve snapshot for restore failed", "error", err, "project_id", projectID)
-				http.Error(w, `{"error":"snapshot lookup failed"}`, http.StatusInternalServerError)
-				return
-			}
-			sourceRef = verifiedProviderID
-		} else {
-			sourceRef = req.TargetTime.Format(time.RFC3339Nano)
+		var verifiedProviderID string
+		err = s.pool.QueryRow(r.Context(),
+			`SELECT provider_snapshot_id
+			   FROM public.backup_snapshots
+			  WHERE (id::text = $1 OR provider_snapshot_id = $1)
+			    AND project_id = $2::uuid
+			    AND expires_at > now()`,
+			req.SnapshotID, projectID,
+		).Scan(&verifiedProviderID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, `{"error":"snapshot not found for this project","code":"snapshot_not_found"}`, http.StatusNotFound)
+			return
 		}
+		if err != nil {
+			slog.Error("resolve snapshot for restore failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"snapshot lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		sourceRef = verifiedProviderID
 
 		var actorID string
 		if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {

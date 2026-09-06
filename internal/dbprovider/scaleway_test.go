@@ -489,15 +489,12 @@ func TestScaleway_RestoreSourceValidation(t *testing.T) {
 		t.Fatal("must not call Scaleway on invalid source")
 	})
 	ctx := context.Background()
-	// Both set → invalid.
-	_, err := p.Restore(ctx, "rdb-1", RestoreSource{SnapshotID: "s", PITRTarget: time.Now()})
+	// Empty SnapshotID → invalid. (PITRTarget path was removed with
+	// migration 000111 alongside Scaleway's CLI drop of PITR — see
+	// euroback#520.)
+	_, err := p.Restore(ctx, "rdb-1", RestoreSource{})
 	if !errors.Is(err, ErrInvalidRestoreSource) {
-		t.Errorf("both set: want ErrInvalidRestoreSource, got %v", err)
-	}
-	// Neither set → invalid.
-	_, err = p.Restore(ctx, "rdb-1", RestoreSource{})
-	if !errors.Is(err, ErrInvalidRestoreSource) {
-		t.Errorf("neither set: want ErrInvalidRestoreSource, got %v", err)
+		t.Errorf("empty snapshot id: want ErrInvalidRestoreSource, got %v", err)
 	}
 }
 

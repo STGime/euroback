@@ -97,7 +97,7 @@
 			<div class="mt-4 rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-800">
 				<p class="font-semibold">Restore failed</p>
 				{#if op.error}<p class="mt-1 font-mono text-xs">{op.error}</p>{/if}
-				<p class="mt-2">Your project stayed on the old instance — no data loss. You can try again with a different snapshot or PITR target.</p>
+				<p class="mt-2">Your project stayed on the old instance — no data loss. You can try again with a different snapshot.</p>
 			</div>
 		{:else}
 			<p class="mt-4 text-xs text-gray-500">

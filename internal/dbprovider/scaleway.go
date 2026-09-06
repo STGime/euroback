@@ -258,13 +258,6 @@ type scalewayRestoreBackupRequest struct {
 	IsHaCluster  bool   `json:"is_ha_cluster,omitempty"`
 }
 
-type scalewayPITRRequest struct {
-	InstanceName string    `json:"instance_name"`
-	NodeType     string    `json:"node_type"`
-	IsHaCluster  bool      `json:"is_ha_cluster,omitempty"`
-	TargetTime   time.Time `json:"target_time"`
-}
-
 // ── Provider methods ───────────────────────────────────────────────
 
 // Provision creates a new managed-PG instance in this client's
@@ -385,10 +378,20 @@ func (s *Scaleway) Snapshot(ctx context.Context, instanceID string, opts Snapsho
 	if err != nil {
 		return nil, err
 	}
+	// If the caller passed a tag, append a slugged version to the
+	// provider-side snapshot name so operators can spot it in the
+	// Scaleway console too. Handler-layer already validated the tag
+	// (≤64 chars, printable), so we only need to convert unsafe
+	// chars for Scaleway's name field — space → dash, keep alnum /
+	// dash / underscore / dot.
+	providerName := "eurobase-ondemand-" + name
+	if slug := scalewayNameSlug(opts.Tag); slug != "" {
+		providerName = providerName + "-" + slug
+	}
 	req := scalewayCreateBackupRequest{
 		InstanceID:   instanceID,
 		DatabaseName: scalewayDefaultDB,
-		Name:         "eurobase-ondemand-" + name,
+		Name:         providerName,
 	}
 	if opts.Retention > 0 {
 		// Compute against the caller's clock (not the provider's)
@@ -463,36 +466,26 @@ func (s *Scaleway) Restore(ctx context.Context, instanceID string, source Restor
 		restoredName = fmt.Sprintf("%s-r-%s", trimmed, suffix)
 	}
 
-	if source.SnapshotID != "" {
-		req := scalewayRestoreBackupRequest{
-			InstanceName: restoredName,
-			NodeType:     src.NodeType,
-		}
-		var out scalewayInstance
-		path := fmt.Sprintf("/rdb/v1/regions/%s/backups/%s/restore", region, source.SnapshotID)
-		if err := s.do(ctx, http.MethodPost, path, req, &out); err != nil {
-			return nil, err
-		}
-		// Restored instance keeps the source's credentials — we
-		// don't get a new password from Scaleway on this path.
-		// Caller must rotate via a follow-up step if it wants
-		// separate creds. For M1 we return the source's Username
-		// with an empty Password; the M4 rotation endpoint handles
-		// setting a fresh one.
-		return mapScalewayInstance(&out, region, "eurobase_owner", ""), nil
-	}
-
-	// PITR path.
-	req := scalewayPITRRequest{
+	// Snapshot-based restore. This is the only surviving customer-
+	// visible restore path — Scaleway removed PITR-to-timestamp from
+	// the CLI + API alongside migration 000111, so RestoreSource has
+	// only SnapshotID. RestoreSource.Valid() already rejected an
+	// empty ID up top, so no need for a source.SnapshotID != ""
+	// branch here.
+	req := scalewayRestoreBackupRequest{
 		InstanceName: restoredName,
 		NodeType:     src.NodeType,
-		TargetTime:   source.PITRTarget,
 	}
 	var out scalewayInstance
-	path := fmt.Sprintf("/rdb/v1/regions/%s/instances/%s/renew-pitr", region, instanceID)
+	path := fmt.Sprintf("/rdb/v1/regions/%s/backups/%s/restore", region, source.SnapshotID)
 	if err := s.do(ctx, http.MethodPost, path, req, &out); err != nil {
 		return nil, err
 	}
+	// Restored instance keeps the source's credentials — we don't
+	// get a new password from Scaleway on this path. Caller must
+	// rotate via a follow-up step if it wants separate creds. For
+	// M1 we return the source's Username with an empty Password;
+	// the M4 rotation endpoint handles setting a fresh one.
 	return mapScalewayInstance(&out, region, "eurobase_owner", ""), nil
 }
 
@@ -836,4 +829,34 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// scalewayNameSlug converts a user-provided snapshot tag into a form
+// safe to append to Scaleway's backup Name field (lowercase alnum +
+// dash, capped at 24 chars so the composed provider name still fits
+// under any hard limit Scaleway enforces on backup names).
+//
+// The handler layer already validated the tag surface (≤64 chars,
+// printable), so this only downgrades whitespace + specials into
+// dashes for the display name in the Scaleway console. Returning ""
+// signals "no suffix" — the caller then uses the bare
+// eurobase-ondemand-<hex> name.
+func scalewayNameSlug(tag string) string {
+	if tag == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range strings.ToLower(tag) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.' || r == ' ':
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 24 {
+		out = strings.TrimRight(out[:24], "-")
+	}
+	return out
 }

@@ -113,16 +113,16 @@ func (w *RestoreTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[job
 		return w.fail(ctx, restoreID, fmt.Errorf("provider lookup: %w", err))
 	}
 
-	// 2. Build the RestoreSource.
+	// 2. Build the RestoreSource. Snapshot-only since Scaleway
+	// removed PITR (see euroback#520). "pitr" kind rows may still
+	// exist on old restore_operations rows from before the CLI
+	// change — fail cleanly rather than mis-restore.
 	var src dbprovider.RestoreSource
 	switch kind {
 	case "snapshot":
 		src = dbprovider.RestoreSource{SnapshotID: sourceRef}
 	case "pitr":
-		if targetTime == nil {
-			return w.fail(ctx, restoreID, errors.New("pitr restore missing target_time"))
-		}
-		src = dbprovider.RestoreSource{PITRTarget: *targetTime}
+		return w.fail(ctx, restoreID, errors.New("pitr restore path removed; source snapshot required"))
 	default:
 		return w.fail(ctx, restoreID, fmt.Errorf("unknown restore kind: %s", kind))
 	}

@@ -261,7 +261,7 @@ const key = ctx.env.STRIPE_KEY</pre>
 			<h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">🚧 What's coming</h2>
 			<ul style="margin:0 0 12px 18px; padding:0; font-size:14px; line-height:1.6; color:#374151;">
 			  <li><strong>Supabase migration CLI</strong> — in testing. Move an existing Supabase project across in one flow.</li>
-			  <li><strong>Team tier (€149/mo)</strong> — dedicated Postgres per project (direct <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">DATABASE_URL</code>), backups + PITR, SSO, RBAC, SOC 2. Coming later this year.</li>
+			  <li><strong>Team tier (€149/mo)</strong> — dedicated Postgres per project (direct <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">DATABASE_URL</code>), daily scheduled backups (7-day retention) + on-demand snapshots, 1 restore/month included, SSO, RBAC, SOC 2. Coming later this year.</li>
 			</ul>
 
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">

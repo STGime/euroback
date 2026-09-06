@@ -127,6 +127,17 @@ type ProvisionOpts struct {
 // Handlers must pass a plan-derived Retention.
 type SnapshotOpts struct {
 	Retention time.Duration
+
+	// Tag is an optional user-provided label attached to an on-demand
+	// snapshot ("pre-migration-v2", "before-cleanup"). Persisted in
+	// backup_snapshots.tag by the caller for display in the console.
+	// Providers embed the tag in the provider-side snapshot name so
+	// it's also visible in the Scaleway console, prefixed with the
+	// eurobase-ondemand-<hex>- machine ID. Empty string = no tag.
+	//
+	// Handler-layer validation: ≤64 chars, printable characters only
+	// (see internal/tenant/backup_handlers.go HandleCreateBackup).
+	Tag string
 }
 
 // SetBackupScheduleOpts is the input to Provider.SetBackupSchedule.
@@ -159,23 +170,24 @@ const (
 	SizeLarge  Size = "large"
 )
 
-// RestoreSource discriminates a snapshot restore from a PITR restore.
-// Exactly one of SnapshotID or PITRTarget must be set — the Provider
-// returns ErrInvalidRestoreSource otherwise.
+// RestoreSource identifies which snapshot to restore.
+//
+// The PITRTarget field was removed in migration 000111's PR after
+// Scaleway RDB dropped `instance clone --point-in-time` from the CLI
+// and the `.restore_to_time` field from the instance JSON — see
+// euroback#520 for the investigation record. The surviving customer-
+// visible restore surface is snapshot-based only (either an on-demand
+// snapshot the customer took, or a scheduled backup cached as a
+// snapshot). If Scaleway ever restores PITR-to-timestamp, this
+// struct can gain a new field alongside SnapshotID.
 type RestoreSource struct {
 	SnapshotID string
-	// PITRTarget is a wall-clock time inside the provider's PITR
-	// window. Ignored if SnapshotID is set.
-	PITRTarget time.Time
 }
 
-// Valid returns nil when the source correctly specifies exactly one
-// restore vector, or ErrInvalidRestoreSource otherwise. Providers
-// call this at the top of Restore.
+// Valid returns nil when SnapshotID is set, ErrInvalidRestoreSource
+// otherwise. Providers call this at the top of Restore.
 func (s RestoreSource) Valid() error {
-	hasSnapshot := s.SnapshotID != ""
-	hasPITR := !s.PITRTarget.IsZero()
-	if hasSnapshot == hasPITR {
+	if s.SnapshotID == "" {
 		return ErrInvalidRestoreSource
 	}
 	return nil

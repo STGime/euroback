@@ -34,10 +34,13 @@ var (
 	ErrProviderUnavailable = errors.New("dbprovider: provider unavailable")
 
 	// ErrInvalidRestoreSource fires when a caller passes a
-	// RestoreSource that specifies both or neither of SnapshotID
-	// and PITRTarget. Interface contract violation — never seen if
-	// the console UI is behaving.
-	ErrInvalidRestoreSource = errors.New("dbprovider: restore source must specify exactly one of SnapshotID or PITRTarget")
+	// RestoreSource with an empty SnapshotID. Interface contract
+	// violation — never seen if the console UI is behaving.
+	// (Historical note: this used to require exactly one of
+	// SnapshotID or PITRTarget; PITR was removed in migration
+	// 000111 after Scaleway dropped the CLI + API surface — see
+	// euroback#520.)
+	ErrInvalidRestoreSource = errors.New("dbprovider: restore source must specify SnapshotID")
 
 	// ErrProviderNotRegistered is returned by Registry.Get when the
 	// name is unknown. Callers should surface as a 500 (config
