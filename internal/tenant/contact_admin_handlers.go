@@ -60,32 +60,40 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 
 		showAll := r.URL.Query().Get("state") == "all"
 
-		// LEFT JOIN platform_users so we can render the resolver's
-		// email inline in the admin table, not just an opaque UUID.
 		// Two variants of the query so the WHERE resolved_at IS NULL
 		// path can use the partial index from migration 000112.
+		//
+		// Design notes from the /admin "Row iteration failed" bug:
+		//   * `id` and `resolved_by` are UUID columns; scan into string
+		//     via ::text cast so pgx v5 doesn't have to negotiate the
+		//     uuid-to-string codec (the *string form under LEFT JOIN
+		//     was surfacing a lazy driver error as row-iteration-failed
+		//     in prod).
+		//   * `ip_address` is INET; ::text cast for the same reason
+		//     (host() would work too but ::text is more mechanical).
+		//   * Dropped the LEFT JOIN to platform_users for the resolver
+		//     email. The frontend already loads AdminListSignupUsers on
+		//     the same admin page, so it can render the resolver's
+		//     email from that list by UUID lookup — one less join
+		//     surface here, one less driver quirk to hit.
 		var q string
 		if showAll {
 			q = `
-				SELECT c.id, c.name, c.email, c.message, c.source,
-				       c.user_agent, host(c.ip_address) AS ip_text,
-				       c.created_at, c.resolved_at, c.resolved_by,
-				       u.email AS resolved_by_email,
+				SELECT c.id::text, c.name, c.email, c.message, c.source,
+				       c.user_agent, c.ip_address::text,
+				       c.created_at, c.resolved_at, c.resolved_by::text,
 				       c.resolution_note
 				  FROM public.contact_requests c
-				  LEFT JOIN public.platform_users u ON u.id = c.resolved_by
 				 ORDER BY c.created_at DESC
 				 LIMIT 500
 			`
 		} else {
 			q = `
-				SELECT c.id, c.name, c.email, c.message, c.source,
-				       c.user_agent, host(c.ip_address) AS ip_text,
-				       c.created_at, c.resolved_at, c.resolved_by,
-				       u.email AS resolved_by_email,
+				SELECT c.id::text, c.name, c.email, c.message, c.source,
+				       c.user_agent, c.ip_address::text,
+				       c.created_at, c.resolved_at, c.resolved_by::text,
 				       c.resolution_note
 				  FROM public.contact_requests c
-				  LEFT JOIN public.platform_users u ON u.id = c.resolved_by
 				 WHERE c.resolved_at IS NULL
 				 ORDER BY c.created_at DESC
 				 LIMIT 500
@@ -94,8 +102,12 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), q)
 		if err != nil {
+			// Include err.Error() in the response body so the
+			// admin-page error banner surfaces the real cause on the
+			// next regression (was suppressed to a generic "query
+			// failed" and cost us a round-trip to prod logs).
 			slog.Error("AdminListContactRequests: query failed", "error", err)
-			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			http.Error(w, `{"error":"query failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -107,17 +119,17 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 				&e.ID, &e.Name, &e.Email, &e.Message, &e.Source,
 				&e.UserAgent, &e.IPAddress,
 				&e.CreatedAt, &e.ResolvedAt, &e.ResolvedByID,
-				&e.ResolvedBy, &e.ResolutionNote,
+				&e.ResolutionNote,
 			); err != nil {
 				slog.Error("AdminListContactRequests: scan failed", "error", err)
-				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
+				http.Error(w, `{"error":"scan failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 				return
 			}
 			out = append(out, e)
 		}
 		if err := rows.Err(); err != nil {
 			slog.Error("AdminListContactRequests: rows.Err()", "error", err)
-			http.Error(w, `{"error":"row iteration failed"}`, http.StatusInternalServerError)
+			http.Error(w, `{"error":"row iteration failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
 		}
 
