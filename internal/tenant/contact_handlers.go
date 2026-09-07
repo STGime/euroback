@@ -4,27 +4,33 @@ package tenant
 //
 // Route: POST /platform/public/contact  (NO auth — this is a
 // widget on eurobase.app that anonymous visitors interact with).
-// The security surface is entirely in this handler:
+// The security surface is entirely in this handler + migration 000112:
 //
 //   - Rate-limited per IP (5 / hour) AND per email (3 / hour). Both
 //     apply — a distributed spammer can't burn one email's budget
 //     from many IPs, and a single IP can't blast many emails.
+//   - Request body capped by http.MaxBytesReader before JSON decode
+//     so an anonymous caller can't push a 50 MB body (nginx cap) into
+//     a runaway allocation.
+//   - Email is canonicalised via mail.ParseAddress().Address so
+//     "Alice <a@b.com>" and "Bob <a@b.com>" both hit the same
+//     rate-limit key + land as one row per address in the DB.
 //   - Field validation matches the DB CHECK constraints, so a
 //     bypassed validator lands as a clean 400 rather than a 500 on
 //     the pgx driver.
 //   - Discord notification is fire-and-forget in a goroutine —
 //     never blocks the response even if Discord is down.
 //   - Inserted under the eurobase_gateway pool, which only holds
-//     INSERT on contact_requests (per migration 000112). No SELECT
-//     grant = a runtime SQL-injection cannot exfiltrate historical
-//     submissions.
+//     INSERT on contact_requests (migration 000112 REVOKEs the
+//     default SELECT/UPDATE/DELETE grant first — see the migration's
+//     #443-class-pitfall comment). No SELECT grant means a runtime
+//     SQL-injection cannot exfiltrate historical submissions.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -56,6 +62,13 @@ const (
 	contactMinMessageLen = 1
 )
 
+// contactMaxRequestBytes caps the whole JSON body before decode.
+// 32 KiB is generous for the largest legit payload: 5,000-char
+// message (~20 KiB in worst-case UTF-8) + 200-char name + 254-char
+// email + JSON overhead. Rejects with 413 Request Entity Too Large
+// before the parser allocates anything.
+const contactMaxRequestBytes = 32 * 1024
+
 // PublicContactRequest is the JSON body of POST /platform/public/contact.
 type PublicContactRequest struct {
 	Name    string `json:"name,omitempty"` // optional
@@ -65,14 +78,21 @@ type PublicContactRequest struct {
 
 // HandlePublicContactRequest is the marketing-widget entry point.
 // Requires the shared rate limiter (nil = local dev, allowed
-// silently) and the gateway pool (INSERT-only on contact_requests).
+// silently with a warn) and the gateway pool (INSERT-only on
+// contact_requests per migration 000112).
 func HandlePublicContactRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
+		// Cap the body before we touch the JSON parser — public
+		// endpoint on an ingress that allows 50 MB requests.
+		r.Body = http.MaxBytesReader(w, r.Body, contactMaxRequestBytes)
+
 		var req PublicContactRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+			// MaxBytesReader wraps its own overflow error type; the
+			// message is fine to surface as a 400 either way.
+			writeJSONError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 
@@ -81,16 +101,18 @@ func HandlePublicContactRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimit
 		req.Message = strings.TrimSpace(req.Message)
 
 		if err := validateContactRequest(&req); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		// Rate-limit gate — IP first (cheapest to enumerate), then
-		// email. 429 body carries the field so the client can show a
-		// specific message ("please wait an hour before sending
-		// another message" vs "too many contact requests from your
-		// network").
-		clientIP := extractClientIP(r)
+		// email. The IP key trusts leftmost-XFF, which is safe here
+		// because deploy/k8s/nginx-ingress-config.yaml sets
+		// use-forwarded-headers: "false" — nginx OVERWRITES the
+		// client-supplied XFF with a single trusted entry before it
+		// reaches the gateway. If that ingress config ever flips,
+		// this rate limit becomes trivially bypassable.
+		clientIP := ratelimit.ClientIP(r)
 		if limiter != nil {
 			if blocked := ratelimit.CheckAuthRate(
 				limiter, w, r.Context(),
@@ -106,18 +128,21 @@ func HandlePublicContactRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimit
 			); blocked {
 				return
 			}
+		} else {
+			// Convention across the codebase (see signup handler): a
+			// missing limiter falls open, not closed — a Redis outage
+			// shouldn't take signups + contact form down. Log warn so
+			// ops sees the unrate-limited window in the aggregator.
+			slog.Warn("contact form: rate limiter unavailable, request allowed unrated", "path", r.URL.Path)
 		}
 
 		var name *string
 		if req.Name != "" {
 			name = &req.Name
 		}
-		userAgent := r.Header.Get("User-Agent")
+		userAgent := truncateRunes(r.Header.Get("User-Agent"), 500)
 		var userAgentPtr *string
 		if userAgent != "" {
-			if len(userAgent) > 500 {
-				userAgent = userAgent[:500]
-			}
 			userAgentPtr = &userAgent
 		}
 
@@ -132,8 +157,12 @@ func HandlePublicContactRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimit
 			RETURNING id
 		`, name, req.Email, req.Message, userAgentPtr, clientIP).Scan(&id)
 		if err != nil {
-			slog.Error("contact form: insert failed", "error", err, "email", req.Email)
-			http.Error(w, `{"error":"internal error, please try again"}`, http.StatusInternalServerError)
+			// Do NOT log req.Email — it's PII, and this line runs on
+			// the log-noise path. We DO include the client IP because
+			// that's already captured in ip_address and helps ops
+			// correlate an outage across sources.
+			slog.Error("contact form: insert failed", "error", err, "client_ip", clientIP)
+			writeJSONError(w, http.StatusInternalServerError, "internal error, please try again")
 			return
 		}
 
@@ -144,9 +173,35 @@ func HandlePublicContactRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimit
 	}
 }
 
+// writeJSONError is a small helper because http.Error unconditionally
+// overwrites Content-Type back to text/plain — we want the whole
+// error surface to stay under application/json for consistent client
+// parsing.
+func writeJSONError(w http.ResponseWriter, code int, msg string) {
+	w.WriteHeader(code)
+	fmt.Fprintf(w, `{"error":%q}`, msg)
+}
+
+// truncateRunes clips s to at most n runes, so a UTF-8 boundary is
+// never cut mid-codepoint. Plain s[:n] would produce invalid UTF-8
+// if a multibyte rune straddles the cut, which Discord rejects (400)
+// and PG stores as garbage.
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:n])
+}
+
 // validateContactRequest enforces the bounds that also live as DB
 // CHECKs. Rune-count where the DB uses char_length() so multibyte
 // characters count consistently (an "OÜ" name is 2 chars, not 3).
+//
+// Also canonicalises Email in-place to `addr.Address` so the
+// rate-limit key + row value use the same address for
+// "Alice <a@b.com>" and "Bob <a@b.com>" — see the review-round
+// bypass finding on the initial version.
 func validateContactRequest(req *PublicContactRequest) error {
 	if req.Email == "" {
 		return fmt.Errorf("email is required")
@@ -154,8 +209,17 @@ func validateContactRequest(req *PublicContactRequest) error {
 	if utf8.RuneCountInString(req.Email) > contactMaxEmailLen {
 		return fmt.Errorf("email must be %d characters or fewer", contactMaxEmailLen)
 	}
-	if _, err := mail.ParseAddress(req.Email); err != nil {
+	addr, err := mail.ParseAddress(req.Email)
+	if err != nil {
 		return fmt.Errorf("email is not a valid address")
+	}
+	// Canonicalise: strip display-name form, lowercase. Bounds re-checked
+	// on the canonical form because the display-name expansion could in
+	// theory shrink AND grow the address slot (empty display-name +
+	// angle brackets vs bare address).
+	req.Email = strings.ToLower(addr.Address)
+	if utf8.RuneCountInString(req.Email) > contactMaxEmailLen {
+		return fmt.Errorf("email must be %d characters or fewer", contactMaxEmailLen)
 	}
 	if utf8.RuneCountInString(req.Message) < contactMinMessageLen {
 		return fmt.Errorf("message is required")
@@ -167,32 +231,4 @@ func validateContactRequest(req *PublicContactRequest) error {
 		return fmt.Errorf("name must be %d characters or fewer", contactMaxNameLen)
 	}
 	return nil
-}
-
-// extractClientIP prefers the platform's Envoy-forwarded original
-// client IP (X-Forwarded-For, leftmost non-private) and falls back
-// to r.RemoteAddr. Kept small — this handler is public so the
-// header can't be trusted for security decisions, only for
-// bucketing rate-limit keys and enriching the audit row.
-func extractClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			// Return the first parseable address. Even a private
-			// range is a useful rate-limit key from behind an
-			// enterprise NAT.
-			if ip := net.ParseIP(p); ip != nil {
-				return ip.String()
-			}
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+	"unicode/utf8"
 )
 
 // discordContactWebhookURL is set by cmd/gateway/main.go from the
@@ -49,11 +50,14 @@ func notifyContactAsync(name, email, message string) {
 
 		// Truncate message for the embed preview — full body lives
 		// in the DB. Keeping the Discord channel readable when
-		// someone pastes 5,000 characters is worth the trade.
-		preview := message
+		// someone pastes 5,000 characters is worth the trade. Cut
+		// on rune boundary (not byte) so a multibyte codepoint at
+		// the boundary doesn't produce invalid UTF-8, which Discord
+		// rejects with 400.
 		const previewMax = 500
-		if len(preview) > previewMax {
-			preview = preview[:previewMax] + "…"
+		preview := message
+		if utf8.RuneCountInString(preview) > previewMax {
+			preview = string([]rune(preview)[:previewMax]) + "…"
 		}
 
 		displayName := name

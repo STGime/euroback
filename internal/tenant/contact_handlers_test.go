@@ -1,7 +1,6 @@
 package tenant
 
 import (
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -10,17 +9,20 @@ func TestValidateContactRequest(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		in      PublicContactRequest
-		wantErr string // substring; empty = expect no error
+		name         string
+		in           PublicContactRequest
+		wantErr      string // substring; empty = expect no error
+		wantCanonEml string // if non-empty, assert canonicalised email
 	}{
 		{
-			name: "happy path — minimal (no name)",
-			in:   PublicContactRequest{Email: "user@example.com", Message: "Hi"},
+			name:         "happy path — minimal (no name)",
+			in:           PublicContactRequest{Email: "user@example.com", Message: "Hi"},
+			wantCanonEml: "user@example.com",
 		},
 		{
-			name: "happy path — with name",
-			in:   PublicContactRequest{Name: "Anna", Email: "user@example.com", Message: "Hi"},
+			name:         "happy path — with name",
+			in:           PublicContactRequest{Name: "Anna", Email: "user@example.com", Message: "Hi"},
+			wantCanonEml: "user@example.com",
 		},
 		{
 			name:    "missing email",
@@ -48,18 +50,45 @@ func TestValidateContactRequest(t *testing.T) {
 			wantErr: "200 characters",
 		},
 		{
-			name: "multibyte name — 100 runes = 300 bytes should pass",
-			in:   PublicContactRequest{Name: strings.Repeat("Ü", 100), Email: "user@example.com", Message: "Hi"},
+			name:         "multibyte name — 100 runes = 300 bytes should pass",
+			in:           PublicContactRequest{Name: strings.Repeat("Ü", 100), Email: "user@example.com", Message: "Hi"},
+			wantCanonEml: "user@example.com",
+		},
+		// ── Regression: mail.ParseAddress accepts display-name form.
+		// Without canonicalisation, "Alice <a@b.com>" and "Bob <a@b.com>"
+		// hit different rate-limit keys, defeating the per-email cap.
+		{
+			name:         "display-name form — canonicalised to bare address",
+			in:           PublicContactRequest{Email: "Alice <a@b.com>", Message: "Hi"},
+			wantCanonEml: "a@b.com",
+		},
+		{
+			name:         "display-name form with rotating name — same canonical",
+			in:           PublicContactRequest{Email: "Bob <a@b.com>", Message: "Hi"},
+			wantCanonEml: "a@b.com",
+		},
+		{
+			name:         "already-canonical mixed case — lowercased",
+			in:           PublicContactRequest{Email: "User@Example.COM", Message: "Hi"},
+			wantCanonEml: "user@example.com",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			in := tt.in
+			// Mirror the handler's TrimSpace+ToLower pre-validate
+			// normalisation so validator input matches what runs in
+			// production.
+			in.Email = strings.ToLower(strings.TrimSpace(in.Email))
+			in.Message = strings.TrimSpace(in.Message)
 			err := validateContactRequest(&in)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("expected no error, got %v", err)
+				}
+				if tt.wantCanonEml != "" && in.Email != tt.wantCanonEml {
+					t.Fatalf("expected canonical email %q, got %q", tt.wantCanonEml, in.Email)
 				}
 				return
 			}
@@ -73,53 +102,25 @@ func TestValidateContactRequest(t *testing.T) {
 	}
 }
 
-func TestExtractClientIP(t *testing.T) {
+func TestTruncateRunes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		xff        string
-		remoteAddr string
-		want       string
+		name string
+		s    string
+		n    int
+		want string
 	}{
-		{
-			name:       "no XFF — falls back to RemoteAddr",
-			remoteAddr: "203.0.113.42:54321",
-			want:       "203.0.113.42",
-		},
-		{
-			name:       "XFF single IP — used",
-			xff:        "203.0.113.42",
-			remoteAddr: "10.0.0.1:8080",
-			want:       "203.0.113.42",
-		},
-		{
-			name:       "XFF list — first parseable used",
-			xff:        "203.0.113.42, 10.0.0.1, 172.16.0.1",
-			remoteAddr: "10.0.0.1:8080",
-			want:       "203.0.113.42",
-		},
-		{
-			name:       "XFF with a garbage leading entry — skipped",
-			xff:        "not-an-ip, 198.51.100.7",
-			remoteAddr: "10.0.0.1:8080",
-			want:       "198.51.100.7",
-		},
-		{
-			name:       "RemoteAddr without port — passthrough",
-			remoteAddr: "203.0.113.42",
-			want:       "203.0.113.42",
-		},
+		{name: "shorter than cap — passthrough", s: "hello", n: 10, want: "hello"},
+		{name: "exactly at cap — passthrough", s: "hello", n: 5, want: "hello"},
+		{name: "byte cut mid-multibyte would be invalid UTF-8", s: strings.Repeat("Ü", 10), n: 3, want: "ÜÜÜ"},
+		{name: "unicode 500 runes — cut at 500 runes not bytes", s: strings.Repeat("Ü", 501), n: 500, want: strings.Repeat("Ü", 500)},
+		{name: "empty — passthrough", s: "", n: 10, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			r := httptest.NewRequest("POST", "/", nil)
-			r.RemoteAddr = tt.remoteAddr
-			if tt.xff != "" {
-				r.Header.Set("X-Forwarded-For", tt.xff)
-			}
-			got := extractClientIP(r)
+			got := truncateRunes(tt.s, tt.n)
 			if got != tt.want {
 				t.Fatalf("expected %q, got %q", tt.want, got)
 			}

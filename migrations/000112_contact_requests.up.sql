@@ -55,11 +55,20 @@ CREATE INDEX ix_contact_requests_unresolved_recent
 -- Grants. Two distinct roles because the read+write surface differs by
 -- caller:
 --   - eurobase_gateway (SDK-runtime + public-endpoint pool) needs INSERT
---     only. The public contact handler runs under this pool. Deliberately
---     NOT granting SELECT — a runtime SQL-injection can't exfiltrate the
---     table.
+--     only. The public contact handler runs under this pool.
 --   - eurobase_developer (platform-authenticated console pool) needs
 --     SELECT + UPDATE for the /admin/contact-requests triage view.
+--
+-- ── #443-class pitfall (billing_profiles precedent) ──
+-- Migration 000037 sets ALTER DEFAULT PRIVILEGES FOR ROLE
+-- eurobase_migrator IN SCHEMA public GRANT SELECT, INSERT, UPDATE,
+-- DELETE ON TABLES TO eurobase_gateway. That means any new
+-- migrator-owned public.* table auto-grants gateway all four DML
+-- privileges — a naked "GRANT INSERT" here is redundant, and the
+-- "gateway can't exfiltrate" property this table's design depends on
+-- would not hold. The billing_profiles migration (000106) documents
+-- the same trap; the fix is REVOKE ALL then GRANT the narrow surface.
+REVOKE ALL ON public.contact_requests FROM eurobase_gateway;
 GRANT INSERT ON public.contact_requests TO eurobase_gateway;
 GRANT SELECT, UPDATE ON public.contact_requests TO eurobase_developer;
 
