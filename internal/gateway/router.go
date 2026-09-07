@@ -666,8 +666,20 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// /platform/public/contact (unauth). The admin view
 			// defaults to unresolved; ?state=all includes handled
 			// rows too. Resolve = mark handled + optional short note.
-			r.Get("/contact-requests", tenant.AdminListContactRequests(pool))
-			r.Post("/contact-requests/{id}/resolve", tenant.AdminResolveContactRequest(pool))
+			//
+			// Wired to developerPool (not the gateway pool the rest of
+			// this admin group uses). contact_requests has an
+			// explicit `REVOKE ALL … FROM eurobase_gateway; GRANT
+			// INSERT` in migration 000112 to preserve the "SDK-runtime
+			// SQLi cannot exfiltrate visitor submissions" property.
+			// The admin READ path therefore has to come from a role
+			// with SELECT — that's eurobase_developer, which
+			// migration 000112 grants SELECT + UPDATE on. Every OTHER
+			// admin handler in this group can safely use the gateway
+			// pool because their target tables have gateway SELECT
+			// via migration 000037's ALTER DEFAULT PRIVILEGES.
+			r.Get("/contact-requests", tenant.AdminListContactRequests(developerPool))
+			r.Post("/contact-requests/{id}/resolve", tenant.AdminResolveContactRequest(developerPool))
 		})
 
 		// Authenticated: platform config endpoints.
