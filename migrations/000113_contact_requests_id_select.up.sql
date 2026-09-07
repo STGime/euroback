@@ -1,0 +1,29 @@
+-- 000113_contact_requests_id_select.up.sql
+--
+-- Follow-up to 000112. The gateway pool has INSERT-only on
+-- public.contact_requests (see 000112's #443-class-pitfall comment),
+-- which is the property we want against a runtime SQL-injection.
+-- But the public contact handler runs
+--
+--     INSERT INTO public.contact_requests (...) VALUES (...) RETURNING id
+--
+-- and RETURNING requires SELECT permission on the returned columns.
+-- Without SELECT on `id`, Postgres rejects the RETURNING clause with
+-- ERROR: permission denied for table contact_requests — and the
+-- caller (marketing widget) sees a generic 500 "internal error,
+-- please try again". Reproduced live 2026-09-07 shortly after the
+-- widget + backend went out together.
+--
+-- Column-level SELECT closes the gap surgically:
+--   * Handler's RETURNING id works — client gets an id to reference
+--     in support conversations ("message id 3f8e-...").
+--   * PII columns (name, email, message, user_agent, ip_address)
+--     remain unreadable to the gateway pool — a SQLi still can't
+--     enumerate visitor submissions, which was the security property
+--     the whole grants setup exists to preserve.
+--   * The only new exfil surface is the id list itself, which is
+--     opaque UUIDs with no correlation value.
+--
+-- No explicit BEGIN/COMMIT: golang-migrate wraps each .up.sql in its own tx.
+
+GRANT SELECT (id) ON public.contact_requests TO eurobase_gateway;
