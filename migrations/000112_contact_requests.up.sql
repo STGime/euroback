@@ -72,6 +72,10 @@ REVOKE ALL ON public.contact_requests FROM eurobase_gateway;
 GRANT INSERT ON public.contact_requests TO eurobase_gateway;
 GRANT SELECT, UPDATE ON public.contact_requests TO eurobase_developer;
 
+-- Note: the handler's INSERT ... RETURNING id needs SELECT on the
+-- id column too, which migration 000113 grants (column-level) so
+-- the PII columns stay unreadable to the gateway pool.
+
 COMMENT ON TABLE public.contact_requests IS
   'Public marketing-site contact form submissions. Rate-limited per IP + email in the handler. Retention sweep TBD.';
 COMMENT ON COLUMN public.contact_requests.source IS
