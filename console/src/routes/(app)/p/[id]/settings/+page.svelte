@@ -195,6 +195,12 @@
 				<div>
 					<label class="block text-sm font-medium text-gray-500">Plan</label>
 					<p class="mt-1 text-sm text-gray-900 capitalize">{projectCtx.project.plan}</p>
+					{#if projectCtx.project.plan === 'free'}
+						<p class="mt-1 text-[11px] text-amber-700">
+							Not for commercial use —
+							<a href="/p/{projectCtx.project.id}/billing" class="underline hover:text-amber-800">upgrade to Pro</a>
+						</p>
+					{/if}
 				</div>
 			</div>
 		</div>

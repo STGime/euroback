@@ -267,6 +267,9 @@
 						<p class="mt-2 text-sm text-gray-600">
 							5,000 MAU · 512 MB storage · 2 GB bandwidth · auto-pauses after 30 days idle.
 						</p>
+						<p class="mt-1 text-sm font-medium text-amber-700">
+							Non-commercial use only — production apps, agency work, and any revenue-generating project need Pro (€25/mo) or higher.
+						</p>
 					{:else if project.plan === 'pro'}
 						<p class="mt-2 text-sm text-gray-600">
 							100k MAU · 100 GB storage · 250 GB bandwidth · never pauses.
