@@ -150,11 +150,20 @@ func main() {
 	// deploy/k8s/{cert,health}-monitor-cronjob.yaml).
 	auth.SetDiscordSignupsWebhook(os.Getenv("DISCORD_SIGNUPS_WEBHOOK"))
 
-	// Real-time marketing-site contact-form notifications to Discord
-	// — optional, same silent-no-op convention as the signup notifier
-	// above. Wires migration 000112's contact_requests inserts through
-	// tenant/contact_notify.go.
-	tenant.SetDiscordContactWebhook(os.Getenv("DISCORD_CONTACT_WEBHOOK"))
+	// Real-time marketing-site contact-form notifications to Discord.
+	// Falls back to DISCORD_SIGNUPS_WEBHOOK when the contact-specific
+	// var is unset — contact-form messages are adjacent to signups
+	// (both are "new engagement" events, not ops incidents) so
+	// routing to the same channel is the sensible default and skips
+	// the "add a new key to eurobase-secrets" step. Set
+	// DISCORD_CONTACT_WEBHOOK explicitly to route contact pings to a
+	// dedicated channel. Empty on both → silent no-op, matching the
+	// signup + alerts convention.
+	contactWebhook := os.Getenv("DISCORD_CONTACT_WEBHOOK")
+	if contactWebhook == "" {
+		contactWebhook = os.Getenv("DISCORD_SIGNUPS_WEBHOOK")
+	}
+	tenant.SetDiscordContactWebhook(contactWebhook)
 
 	if !platformAuthSvc.AllowPublicSignup {
 		slog.Info("signup gated behind platform_allowlist (set ALLOW_PUBLIC_SIGNUP=true to open)")
