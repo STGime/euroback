@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient } from '$lib/api.js';
+	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient, type ContactRequestEntry } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
 	let allowlist = $state<AllowlistEntry[]>([]);
@@ -157,21 +157,60 @@
 		loading = true;
 		error = null;
 		try {
-			const [p, a, tb, su] = await Promise.all([
+			const [p, a, tb, su, cr] = await Promise.all([
 				api.adminListAllProjects(),
 				api.adminListAllowlist(),
 				api.adminListTeamBetaUsers(),
-				api.adminListSignupUsers()
+				api.adminListSignupUsers(),
+				api.adminListContactRequests(contactRequestFilter),
 			]);
 			projects = p.projects;
 			allowlist = a.entries;
 			teamBeta = tb.entries;
 			signupUsers = su.users;
+			contactRequests = cr.requests;
 		} catch (e: any) {
 			error = e?.message ?? 'Failed to load admin data';
 		} finally {
 			loading = false;
 		}
+	}
+
+	// ── Contact-form triage state ───────────────────────────────
+	// Superadmin triage for the marketing-site widget. Defaults to
+	// unresolved so open work stays visible; a small filter above
+	// the table flips to 'all' to include already-handled rows.
+	let contactRequests = $state<ContactRequestEntry[]>([]);
+	let contactRequestFilter = $state<'unresolved' | 'all'>('unresolved');
+	let contactBusy = $state<string | null>(null); // id currently being resolved
+	let contactExpanded = $state<Set<string>>(new Set()); // ids currently expanded
+
+	async function reloadContactRequests() {
+		try {
+			const cr = await api.adminListContactRequests(contactRequestFilter);
+			contactRequests = cr.requests;
+		} catch (e: any) {
+			error = e?.message ?? 'Failed to reload contact requests';
+		}
+	}
+
+	async function resolveContact(id: string, note: string) {
+		if (contactBusy) return;
+		contactBusy = id;
+		try {
+			await api.adminResolveContactRequest(id, note);
+			await reloadContactRequests();
+		} catch (e: any) {
+			error = e?.message ?? 'Failed to resolve contact request';
+		} finally {
+			contactBusy = null;
+		}
+	}
+
+	function toggleContactExpanded(id: string) {
+		const next = new Set(contactExpanded);
+		if (next.has(id)) next.delete(id); else next.add(id);
+		contactExpanded = next;
 	}
 
 	// Team-tier closed-beta grant (M2).
@@ -733,6 +772,136 @@
 									>
 										{u.legal_team_beta_access ? '✓ Granted' : 'Grant'}
 									</button>
+								</td>
+							</tr>
+						{/each}
+					{/if}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<!-- ── Contact-form triage ───────────────────────────────────
+	     Rows written by the marketing-site widget on eurobase.app
+	     (POST /platform/public/contact). Superadmin triage marks
+	     them resolved with an optional short note. -->
+	<section class="space-y-3">
+		<div class="flex items-center justify-between gap-3 flex-wrap">
+			<div>
+				<h2 class="text-lg font-semibold text-gray-900">Contact Requests</h2>
+				<p class="text-xs text-gray-500">
+					Marketing-site contact form submissions. Discord ping fires on every new request.
+				</p>
+			</div>
+			<div class="flex items-center gap-2 text-xs">
+				<label for="cr-filter" class="text-gray-500">Show</label>
+				<select
+					id="cr-filter"
+					bind:value={contactRequestFilter}
+					onchange={reloadContactRequests}
+					class="rounded border border-gray-300 bg-white px-2 py-1 text-sm text-gray-800"
+				>
+					<option value="unresolved">Unresolved only</option>
+					<option value="all">All (incl. resolved)</option>
+				</select>
+			</div>
+		</div>
+		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+			<table class="w-full text-sm">
+				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
+					<tr>
+						<th class="px-4 py-2">Received</th>
+						<th class="px-4 py-2">From</th>
+						<th class="px-4 py-2">Preview</th>
+						<th class="px-4 py-2">Status</th>
+						<th class="px-4 py-2"></th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-gray-100">
+					{#if loading}
+						<tr><td colspan="5" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+					{:else if contactRequests.length === 0}
+						<tr>
+							<td colspan="5" class="px-4 py-6 text-center text-gray-400">
+								{contactRequestFilter === 'unresolved'
+									? 'No unresolved contact requests. 🎉'
+									: 'No contact requests yet.'}
+							</td>
+						</tr>
+					{:else}
+						{#each contactRequests as c}
+							<tr class="align-top">
+								<td class="px-4 py-2 text-xs text-gray-500 whitespace-nowrap">{new Date(c.created_at).toLocaleString()}</td>
+								<td class="px-4 py-2">
+									<div class="text-gray-900">
+										{c.name ?? '—'}
+									</div>
+									<a
+										href={`mailto:${c.email}`}
+										class="text-xs text-eurobase-600 hover:text-eurobase-700 underline"
+									>{c.email}</a>
+								</td>
+								<td class="px-4 py-2 max-w-md">
+									{#if contactExpanded.has(c.id)}
+										<div class="whitespace-pre-wrap text-sm text-gray-800">{c.message}</div>
+										{#if c.user_agent || c.ip_address}
+											<div class="mt-2 text-[11px] text-gray-400 font-mono truncate">
+												{c.ip_address ?? '—'} · {c.user_agent ?? '—'}
+											</div>
+										{/if}
+										<button
+											type="button"
+											class="mt-1 text-xs text-gray-500 hover:text-gray-800 underline"
+											onclick={() => toggleContactExpanded(c.id)}
+										>Collapse</button>
+									{:else}
+										<div class="truncate text-sm text-gray-700" title={c.message}>{c.message}</div>
+										<button
+											type="button"
+											class="mt-1 text-xs text-gray-500 hover:text-gray-800 underline"
+											onclick={() => toggleContactExpanded(c.id)}
+										>Expand</button>
+									{/if}
+								</td>
+								<td class="px-4 py-2 text-xs whitespace-nowrap">
+									{#if c.resolved_at}
+										<span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+											Resolved
+										</span>
+										{#if c.resolved_by}
+											<div class="mt-1 text-[10px] text-gray-500">
+												by {c.resolved_by}<br />{new Date(c.resolved_at).toLocaleDateString()}
+											</div>
+										{/if}
+										{#if c.resolution_note}
+											<div class="mt-1 text-[11px] text-gray-600 italic max-w-xs whitespace-pre-wrap">
+												{c.resolution_note}
+											</div>
+										{/if}
+									{:else}
+										<span class="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-amber-700 ring-1 ring-inset ring-amber-600/20">
+											Open
+										</span>
+									{/if}
+								</td>
+								<td class="px-4 py-2 text-xs text-right whitespace-nowrap">
+									{#if !c.resolved_at}
+										<button
+											type="button"
+											disabled={contactBusy === c.id}
+											onclick={() => {
+												const note = window.prompt('Optional short note about how this was handled (≤500 chars, blank OK):') ?? '';
+												if (note.length > 500) {
+													error = 'Note must be 500 characters or fewer.';
+													return;
+												}
+												void resolveContact(c.id, note);
+											}}
+											class="text-eurobase-600 hover:text-eurobase-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+										>
+											{contactBusy === c.id ? 'Resolving…' : 'Mark resolved'}
+										</button>
+									{/if}
 								</td>
 							</tr>
 						{/each}
