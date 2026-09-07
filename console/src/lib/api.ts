@@ -173,6 +173,28 @@ export interface SignupUserEntry {
 	legal_team_beta_access: boolean;
 }
 
+// ContactRequestEntry — one row on the admin "Contact Requests"
+// triage view. Populated by the public marketing-site widget
+// (POST /platform/public/contact); each row is a message from a
+// visitor of eurobase.app. `resolved_by` is the email of the
+// superadmin who marked it handled, resolved separately from
+// `resolved_by_id` so the UI can render "resolved by alice@..."
+// without a second round-trip.
+export interface ContactRequestEntry {
+	id: string;
+	name: string | null;
+	email: string;
+	message: string;
+	source: string;
+	user_agent: string | null;
+	ip_address: string | null;
+	created_at: string;
+	resolved_at: string | null;
+	resolved_by_id: string | null;
+	resolved_by: string | null;
+	resolution_note: string | null;
+}
+
 export interface PersonalAccessToken {
 	id: string;
 	user_id: string;
@@ -2151,6 +2173,33 @@ export class EurobaseAPI {
 	 *  below. */
 	async adminListSignupUsers(): Promise<{ users: SignupUserEntry[]; total: number }> {
 		return this.fetch<{ users: SignupUserEntry[]; total: number }>('/platform/admin/signup-users');
+	}
+
+	// ---- Contact-form triage (marketing-site widget) ----
+
+	/** List contact form submissions. state='unresolved' (default) or
+	 *  'all'. Newest-first, capped at 500 rows server-side (see the
+	 *  handler's slog.Warn when it approaches the cap). Superadmin only. */
+	async adminListContactRequests(
+		state: 'unresolved' | 'all' = 'unresolved',
+	): Promise<{ requests: ContactRequestEntry[]; total: number; state: string }> {
+		const qs = state === 'all' ? '?state=all' : '';
+		return this.fetch<{ requests: ContactRequestEntry[]; total: number; state: string }>(
+			`/platform/admin/contact-requests${qs}`,
+		);
+	}
+
+	/** Mark a contact request as handled. Optional short note (≤500
+	 *  chars) captured for triage history. Idempotent — a second call
+	 *  updates the note and bumps resolved_at to now(). Superadmin only. */
+	async adminResolveContactRequest(
+		id: string,
+		note?: string,
+	): Promise<{ id: string; resolved_at: string }> {
+		return this.fetch<{ id: string; resolved_at: string }>(
+			`/platform/admin/contact-requests/${id}/resolve`,
+			{ method: 'POST', body: JSON.stringify({ note: note ?? '' }) },
+		);
 	}
 
 	// ---- Team-tier closed-beta (Team-tier M2, issue #308) ----

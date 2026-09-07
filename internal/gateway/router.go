@@ -660,6 +660,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// Signup-users dashboard (public-beta launch observability).
 			// One row per platform_users + derived plan / MRR / project count.
 			r.Get("/signup-users", tenant.AdminListSignupUsers(pool))
+
+			// Contact-form triage — marketing widget on eurobase.app
+			// writes rows into public.contact_requests via
+			// /platform/public/contact (unauth). The admin view
+			// defaults to unresolved; ?state=all includes handled
+			// rows too. Resolve = mark handled + optional short note.
+			r.Get("/contact-requests", tenant.AdminListContactRequests(pool))
+			r.Post("/contact-requests/{id}/resolve", tenant.AdminResolveContactRequest(pool))
 		})
 
 		// Authenticated: platform config endpoints.
