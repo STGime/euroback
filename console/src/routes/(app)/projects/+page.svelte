@@ -515,9 +515,17 @@
 					</p>
 
 					<div class="mt-4 flex items-center gap-2 flex-wrap">
-						<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset {planColor(project.plan)}">
+						<span
+							class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset {planColor(project.plan)}"
+							title={project.plan === 'free' ? 'Free tier is non-commercial only — upgrade to Pro for commercial use' : undefined}
+						>
 							{project.plan}
 						</span>
+						{#if project.plan === 'free'}
+							<span class="text-[11px] text-amber-700" title="Free tier is non-commercial only">
+								non-commercial
+							</span>
+						{/if}
 						<span class="inline-flex items-center gap-1 text-xs text-gray-400">
 							<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />

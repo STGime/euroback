@@ -137,6 +137,12 @@ const { data } = await eb.db.from('todos').select('*')`,
 			<div>
 				<div class="text-xs font-medium uppercase tracking-wider text-gray-400 mb-1">Plan</div>
 				<div class="text-sm text-gray-600 capitalize">{project.plan}</div>
+				{#if project.plan === 'free'}
+					<div class="mt-1 text-[11px] text-amber-700">
+						Not for commercial use —
+						<a href="/p/{project.id}/billing" class="underline hover:text-amber-800">upgrade to Pro</a>
+					</div>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -279,6 +285,12 @@ const { data } = await eb.db.from('todos').select('*')`,
 					<p class="text-xs font-medium text-gray-500">Plan</p>
 					<p class="mt-1 text-sm font-semibold text-gray-900 capitalize">{usage.limits.plan}</p>
 					<p class="mt-1 text-xs text-gray-400">{usage.limits.rate_limit_rps} req/s &middot; {usage.limits.ws_connections} WS</p>
+					{#if usage.limits.plan === 'free'}
+						<p class="mt-2 text-[11px] text-amber-700">
+							Not for commercial use —
+							<a href="/p/{projectId}/billing" class="underline hover:text-amber-800">upgrade to Pro</a>
+						</p>
+					{/if}
 				</div>
 			</div>
 		</div>
