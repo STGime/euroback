@@ -13,6 +13,7 @@ package tenant
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -60,42 +61,59 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 
 		showAll := r.URL.Query().Get("state") == "all"
 
-		// LEFT JOIN platform_users so we can render the resolver's
-		// email inline in the admin table, not just an opaque UUID.
 		// Two variants of the query so the WHERE resolved_at IS NULL
 		// path can use the partial index from migration 000112.
+		//
+		// Defensive rewrite after the /admin "Row iteration failed"
+		// production incident. Reviewer confirmed the old shape
+		// reproduced fine against PG16 + pgx v5 with seeded data, so
+		// this rewrite is a mitigation with reduced surface area, NOT
+		// a proven root-cause fix:
+		//   * `id` and `resolved_by` are UUID; ::text-cast so pgx has
+		//     one less codec to negotiate (uuid → *string).
+		//   * `ip_address` uses host() (NOT ::text — ::text on INET
+		//     appends /32 or /128 which pollutes the admin display).
+		//   * Dropped the LEFT JOIN to platform_users for the resolver
+		//     email. The frontend already loads AdminListSignupUsers on
+		//     the same admin page and can hydrate resolver_by via UUID
+		//     lookup client-side.
+		// The actual root cause is data-shape- or environment-specific
+		// (odd inet, orphaned resolved_by FK, role/grant edge) — the
+		// enhanced error surfacing below is the diagnostic path if it
+		// recurs.
 		var q string
 		if showAll {
 			q = `
-				SELECT c.id, c.name, c.email, c.message, c.source,
+				SELECT c.id::text, c.name, c.email, c.message, c.source,
 				       c.user_agent, host(c.ip_address) AS ip_text,
-				       c.created_at, c.resolved_at, c.resolved_by,
-				       u.email AS resolved_by_email,
+				       c.created_at, c.resolved_at, c.resolved_by::text,
 				       c.resolution_note
 				  FROM public.contact_requests c
-				  LEFT JOIN public.platform_users u ON u.id = c.resolved_by
 				 ORDER BY c.created_at DESC
 				 LIMIT 500
 			`
 		} else {
 			q = `
-				SELECT c.id, c.name, c.email, c.message, c.source,
+				SELECT c.id::text, c.name, c.email, c.message, c.source,
 				       c.user_agent, host(c.ip_address) AS ip_text,
-				       c.created_at, c.resolved_at, c.resolved_by,
-				       u.email AS resolved_by_email,
+				       c.created_at, c.resolved_at, c.resolved_by::text,
 				       c.resolution_note
 				  FROM public.contact_requests c
-				  LEFT JOIN public.platform_users u ON u.id = c.resolved_by
 				 WHERE c.resolved_at IS NULL
 				 ORDER BY c.created_at DESC
 				 LIMIT 500
 			`
 		}
 
+		// Error paths use %q so pgx messages with embedded double
+		// quotes (e.g. `ERROR: column "x" does not exist`) still
+		// produce valid JSON — raw concat produced invalid JSON on
+		// the exact common error shape, defeating the "surface the
+		// real error" purpose.
 		rows, err := pool.Query(r.Context(), q)
 		if err != nil {
 			slog.Error("AdminListContactRequests: query failed", "error", err)
-			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, "query failed: "+err.Error()), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -107,17 +125,17 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 				&e.ID, &e.Name, &e.Email, &e.Message, &e.Source,
 				&e.UserAgent, &e.IPAddress,
 				&e.CreatedAt, &e.ResolvedAt, &e.ResolvedByID,
-				&e.ResolvedBy, &e.ResolutionNote,
+				&e.ResolutionNote,
 			); err != nil {
 				slog.Error("AdminListContactRequests: scan failed", "error", err)
-				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, "scan failed: "+err.Error()), http.StatusInternalServerError)
 				return
 			}
 			out = append(out, e)
 		}
 		if err := rows.Err(); err != nil {
 			slog.Error("AdminListContactRequests: rows.Err()", "error", err)
-			http.Error(w, `{"error":"row iteration failed"}`, http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, "row iteration failed: "+err.Error()), http.StatusInternalServerError)
 			return
 		}
 
