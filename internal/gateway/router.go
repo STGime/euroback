@@ -530,6 +530,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/mailing/unsubscribe", handler)
 		}
 
+		// Public marketing-site widgets. Kept in a dedicated /public
+		// sub-tree so it's obvious at a glance which routes have NO
+		// auth requirement — anything under /platform/public/* is
+		// anonymous-facing and must self-defend (rate limit, input
+		// bounds, DB grants restricted to INSERT). Migration 000112
+		// creates the contact_requests table and grants gateway-pool
+		// INSERT only.
+		r.Route("/public", func(r chi.Router) {
+			r.Post("/contact", tenant.HandlePublicContactRequest(pool, limiter))
+		})
+
 		// Authenticated: account management.
 		r.Route("/auth/account", func(r chi.Router) {
 			if isDev {
