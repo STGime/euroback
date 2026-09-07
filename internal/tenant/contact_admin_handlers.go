@@ -13,6 +13,7 @@ package tenant
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -63,24 +64,28 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		// Two variants of the query so the WHERE resolved_at IS NULL
 		// path can use the partial index from migration 000112.
 		//
-		// Design notes from the /admin "Row iteration failed" bug:
-		//   * `id` and `resolved_by` are UUID columns; scan into string
-		//     via ::text cast so pgx v5 doesn't have to negotiate the
-		//     uuid-to-string codec (the *string form under LEFT JOIN
-		//     was surfacing a lazy driver error as row-iteration-failed
-		//     in prod).
-		//   * `ip_address` is INET; ::text cast for the same reason
-		//     (host() would work too but ::text is more mechanical).
+		// Defensive rewrite after the /admin "Row iteration failed"
+		// production incident. Reviewer confirmed the old shape
+		// reproduced fine against PG16 + pgx v5 with seeded data, so
+		// this rewrite is a mitigation with reduced surface area, NOT
+		// a proven root-cause fix:
+		//   * `id` and `resolved_by` are UUID; ::text-cast so pgx has
+		//     one less codec to negotiate (uuid → *string).
+		//   * `ip_address` uses host() (NOT ::text — ::text on INET
+		//     appends /32 or /128 which pollutes the admin display).
 		//   * Dropped the LEFT JOIN to platform_users for the resolver
 		//     email. The frontend already loads AdminListSignupUsers on
-		//     the same admin page, so it can render the resolver's
-		//     email from that list by UUID lookup — one less join
-		//     surface here, one less driver quirk to hit.
+		//     the same admin page and can hydrate resolver_by via UUID
+		//     lookup client-side.
+		// The actual root cause is data-shape- or environment-specific
+		// (odd inet, orphaned resolved_by FK, role/grant edge) — the
+		// enhanced error surfacing below is the diagnostic path if it
+		// recurs.
 		var q string
 		if showAll {
 			q = `
 				SELECT c.id::text, c.name, c.email, c.message, c.source,
-				       c.user_agent, c.ip_address::text,
+				       c.user_agent, host(c.ip_address) AS ip_text,
 				       c.created_at, c.resolved_at, c.resolved_by::text,
 				       c.resolution_note
 				  FROM public.contact_requests c
@@ -90,7 +95,7 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			q = `
 				SELECT c.id::text, c.name, c.email, c.message, c.source,
-				       c.user_agent, c.ip_address::text,
+				       c.user_agent, host(c.ip_address) AS ip_text,
 				       c.created_at, c.resolved_at, c.resolved_by::text,
 				       c.resolution_note
 				  FROM public.contact_requests c
@@ -100,14 +105,15 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			`
 		}
 
+		// Error paths use %q so pgx messages with embedded double
+		// quotes (e.g. `ERROR: column "x" does not exist`) still
+		// produce valid JSON — raw concat produced invalid JSON on
+		// the exact common error shape, defeating the "surface the
+		// real error" purpose.
 		rows, err := pool.Query(r.Context(), q)
 		if err != nil {
-			// Include err.Error() in the response body so the
-			// admin-page error banner surfaces the real cause on the
-			// next regression (was suppressed to a generic "query
-			// failed" and cost us a round-trip to prod logs).
 			slog.Error("AdminListContactRequests: query failed", "error", err)
-			http.Error(w, `{"error":"query failed: `+err.Error()+`"}`, http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, "query failed: "+err.Error()), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -122,14 +128,14 @@ func AdminListContactRequests(pool *pgxpool.Pool) http.HandlerFunc {
 				&e.ResolutionNote,
 			); err != nil {
 				slog.Error("AdminListContactRequests: scan failed", "error", err)
-				http.Error(w, `{"error":"scan failed: `+err.Error()+`"}`, http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, "scan failed: "+err.Error()), http.StatusInternalServerError)
 				return
 			}
 			out = append(out, e)
 		}
 		if err := rows.Err(); err != nil {
 			slog.Error("AdminListContactRequests: rows.Err()", "error", err)
-			http.Error(w, `{"error":"row iteration failed: `+err.Error()+`"}`, http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, "row iteration failed: "+err.Error()), http.StatusInternalServerError)
 			return
 		}
 
