@@ -150,6 +150,12 @@ func main() {
 	// deploy/k8s/{cert,health}-monitor-cronjob.yaml).
 	auth.SetDiscordSignupsWebhook(os.Getenv("DISCORD_SIGNUPS_WEBHOOK"))
 
+	// Real-time marketing-site contact-form notifications to Discord
+	// — optional, same silent-no-op convention as the signup notifier
+	// above. Wires migration 000112's contact_requests inserts through
+	// tenant/contact_notify.go.
+	tenant.SetDiscordContactWebhook(os.Getenv("DISCORD_CONTACT_WEBHOOK"))
+
 	if !platformAuthSvc.AllowPublicSignup {
 		slog.Info("signup gated behind platform_allowlist (set ALLOW_PUBLIC_SIGNUP=true to open)")
 	}
