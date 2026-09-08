@@ -153,6 +153,79 @@
 <p style="color:#6b7280;font-size:12px;">Sent to Eurobase account holders. This is not a marketing email — one-off announcement.</p>`
 	};
 
+	// September 2026 product update — DSAR one-click, Team-tier backups
+	// UI, contact widget, pricing clarification. First template with the
+	// full onboarding-shell header+footer layout (600px table, blue
+	// header, EU-sovereignty footer) so future product-update sends
+	// have a branded starting point instead of a bare <p>.
+	const SEPT_2026_UPDATE_TEMPLATE = {
+		subject: 'Eurobase update — DSAR, Team-tier backups, and a new contact widget',
+		body: `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eurobase</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+          <tr>
+            <td style="background-color:#1d4ed8; padding:28px 32px;">
+              <p style="margin:0; font-size:22px; font-weight:700; color:#ffffff;">Eurobase</p>
+              <p style="margin:6px 0 0; font-size:14px; color:#bfdbfe;">Product update — September 2026</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px 32px 8px; color:#1f2937; font-size:15px; line-height:1.6;">
+              <p style="margin:0 0 16px;">Hi,</p>
+              <p style="margin:0 0 20px;">Been a busy stretch on Eurobase. A short rundown of what shipped in the last week:</p>
+              <ul style="margin:0 0 20px; padding-left:20px;">
+                <li style="margin-bottom:14px;">
+                  <strong>One-click GDPR DSAR + Article 30 RoPA + audit log</strong> — the compliance stack is live on every project. When a customer asks for a copy of their data, you answer in 30 seconds instead of 8–12 hours.
+                  <a href="https://eurobase.app/blog/marcos-dsar-12-hours-vs-30-seconds" style="color:#1d4ed8;">Full walkthrough on the blog</a>.
+                </li>
+                <li style="margin-bottom:14px;">
+                  <strong>New Backups tab</strong> in the console for Team-tier projects — daily scheduled snapshots plus on-demand snapshots you can tag (<code style="background:#f3f4f6; padding:1px 4px; border-radius:3px; font-size:13px;">pre-migration-v2</code>) and restore from with one click. Old <code style="background:#f3f4f6; padding:1px 4px; border-radius:3px; font-size:13px;">/pitr</code> route folded in. <em>1 restore per calendar month included.</em>
+                </li>
+                <li style="margin-bottom:14px;">
+                  <strong>Measured recovery targets</strong> — RTO <strong>16 seconds</strong> at ~5 MB dataset, RPO <strong>up to 24 hours</strong> between scheduled backups (tighter with on-demand). Published on <a href="https://eurobase.app/security#backup-recovery" style="color:#1d4ed8;">/security</a> and in DPA v2 Annex 2 for procurement checklists.
+                </li>
+                <li style="margin-bottom:14px;">
+                  <strong>Contact widget</strong> on eurobase.app — bottom-right on every page. Faster than digging up an email address for feedback, procurement questions, or bug reports.
+                </li>
+                <li style="margin-bottom:14px;">
+                  <strong>Pricing clarification</strong> — Pro is now <strong>€25/mo per project</strong>. Free stays free but is explicitly personal / development / learning use only. If you're using Eurobase on a revenue-generating project, please upgrade from your project's Billing tab.
+                </li>
+              </ul>
+              <p style="margin:0 0 16px;">Also under the hood: sovereignty cutover phase 1 (marketing site now on Scaleway, no more Google Cloud Run), a hybrid open-source license (BUSL-1.1 core + MIT SDK), and legal-doc polish. Nothing you need to do — all documented at <a href="https://eurobase.app/legal" style="color:#1d4ed8;">eurobase.app/legal</a>.</p>
+              <p style="margin:0 0 8px;">Reply to this mail with feedback — we read every one. Or use the new contact widget on eurobase.app if that's easier.</p>
+              <p style="margin:20px 0 0;">— Stefan</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 32px 32px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0 0 8px; font-size:13px; line-height:1.6; color:#6b7280;">
+                Made in Berlin, hosted in France. Everything Eurobase runs on stays in EU jurisdiction (Scaleway).
+              </p>
+              <p style="margin:0; font-size:12px; color:#9ca3af;">
+                Eurobase OÜ &middot; Ahtri 12, Tallinn 15551, Estonia &middot;
+                <a href="https://console.eurobase.app" style="color:#6b7280; text-decoration:underline;">Console</a> &middot;
+                <a href="https://eurobase.app" style="color:#6b7280; text-decoration:underline;">eurobase.app</a> &middot;
+                To opt out of product updates, reply with "STOP".
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`
+	};
+
 	async function refresh() {
 		loading = true;
 		error = null;
@@ -1040,6 +1113,14 @@
 						onclick={() => applyTemplate(PUBLIC_BETA_OPEN_TEMPLATE)}
 					>
 						Public beta open
+					</button>
+					<span class="text-gray-300">·</span>
+					<button
+						type="button"
+						class="text-eurobase-600 hover:underline cursor-pointer"
+						onclick={() => applyTemplate(SEPT_2026_UPDATE_TEMPLATE)}
+					>
+						Sept 2026 update
 					</button>
 				</div>
 
