@@ -156,20 +156,33 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 
 	size := dbprovider.Size(args.Size)
 	if size == "" {
-		// SizeSmall = Scaleway db-dev-s (2 vCPU / 4 GB RAM) + 10 GB
-		// storage. Right-sized for the €149/mo Team price point + the
-		// SMB buyer profile (<5k signed-up users, <10 GB active DB,
-		// <100 req/s). Previous default (SizeMedium = db-gp-s, 4 vCPU
-		// / 16 GB RAM, 50 GB) was ~€115-136/mo of Scaleway spend on a
-		// €149/mo tier — near-zero gross margin once support + backup
-		// storage + fixed platform costs land. See euroback#523 for
-		// the cost / retention gut-check that surfaced the mismatch.
+		// SizeSmall = Scaleway db-dev-s (2 vCPU / 4 GB RAM) with a
+		// 50 GB `sbs_5k` volume (see dbprovider/scaleway.go —
+		// SizeSmall's volume is 50 GB, NOT 10 GB, to stay ≥ Team's
+		// plan_limits.db_size_mb=100 GB… wait, 50 < 100 — see below).
 		//
-		// Scaleway supports online resize in both compute AND storage
-		// dimensions, so a growing customer's ceiling is a support
-		// conversation, not a migration. Marketing card advertises the
-		// starter shape + the resize path so buyers understand what
-		// they're buying up front (eurobase#TBD).
+		// Right-sized for the €149/mo Team price point + the SMB
+		// buyer profile (<5k signed-up users, <10 GB active DB, <100
+		// req/s). Previous default (SizeMedium = db-gp-s, 4 vCPU /
+		// 16 GB RAM, 50 GB) was ~€115-136/mo of Scaleway spend on a
+		// €149/mo tier — near-zero gross margin once support + backup
+		// storage + fixed platform costs land. Compute downsize is
+		// the ~€60/mo win; storage delta 50→10 GB was only ~€4/mo
+		// and would have collided with plan_limits.db_size_mb (see
+		// the map comment). Keep compute down, keep storage at 50 GB.
+		//
+		// Note: 50 GB starter is still below the 100 GB db_size_mb
+		// plan cap, so a customer approaching their cap still needs
+		// an online volume resize (or a plan_limits bump). Follow-up
+		// #366 makes volume_type + volume_size env-configurable so
+		// ops can lift specific projects without a code change.
+		//
+		// HA note: Scaleway HA requires the gp compute tier. On
+		// db-dev-s (starter), IsHaCluster is unavailable — a Team
+		// customer who needs failover-on-primary-loss goes through
+		// an online compute upgrade to db-gp-s first, THEN enables
+		// HA. Marketing surfaces (DPA Annex 2, /security) must not
+		// promise HA as a starter-shape capability.
 		size = dbprovider.SizeSmall
 	}
 

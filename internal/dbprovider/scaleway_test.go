@@ -139,6 +139,35 @@ func TestScaleway_ProvisionHappyPath(t *testing.T) {
 
 // TestScaleway_ProvisionUnknownSize covers the input-validation
 // branch: bad size hint short-circuits before any HTTP call.
+// TestScaleway_VolumeSizeMeetsTeamPlanQuota guards the invariant
+// spotted during eurobase#56 review: the provisioned Postgres volume
+// must be ≥ the Team plan's advertised db_size_mb quota (100 GB per
+// migration 000085), otherwise a customer inside their plan quota
+// hits Postgres disk-full while the console still shows headroom.
+//
+// This test asserts the SizeSmall entry (Team-tier default per
+// workers/provision_team_db.go) stays at 50 GB or larger. If a
+// future refactor lowers it, the test fails with a message pointing
+// at the plan_limits mismatch so the regression is caught at CI, not
+// after a customer support ticket.
+//
+// Chose 50 GB (not 100 GB matching the exact plan cap) to allow
+// online resize headroom without over-provisioning day-one storage
+// cost. A customer approaching the 50 GB volume can be lifted to
+// 100 GB via an online resize (follow-up: euroback#366 makes this
+// env-configurable per project).
+func TestScaleway_VolumeSizeMeetsTeamPlanQuota(t *testing.T) {
+	t.Parallel()
+	const minStartingGB = 50 // must match or exceed the sizing decision in workers/provision_team_db.go
+	got := scalewayVolumeSizeGB[SizeSmall]
+	if got < minStartingGB {
+		t.Fatalf("scalewayVolumeSizeGB[SizeSmall] = %d GB, want ≥ %d GB — "+
+			"Team plan_limits.db_size_mb is 100 GB (migration 000085); a smaller starter volume "+
+			"lets a customer hit disk-full inside their plan quota. See eurobase#56 review.",
+			got, minStartingGB)
+	}
+}
+
 func TestScaleway_ProvisionUnknownSize(t *testing.T) {
 	p := newFakeScaleway(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("must not call Scaleway on invalid size")

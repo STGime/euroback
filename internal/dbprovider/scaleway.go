@@ -128,8 +128,16 @@ var scalewayNodeType = map[Size]string{
 // scalewayVolumeSizeGB is the initial storage size mapped from the
 // Size hint. Scaleway supports online volume resize so this is a
 // starting point, not a ceiling.
+//
+// Note: SizeSmall is 50 GB, not the "obvious" small value like 10 GB.
+// That's deliberate — public.plan_limits.db_size_mb for Team is
+// 100 GB (migration 000085), and the provisioned Scaleway volume
+// must be ≥ that quota or a customer inside their plan can hit
+// Postgres disk-full while the console still shows headroom. If a
+// future SizeXSmall or dev tier lands with a real 10 GB ceiling,
+// add it as a new Size, don't shrink SizeSmall.
 var scalewayVolumeSizeGB = map[Size]int{
-	SizeSmall:  10,
+	SizeSmall:  50,
 	SizeMedium: 50,
 	SizeLarge:  200,
 }
@@ -270,6 +278,12 @@ func (s *Scaleway) Provision(ctx context.Context, opts ProvisionOpts) (*Instance
 	region := s.defaultRegion
 	size := opts.Size
 	if size == "" {
+		// Provider-layer fallback for callers that don't pass a Size
+		// (test scripts, one-off tooling). The Team-tier worker
+		// (workers/provision_team_db.go) always passes SizeSmall
+		// explicitly today; this default only matters if a new
+		// caller lands without setting Size. Kept at SizeMedium for
+		// backward compat with pre-team-tier callers.
 		size = SizeMedium
 	}
 	nodeType, ok := scalewayNodeType[size]
