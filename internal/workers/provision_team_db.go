@@ -156,7 +156,21 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 
 	size := dbprovider.Size(args.Size)
 	if size == "" {
-		size = dbprovider.SizeMedium
+		// SizeSmall = Scaleway db-dev-s (2 vCPU / 4 GB RAM) + 10 GB
+		// storage. Right-sized for the €149/mo Team price point + the
+		// SMB buyer profile (<5k signed-up users, <10 GB active DB,
+		// <100 req/s). Previous default (SizeMedium = db-gp-s, 4 vCPU
+		// / 16 GB RAM, 50 GB) was ~€115-136/mo of Scaleway spend on a
+		// €149/mo tier — near-zero gross margin once support + backup
+		// storage + fixed platform costs land. See euroback#523 for
+		// the cost / retention gut-check that surfaced the mismatch.
+		//
+		// Scaleway supports online resize in both compute AND storage
+		// dimensions, so a growing customer's ceiling is a support
+		// conversation, not a migration. Marketing card advertises the
+		// starter shape + the resize path so buyers understand what
+		// they're buying up front (eurobase#TBD).
+		size = dbprovider.SizeSmall
 	}
 
 	// Idempotency-Key = deterministic per job. River retries hit
