@@ -31,9 +31,24 @@
 
 	// Remove-member state (per-row spinner)
 	let removingId = $state('');
+	// Caller's own platform_user id — used to hide the Remove button
+	// on the caller's own member row. Self-removal is a distinct flow
+	// ("Leave organization") that we haven't shipped yet; the backend
+	// also refuses removing the sole admin, so letting the button
+	// render for self used to surface a browser alert("Cannot remove
+	// the last admin from an organization") after a wasted round-trip.
+	let callerUserID = $state<string>('');
 
 	onMount(async () => {
-		await load();
+		// Load profile in parallel with org detail — profile gives us
+		// the caller's user id so we can hide the Remove-self button
+		// on the caller's row. If getProfile fails we still show the
+		// page, just with the button visible; backend still refuses
+		// the destructive action.
+		await Promise.all([
+			load(),
+			api.getProfile().then((p) => { callerUserID = p.id; }).catch(() => {}),
+		]);
 	});
 
 	async function load() {
@@ -196,7 +211,7 @@
 							<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset {m.role === 'admin' ? 'bg-eurobase-50 text-eurobase-700 ring-eurobase-600/20' : 'bg-gray-50 text-gray-600 ring-gray-500/10'}">
 								{m.role}
 							</span>
-							{#if detail.role === 'admin'}
+							{#if detail.role === 'admin' && m.platform_user_id !== callerUserID}
 								<button
 									type="button"
 									onclick={() => handleRemove(m.platform_user_id)}
@@ -205,6 +220,10 @@
 								>
 									{removingId === m.platform_user_id ? 'Removing…' : 'Remove'}
 								</button>
+							{:else if detail.role === 'admin' && m.platform_user_id === callerUserID}
+								<span class="text-xs text-gray-400" title="Self-removal is not available here; a Leave organization flow will land in a follow-up">
+									(you)
+								</span>
 							{/if}
 						</div>
 					</li>
