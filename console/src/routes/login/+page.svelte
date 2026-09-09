@@ -59,7 +59,7 @@
 
 	// SSO callback lands on /login#access_token=...&token_type=bearer&expires_in=...&sso=1
 	// (fragment stays client-side, doesn't hit server logs). On error
-	// the gateway sends #sso_error=<code>&sso_msg=<msg>. This runs on
+	// the gateway sends #sso_error=<code>&sso_error_msg=<msg>. This runs on
 	// mount, before the form is rendered.
 	async function handleSSOFragment(): Promise<boolean> {
 		if (typeof window === 'undefined') return false;
@@ -85,7 +85,7 @@
 			return true;
 		}
 		if (errCode) {
-			const msg = params.get('sso_msg') || errCode;
+			const msg = params.get('sso_error_msg') || errCode;
 			error = `SSO sign-in failed: ${msg}`;
 			history.replaceState({}, '', window.location.pathname + window.location.search);
 			return true;

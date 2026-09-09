@@ -16,6 +16,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -248,22 +249,31 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 			return
 		}
 
-		// Find-or-create the platform_users row. MVP creates on
-		// first SSO if the email isn't there yet, but only if the
-		// user is already invited to the org (checked below). This
-		// prevents random SSO'd users from a permissive IdP creating
-		// accounts.
-		userID, isSuperadmin, err := findOrCreatePlatformUserForSSO(r.Context(), h.pool, vt.Claims.Email, vt.Claims.Name)
+		// Look up the platform_users row for the IdP's email.
+		// Manual-invite gate: InviteMember requires the target user to
+		// already exist in platform_users, so any org_members row is
+		// keyed to a real user. An email that has no platform_users
+		// row therefore CANNOT be an invited member — reject fast
+		// before we create any state. Defence-in-depth against a
+		// permissive IdP: even if init were bypassed, the callback
+		// cannot mint a fresh platform_users row for a random email.
+		userID, isSuperadmin, err := lookupPlatformUserForSSO(r.Context(), h.pool, vt.Claims.Email)
 		if err != nil {
-			slog.Error("sso callback: user find-or-create", "error", err)
-			h.redirectWithError(w, r, "user_provisioning_failed", "could not resolve platform user")
+			if errors.Is(err, errSSOUserNotProvisioned) {
+				slog.Warn("sso callback: no platform_users row for IdP email", "org_id", claims.OrgID)
+				h.redirectWithError(w, r, "not_a_member", "you are not a member of this organization — ask an admin to invite you")
+				return
+			}
+			slog.Error("sso callback: user lookup", "error", err)
+			h.redirectWithError(w, r, "user_lookup_failed", "could not resolve platform user")
 			return
 		}
 
 		// Confirm the user is a member of the org they SSO'd into.
-		// Manual-invite gate: rejects a valid SSO login from an
-		// email address that no admin has ever invited. Closes
-		// the "permissive IdP mints any email" attack.
+		// Redundant with the lookup-only design above, but kept as
+		// belt-and-braces so a follow-up that reintroduces auto-provision
+		// (e.g. DNS-TXT verified domains) doesn't accidentally regress
+		// the invite gate.
 		if err := h.orgs.EnsureMemberFromSSO(r.Context(), claims.OrgID, userID); err != nil {
 			slog.Warn("sso callback: user not member of org", "org_id", claims.OrgID, "user_id", userID)
 			h.redirectWithError(w, r, "not_a_member", "you are not a member of this organization — ask an admin to invite you")
@@ -316,14 +326,17 @@ func (h *SSOHandler) redirectWithError(w http.ResponseWriter, r *http.Request, c
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
-// findOrCreatePlatformUserForSSO looks up platform_users by email;
-// creates a row on first SSO login. Returns (userID, isSuperadmin).
-//
-// Password column is set to a marker value ('sso-only:<random>')
-// that fails password auth by design — the user can still sign in
-// via SSO, or reset password via the forgot-password flow if they
-// want to enable password auth as a fallback.
-func findOrCreatePlatformUserForSSO(ctx context.Context, pool *pgxpool.Pool, email, displayName string) (string, bool, error) {
+// errSSOUserNotProvisioned is returned by lookupPlatformUserForSSO
+// when the IdP's email has no platform_users row. This is the
+// primary signal for the manual-invite gate: an uninvited email
+// can't have an org_members row (InviteMember requires the user
+// to exist first), so no platform_users row = not a member.
+var errSSOUserNotProvisioned = errors.New("sso: no platform_users row for email")
+
+// lookupPlatformUserForSSO returns the (userID, isSuperadmin) for
+// an IdP-supplied email. It does NOT create the row on miss —
+// see errSSOUserNotProvisioned + the callback's manual-invite gate.
+func lookupPlatformUserForSSO(ctx context.Context, pool *pgxpool.Pool, email string) (string, bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	var userID string
 	var isSuperadmin bool
@@ -335,18 +348,8 @@ func findOrCreatePlatformUserForSSO(ctx context.Context, pool *pgxpool.Pool, ema
 	if err == nil {
 		return userID, isSuperadmin, nil
 	}
-	if err != pgx.ErrNoRows {
-		return "", false, fmt.Errorf("lookup user: %w", err)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, errSSOUserNotProvisioned
 	}
-	// Create — password is a marker that fails all password auth.
-	pwMarker := "sso-only:" + fmt.Sprintf("%d", time.Now().UnixNano())
-	err = pool.QueryRow(ctx, `
-		INSERT INTO public.platform_users (email, password_hash, display_name)
-		VALUES ($1, $2, $3)
-		RETURNING id::text
-	`, email, pwMarker, displayName).Scan(&userID)
-	if err != nil {
-		return "", false, fmt.Errorf("create user: %w", err)
-	}
-	return userID, false, nil
+	return "", false, fmt.Errorf("lookup user: %w", err)
 }

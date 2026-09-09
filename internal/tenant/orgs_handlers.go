@@ -3,9 +3,8 @@ package tenant
 // HTTP handlers for the org CRUD surface. Routes:
 //   POST   /platform/orgs
 //   GET    /platform/orgs
-//   GET    /platform/orgs/{id}
+//   GET    /platform/orgs/{id}                  (folds in the member list)
 //   PATCH  /platform/orgs/{id}/sso              (admin-only)
-//   GET    /platform/orgs/{id}/members
 //   POST   /platform/orgs/{id}/members          (admin-only)
 //   DELETE /platform/orgs/{id}/members/{userId} (admin-only)
 //

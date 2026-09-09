@@ -234,7 +234,7 @@
 					<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-700">{ssoSuccess}</div>
 				{/if}
 
-				<form onsubmit={handleSaveSSO} class="mt-6 space-y-4">
+				<form onsubmit={handleSaveSSO} oninput={() => { ssoSuccess = ''; ssoError = ''; }} class="mt-6 space-y-4">
 					<div>
 						<label for="sso-provider" class="block text-sm font-medium text-gray-700">Provider</label>
 						<select
