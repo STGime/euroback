@@ -1,12 +1,17 @@
 package tenant
 
 // HTTP handlers for the org CRUD surface. Routes:
-//   POST   /platform/orgs
+//   POST   /platform/orgs                       (Team-tier only)
 //   GET    /platform/orgs
 //   GET    /platform/orgs/{id}                  (folds in the member list)
-//   PATCH  /platform/orgs/{id}/sso              (admin-only)
-//   POST   /platform/orgs/{id}/members          (admin-only)
-//   DELETE /platform/orgs/{id}/members/{userId} (admin-only)
+//   PATCH  /platform/orgs/{id}/sso              (admin-only, Team-tier only)
+//   POST   /platform/orgs/{id}/members          (admin-only, Team-tier only)
+//   DELETE /platform/orgs/{id}/members/{userId} (admin-only, Team-tier only)
+//
+// Every mutating route is gated via `requireTeamBeta` — see the
+// helper's docstring for the rationale (defence-in-depth so a
+// hand-off of admin to a non-Team user cannot silently unlock
+// membership management or SSO configuration).
 //
 // All routes are platform-authenticated (developer pool). Admin
 // gate is per-handler because we already need to fetch the org +
@@ -48,6 +53,25 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 	fmt.Fprintf(w, `{"error":%q}`, msg)
 }
 
+// requireTeamBeta gates every mutating org route on team_beta_access.
+// Fresh DB read (not JWT claim) so revocation via AdminRevokeTeamBeta
+// takes effect on the next request — see the comment on that
+// handler regarding the "admin loses tier → org frozen" mode.
+// Returns true when the check passes; false when a 403 has been
+// written and the handler should return.
+func (h *OrgsHandler) requireTeamBeta(w http.ResponseWriter, r *http.Request, userID string) bool {
+	granted, err := UserHasTeamBetaAccess(r.Context(), h.Svc.pool, userID)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "tier check failed")
+		return false
+	}
+	if !granted {
+		writeJSONErr(w, http.StatusForbidden, "organizations are a Team-tier feature — upgrade to manage members or SSO")
+		return false
+	}
+	return true
+}
+
 // HandleCreateOrg — POST /platform/orgs {name}
 //
 // Gated on team_beta_access: orgs + SSO are a Team-tier feature and
@@ -62,13 +86,7 @@ func (h *OrgsHandler) HandleCreateOrg() http.HandlerFunc {
 		if !ok {
 			return
 		}
-		granted, err := UserHasTeamBetaAccess(r.Context(), h.Svc.pool, userID)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, "tier check failed")
-			return
-		}
-		if !granted {
-			writeJSONErr(w, http.StatusForbidden, "organizations are a Team-tier feature — upgrade to create one")
+		if !h.requireTeamBeta(w, r, userID) {
 			return
 		}
 		var body struct {
@@ -166,13 +184,7 @@ func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 		if !ok {
 			return
 		}
-		granted, err := UserHasTeamBetaAccess(r.Context(), h.Svc.pool, userID)
-		if err != nil {
-			writeJSONErr(w, http.StatusInternalServerError, "tier check failed")
-			return
-		}
-		if !granted {
-			writeJSONErr(w, http.StatusForbidden, "SSO configuration is a Team-tier feature — upgrade to configure")
+		if !h.requireTeamBeta(w, r, userID) {
 			return
 		}
 		orgID := chi.URLParam(r, "id")
@@ -217,10 +229,20 @@ func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 }
 
 // HandleInviteMember — POST /platform/orgs/{id}/members {email,role}
+//
+// Team-tier gated. If we only gated CreateOrg + SetSSOConfig, a
+// Team admin could hand off admin role to a Free user (via role=
+// 'admin' invite), and that Free user could then invite arbitrary
+// more admins — bypassing the Team-tier control over membership
+// machinery entirely. Every mutating org route needs the same
+// gate.
 func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := requireCallerID(w, r)
 		if !ok {
+			return
+		}
+		if !h.requireTeamBeta(w, r, userID) {
 			return
 		}
 		orgID := chi.URLParam(r, "id")
@@ -267,10 +289,18 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 }
 
 // HandleRemoveMember — DELETE /platform/orgs/{id}/members/{userId}
+//
+// Team-tier gated. Same rationale as HandleInviteMember: every
+// mutating org route stays in Team-only hands, so a hypothetical
+// Free-admin can't shrink the admin set to lock out the Team
+// creator either.
 func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := requireCallerID(w, r)
 		if !ok {
+			return
+		}
+		if !h.requireTeamBeta(w, r, userID) {
 			return
 		}
 		orgID := chi.URLParam(r, "id")

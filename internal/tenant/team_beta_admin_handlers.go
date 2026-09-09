@@ -115,6 +115,17 @@ func AdminGrantTeamBeta(pool *pgxpool.Pool) http.HandlerFunc {
 // created). If ops wants to reclaim the underlying provider
 // instances, they must delete the projects manually — the
 // deprovision worker sweeps the dedicated DBs 7 days later.
+//
+// **Org-management side effect**: after revocation, the user
+// immediately loses the ability to invoke any mutating org route
+// (create org, PATCH sso, invite/remove members) because
+// orgs_handlers.requireTeamBeta reads the flag fresh from
+// platform_users on every request. If the revoked user is the
+// sole admin of an org, that org is effectively frozen — no one
+// can update SSO or invite new members. Intentional as of PR #537;
+// ops should verify a revoked user does not solo-admin any org
+// before pulling the flag, or grant Team beta to a co-admin
+// first. See #537 review round 1.
 func AdminRevokeTeamBeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := strings.TrimSpace(chi.URLParam(r, "id"))

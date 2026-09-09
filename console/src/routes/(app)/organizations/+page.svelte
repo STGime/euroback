@@ -9,6 +9,11 @@
 	// Team-tier gate: creation is Team-only, but invited members of
 	// a Team-org keep read access regardless of their own tier.
 	let hasTeamBeta = $state<boolean>(false);
+	// Both `loading` (orgs list) and `profileLoaded` must be true
+	// before we render the empty-state branch. Otherwise a Team user
+	// with 0 orgs briefly sees the non-Team "Upgrade to Team"
+	// nudge while getProfile is still in flight.
+	let profileLoaded = $state<boolean>(false);
 
 	// New-org modal state
 	let showNewModal = $state(false);
@@ -26,6 +31,7 @@
 		if (profile) {
 			hasTeamBeta = profile.team_beta_access === true;
 		}
+		profileLoaded = true;
 	});
 
 	async function load() {
@@ -115,7 +121,7 @@
 		{/if}
 	</div>
 
-	{#if loading}
+	{#if loading || !profileLoaded}
 		<div class="mt-16 flex flex-col items-center text-center">
 			<svg class="h-10 w-10 animate-spin text-eurobase-600" fill="none" viewBox="0 0 24 24">
 				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
