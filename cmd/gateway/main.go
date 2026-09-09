@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/auth/oidc"
 	"github.com/eurobase/euroback/internal/billing"
 	"github.com/eurobase/euroback/internal/billing/mollie"
 	"github.com/eurobase/euroback/internal/compliance"
@@ -543,8 +545,54 @@ func main() {
 		pendingSweeper.StartLoop(ctx)
 	}
 
+	// ── Team-tier SSO wiring ──
+	// PLATFORM_ENCRYPTION_KEY must be exactly 32 bytes (raw) for
+	// AES-256. Encoded as hex in the env for readability (64 hex
+	// chars → 32 bytes). Empty is legal in dev; disables SSO config
+	// writes but doesn't crash — endpoints return 503 so the console
+	// degrades gracefully.
+	var ssoWiring gateway.SSOWiring
+	{
+		platformEncKeyHex := os.Getenv("PLATFORM_ENCRYPTION_KEY")
+		var platformEncKey []byte
+		if platformEncKeyHex != "" {
+			b, err := hex.DecodeString(platformEncKeyHex)
+			if err != nil {
+				log.Fatalf("PLATFORM_ENCRYPTION_KEY must be hex-encoded: %v", err)
+			}
+			platformEncKey = b
+		}
+		orgsSvc, err := tenant.NewOrgsService(developerPool, platformEncKey)
+		if err != nil {
+			log.Fatalf("orgs service init failed: %v", err)
+		}
+		consoleURL := consoleBaseURL
+		if consoleURL == "" {
+			consoleURL = "https://console.eurobase.app"
+		}
+		platformBaseURL := os.Getenv("PLATFORM_BASE_URL")
+		if platformBaseURL == "" {
+			platformBaseURL = "https://api.eurobase.app"
+		}
+		oidcClient := oidc.NewClient()
+		ssoH := auth.NewSSOHandler(pool, platformAuthSvc, gateway.NewOrgsSSOAdapter(orgsSvc), oidcClient, auth.SSOConfig{
+			PlatformJWTSecret:  []byte(platformJWTSecret),
+			ConsoleRedirectURL: consoleURL,
+			CallbackURL:        platformBaseURL + "/platform/auth/sso/callback",
+		})
+		ssoWiring = gateway.SSOWiring{
+			Orgs:       orgsSvc,
+			SSOHandler: ssoH,
+		}
+		if !orgsSvc.SSOConfigWritable() {
+			slog.Info("SSO surface enabled but PLATFORM_ENCRYPTION_KEY unset — org config writes will 503")
+		} else {
+			slog.Info("SSO surface enabled with encrypted client_secret storage")
+		}
+	}
+
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
