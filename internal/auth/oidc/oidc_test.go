@@ -608,10 +608,34 @@ func TestRequireSecureIssuer_LoopbackAllowed(t *testing.T) {
 	for _, bad := range []string{
 		"http://accounts.example.com",
 		"ftp://accounts.example.com",
-		"https://accounts.example.com" + "\x00", // control char — belt-and-braces; we don't reject explicitly today
 	} {
-		if err := requireSecureIssuer(bad); err == nil && bad != "https://accounts.example.com\x00" {
+		if err := requireSecureIssuer(bad); err == nil {
 			t.Errorf("expected %q to fail, got nil", bad)
+		}
+	}
+}
+
+// TestRequireSecureIssuer_UserinfoBypass pins the exact
+// #535-re-review finding. Prefix-matching versions of this guard
+// accept `http://127.0.0.1:80@evil.com` because the literal
+// "http://127.0.0.1:" prefix matches — but url.Parse interprets
+// 127.0.0.1:80 as USERINFO and the real host is evil.com. A
+// plaintext discovery fetch would go to evil.com, and evil.com
+// would then own the token endpoint + jwks_uri. Full bypass.
+//
+// The u.Hostname() fix strips userinfo AND port so the loopback
+// check is against the real host.
+func TestRequireSecureIssuer_UserinfoBypass(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{
+		"http://127.0.0.1:80@evil.com",
+		"http://localhost:8080@evil.com",
+		"http://[::1]:443@evil.com",
+		"http://127.0.0.1.evil.com",  // subdomain trick (already rejected pre-fix, guard against regression)
+		"http://evil.com/127.0.0.1/", // path-injection variant
+	} {
+		if err := requireSecureIssuer(bad); err == nil {
+			t.Errorf("expected %q to fail (userinfo/subdomain/path bypass), got nil", bad)
 		}
 	}
 }

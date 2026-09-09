@@ -123,17 +123,32 @@ type Client struct {
 // forged document pointing at their own token + jwks endpoints).
 // Loopback carve-out exists ONLY for httptest / unit-test servers
 // (Go's httptest.NewServer binds to 127.0.0.1); admin config paths
-// enforce https:// at the schema layer separately.
+// SHOULD enforce https:// at the schema layer separately once
+// migration 000114 gets a CHECK constraint on
+// organizations.oidc_config, but today this guard is the only
+// scheme enforcement so it must be tight.
+//
+// URL-parses (does NOT prefix-match) so an embedded-userinfo
+// authority like `http://127.0.0.1:80@evil.com` — which url.Parse
+// interprets as host=evil.com with 127.0.0.1:80 as userinfo — is
+// correctly rejected. #535 re-review demonstrated the prefix-match
+// version accepted that exact string.
 func requireSecureIssuer(issuer string) error {
-	if strings.HasPrefix(issuer, "https://") {
+	u, err := url.Parse(issuer)
+	if err != nil {
+		return fmt.Errorf("issuer parse failed: %w", err)
+	}
+	if u.Scheme == "https" {
 		return nil
 	}
-	// Loopback carve-out for tests. httptest.NewServer emits
-	// http://127.0.0.1:<port>/…; we tolerate that but nothing else.
-	if strings.HasPrefix(issuer, "http://127.0.0.1:") ||
-		strings.HasPrefix(issuer, "http://localhost:") ||
-		strings.HasPrefix(issuer, "http://[::1]:") {
-		return nil
+	if u.Scheme == "http" {
+		// u.Hostname() strips both userinfo AND port, so an attacker
+		// can't hide a public host behind a loopback-looking
+		// userinfo prefix.
+		switch u.Hostname() {
+		case "127.0.0.1", "localhost", "::1":
+			return nil
+		}
 	}
 	return fmt.Errorf("issuer must be https:// (got %q) — an http:// discovery endpoint is trivially MITM-attackable", issuer)
 }
