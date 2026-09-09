@@ -298,7 +298,10 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 				AuthConfig: p.AuthConfig,
 				CreatedAt:  p.CreatedAt,
 				OrgID:      p.OrgID,
-				OrgName:    p.OrgName,
+				// OrgName intentionally omitted post-hotfix: resolving
+				// the name requires JOIN to `organizations`, which the
+				// gateway pool cannot SELECT. The console falls back to
+				// showing a generic "Org" badge from org_id.
 			}
 		}
 
