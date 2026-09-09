@@ -78,8 +78,10 @@
 		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Email + password, magic links, social login (Google / GitHub / LinkedIn / Apple)', free: true, pro: true, team: true, legal: true },
 		{ label: 'Phone (SMS OTP) sign-in', free: false, pro: true, team: true, legal: true },
+		{ label: 'SSO (OIDC) for console sign-in — Google Workspace, Microsoft Entra ID, Okta, Authentik, any OIDC IdP', free: false, pro: false, team: true, legal: true },
 		{ label: 'SSO (SAML) for console sign-in', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Organizations — invite teammates, org-level admin / member roles', free: false, pro: false, team: true, legal: true },
+		{ label: 'Project RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Automation & integrations' },
 		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: 'Coming soon', legal: 'Coming soon' },
@@ -124,10 +126,10 @@
 
 <svelte:head>
 	<title>Pricing — Eurobase · EU-sovereign backend, GDPR-compliant, legal-tech ready</title>
-	<meta name="description" content="Eurobase pricing: Free for personal + development use, €25/mo Pro for commercial, Team for SMBs, Legal Team for German legal-tech startups needing §257 HGB / §50 BRAO / §147 AO retention. EU-sovereign Backend-as-a-Service hosted in France, made in Berlin. GDPR by design, DSAR built-in, no US CLOUD Act exposure." />
-	<meta name="keywords" content="EU sovereign BaaS, GDPR compliant backend, DSGVO Backend-as-a-Service, Backend Deutschland, legal-tech backend, Kanzlei-Software Hosting, §257 HGB retention, WORM Object Storage, Rechtsanwalt SaaS DSGVO, EU alternative Firebase, EU alternative Supabase" />
+	<meta name="description" content="Eurobase pricing: Free for personal + development use, €25/mo Pro for commercial, Team for SMBs with dedicated Postgres + SSO (OIDC) + organizations, Legal Team for German legal-tech startups needing §257 HGB / §50 BRAO / §147 AO retention. EU-sovereign Backend-as-a-Service hosted in France, made in Berlin. GDPR by design, DSAR built-in, no US CLOUD Act exposure." />
+	<meta name="keywords" content="EU sovereign BaaS, GDPR compliant backend, DSGVO Backend-as-a-Service, Backend Deutschland, legal-tech backend, Kanzlei-Software Hosting, §257 HGB retention, WORM Object Storage, Rechtsanwalt SaaS DSGVO, EU alternative Firebase, EU alternative Supabase, EU SSO OIDC, Google Workspace SSO, Microsoft Entra ID SSO" />
 	<meta property="og:title" content="Eurobase — EU-sovereign backend for GDPR-conscious startups, including German legal-tech" />
-	<meta property="og:description" content="Free to start, €25/mo Pro, dedicated Postgres on Team, WORM retention + §257 HGB / §50 BRAO / §147 AO compliance on Legal Team. Made in Berlin. Hosted in France. Zero DevOps." />
+	<meta property="og:description" content="Free to start, €25/mo Pro, Team with dedicated Postgres + SSO (OIDC) + organizations, WORM retention + §257 HGB / §50 BRAO / §147 AO compliance on Legal Team. Made in Berlin. Hosted in France. Zero DevOps." />
 	<meta property="og:type" content="website" />
 	<link rel="canonical" href="https://eurobase.app/pricing" />
 </svelte:head>
@@ -196,9 +198,9 @@
 				<h2 class="text-base font-semibold text-emerald-900">Recent shipments</h2>
 			</div>
 			<ul class="mt-3 grid grid-cols-1 gap-2 text-sm text-emerald-900 sm:grid-cols-2 lg:grid-cols-4">
-				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Payment-first Pro checkout</strong> — pay via Mollie, project auto-provisions on webhook.</span></li>
+				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>SSO (OIDC) for Team</strong> — Google Workspace, Microsoft Entra ID, Okta, Authentik. Organizations + org-level admin / member roles.</span></li>
 				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Dedicated Postgres on Team</strong> — direct <code class="rounded bg-white/60 px-1 text-[11px]">DATABASE_URL</code> for Payload, Prisma, Drizzle.</span></li>
-				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Test-mode billing rehearsal</strong> — real Mollie flow before public launch.</span></li>
+				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Payment-first Pro checkout</strong> — pay via Mollie, project auto-provisions on webhook.</span></li>
 				<li class="flex gap-2"><span class="text-emerald-600">✓</span><span><strong>Legal Team preview</strong> — WORM retention + §257 HGB / §50 BRAO / §147 AO holds. <a href="/legal" class="underline hover:no-underline">See the legal-tech page</a>.</span></li>
 			</ul>
 		</div>
@@ -300,10 +302,10 @@
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Everything in Pro, plus:</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Dedicated Postgres instance</strong> per project — direct <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px] font-mono">DATABASE_URL</code> for Payload / Prisma / Drizzle</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Daily backups + on-demand snapshots (7-day retention) — 1 restore/month included</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SSO (SAML) for console sign-in</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span>RBAC — Owner / Admin / Developer / Read-only</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>SSO (OIDC)</strong> — Google Workspace, Microsoft Entra ID, Okta, Authentik, or any OIDC IdP. SAML <span class="text-xs italic text-amber-600">coming soon</span></span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Organizations</strong> — invite teammates, org-level admin / member roles, org-owned projects</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Priority email support (24 h SLA)</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SOC 2 Type II attestation</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SOC 2 Type II attestation <span class="text-xs italic text-amber-600">coming later</span></span></li>
 				</ul>
 			</div>
 
