@@ -464,29 +464,32 @@ func (s *TenantService) annotateAuthConfig(ctx context.Context, schemaName strin
 
 // ListProjects returns all projects the given platform user is a member of
 // (owner, admin, developer, or viewer).
+//
+// **Hotfix note (post-#536):** the earlier version of this function
+// added a UNION with `org_members` and a LEFT JOIN on
+// `organizations` to surface projects owned by any org the caller
+// was a member of. That query ran on the gateway pool
+// (`tenantSvc := NewTenantService(pool)` in router.go), and
+// migration 000114 explicitly REVOKEs ALL from eurobase_gateway on
+// both org tables (security property: org membership is NOT
+// SDK-facing). The listing therefore 500'd in prod because the pool
+// role couldn't SELECT from `organizations` / `org_members`. This
+// rollback drops the UNION + JOIN and keeps only `p.org_id`
+// (which lives on `projects` and IS grant-visible to the gateway).
+// The console org badge still renders. Org-membership access to
+// projects is Phase-2 work that must route through the developer
+// pool (or gain a narrow SELECT grant to the gateway) before it
+// can re-land.
 func (s *TenantService) ListProjects(ctx context.Context, platformUserID string) ([]Project, error) {
-	// Team-tier additive access (migration 000114). A user sees a
-	// project when EITHER (a) they're an explicit project_member OR
-	// (b) they're a member of the org that owns the project. The
-	// existing owner_id / project_members path is untouched — this is
-	// purely a UNION for the listing surface. DISTINCT because a
-	// user can be both an explicit project member AND an org member;
-	// we don't want the row twice.
 	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
+		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
 		        p.region, p.plan, p.status, p.auth_config, p.created_at,
 		        p.state, p.last_active_at, p.grandfathered_until,
 		        p.legacy_pro_grace_until,
-		        p.org_id::text, o.name AS org_name
+		        p.org_id::text
 		 FROM projects p
-		 LEFT JOIN organizations o ON o.id = p.org_id
-		 WHERE p.id IN (
-		     SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $1::uuid
-		     UNION
-		     SELECT p2.id FROM projects p2
-		       JOIN org_members om ON om.org_id = p2.org_id
-		       WHERE om.platform_user_id = $1::uuid
-		 )
+		 JOIN project_members pm ON pm.project_id = p.id
+		 WHERE pm.user_id = $1::uuid
 		 ORDER BY p.created_at DESC`,
 		platformUserID,
 	)
@@ -500,7 +503,7 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 		var p Project
 		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status,
 			&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil,
-			&p.OrgID, &p.OrgName); err != nil {
+			&p.OrgID); err != nil {
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
