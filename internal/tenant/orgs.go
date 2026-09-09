@@ -557,14 +557,15 @@ func (s *OrgsService) FindOrgForSSOMember(ctx context.Context, email string) (st
 }
 
 // EnsureMemberFromSSO is called by the SSO callback after we've
-// verified the ID token. Ensures the user is a member of the org
-// (creates the row if missing — but ONLY if the user is already in
-// SOME org membership via manual invite; won't auto-create org
-// membership from scratch). Returns nil if the user is now a
-// member, or an error if not.
+// verified the ID token. Confirms the user has an existing
+// org_members row for the given org. Never inserts — the callback
+// upstream already rejects unknown users at platform_users lookup
+// time (see errSSOUserNotProvisioned), and InviteMember is the only
+// caller-facing route that creates org_members rows.
 //
-// For MVP this is just "confirm the user already has a member row".
-// Auto-provisioning based on primary_email_domain is Phase 2.
+// Auto-provisioning based on primary_email_domain (DNS-TXT verified)
+// is Phase 2 — this function stays lookup-only until then so we don't
+// silently regress the manual-invite gate.
 func (s *OrgsService) EnsureMemberFromSSO(ctx context.Context, orgID, platformUserID string) error {
 	var exists bool
 	err := s.pool.QueryRow(ctx, `
