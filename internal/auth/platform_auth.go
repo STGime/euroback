@@ -408,6 +408,15 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 	}, nil
 }
 
+// IssuePlatformJWT is the exported wrapper around generatePlatformJWT
+// for callers outside this file (the SSO handler, tests). Same JWT
+// shape and lifetime as password-based signin — a platform user
+// signed in via SSO is indistinguishable from one signed in via
+// password from the middleware's perspective.
+func (s *PlatformAuthService) IssuePlatformJWT(userID, email string, isSuperadmin bool) (string, int, error) {
+	return s.generatePlatformJWT(userID, email, isSuperadmin)
+}
+
 // generatePlatformJWT creates an HS256 JWT for a platform user. The
 // isSuperadmin flag is embedded in the token so downstream middleware can
 // gate admin routes without a per-request DB hit; it is re-verified from

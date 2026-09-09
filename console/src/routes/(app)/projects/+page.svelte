@@ -526,6 +526,17 @@
 								non-commercial
 							</span>
 						{/if}
+						{#if project.org_id}
+							<span
+								class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20"
+								title={project.org_name ? `Owned by ${project.org_name}` : 'Owned by an organization'}
+							>
+								<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18" />
+								</svg>
+								{project.org_name ?? 'Org'}
+							</span>
+						{/if}
 						<span class="inline-flex items-center gap-1 text-xs text-gray-400">
 							<svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />

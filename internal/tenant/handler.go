@@ -63,6 +63,11 @@ type ProjectListItem struct {
 	APIURL     string          `json:"api_url"`
 	AuthConfig json.RawMessage `json:"auth_config,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
+	// Team-tier org ownership (migration 000114). Nullable — a
+	// non-null org_id surfaces the "Org" badge on the console
+	// project card.
+	OrgID   *string `json:"org_id,omitempty"`
+	OrgName *string `json:"org_name,omitempty"`
 }
 
 var (
@@ -292,6 +297,8 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 				APIURL:     p.APIURL,
 				AuthConfig: p.AuthConfig,
 				CreatedAt:  p.CreatedAt,
+				OrgID:      p.OrgID,
+				OrgName:    p.OrgName,
 			}
 		}
 

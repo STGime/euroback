@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { user } from '$lib/stores.js';
@@ -17,6 +18,12 @@
 	let submitting = $state(false);
 	let error = $state('');
 	let waitlisted = $state(false);
+	// SSO flow (Team-tier). Two-step UX: click "Sign in with SSO" →
+	// prompt for work email → POST /platform/auth/sso/init → redirect
+	// to the IdP. Post-callback the gateway redirects here with the
+	// access_token in the URL fragment (see onMount below).
+	let ssoMode = $state(false);
+	let ssoSubmitting = $state(false);
 	// Click-through acceptance for Terms + DPA (public-beta launch,
 	// Phase A). Versions match legal_documents seed rows from migration
 	// 000073; if we bump the docs to v3 later, these strings + the
@@ -47,6 +54,63 @@
 			await goto(list.length === 0 ? '/onboarding' : '/projects');
 		} catch {
 			await goto('/projects');
+		}
+	}
+
+	// SSO callback lands on /login#access_token=...&token_type=bearer&expires_in=...&sso=1
+	// (fragment stays client-side, doesn't hit server logs). On error
+	// the gateway sends #sso_error=<code>&sso_error_msg=<msg>. This runs on
+	// mount, before the form is rendered.
+	async function handleSSOFragment(): Promise<boolean> {
+		if (typeof window === 'undefined') return false;
+		const raw = window.location.hash.replace(/^#/, '');
+		if (!raw) return false;
+		const params = new URLSearchParams(raw);
+		const token = params.get('access_token');
+		const errCode = params.get('sso_error');
+		if (token) {
+			// Set the token first so api.getProfile() picks it up on
+			// the next call. Fetch profile to hydrate the email (the
+			// fragment doesn't include it, and the user store persists
+			// email to localStorage).
+			user.set({ token, email: '' });
+			try {
+				const profile = await api.getProfile();
+				user.set({ token, email: profile.email });
+			} catch {
+				// Non-fatal; fallback keeps token, email = "".
+			}
+			history.replaceState({}, '', window.location.pathname + window.location.search);
+			await redirectAfterLogin();
+			return true;
+		}
+		if (errCode) {
+			const msg = params.get('sso_error_msg') || errCode;
+			error = `SSO sign-in failed: ${msg}`;
+			history.replaceState({}, '', window.location.pathname + window.location.search);
+			return true;
+		}
+		return false;
+	}
+
+	onMount(() => {
+		void handleSSOFragment();
+	});
+
+	async function handleSSOSubmit(e: Event) {
+		e.preventDefault();
+		if (!email.trim()) return;
+		error = '';
+		ssoSubmitting = true;
+		try {
+			const res = await api.initSSO(email.trim());
+			// Full-page redirect to the IdP — do not use goto() (SvelteKit
+			// client nav) since the URL is on a different origin.
+			window.location.href = res.authorization_url;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'SSO init failed';
+			error = parseError(msg);
+			ssoSubmitting = false;
 		}
 	}
 
@@ -209,7 +273,34 @@
 					</div>
 				{/if}
 
-				{#if isForgotPassword && forgotPasswordSent}
+				{#if ssoMode}
+					<!-- Team-tier SSO flow: email-only form; backend
+					     resolves the org and returns the IdP URL. -->
+					<form onsubmit={handleSSOSubmit} class="mt-6 space-y-4">
+						<div>
+							<label for="sso-email" class="block text-sm font-medium text-gray-700">Work email</label>
+							<input
+								id="sso-email"
+								type="email"
+								bind:value={email}
+								required
+								placeholder="you@company.eu"
+								class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+							/>
+							<p class="mt-1 text-xs text-gray-400">We'll redirect you to your organization's identity provider.</p>
+						</div>
+						<button
+							type="submit"
+							disabled={ssoSubmitting}
+							class="w-full rounded-lg bg-eurobase-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							{ssoSubmitting ? 'Redirecting…' : 'Continue with SSO'}
+						</button>
+						<div class="text-center">
+							<button type="button" onclick={() => { ssoMode = false; error = ''; }} class="text-xs text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to password sign-in</button>
+						</div>
+					</form>
+				{:else if isForgotPassword && forgotPasswordSent}
 					<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-700">
 						<p class="font-medium">Check your inbox</p>
 						<p class="mt-1">If an account exists for <strong>{email}</strong>, we've sent a password reset link.</p>
@@ -328,6 +419,28 @@
 							{/if}
 						</button>
 					</form>
+
+					{#if !isSignUp && !isForgotPassword}
+						<!-- Team-tier SSO entry-point. Renders under the
+						     password form so password sign-in stays the
+						     primary path; the "with SSO" button expands
+						     the two-step email→IdP flow above. -->
+						<div class="mt-4 flex items-center gap-3">
+							<div class="h-px flex-1 bg-gray-200"></div>
+							<span class="text-xs text-gray-400 uppercase tracking-wide">or</span>
+							<div class="h-px flex-1 bg-gray-200"></div>
+						</div>
+						<button
+							type="button"
+							onclick={() => { ssoMode = true; error = ''; }}
+							class="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer"
+						>
+							<svg class="h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.75" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+							</svg>
+							Sign in with SSO
+						</button>
+					{/if}
 
 					<div class="mt-4 text-center text-sm text-gray-500">
 						{#if isForgotPassword}

@@ -57,7 +57,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -518,6 +518,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/reset-password", auth.HandlePlatformResetPassword(platformAuthSvc))
 
+		// SSO — Team-tier organizations sign in via their configured
+		// OIDC IdP. Both routes are unauthenticated (the whole point
+		// of SSO is that the caller has no session yet). The
+		// callback verifies via cryptographic id_token signature +
+		// signed state, so no session state is needed server-side.
+		// Feature-off when ssoConfig.Enabled() is false — routes
+		// still register but return 503 so the console can degrade
+		// gracefully.
+		if ssoConfig.Enabled() {
+			r.Post("/auth/sso/init", ssoConfig.SSOHandler.HandleSSOInit())
+			r.Get("/auth/sso/callback", ssoConfig.SSOHandler.HandleSSOCallback())
+		} else {
+			r.Post("/auth/sso/init", ssoDisabledHandler)
+			r.Get("/auth/sso/callback", ssoDisabledHandler)
+		}
+
 		// Mailing opt-out — unauthenticated (possession of the
 		// HMAC-signed token IS the authorisation). GET renders a
 		// confirm form so mail scanners (Defender SafeLinks etc.)
@@ -573,6 +589,33 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Use(platformAuth.Handler)
 			}
 			r.Post("/accept", tenant.HandleAcceptInvitation(pool))
+		})
+
+		// Team-tier organizations — CRUD + membership + SSO config.
+		// Platform-authenticated (any signed-in user can create an
+		// org and list their memberships). Per-handler role gate
+		// checks admin for destructive operations.
+		//
+		// Feature-off when ssoConfig.Orgs is nil (typically a dev
+		// env without PLATFORM_ENCRYPTION_KEY). All routes register
+		// but return 503 so the console doesn't 404 confusingly.
+		r.Route("/orgs", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			if ssoConfig.Orgs != nil {
+				h := &tenant.OrgsHandler{Svc: ssoConfig.Orgs}
+				r.Post("/", h.HandleCreateOrg())
+				r.Get("/", h.HandleListOrgs())
+				r.Get("/{id}", h.HandleGetOrg())
+				r.Patch("/{id}/sso", h.HandleSetSSOConfig())
+				r.Post("/{id}/members", h.HandleInviteMember())
+				r.Delete("/{id}/members/{userId}", h.HandleRemoveMember())
+			} else {
+				r.Handle("/*", http.HandlerFunc(ssoDisabledHandler))
+			}
 		})
 
 		// Authenticated: billing (Mollie subscription checkout).
