@@ -48,6 +48,21 @@ type Config struct {
 	RedirectURL  string // https://console.eurobase.app/platform/auth/sso/callback
 	// Scopes is optional; empty defaults to "openid email profile".
 	Scopes []string
+
+	// AllowUnverifiedEmail — when false (DEFAULT, safe posture),
+	// ExchangeCode rejects an ID token whose `email_verified` claim
+	// is either false or missing. When true, unverified emails are
+	// accepted — but the caller MUST enforce domain-binding
+	// (asserted email's domain == the org's DNS-TXT-verified
+	// primary_email_domain from migration 000114) or a permissive
+	// IdP asserting an arbitrary email becomes account-takeover.
+	//
+	// The Team-tier platform SSO handler sets this to true and
+	// relies on the domain-binding path per the DNS-TXT protocol
+	// documented on public.organizations.primary_email_domain (see
+	// migration 000114 comment). Callers that DON'T do domain
+	// binding must leave this false.
+	AllowUnverifiedEmail bool
 }
 
 // Discovery is the subset of the OIDC provider config document
@@ -70,6 +85,7 @@ type Claims struct {
 	Subject       string `json:"sub"`
 	Issuer        string `json:"iss"`
 	Audience      string `json:"aud"`
+	Nonce         string `json:"nonce"`
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
 	Name          string `json:"name"`
@@ -99,6 +115,27 @@ type Client struct {
 	mu        sync.RWMutex
 	discCache map[string]*Discovery
 	jwksCache map[string]keyfunc.Keyfunc
+}
+
+// requireSecureIssuer rejects issuer URLs that aren't https:// —
+// closes the MITM-on-discovery bypass the #535 review flagged. An
+// http:// discovery URL is a full compromise (attacker serves a
+// forged document pointing at their own token + jwks endpoints).
+// Loopback carve-out exists ONLY for httptest / unit-test servers
+// (Go's httptest.NewServer binds to 127.0.0.1); admin config paths
+// enforce https:// at the schema layer separately.
+func requireSecureIssuer(issuer string) error {
+	if strings.HasPrefix(issuer, "https://") {
+		return nil
+	}
+	// Loopback carve-out for tests. httptest.NewServer emits
+	// http://127.0.0.1:<port>/…; we tolerate that but nothing else.
+	if strings.HasPrefix(issuer, "http://127.0.0.1:") ||
+		strings.HasPrefix(issuer, "http://localhost:") ||
+		strings.HasPrefix(issuer, "http://[::1]:") {
+		return nil
+	}
+	return fmt.Errorf("issuer must be https:// (got %q) — an http:// discovery endpoint is trivially MITM-attackable", issuer)
 }
 
 // discoveryTTL — how long we trust a cached provider config before
@@ -180,9 +217,16 @@ func (c *Client) AuthURL(ctx context.Context, cfg Config, state, nonce string) (
 // ExchangeCode runs the token endpoint call, cryptographically
 // verifies the returned ID token against the discovered JWKS, and
 // returns the extracted claims. The caller is responsible for
-// verifying `state` (out-of-band from OIDC) and `nonce` (compare to
-// what was minted in AuthURL).
-func (c *Client) ExchangeCode(ctx context.Context, cfg Config, code string) (*VerifiedToken, error) {
+// verifying `state` (out-of-band from OIDC) — the nonce round-trip
+// is checked here as long as the caller passes the same value they
+// minted for AuthURL.
+//
+// expectedNonce MUST equal what was passed to AuthURL for this
+// login flow. Empty expectedNonce = "no nonce was minted for this
+// flow" — the token is rejected if it carries a nonce claim (an
+// attacker injecting a replay would carry over the nonce from the
+// original victim flow).
+func (c *Client) ExchangeCode(ctx context.Context, cfg Config, code, expectedNonce string) (*VerifiedToken, error) {
 	d, err := c.discover(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, err
@@ -230,12 +274,13 @@ func (c *Client) ExchangeCode(ctx context.Context, cfg Config, code string) (*Ve
 		return nil, errors.New("token endpoint response missing id_token — provider may not have granted openid scope")
 	}
 
-	return c.verifyIDToken(ctx, cfg, tokenResp.IDToken)
+	return c.verifyIDToken(ctx, cfg, tokenResp.IDToken, expectedNonce)
 }
 
 // verifyIDToken parses the JWT, verifies the signature via the
-// issuer's JWKS, and checks the standard claims (iss, aud, exp).
-func (c *Client) verifyIDToken(ctx context.Context, cfg Config, idToken string) (*VerifiedToken, error) {
+// issuer's JWKS, and checks the standard claims (iss, aud, exp,
+// nonce, email_verified per config).
+func (c *Client) verifyIDToken(ctx context.Context, cfg Config, idToken, expectedNonce string) (*VerifiedToken, error) {
 	kf, err := c.jwks(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("jwks fetch: %w", err)
@@ -266,8 +311,11 @@ func (c *Client) verifyIDToken(ctx context.Context, cfg Config, idToken string) 
 	claims.Subject, _ = rawClaims["sub"].(string)
 	claims.Issuer, _ = rawClaims["iss"].(string)
 	// aud can be either a string or a []any per spec; we asked
-	// jwt.WithAudience to enforce, so if we got here it matched.
-	// Just record whichever we can extract.
+	// jwt.WithAudience to enforce membership, so if we got here it
+	// matched. Record it + additionally enforce OIDC §3.1.3.7 rule
+	// 4/5: when aud is multi-valued, the token MUST carry an azp
+	// (authorized party) claim equal to our client_id. Missing azp
+	// on a multi-aud token is a spec violation and we reject.
 	switch a := rawClaims["aud"].(type) {
 	case string:
 		claims.Audience = a
@@ -275,7 +323,17 @@ func (c *Client) verifyIDToken(ctx context.Context, cfg Config, idToken string) 
 		if len(a) > 0 {
 			claims.Audience, _ = a[0].(string)
 		}
+		if len(a) > 1 {
+			azp, _ := rawClaims["azp"].(string)
+			if azp == "" {
+				return nil, errors.New("id_token has multi-valued aud but no azp claim (OIDC §3.1.3.7 violation)")
+			}
+			if azp != cfg.ClientID {
+				return nil, fmt.Errorf("id_token azp=%q does not match client_id=%q", azp, cfg.ClientID)
+			}
+		}
 	}
+	claims.Nonce, _ = rawClaims["nonce"].(string)
 	claims.Email, _ = rawClaims["email"].(string)
 	claims.EmailVerified, _ = rawClaims["email_verified"].(bool)
 	claims.Name, _ = rawClaims["name"].(string)
@@ -286,15 +344,33 @@ func (c *Client) verifyIDToken(ctx context.Context, cfg Config, idToken string) 
 		claims.IssuedAt = int64(iat)
 	}
 
+	// Nonce enforcement — was previously "docs on the caller" and
+	// silently forgettable. Reviewer's #535 finding: a token with
+	// NO nonce claim was verifying fine. Now enforced here in every
+	// case (fail-safe when the caller expected one; fail-safe when
+	// the caller passed "" but the token has a nonce claim,
+	// suggesting a replay).
+	if expectedNonce != "" && claims.Nonce != expectedNonce {
+		return nil, errors.New("id_token nonce does not match expected value — possible replay")
+	}
+	if expectedNonce == "" && claims.Nonce != "" {
+		return nil, errors.New("id_token carries nonce but caller expected none — possible replay")
+	}
+
 	if claims.Email == "" {
 		return nil, errors.New("id_token missing email claim — request `email` scope from the provider")
 	}
-	// email_verified isn't guaranteed present (Okta ships it, some
-	// generic OIDC don't); treat missing as "not verified" and let
-	// the caller decide the policy. For SSO we accept unverified —
-	// the IdP is authoritative over its own domain; the email being
-	// unverified there is the customer's IdP-config problem, not
-	// ours.
+	// email_verified: the safe default is to REJECT if the claim is
+	// false or absent. Callers who intentionally rely on a
+	// domain-binding layer (SSO handler + DNS-TXT-verified
+	// primary_email_domain) can opt out via
+	// Config.AllowUnverifiedEmail=true — that's the platform-SSO
+	// path per migration 000114's DNS-verification protocol. Any
+	// other caller (tenant-end-user auth, one-off scripts) gets the
+	// strict behavior.
+	if !cfg.AllowUnverifiedEmail && !claims.EmailVerified {
+		return nil, errors.New("id_token email_verified is false or missing (set Config.AllowUnverifiedEmail=true if you're binding email domain to a verified org)")
+	}
 
 	return &VerifiedToken{
 		Claims:    claims,
@@ -310,6 +386,9 @@ func (c *Client) discover(ctx context.Context, issuer string) (*Discovery, error
 		return nil, errors.New("empty issuer")
 	}
 	issuer = strings.TrimRight(issuer, "/")
+	if err := requireSecureIssuer(issuer); err != nil {
+		return nil, err
+	}
 
 	c.mu.RLock()
 	d, ok := c.discCache[issuer]

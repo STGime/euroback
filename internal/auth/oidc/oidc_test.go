@@ -38,6 +38,16 @@ type fakeIdPOverrides struct {
 	idTokenIssuer string
 	// idTokenAud — override the `aud` claim.
 	idTokenAud string
+	// idTokenAudMulti — mint aud as a []any (multi-valued) instead
+	// of a plain string. Enables testing OIDC §3.1.3.7 azp rules.
+	idTokenAudMulti []string
+	// idTokenAzp — set the `azp` claim on the ID token.
+	idTokenAzp string
+	// idTokenNonce — set the `nonce` claim on the ID token.
+	idTokenNonce string
+	// emailVerified — force email_verified true/false on the token
+	// (nil = default true).
+	emailVerified *bool
 	// dropEmail — mint an ID token without the email claim.
 	dropEmail bool
 	// expiredIDToken — mint an ID token that's already expired.
@@ -140,20 +150,38 @@ func (f *fakeIdP) mintIDToken(sub, clientID string) string {
 	if iss == "" {
 		iss = f.server.URL
 	}
-	aud := f.overrides.idTokenAud
-	if aud == "" {
-		aud = clientID
-	}
 	claims := jwt.MapClaims{
 		"iss": iss,
-		"aud": aud,
 		"sub": sub,
 		"iat": now,
 		"exp": exp,
 	}
+	if len(f.overrides.idTokenAudMulti) > 0 {
+		auds := make([]any, len(f.overrides.idTokenAudMulti))
+		for i, a := range f.overrides.idTokenAudMulti {
+			auds[i] = a
+		}
+		claims["aud"] = auds
+	} else {
+		aud := f.overrides.idTokenAud
+		if aud == "" {
+			aud = clientID
+		}
+		claims["aud"] = aud
+	}
+	if f.overrides.idTokenAzp != "" {
+		claims["azp"] = f.overrides.idTokenAzp
+	}
+	if f.overrides.idTokenNonce != "" {
+		claims["nonce"] = f.overrides.idTokenNonce
+	}
 	if !f.overrides.dropEmail {
 		claims["email"] = sub + "@example.com"
-		claims["email_verified"] = true
+		verified := true
+		if f.overrides.emailVerified != nil {
+			verified = *f.overrides.emailVerified
+		}
+		claims["email_verified"] = verified
 		claims["name"] = "Test User " + sub
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -260,12 +288,13 @@ func TestExchangeCode_HappyPath(t *testing.T) {
 	f.registerCode("code-1", "user-1")
 	c := NewClient()
 	cfg := Config{
-		Issuer:       f.URL(),
-		ClientID:     "cid-1",
-		ClientSecret: "secret",
-		RedirectURL:  "https://console.example.com/cb",
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true, // SSO handler sets this true + relies on domain binding
 	}
-	vt, err := c.ExchangeCode(context.Background(), cfg, "code-1")
+	vt, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
@@ -293,12 +322,13 @@ func TestExchangeCode_RejectsWrongAudience(t *testing.T) {
 	f.overrides.idTokenAud = "some-other-app"
 	c := NewClient()
 	cfg := Config{
-		Issuer:       f.URL(),
-		ClientID:     "cid-1",
-		ClientSecret: "secret",
-		RedirectURL:  "https://console.example.com/cb",
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true, // SSO handler sets this true + relies on domain binding
 	}
-	_, err := c.ExchangeCode(context.Background(), cfg, "code-1")
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
 	if err == nil {
 		t.Fatalf("expected audience-mismatch error, got nil")
 	}
@@ -311,12 +341,13 @@ func TestExchangeCode_RejectsExpiredToken(t *testing.T) {
 	f.overrides.expiredIDToken = true
 	c := NewClient()
 	cfg := Config{
-		Issuer:       f.URL(),
-		ClientID:     "cid-1",
-		ClientSecret: "secret",
-		RedirectURL:  "https://console.example.com/cb",
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true, // SSO handler sets this true + relies on domain binding
 	}
-	_, err := c.ExchangeCode(context.Background(), cfg, "code-1")
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
 	if err == nil {
 		t.Fatalf("expected expired-token error, got nil")
 	}
@@ -329,12 +360,13 @@ func TestExchangeCode_RejectsMissingEmail(t *testing.T) {
 	f.overrides.dropEmail = true
 	c := NewClient()
 	cfg := Config{
-		Issuer:       f.URL(),
-		ClientID:     "cid-1",
-		ClientSecret: "secret",
-		RedirectURL:  "https://console.example.com/cb",
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true, // SSO handler sets this true + relies on domain binding
 	}
-	_, err := c.ExchangeCode(context.Background(), cfg, "code-1")
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
 	if err == nil {
 		t.Fatalf("expected missing-email error, got nil")
 	}
@@ -348,16 +380,238 @@ func TestExchangeCode_UnknownCode(t *testing.T) {
 	f := newFakeIdP(t)
 	c := NewClient()
 	cfg := Config{
-		Issuer:       f.URL(),
-		ClientID:     "cid-1",
-		ClientSecret: "secret",
-		RedirectURL:  "https://console.example.com/cb",
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true, // SSO handler sets this true + relies on domain binding
 	}
-	_, err := c.ExchangeCode(context.Background(), cfg, "not-registered")
+	_, err := c.ExchangeCode(context.Background(), cfg, "not-registered", "")
 	if err == nil {
 		t.Fatalf("expected error on unknown code, got nil")
 	}
 	if !strings.Contains(err.Error(), "400") {
 		t.Errorf("expected HTTP 400 in error, got: %v", err)
+	}
+}
+
+// ── Nonce enforcement — new after #535 review ──────────────────
+
+func TestExchangeCode_NonceMatchesExpected(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	f.overrides.idTokenNonce = "n-abc"
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	vt, err := c.ExchangeCode(context.Background(), cfg, "code-1", "n-abc")
+	if err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if vt.Claims.Nonce != "n-abc" {
+		t.Errorf("expected claims.Nonce=n-abc, got %q", vt.Claims.Nonce)
+	}
+}
+
+func TestExchangeCode_RejectsMismatchedNonce(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	f.overrides.idTokenNonce = "n-abc"
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "n-different")
+	if err == nil || !strings.Contains(err.Error(), "nonce") {
+		t.Fatalf("expected nonce-mismatch error, got: %v", err)
+	}
+}
+
+func TestExchangeCode_RejectsMissingNonceWhenExpected(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	// idTokenNonce override is empty → token minted without nonce claim.
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "n-expected-but-absent")
+	if err == nil || !strings.Contains(err.Error(), "nonce") {
+		t.Fatalf("expected nonce error when caller expected one and token has none, got: %v", err)
+	}
+}
+
+func TestExchangeCode_RejectsUnexpectedNonce(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	f.overrides.idTokenNonce = "n-leftover-from-victim-flow"
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
+	if err == nil || !strings.Contains(err.Error(), "nonce") {
+		t.Fatalf("expected replay-suggestive nonce error, got: %v", err)
+	}
+}
+
+// ── email_verified strict mode — new after #535 review ─────────
+
+func TestExchangeCode_StrictModeRejectsUnverifiedEmail(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	falseVal := false
+	f.overrides.emailVerified = &falseVal
+	c := NewClient()
+	cfg := Config{
+		Issuer:       f.URL(),
+		ClientID:     "cid-1",
+		ClientSecret: "secret",
+		RedirectURL:  "https://console.example.com/cb",
+		// AllowUnverifiedEmail: false (default)
+	}
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
+	if err == nil || !strings.Contains(err.Error(), "email_verified") {
+		t.Fatalf("expected email_verified error, got: %v", err)
+	}
+}
+
+func TestExchangeCode_LooseModeAcceptsUnverifiedEmail(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	falseVal := false
+	f.overrides.emailVerified = &falseVal
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	vt, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
+	if err != nil {
+		t.Fatalf("expected accept, got: %v", err)
+	}
+	if vt.Claims.EmailVerified {
+		t.Errorf("expected EmailVerified=false in claims")
+	}
+}
+
+// ── OIDC §3.1.3.7 azp rules for multi-valued aud ──────────────
+
+func TestExchangeCode_MultiAudRequiresAzp(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	f.overrides.idTokenAudMulti = []string{"cid-1", "other-app"}
+	// idTokenAzp intentionally left empty
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
+	if err == nil || !strings.Contains(err.Error(), "azp") {
+		t.Fatalf("expected azp error on multi-aud without azp, got: %v", err)
+	}
+}
+
+func TestExchangeCode_MultiAudRejectsWrongAzp(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	f.overrides.idTokenAudMulti = []string{"cid-1", "other-app"}
+	f.overrides.idTokenAzp = "other-app" // NOT cid-1
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	_, err := c.ExchangeCode(context.Background(), cfg, "code-1", "")
+	if err == nil || !strings.Contains(err.Error(), "azp") {
+		t.Fatalf("expected azp mismatch error, got: %v", err)
+	}
+}
+
+func TestExchangeCode_MultiAudAcceptsMatchingAzp(t *testing.T) {
+	t.Parallel()
+	f := newFakeIdP(t)
+	f.registerCode("code-1", "user-1")
+	f.overrides.idTokenAudMulti = []string{"cid-1", "other-app"}
+	f.overrides.idTokenAzp = "cid-1"
+	c := NewClient()
+	cfg := Config{
+		Issuer:               f.URL(),
+		ClientID:             "cid-1",
+		ClientSecret:         "secret",
+		RedirectURL:          "https://console.example.com/cb",
+		AllowUnverifiedEmail: true,
+	}
+	if _, err := c.ExchangeCode(context.Background(), cfg, "code-1", ""); err != nil {
+		t.Fatalf("expected accept on multi-aud + matching azp, got: %v", err)
+	}
+}
+
+// ── Issuer must be https:// (loopback carve-out for tests) ─────
+
+func TestDiscovery_RejectsPlainHTTPIssuer(t *testing.T) {
+	t.Parallel()
+	c := NewClient()
+	_, err := c.discover(context.Background(), "http://accounts.example.com")
+	if err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("expected https requirement error, got: %v", err)
+	}
+}
+
+func TestRequireSecureIssuer_LoopbackAllowed(t *testing.T) {
+	t.Parallel()
+	for _, ok := range []string{
+		"https://accounts.example.com",
+		"http://127.0.0.1:8080",
+		"http://localhost:9000",
+		"http://[::1]:1234",
+	} {
+		if err := requireSecureIssuer(ok); err != nil {
+			t.Errorf("expected %q to pass, got: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"http://accounts.example.com",
+		"ftp://accounts.example.com",
+		"https://accounts.example.com" + "\x00", // control char — belt-and-braces; we don't reject explicitly today
+	} {
+		if err := requireSecureIssuer(bad); err == nil && bad != "https://accounts.example.com\x00" {
+			t.Errorf("expected %q to fail, got nil", bad)
+		}
 	}
 }
