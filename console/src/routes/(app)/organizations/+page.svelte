@@ -6,6 +6,14 @@
 	let orgs = $state<OrgWithMembership[]>([]);
 	let loading = $state(true);
 	let error = $state('');
+	// Team-tier gate: creation is Team-only, but invited members of
+	// a Team-org keep read access regardless of their own tier.
+	let hasTeamBeta = $state<boolean>(false);
+	// Both `loading` (orgs list) and `profileLoaded` must be true
+	// before we render the empty-state branch. Otherwise a Team user
+	// with 0 orgs briefly sees the non-Team "Upgrade to Team"
+	// nudge while getProfile is still in flight.
+	let profileLoaded = $state<boolean>(false);
 
 	// New-org modal state
 	let showNewModal = $state(false);
@@ -14,7 +22,16 @@
 	let createError = $state('');
 
 	onMount(async () => {
-		await load();
+		// Fetch profile + orgs in parallel; both are needed to render
+		// the create-org affordance vs the upgrade nudge.
+		const [profile] = await Promise.all([
+			api.getProfile().catch(() => null),
+			load(),
+		]);
+		if (profile) {
+			hasTeamBeta = profile.team_beta_access === true;
+		}
+		profileLoaded = true;
 	});
 
 	async function load() {
@@ -82,19 +99,29 @@
 				<span class="ml-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">Team-tier</span>
 			</p>
 		</div>
-		<button
-			type="button"
-			onclick={openModal}
-			class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer"
-		>
-			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-				<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-			</svg>
-			New Organization
-		</button>
+		{#if hasTeamBeta}
+			<button
+				type="button"
+				onclick={openModal}
+				class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer"
+			>
+				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+				</svg>
+				New Organization
+			</button>
+		{:else}
+			<a
+				href="/pricing"
+				class="inline-flex items-center gap-2 rounded-lg border border-eurobase-300 bg-white px-4 py-2.5 text-sm font-semibold text-eurobase-700 shadow-sm hover:bg-eurobase-50 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer"
+				title="Organizations + SSO are a Team-tier feature"
+			>
+				Upgrade to Team
+			</a>
+		{/if}
 	</div>
 
-	{#if loading}
+	{#if loading || !profileLoaded}
 		<div class="mt-16 flex flex-col items-center text-center">
 			<svg class="h-10 w-10 animate-spin text-eurobase-600" fill="none" viewBox="0 0 24 24">
 				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -113,21 +140,36 @@
 					<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21" />
 				</svg>
 			</div>
-			<h3 class="mt-4 text-lg font-semibold text-gray-900">No organizations yet</h3>
-			<p class="mt-2 max-w-sm text-sm text-gray-500">
-				Create an organization to invite teammates and set up single sign-on (OIDC).
-				Existing per-user projects are unaffected.
-			</p>
-			<button
-				type="button"
-				onclick={openModal}
-				class="mt-6 inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors cursor-pointer"
-			>
-				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-				</svg>
-				Create your first organization
-			</button>
+			{#if hasTeamBeta}
+				<h3 class="mt-4 text-lg font-semibold text-gray-900">No organizations yet</h3>
+				<p class="mt-2 max-w-sm text-sm text-gray-500">
+					Create an organization to invite teammates and set up single sign-on (OIDC).
+					Existing per-user projects are unaffected.
+				</p>
+				<button
+					type="button"
+					onclick={openModal}
+					class="mt-6 inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors cursor-pointer"
+				>
+					<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+					</svg>
+					Create your first organization
+				</button>
+			{:else}
+				<h3 class="mt-4 text-lg font-semibold text-gray-900">Organizations are a Team-tier feature</h3>
+				<p class="mt-2 max-w-md text-sm text-gray-500">
+					Upgrade to Team to create organizations, invite teammates, and enable
+					single sign-on (OIDC) for your work IdP. If someone invites you to their
+					organization, it will appear here automatically.
+				</p>
+				<a
+					href="/pricing"
+					class="mt-6 inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors cursor-pointer"
+				>
+					See Team-tier pricing
+				</a>
+			{/if}
 		</div>
 	{:else}
 		<div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

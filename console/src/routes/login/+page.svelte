@@ -287,7 +287,7 @@
 								placeholder="you@company.eu"
 								class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 							/>
-							<p class="mt-1 text-xs text-gray-400">We'll redirect you to your organization's identity provider.</p>
+							<p class="mt-1 text-xs text-gray-400">We'll redirect you to your organization's identity provider. SSO requires a Team-tier organization to have invited you.</p>
 						</div>
 						<button
 							type="submit"
@@ -440,6 +440,9 @@
 							</svg>
 							Sign in with SSO
 						</button>
+						<p class="mt-2 text-center text-[11px] text-gray-400">
+							SSO is available on <a href="/pricing" class="text-eurobase-600 hover:text-eurobase-700 underline">Team-tier plans</a>. Ask your admin to invite you.
+						</p>
 					{/if}
 
 					<div class="mt-4 text-center text-sm text-gray-500">
