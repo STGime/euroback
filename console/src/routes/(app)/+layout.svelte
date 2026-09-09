@@ -16,6 +16,15 @@
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
 	let isSuperadmin = $state<boolean>(false);
+	// Team-tier org membership: gates the "Organizations" nav entry.
+	// A user with team_beta_access can create orgs; a user who's been
+	// invited to a Team-org (but has no team_beta_access themselves)
+	// still needs the entry to see the org they're in. hasTeamAccess
+	// OR hasAnyOrgMembership → show. Cheaper than a listOrgs call in
+	// the hot layout path: profile.team_beta_access covers the create
+	// path; membership is fetched lazily on nav click.
+	let hasTeamBeta = $state<boolean>(false);
+	let hasAnyOrgMembership = $state<boolean>(false);
 
 	// Legacy-Pro projects awaiting payment (billing PR 5).
 	// Loaded on every app-shell render; the modal component
@@ -31,8 +40,21 @@
 			const profile = await api.getProfile();
 			displayName = profile.display_name;
 			isSuperadmin = profile.is_superadmin === true;
+			hasTeamBeta = profile.team_beta_access === true;
 		} catch {
 			// Silently ignore — falls back to email display.
+		}
+		// Only fire listOrgs for users who lack team_beta_access — the
+		// creators already see the nav entry via hasTeamBeta. This is
+		// how an invited Free-tier member of a Team-org still gets
+		// the entry.
+		if (!hasTeamBeta) {
+			try {
+				const res = await api.listOrgs();
+				hasAnyOrgMembership = (res.orgs?.length ?? 0) > 0;
+			} catch {
+				hasAnyOrgMembership = false;
+			}
 		}
 		try {
 			const projects = await api.listProjects();
@@ -55,7 +77,7 @@
 	let navItems = $derived(
 		[
 			{ label: 'Projects', href: '/projects', icon: 'projects' },
-			{ label: 'Organizations', href: '/organizations', icon: 'organizations' },
+			...((hasTeamBeta || hasAnyOrgMembership) ? [{ label: 'Organizations', href: '/organizations', icon: 'organizations' }] : []),
 			{ label: 'Account', href: '/account', icon: 'account' },
 			{ label: 'Billing', href: '/billing', icon: 'billing' },
 			{ label: 'Pricing', href: '/pricing', icon: 'pricing' },

@@ -49,10 +49,26 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 }
 
 // HandleCreateOrg — POST /platform/orgs {name}
+//
+// Gated on team_beta_access: orgs + SSO are a Team-tier feature and
+// pricing lists them as such. Existing invited members of an org
+// keep access regardless of their own tier — only NEW org creation
+// requires the flag. Admins can hand SSO admin off to a
+// non-Team user, but SetSSOConfig re-checks (defence in depth) so
+// SSO writes always require Team access on the caller.
 func (h *OrgsHandler) HandleCreateOrg() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := requireCallerID(w, r)
 		if !ok {
+			return
+		}
+		granted, err := UserHasTeamBetaAccess(r.Context(), h.Svc.pool, userID)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, "tier check failed")
+			return
+		}
+		if !granted {
+			writeJSONErr(w, http.StatusForbidden, "organizations are a Team-tier feature — upgrade to create one")
 			return
 		}
 		var body struct {
@@ -133,7 +149,13 @@ func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 	}
 }
 
-// HandleSetSSOConfig — PATCH /platform/orgs/{id}/sso  (admin-only)
+// HandleSetSSOConfig — PATCH /platform/orgs/{id}/sso  (admin-only, Team-tier)
+//
+// Defence-in-depth Team-tier gate: the create-org path already
+// requires team_beta_access, but the admin role can be handed off
+// to a non-Team user via InviteMember + role=admin. Re-check on
+// every SSO write so downgrading / handing off never silently
+// unlocks the SSO surface for non-Team callers.
 func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !h.Svc.SSOConfigWritable() {
@@ -142,6 +164,15 @@ func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 		}
 		userID, ok := requireCallerID(w, r)
 		if !ok {
+			return
+		}
+		granted, err := UserHasTeamBetaAccess(r.Context(), h.Svc.pool, userID)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, "tier check failed")
+			return
+		}
+		if !granted {
+			writeJSONErr(w, http.StatusForbidden, "SSO configuration is a Team-tier feature — upgrade to configure")
 			return
 		}
 		orgID := chi.URLParam(r, "id")
