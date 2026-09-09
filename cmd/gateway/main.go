@@ -575,9 +575,13 @@ func main() {
 			platformBaseURL = "https://api.eurobase.app"
 		}
 		oidcClient := oidc.NewClient()
+		// Redirect back to /login so the login page's fragment handler
+		// picks up `#access_token=...`. Landing on `/` would go through
+		// the app-layout auth guard, which strips the fragment on its
+		// bounce to /login and loses the token.
 		ssoH := auth.NewSSOHandler(pool, platformAuthSvc, gateway.NewOrgsSSOAdapter(orgsSvc), oidcClient, auth.SSOConfig{
 			PlatformJWTSecret:  []byte(platformJWTSecret),
-			ConsoleRedirectURL: consoleURL,
+			ConsoleRedirectURL: strings.TrimRight(consoleURL, "/") + "/login",
 			CallbackURL:        platformBaseURL + "/platform/auth/sso/callback",
 		})
 		ssoWiring = gateway.SSOWiring{

@@ -367,6 +367,13 @@ export interface Project {
 	 * Free. When plan='pro' AND this field is non-null, the
 	 * console shows a "add a payment method" conversion modal. */
 	legacy_pro_grace_until?: string | null;
+	/** Team-tier SSO (migration 000114). Non-null when the project is
+	 * owned by an organization — surfaces an "Org" badge in the
+	 * project card so users can tell org-visible projects apart. */
+	org_id?: string | null;
+	/** Convenience: the org name resolved server-side; matches
+	 * `org_id` when set. */
+	org_name?: string | null;
 }
 
 export interface ForeignKeyInfo {
@@ -2310,6 +2317,117 @@ export class EurobaseAPI {
 		const qs = searchParams.toString();
 		return this.fetch<LogsResponse>(`/platform/projects/${projectId}/logs${qs ? `?${qs}` : ''}`);
 	}
+
+	// ---- Organizations & SSO (Team-tier) ----
+
+	/**
+	 * Kick off an SSO login flow. Given the user's work email, the
+	 * backend resolves the matching org (via org_members email match),
+	 * signs a short-lived `state` JWT, and returns the IdP's
+	 * authorization URL. The console then redirects the browser to
+	 * that URL; the IdP posts back to `/platform/auth/sso/callback`,
+	 * which redirects to the console with the access_token in the
+	 * URL fragment. This endpoint does NOT require an existing
+	 * platform session.
+	 */
+	async initSSO(email: string): Promise<{ authorization_url: string }> {
+		return this.fetch<{ authorization_url: string }>('/platform/auth/sso/init', {
+			method: 'POST',
+			body: JSON.stringify({ email })
+		});
+	}
+
+	/** List orgs the caller is a member of. */
+	async listOrgs(): Promise<{ orgs: OrgWithMembership[]; total: number }> {
+		return this.fetch<{ orgs: OrgWithMembership[]; total: number }>('/platform/orgs');
+	}
+
+	/** Create a new org. The caller becomes its first admin. */
+	async createOrg(name: string): Promise<Org> {
+		return this.fetch<Org>('/platform/orgs', {
+			method: 'POST',
+			body: JSON.stringify({ name })
+		});
+	}
+
+	/** Get org detail — org meta, caller's role, members, SSO
+	 *  config (public shape, secret never returned). */
+	async getOrg(orgId: string): Promise<OrgDetail> {
+		return this.fetch<OrgDetail>(`/platform/orgs/${orgId}`);
+	}
+
+	/** Configure OIDC SSO for an org (admin-only). Provider is
+	 * currently a free-form label ("google", "okta", …). The
+	 * client_secret is sealed server-side with AES-256-GCM and
+	 * never returned in any read. */
+	async updateOrgSSO(orgId: string, config: {
+		provider: string;
+		issuer: string;
+		client_id: string;
+		client_secret: string;
+		redirect_url: string;
+	}): Promise<{ status: string }> {
+		return this.fetch(`/platform/orgs/${orgId}/sso`, {
+			method: 'PATCH',
+			body: JSON.stringify(config)
+		});
+	}
+
+	/** Invite a user to the org by email (admin-only). Role
+	 * defaults to "member" if omitted. */
+	async inviteOrgMember(orgId: string, email: string, role: 'admin' | 'member' = 'member'): Promise<OrgMember> {
+		return this.fetch<OrgMember>(`/platform/orgs/${orgId}/members`, {
+			method: 'POST',
+			body: JSON.stringify({ email, role })
+		});
+	}
+
+	/** Remove a member from the org (admin-only). Cannot remove
+	 * the last admin. */
+	async removeOrgMember(orgId: string, userId: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/orgs/${orgId}/members/${userId}`, {
+			method: 'DELETE'
+		});
+	}
+}
+
+export interface Org {
+	id: string;
+	name: string;
+	primary_email_domain: string | null;
+	oidc_configured: boolean;
+	created_by_id: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface OrgWithMembership extends Org {
+	role: 'admin' | 'member';
+	member_since: string;
+}
+
+export interface OrgMember {
+	id: string;
+	platform_user_id: string;
+	email: string;
+	role: 'admin' | 'member';
+	invited_via: 'manual' | 'sso';
+	created_at: string;
+}
+
+export interface OIDCConfigPublic {
+	provider: string;
+	issuer: string;
+	client_id: string;
+	redirect_url: string;
+	client_secret_set: boolean;
+}
+
+export interface OrgDetail {
+	org: Org;
+	role: 'admin' | 'member';
+	members: OrgMember[];
+	sso: OIDCConfigPublic | null;
 }
 
 export interface VaultSecret {

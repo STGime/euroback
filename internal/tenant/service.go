@@ -48,6 +48,11 @@ type Project struct {
 	// with plan='pro' — to render the "add a payment method"
 	// modal for the 1% of beta users on Pro at billing-flip time.
 	LegacyProGraceUntil *time.Time `json:"legacy_pro_grace_until,omitempty"`
+	// Team-tier org ownership (migration 000114). Nullable; NULL
+	// means the project is per-user-owned. When set, org_members of
+	// this org can see the project through the additive access path.
+	OrgID   *string `json:"org_id,omitempty"`
+	OrgName *string `json:"org_name,omitempty"`
 }
 
 // SecretStore is the minimal interface the tenant package needs to persist
@@ -460,14 +465,28 @@ func (s *TenantService) annotateAuthConfig(ctx context.Context, schemaName strin
 // ListProjects returns all projects the given platform user is a member of
 // (owner, admin, developer, or viewer).
 func (s *TenantService) ListProjects(ctx context.Context, platformUserID string) ([]Project, error) {
+	// Team-tier additive access (migration 000114). A user sees a
+	// project when EITHER (a) they're an explicit project_member OR
+	// (b) they're a member of the org that owns the project. The
+	// existing owner_id / project_members path is untouched — this is
+	// purely a UNION for the listing surface. DISTINCT because a
+	// user can be both an explicit project member AND an org member;
+	// we don't want the row twice.
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
+		`SELECT DISTINCT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
 		        p.region, p.plan, p.status, p.auth_config, p.created_at,
 		        p.state, p.last_active_at, p.grandfathered_until,
-		        p.legacy_pro_grace_until
+		        p.legacy_pro_grace_until,
+		        p.org_id::text, o.name AS org_name
 		 FROM projects p
-		 JOIN project_members pm ON pm.project_id = p.id
-		 WHERE pm.user_id = $1::uuid
+		 LEFT JOIN organizations o ON o.id = p.org_id
+		 WHERE p.id IN (
+		     SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $1::uuid
+		     UNION
+		     SELECT p2.id FROM projects p2
+		       JOIN org_members om ON om.org_id = p2.org_id
+		       WHERE om.platform_user_id = $1::uuid
+		 )
 		 ORDER BY p.created_at DESC`,
 		platformUserID,
 	)
@@ -480,7 +499,8 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 	for rows.Next() {
 		var p Project
 		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status,
-			&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil); err != nil {
+			&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil,
+			&p.OrgID, &p.OrgName); err != nil {
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
