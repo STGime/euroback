@@ -42,6 +42,25 @@ CREATE TABLE public.organizations (
     -- the new member into. Nullable because MVP allows an org that
     -- explicitly invites members without domain matching (small
     -- consultancies, multi-brand agencies).
+    --
+    -- SECURITY — domain-squatting attack surface (#534 review).
+    -- The column has NO UNIQUE constraint, so two orgs can claim
+    -- the same domain. That's deliberate at the schema layer
+    -- (multi-brand orgs, mergers, and post-acquisition renaming
+    -- would break under a global UNIQUE), BUT the follow-up
+    -- HANDLER PR MUST enforce DNS proof before honouring a domain
+    -- for SSO auto-provisioning:
+    --   1. Admin sets primary_email_domain='acme.com'
+    --   2. Handler emits a random TXT-record token
+    --      (e.g. 'eurobase-verification=xxxxx')
+    --   3. Domain stays UNVERIFIED (SSO auto-provisioning refuses)
+    --      until DNS resolves the TXT record
+    --   4. Once verified, an audit_log row + a verified_at column
+    --      (new in a Phase-2 migration) marks the domain trusted.
+    -- Without this the first attacker who registers an org can
+    -- claim victim-corp.com and intercept SSO logins. This is a
+    -- HANDLER-level requirement — do not merge the SSO handler PR
+    -- without it.
     primary_email_domain   TEXT NULL,
     -- OIDC provider config as JSONB:
     --   {
@@ -56,7 +75,18 @@ CREATE TABLE public.organizations (
     -- value lives in public.vault_secrets. A JSONB dump of this
     -- table therefore leaks NO usable IdP credential.
     oidc_config            JSONB NULL,
-    created_by             UUID NOT NULL REFERENCES public.platform_users(id) ON DELETE SET NULL,
+    -- Nullable + ON DELETE SET NULL: deleting the platform_user who
+    -- created the org sets created_by to NULL rather than aborting
+    -- the DELETE. The alternative — NOT NULL + ON DELETE RESTRICT —
+    -- would block offboarding any staff member who has ever stood
+    -- up an org until every org they created gets reassigned; that's
+    -- a surprise for a normal user-deletion path and not what the
+    -- created_by field is for. Losing "who created this" after
+    -- deletion is acceptable — the audit_log carries actor info per
+    -- write, so the org's provenance survives elsewhere.
+    -- (#534 review: NOT NULL + SET NULL was contradictory —
+    -- reviewer reproduced a DELETE-aborts-on-cascade on PG16.)
+    created_by             UUID NULL REFERENCES public.platform_users(id) ON DELETE SET NULL,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
 
