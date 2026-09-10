@@ -260,7 +260,17 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 		userID, isSuperadmin, err := lookupPlatformUserForSSO(r.Context(), h.pool, vt.Claims.Email)
 		if err != nil {
 			if errors.Is(err, errSSOUserNotProvisioned) {
-				slog.Warn("sso callback: no platform_users row for IdP email", "org_id", claims.OrgID)
+				// Log the IdP-asserted email at WARN so ops can
+				// diagnose "I have an account, why did SSO reject me"
+				// quickly. Users typing a work email into SSO init
+				// but having a personal Google account under a
+				// different address is a common trap; without this
+				// line we're guessing at what Google returned.
+				slog.Warn("sso callback: no platform_users row for IdP email",
+					"org_id", claims.OrgID,
+					"idp_email", vt.Claims.Email,
+					"idp_email_verified", vt.Claims.EmailVerified,
+					"idp_sub", vt.Claims.Subject)
 				h.redirectWithError(w, r, "not_a_member", "you are not a member of this organization — ask an admin to invite you")
 				return
 			}
@@ -341,8 +351,42 @@ var errSSOUserNotProvisioned = errors.New("sso: no platform_users row for email"
 // lookupPlatformUserForSSO returns the (userID, isSuperadmin) for
 // an IdP-supplied email. It does NOT create the row on miss —
 // see errSSOUserNotProvisioned + the callback's manual-invite gate.
+//
+// Two-step match. First tries the exact lowercased email as it
+// comes off the ID token. If that misses AND the address is
+// @gmail.com / @googlemail.com, retries against a Gmail-normalized
+// form (dots removed from the local part + `+tag` stripped). This
+// closes a real-world usability trap: the user's Eurobase account
+// might be `stefan.gimeson@gmail.com` while their Google account's
+// canonical primary email — which is what Google returns in the
+// `email` claim — might be `stefangimeson@gmail.com`. Both route to
+// the same inbox and the invite gate is enforced separately via
+// `EnsureMemberFromSSO`, so this only widens WHICH platform_users
+// row we resolve; it doesn't loosen the security posture.
 func lookupPlatformUserForSSO(ctx context.Context, pool *pgxpool.Pool, email string) (string, bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
+	userID, isSuperadmin, err := queryUserByExactEmail(ctx, pool, email)
+	if err == nil {
+		return userID, isSuperadmin, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", false, fmt.Errorf("lookup user: %w", err)
+	}
+	// Fallback: Gmail-normalized match. Widens the lookup to any
+	// row whose Gmail-canonical form matches the IdP-supplied one.
+	if norm := gmailCanonical(email); norm != "" && norm != email {
+		userID, isSuperadmin, err = queryUserByGmailCanonical(ctx, pool, norm)
+		if err == nil {
+			return userID, isSuperadmin, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", false, fmt.Errorf("lookup user (gmail-normalized): %w", err)
+		}
+	}
+	return "", false, errSSOUserNotProvisioned
+}
+
+func queryUserByExactEmail(ctx context.Context, pool *pgxpool.Pool, email string) (string, bool, error) {
 	var userID string
 	var isSuperadmin bool
 	err := pool.QueryRow(ctx, `
@@ -350,11 +394,52 @@ func lookupPlatformUserForSSO(ctx context.Context, pool *pgxpool.Pool, email str
 		  FROM public.platform_users
 		 WHERE lower(email) = $1
 	`, email).Scan(&userID, &isSuperadmin)
-	if err == nil {
-		return userID, isSuperadmin, nil
+	return userID, isSuperadmin, err
+}
+
+// queryUserByGmailCanonical scans rows whose local part collapses
+// (dots + `+tag` stripped) to the given canonical Gmail address.
+// This is only called when the exact match missed AND the
+// IdP-supplied address is @gmail.com or @googlemail.com.
+//
+// The WHERE clause matches any platform_users row whose email
+// domain is @gmail.com / @googlemail.com AND whose Gmail-canonical
+// form == the target. Done in-Postgres via `regexp_replace` +
+// `split_part` so we don't have to load every row into Go.
+func queryUserByGmailCanonical(ctx context.Context, pool *pgxpool.Pool, canonical string) (string, bool, error) {
+	var userID string
+	var isSuperadmin bool
+	err := pool.QueryRow(ctx, `
+		SELECT id::text, COALESCE(is_superadmin, false)
+		  FROM public.platform_users
+		 WHERE lower(split_part(email, '@', 2)) IN ('gmail.com', 'googlemail.com')
+		   AND lower(regexp_replace(split_part(email, '@', 1), '\.|(\+.*)$', '', 'g')) || '@gmail.com' = $1
+		 LIMIT 1
+	`, canonical).Scan(&userID, &isSuperadmin)
+	return userID, isSuperadmin, err
+}
+
+// gmailCanonical returns the dots-stripped, `+tag`-stripped form
+// of a @gmail.com / @googlemail.com address, normalized to
+// @gmail.com so the two domains map to a single canonical.
+// Returns "" for non-Gmail addresses.
+func gmailCanonical(email string) string {
+	at := strings.LastIndex(email, "@")
+	if at < 0 {
+		return ""
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, errSSOUserNotProvisioned
+	local := email[:at]
+	domain := email[at+1:]
+	if domain != "gmail.com" && domain != "googlemail.com" {
+		return ""
 	}
-	return "", false, fmt.Errorf("lookup user: %w", err)
+	// Strip everything from `+` onward, then remove dots.
+	if plus := strings.Index(local, "+"); plus >= 0 {
+		local = local[:plus]
+	}
+	local = strings.ReplaceAll(local, ".", "")
+	if local == "" {
+		return ""
+	}
+	return local + "@gmail.com"
 }
