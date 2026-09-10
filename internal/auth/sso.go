@@ -304,8 +304,13 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 			"expires_in":   {fmt.Sprintf("%d", expiresIn)},
 			"sso":          {"1"},
 		}
-		u.Fragment = frag.Encode()
-		http.Redirect(w, r, u.String(), http.StatusFound)
+		// Append the fragment manually. Setting u.Fragment to an
+		// already-encoded string double-encodes on u.String(): Go
+		// treats u.Fragment as the DECODED fragment and re-escapes
+		// every `%` as `%25`. That was invisible for base64url
+		// tokens (no special chars) but broke the error path where
+		// a UTF-8 em-dash surfaced as `%E2%80%94` in the console.
+		http.Redirect(w, r, u.String()+"#"+frag.Encode(), http.StatusFound)
 	}
 }
 
@@ -322,8 +327,8 @@ func (h *SSOHandler) redirectWithError(w http.ResponseWriter, r *http.Request, c
 		u.Path = strings.TrimRight(u.Path, "/") + "/login"
 	}
 	frag := url.Values{"sso_error": {code}, "sso_error_msg": {msg}}
-	u.Fragment = frag.Encode()
-	http.Redirect(w, r, u.String(), http.StatusFound)
+	// Same double-encode workaround as the success path above.
+	http.Redirect(w, r, u.String()+"#"+frag.Encode(), http.StatusFound)
 }
 
 // errSSOUserNotProvisioned is returned by lookupPlatformUserForSSO
