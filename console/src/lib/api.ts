@@ -2389,6 +2389,29 @@ export class EurobaseAPI {
 			method: 'DELETE'
 		});
 	}
+
+	// ---- Team-tier priority support ----
+
+	/**
+	 * File a Team-tier priority-support ticket. Backend gates on
+	 * team_beta_access and rate-limits per user + per IP. Fires a
+	 * Discord webhook to the ops channel (see gateway env chain
+	 * DISCORD_SUPPORT_WEBHOOK → DISCORD_ALERTS_WEBHOOK →
+	 * DISCORD_SIGNUPS_WEBHOOK) so ops sees new tickets in real time.
+	 */
+	async submitSupportRequest(body: {
+		subject: string;
+		message: string;
+		category?: 'question' | 'bug' | 'billing' | 'feature' | 'other';
+		priority?: 'normal' | 'urgent';
+		org_id?: string | null;
+		project_id?: string | null;
+	}): Promise<{ id: string; status: string }> {
+		return this.fetch<{ id: string; status: string }>('/platform/support/request', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		});
+	}
 }
 
 export interface Org {
