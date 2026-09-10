@@ -167,6 +167,22 @@ func main() {
 	}
 	tenant.SetDiscordContactWebhook(contactWebhook)
 
+	// Team-tier priority-support ticket notifications. Same fallback
+	// chain as the contact form but starts with the dedicated
+	// DISCORD_SUPPORT_WEBHOOK, then the ops-alerts channel
+	// (DISCORD_ALERTS_WEBHOOK — already in eurobase-secrets via
+	// deploy/create-secrets.sh), then the signups channel. Ops picks
+	// which channel via that env chain — no code change needed to
+	// re-route.
+	supportWebhook := os.Getenv("DISCORD_SUPPORT_WEBHOOK")
+	if supportWebhook == "" {
+		supportWebhook = os.Getenv("DISCORD_ALERTS_WEBHOOK")
+	}
+	if supportWebhook == "" {
+		supportWebhook = os.Getenv("DISCORD_SIGNUPS_WEBHOOK")
+	}
+	tenant.SetDiscordSupportWebhook(supportWebhook)
+
 	if !platformAuthSvc.AllowPublicSignup {
 		slog.Info("signup gated behind platform_allowlist (set ALLOW_PUBLIC_SIGNUP=true to open)")
 	}

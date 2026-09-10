@@ -82,6 +82,11 @@
 			{ label: 'Billing', href: '/billing', icon: 'billing' },
 			{ label: 'Pricing', href: '/pricing', icon: 'pricing' },
 			{ label: 'Documentation', href: '/docs', icon: 'docs' },
+			// Team-tier: priority-support ticket form. Non-Team users
+			// still get the /support route but it renders an upgrade
+			// nudge instead of the form. Nav-hidden to avoid a false
+			// promise in the sidebar.
+			...(hasTeamBeta ? [{ label: 'Support', href: '/support', icon: 'support' }] : []),
 			...(isSuperadmin ? [{ label: 'Admin', href: '/admin', icon: 'admin' }] : [])
 		]
 	);
@@ -128,6 +133,12 @@
 							     the Team-tier org surface. -->
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21" />
+							</svg>
+						{:else if item.icon === 'support'}
+							<!-- Life-buoy icon (Heroicons outline) for the
+							     Team-tier priority-support entry point. -->
+							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12ZM12 22.5V18M12 6V1.5M6 12H1.5M22.5 12H18M7.757 7.757 4.575 4.575M19.425 19.425l-3.182-3.182M7.757 16.243l-3.182 3.182M19.425 4.575l-3.182 3.182" />
 							</svg>
 						{:else if item.icon === 'docs'}
 							<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

@@ -618,6 +618,20 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 		})
 
+		// Team-tier priority-support ticket submit (#537 follow-up).
+		// The handler gates on team_beta_access itself + rate-limits
+		// per user AND per IP. Runs on the developer pool because
+		// support_requests only grants that role (see migration 000115).
+		r.Route("/support", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			supportH := &tenant.SupportHandler{Pool: developerPool, Limiter: limiter}
+			r.Post("/request", supportH.HandleSubmitSupportRequest())
+		})
+
 		// Authenticated: billing (Mollie subscription checkout).
 		// Feature-flagged behind BILLING_ENABLED — the handler
 		// returns 503 when the service reports disabled, so wiring
