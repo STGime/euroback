@@ -8,6 +8,37 @@ import (
 	"testing"
 )
 
+// TestGmailCanonical pins the Gmail dot-and-plus-tag normalization
+// used to salvage SSO logins where the user's Eurobase email uses a
+// different form (dot placement, +tag) than the canonical email
+// Google returns in the OIDC id_token. Non-Gmail addresses return
+// "" so the caller knows to fall through instead of matching too
+// broadly (e.g. we do NOT strip dots from "acme.com" addresses —
+// those are different mailboxes).
+func TestGmailCanonical(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		// Gmail: dots stripped, +tag stripped, googlemail folds to gmail.
+		{"stefan.gimeson@gmail.com", "stefangimeson@gmail.com"},
+		{"stefangimeson@gmail.com", "stefangimeson@gmail.com"},
+		{"stefan.gimeson+foo@gmail.com", "stefangimeson@gmail.com"},
+		{"stefan+foo@googlemail.com", "stefan@gmail.com"},
+		{"a.b.c.d@gmail.com", "abcd@gmail.com"},
+		{"A.B@GMAIL.COM", ""},           // caller lowercases; we only canonicalize post-lower
+		{"acme@example.com", ""},        // not Gmail
+		{"bad", ""},                     // no @
+		{"@gmail.com", ""},              // empty local part
+		{"+tag@gmail.com", ""},          // local part is only a tag
+	}
+	for _, tc := range cases {
+		got := gmailCanonical(tc.in)
+		if got != tc.want {
+			t.Errorf("gmailCanonical(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestRedirectWithError_NoDoubleEncoding pins the fix for the
 // bug spotted in prod on 2026-09-10: the em-dash in the
 // "not_a_member" error message rendered as `%E2%80%94` in the
