@@ -257,7 +257,7 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 		// before we create any state. Defence-in-depth against a
 		// permissive IdP: even if init were bypassed, the callback
 		// cannot mint a fresh platform_users row for a random email.
-		userID, isSuperadmin, err := lookupPlatformUserForSSO(r.Context(), h.pool, vt.Claims.Email)
+		userID, isSuperadmin, err := lookupPlatformUserForSSO(r.Context(), h.pool, vt.Claims.Email, claims.OrgID)
 		if err != nil {
 			if errors.Is(err, errSSOUserNotProvisioned) {
 				// Log the IdP-asserted email at WARN so ops can
@@ -349,74 +349,115 @@ func (h *SSOHandler) redirectWithError(w http.ResponseWriter, r *http.Request, c
 var errSSOUserNotProvisioned = errors.New("sso: no platform_users row for email")
 
 // lookupPlatformUserForSSO returns the (userID, isSuperadmin) for
-// an IdP-supplied email. It does NOT create the row on miss —
-// see errSSOUserNotProvisioned + the callback's manual-invite gate.
+// an IdP-supplied email + target org. Does NOT create the row on
+// miss — see errSSOUserNotProvisioned + the callback's
+// manual-invite gate.
 //
-// Two-step match. First tries the exact lowercased email as it
-// comes off the ID token. If that misses AND the address is
-// @gmail.com / @googlemail.com, retries against a Gmail-normalized
-// form (dots removed from the local part + `+tag` stripped). This
-// closes a real-world usability trap: the user's Eurobase account
-// might be `stefan.gimeson@gmail.com` while their Google account's
-// canonical primary email — which is what Google returns in the
-// `email` claim — might be `stefangimeson@gmail.com`. Both route to
-// the same inbox and the invite gate is enforced separately via
-// `EnsureMemberFromSSO`, so this only widens WHICH platform_users
-// row we resolve; it doesn't loosen the security posture.
-func lookupPlatformUserForSSO(ctx context.Context, pool *pgxpool.Pool, email string) (string, bool, error) {
+// Resolution strategy (in order):
+//
+//  1. Exact lowercased email match. If that row IS a member of
+//     `orgID`, we're done — the common case.
+//  2. If the exact match hit but the row is NOT a member of `orgID`,
+//     OR if the exact match missed AND the address is @gmail.com /
+//     @googlemail.com, fall back to a Gmail-normalized lookup that
+//     PREFERS candidates who are already members of the target
+//     org. This closes a real-world trap: a stale phantom
+//     platform_users row (created by an early SSO attempt under
+//     the OLD auto-provision codepath, since removed) can collide
+//     with the real invited row. Without the org-preference
+//     ORDER BY, `LIMIT 1` picked the phantom and left the user
+//     locked out.
+//  3. Return errSSOUserNotProvisioned if nothing matches.
+//
+// The manual-invite gate is enforced separately via
+// EnsureMemberFromSSO downstream — this function widens WHICH
+// platform_users row we resolve; it does not loosen the security
+// posture.
+func lookupPlatformUserForSSO(ctx context.Context, pool *pgxpool.Pool, email, orgID string) (string, bool, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	userID, isSuperadmin, err := queryUserByExactEmail(ctx, pool, email)
-	if err == nil {
-		return userID, isSuperadmin, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+
+	// Step 1: exact match, requiring org membership to win outright.
+	userID, isSuperadmin, isMember, err := queryUserByExactEmail(ctx, pool, email, orgID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return "", false, fmt.Errorf("lookup user: %w", err)
 	}
-	// Fallback: Gmail-normalized match. Widens the lookup to any
-	// row whose Gmail-canonical form matches the IdP-supplied one.
-	if norm := gmailCanonical(email); norm != "" && norm != email {
-		userID, isSuperadmin, err = queryUserByGmailCanonical(ctx, pool, norm)
-		if err == nil {
-			return userID, isSuperadmin, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+	// Exact match + member of the target org: done.
+	if err == nil && isMember {
+		return userID, isSuperadmin, nil
+	}
+	// Cache the exact hit — we'll fall back to it if the Gmail
+	// fallback ALSO doesn't find a member candidate.
+	exactHit := err == nil
+	exactUserID, exactIsSuperadmin := userID, isSuperadmin
+
+	// Step 2: Gmail-normalized fallback that prefers the row that's
+	// actually an org member. Only fires for Gmail-family addresses.
+	if norm := gmailCanonical(email); norm != "" {
+		userID, isSuperadmin, isMember, err = queryUserByGmailCanonical(ctx, pool, norm, orgID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return "", false, fmt.Errorf("lookup user (gmail-normalized): %w", err)
 		}
+		if err == nil {
+			// The Gmail fallback prefers members via ORDER BY.
+			// If it found ONE at all, use it — either it's a
+			// member (win), or the exact match wasn't a member
+			// either and this is the only viable candidate.
+			if isMember || !exactHit {
+				return userID, isSuperadmin, nil
+			}
+			// Neither the exact hit nor the Gmail-fallback hit
+			// are org members. Prefer the exact-match user id so
+			// the downstream EnsureMemberFromSSO produces a
+			// stable, predictable "not_a_member" error tied to
+			// the row the IdP actually asserted.
+		}
+	}
+	if exactHit {
+		return exactUserID, exactIsSuperadmin, nil
 	}
 	return "", false, errSSOUserNotProvisioned
 }
 
-func queryUserByExactEmail(ctx context.Context, pool *pgxpool.Pool, email string) (string, bool, error) {
-	var userID string
-	var isSuperadmin bool
-	err := pool.QueryRow(ctx, `
-		SELECT id::text, COALESCE(is_superadmin, false)
-		  FROM public.platform_users
-		 WHERE lower(email) = $1
-	`, email).Scan(&userID, &isSuperadmin)
-	return userID, isSuperadmin, err
+// queryUserByExactEmail resolves a row by exact lowercased email +
+// reports whether that row is a member of the target org. The
+// membership boolean is what the caller uses to decide whether to
+// fall back to the Gmail-normalized search.
+func queryUserByExactEmail(ctx context.Context, pool *pgxpool.Pool, email, orgID string) (userID string, isSuperadmin, isMember bool, err error) {
+	err = pool.QueryRow(ctx, `
+		SELECT u.id::text,
+		       COALESCE(u.is_superadmin, false),
+		       EXISTS(
+		           SELECT 1 FROM public.org_members m
+		            WHERE m.org_id = $2::uuid
+		              AND m.platform_user_id = u.id
+		       )
+		  FROM public.platform_users u
+		 WHERE lower(u.email) = $1
+	`, email, orgID).Scan(&userID, &isSuperadmin, &isMember)
+	return
 }
 
 // queryUserByGmailCanonical scans rows whose local part collapses
-// (dots + `+tag` stripped) to the given canonical Gmail address.
-// This is only called when the exact match missed AND the
-// IdP-supplied address is @gmail.com or @googlemail.com.
-//
-// The WHERE clause matches any platform_users row whose email
-// domain is @gmail.com / @googlemail.com AND whose Gmail-canonical
-// form == the target. Done in-Postgres via `regexp_replace` +
-// `split_part` so we don't have to load every row into Go.
-func queryUserByGmailCanonical(ctx context.Context, pool *pgxpool.Pool, canonical string) (string, bool, error) {
-	var userID string
-	var isSuperadmin bool
-	err := pool.QueryRow(ctx, `
-		SELECT id::text, COALESCE(is_superadmin, false)
-		  FROM public.platform_users
-		 WHERE lower(split_part(email, '@', 2)) IN ('gmail.com', 'googlemail.com')
-		   AND lower(regexp_replace(split_part(email, '@', 1), '\.|(\+.*)$', '', 'g')) || '@gmail.com' = $1
+// (dots + `+tag` stripped) to the given canonical Gmail address,
+// and RETURNS THE ORG-MEMBER CANDIDATE FIRST via an ORDER BY on
+// the EXISTS-join. Ties within the same member/non-member class
+// break by created_at ASC (older = more likely the real signup).
+func queryUserByGmailCanonical(ctx context.Context, pool *pgxpool.Pool, canonical, orgID string) (userID string, isSuperadmin, isMember bool, err error) {
+	err = pool.QueryRow(ctx, `
+		SELECT u.id::text,
+		       COALESCE(u.is_superadmin, false),
+		       EXISTS(
+		           SELECT 1 FROM public.org_members m
+		            WHERE m.org_id = $2::uuid
+		              AND m.platform_user_id = u.id
+		       ) AS is_member
+		  FROM public.platform_users u
+		 WHERE lower(split_part(u.email, '@', 2)) IN ('gmail.com', 'googlemail.com')
+		   AND lower(regexp_replace(split_part(u.email, '@', 1), '\.|(\+.*)$', '', 'g')) || '@gmail.com' = $1
+		 ORDER BY is_member DESC, u.created_at ASC
 		 LIMIT 1
-	`, canonical).Scan(&userID, &isSuperadmin)
-	return userID, isSuperadmin, err
+	`, canonical, orgID).Scan(&userID, &isSuperadmin, &isMember)
+	return
 }
 
 // gmailCanonical returns the dots-stripped, `+tag`-stripped form
