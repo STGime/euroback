@@ -191,6 +191,13 @@ jobs:
 
       - uses: actions/checkout@v4
         if: steps.fresh.outputs.stale != 'true'
+        # The gateway image embeds internal/sovereignty/data via
+        # //go:embed — that path is a git submodule pointing at
+        # sovereignty-vendors. Docker's build context needs the
+        # files present or `go build` fails with
+        # `pattern data/vendors/*.yaml: no matching files found`.
+        with:
+          submodules: recursive
 
       - name: Login to Scaleway Registry
         if: steps.fresh.outputs.stale != 'true'
