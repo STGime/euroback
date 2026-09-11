@@ -31,6 +31,7 @@ import (
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/storage"
+	"github.com/eurobase/euroback/internal/sovereignty"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/webhook"
@@ -57,7 +58,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -555,6 +556,24 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// INSERT only.
 		r.Route("/public", func(r chi.Router) {
 			r.Post("/contact", tenant.HandlePublicContactRequest(pool, limiter))
+			// CLOUD Act Exposure Checker (Tool 1 of the growth spec,
+			// issue #548). Anonymous surface — the checker is a
+			// public lead-magnet. Create runs on the gateway pool
+			// (INSERT-only per migration 000116); lookup runs on the
+			// developer pool (SELECT is developer-only, keeps the
+			// historic ledger + PII off the SDK-facing surface).
+			if sovereigntyReg != nil {
+				sh := &sovereignty.Handler{
+					GatewayPool:   pool,
+					DeveloperPool: developerPool,
+					Registry:      sovereigntyReg,
+					Limiter:       limiter,
+				}
+				r.Route("/sovereignty", func(r chi.Router) {
+					r.Post("/report", sh.HandleCreateReport())
+					r.Get("/report/{hash}", sh.HandleGetReport())
+				})
+			}
 		})
 
 		// Authenticated: account management.

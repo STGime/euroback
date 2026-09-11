@@ -36,6 +36,7 @@ import (
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/storage"
+	"github.com/eurobase/euroback/internal/sovereignty"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
@@ -612,7 +613,23 @@ func main() {
 	}
 
 	// ── Set up chi router (extracted for testability) ──
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, devMode)
+	// Load the CLOUD Act Exposure Checker vendor DB from the
+	// embedded YAML (git submodule at internal/sovereignty/data).
+	// A load failure is non-fatal — the gateway starts and the
+	// checker routes just don't register. Any deploy where the
+	// submodule wasn't checked out surfaces here at boot rather
+	// than as a 500 on the first request.
+	sovereigntyReg, sovErr := sovereignty.LoadEmbedded()
+	if sovErr != nil {
+		slog.Warn("sovereignty checker: vendor DB unavailable, routes disabled",
+			"error", sovErr)
+		sovereigntyReg = nil
+	} else {
+		slog.Info("sovereignty checker: vendor DB loaded",
+			"count", sovereigntyReg.Count())
+	}
+
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
