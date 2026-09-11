@@ -90,6 +90,52 @@ type Subscription struct {
 	CanceledAt      *time.Time        `json:"canceledAt,omitempty"`
 }
 
+// DefaultRecurringStartDate returns the yyyy-mm-dd string that
+// callers should pass as `SubscriptionCreateRequest.StartDate`
+// when creating a monthly recurring subscription right after a
+// `sequenceType=first` initial payment. Without a StartDate,
+// Mollie schedules the first recurring charge for "today" and
+// fires it within 24h — customers get billed twice for month 1.
+// Repro'd on 2026-09-10/11 for InBloom community (invoices
+// EB-2026-000011 + 000012).
+//
+// **Timezone:** Mollie interprets `startDate` as Amsterdam
+// (Europe/Amsterdam) local time — Mollie's subscription cron
+// runs on their local clock, not UTC. We compute in Amsterdam
+// time so the customer's billing day matches what they'd expect
+// even if the webhook lands close to midnight UTC. If the
+// Amsterdam location isn't loadable (edge case: minimal
+// distroless image without tzdata), fall back to UTC + 1h so we
+// don't crash on a legitimate signup — a one-hour drift is
+// harmless.
+//
+// **Month-end rollover.** Go's `AddDate(0, 1, 0)` normalizes
+// impossible dates forward: Jan 31 + 1 month = Mar 3, not
+// Feb 28. That silently shifts the customer's billing
+// anniversary. We clamp: if `AddDate` produced a month later
+// than "next month", pull it back to the last day of the
+// intended month. Result: a Jan 31 signup gets Feb 28 (or 29
+// in a leap year); a Mar 31 signup gets Apr 30. Stable
+// anniversary going forward.
+func DefaultRecurringStartDate(now time.Time) string {
+	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		amsterdam = time.FixedZone("CET", 3600)
+	}
+	local := now.In(amsterdam)
+	target := local.AddDate(0, 1, 0)
+	// Clamp month-end rollover: if AddDate walked further than
+	// one month forward (e.g. Jan 31 → Mar 3), roll back to the
+	// last day of the intended month.
+	wantMonth := time.Month(((int(local.Month()) - 1 + 1) % 12) + 1)
+	if target.Month() != wantMonth {
+		// target overshot — walk back to the last day of the
+		// intended (previous) month.
+		target = time.Date(target.Year(), target.Month(), 1, 0, 0, 0, 0, amsterdam).AddDate(0, 0, -1)
+	}
+	return target.Format("2006-01-02")
+}
+
 // SubscriptionCreateRequest is the POST body for creating a
 // subscription on an existing customer. Interval is a Mollie-native
 // string ("1 month", "3 months"); Eurobase always uses "1 month" for

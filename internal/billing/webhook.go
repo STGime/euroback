@@ -252,6 +252,7 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	mollieSub, err := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
 		Amount:      mollie.AmountFromCents(priceCents, "EUR"),
 		Interval:    "1 month",
+		StartDate:   mollie.DefaultRecurringStartDate(time.Now()),
 		Description: payment.Description,
 		// Pin the recurring subscription to the mandate captured
 		// by THIS first payment. Without this, Mollie picks the
@@ -519,25 +520,14 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 	// (or a manual re-invocation) can fix. Log and continue so
 	// the project + invoice are recorded regardless.
 	//
-	// **startDate is critical.** Per Mollie's docs: "The first
-	// payment is created on the day the subscription is created.
-	// So if you don't want a payment right away, set the startDate
-	// to a date in the future." Without startDate, Mollie fires
-	// the first subscription charge ~immediately, which for us
-	// means: yesterday's first-payment webhook charged €25 to
-	// create the mandate + invoice #N, and today Mollie's
-	// subscription cron fires ANOTHER €25 charge + invoice #N+1
-	// for the "first" recurring cycle — the customer is billed
-	// twice for month 1. Repro'd on 2026-09-10/11 for InBloom
-	// community (EB-2026-000011 + 000012).
-	//
-	// Set startDate to today + one interval so the first recurring
-	// charge fires when the initial-payment period naturally ends.
-	startDate := time.Now().UTC().AddDate(0, 1, 0).Format("2006-01-02")
+	// **startDate is critical.** See mollie.DefaultRecurringStartDate
+	// for the full explanation — TL;DR: without startDate Mollie
+	// fires a second €25 charge within 24h of the initial
+	// mandate-creating payment, double-billing month 1.
 	mollieSub, msErr := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
 		Amount:      mollie.AmountFromCents(priceCents, "EUR"),
 		Interval:    "1 month",
-		StartDate:   startDate,
+		StartDate:   mollie.DefaultRecurringStartDate(time.Now()),
 		Description: payment.Description,
 		MandateID:   payment.MandateID,
 		WebhookURL:  fmt.Sprintf("%s/platform/billing/webhook", s.config.WebhookBaseURL),
