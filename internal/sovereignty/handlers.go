@@ -187,8 +187,16 @@ func (h *Handler) HandleCreateReport() http.HandlerFunc {
 		insertCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
+		// Insert without RETURNING so the gateway pool doesn't need
+		// SELECT on the row. Migration 000116 grants gateway INSERT
+		// only — a RETURNING clause would need column-level SELECT
+		// too, and adding that grant would broaden the SDK-facing
+		// surface for no gain since we already own the hash we just
+		// generated. `created_at` is computed here to match; any
+		// caller that needs the DB's authoritative value can hit
+		// GET /report/{hash} on the developer pool.
 		var savedHash string
-		var savedCreatedAt time.Time
+		savedCreatedAt := time.Now().UTC()
 		for attempt := 0; attempt < 4; attempt++ {
 			hash, err := newReportHash()
 			if err != nil {
@@ -196,16 +204,16 @@ func (h *Handler) HandleCreateReport() http.HandlerFunc {
 				writeJSONErr(w, http.StatusInternalServerError, "internal error, please try again")
 				return
 			}
-			err = h.GatewayPool.QueryRow(insertCtx, `
+			_, err = h.GatewayPool.Exec(insertCtx, `
 				INSERT INTO public.sovereignty_reports
 				    (hash, vendor_slugs, severity_modifier, computed_score,
 				     campaign_metadata, ip_address, user_agent)
 				VALUES ($1, $2::jsonb, NULLIF($3, ''), $4::jsonb,
 				        NULLIF($5, '')::jsonb, $6::inet, NULLIF($7, ''))
-				RETURNING hash, created_at
 			`, hash, string(slugsJSON), sev, string(scoreJSON),
-				string(metaJSON), clientIP, userAgent).Scan(&savedHash, &savedCreatedAt)
+				string(metaJSON), clientIP, userAgent)
 			if err == nil {
+				savedHash = hash
 				break
 			}
 			if isUniqueViolation(err) {
