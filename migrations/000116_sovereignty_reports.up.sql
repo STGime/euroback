@@ -21,8 +21,13 @@
 --   * Leads never touch the gateway pool at all.
 --
 -- No explicit BEGIN/COMMIT: golang-migrate wraps each .up.sql tx.
-
-CREATE EXTENSION IF NOT EXISTS citext;
+--
+-- **No CITEXT** — Scaleway managed PG doesn't allow us to enable
+-- arbitrary extensions from a migration, and the first shot at this
+-- table used `email CITEXT` which crashed migrate at boot with
+-- `type "citext" does not exist`. We keep `email TEXT` and enforce
+-- case-insensitive dedup via a functional UNIQUE index on
+-- lower(email), campaign) below.
 
 CREATE TABLE public.sovereignty_reports (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -69,11 +74,10 @@ CREATE INDEX ix_sovereignty_reports_created ON public.sovereignty_reports (creat
 
 CREATE TABLE public.sovereignty_leads (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- CITEXT for case-insensitive dedup — a user typing
-    -- "Alice@Example.com" and later "alice@example.com" hits the
-    -- same row. UNIQUE per campaign so the same email can appear
-    -- in more than one funnel over time.
-    email           CITEXT NOT NULL,
+    -- TEXT, not CITEXT — see the migration header note. The handler
+    -- lowercases at write time and we enforce case-insensitive dedup
+    -- via the functional UNIQUE index below.
+    email           TEXT NOT NULL,
     role            TEXT NULL,
     sensitivity     TEXT NULL,
     -- Optional link back to the report that triggered the PDF
@@ -87,14 +91,21 @@ CREATE TABLE public.sovereignty_leads (
     unsubscribed_at TIMESTAMPTZ NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    UNIQUE (email, campaign),
-
     CHECK (role IS NULL OR role IN ('dev', 'founder', 'agency', 'dpo', 'procurement')),
     CHECK (sensitivity IS NULL
            OR sensitivity IN ('health', 'legal', 'financial', 'children', 'standard')),
     CHECK (sequence_stage >= 0 AND sequence_stage <= 10),
     CHECK (char_length(campaign) BETWEEN 1 AND 64)
 );
+
+-- Case-insensitive email dedup per campaign (replaces the CITEXT
+-- UNIQUE constraint we would have had). Functional index over
+-- lower(email) so "Alice@Example.com" and "alice@example.com"
+-- collide as intended. The handler is responsible for lower-casing
+-- on insert too, so the row's email column stays predictable for
+-- displays.
+CREATE UNIQUE INDEX ux_sovereignty_leads_email_campaign
+    ON public.sovereignty_leads (lower(email), campaign);
 
 -- Only-open-leads index — the drip worker scans this on every
 -- tick, so keep it tiny.
