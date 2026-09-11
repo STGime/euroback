@@ -31,6 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # sovereignty-vendors is a submodule at
+        # internal/sovereignty/data — the sovereignty package
+        # embeds its YAMLs via //go:embed and won't build without
+        # the files present. `recursive` is future-proof (no
+        # nested submodules today).
+        with:
+          submodules: recursive
 
       - uses: actions/setup-go@v5
         with:

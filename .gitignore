@@ -64,3 +64,4 @@ deploy/create-secrets.sh
 test_*.sh
 test_report_*.md
 scripts/discord/node_modules/
+node_modules/
