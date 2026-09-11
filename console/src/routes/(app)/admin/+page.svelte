@@ -53,9 +53,16 @@
 	//   'audience' — the broadcast audience filtered by audienceFilter.
 	// When mode='audience' the recipient list comes from
 	// broadcastAudience; the manual `selected` set is ignored.
-	type ComposeMode = 'selected' | 'audience';
+	type ComposeMode = 'selected' | 'audience' | 'signup-selected';
 	type AudienceFilter = 'everyone' | 'allowlist_only' | 'users_only' | 'both';
 	let composeMode = $state<ComposeMode>('selected');
+
+	// Manual per-row selection for the Signup Users table. Distinct
+	// from `selected` (allowlist) so ticking rows in one table doesn't
+	// visibly flip the other — the two selections address different
+	// address sets and the operator often wants to email one without
+	// affecting the other.
+	let selectedSignups = $state<Set<string>>(new Set());
 	let audienceFilter = $state<AudienceFilter>('everyone');
 	let broadcastAudience = $state<BroadcastRecipient[]>([]);
 	let broadcastLoaded = $state(false);
@@ -337,6 +344,45 @@
 		selected = new Set(selected);
 	}
 
+	function toggleOneSignup(email: string) {
+		if (selectedSignups.has(email)) selectedSignups.delete(email);
+		else selectedSignups.add(email);
+		selectedSignups = new Set(selectedSignups);
+	}
+
+	// All / some for the CURRENT filter (so "select all" respects the
+	// visible rows, not the whole dataset — matches the allowlist
+	// pattern above). Signup-row selection uses email as the key so
+	// it dedupes across a re-fetch.
+	let allSignupsSelected = $derived(
+		signupFiltered.length > 0 &&
+			signupFiltered.every((u) => selectedSignups.has(u.email))
+	);
+	let someSignupsSelected = $derived(
+		selectedSignups.size > 0 && !allSignupsSelected
+	);
+
+	function toggleAllSignups() {
+		if (allSignupsSelected) {
+			// Clear only the currently-visible-and-selected rows so
+			// selections made under a different filter are preserved.
+			const next = new Set(selectedSignups);
+			for (const u of signupFiltered) next.delete(u.email);
+			selectedSignups = next;
+		} else {
+			const next = new Set(selectedSignups);
+			for (const u of signupFiltered) next.add(u.email);
+			selectedSignups = next;
+		}
+	}
+
+	function openSignupCompose() {
+		composeError = null;
+		composeSuccess = null;
+		composeMode = 'signup-selected';
+		composeOpen = true;
+	}
+
 	let allSelected = $derived(allowlist.length > 0 && selected.size === allowlist.length);
 	let someSelected = $derived(selected.size > 0 && selected.size < allowlist.length);
 
@@ -397,7 +443,11 @@
 		// validation was widened to accept either source in the same
 		// PR that shipped the audience endpoint.
 		const recipients =
-			composeMode === 'audience' ? audienceRecipients : Array.from(selected);
+			composeMode === 'audience'
+				? audienceRecipients
+				: composeMode === 'signup-selected'
+					? Array.from(selectedSignups)
+					: Array.from(selected);
 		if (recipients.length === 0) {
 			composeError =
 				composeMode === 'audience'
@@ -438,11 +488,15 @@
 				// retry.
 				if (composeMode === 'selected') {
 					selected = new Set(composeFailures.flatMap((e) => e.recipients));
+				} else if (composeMode === 'signup-selected') {
+					selectedSignups = new Set(composeFailures.flatMap((e) => e.recipients));
 				}
 			} else {
 				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.`;
 				if (composeMode === 'selected') {
 					selected = new Set();
+				} else if (composeMode === 'signup-selected') {
+					selectedSignups = new Set();
 				}
 			}
 			// Leave modal open so the user can see confirmation; they close manually.
@@ -695,18 +749,36 @@
 				</div>
 			</div>
 		</div>
-		<div>
+		<div class="flex items-center justify-between gap-3 flex-wrap">
 			<input
 				type="search"
 				placeholder="Filter by email…"
 				bind:value={signupSearch}
 				class="w-full max-w-md rounded-md border border-gray-300 px-3 py-1.5 text-sm"
 			/>
+			<button
+				type="button"
+				onclick={openSignupCompose}
+				disabled={selectedSignups.size === 0}
+				class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+			>
+				Email {selectedSignups.size > 0 ? `(${selectedSignups.size})` : 'selected'}
+			</button>
 		</div>
 		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
 			<table class="w-full text-sm">
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>
+						<th class="px-3 py-2 w-8">
+							<input
+								type="checkbox"
+								checked={allSignupsSelected}
+								indeterminate={someSignupsSelected}
+								onchange={toggleAllSignups}
+								aria-label={allSignupsSelected ? 'Deselect all visible signup users' : 'Select all visible signup users'}
+								class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500"
+							/>
+						</th>
 						<th class="px-4 py-2">Email</th>
 						<th class="px-4 py-2">Name</th>
 						<th class="px-4 py-2">Signed up</th>
@@ -720,14 +792,23 @@
 				</thead>
 				<tbody class="divide-y divide-gray-100">
 					{#if loading}
-						<tr><td colspan="9" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+						<tr><td colspan="10" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
 					{:else if signupFiltered.length === 0}
-						<tr><td colspan="9" class="px-4 py-6 text-center text-gray-400">
+						<tr><td colspan="10" class="px-4 py-6 text-center text-gray-400">
 							{signupSearch.trim() === '' ? 'No signups yet.' : 'No matches.'}
 						</td></tr>
 					{:else}
 						{#each signupFiltered as u (u.user_id)}
-							<tr>
+							<tr class={selectedSignups.has(u.email) ? 'bg-eurobase-50/60' : ''}>
+								<td class="px-3 py-2">
+									<input
+										type="checkbox"
+										checked={selectedSignups.has(u.email)}
+										onchange={() => toggleOneSignup(u.email)}
+										aria-label={`Select ${u.email}`}
+										class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500"
+									/>
+								</td>
 								<td class="px-4 py-2 font-medium text-gray-900">{u.email}</td>
 								<td class="px-4 py-2 text-gray-600">{u.display_name ?? '—'}</td>
 								<td class="px-4 py-2 text-gray-500">
@@ -959,7 +1040,11 @@
 			<div class="flex items-center justify-between border-b border-gray-200 px-5 py-3">
 				<div>
 					<h3 class="text-base font-semibold text-gray-900">
-						{composeMode === 'audience' ? 'Compose broadcast' : 'Email recipients'}
+						{composeMode === 'audience'
+							? 'Compose broadcast'
+							: composeMode === 'signup-selected'
+								? 'Email signup users'
+								: 'Email recipients'}
 					</h3>
 					<p class="text-xs text-gray-500 mt-0.5">
 						{#if composeMode === 'audience'}
@@ -970,6 +1055,8 @@
 							{:else}
 								{audienceRecipientCount} recipient{audienceRecipientCount === 1 ? '' : 's'}{audienceRecipientCount > 1 ? ' · delivered via BCC' : ''}
 							{/if}
+						{:else if composeMode === 'signup-selected'}
+							{selectedSignups.size} signup user{selectedSignups.size === 1 ? '' : 's'} selected{selectedSignups.size > 1 ? ' · delivered via BCC' : ''}
 						{:else}
 							{selected.size} selected{selected.size > 1 ? ' · delivered via BCC' : ''}
 						{/if}
