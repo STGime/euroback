@@ -252,6 +252,7 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	mollieSub, err := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
 		Amount:      mollie.AmountFromCents(priceCents, "EUR"),
 		Interval:    "1 month",
+		StartDate:   mollie.DefaultRecurringStartDate(time.Now()),
 		Description: payment.Description,
 		// Pin the recurring subscription to the mandate captured
 		// by THIS first payment. Without this, Mollie picks the
@@ -518,9 +519,15 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 	// we have a project but no recurring charge — the sweeper
 	// (or a manual re-invocation) can fix. Log and continue so
 	// the project + invoice are recorded regardless.
+	//
+	// **startDate is critical.** See mollie.DefaultRecurringStartDate
+	// for the full explanation — TL;DR: without startDate Mollie
+	// fires a second €25 charge within 24h of the initial
+	// mandate-creating payment, double-billing month 1.
 	mollieSub, msErr := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
 		Amount:      mollie.AmountFromCents(priceCents, "EUR"),
 		Interval:    "1 month",
+		StartDate:   mollie.DefaultRecurringStartDate(time.Now()),
 		Description: payment.Description,
 		MandateID:   payment.MandateID,
 		WebhookURL:  fmt.Sprintf("%s/platform/billing/webhook", s.config.WebhookBaseURL),
