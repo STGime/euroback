@@ -56,13 +56,19 @@ type Vendor struct {
 
 // Ratings is the 5-dimension + overall score for a vendor. Each
 // value is one of "red", "amber", "green".
+//
+// Explicit json tags — without them, Go marshals field names
+// verbatim (PascalCase), which broke consistency with the rest of
+// the API's snake_case surface when the ratings block hit the
+// wire on /report responses. Keep the YAML tags aligned with the
+// sovereignty-vendors dataset shape (snake_case on both sides).
 type Ratings struct {
-	EntityControl     string `yaml:"entity_control"`
-	DataLocation      string `yaml:"data_location"`
-	OperationalAccess string `yaml:"operational_access"`
-	SubprocessorChain string `yaml:"subprocessor_chain"`
-	TransferMechanism string `yaml:"transfer_mechanism"`
-	Overall           string `yaml:"overall"`
+	EntityControl     string `yaml:"entity_control"     json:"entity_control"`
+	DataLocation      string `yaml:"data_location"      json:"data_location"`
+	OperationalAccess string `yaml:"operational_access" json:"operational_access"`
+	SubprocessorChain string `yaml:"subprocessor_chain" json:"subprocessor_chain"`
+	TransferMechanism string `yaml:"transfer_mechanism" json:"transfer_mechanism"`
+	Overall           string `yaml:"overall"            json:"overall"`
 }
 
 // Registry holds the loaded vendor DB. Callers should treat it as
