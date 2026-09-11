@@ -1,8 +1,51 @@
 package sovereignty
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 )
+
+// TestRatings_JSONCasing pins the snake_case JSON marshaling of
+// the Ratings struct. Without explicit json tags Go emits field
+// names verbatim (PascalCase). That shipped for a hot minute on
+// the first Sovereignty Check deploy — the ratings block on
+// /report responses came out as "EntityControl" while every
+// other key was snake_case. Fixed with json tags on vendor.go;
+// this test locks the shape in so a future rename can't silently
+// regress it.
+func TestRatings_JSONCasing(t *testing.T) {
+	r := Ratings{
+		EntityControl: "red", DataLocation: "amber",
+		OperationalAccess: "amber", SubprocessorChain: "amber",
+		TransferMechanism: "amber", Overall: "red",
+	}
+	blob, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(blob)
+	// Must contain every snake_case key.
+	for _, key := range []string{
+		`"entity_control":`, `"data_location":`,
+		`"operational_access":`, `"subprocessor_chain":`,
+		`"transfer_mechanism":`, `"overall":`,
+	} {
+		if !strings.Contains(got, key) {
+			t.Errorf("expected key %q in JSON; got %s", key, got)
+		}
+	}
+	// Must NOT contain the PascalCase forms.
+	for _, key := range []string{
+		`"EntityControl":`, `"DataLocation":`,
+		`"OperationalAccess":`, `"SubprocessorChain":`,
+		`"TransferMechanism":`, `"Overall":`,
+	} {
+		if strings.Contains(got, key) {
+			t.Errorf("expected NO PascalCase key %q; got %s", key, got)
+		}
+	}
+}
 
 // helper: build a minimal in-memory registry so we don't depend on
 // the git submodule being checked out during CI.
