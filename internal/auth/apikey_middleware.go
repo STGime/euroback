@@ -44,6 +44,7 @@ func ResolveAPIKey(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Pro
 	err := pool.QueryRow(ctx,
 		`SELECT p.id, p.schema_name, p.slug, p.jwt_secret, ak.type,
 		        COALESCE(p.plan, 'free'), p.auth_config,
+		        COALESCE(p.maintenance_mode, false),
 		        pd.id
 		   FROM api_keys ak
 		   JOIN projects p ON ak.project_id = p.id
@@ -54,7 +55,7 @@ func ResolveAPIKey(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Pro
 		  WHERE ak.key_hash = $1 AND p.status = 'active'`,
 		keyHash,
 	).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType,
-		&pc.Plan, &pc.AuthConfig, &pdID)
+		&pc.Plan, &pc.AuthConfig, &pc.MaintenanceMode, &pdID)
 	if err != nil {
 		return nil, errInvalidAPIKey
 	}
@@ -95,6 +96,7 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 		err := m.pool.QueryRow(r.Context(),
 			`SELECT p.id, p.schema_name, p.slug, p.jwt_secret, ak.type,
 			        COALESCE(p.plan, 'free'), p.auth_config,
+			        COALESCE(p.maintenance_mode, false),
 			        pd.id
 			   FROM api_keys ak
 			   JOIN projects p ON ak.project_id = p.id
@@ -105,7 +107,7 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 			  WHERE ak.key_hash = $1 AND p.status = 'active'`,
 			keyHash,
 		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType,
-			&pc.Plan, &pc.AuthConfig, &pdID)
+			&pc.Plan, &pc.AuthConfig, &pc.MaintenanceMode, &pdID)
 		if err != nil {
 			slog.Warn("invalid API key", "error", err, "prefix", safePrefix(apiKey))
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
