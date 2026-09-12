@@ -23,6 +23,7 @@ import (
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/vault"
+	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/workers"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -423,6 +424,13 @@ func main() {
 	// populated, the WHERE filter excludes the row. Naturally
 	// stops firing once the backlog drains.
 	workers.StartBackfillSweeper(ctx, pool, riverClient)
+
+	// ── Upgrade confirm sweeper (Team-tier upgrade series) ──
+	// Hourly ticker: transitions live upgrades past the 7-day
+	// rollback window to `confirmed`. Actual source-data purge
+	// lands in a follow-up PR alongside the copy work — this
+	// sweeper only advances the state.
+	upgrade.NewConfirmSweeper(upgrade.NewService(pool, riverClient)).StartLoop(ctx)
 
 	// ── Retention hold sweeper (Legal-Team M2b, #314) ──
 	// Daily ticker: purges expired retention_holds rows so the
