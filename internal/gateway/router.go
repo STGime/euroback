@@ -1198,6 +1198,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			authorize = buildRealtimeAuthorize(pool, platformAuth)
 		}
 		wsHandler := realtime.HandleWebSocket(hub, authorize, BuildOriginChecker(allowedOrigins), isDev)
+		// MaintenanceModeMiddleware intentionally not applied here.
+		// WebSocket is long-lived, so a mid-connection 503 is
+		// meaningless — the hub needs a distinct freeze signal
+		// (kick open connections + refuse new). Follow-up PR.
 		r.Get("/v1/realtime", wsHandler)
 	} else {
 		slog.Warn("realtime hub not configured, websocket route disabled")
