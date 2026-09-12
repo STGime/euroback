@@ -694,6 +694,14 @@ func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID
 		rotatedProviders = append(rotatedProviders, name)
 	}
 
+	// Validate per-project rate-limit overrides against MaxRateLimits.
+	// Refuses values that would exceed platform ceilings (SMS spend,
+	// per-IP throttle bypass). Ops override via SQL when a real
+	// enterprise case needs headroom. See ValidateRateLimits doc.
+	if err := ValidateRateLimits(config.RateLimits); err != nil {
+		return nil, fmt.Errorf("rate limits: %w", err)
+	}
+
 	// Marshal the (now secret-free) config and persist to auth_config.
 	configJSON, err := json.Marshal(config)
 	if err != nil {

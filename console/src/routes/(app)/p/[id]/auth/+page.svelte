@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	import { api, DEFAULT_RATE_LIMITS, type AuthConfig, type EmailTemplate, type ProjectEmailSender, type RateLimits } from '$lib/api.js';
+	import { api, DEFAULT_RATE_LIMITS, MAX_RATE_LIMITS, type AuthConfig, type EmailTemplate, type ProjectEmailSender, type RateLimits } from '$lib/api.js';
 
 	const projectCtx: { id: string; project: import('$lib/api.js').Project | null; updateProject: (p: import('$lib/api.js').Project) => void } = getContext('projectId');
 
@@ -1524,30 +1524,35 @@
 				</p>
 			</div>
 
+			<!-- BYO-SMTP interaction. The one thing custom SMTP actually
+			     bypasses is the platform email-delivery ceiling (currently
+			     hidden pending #235). Everything shown below is per-IP
+			     anti-abuse or SMS — none of it is affected by SMTP choice.
+			     Spell that out so a customer configuring BYO SMTP for
+			     high-volume auth emails doesn't wonder why the per-IP
+			     throttles below are still there. -->
+			<div class="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-900">
+				<div class="flex items-start gap-2">
+					<svg class="w-4 h-4 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>
+					<div>
+						<div class="font-medium">Using <a href="#smtp" onclick={() => (activeTab = 'smtp')} class="underline">custom SMTP</a>?</div>
+						<div class="mt-1 leading-snug">
+							Auth emails (verification, password reset, magic link) route through your SMTP provider —
+							<strong>your provider's limits apply, not ours</strong>. The per-IP throttles below still apply
+							as anti-abuse safeguards on the signup / signin / verify endpoints, and SMS is a separate channel with its own cap.
+						</div>
+					</div>
+				</div>
+			</div>
+
 			<!-- Rate limit fields, modeled on the Supabase Rate Limits page -->
 			<div class="rounded-lg border border-gray-200 bg-white divide-y divide-gray-200">
 
-				<!-- Emails / hour -->
-				<div class="flex items-start gap-4 p-4">
-					<div class="flex-1">
-						<label for="rl-emails" class="text-sm font-medium text-gray-900">Rate limit for sending emails</label>
-						<p class="mt-0.5 text-xs text-gray-500">
-							Number of emails (verification, password reset, magic link) that can be sent per hour from your project.
-							<span class="block mt-0.5 text-amber-700">Note: enforcement is parked behind the BYO-SMTP feature (#235); the field saves but isn't applied yet.</span>
-						</p>
-					</div>
-					<div class="flex items-center gap-2 shrink-0">
-						<input
-							id="rl-emails"
-							type="number"
-							min="0"
-							bind:value={rlEmailsPerHour}
-							placeholder={String(DEFAULT_RATE_LIMITS.emails_per_hour)}
-							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
-						/>
-						<span class="text-xs text-gray-500">emails/h</span>
-					</div>
-				</div>
+				<!-- Emails / hour is hidden until enforcement lands with
+				     BYO-SMTP (#235). The rlEmailsPerHour state variable
+				     is still loaded + saved so an existing project's
+				     stored value isn't clobbered on the next save
+				     (round-trip parity preserved). -->
 
 				<!-- SMS / hour -->
 				<div class="flex items-start gap-4 p-4">
@@ -1555,6 +1560,7 @@
 						<label for="rl-sms" class="text-sm font-medium text-gray-900">Rate limit for sending SMS messages</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Number of SMS one-time codes that can be sent per hour from your project. Over-quota sends are silently skipped server-side; the operator log shows the cap-hit.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.sms_per_hour} — contact support for enterprise headroom.</span>
 						</p>
 					</div>
 					<div class="flex items-center gap-2 shrink-0">
@@ -1562,6 +1568,7 @@
 							id="rl-sms"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.sms_per_hour}
 							bind:value={rlSmsPerHour}
 							placeholder={String(DEFAULT_RATE_LIMITS.sms_per_hour)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
@@ -1576,6 +1583,7 @@
 						<label for="rl-refresh" class="text-sm font-medium text-gray-900">Rate limit for token refreshes</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Number of <code class="text-[11px] bg-gray-100 px-1 rounded">/v1/auth/refresh</code> calls allowed in a 5-minute interval per IP address. Higher because legitimate SDK clients refresh proactively.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.token_refresh_per_5min_per_ip}.</span>
 						</p>
 						{#if rlTokenRefresh}
 							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenRefresh, 10) * 12} requests/hour</p>
@@ -1586,6 +1594,7 @@
 							id="rl-refresh"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.token_refresh_per_5min_per_ip}
 							bind:value={rlTokenRefresh}
 							placeholder={String(DEFAULT_RATE_LIMITS.token_refresh_per_5min_per_ip)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
@@ -1600,6 +1609,7 @@
 						<label for="rl-verify" class="text-sm font-medium text-gray-900">Rate limit for token verifications</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Number of OTP, magic-link, and email-verify attempts allowed in a 5-minute interval per IP. Throttles brute-force against 6-digit phone OTPs.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.token_verification_per_5min_per_ip}.</span>
 						</p>
 						{#if rlTokenVerify}
 							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenVerify, 10) * 12} requests/hour</p>
@@ -1610,6 +1620,7 @@
 							id="rl-verify"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.token_verification_per_5min_per_ip}
 							bind:value={rlTokenVerify}
 							placeholder={String(DEFAULT_RATE_LIMITS.token_verification_per_5min_per_ip)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
@@ -1624,6 +1635,7 @@
 						<label for="rl-signup" class="text-sm font-medium text-gray-900">Rate limit for sign-ups and sign-ins</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Combined volume cap on signup and signin requests per IP, per 5 minutes. The per-account brute-force counter (signin failures by email) is a separate axis at platform defaults.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.signup_signin_per_5min_per_ip} — keeps a single IP from bot-farming mass account creation.</span>
 						</p>
 						{#if rlSignupSignin}
 							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlSignupSignin, 10) * 12} requests/hour</p>
@@ -1634,6 +1646,7 @@
 							id="rl-signup"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.signup_signin_per_5min_per_ip}
 							bind:value={rlSignupSignin}
 							placeholder={String(DEFAULT_RATE_LIMITS.signup_signin_per_5min_per_ip)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
@@ -1655,13 +1668,17 @@
 					<div class="flex-1">
 						<label for="rl-trust-proxy" class="text-sm font-medium text-gray-900">Trust X-Forwarded-For</label>
 						<p class="mt-0.5 text-xs text-gray-500">
-							When <strong>on</strong>, the limiter keys on the leftmost <code class="text-[11px] bg-gray-100 px-1 rounded">X-Forwarded-For</code> entry (the real client IP). Only safe when exactly one trusted hop in front of the gateway authoritatively overwrites that header.
+							When <strong>on</strong>, the limiter picks the <code class="text-[11px] bg-gray-100 px-1 rounded">X-Forwarded-For</code> entry at index <code class="text-[11px] bg-gray-100 px-1 rounded">len(entries) − trusted_proxy_hops</code> (the real client IP written by the last trusted hop). Anything to the left of that index is caller-controlled and discarded — safe against header forgery.
 						</p>
 						<p class="mt-0.5 text-xs text-gray-500">
 							When <strong>off</strong> (default), the limiter keys on the TCP peer — safe under any header forgery, but in deployments behind one shared ingress the counter collapses to a per-project total.
 						</p>
-						<p class="mt-1 text-[11px] text-amber-700">
-							Eurobase ships <strong>off</strong> by default until the Scaleway LB / nginx-ingress XFF chain is verified end-to-end (#238).
+						<p class="mt-1 text-[11px] text-gray-500">
+							Eurobase ships <strong>off</strong> by default: it's safe under any XFF chain configuration. The trusted-hop-count hardening
+							(rightmost-XFF extraction, fail-closed on missing hops) is in place, so flipping this on is safe against header forgery — but the
+							single-hop precondition (exactly one trusted proxy authoritatively rewrites the header) hasn't been formalized end-to-end for the
+							Scaleway LB + nginx-ingress chain we run. See <code class="text-[11px] bg-gray-100 px-1 rounded">docs/runbooks/rate-limits-ip-source.md</code>
+							for the check to run before flipping.
 						</p>
 					</div>
 					<div class="shrink-0 pt-1">

@@ -1,6 +1,9 @@
 package tenant
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #225: per-project Rate Limits — verify the default + merge semantics
 // without touching Redis or the HTTP layer. The merge contract is what
@@ -236,5 +239,61 @@ func TestParseAuthConfig_RateLimitsRoundTrip(t *testing.T) {
 	// Unspecified knob falls back to default.
 	if eff.SMSPerHour != DefaultRateLimits().SMSPerHour {
 		t.Errorf("SMSPerHour: got %d, want default %d", eff.SMSPerHour, DefaultRateLimits().SMSPerHour)
+	}
+}
+
+// TestValidateRateLimits covers the platform-ceiling refuseal path.
+// Zero (= "use default") passes; ceilings refuse; exact-ceiling
+// passes; negatives refuse loud rather than silently coerce.
+func TestValidateRateLimits(t *testing.T) {
+	sms, tokenRefresh, tokenVerify, signup := MaxRateLimits()
+
+	t.Run("nil passes", func(t *testing.T) {
+		if err := ValidateRateLimits(nil); err != nil {
+			t.Errorf("nil RateLimits: got err %v, want nil", err)
+		}
+	})
+
+	t.Run("zero fields pass", func(t *testing.T) {
+		if err := ValidateRateLimits(&RateLimits{}); err != nil {
+			t.Errorf("zero fields: got err %v, want nil", err)
+		}
+	})
+
+	t.Run("exact ceilings pass", func(t *testing.T) {
+		if err := ValidateRateLimits(&RateLimits{
+			SMSPerHour:                    sms,
+			TokenRefreshPer5MinPerIP:      tokenRefresh,
+			TokenVerificationPer5MinPerIP: tokenVerify,
+			SignupSigninPer5MinPerIP:      signup,
+		}); err != nil {
+			t.Errorf("exact ceilings: got err %v, want nil", err)
+		}
+	})
+
+	cases := []struct {
+		name string
+		rl   RateLimits
+		want string
+	}{
+		{"sms above cap", RateLimits{SMSPerHour: sms + 1}, "sms_per_hour"},
+		{"token refresh above cap", RateLimits{TokenRefreshPer5MinPerIP: tokenRefresh + 1}, "token_refresh_per_5min_per_ip"},
+		{"token verify above cap", RateLimits{TokenVerificationPer5MinPerIP: tokenVerify + 1}, "token_verification_per_5min_per_ip"},
+		{"signup signin above cap", RateLimits{SignupSigninPer5MinPerIP: signup + 1}, "signup_signin_per_5min_per_ip"},
+		{"sms negative", RateLimits{SMSPerHour: -1}, "sms_per_hour"},
+		{"token refresh negative", RateLimits{TokenRefreshPer5MinPerIP: -1}, "token_refresh_per_5min_per_ip"},
+		{"token verify negative", RateLimits{TokenVerificationPer5MinPerIP: -1}, "token_verification_per_5min_per_ip"},
+		{"signup signin negative", RateLimits{SignupSigninPer5MinPerIP: -1}, "signup_signin_per_5min_per_ip"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateRateLimits(&tc.rl)
+			if err == nil {
+				t.Fatalf("want error mentioning %q, got nil", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q missing field name %q", err.Error(), tc.want)
+			}
+		})
 	}
 }

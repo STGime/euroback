@@ -79,6 +79,21 @@ export const DEFAULT_RATE_LIMITS = {
 	trust_proxy: false
 } as const;
 
+/** Platform ceilings on rate-limit overrides. Enforced server-side
+ *  by tenant.ValidateRateLimits() at auth_config save time. The Svelte
+ *  form's `max=` attributes come from here so the two stay in sync;
+ *  if you change these, update internal/tenant/auth_config.go's
+ *  maxRateLimitsValues() too.
+ *
+ *  Emails/hour has no cap because the field is hidden until BYO-SMTP
+ *  enforcement lands (#235). */
+export const MAX_RATE_LIMITS = {
+	signup_signin_per_5min_per_ip: 30,
+	token_refresh_per_5min_per_ip: 500,
+	token_verification_per_5min_per_ip: 150,
+	sms_per_hour: 10
+} as const;
+
 /** Per-project custom SMTP sender (#235 Part 1). Returned from
  * `GET /platform/projects/{id}/email-sender`; null on the wire (404)
  * when no sender is configured — the client converts that to a
