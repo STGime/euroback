@@ -3036,12 +3036,23 @@ export interface Invoice {
 // machine: requested → provisioning → copying → cutting_over → live
 // → confirmed. Terminal alternate: failed.
 
+export type UpgradeState =
+	| 'requested'
+	| 'provisioning'
+	| 'copying'
+	| 'cutting_over'
+	| 'live'
+	| 'confirmed'
+	| 'failed';
+
+export type UpgradePlan = 'free' | 'pro' | 'team' | 'legal_team';
+
 export interface UpgradeRecord {
 	id: string;
 	project_id: string;
-	from_plan: string;
-	to_plan: string;
-	state: string;
+	from_plan: UpgradePlan;
+	to_plan: UpgradePlan;
+	state: UpgradeState;
 	project_database_id?: string | null;
 	bytes_copied: number;
 	tables_copied: number;

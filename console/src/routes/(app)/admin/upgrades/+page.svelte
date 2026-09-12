@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { api, type UpgradeRecord } from '$lib/api.js';
+	import { api, type UpgradeRecord, type UpgradeState } from '$lib/api.js';
 
 	let upgrades = $state<UpgradeRecord[]>([]);
 	let loading = $state(true);
@@ -106,20 +106,20 @@
 		}
 	}
 
-	function stateBadgeClass(state: string): string {
+	function stateBadgeClass(state: UpgradeState): string {
 		switch (state) {
 			case 'confirmed':
 			case 'live':
-				return 'bg-emerald-600/20 text-emerald-300 border border-emerald-500/40';
+				return 'bg-emerald-50 text-emerald-800 border border-emerald-200';
 			case 'failed':
-				return 'bg-red-600/20 text-red-300 border border-red-500/40';
+				return 'bg-red-50 text-red-800 border border-red-200';
 			case 'requested':
 			case 'provisioning':
 			case 'copying':
 			case 'cutting_over':
-				return 'bg-amber-600/20 text-amber-300 border border-amber-500/40';
+				return 'bg-amber-50 text-amber-800 border border-amber-200';
 			default:
-				return 'bg-slate-600/20 text-slate-300 border border-slate-500/40';
+				return 'bg-gray-50 text-gray-800 border border-gray-200';
 		}
 	}
 
@@ -133,22 +133,22 @@
 	}
 </script>
 
-<div class="p-6 space-y-6">
-	<div>
-		<h1 class="text-2xl font-bold text-white">Team-tier upgrades</h1>
-		<p class="text-sm text-slate-400 mt-1">
+<div class="max-w-6xl mx-auto p-6 space-y-6">
+	<header>
+		<h1 class="text-2xl font-semibold text-gray-900">Team-tier upgrades</h1>
+		<p class="text-sm text-gray-500 mt-1">
 			Free/Pro → Team tier migration state machine. Data-copy step is currently
 			STUBBED (dedicated instance will have zero user data until the copy PR
 			lands).
 		</p>
-	</div>
+	</header>
 
 	<!-- Trigger form -->
-	<div class="rounded-lg border border-slate-700 bg-slate-900 p-4 space-y-3">
-		<h2 class="text-lg font-semibold text-white">Trigger upgrade</h2>
+	<section class="rounded-md border border-gray-200 bg-white p-4 space-y-3">
+		<h2 class="text-lg font-semibold text-gray-900">Trigger upgrade</h2>
 		<div class="flex flex-wrap gap-3 items-end">
 			<div class="flex-1 min-w-[300px]">
-				<label class="block text-xs text-slate-400 mb-1" for="project-id">
+				<label class="block text-xs text-gray-500 mb-1" for="project-id">
 					Project ID (UUID)
 				</label>
 				<input
@@ -156,18 +156,18 @@
 					type="text"
 					bind:value={newProjectId}
 					placeholder="00000000-0000-0000-0000-000000000000"
-					class="w-full rounded bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-white"
+					class="w-full rounded bg-white border border-gray-300 px-3 py-2 text-sm text-gray-900"
 					disabled={triggerBusy}
 				/>
 			</div>
 			<div>
-				<label class="block text-xs text-slate-400 mb-1" for="plan">
+				<label class="block text-xs text-gray-500 mb-1" for="plan">
 					Target plan
 				</label>
 				<select
 					id="plan"
 					bind:value={newPlan}
-					class="rounded bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-white"
+					class="rounded bg-white border border-gray-300 px-3 py-2 text-sm text-gray-900"
 					disabled={triggerBusy}
 				>
 					<option value="team">team</option>
@@ -184,42 +184,42 @@
 			</button>
 		</div>
 		{#if triggerError}
-			<div class="text-sm text-red-300 bg-red-950/40 border border-red-800/40 rounded px-3 py-2">
+			<div class="text-sm rounded-md bg-red-50 border border-red-200 px-3 py-2 text-red-800">
 				{triggerError}
 			</div>
 		{/if}
 		{#if triggerSuccess}
-			<div class="text-sm text-emerald-300 bg-emerald-950/40 border border-emerald-800/40 rounded px-3 py-2">
+			<div class="text-sm rounded-md bg-emerald-50 border border-emerald-200 px-3 py-2 text-emerald-800">
 				{triggerSuccess}
 			</div>
 		{/if}
-	</div>
+	</section>
 
 	{#if actionError}
-		<div class="text-sm text-red-300 bg-red-950/40 border border-red-800/40 rounded px-3 py-2">
+		<div class="text-sm rounded-md bg-red-50 border border-red-200 px-3 py-2 text-red-800">
 			{actionError}
 		</div>
 	{/if}
 
 	<!-- Recent upgrades -->
-	<div class="rounded-lg border border-slate-700 bg-slate-900 overflow-hidden">
-		<div class="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-			<h2 class="text-lg font-semibold text-white">Recent upgrades</h2>
-			<span class="text-xs text-slate-400">
+	<section class="rounded-md border border-gray-200 bg-white overflow-hidden">
+		<div class="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+			<h2 class="text-lg font-semibold text-gray-900">Recent upgrades</h2>
+			<span class="text-xs text-gray-500" aria-live="polite">
 				{upgrades.length} row{upgrades.length === 1 ? '' : 's'}
 				{#if hasNonTerminal()}· polling every 5s{/if}
 			</span>
 		</div>
 		{#if loading}
-			<div class="p-6 text-sm text-slate-400">Loading…</div>
+			<div class="p-6 text-sm text-gray-500">Loading…</div>
 		{:else if loadError}
-			<div class="p-6 text-sm text-red-300">{loadError}</div>
+			<div class="p-6 text-sm text-red-700">{loadError}</div>
 		{:else if upgrades.length === 0}
-			<div class="p-6 text-sm text-slate-500">No upgrades yet. Trigger one above.</div>
+			<div class="p-6 text-sm text-gray-500">No upgrades yet. Trigger one above.</div>
 		{:else}
 			<div class="overflow-x-auto">
 				<table class="w-full text-sm">
-					<thead class="bg-slate-800/50 text-slate-400 text-xs uppercase">
+					<thead class="bg-gray-50 text-gray-500 text-xs uppercase">
 						<tr>
 							<th class="px-3 py-2 text-left font-medium">Started</th>
 							<th class="px-3 py-2 text-left font-medium">Project</th>
@@ -230,27 +230,35 @@
 							<th class="px-3 py-2 text-right font-medium">Actions</th>
 						</tr>
 					</thead>
-					<tbody class="divide-y divide-slate-800">
+					<tbody class="divide-y divide-gray-100">
 						{#each upgrades as u (u.id)}
-							<tr class="hover:bg-slate-800/30">
-								<td class="px-3 py-2 text-slate-300 whitespace-nowrap">
+							<tr class="hover:bg-gray-50">
+								<td class="px-3 py-2 text-gray-700 whitespace-nowrap">
 									{formatTs(u.started_at)}
 								</td>
-								<td class="px-3 py-2 text-slate-300 font-mono text-xs">
+								<td class="px-3 py-2 text-gray-700 font-mono text-xs">
 									{u.project_id.slice(0, 8)}…
 								</td>
-								<td class="px-3 py-2 text-slate-300">
+								<td class="px-3 py-2 text-gray-700">
 									{u.from_plan} → {u.to_plan}
 								</td>
 								<td class="px-3 py-2">
-									<span class="rounded px-2 py-0.5 text-xs font-medium {stateBadgeClass(u.state)}">
+									<span
+										class="rounded px-2 py-0.5 text-xs font-medium {stateBadgeClass(u.state)}"
+										role="status"
+										aria-label="Upgrade state: {u.state}"
+									>
 										{u.state}
 									</span>
 								</td>
-								<td class="px-3 py-2 text-slate-400 text-xs">
+								<td class="px-3 py-2 text-gray-500 text-xs">
 									{formatTs(u.cutover_at)}
 								</td>
-								<td class="px-3 py-2 text-red-300 text-xs max-w-[300px] truncate" title={u.error ?? ''}>
+								<td
+									class="px-3 py-2 text-red-700 text-xs max-w-[300px] truncate"
+									title={u.error ?? ''}
+									aria-label={u.error ? `Error: ${u.error}` : ''}
+								>
 									{u.error ?? '—'}
 								</td>
 								<td class="px-3 py-2 text-right whitespace-nowrap space-x-2">
@@ -259,7 +267,7 @@
 											type="button"
 											onclick={() => confirmUpgrade(u.id)}
 											disabled={actionBusy !== null}
-											class="rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 px-3 py-1 text-xs text-white"
+											class="rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-1 text-xs text-white"
 										>
 											Confirm now
 										</button>
@@ -269,7 +277,7 @@
 											type="button"
 											onclick={() => abortUpgrade(u.id)}
 											disabled={actionBusy !== null}
-											class="rounded bg-red-700 hover:bg-red-600 disabled:opacity-50 px-3 py-1 text-xs text-white"
+											class="rounded bg-red-600 hover:bg-red-500 disabled:opacity-50 px-3 py-1 text-xs text-white"
 										>
 											{actionBusy === u.id ? '…' : 'Abort'}
 										</button>
@@ -281,5 +289,5 @@
 				</table>
 			</div>
 		{/if}
-	</div>
+	</section>
 </div>
