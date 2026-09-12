@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	import { api, DEFAULT_RATE_LIMITS, type AuthConfig, type EmailTemplate, type ProjectEmailSender, type RateLimits } from '$lib/api.js';
+	import { api, DEFAULT_RATE_LIMITS, MAX_RATE_LIMITS, type AuthConfig, type EmailTemplate, type ProjectEmailSender, type RateLimits } from '$lib/api.js';
 
 	const projectCtx: { id: string; project: import('$lib/api.js').Project | null; updateProject: (p: import('$lib/api.js').Project) => void } = getContext('projectId');
 
@@ -1527,27 +1527,11 @@
 			<!-- Rate limit fields, modeled on the Supabase Rate Limits page -->
 			<div class="rounded-lg border border-gray-200 bg-white divide-y divide-gray-200">
 
-				<!-- Emails / hour -->
-				<div class="flex items-start gap-4 p-4">
-					<div class="flex-1">
-						<label for="rl-emails" class="text-sm font-medium text-gray-900">Rate limit for sending emails</label>
-						<p class="mt-0.5 text-xs text-gray-500">
-							Number of emails (verification, password reset, magic link) that can be sent per hour from your project.
-							<span class="block mt-0.5 text-amber-700">Note: enforcement is parked behind the BYO-SMTP feature (#235); the field saves but isn't applied yet.</span>
-						</p>
-					</div>
-					<div class="flex items-center gap-2 shrink-0">
-						<input
-							id="rl-emails"
-							type="number"
-							min="0"
-							bind:value={rlEmailsPerHour}
-							placeholder={String(DEFAULT_RATE_LIMITS.emails_per_hour)}
-							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
-						/>
-						<span class="text-xs text-gray-500">emails/h</span>
-					</div>
-				</div>
+				<!-- Emails / hour is hidden until enforcement lands with
+				     BYO-SMTP (#235). The rlEmailsPerHour state variable
+				     is still loaded + saved so an existing project's
+				     stored value isn't clobbered on the next save
+				     (round-trip parity preserved). -->
 
 				<!-- SMS / hour -->
 				<div class="flex items-start gap-4 p-4">
@@ -1555,6 +1539,7 @@
 						<label for="rl-sms" class="text-sm font-medium text-gray-900">Rate limit for sending SMS messages</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Number of SMS one-time codes that can be sent per hour from your project. Over-quota sends are silently skipped server-side; the operator log shows the cap-hit.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.sms_per_hour} — contact support for enterprise headroom.</span>
 						</p>
 					</div>
 					<div class="flex items-center gap-2 shrink-0">
@@ -1562,6 +1547,7 @@
 							id="rl-sms"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.sms_per_hour}
 							bind:value={rlSmsPerHour}
 							placeholder={String(DEFAULT_RATE_LIMITS.sms_per_hour)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
@@ -1576,6 +1562,7 @@
 						<label for="rl-refresh" class="text-sm font-medium text-gray-900">Rate limit for token refreshes</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Number of <code class="text-[11px] bg-gray-100 px-1 rounded">/v1/auth/refresh</code> calls allowed in a 5-minute interval per IP address. Higher because legitimate SDK clients refresh proactively.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.token_refresh_per_5min_per_ip}.</span>
 						</p>
 						{#if rlTokenRefresh}
 							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenRefresh, 10) * 12} requests/hour</p>
@@ -1586,6 +1573,7 @@
 							id="rl-refresh"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.token_refresh_per_5min_per_ip}
 							bind:value={rlTokenRefresh}
 							placeholder={String(DEFAULT_RATE_LIMITS.token_refresh_per_5min_per_ip)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
@@ -1600,6 +1588,7 @@
 						<label for="rl-verify" class="text-sm font-medium text-gray-900">Rate limit for token verifications</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Number of OTP, magic-link, and email-verify attempts allowed in a 5-minute interval per IP. Throttles brute-force against 6-digit phone OTPs.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.token_verification_per_5min_per_ip}.</span>
 						</p>
 						{#if rlTokenVerify}
 							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenVerify, 10) * 12} requests/hour</p>
@@ -1610,6 +1599,7 @@
 							id="rl-verify"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.token_verification_per_5min_per_ip}
 							bind:value={rlTokenVerify}
 							placeholder={String(DEFAULT_RATE_LIMITS.token_verification_per_5min_per_ip)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"
@@ -1624,6 +1614,7 @@
 						<label for="rl-signup" class="text-sm font-medium text-gray-900">Rate limit for sign-ups and sign-ins</label>
 						<p class="mt-0.5 text-xs text-gray-500">
 							Combined volume cap on signup and signin requests per IP, per 5 minutes. The per-account brute-force counter (signin failures by email) is a separate axis at platform defaults.
+							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.signup_signin_per_5min_per_ip} — keeps a single IP from bot-farming mass account creation.</span>
 						</p>
 						{#if rlSignupSignin}
 							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlSignupSignin, 10) * 12} requests/hour</p>
@@ -1634,6 +1625,7 @@
 							id="rl-signup"
 							type="number"
 							min="0"
+							max={MAX_RATE_LIMITS.signup_signin_per_5min_per_ip}
 							bind:value={rlSignupSignin}
 							placeholder={String(DEFAULT_RATE_LIMITS.signup_signin_per_5min_per_ip)}
 							class="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600"

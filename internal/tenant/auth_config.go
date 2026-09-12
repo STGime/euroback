@@ -265,6 +265,87 @@ func DefaultRateLimits() RateLimits {
 	}
 }
 
+// MaxRateLimits are the per-project ceilings on user-configurable
+// overrides. Values above these are refused by
+// UpdateAuthConfig → ValidateRateLimits. Ops can lift a specific
+// project by SQL-editing projects.auth_config directly (same escape
+// hatch used elsewhere) when a real enterprise case needs headroom.
+//
+// The numbers are deliberately conservative — high enough for busy
+// legitimate use, low enough that a mis-set knob (or a compromised
+// tenant admin token) can't burn platform budget or take the whole
+// per-IP defence off.
+//
+//   - SMSPerHour = 10: GatewayAPI ~€0.05/SMS → ceiling of €0.50/h per
+//     project. Real limit is per-hour, so a project setting max=10
+//     is capped at 240/day and 7 200/month worst case.
+//   - TokenRefreshPer5MinPerIP = 500: 100/min per IP. Above any
+//     realistic SDK refresh cadence; still catches runaway retry loops.
+//   - TokenVerificationPer5MinPerIP = 150: 30/min per IP. Preserves
+//     brute-force resistance on 6-digit OTPs (~1M combinations).
+//   - SignupSigninPer5MinPerIP = 30: 6/min per IP. Enough headroom for
+//     a shared-IP office; below the threshold at which a single IP can
+//     bot-farm mass signups.
+//   - EmailsPerHour: no cap here today — the field is hidden from the
+//     UI (enforcement parked behind #235). When enforcement lands the
+//     cap will be added here at ~1000.
+type maxRateLimits struct {
+	SMSPerHour                    int
+	TokenRefreshPer5MinPerIP      int
+	TokenVerificationPer5MinPerIP int
+	SignupSigninPer5MinPerIP      int
+}
+
+// MaxRateLimits exposes the ceilings so the console can render the
+// same `max` attribute clients see enforced server-side. Keep the
+// numbers in sync with the Svelte UI's rate-limits page.
+func MaxRateLimits() (sms, tokenRefresh, tokenVerify, signupSignin int) {
+	m := maxRateLimitsValues()
+	return m.SMSPerHour, m.TokenRefreshPer5MinPerIP, m.TokenVerificationPer5MinPerIP, m.SignupSigninPer5MinPerIP
+}
+
+func maxRateLimitsValues() maxRateLimits {
+	return maxRateLimits{
+		SMSPerHour:                    10,
+		TokenRefreshPer5MinPerIP:      500,
+		TokenVerificationPer5MinPerIP: 150,
+		SignupSigninPer5MinPerIP:      30,
+	}
+}
+
+// ValidateRateLimits refuses any override above MaxRateLimits. Zero
+// means "use platform default" and passes. Negative values are also
+// refused — they can't legitimately mean anything.
+//
+// Called by TenantService.UpdateAuthConfig before persist. The
+// console's client-side max attribute is a UX nicety; this is the
+// actual enforcement point.
+func ValidateRateLimits(rl *RateLimits) error {
+	if rl == nil {
+		return nil
+	}
+	max := maxRateLimitsValues()
+	switch {
+	case rl.SMSPerHour < 0:
+		return fmt.Errorf("sms_per_hour: negative values not allowed")
+	case rl.SMSPerHour > max.SMSPerHour:
+		return fmt.Errorf("sms_per_hour: %d exceeds platform ceiling of %d", rl.SMSPerHour, max.SMSPerHour)
+	case rl.TokenRefreshPer5MinPerIP < 0:
+		return fmt.Errorf("token_refresh_per_5min_per_ip: negative values not allowed")
+	case rl.TokenRefreshPer5MinPerIP > max.TokenRefreshPer5MinPerIP:
+		return fmt.Errorf("token_refresh_per_5min_per_ip: %d exceeds platform ceiling of %d", rl.TokenRefreshPer5MinPerIP, max.TokenRefreshPer5MinPerIP)
+	case rl.TokenVerificationPer5MinPerIP < 0:
+		return fmt.Errorf("token_verification_per_5min_per_ip: negative values not allowed")
+	case rl.TokenVerificationPer5MinPerIP > max.TokenVerificationPer5MinPerIP:
+		return fmt.Errorf("token_verification_per_5min_per_ip: %d exceeds platform ceiling of %d", rl.TokenVerificationPer5MinPerIP, max.TokenVerificationPer5MinPerIP)
+	case rl.SignupSigninPer5MinPerIP < 0:
+		return fmt.Errorf("signup_signin_per_5min_per_ip: negative values not allowed")
+	case rl.SignupSigninPer5MinPerIP > max.SignupSigninPer5MinPerIP:
+		return fmt.Errorf("signup_signin_per_5min_per_ip: %d exceeds platform ceiling of %d", rl.SignupSigninPer5MinPerIP, max.SignupSigninPer5MinPerIP)
+	}
+	return nil
+}
+
 // EffectiveRateLimits returns the merged knobs: each zero-valued override
 // in the project's stored config is filled from DefaultRateLimits. Safe to
 // call on a config whose RateLimits field is nil.
