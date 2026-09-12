@@ -2223,6 +2223,40 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Free/Pro → Team tier upgrade admin (team-tier/upgrade series) ----
+
+	async adminListUpgrades(): Promise<{ upgrades: UpgradeRecord[] }> {
+		return this.fetch<{ upgrades: UpgradeRecord[] }>('/platform/admin/upgrades');
+	}
+
+	async adminGetUpgrade(id: string): Promise<UpgradeRecord> {
+		return this.fetch<UpgradeRecord>(
+			`/platform/admin/upgrades/${encodeURIComponent(id)}`
+		);
+	}
+
+	async adminRequestUpgrade(
+		projectId: string,
+		toPlan: 'team' | 'legal_team'
+	): Promise<{ id: string; state: string }> {
+		return this.fetch<{ id: string; state: string }>('/platform/admin/upgrades', {
+			method: 'POST',
+			body: JSON.stringify({ project_id: projectId, to_plan: toPlan })
+		});
+	}
+
+	async adminAbortUpgrade(id: string): Promise<void> {
+		return this.fetch(`/platform/admin/upgrades/${encodeURIComponent(id)}/abort`, {
+			method: 'POST'
+		});
+	}
+
+	async adminConfirmUpgrade(id: string): Promise<void> {
+		return this.fetch(`/platform/admin/upgrades/${encodeURIComponent(id)}/confirm`, {
+			method: 'POST'
+		});
+	}
+
 	/** Revoke Team-tier closed-beta access. Revocation is prospective —
 	 * existing Team projects the user created keep running. Superadmin only. */
 	async adminRevokeTeamBeta(userId: string): Promise<void> {
@@ -2994,6 +3028,32 @@ export interface Invoice {
 	 * download endpoint renders on demand — no separate handling
 	 * needed by the client. */
 	has_pdf: boolean;
+}
+
+// ---- Free/Pro → Team tier upgrade (team-tier/upgrade series) ----
+//
+// Superadmin-only endpoints under /platform/admin/upgrades. State
+// machine: requested → provisioning → copying → cutting_over → live
+// → confirmed. Terminal alternate: failed.
+
+export interface UpgradeRecord {
+	id: string;
+	project_id: string;
+	from_plan: string;
+	to_plan: string;
+	state: string;
+	project_database_id?: string | null;
+	bytes_copied: number;
+	tables_copied: number;
+	started_at: string;
+	provisioned_at?: string | null;
+	copied_at?: string | null;
+	cutover_at?: string | null;
+	confirmed_at?: string | null;
+	failed_at?: string | null;
+	error?: string | null;
+	triggered_by?: string | null;
+	updated_at: string;
 }
 
 export const api = new EurobaseAPI();
