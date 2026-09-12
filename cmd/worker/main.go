@@ -227,13 +227,14 @@ func main() {
 	// worker. In-memory cached per plan for process lifetime.
 	limitsService := plans.NewLimitsService(pool)
 
-	river.AddWorker(riverWorkers, &workers.ProvisionTeamDatabaseWorker{
+	provisionTeamDBWorker := &workers.ProvisionTeamDatabaseWorker{
 		Registry:              providerRegistry,
 		Cipher:                cipher,
 		Repo:                  providerRepo,
 		RuntimePasswordSecret: runtimePwSecret,
 		Limits:                limitsService,
-	})
+	}
+	river.AddWorker(riverWorkers, provisionTeamDBWorker)
 	river.AddWorker(riverWorkers, &workers.DeprovisionTeamDatabaseWorker{
 		Registry: providerRegistry,
 		Repo:     providerRepo,
@@ -266,13 +267,14 @@ func main() {
 		RuntimePasswordSecret: runtimePwSecret,
 	})
 
-	// Team-tier Free/Pro → Team upgrade orchestrator worker
-	// (skeleton — real state machine lands in a follow-up PR).
-	// Registered here so River dispatches jobs.UpgradeProjectArgs
-	// enqueued by upgrade.Service.RequestUpgrade cleanly rather
-	// than erroring on "unregistered kind".
+	// Team-tier Free/Pro → Team upgrade orchestrator worker. Uses
+	// ProvisionTeamDatabaseWorker.Ensure() (via the shared instance
+	// constructed above) so upgrade + create-time-Team share every
+	// bit of the provisioning path — cipher unwrap, Scaleway
+	// idempotency, runtime + readonly credential bootstrap.
 	river.AddWorker(riverWorkers, &workers.UpgradeProjectWorker{
-		Pool: pool,
+		Pool:        pool,
+		Provisioner: provisionTeamDBWorker,
 	})
 
 	// #354 audit webhook deliverer. Vault is used to resolve the
