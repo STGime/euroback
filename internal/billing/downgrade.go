@@ -145,6 +145,15 @@ type downgradeCandidate struct {
 	ProjectID              string
 	ProjectName            string
 	OwnerEmail             string
+	// Plan is fetched purely for the "no Team downgrade" guard in
+	// downgradeOne. Every SELECT below MUST populate this so the
+	// guard can refuse a stray Team-tier row before we cancel Mollie
+	// or expire the subscription — see migration 000117 header:
+	// once a project sits on a dedicated managed-PG instance, we
+	// have no code path to move it back to the shared cluster, so
+	// silently "downgrading" it would leave a Team-tier project
+	// stuck on Free with orphaned billing state.
+	Plan                   string
 	SubscriptionID         *string // nil for legacy-Pro (no sub)
 	MollieSubscriptionID   *string
 	MollieCustomerID       *string
@@ -154,7 +163,7 @@ type downgradeCandidate struct {
 // been past_due longer than pastDueGracePeriod.
 func (s *DowngradeService) findPastDueGraceElapsed(ctx context.Context) ([]downgradeCandidate, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.name, u.email,
+		`SELECT p.id, p.name, u.email, p.plan,
 		        s.id, s.mollie_subscription_id, s.mollie_customer_id
 		   FROM public.subscriptions s
 		   JOIN public.projects p ON p.id = s.project_id
@@ -174,7 +183,7 @@ func (s *DowngradeService) findPastDueGraceElapsed(ctx context.Context) ([]downg
 	for rows.Next() {
 		var c downgradeCandidate
 		var subID string
-		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.OwnerEmail,
+		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.OwnerEmail, &c.Plan,
 			&subID, &c.MollieSubscriptionID, &c.MollieCustomerID); err != nil {
 			return nil, err
 		}
@@ -190,7 +199,7 @@ func (s *DowngradeService) findPastDueGraceElapsed(ctx context.Context) ([]downg
 // subscription with a future next_charge_at doesn't get swept.
 func (s *DowngradeService) findEndOfPeriodElapsed(ctx context.Context) ([]downgradeCandidate, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.name, u.email,
+		`SELECT p.id, p.name, u.email, p.plan,
 		        s.id, s.mollie_subscription_id, s.mollie_customer_id
 		   FROM public.subscriptions s
 		   JOIN public.projects p ON p.id = s.project_id
@@ -211,7 +220,7 @@ func (s *DowngradeService) findEndOfPeriodElapsed(ctx context.Context) ([]downgr
 	for rows.Next() {
 		var c downgradeCandidate
 		var subID string
-		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.OwnerEmail,
+		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.OwnerEmail, &c.Plan,
 			&subID, &c.MollieSubscriptionID, &c.MollieCustomerID); err != nil {
 			return nil, err
 		}
@@ -228,7 +237,7 @@ func (s *DowngradeService) findEndOfPeriodElapsed(ctx context.Context) ([]downgr
 // then hit this sweep on grace-day 14 hour 1 (the plan-doc race).
 func (s *DowngradeService) findLegacyProGraceElapsed(ctx context.Context) ([]downgradeCandidate, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.name, u.email
+		`SELECT p.id, p.name, u.email, p.plan
 		   FROM public.projects p
 		   JOIN public.platform_users u ON u.id = p.owner_id
 		  WHERE p.plan = 'pro'
@@ -251,7 +260,7 @@ func (s *DowngradeService) findLegacyProGraceElapsed(ctx context.Context) ([]dow
 	var out []downgradeCandidate
 	for rows.Next() {
 		var c downgradeCandidate
-		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.OwnerEmail); err != nil {
+		if err := rows.Scan(&c.ProjectID, &c.ProjectName, &c.OwnerEmail, &c.Plan); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -270,6 +279,30 @@ func (s *DowngradeService) findLegacyProGraceElapsed(ctx context.Context) ([]dow
 // reason is a slog label so operators can bisect "why did project
 // X get downgraded" without SQL archaeology.
 func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidate, reason string) {
+	// Team-tier rejection guard. A Team / Legal-Team project owns a
+	// dedicated managed-PG instance (migration 000083). Team → Free
+	// is not a supported transition — we have no code path to move
+	// the tenant back onto the shared cluster and no policy for
+	// what to do with the dedicated instance. Silently downgrading
+	// would leave the project stuck (Mollie cancelled, subscription
+	// expired) with orphaned billing state; the WHERE plan='pro'
+	// guard on the projects UPDATE catches this eventually but not
+	// before we've done real work on Mollie.
+	//
+	// Loud slog.Error on this branch so ops sees a stray Team
+	// candidate as soon as one appears — most likely a bug in a
+	// future SELECT that forgets to filter by plan. Empty Plan
+	// (candidate constructed without loading the field) is treated
+	// as a bug too — refuse fail-loud rather than fail-safe.
+	if c.Plan != "pro" {
+		slog.Error("billing: refusing to downgrade — candidate plan is not 'pro'",
+			"project_id", c.ProjectID,
+			"plan", c.Plan,
+			"reason", reason,
+		)
+		return
+	}
+
 	// 1. Cancel Mollie subscription (only for past_due branch —
 	// legacy-Pro has no mollie_subscription_id).
 	if c.MollieSubscriptionID != nil && c.MollieCustomerID != nil &&
