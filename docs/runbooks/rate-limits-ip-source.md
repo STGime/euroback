@@ -94,7 +94,7 @@ Leave `trust_proxy = false`. Document that decision here so the "why isn't the d
 
 ## Related
 
-- `internal/ratelimit/client_ip.go` — the extractor. See its doc-comment for the two failure modes (collapse vs. forgery) this runbook is trying to reason about.
+- `internal/ratelimit/auth.go` — the extractor. See its doc-comment for the two failure modes (collapse vs. forgery) this runbook is trying to reason about.
 - `internal/tenant/auth_config.go` — `DefaultRateLimits()`, `TrustProxy`, `TrustedProxyHops` fields on `RateLimits`.
 - PR #420 — trusted-hop-count hardening (`#238`) that made this a correctness question rather than a security one.
 - Console UI: Auth → Rate Limits → IP Address Forwarding.

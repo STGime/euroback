@@ -1668,7 +1668,7 @@
 					<div class="flex-1">
 						<label for="rl-trust-proxy" class="text-sm font-medium text-gray-900">Trust X-Forwarded-For</label>
 						<p class="mt-0.5 text-xs text-gray-500">
-							When <strong>on</strong>, the limiter keys on the leftmost <code class="text-[11px] bg-gray-100 px-1 rounded">X-Forwarded-For</code> entry (the real client IP). Only safe when exactly one trusted hop in front of the gateway authoritatively overwrites that header.
+							When <strong>on</strong>, the limiter picks the <code class="text-[11px] bg-gray-100 px-1 rounded">X-Forwarded-For</code> entry at index <code class="text-[11px] bg-gray-100 px-1 rounded">len(entries) − trusted_proxy_hops</code> (the real client IP written by the last trusted hop). Anything to the left of that index is caller-controlled and discarded — safe against header forgery.
 						</p>
 						<p class="mt-0.5 text-xs text-gray-500">
 							When <strong>off</strong> (default), the limiter keys on the TCP peer — safe under any header forgery, but in deployments behind one shared ingress the counter collapses to a per-project total.
