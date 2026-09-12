@@ -109,7 +109,8 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 		var state string
 		var pdID *string
 		err := m.pool.QueryRow(r.Context(),
-			`SELECT p.id, p.schema_name, p.jwt_secret, p.auth_config, p.state, pd.id
+			`SELECT p.id, p.schema_name, p.jwt_secret, p.auth_config, p.state,
+			        COALESCE(p.maintenance_mode, false), pd.id
 			   FROM projects p
 			   LEFT JOIN project_databases pd
 			          ON pd.project_id = p.id
@@ -119,7 +120,8 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 			  ORDER BY (pd.state = 'active') DESC NULLS LAST, pd.created_at DESC NULLS LAST
 			  LIMIT 1`,
 			slug,
-		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.JWTSecret, &pc.AuthConfig, &state, &pdID)
+		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.JWTSecret, &pc.AuthConfig, &state,
+			&pc.MaintenanceMode, &pdID)
 		if err != nil {
 			slog.Warn("subdomain project not found", "slug", slug, "error", err)
 			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)

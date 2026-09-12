@@ -32,6 +32,15 @@ type ProjectContext struct {
 	// project_databases row when HasDedicatedDB is true. Nil
 	// otherwise. Used by future pool-cache lookups.
 	ProjectDatabaseID *string
+
+	// MaintenanceMode mirrors public.projects.maintenance_mode
+	// (added in migration 000117). When true, SDK requests for this
+	// project are refused with HTTP 503 by
+	// gateway.MaintenanceModeMiddleware. Set during Free/Pro → Team
+	// tier upgrade cutover (~30 seconds) and by ops for emergencies.
+	// Populated by the same SELECT that resolves the project, so no
+	// extra DB hit per request.
+	MaintenanceMode bool
 }
 
 // ContextWithProject stores a ProjectContext in the given context.

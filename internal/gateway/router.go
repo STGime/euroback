@@ -1243,8 +1243,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// middleware's LEFT JOIN of project_databases (added in
 		// subdomain_middleware.go same-PR); otherwise pc.HasDedicatedDB
 		// stays false and the middleware no-ops.
-		r.With(sdkTenantPoolMw).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
-		r.With(sdkTenantPoolMw).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
+		r.With(sdkTenantPoolMw, MaintenanceModeMiddleware).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
+		r.With(sdkTenantPoolMw, MaintenanceModeMiddleware).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 
 		// Auth endpoints (only need API key, no end-user JWT).
 		// sdkTenantPoolMw stashes the runtime pool for Team-tier
@@ -1256,6 +1256,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.Route("/auth", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
 			r.Use(sdkTenantPoolMw)
+			r.Use(MaintenanceModeMiddleware)
 			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc, limiter))
 			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc, limiter))
 			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc, limiter))
@@ -1287,6 +1288,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Use(tenant.TenantContextMiddleware(pool))
 			} else {
 				r.Use(apiKeyMw.Handler)
+				r.Use(MaintenanceModeMiddleware)
 				r.Use(endUserMw.Handler)
 				r.Use(tenant.TenantContextFromProject())
 			}
@@ -1339,6 +1341,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					r.Use(devAuthMiddleware)
 				} else {
 					r.Use(apiKeyMw.Handler)
+					r.Use(MaintenanceModeMiddleware)
 					r.Use(endUserMw.Handler)
 				}
 
@@ -1367,6 +1370,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Route("/vault", func(r chi.Router) {
 				r.Use(apiKeyMw.Handler)
 				r.Use(sdkTenantPoolMw)
+				r.Use(MaintenanceModeMiddleware)
 				r.Get("/", vault.HandleSDKList(vaultSvc))
 				r.Get("/{name}", vault.HandleSDKGet(vaultSvc))
 				r.Post("/", vault.HandleSDKSet(vaultSvc, pool))
@@ -1378,6 +1382,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		sdkFnSvc := functions.NewService(pool, vaultSvc)
 		r.Route("/functions", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
+			r.Use(MaintenanceModeMiddleware)
 			r.Use(endUserMw.Handler)
 			r.HandleFunc("/{name}", functions.HandleInvoke(pool, sdkFnSvc, fnRunnerURL, fnSigner))
 		})
@@ -1387,6 +1392,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// cron_jobs) and public keys live in client code.
 		r.Route("/schedules", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
+			r.Use(MaintenanceModeMiddleware)
 			r.Use(requireSecretKeyForSchedules)
 			sdkCronSvc := cron.NewCronService(pool)
 			r.Mount("/", cron.SDKRoutes(sdkCronSvc))
