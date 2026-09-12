@@ -130,6 +130,44 @@ func TestSendDowngradeMail_EmptyOwnerEmailIsNoop(t *testing.T) {
 	}
 }
 
+// TestDowngradeOneRefusesNonPro verifies the guard at the top of
+// downgradeOne — Team-tier projects (and any other non-Pro plan)
+// must exit before any Mollie cancel or DB write happens. If a
+// future SELECT accidentally includes a Team row, this fires as
+// a loud slog.Error but takes no destructive action.
+//
+// We test the guard by observing that no mail is sent — the guard
+// returns before the mail step, and the mailer records every call.
+// A DB or Mollie mock would exercise the same path but adds glue
+// with no extra signal.
+func TestDowngradeOneRefusesNonPro(t *testing.T) {
+	cases := []struct {
+		name string
+		plan string
+	}{
+		{"team plan refused", "team"},
+		{"legal_team plan refused", "legal_team"},
+		{"free plan refused (already downgraded)", "free"},
+		{"empty plan refused (candidate constructed without Plan)", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &fakeMailer{}
+			svc := &DowngradeService{mailer: m}
+			svc.downgradeOne(context.Background(), downgradeCandidate{
+				ProjectID:   "proj_x",
+				ProjectName: "MyProject",
+				OwnerEmail:  "owner@example.com",
+				Plan:        tc.plan,
+			}, "test_reason")
+			// The guard returns before the mail step, so calls stays 0.
+			if m.calls != 0 {
+				t.Fatalf("expected 0 mailer calls for plan=%q, got %d", tc.plan, m.calls)
+			}
+		})
+	}
+}
+
 // contains is a case-sensitive substring helper. Kept package-
 // local so tests don't have to import strings for one function.
 func contains(s, sub string) bool {
