@@ -208,6 +208,9 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, []string{aggCol}); err != nil {
 			return nil, err
 		}
+		if err := checkDeniedColumns(ctx, tableName, []string{aggCol}); err != nil {
+			return nil, err
+		}
 	}
 
 	// Validate filter columns.
@@ -219,6 +222,9 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, filterCols); err != nil {
 			return nil, err
 		}
+	}
+	if err := checkDeniedColumns(ctx, tableName, filterCols); err != nil {
+		return nil, err
 	}
 
 	sql, args, _ := buildAggregateQuery(schemaName, tableName, params.Aggregate, params)
@@ -251,6 +257,11 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 			if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, rel.Table, rel.Columns); err != nil {
 				return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
 			}
+		}
+		// Reject embedding sensitive columns of a system table (incl.
+		// the `table(*)` row_to_json form, which can't be stripped).
+		if err := checkDeniedRelation(ctx, rel.Table, rel.Columns); err != nil {
+			return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
 		}
 
 		// Find FK from main table to related table.
@@ -309,6 +320,9 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 			}
 		}
 	}
+	if err := checkDeniedColumns(ctx, tableName, params.Select); err != nil {
+		return nil, 0, err
+	}
 
 	// Validate filter columns.
 	filterCols := make([]string, 0, len(params.Filters))
@@ -320,6 +334,9 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 			return nil, 0, err
 		}
 	}
+	if err := checkDeniedColumns(ctx, tableName, filterCols); err != nil {
+		return nil, 0, err
+	}
 
 	// Validate order columns.
 	orderCols := make([]string, 0, len(params.OrderBy))
@@ -330,6 +347,9 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, orderCols); err != nil {
 			return nil, 0, err
 		}
+	}
+	if err := checkDeniedColumns(ctx, tableName, orderCols); err != nil {
+		return nil, 0, err
 	}
 
 	// Enforce max limit.
@@ -395,6 +415,9 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 	if err != nil {
 		return nil, 0, err
 	}
+	// Catch-all: scrub sensitive system-table columns that `select=*`
+	// or an omitted select would otherwise return unnamed.
+	stripDeniedColumns(ctx, tableName, results)
 	return results, totalCount, nil
 }
 
@@ -472,6 +495,9 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, cols); err != nil {
 			return nil, err
 		}
+		if err := checkDeniedColumns(ctx, tableName, cols); err != nil {
+			return nil, err
+		}
 		sql, args = buildInsertQuery(schemaName, tableName, data)
 	}
 
@@ -498,6 +524,8 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 	if err != nil {
 		return nil, err
 	}
+	// RETURNING * would otherwise echo sensitive system-table columns.
+	stripDeniedColumns(ctx, tableName, []map[string]interface{}{result})
 	return result, nil
 }
 
@@ -518,6 +546,9 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 		cols = append(cols, k)
 	}
 	if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, cols); err != nil {
+		return nil, err
+	}
+	if err := checkDeniedColumns(ctx, tableName, cols); err != nil {
 		return nil, err
 	}
 
@@ -545,6 +576,8 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	if err != nil {
 		return nil, err
 	}
+	// RETURNING * would otherwise echo sensitive system-table columns.
+	stripDeniedColumns(ctx, tableName, []map[string]interface{}{result})
 	return result, nil
 }
 
