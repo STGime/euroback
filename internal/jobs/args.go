@@ -252,6 +252,44 @@ func (DeliverAuditWebhookArgs) InsertOpts() river.InsertOpts {
 // the restore_operations row ID — the worker reads every other
 // input (source_ref, target_time, old_instance_id) from that row so
 // the job payload stays tiny and idempotent-checkable.
+// UpgradeProjectArgs drives the Free/Pro → Team tier upgrade
+// orchestrator (internal/workers/upgrade_project.go). Enqueued by
+// upgrade.Service.RequestUpgrade after inserting the initial
+// project_upgrades row.
+//
+// The worker owns the state machine: requested → provisioning →
+// copying → cutting_over → live. On terminal failure the state is
+// flipped to `failed` and (in the future) the sweeper can pick it
+// up for cleanup.
+type UpgradeProjectArgs struct {
+	// UpgradeID is the project_upgrades row primary key. The worker
+	// re-fetches the row on start to avoid trusting args after a
+	// long queue wait (someone may have aborted the upgrade in the
+	// interim).
+	UpgradeID string `json:"upgrade_id"`
+}
+
+func (UpgradeProjectArgs) Kind() string { return "upgrade_project" }
+
+// MaxAttempts = 3 with River's exponential backoff. Provisioning
+// alone is retryable via ProvisionTeamDatabaseWorker; copying is
+// idempotent (ON CONFLICT DO NOTHING); cutting_over is the
+// short-critical section. Three attempts is enough to weather a
+// single provider blip; more and we're just retrying on a broken
+// upgrade that ops needs to abort manually.
+//
+// UniqueOpts.ByArgs collapses duplicate enqueues on the SAME
+// UpgradeID. The service layer's UNIQUE INDEX on project_upgrades
+// prevents multiple concurrent upgrade rows for the same project,
+// so ByArgs is belt-and-braces against a double-enqueue on the
+// same row.
+func (UpgradeProjectArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		MaxAttempts: 3,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
+}
+
 type RestoreTeamDatabaseArgs struct {
 	RestoreOperationID string `json:"restore_operation_id"`
 }
