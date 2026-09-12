@@ -266,6 +266,15 @@ func main() {
 		RuntimePasswordSecret: runtimePwSecret,
 	})
 
+	// Team-tier Free/Pro → Team upgrade orchestrator worker
+	// (skeleton — real state machine lands in a follow-up PR).
+	// Registered here so River dispatches jobs.UpgradeProjectArgs
+	// enqueued by upgrade.Service.RequestUpgrade cleanly rather
+	// than erroring on "unregistered kind".
+	river.AddWorker(riverWorkers, &workers.UpgradeProjectWorker{
+		Pool: pool,
+	})
+
 	// #354 audit webhook deliverer. Vault is used to resolve the
 	// tenant's HMAC signing secret (secret_ref → vault key name).
 	// Nil vault is fine — destinations with secret_ref=NULL just
