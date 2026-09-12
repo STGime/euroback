@@ -529,11 +529,18 @@
 </script>
 
 <div class="max-w-6xl mx-auto space-y-8">
-	<header>
-		<h1 class="text-2xl font-semibold text-gray-900">Platform Admin</h1>
-		<p class="text-sm text-gray-500 mt-1">
-			Superadmin-only view of every project and the closed-beta allowlist.
-		</p>
+	<header class="flex items-center justify-between">
+		<div>
+			<h1 class="text-2xl font-semibold text-gray-900">Platform Admin</h1>
+			<p class="text-sm text-gray-500 mt-1">
+				Superadmin-only view of every project and the closed-beta allowlist.
+			</p>
+		</div>
+		<nav class="text-sm space-x-3">
+			<a href="/admin/upgrades" class="text-blue-600 hover:underline">
+				Team-tier upgrades →
+			</a>
+		</nav>
 	</header>
 
 	{#if error}
