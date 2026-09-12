@@ -56,6 +56,26 @@ func main() {
 	defer pool.Close()
 	slog.Info("database connection pool established")
 
+	// developerPool is wired to eurobase_developer (member of
+	// eurobase_migrator with INHERIT) so workers that need
+	// SET LOCAL ROLE eurobase_migrator can elevate. Used by the
+	// upgrade confirm sweeper (team-tier/upgrade series) — the
+	// gateway pool is eurobase_gateway which is NOT a member of
+	// migrator and can't SET ROLE. Falls back to `pool` in dev.
+	developerPool := pool
+	if devURL := os.Getenv("DATABASE_URL_DEVELOPER"); devURL != "" {
+		dp, err := db.NewPool(ctx, devURL)
+		if err != nil {
+			slog.Error("failed to connect to developer database", "error", err)
+			os.Exit(1)
+		}
+		developerPool = dp
+		defer dp.Close()
+		slog.Info("developer database connection pool established")
+	} else {
+		slog.Warn("DATABASE_URL_DEVELOPER not set — falling back to gateway pool; upgrade confirm sweeper will fail in prod (gateway role can't SET ROLE migrator)")
+	}
+
 	// ── Run River schema migrations ──
 	slog.Info("running river schema migrations")
 	migrator, err := rivermigrate.New(riverpgxv5.New(pool), nil)
@@ -430,7 +450,12 @@ func main() {
 	// rollback window to `confirmed`. Actual source-data purge
 	// lands in a follow-up PR alongside the copy work — this
 	// sweeper only advances the state.
-	upgrade.NewConfirmSweeper(upgrade.NewService(pool, riverClient)).StartLoop(ctx)
+	//
+	// Uses developerPool because ConfirmUpgrade runs SET LOCAL
+	// ROLE eurobase_migrator; the gateway pool would 500 on that
+	// every tick (see #563 review — reviewer caught the wrong-pool
+	// bug pre-merge).
+	upgrade.NewConfirmSweeper(upgrade.NewService(developerPool, riverClient)).StartLoop(ctx)
 
 	// ── Retention hold sweeper (Legal-Team M2b, #314) ──
 	// Daily ticker: purges expired retention_holds rows so the
