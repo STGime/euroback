@@ -114,6 +114,13 @@ func (w *UpgradeProjectWorker) Work(ctx context.Context, job *river.Job[jobs.Upg
 
 	// Provisioning step. Ensure() is idempotent + returns the active
 	// record (host, port, runtime creds).
+	//
+	// job.Attempt is forwarded so a River retry after
+	// state=active-on-project_databases-but-bootstrap-failed triggers
+	// the resume-from-active branch (provision_team_db.go:176). Without
+	// this, a retry would re-run Provision + InsertProvisioning and
+	// stall permanently on the state='active' partial unique index —
+	// the exact regression PR #560's doc warned about.
 	if row.state == "provisioning" {
 		if w.Provisioner == nil {
 			return w.fail(ctx, logger, upgradeID, "provisioner", errors.New("Provisioner not configured"))
@@ -125,7 +132,7 @@ func (w *UpgradeProjectWorker) Work(ctx context.Context, job *river.Job[jobs.Upg
 			Provider:  "scaleway",
 			Region:    "fr-par",
 			Size:      "small",
-		}, 1, idemKey)
+		}, job.Attempt, idemKey)
 		if err != nil {
 			return w.fail(ctx, logger, upgradeID, "provision dedicated instance", err)
 		}
@@ -218,7 +225,10 @@ func (w *UpgradeProjectWorker) exitMaintenance(ctx context.Context, projectID st
 
 // flipPlan sets projects.plan to the target Team tier. Guarded on
 // current plan being free/pro so a concurrent admin change surfaces
-// as a zero-rows-affected error.
+// as an error. Idempotent across retries: if the plan is already
+// flipped to `toPlan` (previous cutover attempt succeeded but the
+// subsequent state stamp failed), this returns nil without error so
+// the retry can move on to updateStateAndCutoverAt.
 func (w *UpgradeProjectWorker) flipPlan(ctx context.Context, projectID, toPlan string) error {
 	tag, err := w.execAndCount(ctx,
 		`UPDATE public.projects
@@ -228,10 +238,27 @@ func (w *UpgradeProjectWorker) flipPlan(ctx context.Context, projectID, toPlan s
 	if err != nil {
 		return err
 	}
-	if tag != 1 {
-		return fmt.Errorf("plan flip affected %d rows (expected 1) — concurrent change?", tag)
+	if tag == 1 {
+		return nil
 	}
-	return nil
+	// Zero rows affected — either concurrent change or already-flipped.
+	// Read current plan to distinguish. Already-flipped is fine for a
+	// retry; anything else is an error the operator needs to see.
+	var currentPlan string
+	if err := w.Pool.QueryRow(ctx,
+		`SELECT plan FROM public.projects WHERE id = $1`,
+		projectID,
+	).Scan(&currentPlan); err != nil {
+		return fmt.Errorf("plan flip affected 0 rows and follow-up read failed: %w", err)
+	}
+	if currentPlan == toPlan {
+		// Idempotent success: the row was already at toPlan (previous
+		// cutover attempt commit-then-crashed between flipPlan and
+		// updateStateAndCutoverAt).
+		return nil
+	}
+	return fmt.Errorf("plan flip affected 0 rows and current plan=%q (expected free/pro or already %q) — concurrent change?",
+		currentPlan, toPlan)
 }
 
 func (w *UpgradeProjectWorker) updateState(ctx context.Context, upgradeID, newState, expected string) error {
