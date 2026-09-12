@@ -1524,6 +1524,27 @@
 				</p>
 			</div>
 
+			<!-- BYO-SMTP interaction. The one thing custom SMTP actually
+			     bypasses is the platform email-delivery ceiling (currently
+			     hidden pending #235). Everything shown below is per-IP
+			     anti-abuse or SMS — none of it is affected by SMTP choice.
+			     Spell that out so a customer configuring BYO SMTP for
+			     high-volume auth emails doesn't wonder why the per-IP
+			     throttles below are still there. -->
+			<div class="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-900">
+				<div class="flex items-start gap-2">
+					<svg class="w-4 h-4 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>
+					<div>
+						<div class="font-medium">Using <a href="#smtp" onclick={() => (activeTab = 'smtp')} class="underline">custom SMTP</a>?</div>
+						<div class="mt-1 leading-snug">
+							Auth emails (verification, password reset, magic link) route through your SMTP provider —
+							<strong>your provider's limits apply, not ours</strong>. The per-IP throttles below still apply
+							as anti-abuse safeguards on the signup / signin / verify endpoints, and SMS is a separate channel with its own cap.
+						</div>
+					</div>
+				</div>
+			</div>
+
 			<!-- Rate limit fields, modeled on the Supabase Rate Limits page -->
 			<div class="rounded-lg border border-gray-200 bg-white divide-y divide-gray-200">
 
