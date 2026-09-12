@@ -1673,8 +1673,12 @@
 						<p class="mt-0.5 text-xs text-gray-500">
 							When <strong>off</strong> (default), the limiter keys on the TCP peer — safe under any header forgery, but in deployments behind one shared ingress the counter collapses to a per-project total.
 						</p>
-						<p class="mt-1 text-[11px] text-amber-700">
-							Eurobase ships <strong>off</strong> by default until the Scaleway LB / nginx-ingress XFF chain is verified end-to-end (#238).
+						<p class="mt-1 text-[11px] text-gray-500">
+							Eurobase ships <strong>off</strong> by default: it's safe under any XFF chain configuration. The trusted-hop-count hardening
+							(rightmost-XFF extraction, fail-closed on missing hops) is in place, so flipping this on is safe against header forgery — but the
+							single-hop precondition (exactly one trusted proxy authoritatively rewrites the header) hasn't been formalized end-to-end for the
+							Scaleway LB + nginx-ingress chain we run. See <code class="text-[11px] bg-gray-100 px-1 rounded">docs/runbooks/rate-limits-ip-source.md</code>
+							for the check to run before flipping.
 						</p>
 					</div>
 					<div class="shrink-0 pt-1">
