@@ -38,6 +38,7 @@ import (
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/sovereignty"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
 	"github.com/jackc/pgx/v5"
@@ -629,7 +630,14 @@ func main() {
 			"count", sovereigntyReg.Count())
 	}
 
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, devMode)
+	// Free/Pro → Team tier upgrade orchestrator. Uses developerPool
+	// so writes on project_upgrades hit eurobase_developer (member
+	// of migrator); the service SET LOCAL ROLE elevates inside each
+	// tx. riverInsertOnly is the same client used for the drip enqueue
+	// above — see internal/upgrade for the state machine flow.
+	upgradeSvc := upgrade.NewService(developerPool, riverInsertOnly)
+
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
