@@ -31,7 +31,8 @@ func TestStateConstants(t *testing.T) {
 func TestErrSentinels(t *testing.T) {
 	if ErrAlreadyTeam == nil ||
 		ErrUpgradeInFlight == nil ||
-		ErrBetaAccessMissing == nil ||
+		ErrTeamBetaAccessMissing == nil ||
+		ErrLegalTeamBetaAccessMissing == nil ||
 		ErrProjectNotFound == nil ||
 		ErrUnsupportedPlan == nil {
 		t.Fatal("one or more Err* sentinels is nil")

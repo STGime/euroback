@@ -10,7 +10,9 @@ import (
 	"fmt"
 
 	"github.com/eurobase/euroback/internal/jobs"
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 )
@@ -35,11 +37,12 @@ const (
 // user-facing failures (return 4xx) from platform errors
 // (return 5xx) via errors.Is / errors.As.
 var (
-	ErrAlreadyTeam      = errors.New("project is already on a Team tier")
-	ErrUpgradeInFlight  = errors.New("an upgrade is already in progress for this project")
-	ErrBetaAccessMissing = errors.New("Team-tier upgrade requires beta access")
-	ErrProjectNotFound  = errors.New("project not found")
-	ErrUnsupportedPlan  = errors.New("target plan is not a Team tier")
+	ErrAlreadyTeam               = errors.New("project is already on a Team tier")
+	ErrUpgradeInFlight           = errors.New("an upgrade is already in progress for this project")
+	ErrTeamBetaAccessMissing     = errors.New("Team-tier upgrade requires team_beta_access")
+	ErrLegalTeamBetaAccessMissing = errors.New("Legal-Team-tier upgrade requires legal_team_beta_access")
+	ErrProjectNotFound           = errors.New("project not found")
+	ErrUnsupportedPlan           = errors.New("target plan is not a Team tier")
 )
 
 // Service owns the guard logic + River enqueue for an upgrade
@@ -101,18 +104,30 @@ func (s *Service) RequestUpgrade(ctx context.Context, projectID, adminID, toPlan
 		return "", ErrAlreadyTeam
 	}
 
-	// Guard 2: owner has team_beta_access. Match the tenant service
-	// gate — no separate legal_team beta flag today; a follow-up may
-	// introduce it. For now legal_team upgrades share the team beta.
-	var betaAccess bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT team_beta_access FROM public.platform_users WHERE id = $1`,
-		ownerID,
-	).Scan(&betaAccess); err != nil {
-		return "", fmt.Errorf("lookup owner beta: %w", err)
-	}
-	if !betaAccess {
-		return "", ErrBetaAccessMissing
+	// Guard 2: owner has the right beta flag for the target plan.
+	// Matches CreateProject's dispatch (tenant/service.go): team →
+	// team_beta_access, legal_team → legal_team_beta_access. Two
+	// separate flags because Legal Team ships a different SKU with
+	// stricter compliance obligations (BSI C5 dossier, §203 StGB
+	// staff declarations) — a customer approved for the base beta
+	// isn't automatically approved for the legal-tech beta.
+	switch toPlan {
+	case "team":
+		ok, err := tenant.UserHasTeamBetaAccess(ctx, s.pool, ownerID)
+		if err != nil {
+			return "", fmt.Errorf("lookup team beta: %w", err)
+		}
+		if !ok {
+			return "", ErrTeamBetaAccessMissing
+		}
+	case "legal_team":
+		ok, err := tenant.UserHasLegalTeamBetaAccess(ctx, s.pool, ownerID)
+		if err != nil {
+			return "", fmt.Errorf("lookup legal_team beta: %w", err)
+		}
+		if !ok {
+			return "", ErrLegalTeamBetaAccessMissing
+		}
 	}
 
 	// Guard 3: no in-flight upgrade. The partial unique index would
@@ -157,6 +172,19 @@ func (s *Service) RequestUpgrade(ctx context.Context, projectID, adminID, toPlan
 		 RETURNING id`,
 		projectID, currentPlan, toPlan, nullableAdminID(adminID),
 	).Scan(&upgradeID); err != nil {
+		// Map ux_project_upgrades_active violation to the friendly
+		// ErrUpgradeInFlight rather than surfacing a raw 23505.
+		// Handles the guard-3 race: two concurrent RequestUpgrade
+		// calls both pass the EXISTS pre-check and both try to
+		// INSERT — the partial unique index rejects the second, and
+		// without this the client sees a wrapped constraint error
+		// instead of the friendly guard message.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) &&
+			pgErr.Code == "23505" &&
+			pgErr.ConstraintName == "ux_project_upgrades_active" {
+			return "", ErrUpgradeInFlight
+		}
 		return "", fmt.Errorf("insert project_upgrades: %w", err)
 	}
 
