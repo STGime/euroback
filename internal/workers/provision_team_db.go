@@ -92,7 +92,13 @@ func (w *ProvisionTeamDatabaseWorker) Timeout(*river.Job[jobs.ProvisionTeamDatab
 }
 
 func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[jobs.ProvisionTeamDatabaseArgs]) error {
-	_, err := w.Ensure(ctx, job.Args, job.Attempt)
+	// River-path idempotency key = job.ID. Retries of the same job
+	// share it; a re-enqueue after `MarkDeleted` produces a NEW job
+	// ID, so Scaleway's 24 h idempotency cache doesn't fold the
+	// second provision into the first (would otherwise return a
+	// stale reference to a torn-down instance — the #560 review
+	// regression).
+	_, err := w.Ensure(ctx, job.Args, job.Attempt, fmt.Sprintf("provision-%d", job.ID))
 	return err
 }
 
@@ -116,10 +122,18 @@ func (w *ProvisionTeamDatabaseWorker) Work(ctx context.Context, job *river.Job[j
 // Callers driving this synchronously outside of River can pass 1 for
 // the first attempt.
 //
+// `idempotencyKey` is forwarded to provider.Provision(). Callers
+// MUST provide a value that rotates per "generation" (project +
+// deleted-and-re-provisioned counter) so Scaleway's idempotency
+// cache doesn't return metadata for a torn-down instance. Work()
+// uses `provision-{job.ID}` (River retries share it, re-enqueues
+// don't). Synchronous callers should salt with something equally
+// unique per upgrade attempt (e.g. `upgrade-{project_upgrades.id}`).
+//
 // Same idempotency guarantees as Work(): safe to call multiple times
 // for the same project. First success returns the record; subsequent
-// calls hit the resume-from-active branch.
-func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.ProvisionTeamDatabaseArgs, attempt int) (*dbprovider.Record, error) {
+// calls hit the resume-from-active branch (attempt >= 2).
+func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.ProvisionTeamDatabaseArgs, attempt int, idempotencyKey string) (*dbprovider.Record, error) {
 	logger := slog.With(
 		"project_id", args.ProjectID,
 		"slug", args.Slug,
@@ -177,7 +191,17 @@ func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.Prov
 			if err := w.bootstrapRuntime(ctx, provider, existing, activeInst, logger); err != nil {
 				return nil, fmt.Errorf("resume bootstrap dedicated: %w", err)
 			}
-			return existing, nil
+			// Same rationale as the fresh-provision path: re-fetch so
+			// runtime + readonly credential slots reflect what
+			// bootstrapRuntime just wrote (existing was fetched
+			// BEFORE bootstrap, so its slots are stale).
+			fresh, refetchErr := w.Repo.GetLiveByProject(ctx, args.ProjectID)
+			if refetchErr != nil {
+				logger.Warn("final GetLiveByProject failed on resume path — returning pre-bootstrap rec (runtime slots may be stale)",
+					"error", refetchErr)
+				return existing, nil
+			}
+			return fresh, nil
 		}
 	}
 
@@ -213,18 +237,14 @@ func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.Prov
 		size = dbprovider.SizeSmall
 	}
 
-	// Idempotency-Key = deterministic per project. River retries and
-	// out-of-River callers (upgrade orchestrator) both re-enter here
-	// with the same project_id, so Scaleway returns the
-	// previously-created instance rather than spinning up a duplicate
-	// (~€50-500/mo of orphan spend per leak on a MaxAttempts=5 job).
-	idemKey := fmt.Sprintf("provision-%s", args.ProjectID)
-
+	// Idempotency-Key comes from the caller so River retries share it
+	// (same job.ID) while re-enqueues after MarkDeleted get a fresh
+	// value. See the Ensure doc comment for the contract.
 	inst, err := provider.Provision(ctx, dbprovider.ProvisionOpts{
 		ProjectID:      args.ProjectID,
 		Slug:           args.Slug,
 		Size:           size,
-		IdempotencyKey: idemKey,
+		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
 		if isNonRetryable(err) {
@@ -351,7 +371,23 @@ func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.Prov
 		return nil, fmt.Errorf("bootstrap dedicated: %w", err)
 	}
 
-	return rec, nil
+	// Re-fetch the record so the returned value reflects EVERY field
+	// bootstrapRuntime + applyBackupSchedule wrote (runtime creds,
+	// readonly creds, backup_schedule_applied_at). Callers that need
+	// runtime credentials to open a fresh pool (upgrade orchestrator
+	// in PR 5) get them without a follow-up round-trip.
+	//
+	// Best-effort: if this fetch races a deletion, the in-memory rec
+	// is still close-enough (state/host/port synced above) and the
+	// caller can retry. Do NOT fail Ensure on refetch error — the
+	// database is provably active and bootstrapped at this point.
+	fresh, refetchErr := w.Repo.GetLiveByProject(ctx, args.ProjectID)
+	if refetchErr != nil {
+		logger.Warn("final GetLiveByProject failed after successful bootstrap — returning in-memory rec (runtime/readonly slots may be stale)",
+			"error", refetchErr)
+		return rec, nil
+	}
+	return fresh, nil
 }
 
 // bootstrapRuntime applies the dedicated-instance bootstrap SQL,
