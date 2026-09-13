@@ -52,6 +52,53 @@ func TestCheckDeniedRelation_RejectsWildcardAndSensitive(t *testing.T) {
 	}
 }
 
+func TestGuardSDKSQLInput_RejectsSensitiveRefs(t *testing.T) {
+	ctx := publicCtx()
+	reject := []string{
+		"SELECT password_hash FROM users WHERE id = 'x'",
+		"SELECT u.password_hash FROM users u",
+		"SELECT password_hash AS ph FROM users",                    // alias bypass of an output-only check
+		`SELECT "password_hash" FROM users`,                        // quoted identifier
+		"SELECT ph FROM (SELECT password_hash AS ph FROM users) t", // subquery
+		"select PASSWORD_HASH from users",                          // case-insensitive
+	}
+	for _, q := range reject {
+		if err := guardSDKSQLInput(ctx, q); err == nil {
+			t.Errorf("expected rejection for: %s", q)
+		}
+	}
+
+	allow := []string{
+		"SELECT id, email, display_name FROM users",
+		"SELECT 'password_hash' AS label FROM users", // string literal, not an identifier
+		"SELECT id FROM users -- password_hash in a comment",
+		"SELECT count(*) FROM users",
+	}
+	for _, q := range allow {
+		if err := guardSDKSQLInput(ctx, q); err != nil {
+			t.Errorf("unexpected rejection for %q: %v", q, err)
+		}
+	}
+
+	// Service key is exempt.
+	if err := guardSDKSQLInput(serviceCtx(), "SELECT password_hash FROM users"); err != nil {
+		t.Errorf("service key should be exempt: %v", err)
+	}
+}
+
+func TestGuardSDKSQLOutput_RejectsSelectStar(t *testing.T) {
+	// SELECT * returns password_hash under its real name.
+	if err := guardSDKSQLOutput(publicCtx(), []string{"id", "email", "password_hash"}); err == nil {
+		t.Fatal("expected rejection when password_hash is in returned columns")
+	}
+	if err := guardSDKSQLOutput(publicCtx(), []string{"id", "email"}); err != nil {
+		t.Fatalf("safe columns should pass: %v", err)
+	}
+	if err := guardSDKSQLOutput(serviceCtx(), []string{"password_hash"}); err != nil {
+		t.Fatalf("service key should be exempt: %v", err)
+	}
+}
+
 func TestStripDeniedColumns_ScrubsForPublicKeepsForService(t *testing.T) {
 	mkRows := func() []map[string]interface{} {
 		return []map[string]interface{}{
