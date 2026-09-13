@@ -3,17 +3,23 @@
        Light-background variant (navy "euro" + gold "base"): designed for use on
        white or light neutral surfaces (directory listings, social bios, GitHub
        README, favicons at scale). For dark backgrounds, swap the "euro" fill
-       to #FFFFFF. Colors + font match /public/favicon.svg. -->
-  <text x="256" y="235"
-        font-family="Trebuchet MS, Verdana, Helvetica, sans-serif"
+       to #FFFFFF. Colors match /public/favicon.png.
+
+       Layout tuned for ≥85% vertical fill so the mark reads at 16×16 (browser
+       tab bar) with weight comparable to peer icons. Trebuchet-MS bold at
+       size 200 keeps ~54px horizontal margin — safe under most substitutions.
+       PNG variant is rendered from the same parameters via ImageMagick so the
+       raster + vector paths look identical. -->
+  <text x="256" y="260"
+        font-family="'Trebuchet MS', Trebuchet, Verdana, Helvetica, sans-serif"
         font-weight="bold"
-        font-size="150"
+        font-size="200"
         text-anchor="middle"
         fill="#0A1929">euro</text>
-  <text x="256" y="385"
-        font-family="Trebuchet MS, Verdana, Helvetica, sans-serif"
+  <text x="256" y="450"
+        font-family="'Trebuchet MS', Trebuchet, Verdana, Helvetica, sans-serif"
         font-weight="bold"
-        font-size="150"
+        font-size="200"
         text-anchor="middle"
         fill="#FFB300">base</text>
 </svg>
