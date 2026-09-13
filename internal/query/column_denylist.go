@@ -2,9 +2,15 @@ package query
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// errDeniedSQL is the uniform rejection for the raw /sql guards. It
+// deliberately does NOT echo the offending table/column name, so error
+// output stays constant and untied to caller input.
+var errDeniedSQL = errors.New("this query references a restricted system table or column and is not allowed on the SQL endpoint")
 
 // sensitiveColumns lists columns on the per-tenant *system* tables that
 // must never be exposed through the generic /v1/db data API to
@@ -66,8 +72,42 @@ var sensitiveColumns = map[string]map[string]bool{
 // rejected. Such callers should use the typed REST endpoint (keyed on
 // table name, so their own table is not on the denylist) or a service
 // key.
+//
+// The column scan is only the FIRST of two layers on /sql. It catches
+// a value that is named (directly, aliased, qualified, or in a
+// subquery) — but NOT a whole row smuggled out under an innocuous name,
+// e.g. `SELECT to_jsonb(u) FROM users u`, `SELECT row_to_json(u) ...`,
+// or the bare row `SELECT u FROM users u`. There the identifier stream
+// is {to_jsonb, u, users} and the output column is "to_jsonb" — no
+// password_hash token anywhere — yet the serialized value contains the
+// full row. Column-name filtering cannot win against row-typed / JSON
+// wrapping on a raw-SQL endpoint, so sqlPathDeniedTables below closes
+// it at the table level.
 var sqlPathDeniedColumns = map[string]bool{
 	"password_hash": true,
+}
+
+// sqlPathDeniedTables blocks the raw SDK SQL endpoint from referencing
+// the per-tenant system tables AT ALL (not just their sensitive
+// columns). This is the robust layer: on a raw-SQL surface a row can be
+// exfiltrated without ever naming a column — to_jsonb(u), row_to_json(u),
+// a bare row-typed `SELECT u`, hstore(u), a composite cast, etc. — so
+// the only reliable guard is to refuse the statement if it touches one
+// of these tables.
+//
+// This is safe on the SDK path: a public / end-user-JWT caller has no
+// legitimate raw-SQL use for the auth system tables. The typed REST
+// endpoint exposes exactly the non-sensitive columns each one needs
+// (with password_hash stripped), and everything the auth flow itself
+// needs lives in internal/enduser/auth_service.go under the service-
+// role GUC. The service key is exempt (see guardSDKSQLTables). Trade-off
+// (documented): `SELECT id, email FROM users` via raw /sql under the
+// public key is now refused — use the REST path for that.
+var sqlPathDeniedTables = map[string]bool{
+	"users":          true,
+	"refresh_tokens": true,
+	"email_tokens":   true,
+	"vault_secrets":  true,
 }
 
 // serviceKeyExempt reports whether the caller may see sensitive
@@ -174,7 +214,29 @@ func guardSDKSQLInput(ctx context.Context, sql string) error {
 			continue
 		}
 		if sqlPathDeniedColumns[strings.ToLower(tok.value)] {
-			return fmt.Errorf("column %q is not accessible via the data API", strings.ToLower(tok.value))
+			return errDeniedSQL
+		}
+	}
+	return nil
+}
+
+// guardSDKSQLTables rejects a raw SDK-path statement that references any
+// per-tenant system table, for a non-service caller. This is the layer
+// that closes the row-typed / JSON-wrap bypass (to_jsonb(u),
+// row_to_json(u), bare `SELECT u`, composite casts, …) that the
+// column-name scans cannot see, because it keys on the table reference
+// rather than on any column name. Identifier-token scan, so a matching
+// string literal or comment does not false-positive.
+func guardSDKSQLTables(ctx context.Context, sql string) error {
+	if serviceKeyExempt(ctx) {
+		return nil
+	}
+	for _, tok := range scanIdentifiersAndDots(sql) {
+		if tok.kind != tokIdent {
+			continue
+		}
+		if sqlPathDeniedTables[strings.ToLower(tok.value)] {
+			return errDeniedSQL
 		}
 	}
 	return nil
@@ -193,7 +255,7 @@ func guardSDKSQLOutput(ctx context.Context, columns []string) error {
 	}
 	for _, c := range columns {
 		if sqlPathDeniedColumns[strings.ToLower(c)] {
-			return fmt.Errorf("column %q is not accessible via the data API", strings.ToLower(c))
+			return errDeniedSQL
 		}
 	}
 	return nil

@@ -104,12 +104,34 @@ func TestIntegration_PasswordHashNotExposed(t *testing.T) {
 	if rr := call(pubCtx, "SELECT * FROM users"); rr.Code != http.StatusBadRequest {
 		t.Errorf("/sql SELECT *: want 400, got %d (%s)", rr.Code, rr.Body.String())
 	}
-	// Public: a safe projection still works.
-	if rr := call(pubCtx, "SELECT id, email FROM users"); rr.Code != http.StatusOK {
-		t.Errorf("/sql safe projection: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	// Public: row-typed / JSON-wrap bypass — the whole row is smuggled
+	// out under an innocuous column name, so the column scans can't see
+	// it; the table-level guard must reject it.
+	for _, q := range []string{
+		"SELECT to_jsonb(u) FROM users u",
+		"SELECT row_to_json(u) FROM users u",
+		"SELECT u FROM users u",
+		"WITH x AS (SELECT * FROM users) SELECT to_jsonb(x) FROM x",
+	} {
+		if rr := call(pubCtx, q); rr.Code != http.StatusBadRequest {
+			t.Errorf("/sql row-wrap bypass %q: want 400, got %d (%s)", q, rr.Code, rr.Body.String())
+		}
 	}
-	// Service key: password_hash allowed through /sql.
+	// Public: any reference to a system table is refused (use REST for
+	// non-sensitive user columns).
+	if rr := call(pubCtx, "SELECT id, email FROM users"); rr.Code != http.StatusBadRequest {
+		t.Errorf("/sql users reference: want 400, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	// Public: a safe projection on a NON-system table still works
+	// (todos is provisioned in every tenant, world-readable).
+	if rr := call(pubCtx, "SELECT id, title FROM todos"); rr.Code != http.StatusOK {
+		t.Errorf("/sql non-system projection: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	// Service key: system-table access allowed through /sql.
 	if rr := call(svcCtx, "SELECT password_hash FROM users"); rr.Code != http.StatusOK {
 		t.Errorf("/sql service password_hash: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if rr := call(svcCtx, "SELECT to_jsonb(u) FROM users u"); rr.Code != http.StatusOK {
+		t.Errorf("/sql service row-wrap: want 200, got %d (%s)", rr.Code, rr.Body.String())
 	}
 }

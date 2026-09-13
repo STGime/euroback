@@ -86,6 +86,45 @@ func TestGuardSDKSQLInput_RejectsSensitiveRefs(t *testing.T) {
 	}
 }
 
+func TestGuardSDKSQLTables_RejectsSystemTableRefs(t *testing.T) {
+	ctx := publicCtx()
+	// The row-typed / JSON-wrap bypass and any other reference to a
+	// system table must be refused — no column name is involved.
+	reject := []string{
+		"SELECT to_jsonb(u) FROM users u",
+		"SELECT row_to_json(u) FROM users u",
+		"SELECT u FROM users u",
+		"WITH x AS (SELECT * FROM users) SELECT to_jsonb(x) FROM x",
+		"SELECT (SELECT to_jsonb(u) FROM users u LIMIT 1) AS x",
+		"SELECT id, email FROM users", // even a safe projection: use REST instead
+		"SELECT * FROM refresh_tokens",
+		"SELECT secret FROM vault_secrets",
+		"select TO_JSONB(u) from USERS u", // case-insensitive
+	}
+	for _, q := range reject {
+		if err := guardSDKSQLTables(ctx, q); err == nil {
+			t.Errorf("expected system-table reference to be rejected: %s", q)
+		}
+	}
+
+	allow := []string{
+		"SELECT id, title, completed FROM todos",
+		"SELECT to_jsonb(t) FROM my_app_table t",
+		"SELECT 'users' AS label FROM todos", // string literal, not an identifier
+		"SELECT count(*) FROM orders",
+	}
+	for _, q := range allow {
+		if err := guardSDKSQLTables(ctx, q); err != nil {
+			t.Errorf("unexpected rejection for %q: %v", q, err)
+		}
+	}
+
+	// Service key is exempt.
+	if err := guardSDKSQLTables(serviceCtx(), "SELECT to_jsonb(u) FROM users u"); err != nil {
+		t.Errorf("service key should be exempt: %v", err)
+	}
+}
+
 func TestGuardSDKSQLOutput_RejectsSelectStar(t *testing.T) {
 	// SELECT * returns password_hash under its real name.
 	if err := guardSDKSQLOutput(publicCtx(), []string{"id", "email", "password_hash"}); err == nil {

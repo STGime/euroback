@@ -225,6 +225,14 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 				jsonError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			// Table-level guard: refuse any reference to a system table.
+			// Closes the row-typed / JSON-wrap bypass (to_jsonb(u),
+			// row_to_json(u), bare `SELECT u`, composite casts) that the
+			// column-name scans can't see. SDK path only; service exempt.
+			if err := guardSDKSQLTables(r.Context(), req.SQL); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		// Guard: pgx Tx.Exec uses the extended query protocol, which runs
