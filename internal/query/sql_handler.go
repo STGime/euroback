@@ -214,6 +214,25 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 				jsonError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			// SDK: block reads of sensitive system-table columns
+			// (e.g. users.password_hash). The typed REST paths are
+			// guarded in the query engine; this raw-SQL sibling shares
+			// the same public-key / end-user-JWT threat surface and
+			// must get the same guard. Input scan here (pre-exec);
+			// output scan below covers SELECT *. Service key is exempt
+			// inside the guard.
+			if err := guardSDKSQLInput(r.Context(), req.SQL); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// Table-level guard: refuse any reference to a system table.
+			// Closes the row-typed / JSON-wrap bypass (to_jsonb(u),
+			// row_to_json(u), bare `SELECT u`, composite casts) that the
+			// column-name scans can't see. SDK path only; service exempt.
+			if err := guardSDKSQLTables(r.Context(), req.SQL); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		// Guard: pgx Tx.Exec uses the extended query protocol, which runs
@@ -261,6 +280,17 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 				jsonError(w, err.Error(), http.StatusBadRequest)
 			}
 			return
+		}
+
+		// SDK output backstop: a `SELECT *` returns a denied column
+		// under its real name without naming it in the SQL, so the
+		// input scan above can't see it. Reject on the returned column
+		// set. Service key is exempt inside the guard.
+		if forceReadOnly {
+			if err := guardSDKSQLOutput(r.Context(), columns); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		if rows == nil {
