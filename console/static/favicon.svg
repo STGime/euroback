@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Eurobase brand mark — stacked wordmark, 512×512, transparent background.
+       Light-background variant (navy "euro" + gold "base"): designed for use on
+       white or light neutral surfaces (directory listings, social bios, GitHub
+       README, favicons at scale). For dark backgrounds, swap the "euro" fill
+       to #FFFFFF. Colors + font match /public/favicon.svg. -->
+  <text x="256" y="235"
+        font-family="Trebuchet MS, Verdana, Helvetica, sans-serif"
+        font-weight="bold"
+        font-size="150"
+        text-anchor="middle"
+        fill="#0A1929">euro</text>
+  <text x="256" y="385"
+        font-family="Trebuchet MS, Verdana, Helvetica, sans-serif"
+        font-weight="bold"
+        font-size="150"
+        text-anchor="middle"
+        fill="#FFB300">base</text>
+</svg>
