@@ -25,6 +25,63 @@ env:
 
 jobs:
   # -------------------------------------------------------------------------
+  # Sovereignty vendors — pin parity with marketing site
+  # -------------------------------------------------------------------------
+  #
+  # The sovereignty-vendors dataset is consumed by TWO repos:
+  #
+  #   * This repo (euroback) — internal/sovereignty/data submodule,
+  #     embedded at build time via //go:embed and used by the
+  #     /platform/public/sovereignty/report endpoint.
+  #   * Marketing site (STGime/eurobase) — src/data/sovereignty-vendors
+  #     submodule, consumed by the picker + per-vendor SEO pages.
+  #
+  # If the two pins drift, the picker UI offers 112 vendors while
+  # the backend only knows 11 — a real user-visible bug shipped 2026-09-14
+  # (empty report pages for 7-vendor picks). This job enforces
+  # parity: backend pin MUST match marketing pin. When adding vendors,
+  # bump both in the same round.
+  sovereignty-vendors-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # No need for submodule contents — we only compare the pin.
+
+      - name: Compare submodule pins
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # This repo's pinned SHA for internal/sovereignty/data.
+          BACKEND_SHA=$(git ls-tree HEAD internal/sovereignty/data | awk '{print $3}')
+
+          # Marketing site's pinned SHA for src/data/sovereignty-vendors.
+          # GitHub REST API `.sha` on a submodule tree entry is the pinned commit.
+          MARKETING_SHA=$(gh api \
+            repos/STGime/eurobase/contents/src/data/sovereignty-vendors \
+            --jq .sha)
+
+          echo "backend    (euroback)    : $BACKEND_SHA"
+          echo "marketing  (eurobase)    : $MARKETING_SHA"
+
+          if [ "$BACKEND_SHA" = "$MARKETING_SHA" ]; then
+            echo "::notice::sovereignty-vendors pins match"
+            exit 0
+          fi
+
+          echo "::error::sovereignty-vendors pin mismatch — backend and marketing site are pointing at different snapshots of the dataset."
+          echo ""
+          echo "To fix, bump this repo's submodule to match marketing:"
+          echo ""
+          echo "    git submodule update --remote internal/sovereignty/data"
+          echo "    git add internal/sovereignty/data"
+          echo "    git commit -m 'Sovereignty: bump vendor data to match marketing pin'"
+          echo ""
+          echo "OR if marketing is the one behind, bump marketing first."
+          exit 1
+
+  # -------------------------------------------------------------------------
   # Go tests
   # -------------------------------------------------------------------------
   test-go:
