@@ -1,5 +1,36 @@
 # Plan: Pro-tier monetization + a Team tier for SMBs
 
+> **Status (2026-09-14):** this is the original planning doc. Team
+> tier is now in **closed beta** — some items below shipped, some
+> are still on the roadmap. For the current customer-facing reality
+> see [`team-tier/getting-started.md`](team-tier/getting-started.md).
+>
+> **Shipped in the closed beta**
+> - Dedicated Postgres instance per Team project (Scaleway fr-par)
+> - Automatic daily backups (7-day retention)
+> - On-demand snapshots with tags + self-serve restore (1/month included)
+> - Organizations + admin/member roles
+> - SSO via OIDC (Google Workspace, Entra ID, Okta, Authentik, custom)
+> - Priority support UI (Team-tier nav entry)
+>
+> **NOT shipped — described below as aspirational**
+> - SAML SSO (OIDC only for now)
+> - Project-level RBAC (Owner / Admin / Developer / Read-only) — org
+>   roles today are org-scoped, not project-scoped
+> - Dev / staging / prod branches
+> - Preview environments for functions
+> - Point-in-time recovery — replaced by snapshot-based restore;
+>   PITR was removed (see `docs/runbooks/backup-pitr-test.md`)
+> - Domain-based SSO auto-provisioning (needs DNS-TXT verification)
+> - SOC 2 Type II attestation
+> - HIPAA-ready + BAA
+> - Uptime SLA with credits
+> - Mollie subscription plan-change (Team stays free during beta)
+>
+> Pricing (€149/mo) below is the pre-beta target; the closed beta
+> is currently free. Real pricing lands with the Mollie plan-change
+> milestone.
+
 ## Context
 
 Everyone stays on Free. Two things need to change:
