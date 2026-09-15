@@ -2919,8 +2919,8 @@ export const db = drizzle(client);</code></pre>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">Security notes</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
-					<li>Client secret is encrypted at rest with AES-256-GCM using a gateway-owned key. Never persisted plaintext.</li>
-					<li>SSO login authenticates ONLY users already in <code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>. A malicious IdP returning a valid ID token for a user we've never invited cannot get a platform session.</li>
+					<li>Client secret is encrypted at rest with AES-256-GCM using a server-side platform key (<code class="rounded bg-gray-100 px-1 text-[11px]">PLATFORM_ENCRYPTION_KEY</code>). Never persisted plaintext.</li>
+					<li>Access to org-owned projects is gated on <code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>: an SSO login only succeeds for an email an org admin has already invited. Two properties fall out of that: (1) the load-bearing trust is on your org admins to only invite people they mean to; (2) a third-party IdP that returns a valid ID token for a user we've never invited still cannot get a platform session.</li>
 					<li>SSO sessions have the same lifetime as password logins (24 h access token, refresh via the standard flow).</li>
 				</ul>
 			</div>
