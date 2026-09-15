@@ -500,10 +500,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					limit  int
 					window time.Duration
 				}{
-					"platform_signup":    {ratelimit.SignupLimit, ratelimit.SignupWindow},
-					"platform_forgot":    {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
-					"signin_fail":        {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
-					"signin_fail_record": {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
+					"platform_signup":              {ratelimit.SignupLimit, ratelimit.SignupWindow},
+					"platform_forgot":              {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
+					"platform_resend_verification": {ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow},
+					"signin_fail":                  {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
+					"signin_fail_record":           {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
 				}
 				cfg, ok := limits[action]
 				if !ok {

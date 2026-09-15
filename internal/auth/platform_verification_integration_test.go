@@ -153,6 +153,19 @@ func TestPlatformSignupVerificationFlow(t *testing.T) {
 	if fake.sends != before {
 		t.Error("resend should not send for an already-verified account")
 	}
+
+	// 8. ChangePassword enforces the same strength policy.
+	if err := svc.ChangePassword(ctx, si.User.ID, strongPW, "password1234"); err == nil {
+		t.Error("ChangePassword should reject a weak new password")
+	} else {
+		var weakChange *ErrWeakPassword
+		if !errors.As(err, &weakChange) {
+			t.Errorf("expected *ErrWeakPassword from ChangePassword, got %v", err)
+		}
+	}
+	if err := svc.ChangePassword(ctx, si.User.ID, strongPW, "a-different-strong-passphrase-9"); err != nil {
+		t.Errorf("ChangePassword should accept a strong new password: %v", err)
+	}
 }
 
 func activeLegalDocs(ctx context.Context, t *testing.T, pool *pgxpool.Pool) ([]AcceptedDocument, bool) {

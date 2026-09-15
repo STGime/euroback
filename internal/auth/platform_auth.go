@@ -611,21 +611,25 @@ func (s *PlatformAuthService) UpdateDisplayName(ctx context.Context, userID, dis
 
 // ChangePassword verifies the current password and updates to a new one.
 func (s *PlatformAuthService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
-	if len(newPassword) < 8 {
-		return fmt.Errorf("new password must be at least 8 characters")
-	}
-
-	var passwordHash string
+	var email, passwordHash string
 	err := s.pool.QueryRow(ctx,
-		`SELECT password_hash FROM platform_users WHERE id = $1`,
+		`SELECT email, password_hash FROM platform_users WHERE id = $1`,
 		userID,
-	).Scan(&passwordHash)
+	).Scan(&email, &passwordHash)
 	if err != nil {
 		return fmt.Errorf("query user: %w", err)
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(currentPassword)); err != nil {
 		return fmt.Errorf("current password is incorrect")
+	}
+
+	// Same NIST-style strength policy as signup, now that we have the
+	// account email for the derived-password check. Checked after the
+	// current-password comparison so a caller who can't authenticate
+	// doesn't get password-policy feedback.
+	if err := ValidatePasswordStrength(newPassword, email); err != nil {
+		return err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
@@ -733,8 +737,12 @@ func (s *PlatformAuthService) ForgotPassword(ctx context.Context, emailAddr stri
 
 // ResetPasswordWithToken resets a platform user's password using a token.
 func (s *PlatformAuthService) ResetPasswordWithToken(ctx context.Context, rawToken, newPassword string) error {
-	if len(newPassword) < 8 {
-		return fmt.Errorf("password must be at least 8 characters")
+	// Validate strength BEFORE consuming the token, so a weak new
+	// password doesn't burn a single-use reset token. Email is unknown
+	// until the token resolves, so the email-derived check is skipped
+	// here (length + blocklist + sequence checks still apply).
+	if err := ValidatePasswordStrength(newPassword, ""); err != nil {
+		return err
 	}
 	if s.emailService == nil {
 		return fmt.Errorf("email service not configured")

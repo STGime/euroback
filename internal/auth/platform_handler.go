@@ -373,10 +373,11 @@ func HandlePlatformResendVerification(svc *PlatformAuthService, rateFn ...AuthRa
 			return
 		}
 
-		// Rate limit per email, reusing the forgot-password limiter
-		// (same shape: an unauthenticated, email-triggered send).
+		// Dedicated resend limiter (ResendVerifyLimit/Window) — a
+		// verification resend is more abusable as a mail-bomb vector
+		// than forgot-password, so it gets its own tighter budget.
 		email := strings.ToLower(strings.TrimSpace(req.Email))
-		if email != "" && check != nil && check(w, r, "platform_forgot", email) {
+		if email != "" && check != nil && check(w, r, "platform_resend_verification", email) {
 			return
 		}
 
