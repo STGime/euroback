@@ -2500,6 +2500,21 @@ export class EurobaseAPI {
 			body: JSON.stringify(body),
 		});
 	}
+
+	/**
+	 * Request Team-tier beta access. Sends a one-line description of
+	 * the caller's use case; the backend writes it to contact_requests
+	 * (source='team_beta_request') and fires a Discord ping so ops
+	 * sees the ask in real time. Email + user_id come from the JWT
+	 * server-side, so the client only supplies the message.
+	 * Rate limit: 1/hour per user.
+	 */
+	async requestTeamBetaAccess(message: string): Promise<{ id: string; status: string }> {
+		return this.fetch<{ id: string; status: string }>('/platform/team-beta-request/', {
+			method: 'POST',
+			body: JSON.stringify({ message }),
+		});
+	}
 }
 
 export interface Org {
