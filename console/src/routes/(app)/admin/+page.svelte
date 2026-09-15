@@ -818,7 +818,11 @@
 				Email {selectedSignups.size > 0 ? `(${selectedSignups.size})` : 'selected'}
 			</button>
 		</div>
-		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+		<!-- Signup Users table wrapper needs overflow-x-auto (not
+		     overflow-hidden used elsewhere in this page): at 11 columns
+		     the last column (Actions / delete) clips off-screen on
+		     narrower viewports with no way to scroll to it. -->
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
 			<table class="w-full text-sm">
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>
