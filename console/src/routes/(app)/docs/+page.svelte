@@ -31,6 +31,9 @@
 		{ id: 'mcp', label: '23. MCP Server' },
 		{ id: 'account', label: '24. Your Account' },
 		{ id: 'connect-db', label: '25. Direct Postgres connection (Team)' },
+		{ id: 'team-tier', label: '26. Team tier — dedicated Postgres, backups, snapshots' },
+		{ id: 'orgs-sso', label: '27. Organizations & SSO (OIDC)' },
+		{ id: 'legal-tech', label: '28. German legal-tech retention (Legal Team)' },
 		{ id: 'next', label: "What's Next" }
 	];
 
@@ -2641,6 +2644,288 @@ export const db = drizzle(client);</code></pre>
 			</div>
 
 			<div class="mt-4">
+				<button onclick={() => scrollTo('team-tier')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Team tier — dedicated Postgres, backups, snapshots &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 26. TEAM TIER (DEDICATED PG + BACKUPS) ======================= -->
+		<section id="team-tier" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">26. Team tier <span class="text-sm font-normal text-emerald-700">(closed beta)</span></h2>
+			<p class="text-sm italic text-gray-500 mb-4">
+				Alex's first pilot law firm signs on. LexVault needs production isolation, daily backups, and a way to safely try schema changes without holding their breath.
+			</p>
+
+			<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900 mb-4">
+				<strong>Closed beta — free during the beta window.</strong> Team is not yet self-serve on the pricing page.
+				Email <a href="mailto:contact@eurobase.app" class="underline hover:no-underline">contact@eurobase.app</a>
+				with a one-line description of the workload; grants are manual and we'll notify you 30 days before
+				billing turns on.
+			</div>
+
+			<div class="rounded-xl border border-gray-200 bg-white p-6 space-y-4">
+				<h3 class="text-base font-semibold text-gray-900">What Team unlocks (beyond Pro)</h3>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1.5">
+					<li><strong>Dedicated Postgres instance</strong> in Scaleway fr-par — no shared cluster, no noisy neighbours. Each Team project is its own managed-PG instance.</li>
+					<li><strong>Automatic daily backups</strong> with 7-day retention, managed by Scaleway.</li>
+					<li><strong>On-demand snapshots</strong> with an optional tag — take one before a risky migration, restore in a few clicks. Retention window shared with daily backups.</li>
+					<li><strong>Self-serve restore</strong> from any snapshot, no support ticket. 1 restore per calendar month is included.</li>
+					<li><strong>Organizations + OIDC SSO</strong> so a company can share access under one identity provider — covered in the next chapter.</li>
+					<li><strong>Direct Postgres connection URL</strong> — the DSN reveal from chapter <button onclick={() => scrollTo('connect-db')} class="text-eurobase-700 hover:underline cursor-pointer">25</button>.</li>
+				</ul>
+
+				<div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-900">
+					<strong>What's NOT in the beta yet.</strong> Say this up front to your own team so nobody plans around it:
+					SAML SSO (OIDC only for now), project-level RBAC (Owner/Admin/Developer/Read-only),
+					domain-based SSO auto-provisioning (invitees must be added by email today),
+					dev/staging/prod branches, preview function envs. PITR was removed in favour of snapshots.
+				</div>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">1. Requesting beta access</h3>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-2">
+					<li>
+						Alex emails <a href="mailto:contact@eurobase.app" class="text-eurobase-700 hover:underline">contact@eurobase.app</a>
+						from the same address they signed up with — one line about the workload
+						(<em>"early-access pilot with a Berlin law firm, ~500 documents, GDPR-sensitive"</em>) is enough.
+					</li>
+					<li>
+						Ops flips <code class="rounded bg-gray-100 px-1 text-[11px]">team_beta_access</code> on Alex's account
+						(there's a small superadmin panel for this — no direct DB writes needed on our side).
+					</li>
+					<li>
+						On next page load, Alex sees three new affordances in the console:
+						<ul class="list-disc pl-5 mt-1 space-y-0.5">
+							<li>A <strong>Team</strong> plan option in the new-project modal.</li>
+							<li>An <strong>Organizations</strong> entry in the sidebar.</li>
+							<li>A <strong>Support</strong> entry in the sidebar — Team-tier tickets are prioritised.</li>
+						</ul>
+					</li>
+				</ol>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">2. Creating a Team project</h3>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-2">
+					<li>
+						<strong>Projects → New project</strong>. Pick plan <strong>Team</strong>. Region defaults to
+						<code class="rounded bg-gray-100 px-1 text-[11px]">fr-par</code> (Scaleway EU).
+					</li>
+					<li>
+						Submit. Behind the scenes we enqueue a provisioning job that calls Scaleway to spin up a
+						dedicated managed-PG instance, waits for it to hit <code class="rounded bg-gray-100 px-1 text-[11px]">state=active</code>,
+						sets the backup schedule, and bootstraps the SDK runtime role.
+					</li>
+					<li>
+						Wall-clock: <strong>90 seconds to 4 minutes</strong> typically; 15 minutes is the ceiling before the worker gives up.
+					</li>
+				</ol>
+
+				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
+					<strong>No progress bar yet</strong> — the project sits in state <code class="rounded bg-amber-100 px-1">provisioning</code> until the worker flips it to <code class="rounded bg-amber-100 px-1">active</code>. Refresh the projects page to see the flip; if it's been over 15 minutes, open a support ticket.
+				</div>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">3. Backups + snapshots</h3>
+				<p class="text-sm text-gray-700">
+					Alex's Team project is live. Before the first schema migration for the pilot, they want a rollback point.
+				</p>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-2">
+					<li>
+						<strong>Project → Database → Backups</strong>. The list shows daily backups + any manual snapshots,
+						with created-at, size, and an optional tag column.
+					</li>
+					<li>
+						Click <strong>Create Snapshot</strong>. Optional tag (max 64 chars) — Alex types
+						<code class="rounded bg-gray-100 px-1 text-[11px]">pre-migration-cases-v2</code> so future-Alex knows what this was for.
+					</li>
+					<li>
+						Snapshot lands in a few seconds. Alex runs the migration; something breaks.
+					</li>
+					<li>
+						On the snapshot row, click <strong>Restore</strong> → confirm modal → a progress panel takes over.
+						Restore quota badge shows the current usage; 1 restore per calendar month is included, with the
+						console blocking further self-serve restores after that (contact support for extras during the beta).
+					</li>
+				</ol>
+
+				<div class="rounded-md bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-900">
+					<strong>Rollback semantics.</strong> Restore rewrites the tenant schema back to the snapshot state.
+					Any data written after the snapshot is lost — the point of the snapshot is that Alex chose that moment.
+					Storage objects in the project's S3 bucket are <strong>not</strong> included; those have their own
+					lifecycle and can be handled via Legal Team's retention holds if you need them locked (chapter
+					<button onclick={() => scrollTo('legal-tech')} class="text-eurobase-700 hover:underline cursor-pointer">28</button>).
+				</div>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">4. Connecting external tools</h3>
+				<p class="text-sm text-gray-700">
+					Team also unlocks the direct <code class="rounded bg-gray-100 px-1 text-[11px]">DATABASE_URL</code> surface
+					so Prisma / Drizzle / Payload / <code class="rounded bg-gray-100 px-1 text-[11px]">psql</code> / migration
+					runners can connect straight to the dedicated instance. Chapter
+					<button onclick={() => scrollTo('connect-db')} class="text-eurobase-700 hover:underline cursor-pointer">25</button>
+					walks that path in detail.
+				</p>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">5. Known rough edges (beta)</h3>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
+					<li>No progress indicator during provisioning; refresh to check.</li>
+					<li>No self-serve billing yet — the Mollie plan-change wiring lands separately.</li>
+					<li>Downgrade Team → Free/Pro is not implemented. Once a project is on a dedicated instance, it stays there for the beta.</li>
+				</ul>
+			</div>
+
+			<div class="mt-4">
+				<button onclick={() => scrollTo('orgs-sso')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					Next: Organizations &amp; SSO (OIDC) &rarr;
+				</button>
+			</div>
+		</section>
+
+		<!-- ======================= 27. ORGS + SSO ======================= -->
+		<section id="orgs-sso" class="scroll-mt-20">
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">27. Organizations &amp; SSO <span class="text-sm font-normal text-emerald-700">(Team &amp; Legal Team)</span></h2>
+			<p class="text-sm italic text-gray-500 mb-4">
+				Alex hires Bea. She needs her own login for LexVault's projects — no shared passwords, no forwarded API keys.
+			</p>
+
+			<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900 mb-4">
+				<strong>Not the same as chapter 19 (Team Collaboration).</strong> That covers <strong>project-level members</strong>
+				(Viewer / Developer / Admin / Owner) — one project shared with individually-invited teammates. This chapter is about
+				<strong>organizations</strong> — a company-level container with OIDC SSO login, member roles across the whole org,
+				and orgs owning projects. On Team you can use either or both.
+			</div>
+
+			<div class="rounded-xl border border-gray-200 bg-white p-6 space-y-4">
+				<h3 class="text-base font-semibold text-gray-900">What Alex is setting up</h3>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1.5">
+					<li>A <strong>LexVault</strong> organization that owns the Team project from chapter 26.</li>
+					<li>Google Workspace as the identity provider (any OIDC-conformant provider works — Microsoft Entra ID, Okta, Authentik, custom).</li>
+					<li>Bea invited to the org as a <strong>member</strong> — she'll sign in with her <code class="rounded bg-gray-100 px-1 text-[11px]">@lexvault.eu</code> Google account and see the LexVault project alongside her own.</li>
+				</ul>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">1. Create the organization</h3>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
+					<li>Console → <strong>Organizations</strong> → <strong>Create organization</strong>.</li>
+					<li>Give it a name (<em>"LexVault"</em>) and submit.</li>
+					<li>Alex is now the sole admin. Nothing broke on the project side — Alex still owns their existing project directly.</li>
+				</ol>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">2. Register Eurobase as an OIDC client at Google</h3>
+				<p class="text-sm text-gray-700">You'll need four values from Google Cloud Console:</p>
+				<div class="rounded-md border border-gray-200 overflow-hidden">
+					<table class="w-full text-xs">
+						<thead class="bg-gray-50 text-left">
+							<tr>
+								<th class="px-3 py-2 font-medium text-gray-600">Field</th>
+								<th class="px-3 py-2 font-medium text-gray-600">What it is</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-gray-100 text-gray-700">
+							<tr><td class="px-3 py-2 font-mono">Issuer</td><td class="px-3 py-2"><code>https://accounts.google.com</code></td></tr>
+							<tr><td class="px-3 py-2 font-mono">Client ID</td><td class="px-3 py-2">From your OAuth client registration.</td></tr>
+							<tr><td class="px-3 py-2 font-mono">Client Secret</td><td class="px-3 py-2">Kept only server-side, sealed with AES-256-GCM.</td></tr>
+							<tr><td class="px-3 py-2 font-mono">Redirect URL</td><td class="px-3 py-2">Register <strong>exactly</strong> <code>https://api.eurobase.app/platform/auth/sso/callback</code> at Google.</td></tr>
+						</tbody>
+					</table>
+				</div>
+
+				<div class="text-sm text-gray-700">
+					<p class="font-medium text-gray-900 mb-1">Google Workspace walkthrough:</p>
+					<ol class="list-decimal pl-5 space-y-1">
+						<li>Google Cloud Console → <strong>APIs &amp; Services</strong> → <strong>Credentials</strong>.</li>
+						<li><strong>Create Credentials</strong> → <strong>OAuth client ID</strong>.</li>
+						<li>Application type: <strong>Web application</strong>. Name it <em>"Eurobase"</em>.</li>
+						<li>Authorised redirect URIs: <code class="rounded bg-gray-100 px-1 text-[11px]">https://api.eurobase.app/platform/auth/sso/callback</code></li>
+						<li>Save. Copy the Client ID + Client Secret.</li>
+					</ol>
+				</div>
+
+				<div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-900">
+					<strong>Same redirect URL for every org.</strong> The callback resolves the org from a signed
+					<code class="rounded bg-blue-100 px-1">state</code> parameter, so registering
+					<code class="rounded bg-blue-100 px-1">/platform/auth/sso/callback</code> once at the IdP is enough — no
+					per-org URI edits.
+				</div>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">3. Save the OIDC config in Eurobase</h3>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
+					<li>Console → <strong>Organizations</strong> → LexVault → <strong>SSO</strong> panel.</li>
+					<li>
+						Fill in <em>Provider</em> (<code class="rounded bg-gray-100 px-1 text-[11px]">google</code>),
+						<em>Issuer</em>, <em>Client ID</em>, paste the <em>Client Secret</em>, and the redirect URL above.
+					</li>
+					<li>
+						Save. The panel shows <code class="rounded bg-gray-100 px-1 text-[11px]">•••••••• (set)</code> once
+						stored. To rotate later, paste a new secret and save again — old value overwritten.
+					</li>
+				</ol>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">4. Invite Bea</h3>
+				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
+					<strong>Prerequisite.</strong> Bea must sign up as a regular Eurobase user first (Free tier is fine).
+					The invite endpoint refuses email addresses that don't already exist in <code class="rounded bg-amber-100 px-1">platform_users</code>
+					— you'll see <em>"no platform user with that email — user must sign up first"</em> otherwise.
+				</div>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
+					<li>Bea creates a Eurobase account at <code class="rounded bg-gray-100 px-1 text-[11px]">console.eurobase.app</code> with <code class="rounded bg-gray-100 px-1 text-[11px]">bea@lexvault.eu</code> — the same email that lives in her Google Workspace.</li>
+					<li>Alex → Organizations → LexVault → <strong>Members</strong> → <strong>Add member</strong> → paste <code class="rounded bg-gray-100 px-1 text-[11px]">bea@lexvault.eu</code>.</li>
+					<li>Role: <strong>member</strong> (can't invite others or edit SSO). <strong>admin</strong> would let her manage the org config.</li>
+					<li>Save.</li>
+				</ol>
+				<p class="text-sm text-gray-700">
+					Bea receives a notification email from Eurobase — subject <em>"You've been added to LexVault on Eurobase"</em>
+					— naming Alex as the inviter and linking to the sign-in page. The DB row is written before the mail is
+					sent, so a mail-provider hiccup never leaves her in a half-invited state.
+				</p>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">5. Bea signs in with SSO</h3>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
+					<li>Bea opens <code class="rounded bg-gray-100 px-1 text-[11px]">console.eurobase.app/login</code>.</li>
+					<li>Clicks <strong>Sign in with SSO</strong> and enters <code class="rounded bg-gray-100 px-1 text-[11px]">bea@lexvault.eu</code>.</li>
+					<li>
+						Redirected to Google, completes the Workspace login, comes back to Eurobase.
+						Backend validates the ID token against LexVault's OIDC config, checks Bea's email is in
+						<code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>, and issues a platform session.
+					</li>
+					<li>Bea lands on the projects page with LexVault's project visible.</li>
+				</ol>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">6. Point a project at the org</h3>
+				<p class="text-sm text-gray-700">
+					To share the Team project with everyone in LexVault, transfer ownership from Alex to the org:
+				</p>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
+					<li>Open the project → <strong>Settings → Ownership</strong>.</li>
+					<li>Choose <strong>Transfer to organization</strong> → pick LexVault → confirm.</li>
+					<li>Members of LexVault (Alex + Bea today, whoever gets invited tomorrow) now see it in their project list, with an org badge on the sidebar card.</li>
+				</ol>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">Troubleshooting</h3>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1.5">
+					<li>
+						<strong>"no platform user with that email — user must sign up first"</strong> — the invitee hasn't
+						created a Eurobase account yet. Ask them to sign up first, then retry the invite. The email must match
+						<em>exactly</em> — case-insensitive OK, but <code class="rounded bg-gray-100 px-1 text-[11px]">+tag</code>
+						aliases like <code class="rounded bg-gray-100 px-1 text-[11px]">bea+eurobase@lexvault.eu</code> won't.
+					</li>
+					<li>
+						<strong>"SSO sign-in failed"</strong> after the IdP redirect — three usual causes: (1) the returned
+						email isn't in <code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>; (2) the redirect
+						URI at Google doesn't match the exact <code class="rounded bg-gray-100 px-1 text-[11px]">/platform/auth/sso/callback</code>
+						path; (3) the client secret in the SSO panel doesn't match the current secret at Google.
+					</li>
+					<li>
+						<strong>"SSO requires a Team-tier organization to have invited you"</strong> — the person hit
+						<em>Sign in with SSO</em> but no org has invited them under that email. Add them via the members panel.
+					</li>
+				</ul>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">Security notes</h3>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
+					<li>Client secret is encrypted at rest with AES-256-GCM using a server-side platform key (<code class="rounded bg-gray-100 px-1 text-[11px]">PLATFORM_ENCRYPTION_KEY</code>). Never persisted plaintext.</li>
+					<li>Access to org-owned projects is gated on <code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>: an SSO login only succeeds for an email an org admin has already invited. Two properties fall out of that: (1) the load-bearing trust is on your org admins to only invite people they mean to; (2) a third-party IdP that returns a valid ID token for a user we've never invited still cannot get a platform session.</li>
+					<li>SSO sessions have the same lifetime as password logins (24 h access token, refresh via the standard flow).</li>
+				</ul>
+			</div>
+
+			<div class="mt-4">
 				<button onclick={() => scrollTo('legal-tech')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: German legal-tech retention (Legal Team) &rarr;
 				</button>
@@ -2649,7 +2934,7 @@ export const db = drizzle(client);</code></pre>
 
 		<!-- ======================= LEGAL-TECH RETENTION ======================= -->
 		<section id="legal-tech" class="scroll-mt-20">
-			<h2 class="text-2xl font-bold text-gray-900 mb-1">26. German legal-tech retention <span class="text-sm font-normal text-emerald-700">(Legal Team)</span></h2>
+			<h2 class="text-2xl font-bold text-gray-900 mb-1">28. German legal-tech retention <span class="text-sm font-normal text-emerald-700">(Legal Team)</span></h2>
 			<p class="text-sm italic text-gray-500 mb-4">
 				Per-prefix WORM policies and row/object-scoped retention holds for tenants subject to §50 BRAO, §257 HGB, or §147 AO.
 			</p>
