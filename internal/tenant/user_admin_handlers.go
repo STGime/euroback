@@ -27,6 +27,19 @@ import (
 // provider-side teardown inline before the row is dropped. Reuse it
 // rather than re-implement.
 //
+// Two pools by design:
+//   - `pool` is the gateway pool. Used for the platform_users lookup,
+//     the projects read, and the final platform_users DELETE. The
+//     platform_users→org_members / subscriptions / etc. CASCADEs
+//     fire on this pool without any grant issue (RI cascades don't
+//     check the caller's DML privilege on the child).
+//   - `developerPool` is the developer pool. Used for the sole-admin
+//     org check ONLY, because migration 000114 REVOKEs ALL on
+//     public.org_members from eurobase_gateway. Running the check on
+//     `pool` would 42501. Same rule the console's own project-list
+//     path enforces (see CLAUDE.md, "gateway pool CANNOT read
+//     organizations / org_members").
+//
 // Safety guards:
 //   - Refuses to delete the calling superadmin themselves. Self-delete
 //     is available via /platform/auth/account/delete after the caller
@@ -34,9 +47,12 @@ import (
 //   - Refuses to delete another superadmin. Ops trying to demote /
 //     remove a peer must revoke is_superadmin first via SQL — a
 //     superadmin's project set is likely load-bearing.
+//   - Refuses to delete a user who is the sole admin of any org
+//     (would leave the org unmanageable + orphan any org-owned
+//     projects with a different owner_id).
 //
 // URL param `id` is the target user's UUID.
-func AdminDeleteUser(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
+func AdminDeleteUser(pool, developerPool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		targetUserID := strings.TrimSpace(chi.URLParam(r, "id"))
 		if targetUserID == "" {
@@ -79,16 +95,23 @@ func AdminDeleteUser(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 		// another member first. Matches the same guard the ops
 		// runbook (docs/runbooks/grant-team-beta-access.md) documents
 		// for the team_beta_access revoke path.
+		//
+		// Reads org_members on the DEVELOPER pool: migration 000114
+		// REVOKEs ALL on public.org_members from eurobase_gateway
+		// (the gateway pool). Same rule ListProjects had to be split
+		// on (see the #538/#545/#546 lesson in CLAUDE.md) — reads of
+		// org tables live on the developer pool, DML on
+		// platform_users / projects stays on the gateway pool.
 		var orphanedOrgs int
-		err = pool.QueryRow(r.Context(),
+		err = developerPool.QueryRow(r.Context(),
 			`SELECT count(*) FROM public.org_members m
-			  WHERE m.user_id = $1::uuid
+			  WHERE m.platform_user_id = $1::uuid
 			    AND m.role = 'admin'
 			    AND NOT EXISTS (
 			      SELECT 1 FROM public.org_members m2
 			       WHERE m2.org_id = m.org_id
 			         AND m2.role = 'admin'
-			         AND m2.user_id <> m.user_id
+			         AND m2.platform_user_id <> m.platform_user_id
 			    )`,
 			targetUserID,
 		).Scan(&orphanedOrgs)
