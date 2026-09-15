@@ -96,3 +96,59 @@ func notifyContactAsync(name, email, message string) {
 		}
 	}()
 }
+
+// notifyTeamBetaRequestAsync fires the same Discord webhook as
+// notifyContactAsync but with a distinct title + colour so ops can
+// spot a beta-access request in the channel without opening
+// /admin/contact-requests. Same fire-and-forget contract: missing URL
+// = no-op, failure logs and is swallowed.
+func notifyTeamBetaRequestAsync(name, email, message string) {
+	if discordContactWebhookURL == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		const previewMax = 500
+		preview := message
+		if utf8.RuneCountInString(preview) > previewMax {
+			preview = string([]rune(preview)[:previewMax]) + "…"
+		}
+
+		displayName := name
+		if displayName == "" {
+			displayName = "(no name)"
+		}
+
+		payload := map[string]any{
+			"embeds": []map[string]any{{
+				"title":       "🎯 Team-tier beta access request",
+				"description": fmt.Sprintf("**From:** %s <`%s`>\n\n%s", displayName, email, preview),
+				"url":         "https://console.eurobase.app/admin",
+				"color":       0x10b981, // emerald-500 — distinct from contact-form blue
+				"timestamp":   time.Now().UTC().Format(time.RFC3339),
+			}},
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			slog.Warn("Discord team-beta notify: marshal failed", "error", err)
+			return
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, discordContactWebhookURL, bytes.NewReader(body))
+		if err != nil {
+			slog.Warn("Discord team-beta notify: build request failed", "error", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			slog.Warn("Discord team-beta notify: request failed", "error", err)
+			return
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			slog.Warn("Discord team-beta notify: non-2xx response", "status", resp.StatusCode)
+		}
+	}()
+}

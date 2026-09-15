@@ -10,6 +10,48 @@
 	// CTA that deep-links into /projects?new=team.
 	let hasTeamBeta = $state(false);
 
+	// Team-tier beta-access request modal (opens when a signed-in
+	// user without team_beta_access clicks "Request beta access" on
+	// the Team card). Submits to /platform/team-beta-request/, which
+	// writes contact_requests + fires the Discord ping.
+	let requestOpen = $state(false);
+	let requestMessage = $state('');
+	let requestBusy = $state(false);
+	let requestSuccess = $state(false);
+	let requestError = $state<string | null>(null);
+
+	function openTeamBetaRequest() {
+		requestMessage = '';
+		requestError = null;
+		requestSuccess = false;
+		requestBusy = false;
+		requestOpen = true;
+	}
+
+	function closeTeamBetaRequest() {
+		if (requestBusy) return;
+		requestOpen = false;
+	}
+
+	async function submitTeamBetaRequest(e: Event) {
+		e.preventDefault();
+		if (requestBusy || requestSuccess) return;
+		if (requestMessage.trim().length < 10) {
+			requestError = 'Tell us a little about your use case (at least 10 characters).';
+			return;
+		}
+		requestBusy = true;
+		requestError = null;
+		try {
+			await api.requestTeamBetaAccess(requestMessage.trim());
+			requestSuccess = true;
+		} catch (err: unknown) {
+			requestError = err instanceof Error ? err.message : 'Request failed.';
+		} finally {
+			requestBusy = false;
+		}
+	}
+
 	onMount(async () => {
 		// Only fetch live limits when the visitor is already signed in.
 		// /platform/config/plans is auth-gated; calling it anonymously
@@ -63,19 +105,29 @@
 	// MAU / storage / bandwidth / realtime cxns. The fallback strings
 	// below reflect the NEW (post-migration) values so anonymous
 	// visitors see the tight numbers even before the live-fetch runs.
+	//
+	// Team column status legend (post-#579 / #584 / #585 / this PR):
+	//   - `true`  — shipped in closed beta, working today for anyone
+	//               with team_beta_access granted.
+	//   - specific value — shipped, matches the Pro row's shape.
+	//   - 'Coming soon' — genuinely not shipped (SAML, RBAC, SOC 2,
+	//                     custom domain, uptime SLA, quota alerts).
+	//   Do NOT flip a row to `true` without a visible feature behind
+	//   it — customers cross-check the docs page and any dishonest
+	//   cell erodes trust fast.
 	let rows = $derived([
 		{ category: 'Database & storage' },
-		{ label: 'Database size', free: fmt(freePlan?.db_size_mb, '500 MB'), pro: fmt(proPlan?.db_size_mb, '5 GB'), team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'File storage', free: fmt(freePlan?.storage_mb, '500 MB'), pro: fmt(proPlan?.storage_mb, '50 GB'), team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Egress bandwidth', free: fmt(freePlan?.bandwidth_mb, '2 GB') + '/mo', pro: fmt(proPlan?.bandwidth_mb, '100 GB') + '/mo', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Upload size', free: (freePlan?.upload_size_mb ?? 10) + ' MB', pro: (proPlan?.upload_size_mb ?? 50) + ' MB', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Dedicated Postgres instance', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Daily backups + on-demand snapshots (7-day retention)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Database size', free: fmt(freePlan?.db_size_mb, '500 MB'), pro: fmt(proPlan?.db_size_mb, '5 GB'), team: 'Dedicated instance', legal: 'Dedicated instance' },
+		{ label: 'File storage', free: fmt(freePlan?.storage_mb, '500 MB'), pro: fmt(proPlan?.storage_mb, '50 GB'), team: 'Dedicated bucket', legal: 'Dedicated bucket' },
+		{ label: 'Egress bandwidth', free: fmt(freePlan?.bandwidth_mb, '2 GB') + '/mo', pro: fmt(proPlan?.bandwidth_mb, '100 GB') + '/mo', team: 'Metered', legal: 'Metered' },
+		{ label: 'Upload size', free: (freePlan?.upload_size_mb ?? 10) + ' MB', pro: (proPlan?.upload_size_mb ?? 50) + ' MB', team: '250 MB', legal: '250 MB' },
+		{ label: 'Dedicated Postgres instance', free: false, pro: false, team: true, legal: true },
+		{ label: 'Daily backups + on-demand snapshots (7-day retention)', free: false, pro: false, team: true, legal: true },
 
 		{ category: 'Auth & API' },
-		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'API rate limit', free: (freePlan?.rate_limit_rps ?? 100) + ' rps', pro: (proPlan?.rate_limit_rps ?? 1000) + ' rps', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: 'Unlimited', legal: 'Unlimited' },
+		{ label: 'API rate limit', free: (freePlan?.rate_limit_rps ?? 100) + ' rps', pro: (proPlan?.rate_limit_rps ?? 1000) + ' rps', team: '5000 rps', legal: '5000 rps' },
+		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: 'Unlimited', legal: 'Unlimited' },
 		{ label: 'Email + password, magic links, social login (Google / GitHub / LinkedIn / Apple)', free: true, pro: true, team: true, legal: true },
 		{ label: 'Phone (SMS OTP) sign-in', free: false, pro: true, team: true, legal: true },
 		{ label: 'SSO (OIDC) for console sign-in — Google Workspace, Microsoft Entra ID, Okta, Authentik, any OIDC IdP', free: false, pro: false, team: true, legal: true },
@@ -84,20 +136,20 @@
 		{ label: 'Project RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Automation & integrations' },
-		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Scheduled jobs (cron)', free: '2', pro: 'Unlimited', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: 'Unlimited', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Custom email templates', free: false, pro: true, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: 'Unlimited', legal: 'Unlimited' },
+		{ label: 'Scheduled jobs (cron)', free: '2', pro: 'Unlimited', team: 'Unlimited', legal: 'Unlimited' },
+		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: 'Unlimited', team: 'Unlimited', legal: 'Unlimited' },
+		{ label: 'Custom email templates', free: false, pro: true, team: true, legal: true },
 		{ label: 'Custom domain (CNAME your own domain)', free: false, pro: 'Coming soon', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: true, legal: true },
 		{ label: 'Slack / webhook quota alerts', free: false, pro: true, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Lifecycle' },
 		{ label: 'Idle-project pause after 30 days', free: 'Auto', pro: 'Never', team: 'Never', legal: 'Never' },
 
 		{ category: 'Operations' },
-		{ label: 'Log retention', free: (freePlan?.log_retention_days ?? 1) + ' day', pro: (proPlan?.log_retention_days ?? 30) + ' days', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Projects per organisation', free: String(freePlan?.project_limit ?? 2), pro: String(proPlan?.project_limit ?? 10), team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Log retention', free: (freePlan?.log_retention_days ?? 1) + ' day', pro: (proPlan?.log_retention_days ?? 30) + ' days', team: '90 days', legal: '10 years' },
+		{ label: 'Projects per organisation', free: String(freePlan?.project_limit ?? 2), pro: String(proPlan?.project_limit ?? 10), team: 'Unlimited', legal: 'Unlimited' },
 		{ label: 'Priority email support (24 h SLA)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Uptime SLA (99.9 %)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
@@ -274,29 +326,30 @@
 				doesn't visually reflow between granted and non-granted
 				users.
 			-->
-			<div class="relative rounded-2xl border {hasTeamBeta ? 'border-2 border-emerald-500 shadow-lg' : 'border border-dashed border-gray-300 shadow-sm'} bg-white p-8">
-				{#if hasTeamBeta}
-					<span class="absolute -top-3 right-6 rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow">Closed beta</span>
-				{:else}
-					<span class="absolute -top-3 right-6 rounded-full bg-amber-500/20 text-amber-700 border border-amber-400/60 px-3 py-1 text-xs font-semibold shadow">Coming soon</span>
-				{/if}
+			<div class="relative rounded-2xl border {hasTeamBeta ? 'border-2 border-emerald-500 shadow-lg' : 'border-2 border-emerald-300 shadow-sm'} bg-white p-8">
+				<span class="absolute -top-3 right-6 rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow">Closed beta</span>
 				<h2 class="text-xl font-semibold text-gray-900">Team</h2>
 				<p class="mt-1 text-sm text-gray-500">For SMBs running production on Eurobase.</p>
 				<div class="mt-6 flex items-baseline gap-1">
-					{#if hasTeamBeta}
-						<span class="text-4xl font-bold text-emerald-700">Free</span>
-						<span class="text-sm text-gray-500">during closed beta</span>
-					{:else}
-						<span class="text-4xl font-bold text-gray-400">€—</span>
-						<span class="text-sm text-gray-400">pricing TBD</span>
-					{/if}
+					<span class="text-4xl font-bold text-emerald-700">Free</span>
+					<span class="text-sm text-gray-500">during closed beta</span>
 				</div>
 				{#if hasTeamBeta}
 					<a href="/projects?new=team" class="mt-6 block rounded-lg bg-emerald-600 px-4 py-2.5 text-center text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 transition-colors">
 						Create Team project
 					</a>
+				{:else if signedIn}
+					<button
+						type="button"
+						onclick={openTeamBetaRequest}
+						class="mt-6 block w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-center text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 transition-colors cursor-pointer"
+					>
+						Request beta access
+					</button>
 				{:else}
-					<div class="mt-6 block rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-center text-sm text-gray-500">Waitlist opening later</div>
+					<a href="/login?signup=1" class="mt-6 block rounded-lg bg-emerald-600 px-4 py-2.5 text-center text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 transition-colors">
+						Sign up to request access
+					</a>
 				{/if}
 				<ul class="mt-6 space-y-2 text-sm text-gray-600">
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Everything in Pro, plus:</span></li>
@@ -348,8 +401,8 @@
 						<th class="px-6 py-3 text-left font-medium text-gray-700"></th>
 						<th class="px-6 py-3 text-center font-medium text-gray-700 w-24">Free</th>
 						<th class="px-6 py-3 text-center font-medium text-gray-700 w-24">Pro</th>
-						<th class="px-6 py-3 text-center font-medium text-gray-500 w-24">Team <span class="ml-1 text-[10px] uppercase tracking-wide text-amber-600">Soon</span></th>
-						<th class="px-6 py-3 text-center font-medium text-gray-500 w-32">Legal Team <span class="ml-1 text-[10px] uppercase tracking-wide text-amber-600">Soon</span></th>
+						<th class="px-6 py-3 text-center font-medium text-gray-700 w-24">Team <span class="ml-1 text-[10px] uppercase tracking-wide text-emerald-700">Beta</span></th>
+						<th class="px-6 py-3 text-center font-medium text-gray-700 w-32">Legal Team <span class="ml-1 text-[10px] uppercase tracking-wide text-emerald-700">Beta</span></th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-200">
@@ -426,3 +479,74 @@
 		</div>
 	</section>
 </div>
+
+<!-- Request Team-tier beta access modal. Opens from the Team card
+     CTA for signed-in users without team_beta_access. Submits to
+     /platform/team-beta-request/ (auth-required) which writes a row
+     into contact_requests with source='team_beta_request' + fires a
+     Discord ping so ops see the ask in real time. -->
+{#if requestOpen}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+		<div class="w-full max-w-md rounded-xl bg-white shadow-xl">
+			<div class="border-b border-gray-200 px-5 py-3">
+				<h3 class="text-base font-semibold text-gray-900">Request Team-tier beta access</h3>
+				<p class="mt-1 text-xs text-gray-500">Team is currently a closed beta — free while we finish billing wiring. We'll email you when your slot opens.</p>
+			</div>
+			{#if requestSuccess}
+				<div class="px-5 py-6 text-center">
+					<div class="inline-flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100">
+						<svg class="h-6 w-6 text-emerald-700" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+						</svg>
+					</div>
+					<h4 class="mt-4 text-base font-semibold text-gray-900">Thanks — we'll be in touch</h4>
+					<p class="mt-1 text-sm text-gray-600">We got your request and pinged the team. Expect a reply within a couple of business days.</p>
+					<button
+						type="button"
+						onclick={closeTeamBetaRequest}
+						class="mt-6 rounded-md bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 cursor-pointer"
+					>
+						Close
+					</button>
+				</div>
+			{:else}
+				<form onsubmit={submitTeamBetaRequest} class="px-5 py-4 space-y-3">
+					<label for="team-beta-message" class="block text-sm font-medium text-gray-700">
+						What are you building?
+					</label>
+					<textarea
+						id="team-beta-message"
+						bind:value={requestMessage}
+						disabled={requestBusy}
+						rows="4"
+						minlength="10"
+						maxlength="5000"
+						required
+						placeholder="A short paragraph about your project + why you need dedicated Postgres, orgs / SSO, or backups. Helps us prioritise your slot."
+						class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none disabled:opacity-50"
+					></textarea>
+					{#if requestError}
+						<p class="text-sm text-red-700">{requestError}</p>
+					{/if}
+					<div class="flex items-center justify-end gap-2 pt-1">
+						<button
+							type="button"
+							onclick={closeTeamBetaRequest}
+							disabled={requestBusy}
+							class="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer disabled:opacity-50"
+						>
+							Cancel
+						</button>
+						<button
+							type="submit"
+							disabled={requestBusy || requestMessage.trim().length < 10}
+							class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+						>
+							{requestBusy ? 'Sending…' : 'Request access'}
+						</button>
+					</div>
+				</form>
+			{/if}
+		</div>
+	</div>
+{/if}

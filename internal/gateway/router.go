@@ -655,6 +655,21 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/request", supportH.HandleSubmitSupportRequest())
 		})
 
+		// Team-tier beta-access request from the console pricing
+		// page. Authenticated (email + user_id come from JWT
+		// claims). Writes into public.contact_requests with
+		// source='team_beta_request' and fires the Discord webhook
+		// with a distinct-coloured embed. Runs on the gateway pool
+		// (INSERT-only on contact_requests per migration 000112).
+		r.Route("/team-beta-request", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			r.Post("/", tenant.HandleTeamBetaRequest(pool, limiter))
+		})
+
 		// Authenticated: billing (Mollie subscription checkout).
 		// Feature-flagged behind BILLING_ENABLED — the handler
 		// returns 503 when the service reports disabled, so wiring
