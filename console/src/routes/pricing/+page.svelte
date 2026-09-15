@@ -81,6 +81,24 @@
 
 	let freePlan = $derived(limits.find(p => p.plan === 'free'));
 	let proPlan = $derived(limits.find(p => p.plan === 'pro'));
+	// Team + Legal Team live-fetched from plan_limits so the pricing
+	// page tracks migration 000085 / 000087 exactly and can never
+	// drift into promising a limit the platform doesn't enforce.
+	// Fallbacks below match the values seeded by those migrations at
+	// the time this page was written; if the DB says otherwise, the
+	// DB wins.
+	let teamPlan = $derived(limits.find(p => p.plan === 'team'));
+	let legalPlan = $derived(limits.find(p => p.plan === 'legal_team'));
+
+	// Unlimited-sentinel resolver: several fields on plan_limits use
+	// 0 as an "unlimited" marker (webhooks, cron). Preserve that
+	// semantic here so a live-fetched 0 renders as "Unlimited" and
+	// only a real numeric limit renders as itself.
+	function limitOrUnlimited(n: number | undefined, fallback: string): string {
+		if (n === undefined) return fallback;
+		if (n === 0) return 'Unlimited';
+		return String(n);
+	}
 
 	function fmt(mb: number | undefined, fallback: string): string {
 		if (mb === undefined) return fallback;
@@ -117,17 +135,17 @@
 	//   cell erodes trust fast.
 	let rows = $derived([
 		{ category: 'Database & storage' },
-		{ label: 'Database size', free: fmt(freePlan?.db_size_mb, '500 MB'), pro: fmt(proPlan?.db_size_mb, '5 GB'), team: 'Dedicated instance', legal: 'Dedicated instance' },
-		{ label: 'File storage', free: fmt(freePlan?.storage_mb, '500 MB'), pro: fmt(proPlan?.storage_mb, '50 GB'), team: 'Dedicated bucket', legal: 'Dedicated bucket' },
-		{ label: 'Egress bandwidth', free: fmt(freePlan?.bandwidth_mb, '2 GB') + '/mo', pro: fmt(proPlan?.bandwidth_mb, '100 GB') + '/mo', team: 'Metered', legal: 'Metered' },
-		{ label: 'Upload size', free: (freePlan?.upload_size_mb ?? 10) + ' MB', pro: (proPlan?.upload_size_mb ?? 50) + ' MB', team: '250 MB', legal: '250 MB' },
+		{ label: 'Database size', free: fmt(freePlan?.db_size_mb, '500 MB'), pro: fmt(proPlan?.db_size_mb, '5 GB'), team: fmt(teamPlan?.db_size_mb, '100 GB'), legal: fmt(legalPlan?.db_size_mb, '100 GB') },
+		{ label: 'File storage', free: fmt(freePlan?.storage_mb, '500 MB'), pro: fmt(proPlan?.storage_mb, '50 GB'), team: fmt(teamPlan?.storage_mb, '500 GB'), legal: fmt(legalPlan?.storage_mb, '500 GB') },
+		{ label: 'Egress bandwidth', free: fmt(freePlan?.bandwidth_mb, '2 GB') + '/mo', pro: fmt(proPlan?.bandwidth_mb, '100 GB') + '/mo', team: fmt(teamPlan?.bandwidth_mb, '1 TB') + '/mo', legal: fmt(legalPlan?.bandwidth_mb, '1 TB') + '/mo' },
+		{ label: 'Upload size', free: (freePlan?.upload_size_mb ?? 10) + ' MB', pro: (proPlan?.upload_size_mb ?? 50) + ' MB', team: (teamPlan?.upload_size_mb ?? 500) + ' MB', legal: (legalPlan?.upload_size_mb ?? 500) + ' MB' },
 		{ label: 'Dedicated Postgres instance', free: false, pro: false, team: true, legal: true },
 		{ label: 'Daily backups + on-demand snapshots (7-day retention)', free: false, pro: false, team: true, legal: true },
 
 		{ category: 'Auth & API' },
-		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: 'Unlimited', legal: 'Unlimited' },
-		{ label: 'API rate limit', free: (freePlan?.rate_limit_rps ?? 100) + ' rps', pro: (proPlan?.rate_limit_rps ?? 1000) + ' rps', team: '5000 rps', legal: '5000 rps' },
-		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: 'Unlimited', legal: 'Unlimited' },
+		{ label: 'Monthly active users', free: kmau(freePlan?.mau_limit, '5k'), pro: kmau(proPlan?.mau_limit, '100k'), team: kmau(teamPlan?.mau_limit, '1M'), legal: kmau(legalPlan?.mau_limit, '1M') },
+		{ label: 'API rate limit', free: (freePlan?.rate_limit_rps ?? 100) + ' rps', pro: (proPlan?.rate_limit_rps ?? 1000) + ' rps', team: (teamPlan?.rate_limit_rps ?? 5000) + ' rps', legal: (legalPlan?.rate_limit_rps ?? 5000) + ' rps' },
+		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: kmau(teamPlan?.ws_connections, '50k'), legal: kmau(legalPlan?.ws_connections, '50k') },
 		{ label: 'Email + password, magic links, social login (Google / GitHub / LinkedIn / Apple)', free: true, pro: true, team: true, legal: true },
 		{ label: 'Phone (SMS OTP) sign-in', free: false, pro: true, team: true, legal: true },
 		{ label: 'SSO (OIDC) for console sign-in — Google Workspace, Microsoft Entra ID, Okta, Authentik, any OIDC IdP', free: false, pro: false, team: true, legal: true },
@@ -136,20 +154,20 @@
 		{ label: 'Project RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Automation & integrations' },
-		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: 'Unlimited', legal: 'Unlimited' },
+		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: limitOrUnlimited(teamPlan?.edge_function_limit, '250'), legal: limitOrUnlimited(legalPlan?.edge_function_limit, '250') },
 		{ label: 'Scheduled jobs (cron)', free: '2', pro: 'Unlimited', team: 'Unlimited', legal: 'Unlimited' },
-		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: 'Unlimited', team: 'Unlimited', legal: 'Unlimited' },
-		{ label: 'Custom email templates', free: false, pro: true, team: true, legal: true },
+		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: limitOrUnlimited(proPlan?.webhook_limit, 'Unlimited'), team: limitOrUnlimited(teamPlan?.webhook_limit, 'Unlimited'), legal: limitOrUnlimited(legalPlan?.webhook_limit, 'Unlimited') },
+		{ label: 'Custom email templates', free: false, pro: true, team: !!(teamPlan?.custom_templates ?? true), legal: !!(legalPlan?.custom_templates ?? true) },
 		{ label: 'Custom domain (CNAME your own domain)', free: false, pro: 'Coming soon', team: 'Coming soon', legal: 'Coming soon' },
-		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: true, legal: true },
-		{ label: 'Slack / webhook quota alerts', free: false, pro: true, team: 'Coming soon', legal: 'Coming soon' },
+		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: !!(teamPlan?.byo_smtp ?? true), legal: !!(legalPlan?.byo_smtp ?? true) },
+		{ label: 'Slack / webhook quota alerts', free: false, pro: true, team: !!(teamPlan?.quota_alerts ?? true), legal: !!(legalPlan?.quota_alerts ?? true) },
 
 		{ category: 'Lifecycle' },
 		{ label: 'Idle-project pause after 30 days', free: 'Auto', pro: 'Never', team: 'Never', legal: 'Never' },
 
 		{ category: 'Operations' },
-		{ label: 'Log retention', free: (freePlan?.log_retention_days ?? 1) + ' day', pro: (proPlan?.log_retention_days ?? 30) + ' days', team: '90 days', legal: '10 years' },
-		{ label: 'Projects per organisation', free: String(freePlan?.project_limit ?? 2), pro: String(proPlan?.project_limit ?? 10), team: 'Unlimited', legal: 'Unlimited' },
+		{ label: 'Log retention', free: (freePlan?.log_retention_days ?? 1) + ' day', pro: (proPlan?.log_retention_days ?? 30) + ' days', team: (teamPlan?.log_retention_days ?? 90) + ' days', legal: (legalPlan?.log_retention_days ?? 90) + ' days' },
+		{ label: 'Projects per organisation', free: String(freePlan?.project_limit ?? 2), pro: String(proPlan?.project_limit ?? 10), team: limitOrUnlimited(teamPlan?.project_limit, '50'), legal: limitOrUnlimited(legalPlan?.project_limit, '50') },
 		{ label: 'Priority email support (24 h SLA)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Uptime SLA (99.9 %)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
