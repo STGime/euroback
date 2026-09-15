@@ -1,31 +1,13 @@
-<script lang="ts">
-	// Redirect to projects or login depending on auth state.
-	// For now, show a simple redirect to login.
-</script>
-
+<!--
+  The root route redirects to /login?signup=1 (see +page.ts). This
+  component only renders in the extremely unlikely case the redirect
+  didn't fire — e.g. a preview build. Keep the fallback minimal.
+-->
 <div class="flex min-h-screen items-center justify-center bg-gray-50">
 	<div class="text-center">
-		<h1 class="text-3xl font-bold text-gray-900">Eurobase</h1>
-		<p class="mt-2 text-gray-500">EU-Sovereign Backend-as-a-Service</p>
-		<div class="mt-6 flex gap-4 justify-center">
-			<a
-				href="/login"
-				class="rounded-lg bg-eurobase-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors"
-			>
-				Sign In
-			</a>
-			<a
-				href="/pricing"
-				class="rounded-lg border border-gray-300 bg-white px-6 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
-			>
-				Pricing
-			</a>
-			<a
-				href="/projects"
-				class="rounded-lg border border-gray-300 bg-white px-6 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
-			>
-				Dashboard
-			</a>
-		</div>
+		<h1 class="text-lg font-semibold text-gray-900">Eurobase</h1>
+		<p class="mt-2 text-sm text-gray-500">
+			Redirecting to <a href="/login?signup=1" class="text-eurobase-600 hover:text-eurobase-700 underline">sign up</a>…
+		</p>
 	</div>
 </div>
