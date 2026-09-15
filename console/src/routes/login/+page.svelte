@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { user } from '$lib/stores.js';
-	import { api } from '$lib/api.js';
+	import { api, APIError } from '$lib/api.js';
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
@@ -18,6 +18,33 @@
 	let submitting = $state(false);
 	let error = $state('');
 	let waitlisted = $state(false);
+	// Email verification (platform signup). After signup the backend
+	// issues no session until the emailed link is clicked, so we show a
+	// "check your inbox" state. `needsVerification` is the sign-in-blocked
+	// case (correct password, unconfirmed email) which offers a resend.
+	let verificationSent = $state(false);
+	let needsVerification = $state(false);
+	let resending = $state(false);
+	let resent = $state(false);
+
+	// Minimum length must match PlatformPasswordMinLength on the backend
+	// (internal/auth/password_policy.go). The backend is authoritative;
+	// this is just a friendly pre-submit hint.
+	const PASSWORD_MIN_LENGTH = 12;
+	let passwordTooShort = $derived(isSignUp && password.length > 0 && password.length < PASSWORD_MIN_LENGTH);
+
+	async function handleResend() {
+		resending = true;
+		try {
+			await api.resendVerification(email);
+			resent = true;
+		} catch {
+			// resend always 200s server-side; ignore transport errors
+			resent = true;
+		} finally {
+			resending = false;
+		}
+	}
 	// SSO flow (Team-tier). Two-step UX: click "Sign in with SSO" →
 	// prompt for work email → POST /platform/auth/sso/init → redirect
 	// to the IdP. Post-callback the gateway redirects here with the
@@ -137,10 +164,23 @@
 						{ type: 'dpa', version: LEGAL_VERSION },
 					])
 					: await api.signIn(email, password);
-				user.set({ token: result.access_token, email });
+				// Signup that requires email verification issues no token —
+				// show the "check your inbox" state instead of logging in.
+				if (isSignUp && !result.access_token) {
+					verificationSent = true;
+					return;
+				}
+				user.set({ token: result.access_token!, email });
 				await redirectAfterLogin();
 			}
 		} catch (err) {
+			// Correct password but unverified email → offer a resend
+			// instead of a generic error.
+			if (err instanceof APIError && err.code === 'email_not_verified') {
+				needsVerification = true;
+				error = '';
+				return;
+			}
 			const msg = err instanceof Error ? err.message : 'Authentication failed';
 			if (msg.toLowerCase().includes('waitlist')) {
 				waitlisted = true;
@@ -308,6 +348,34 @@
 					<div class="mt-4 text-center">
 						<button onclick={() => { isForgotPassword = false; forgotPasswordSent = false; error = ''; }} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to sign in</button>
 					</div>
+				{:else if verificationSent}
+					<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-700">
+						<p class="font-medium">Confirm your email</p>
+						<p class="mt-1">We've sent a verification link to <strong>{email}</strong>. Click it to activate your account, then sign in.</p>
+					</div>
+					<div class="mt-4 text-center text-sm text-gray-500">
+						Didn't get it?
+						<button onclick={handleResend} disabled={resending || resent} class="text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+							{resent ? 'Sent — check your inbox' : resending ? 'Sending…' : 'Resend link'}
+						</button>
+					</div>
+					<div class="mt-2 text-center">
+						<button onclick={() => { verificationSent = false; isSignUp = false; resent = false; password = ''; confirmPassword = ''; }} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to sign in</button>
+					</div>
+				{:else if needsVerification}
+					<div class="mt-4 rounded-lg bg-amber-50 border border-amber-200 p-4 text-sm text-amber-800">
+						<p class="font-medium">Email not verified</p>
+						<p class="mt-1">Your email <strong>{email}</strong> hasn't been confirmed yet. Please click the verification link we sent you before signing in.</p>
+					</div>
+					<div class="mt-4 text-center text-sm text-gray-500">
+						Need a new link?
+						<button onclick={handleResend} disabled={resending || resent} class="text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+							{resent ? 'Sent — check your inbox' : resending ? 'Sending…' : 'Resend verification email'}
+						</button>
+					</div>
+					<div class="mt-2 text-center">
+						<button onclick={() => { needsVerification = false; resent = false; }} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to sign in</button>
+					</div>
 				{:else}
 					<form onsubmit={handleSubmit} class="mt-6 space-y-4">
 						<div>
@@ -331,8 +399,8 @@
 										type={showPassword ? 'text' : 'password'}
 										bind:value={password}
 										required
-										minlength="8"
-										placeholder={isSignUp ? 'At least 8 characters' : ''}
+										minlength={isSignUp ? PASSWORD_MIN_LENGTH : 8}
+										placeholder={isSignUp ? `At least ${PASSWORD_MIN_LENGTH} characters` : ''}
 										class="block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 pr-10 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 									/>
 									<button
@@ -348,6 +416,11 @@
 										{/if}
 									</button>
 								</div>
+								{#if isSignUp}
+									<p class="mt-1.5 text-xs {passwordTooShort ? 'text-red-600' : 'text-gray-400'}">
+										Use at least {PASSWORD_MIN_LENGTH} characters. Avoid common passwords and anything based on your email — a passphrase of a few random words works well.
+									</p>
+								{/if}
 							</div>
 							{#if isSignUp}
 								<div>
@@ -357,7 +430,7 @@
 										type={showPassword ? 'text' : 'password'}
 										bind:value={confirmPassword}
 										required
-										minlength="8"
+										minlength={PASSWORD_MIN_LENGTH}
 										placeholder="Repeat your password"
 										class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 									/>
