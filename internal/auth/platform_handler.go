@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -47,7 +48,7 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(map[string]string{
-					"error": "waitlist",
+					"error":   "waitlist",
 					"message": "Eurobase is currently in closed beta. You've been added to the waitlist and we'll notify you when your spot opens up.",
 				})
 				return
@@ -62,7 +63,7 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
-					"error": "stale_document_version",
+					"error":   "stale_document_version",
 					"message": err.Error(),
 				})
 				return
@@ -103,6 +104,18 @@ func HandlePlatformSignIn(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 
 		resp, err := svc.SignIn(r.Context(), req.Email, req.Password)
 		if err != nil {
+			// Correct password but unverified email → distinct 403 with a
+			// machine code so the console can offer "resend". Credentials
+			// were valid, so this isn't counted as a signin failure.
+			if errors.Is(err, ErrEmailNotVerified) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error":   "email_not_verified",
+					"message": "Please verify your email before signing in — check your inbox for the confirmation link.",
+				})
+				return
+			}
 			slog.Warn("platform signin failed", "error", err, "email", req.Email)
 			// Record the failure for rate limiting (call check to increment counter).
 			if email != "" && check != nil {
@@ -309,14 +322,83 @@ func HandlePlatformResetPassword(svc *PlatformAuthService) http.HandlerFunc {
 	}
 }
 
+// HandlePlatformVerifyEmail returns an HTTP handler for
+// POST /platform/auth/verify-email. Consumes a verification token and,
+// on success, returns a session (the link both verifies and signs in).
+func HandlePlatformVerifyEmail(svc *PlatformAuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Token) == "" {
+			writeJSONError(w, "verification token is required", http.StatusBadRequest)
+			return
+		}
+
+		resp, err := svc.VerifyEmail(r.Context(), req.Token)
+		if err != nil {
+			slog.Info("platform email verification failed", "error", err)
+			// "invalid or expired token" is user-fixable (request a
+			// new link) → 400; anything else is internal → 500.
+			status := http.StatusInternalServerError
+			if isUserError(err) {
+				status = http.StatusBadRequest
+			}
+			writeJSONError(w, err.Error(), status)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// HandlePlatformResendVerification returns an HTTP handler for
+// POST /platform/auth/resend-verification. Always 200 (no enumeration).
+func HandlePlatformResendVerification(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
+	var check AuthRateLimiter
+	if len(rateFn) > 0 {
+		check = rateFn[0]
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Dedicated resend limiter (ResendVerifyLimit/Window) — a
+		// verification resend is more abusable as a mail-bomb vector
+		// than forgot-password, so it gets its own tighter budget.
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		if email != "" && check != nil && check(w, r, "platform_resend_verification", email) {
+			return
+		}
+
+		_ = svc.ResendVerification(r.Context(), req.Email)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
 func isUserError(err error) bool {
+	// Password-policy rejections are user-fixable → 400, not 500.
+	var weak *ErrWeakPassword
+	if errors.As(err, &weak) {
+		return true
+	}
 	msg := err.Error()
 	return msg == "email is required" ||
-		msg == "password must be at least 8 characters" ||
 		msg == "email already registered" ||
 		msg == "display name is required" ||
 		msg == "display name must be at most 100 characters" ||
-		msg == "new password must be at least 8 characters" ||
 		msg == "current password is incorrect" ||
 		msg == "delete all projects before deleting your account" ||
 		msg == "invalid or expired token" ||

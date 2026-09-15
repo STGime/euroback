@@ -660,13 +660,39 @@ export class EurobaseAPI {
 		email: string,
 		password: string,
 		acceptedDocuments: Array<{ type: string; version: string }>,
-	): Promise<{ access_token: string; user: { id: string; email: string } }> {
-		const resp = await this.fetch<{ access_token: string; user: { id: string; email: string } }>('/platform/auth/signup', {
+	): Promise<{ access_token?: string; email_verification_required?: boolean; user: { id: string; email: string } }> {
+		const resp = await this.fetch<{ access_token?: string; email_verification_required?: boolean; user: { id: string; email: string } }>('/platform/auth/signup', {
 			method: 'POST',
 			body: JSON.stringify({ email, password, accepted_documents: acceptedDocuments })
 		});
+		// When email verification is required the backend issues no
+		// session — only persist a token if one came back (dev fallback
+		// with no email service auto-confirms and returns a token).
+		if (resp.access_token) {
+			this.setToken(resp.access_token);
+		}
+		return resp;
+	}
+
+	/** Confirm a platform user's email from the link token. On success the
+	 *  backend returns a session (verifying also signs the user in). */
+	async verifyEmail(token: string): Promise<{ access_token: string; user: { id: string; email: string } }> {
+		const resp = await this.fetchUnauthed<{ access_token: string; user: { id: string; email: string } }>('/platform/auth/verify-email', {
+			method: 'POST',
+			body: JSON.stringify({ token })
+		});
 		this.setToken(resp.access_token);
 		return resp;
+	}
+
+	/** Resend the verification email for an unconfirmed account. Always
+	 *  resolves (the backend returns 200 regardless, to avoid leaking
+	 *  whether the address is registered). */
+	async resendVerification(email: string): Promise<{ status: string }> {
+		return this.fetchUnauthed('/platform/auth/resend-verification', {
+			method: 'POST',
+			body: JSON.stringify({ email })
+		});
 	}
 
 	/** Sign in an existing platform user. */

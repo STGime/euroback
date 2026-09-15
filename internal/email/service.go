@@ -272,6 +272,40 @@ func (s *EmailService) SendPlatformPasswordResetEmail(ctx context.Context, userI
 	return s.client.Send(ctx, userEmail, subject, body)
 }
 
+// SendPlatformVerificationEmail sends an email-verification link for a
+// console (platform) user. Mirrors SendPlatformPasswordResetEmail: a
+// 'verification' token in public.platform_email_tokens (24h, matching
+// the tenant verification TTL) + a link to the console's /verify-email
+// page. Platform mail always sends from us, never a tenant's BYO-SMTP.
+func (s *EmailService) SendPlatformVerificationEmail(ctx context.Context, userID, userEmail string) error {
+	rawToken, tokenHash, err := generateToken()
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO public.platform_email_tokens (user_id, token_hash, token_type, expires_at)
+		 VALUES ($1, $2, 'verification', now() + interval '24 hours')`,
+		userID, tokenHash,
+	)
+	if err != nil {
+		return fmt.Errorf("store platform verification token: %w", err)
+	}
+
+	actionURL := fmt.Sprintf("%s/verify-email?token=%s", s.consoleURL, rawToken)
+	subject, body, err := RenderTemplate("verification", "", "", TemplateData{
+		UserEmail:   userEmail,
+		ProjectName: "Eurobase Console",
+		ActionURL:   actionURL,
+		ExpiresIn:   "24 hours",
+	})
+	if err != nil {
+		return fmt.Errorf("render platform verification email: %w", err)
+	}
+
+	return s.client.Send(ctx, userEmail, subject, body)
+}
+
 // VerifyToken validates a tenant email token and marks it as used.
 // Returns the user ID on success.
 func (s *EmailService) VerifyToken(ctx context.Context, schemaName, rawToken, tokenType string) (string, error) {

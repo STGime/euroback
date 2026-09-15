@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,8 +20,16 @@ import (
 // PlatformEmailer is the interface for sending platform email tokens.
 type PlatformEmailer interface {
 	SendPlatformPasswordResetEmail(ctx context.Context, userID, userEmail string) error
+	SendPlatformVerificationEmail(ctx context.Context, userID, userEmail string) error
 	VerifyPlatformToken(ctx context.Context, rawToken, tokenType string) (string, error)
 }
+
+// ErrEmailNotVerified is returned by SignIn when the account exists and
+// the password is correct but the email has not been confirmed. Typed so
+// the HTTP handler can return a distinct status + machine-readable code
+// ("email_not_verified") that lets the console offer a "resend" action
+// rather than showing a generic "invalid credentials" message.
+var ErrEmailNotVerified = errors.New("email not verified")
 
 // DripEnqueuer is an optional hook the gateway wires up in main.go to
 // enqueue the onboarding drip series when a signup succeeds. Runs
@@ -91,11 +100,18 @@ type PlatformProfile struct {
 }
 
 // PlatformAuthResponse is returned after successful sign-up or sign-in.
+//
+// When EmailVerificationRequired is true (a fresh signup that must
+// confirm its email before it can sign in), AccessToken is empty — no
+// session is issued until verification. The console shows a
+// "check your email" state instead of logging the user in.
 type PlatformAuthResponse struct {
 	AccessToken string       `json:"access_token"`
 	TokenType   string       `json:"token_type"`
 	ExpiresIn   int          `json:"expires_in"`
 	User        PlatformUser `json:"user"`
+
+	EmailVerificationRequired bool `json:"email_verification_required,omitempty"`
 }
 
 // NewPlatformAuthService creates a new service for platform auth.
@@ -153,11 +169,23 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	if email == "" {
 		return nil, fmt.Errorf("email is required")
 	}
-	if len(password) < 8 {
-		return nil, fmt.Errorf("password must be at least 8 characters")
+	if err := ValidatePasswordStrength(password, email); err != nil {
+		return nil, err
 	}
 	if err := validateRequiredAcceptances(accepted); err != nil {
 		return nil, err
+	}
+
+	// Email verification is required whenever an email service is wired
+	// (production). Without one (local dev booting without SMTP secrets),
+	// there's no way to deliver a link, so fall back to auto-confirming
+	// — mirrors the "empty config is legal in dev" pattern used
+	// elsewhere. When required, the row lands with email_confirmed_at
+	// NULL and no session is issued until the link is clicked.
+	verificationRequired := s.emailService != nil
+	emailConfirmedExpr := "now()"
+	if verificationRequired {
+		emailConfirmedExpr = "NULL"
 	}
 
 	if !s.AllowPublicSignup {
@@ -205,9 +233,12 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 
 	var user PlatformUser
 	err = tx.QueryRow(ctx,
-		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
-		 VALUES ($1, $2, now())
-		 RETURNING id, email, display_name`,
+		fmt.Sprintf(
+			`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+			 VALUES ($1, $2, %s)
+			 RETURNING id, email, display_name`,
+			emailConfirmedExpr,
+		),
 		email, string(hash),
 	).Scan(&user.ID, &user.Email, &user.DisplayName)
 	if err != nil {
@@ -291,6 +322,22 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	// No-op when DISCORD_SIGNUPS_WEBHOOK is unset.
 	notifySignupAsync(user.Email, totalSignups)
 
+	// Verification required: send the confirmation email and return WITHOUT
+	// a session. SignIn is hard-blocked until the link is clicked, so
+	// issuing a token here would be a token the middleware must then
+	// reject — cleaner to issue none. A send failure is non-fatal (the
+	// row is committed); the user can trigger a resend.
+	if verificationRequired {
+		if err := s.emailService.SendPlatformVerificationEmail(ctx, user.ID, user.Email); err != nil {
+			slog.Error("failed to send platform verification email", "error", err, "user_id", user.ID)
+		}
+		return &PlatformAuthResponse{
+			User:                      user,
+			EmailVerificationRequired: true,
+		}, nil
+	}
+
+	// Dev fallback (no email service): auto-confirmed above, so log in.
 	// New signups are never superadmin; that flag is granted out-of-band.
 	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, false)
 	if err != nil {
@@ -370,12 +417,13 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 	var user PlatformUser
 	var passwordHash string
 	var isSuperadmin bool
+	var emailConfirmedAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, display_name, password_hash, COALESCE(is_superadmin, false)
+		`SELECT id, email, display_name, password_hash, COALESCE(is_superadmin, false), email_confirmed_at
 		 FROM platform_users
 		 WHERE email = $1 AND password_hash IS NOT NULL`,
 		email,
-	).Scan(&user.ID, &user.Email, &user.DisplayName, &passwordHash, &isSuperadmin)
+	).Scan(&user.ID, &user.Email, &user.DisplayName, &passwordHash, &isSuperadmin, &emailConfirmedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("invalid email or password")
@@ -385,6 +433,15 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
 		return nil, fmt.Errorf("invalid email or password")
+	}
+
+	// Hard gate: an unconfirmed email cannot sign in. Checked AFTER the
+	// password comparison so the response can't be used to distinguish a
+	// registered-but-unverified email from a wrong password until the
+	// password is already known-correct (no new enumeration signal for a
+	// caller who doesn't have the password).
+	if emailConfirmedAt == nil {
+		return nil, ErrEmailNotVerified
 	}
 
 	// Update last sign-in timestamp.
@@ -406,6 +463,74 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 		ExpiresIn:   expiresIn,
 		User:        user,
 	}, nil
+}
+
+// VerifyEmail confirms a platform user's email from a verification
+// token and, on success, issues a session (so clicking the link both
+// verifies and signs the user in). Idempotent at the DB level: a token
+// is single-use (VerifyPlatformToken marks it used), and the UPDATE
+// only sets email_confirmed_at when it's still NULL.
+func (s *PlatformAuthService) VerifyEmail(ctx context.Context, rawToken string) (*PlatformAuthResponse, error) {
+	if s.emailService == nil {
+		return nil, fmt.Errorf("email verification is not available")
+	}
+	userID, err := s.emailService.VerifyPlatformToken(ctx, rawToken, "verification")
+	if err != nil {
+		return nil, err // "invalid or expired token"
+	}
+
+	var user PlatformUser
+	var isSuperadmin bool
+	err = s.pool.QueryRow(ctx,
+		`UPDATE platform_users
+		    SET email_confirmed_at = COALESCE(email_confirmed_at, now())
+		  WHERE id = $1
+		  RETURNING id, email, display_name, COALESCE(is_superadmin, false)`,
+		userID,
+	).Scan(&user.ID, &user.Email, &user.DisplayName, &isSuperadmin)
+	if err != nil {
+		return nil, fmt.Errorf("confirm email: %w", err)
+	}
+
+	slog.Info("platform user verified email", "user_id", user.ID, "email", user.Email)
+
+	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin)
+	if err != nil {
+		return nil, err
+	}
+	return &PlatformAuthResponse{
+		AccessToken: token,
+		TokenType:   "bearer",
+		ExpiresIn:   expiresIn,
+		User:        user,
+	}, nil
+}
+
+// ResendVerification re-sends the verification email for an unconfirmed
+// account. Always returns nil regardless of whether the email exists or
+// is already verified — same anti-enumeration contract as
+// ForgotPassword: the caller learns nothing about account existence.
+func (s *PlatformAuthService) ResendVerification(ctx context.Context, email string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || s.emailService == nil {
+		return nil
+	}
+	var userID, userEmail string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, email FROM platform_users
+		  WHERE email = $1 AND password_hash IS NOT NULL AND email_confirmed_at IS NULL`,
+		email,
+	).Scan(&userID, &userEmail)
+	if err != nil {
+		if err != pgx.ErrNoRows {
+			slog.Warn("resend-verification lookup failed", "error", err)
+		}
+		return nil // no such unverified user — stay silent
+	}
+	if err := s.emailService.SendPlatformVerificationEmail(ctx, userID, userEmail); err != nil {
+		slog.Error("failed to resend platform verification email", "error", err, "user_id", userID)
+	}
+	return nil
 }
 
 // IssuePlatformJWT is the exported wrapper around generatePlatformJWT
@@ -486,21 +611,25 @@ func (s *PlatformAuthService) UpdateDisplayName(ctx context.Context, userID, dis
 
 // ChangePassword verifies the current password and updates to a new one.
 func (s *PlatformAuthService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
-	if len(newPassword) < 8 {
-		return fmt.Errorf("new password must be at least 8 characters")
-	}
-
-	var passwordHash string
+	var email, passwordHash string
 	err := s.pool.QueryRow(ctx,
-		`SELECT password_hash FROM platform_users WHERE id = $1`,
+		`SELECT email, password_hash FROM platform_users WHERE id = $1`,
 		userID,
-	).Scan(&passwordHash)
+	).Scan(&email, &passwordHash)
 	if err != nil {
 		return fmt.Errorf("query user: %w", err)
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(currentPassword)); err != nil {
 		return fmt.Errorf("current password is incorrect")
+	}
+
+	// Same NIST-style strength policy as signup, now that we have the
+	// account email for the derived-password check. Checked after the
+	// current-password comparison so a caller who can't authenticate
+	// doesn't get password-policy feedback.
+	if err := ValidatePasswordStrength(newPassword, email); err != nil {
+		return err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
@@ -608,8 +737,12 @@ func (s *PlatformAuthService) ForgotPassword(ctx context.Context, emailAddr stri
 
 // ResetPasswordWithToken resets a platform user's password using a token.
 func (s *PlatformAuthService) ResetPasswordWithToken(ctx context.Context, rawToken, newPassword string) error {
-	if len(newPassword) < 8 {
-		return fmt.Errorf("password must be at least 8 characters")
+	// Validate strength BEFORE consuming the token, so a weak new
+	// password doesn't burn a single-use reset token. Email is unknown
+	// until the token resolves, so the email-derived check is skipped
+	// here (length + blocklist + sequence checks still apply).
+	if err := ValidatePasswordStrength(newPassword, ""); err != nil {
+		return err
 	}
 	if s.emailService == nil {
 		return fmt.Errorf("email service not configured")

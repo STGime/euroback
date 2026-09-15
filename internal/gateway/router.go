@@ -30,8 +30,8 @@ import (
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/sms"
-	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/sovereignty"
+	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/vault"
@@ -500,10 +500,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					limit  int
 					window time.Duration
 				}{
-					"platform_signup":    {ratelimit.SignupLimit, ratelimit.SignupWindow},
-					"platform_forgot":    {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
-					"signin_fail":        {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
-					"signin_fail_record": {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
+					"platform_signup":              {ratelimit.SignupLimit, ratelimit.SignupWindow},
+					"platform_forgot":              {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
+					"platform_resend_verification": {ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow},
+					"signin_fail":                  {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
+					"signin_fail_record":           {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
 				}
 				cfg, ok := limits[action]
 				if !ok {
@@ -519,6 +520,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/reset-password", auth.HandlePlatformResetPassword(platformAuthSvc))
+		r.Post("/auth/verify-email", auth.HandlePlatformVerifyEmail(platformAuthSvc))
+		r.Post("/auth/resend-verification", auth.HandlePlatformResendVerification(platformAuthSvc, platformRateCheck))
 
 		// SSO — Team-tier organizations sign in via their configured
 		// OIDC IdP. Both routes are unauthenticated (the whole point
