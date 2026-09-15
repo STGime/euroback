@@ -49,6 +49,17 @@ const (
 	ActionTeamBetaGranted = "team_beta.granted"
 	ActionTeamBetaRevoked = "team_beta.revoked"
 
+	// ActionUserDeleted is emitted when a superadmin deletes a
+	// platform user + all of their projects via
+	// DELETE /platform/admin/users/{id} (superadmin-only). The
+	// self-service path (POST /platform/auth/account/delete)
+	// requires the caller to delete their projects first, so it
+	// doesn't need its own audit action — the individual project
+	// deletes are already logged. This action captures the "ops
+	// swept a signup + everything they had" case, which the
+	// self-service path can't do.
+	ActionUserDeleted = "user.deleted"
+
 	// Legal-Team-tier closed-beta grants (Team-tier M2b).
 	// Separate flag from team_beta_access — Legal Team is a premium
 	// tier bundling the German legal-tech compliance pack (§203 /

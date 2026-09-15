@@ -160,22 +160,30 @@
 <p style="color:#6b7280;font-size:12px;">Sent to Eurobase account holders. This is not a marketing email — one-off announcement.</p>`
 	};
 
+	// Current superadmin's user_id — read once at load so the
+	// Signup Users table can hide the delete button on the row that
+	// represents the operator themselves. The backend refuses
+	// self-delete regardless; this is UX polish.
+	let currentUserId = $state<string>('');
+
 	async function refresh() {
 		loading = true;
 		error = null;
 		try {
-			const [p, a, tb, su, cr] = await Promise.all([
+			const [p, a, tb, su, cr, profile] = await Promise.all([
 				api.adminListAllProjects(),
 				api.adminListAllowlist(),
 				api.adminListTeamBetaUsers(),
 				api.adminListSignupUsers(),
 				api.adminListContactRequests(contactRequestFilter),
+				api.getProfile(),
 			]);
 			projects = p.projects;
 			allowlist = a.entries;
 			teamBeta = tb.entries;
 			signupUsers = su.users;
 			contactRequests = cr.requests;
+			currentUserId = profile.id;
 		} catch (e: any) {
 			error = e?.message ?? 'Failed to load admin data';
 		} finally {
@@ -309,6 +317,44 @@
 			await refresh();
 		} finally {
 			signupToggleBusy = null;
+		}
+	}
+
+	// Delete-user modal state. Two-step confirm: click trash → modal
+	// showing email + project count, operator types the email to
+	// confirm → destructive call. The backend does the actual
+	// project-by-project teardown (including Scaleway for Team-tier)
+	// so this handler just fires the request and reloads.
+	let deleteUserTarget = $state<SignupUserEntry | null>(null);
+	let deleteUserConfirmInput = $state('');
+	let deleteUserBusy = $state(false);
+
+	function openDeleteUserModal(u: SignupUserEntry) {
+		deleteUserTarget = u;
+		deleteUserConfirmInput = '';
+	}
+
+	function closeDeleteUserModal() {
+		if (deleteUserBusy) return;
+		deleteUserTarget = null;
+		deleteUserConfirmInput = '';
+	}
+
+	async function confirmDeleteUser() {
+		if (!deleteUserTarget || deleteUserBusy) return;
+		if (deleteUserConfirmInput.trim().toLowerCase() !== deleteUserTarget.email.toLowerCase()) return;
+		deleteUserBusy = true;
+		error = null;
+		try {
+			const target = deleteUserTarget;
+			await api.adminDeleteUser(target.user_id);
+			deleteUserTarget = null;
+			deleteUserConfirmInput = '';
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Delete failed';
+		} finally {
+			deleteUserBusy = false;
 		}
 	}
 
@@ -795,13 +841,14 @@
 						<th class="px-4 py-2 text-right">Projects</th>
 						<th class="px-4 py-2 text-center">Team beta</th>
 						<th class="px-4 py-2 text-center">Legal Team beta</th>
+						<th class="px-4 py-2 text-center w-16">Actions</th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-100">
 					{#if loading}
-						<tr><td colspan="10" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+						<tr><td colspan="11" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
 					{:else if signupFiltered.length === 0}
-						<tr><td colspan="10" class="px-4 py-6 text-center text-gray-400">
+						<tr><td colspan="11" class="px-4 py-6 text-center text-gray-400">
 							{signupSearch.trim() === '' ? 'No signups yet.' : 'No matches.'}
 						</td></tr>
 					{:else}
@@ -860,6 +907,23 @@
 									>
 										{u.legal_team_beta_access ? '✓ Granted' : 'Grant'}
 									</button>
+								</td>
+								<td class="px-4 py-2 text-center">
+									{#if u.user_id === currentUserId}
+										<span class="text-xs text-gray-400" title="You can't delete your own account from here — use Settings → Delete account.">(you)</span>
+									{:else}
+										<button
+											type="button"
+											onclick={() => openDeleteUserModal(u)}
+											title={`Delete ${u.email} and their ${u.project_count} project(s)`}
+											aria-label={`Delete ${u.email}`}
+											class="inline-flex items-center justify-center rounded p-1.5 text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+										>
+											<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.6" stroke="currentColor">
+												<path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+											</svg>
+										</button>
+									{/if}
 								</td>
 							</tr>
 						{/each}
@@ -1206,6 +1270,70 @@
 					class="rounded-md bg-eurobase-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-eurobase-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
 				>
 					{composeBusy ? 'Sending…' : 'Send'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Delete user confirm modal -->
+{#if deleteUserTarget}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+		<div class="w-full max-w-md rounded-xl bg-white shadow-xl">
+			<div class="border-b border-gray-200 px-5 py-3">
+				<h3 class="text-base font-semibold text-red-700">Delete user + all their data</h3>
+				<p class="mt-1 text-xs text-gray-500">This is irreversible.</p>
+			</div>
+			<div class="px-5 py-4 space-y-4">
+				<div class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+					<div><strong>Email:</strong> {deleteUserTarget.email}</div>
+					<div class="mt-1">
+						<strong>Projects:</strong> {deleteUserTarget.project_count}
+						{#if deleteUserTarget.project_count > 0}
+							<span class="text-xs">(each dedicated Scaleway instance will be torn down)</span>
+						{/if}
+					</div>
+					{#if deleteUserTarget.plan === 'pro'}
+						<div class="mt-1"><strong>Plan:</strong> Pro (active subscription)</div>
+					{/if}
+					{#if deleteUserTarget.team_beta_access || deleteUserTarget.legal_team_beta_access}
+						<div class="mt-1">
+							<strong>Beta access:</strong>
+							{[
+								deleteUserTarget.team_beta_access ? 'Team' : null,
+								deleteUserTarget.legal_team_beta_access ? 'Legal Team' : null,
+							].filter(Boolean).join(', ')}
+						</div>
+					{/if}
+				</div>
+				<p class="text-sm text-gray-700">
+					Type the email <code class="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">{deleteUserTarget.email}</code> to confirm.
+				</p>
+				<input
+					type="text"
+					bind:value={deleteUserConfirmInput}
+					placeholder="Type email to confirm"
+					class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono"
+					autocomplete="off"
+				/>
+			</div>
+			<div class="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">
+				<button
+					type="button"
+					onclick={closeDeleteUserModal}
+					disabled={deleteUserBusy}
+					class="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer disabled:opacity-50"
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					onclick={confirmDeleteUser}
+					disabled={deleteUserBusy ||
+						deleteUserConfirmInput.trim().toLowerCase() !== deleteUserTarget.email.toLowerCase()}
+					class="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+				>
+					{deleteUserBusy ? 'Deleting…' : 'Delete permanently'}
 				</button>
 			</div>
 		</div>

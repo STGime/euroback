@@ -737,6 +737,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// Signup-users dashboard (public-beta launch observability).
 			// One row per platform_users + derived plan / MRR / project count.
 			r.Get("/signup-users", tenant.AdminListSignupUsers(pool))
+			// Superadmin cleanup: delete a platform user + every
+			// project they own (including Scaleway teardown for
+			// Team-tier dedicated instances). Refuses self-delete
+			// and refuses to delete another superadmin.
+			r.Delete("/users/{id}", tenant.AdminDeleteUser(pool, tenantSvc))
 
 			// Contact-form triage — marketing widget on eurobase.app
 			// writes rows into public.contact_requests via
