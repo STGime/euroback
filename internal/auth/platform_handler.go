@@ -396,11 +396,9 @@ func isUserError(err error) bool {
 	}
 	msg := err.Error()
 	return msg == "email is required" ||
-		msg == "password must be at least 8 characters" ||
 		msg == "email already registered" ||
 		msg == "display name is required" ||
 		msg == "display name must be at most 100 characters" ||
-		msg == "new password must be at least 8 characters" ||
 		msg == "current password is incorrect" ||
 		msg == "delete all projects before deleting your account" ||
 		msg == "invalid or expired token" ||
