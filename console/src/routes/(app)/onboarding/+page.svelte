@@ -30,6 +30,46 @@
 	// still gets a clean 403.
 	let hasLegalTeamBeta = $state(false);
 
+	// Team-tier beta-access request modal — mirrors the pricing page
+	// pattern (see console/src/routes/pricing/+page.svelte). Signed-in
+	// non-beta users clicking the Team card open this instead of
+	// selecting the plan (which would 403 on submit anyway).
+	let requestOpen = $state(false);
+	let requestMessage = $state('');
+	let requestBusy = $state(false);
+	let requestSuccess = $state(false);
+	let requestError = $state<string | null>(null);
+
+	function openTeamBetaRequest() {
+		requestMessage = '';
+		requestError = null;
+		requestSuccess = false;
+		requestBusy = false;
+		requestOpen = true;
+	}
+	function closeTeamBetaRequest() {
+		if (requestBusy) return;
+		requestOpen = false;
+	}
+	async function submitTeamBetaRequest(e: Event) {
+		e.preventDefault();
+		if (requestBusy || requestSuccess) return;
+		if (requestMessage.trim().length < 10) {
+			requestError = 'Tell us a little about your use case (at least 10 characters).';
+			return;
+		}
+		requestBusy = true;
+		requestError = null;
+		try {
+			await api.requestTeamBetaAccess(requestMessage.trim());
+			requestSuccess = true;
+		} catch (err: unknown) {
+			requestError = err instanceof Error ? err.message : 'Request failed.';
+		} finally {
+			requestBusy = false;
+		}
+	}
+
 	onMount(async () => {
 		try {
 			const [plans, profile] = await Promise.all([
@@ -121,14 +161,14 @@
 	let teamPlan = $derived(planData.find(p => p.plan === 'team'));
 	let legalTeamPlan = $derived(planData.find(p => p.plan === 'legal_team'));
 
-	// 4 visible tiers → 2×2 grid; 3 → 3-col; ≤2 → 2-col. Keeps
-	// each card wide enough to fit its bullet list without cramping.
+	// 4 visible tiers → 2×2 grid; 3 → 3-col; ≤2 → 2-col. Team is now
+	// always visible (non-beta users get a "Request access" affordance
+	// on the card instead of a working radio), so it's counted
+	// unconditionally.
 	let planGridClass = $derived(
-		hasTeamBeta && hasLegalTeamBeta
+		hasLegalTeamBeta
 			? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-2'
-			: (hasTeamBeta || hasLegalTeamBeta)
-				? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
-				: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-2'
+			: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
 	);
 
 	function formatLimit(mb: number): string {
@@ -525,23 +565,26 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 								</ul>
 							</div>
 						</label>
-						{#if hasTeamBeta}
-							<!-- Team-tier closed-beta option (M2). Only rendered
-							     for users with team_beta_access = true. Emerald
-							     styling matches the projects/+page.svelte New
-							     Project modal so the two create paths look the
-							     same to a granted user.
+						<!--
+							Team card — always visible so non-beta users can
+							see what they'd get and click through to request
+							access. hasTeamBeta gates the interactive shape:
+							  * granted → real radio input, selectable, no gate
+							            on submit (backend accepts plan=team).
+							  * not granted → button that opens the
+							                  request-access modal; the radio
+							                  is skipped so the user can't
+							                  submit plan=team and get a 403.
+							Emerald styling matches projects/+page.svelte's New
+							Project modal so the two create paths look the
+							same to a granted user.
 
-							     Hardcoded fallback numbers (100 GB / 500 GB /
-							     1000k) are intentional — getPlans() returns
-							     free/pro only for non-beta callers, so teamPlan
-							     may be undefined here even when Team is
-							     visible. Kept in sync with plan_limits' team
-							     row (migration 000085) by hand; the values
-							     will only diverge on a plan_limits change,
-							     which is rare and would be caught in the same
-							     PR by anyone reviewing changes to this
-							     section. -->
+							Hardcoded fallback numbers (100 GB / 500 GB /
+							1000k) mirror plan_limits' team row (migration
+							000085). Divergence is a manual sync — flagged in
+							review whenever plan_limits changes.
+						-->
+						{#if hasTeamBeta}
 							<label class="cursor-pointer">
 								<input type="radio" name="onb-plan" value="team" bind:group={plan} class="peer sr-only" />
 								<div class="rounded-xl border-2 p-4 transition-all peer-checked:border-emerald-600 peer-checked:bg-emerald-50/50 peer-checked:shadow-sm border-emerald-200 hover:border-emerald-300">
@@ -574,6 +617,33 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 									</ul>
 								</div>
 							</label>
+						{:else}
+							<button type="button" onclick={openTeamBetaRequest} class="text-left cursor-pointer">
+								<div class="rounded-xl border-2 border-emerald-200 bg-emerald-50/30 hover:border-emerald-400 hover:bg-emerald-50/60 transition-all p-4">
+									<div class="flex items-center justify-between">
+										<p class="text-sm font-semibold text-gray-900">Team</p>
+										<span class="text-xs font-semibold text-emerald-700">Closed beta</span>
+									</div>
+									<p class="mt-1.5 text-xs text-gray-500">Dedicated Postgres, direct <code class="rounded bg-gray-100 px-1 text-[10px]">DATABASE_URL</code>, daily backups + on-demand snapshots.</p>
+									<ul class="mt-2.5 space-y-1 text-xs text-gray-500">
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											100 GB dedicated database, 500 GB file storage
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											SSO (OIDC) + Organizations
+										</li>
+										<li class="flex items-center gap-1.5">
+											<svg class="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+											Direct <code class="rounded bg-gray-100 px-1 text-[10px]">postgres://</code> URL — Payload, Prisma, Drizzle, psql
+										</li>
+									</ul>
+									<div class="mt-3 rounded-md bg-emerald-600 px-3 py-1.5 text-center text-xs font-semibold text-white">
+										Request beta access →
+									</div>
+								</div>
+							</button>
 						{/if}
 						{#if hasLegalTeamBeta}
 							<!-- Legal-Team closed-beta option. Separate SKU
@@ -1042,3 +1112,72 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 		</div>
 	{/if}
 </div>
+
+<!-- Team-tier beta-access request modal — same shape as the pricing
+     page's modal (see console/src/routes/pricing/+page.svelte). Opens
+     from the Team card in the plan selector for non-beta users. -->
+{#if requestOpen}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+		<div class="w-full max-w-md rounded-xl bg-white shadow-xl">
+			<div class="border-b border-gray-200 px-5 py-3">
+				<h3 class="text-base font-semibold text-gray-900">Request Team-tier beta access</h3>
+				<p class="mt-1 text-xs text-gray-500">Team is currently a closed beta — free while we finish billing wiring. We'll email you when your slot opens.</p>
+			</div>
+			{#if requestSuccess}
+				<div class="px-5 py-6 text-center">
+					<div class="inline-flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100">
+						<svg class="h-6 w-6 text-emerald-700" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+						</svg>
+					</div>
+					<h4 class="mt-4 text-base font-semibold text-gray-900">Thanks — we'll be in touch</h4>
+					<p class="mt-1 text-sm text-gray-600">We got your request and pinged the team. Expect a reply within a couple of business days.</p>
+					<button
+						type="button"
+						onclick={closeTeamBetaRequest}
+						class="mt-6 rounded-md bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 cursor-pointer"
+					>
+						Close
+					</button>
+				</div>
+			{:else}
+				<form onsubmit={submitTeamBetaRequest} class="px-5 py-4 space-y-3">
+					<label for="onb-team-beta-message" class="block text-sm font-medium text-gray-700">
+						What are you building?
+					</label>
+					<textarea
+						id="onb-team-beta-message"
+						bind:value={requestMessage}
+						disabled={requestBusy}
+						rows="4"
+						minlength="10"
+						maxlength="5000"
+						required
+						placeholder="A short paragraph about your project + why you need dedicated Postgres, orgs / SSO, or backups. Helps us prioritise your slot."
+						class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none disabled:opacity-50"
+					></textarea>
+					{#if requestError}
+						<p class="text-sm text-red-700">{requestError}</p>
+					{/if}
+					<div class="flex items-center justify-end gap-2 pt-1">
+						<button
+							type="button"
+							onclick={closeTeamBetaRequest}
+							disabled={requestBusy}
+							class="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer disabled:opacity-50"
+						>
+							Cancel
+						</button>
+						<button
+							type="submit"
+							disabled={requestBusy || requestMessage.trim().length < 10}
+							class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+						>
+							{requestBusy ? 'Sending…' : 'Request access'}
+						</button>
+					</div>
+				</form>
+			{/if}
+		</div>
+	</div>
+{/if}
