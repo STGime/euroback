@@ -8,8 +8,27 @@ import (
 )
 
 // Auth endpoint rate limit configuration.
+//
+// **SignupLimit is intentionally generous.** The keyed identifier is
+// the client IP resolved by internal/clientip, but under the current
+// nginx-ingress config the Scaleway LB does not preserve the real
+// client — every external request lands on the gateway with the same
+// internal LB IP as X-Forwarded-For. Both the leftmost (legacy) and
+// rightmost-1 (post-#586) extractors collapse to that shared value,
+// so this limit is effectively product-wide, not per-user, and a
+// tight per-user number like 5/hour would deny every legitimate
+// signup after the first five across the whole product.
+//
+// 60/hour is a compromise: high enough that organic public-beta
+// traffic doesn't collide with itself, low enough that a burst of
+// automated abuse still trips at a visible threshold ops can look at
+// in logs. Restore to per-user semantics is a separate follow-up
+// (nginx-ingress `use-forwarded-headers: true` + `proxy-real-ip-cidr:
+// <Scaleway-LB-CIDR>` — see docs/runbooks/rate-limits-ip-source.md);
+// when that lands, drop this back to a real per-user number
+// (5–10/hour).
 const (
-	SignupLimit          = 5
+	SignupLimit          = 60
 	SignupWindow         = 1 * time.Hour
 	SigninFailLimit      = 5
 	SigninFailWindow     = 15 * time.Minute
