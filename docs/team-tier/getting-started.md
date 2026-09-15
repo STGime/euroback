@@ -133,12 +133,11 @@ high-signal.
   just sees "provisioning" until it flips to "active".
 - No self-serve billing yet — nothing shows up on Mollie until we
   wire plan-change (that's a separate milestone).
-- No org invite email — adding a member is a pure DB row, and the
-  admin has to tell the teammate out-of-band that they've been
-  added.
 - New invitees must have **already signed up** as a regular platform
   user (Free tier is fine) before the org admin can add them.
   Otherwise the invite endpoint returns "no platform user with that
-  email — user must sign up first".
+  email — user must sign up first". Once they've signed up, the
+  invite endpoint sends them a notification email with the org name
+  and a link to the SSO login (see the SSO doc for details).
 - Downgrade path from Team → Free/Pro is not implemented. Once a
   project is on a dedicated instance, it stays there for the beta.

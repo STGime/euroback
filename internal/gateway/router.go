@@ -629,7 +629,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Use(platformAuth.Handler)
 			}
 			if ssoConfig.Orgs != nil {
-				h := &tenant.OrgsHandler{Svc: ssoConfig.Orgs}
+				h := &tenant.OrgsHandler{Svc: ssoConfig.Orgs, Mailer: emailService}
 				r.Post("/", h.HandleCreateOrg())
 				r.Get("/", h.HandleListOrgs())
 				r.Get("/{id}", h.HandleGetOrg())
