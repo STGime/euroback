@@ -71,6 +71,38 @@ func AdminDeleteUser(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 			return
 		}
 
+		// Refuse if the target is the sole admin of any organization.
+		// Deleting them cascades org_members away and leaves the org
+		// (and any org-owned projects with a different owner_id)
+		// unmanageable — no one can add members, edit SSO, or
+		// transfer projects out. Ops must hand off admin rights to
+		// another member first. Matches the same guard the ops
+		// runbook (docs/runbooks/grant-team-beta-access.md) documents
+		// for the team_beta_access revoke path.
+		var orphanedOrgs int
+		err = pool.QueryRow(r.Context(),
+			`SELECT count(*) FROM public.org_members m
+			  WHERE m.user_id = $1::uuid
+			    AND m.role = 'admin'
+			    AND NOT EXISTS (
+			      SELECT 1 FROM public.org_members m2
+			       WHERE m2.org_id = m.org_id
+			         AND m2.role = 'admin'
+			         AND m2.user_id <> m.user_id
+			    )`,
+			targetUserID,
+		).Scan(&orphanedOrgs)
+		if err != nil {
+			slog.Error("admin delete user: sole-admin check failed",
+				"target_user_id", targetUserID, "error", err)
+			http.Error(w, `{"error":"sole-admin check failed"}`, http.StatusInternalServerError)
+			return
+		}
+		if orphanedOrgs > 0 {
+			http.Error(w, `{"error":"refusing to delete — user is sole admin of one or more organizations; hand off admin to another member first"}`, http.StatusConflict)
+			return
+		}
+
 		// Enumerate the target's projects. owner_id is FK'd with
 		// ON DELETE CASCADE to platform_users, but we need to
 		// call DeleteProject for the Scaleway teardown side-effect
@@ -112,6 +144,32 @@ func AdminDeleteUser(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 			}
 		}
 
+		// Guard the enumerate-then-delete race: if the target
+		// created a fresh project between the SELECT above and
+		// this point, the platform_users cascade would tear the
+		// row out (owner_id FK is ON DELETE CASCADE) but skip the
+		// Scaleway teardown — the exact leak this endpoint was
+		// designed to prevent. Refuse rather than silently orphan.
+		// Extremely narrow race (target creating a project during
+		// their own deletion), but cheap to guard.
+		var remaining int
+		if err := pool.QueryRow(r.Context(),
+			`SELECT count(*) FROM public.projects WHERE owner_id = $1::uuid`,
+			targetUserID,
+		).Scan(&remaining); err != nil {
+			slog.Error("admin delete user: post-loop project re-check failed",
+				"target_user_id", targetUserID, "error", err)
+			http.Error(w, `{"error":"post-loop project check failed"}`, http.StatusInternalServerError)
+			return
+		}
+		if remaining > 0 {
+			slog.Warn("admin delete user: project appeared during teardown — aborting to avoid Scaleway leak",
+				"target_user_id", targetUserID,
+				"remaining_projects", remaining)
+			http.Error(w, `{"error":"a new project appeared during teardown — retry the delete"}`, http.StatusConflict)
+			return
+		}
+
 		// Finally delete the user. Cascades to org_members,
 		// subscriptions, platform_email_tokens, legal_acceptances,
 		// personal_access_tokens, etc. via their platform_users FK
@@ -130,7 +188,9 @@ func AdminDeleteUser(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 		}
 		if tag.RowsAffected() == 0 {
 			// Race: someone else deleted the row between the lookup
-			// and here. Idempotent from the caller's perspective.
+			// and here. Idempotent from the caller's perspective —
+			// but skip the audit write so we don't record a
+			// user.deleted event for a no-op.
 			slog.Info("admin delete user: row already gone",
 				"target_user_id", targetUserID)
 		} else {
@@ -139,9 +199,8 @@ func AdminDeleteUser(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 				"email", email,
 				"projects_deleted", len(projectIDs),
 				"actor_id", actorID)
+			writeAudit(r, audit.ActionUserDeleted, targetUserID)
 		}
-
-		writeAudit(r, audit.ActionUserDeleted, targetUserID)
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
