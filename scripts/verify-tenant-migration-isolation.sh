@@ -180,5 +180,38 @@ REVOKE EXECUTE ON FUNCTION public.priv_helper() FROM PUBLIC;
 SQL
 must_deny lockdown as_role tenant_a_ddl pw_a -tAc "SELECT public.priv_helper();"
 
+echo "12. pg_stat_activity: same-role query text leaks across tenants on the shared gateway role; superuser REVOKE belt closes all three access forms ..."
+# Cross-tenant disclosure (security report 2026-09-16). PostgreSQL shows the
+# full query text of *same-role* backends to any session of that role with NO
+# extra grant — pg_read_all_stats is irrelevant (never granted; same-role
+# visibility doesn't depend on it). Every SDK tenant shares eurobase_gateway,
+# so one tenant reads another's in-flight SQL incl. inlined literals. The
+# deployable primary control is the app-layer guard (query.ValidateNoCatalogRefs,
+# applied to the SDK and platform SQL paths). This check covers the DB-level
+# belt, which needs superuser on managed Postgres (a Scaleway-support action —
+# attempting it as eurobase_migrator is the same silent no-op trap as the other
+# Scaleway-owned-object grants; see CLAUDE.md).
+#
+# Negative control first: reproduce the disclosure pre-revoke.
+( as_role eurobase_gateway pw -tAc "SELECT pg_sleep(4), 'XMARK_LIT=secret-token' AS t" >/dev/null 2>&1 & )
+sleep 1
+seen=$(as_role eurobase_gateway pw -tAc "SELECT query FROM pg_stat_activity WHERE query LIKE '%XMARK_LIT%' AND pid <> pg_backend_pid() LIMIT 1" 2>&1)
+echo "$seen" | grep -q "XMARK_LIT=secret-token" \
+  || fail "disclosure not reproduced: a same-role backend's query text should be visible pre-revoke (got: $seen)"
+sleep 4
+# The belt: revoke the view AND the underlying stats function — the function
+# path (pg_stat_get_activity) returns identical data, so a view-only revoke
+# would be bypassable. Re-grant to a dedicated monitoring role if ops need it.
+psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+REVOKE SELECT ON pg_catalog.pg_stat_activity FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_stat_get_activity(integer) FROM PUBLIC;
+SQL
+must_deny "bare pg_stat_activity"          as_role eurobase_gateway pw -tAc "SELECT count(*) FROM pg_stat_activity;"
+must_deny "qualified pg_catalog.pg_stat_activity" as_role eurobase_gateway pw -tAc "SELECT count(*) FROM pg_catalog.pg_stat_activity;"
+must_deny "pg_stat_get_activity function"  as_role eurobase_gateway pw -tAc "SELECT count(*) FROM pg_stat_get_activity(NULL);"
+# The revoke must not over-reach: unrelated pg_ functions keep working.
+[ "$(as_role eurobase_gateway pw -tAc 'SELECT pg_backend_pid() > 0;' 2>&1)" = "t" ] \
+  || fail "revoke over-reached: pg_backend_pid() should still work for the gateway role"
+
 echo
 echo "ALL CHECKS PASSED — tenant migrations are isolated to one tenant."

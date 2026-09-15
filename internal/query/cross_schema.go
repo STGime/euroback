@@ -39,7 +39,7 @@ type CrossSchemaOptions struct {
 // data via `SELECT * FROM tenant_<other-uuid>.users`.
 //
 // The check uses a state-machine scanner that recognises:
-//   - single-quoted strings (`'…'`, with `''` escape)
+//   - single-quoted strings (`'…'`, with `”` escape)
 //   - double-quoted identifiers (`"…"`, with `""` escape)
 //   - dollar-quoted strings (`$$…$$` and `$tag$…$tag$`)
 //   - line comments (`-- …`)
@@ -171,6 +171,83 @@ var SDKPublicAllowlist = map[string]bool{
 // no legitimate reason to reach. The list is conservative: anything not
 // the caller's own schema or pg_temp is suspect, but we explicitly reject
 // the high-value targets so the error message is precise.
+// catalogAllowedNames are the few `pg_`-prefixed identifiers a user
+// query may legitimately reference. Everything else with the `pg_`
+// prefix is refused by ValidateNoCatalogRefs — PostgreSQL reserves that
+// prefix for system objects, so a deny-by-default on the prefix is the
+// only rule that stays correct as new catalog views/functions appear.
+//
+//   - pg_temp — the session temp schema; already permitted qualified by
+//     schemaIsForbidden, kept consistent here.
+//   - pg_typeof, pg_get_serial_sequence, pg_size_pretty,
+//     pg_column_size, pg_backend_pid — benign, commonly used, and
+//     reveal nothing about other sessions.
+//
+// Deliberately NOT allowed: pg_sleep (resource abuse), and every
+// pg_stat_* / pg_locks / pg_prepared_* / pg_settings / pg_roles /
+// pg_shadow relation and stats function — those are the cross-tenant
+// disclosure surface this guard exists to close.
+var catalogAllowedNames = map[string]bool{
+	"pg_temp":                true,
+	"pg_typeof":              true,
+	"pg_get_serial_sequence": true,
+	"pg_size_pretty":         true,
+	"pg_column_size":         true,
+	"pg_backend_pid":         true,
+}
+
+// ValidateNoCatalogRefs rejects any reference to a PostgreSQL system
+// catalog object by name — qualified OR bare. It closes the gap the
+// cross-schema scanner above cannot: that scanner only inspects an
+// identifier when it is followed by a dot (the schema position), so a
+// bare `pg_stat_activity` is never examined, yet it resolves anyway
+// because `pg_catalog` is ALWAYS on the implicit search path — it
+// cannot be removed by the `SET LOCAL search_path` narrowing the engine
+// applies.
+//
+// Why this matters (cross-tenant disclosure): every SDK tenant runs as
+// the single shared `eurobase_gateway` login role, and the platform
+// SQL path runs as `eurobase_developer` → member of `eurobase_migrator`
+// → member of `eurobase_gateway` (migration 000045). PostgreSQL shows
+// the full `query` text of *same-role* backends in pg_stat_activity to
+// any session of that role, with no extra grant — so any tenant (or
+// any console user) could read every other tenant's in-flight SQL,
+// including inlined literals, plus the control plane's own statements.
+// The same data is reachable via the underlying function
+// pg_stat_get_activity(), and the wider pg_locks / pg_prepared_* /
+// pg_settings surface leaks adjacent state. Schema and RLS isolation
+// sit *below* this: the catalog is role-scoped, not schema-scoped.
+//
+// The rule is a prefix deny: any identifier token starting with `pg_`
+// (case-insensitive) is refused unless it is in catalogAllowedNames.
+// Identifier tokens only — string literals, comments and dollar-quoted
+// bodies are skipped by the scanner, so `SELECT 'pg_stat_activity'`
+// does not false-positive. Applied to the SDK SQL path AND the platform
+// SQL/transaction paths, because both are customer-driven and both can
+// see the shared role's sessions.
+//
+// The complementary DB-level belt is `REVOKE SELECT ON
+// pg_catalog.pg_stat_activity` + `REVOKE EXECUTE ON
+// pg_stat_get_activity(integer)` from the runtime roles — that needs
+// superuser on managed Postgres (a Scaleway-support action, see
+// CLAUDE.md), so this guard is the deployable primary control.
+func ValidateNoCatalogRefs(sql string) error {
+	for _, tok := range scanIdentifiersAndDots(sql) {
+		if tok.kind != tokIdent {
+			continue
+		}
+		name := strings.ToLower(tok.value)
+		if !strings.HasPrefix(name, "pg_") {
+			continue
+		}
+		if catalogAllowedNames[name] {
+			continue
+		}
+		return fmt.Errorf("references to PostgreSQL system catalog objects (%q) are not allowed", tok.value)
+	}
+	return nil
+}
+
 func schemaIsForbidden(s string) bool {
 	switch s {
 	case "public", "pg_catalog", "information_schema":

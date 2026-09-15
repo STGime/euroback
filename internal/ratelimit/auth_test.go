@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/eurobase/euroback/internal/clientip"
 )
 
 func setupAuthTestLimiter(t *testing.T) *RateLimiter {
@@ -88,11 +90,23 @@ func TestSigninFailRate_OnlyCountsFailures(t *testing.T) {
 	}
 }
 
+// ClientIP resolves the entry the trusted proxy APPENDED (rightmost,
+// one hop by default), never the client-controlled leftmost entry.
+// This test previously asserted the leftmost value — i.e. it pinned the
+// spoofable behaviour that let `X-Forwarded-For: 8.8.4.4` bypass every
+// IP-keyed limiter (security report 2026-09-16). With one trusted hop,
+// "1.2.3.4, 10.0.0.1" means the client sent "1.2.3.4" and the proxy
+// appended the real peer "10.0.0.1".
 func TestClientIP_XForwardedFor(t *testing.T) {
+	origTrust, origHops := clientip.TrustProxy, clientip.TrustedHops
+	t.Cleanup(func() { clientip.TrustProxy, clientip.TrustedHops = origTrust, origHops })
+	clientip.TrustProxy, clientip.TrustedHops = true, 1
+
 	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.9.9.9:1"
 	r.Header.Set("X-Forwarded-For", "1.2.3.4, 10.0.0.1")
-	if ip := ClientIP(r); ip != "1.2.3.4" {
-		t.Fatalf("expected 1.2.3.4, got %s", ip)
+	if ip := ClientIP(r); ip != "10.0.0.1" {
+		t.Fatalf("expected proxy-appended 10.0.0.1 (spoofed leftmost 1.2.3.4 must be ignored), got %s", ip)
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/eurobase/euroback/internal/clientip"
 )
 
 // AuthRateLimiter is a function that checks rate limits and writes a 429 if exceeded.
@@ -413,20 +415,16 @@ func writeJSONError(w http.ResponseWriter, msg string, status int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// clientIP resolves the caller's IP from the TRUSTED side of
+// X-Forwarded-For (see internal/clientip). The platform auth routes —
+// signup rate limit, the signup IP written to legal_acceptances,
+// forgot-password / resend-verification limits — sit behind the same
+// ingress as everything else, so the real client is the entry the proxy
+// APPENDED, not the leftmost one the client controls. Previously this
+// took the leftmost entry unconditionally, so `X-Forwarded-For: 8.8.4.4`
+// bypassed the 5/hour signup limit and poisoned the audit IP (security
+// report 2026-09-16, secondary finding). Fails closed to the TCP peer
+// when the forwarded chain doesn't match the configured hop count.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-	addr := r.RemoteAddr
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
-	}
-	return addr
+	return clientip.FromRequestDefault(r)
 }

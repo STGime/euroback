@@ -3,6 +3,8 @@ package ratelimit
 import (
 	"net/http/httptest"
 	"testing"
+
+	"github.com/eurobase/euroback/internal/clientip"
 )
 
 // #228 + #238: ClientIPForProject is the trust-proxy-aware sibling of
@@ -172,17 +174,31 @@ func equalStringSlice(a, b []string) bool {
 // for the audit log's client IP and for legacy auth helpers). Legacy
 // callers key on leftmost XFF because they historically had no config
 // knob; a future migration would replace them.
-func TestClientIP_LegacyBehaviorUnchanged(t *testing.T) {
+// This test used to be TestClientIP_LegacyBehaviorUnchanged and pinned
+// the platform-wide ClientIP to "trust the LEFTMOST X-Forwarded-For
+// entry" — the client-controlled one. That contract was the bug: a
+// spoofed header bypassed every IP-keyed limiter that used ClientIP
+// (security report 2026-09-16, secondary finding). ClientIP now shares
+// the trusted-hop resolver with ClientIPForProject, so the guarantee is
+// inverted — the leftmost entry is IGNORED and the proxy-appended entry
+// wins. The no-XFF → TCP-peer fallback is unchanged.
+func TestClientIP_TrustsProxyAppendedEntryNotLeftmost(t *testing.T) {
+	origTrust, origHops := clientip.TrustProxy, clientip.TrustedHops
+	t.Cleanup(func() { clientip.TrustProxy, clientip.TrustedHops = origTrust, origHops })
+	clientip.TrustProxy, clientip.TrustedHops = true, 1
+
 	r := httptest.NewRequest("POST", "/", nil)
-	r.RemoteAddr = "10.0.0.5:54321"
+	r.RemoteAddr = "10.0.0.9:54321"
+	// "203.0.113.7" is what the client wrote; "10.0.0.5" is what the one
+	// trusted proxy appended — that is the real peer.
 	r.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.5")
-	if got := ClientIP(r); got != "203.0.113.7" {
-		t.Errorf("legacy ClientIP must still trust leftmost XFF, got %q", got)
+	if got := ClientIP(r); got != "10.0.0.5" {
+		t.Errorf("ClientIP must return the proxy-appended entry 10.0.0.5, not the client-controlled leftmost; got %q", got)
 	}
 
 	r2 := httptest.NewRequest("POST", "/", nil)
 	r2.RemoteAddr = "192.0.2.42:9999"
 	if got := ClientIP(r2); got != "192.0.2.42" {
-		t.Errorf("legacy ClientIP with no XFF must fall back to TCP peer, got %q", got)
+		t.Errorf("ClientIP with no XFF must fall back to TCP peer, got %q", got)
 	}
 }
