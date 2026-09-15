@@ -23,6 +23,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth/oidc"
 	"github.com/eurobase/euroback/internal/billing"
 	"github.com/eurobase/euroback/internal/billing/mollie"
+	"github.com/eurobase/euroback/internal/clientip"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
@@ -35,8 +36,8 @@ import (
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/sms"
-	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/sovereignty"
+	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/vault"
@@ -147,6 +148,12 @@ func main() {
 	// ── Set up platform auth ──
 	platformAuthSvc := auth.NewPlatformAuthService(pool, platformJWTSecret)
 	platformAuthSvc.AllowPublicSignup = os.Getenv("ALLOW_PUBLIC_SIGNUP") == "true"
+	// Every IP-keyed limiter and audit-IP capture (platform auth routes,
+	// contact/support/sovereignty forms) resolves the client from the
+	// TRUSTED side of X-Forwarded-For — PLATFORM_TRUST_PROXY /
+	// PLATFORM_TRUSTED_PROXY_HOPS — so a spoofed leftmost entry can't
+	// bypass a limit or poison an audit IP. One config, one resolver.
+	clientip.ConfigureFromEnv()
 
 	// Real-time signup notifications to Discord — optional. When
 	// DISCORD_SIGNUPS_WEBHOOK is unset, the notifier is a silent

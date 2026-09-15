@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/eurobase/euroback/internal/clientip"
 )
 
 // Auth endpoint rate limit configuration.
@@ -141,17 +143,20 @@ func CheckAuthRateForProject(limiter *RateLimiter, w http.ResponseWriter, ctx co
 // search-and-replace across handlers.
 const FiveMinutes = 5 * time.Minute
 
-// ClientIP extracts the client IP from a request, preferring X-Forwarded-For.
+// ClientIP extracts the client IP for the platform-wide limiters
+// (contact / support / sovereignty forms) using the deployment-wide
+// trusted-hop rule in internal/clientip.
 //
-// This is the legacy / platform-wide helper — it ALWAYS trusts the
-// leftmost X-Forwarded-For entry. Per-project gates should use
-// ClientIPForProject instead, which honours the project's `trust_proxy`
-// knob (#228).
+// It previously trusted the LEFTMOST X-Forwarded-For entry
+// unconditionally — the entry the client controls — so a spoofed
+// header bypassed every IP-keyed limit that used it (security report
+// 2026-09-16, secondary finding). It now resolves the entry the trusted
+// proxy appended and fails closed to the TCP peer when the chain
+// doesn't match the configured hop count. Per-project gates keep using
+// ClientIPForProject, which honours the project's `trust_proxy` knob
+// (#228); both share one implementation.
 func ClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return leftmostXFF(xff)
-	}
-	return remoteAddrNoPort(r)
+	return clientip.FromRequestDefault(r)
 }
 
 // ClientIPForProject is the per-project sibling that honours
@@ -175,13 +180,13 @@ func ClientIP(r *http.Request) string {
 //     regardless of how many the attacker prepends).
 //
 //     Two supported shapes:
-//       trustedHops=1 — nginx-ingress `use-forwarded-headers: false`,
-//                       single XFF entry from the trusted proxy
-//                       (via Scaleway LB proxy-protocol v2 or direct).
-//       trustedHops=2 — LB and nginx both append their view of the
-//                       source (LB appends real client, nginx appends
-//                       LB's IP). Requires nginx
-//                       `use-forwarded-headers: true`.
+//     trustedHops=1 — nginx-ingress `use-forwarded-headers: false`,
+//     single XFF entry from the trusted proxy
+//     (via Scaleway LB proxy-protocol v2 or direct).
+//     trustedHops=2 — LB and nginx both append their view of the
+//     source (LB appends real client, nginx appends
+//     LB's IP). Requires nginx
+//     `use-forwarded-headers: true`.
 //
 //     **Fail-closed**: fewer observed XFF entries than trustedHops
 //     → return TCP peer instead of the leftmost entry. Catches
@@ -191,37 +196,22 @@ func ClientIP(r *http.Request) string {
 //     availability issue (all requests key on one TCP peer), not a
 //     security issue.
 //
-// The Eurobase default is `TrustProxy=false, TrustedProxyHops=1`. See
-// the field comments in internal/tenant/auth_config.go for the full
-// trade-off walkthrough.
+// The per-project default is `TrustProxy=false, TrustedProxyHops=1` —
+// customers control their own ingress shape, so the safe default is to
+// ignore XFF until they opt in. The platform-wide ClientIP above uses
+// internal/clientip's default (trust, 1 hop) instead, because that
+// surface sits behind Eurobase's own known-shape ingress. See the field
+// comments in internal/tenant/auth_config.go for the full trade-off
+// walkthrough.
 //
 // trustedHops ≤ 0 is treated as 1 (belt + suspenders on top of the
 // EffectiveRateLimits merge that already normalises ≤0 → default).
 // An out-of-range value must not be usable as a bypass primitive.
 func ClientIPForProject(r *http.Request, trustProxy bool, trustedHops int) string {
-	if !trustProxy {
-		return remoteAddrNoPort(r)
-	}
-	if trustedHops <= 0 {
-		trustedHops = 1
-	}
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
-		return remoteAddrNoPort(r)
-	}
-	entries := splitXFF(xff)
-	// entries indexed 0..len-1, left-to-right. Real client is at
-	// index len-trustedHops (or before it, from the client's own
-	// header). Anything earlier is untrusted.
-	idx := len(entries) - trustedHops
-	if idx < 0 {
-		// Fewer observed entries than expected trusted hops — the
-		// chain doesn't match our config assumption. Fail-closed to
-		// TCP peer rather than trusting whatever leftmost entry
-		// happens to be present.
-		return remoteAddrNoPort(r)
-	}
-	return entries[idx]
+	// Single implementation lives in internal/clientip so the platform
+	// auth routes (which cannot import this package — it imports auth)
+	// resolve the client IP by the same trusted-hop rule.
+	return clientip.FromRequest(r, trustProxy, trustedHops)
 }
 
 // leftmostXFF returns the first entry of an X-Forwarded-For header,

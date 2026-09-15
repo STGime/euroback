@@ -129,6 +129,12 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
 				return
 			}
+			// Same catalog guard as the single-statement path — a
+			// multi-statement migration must not be a way around it.
+			if err := ValidateNoCatalogRefs(stmt); err != nil {
+				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
+				return
+			}
 		}
 
 		start := time.Now()
@@ -203,6 +209,19 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		if err := ValidateNoCrossSchemaRefsOpts(req.SQL, schema, CrossSchemaOptions{
 			AllowedPublicNames: allowlist,
 		}); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Both paths: refuse bare or qualified references to the
+		// PostgreSQL system catalog. The cross-schema check above is
+		// dot-keyed and cannot see a bare `pg_stat_activity`, which
+		// resolves via the always-implicit pg_catalog search path and
+		// exposes every same-role session's in-flight SQL (all SDK
+		// tenants share eurobase_gateway; the platform path inherits
+		// it via developer → migrator → gateway). Cross-tenant
+		// disclosure — see ValidateNoCatalogRefs.
+		if err := ValidateNoCatalogRefs(req.SQL); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
