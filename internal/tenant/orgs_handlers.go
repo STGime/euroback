@@ -314,6 +314,16 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 			if claims != nil {
 				inviterEmail = claims.Email
 			}
+			// Cosmetic fallback (#584 review 🟢): a missing inviter
+			// email would render "<strong></strong> has added
+			// you…". Substitute a generic label so the mail still
+			// reads well. Reaches this branch only if the auth
+			// middleware upstream ever ships claims without an
+			// email (defence-in-depth — the current password /
+			// SSO paths both populate it).
+			if inviterEmail == "" {
+				inviterEmail = "An organization admin"
+			}
 			invitedEmail := m.Email
 			orgName := org.Name
 			go func() {

@@ -3,7 +3,8 @@ package email
 import (
 	"bytes"
 	"fmt"
-	"html/template"
+	htmltemplate "html/template"
+	texttemplate "text/template"
 )
 
 // TemplateData holds the variables available in email templates.
@@ -134,12 +135,12 @@ func RenderTemplate(templateType, customSubject, customHTML string, data Templat
 		bodyTpl = customHTML
 	}
 
-	subject, err := renderString(subjectTpl, data)
+	subject, err := renderSubject(subjectTpl, data)
 	if err != nil {
 		return "", "", fmt.Errorf("render subject: %w", err)
 	}
 
-	body, err := renderString(bodyTpl, data)
+	body, err := renderBody(bodyTpl, data)
 	if err != nil {
 		return "", "", fmt.Errorf("render body: %w", err)
 	}
@@ -147,8 +148,29 @@ func RenderTemplate(templateType, customSubject, customHTML string, data Templat
 	return subject, body, nil
 }
 
-func renderString(tpl string, data TemplateData) (string, error) {
-	t, err := template.New("email").Parse(tpl)
+// renderSubject runs through text/template so plain-text runes
+// (ampersands, apostrophes, angle brackets in user-controlled fields
+// like OrgName) land in the mail client's Subject: header verbatim,
+// not as HTML entities. E.g. "Ben & Jerry's Bakery" must arrive as
+// "Ben & Jerry's Bakery", not "Ben &amp; Jerry&#39;s Bakery".
+// #584 review 🟡.
+func renderSubject(tpl string, data TemplateData) (string, error) {
+	t, err := texttemplate.New("email-subject").Parse(tpl)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// renderBody keeps html/template so context-aware escaping still
+// protects the HTML body against injection via user-controlled
+// fields (an OrgName containing "<script>…" renders inert).
+func renderBody(tpl string, data TemplateData) (string, error) {
+	t, err := htmltemplate.New("email-body").Parse(tpl)
 	if err != nil {
 		return "", err
 	}
