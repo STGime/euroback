@@ -2223,6 +2223,19 @@ export class EurobaseAPI {
 		return this.fetch<{ users: SignupUserEntry[]; total: number }>('/platform/admin/signup-users');
 	}
 
+	/** Delete a platform user + every project they own (including
+	 *  Scaleway teardown for Team-tier dedicated instances).
+	 *  Superadmin only. Refuses self-delete and refuses to delete
+	 *  another superadmin. Response includes projects_deleted count. */
+	async adminDeleteUser(
+		userId: string,
+	): Promise<{ deleted: boolean; email: string; projects_deleted: number }> {
+		return this.fetch<{ deleted: boolean; email: string; projects_deleted: number }>(
+			`/platform/admin/users/${encodeURIComponent(userId)}`,
+			{ method: 'DELETE' },
+		);
+	}
+
 	// ---- Contact-form triage (marketing-site widget) ----
 
 	/** List contact form submissions. state='unresolved' (default) or
