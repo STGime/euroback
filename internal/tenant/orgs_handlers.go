@@ -18,18 +18,35 @@ package tenant
 // role for authorization — a middleware would add an extra DB hit.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
 )
 
+// PlatformOrgMailer is the narrow interface OrgsHandler needs from
+// the platform email service to send an org-invitation notice on
+// successful invite. Kept small so tests can fake it without
+// depending on the full EmailService surface. Nil means "skip the
+// send" — matches every other platform-mail integration in the
+// codebase (empty config is legal in dev).
+type PlatformOrgMailer interface {
+	SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail string) error
+}
+
 // OrgsHandler wires HTTP handlers over the OrgsService.
 type OrgsHandler struct {
 	Svc *OrgsService
+	// Mailer is optional. When set, HandleInviteMember fires an
+	// invitation email (fire-and-forget) after a successful DB
+	// insert. Left nil in dev/tests without SMTP configured.
+	Mailer PlatformOrgMailer
 }
 
 // requireCallerID is a common preamble — pulls the platform user's
@@ -246,7 +263,7 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 			return
 		}
 		orgID := chi.URLParam(r, "id")
-		_, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
+		org, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
 		if err != nil {
 			if errors.Is(err, ErrOrgMemberMissing) {
 				writeJSONErr(w, http.StatusNotFound, "organization not found or not a member")
@@ -281,6 +298,44 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
 			}
 			return
+		}
+		// Fire-and-forget invitation notice. Uses the inviter's email
+		// from JWT claims so the recipient sees who added them (nice-
+		// to-know for legitimate invites, and a directional prompt
+		// for the SSO login page). A send failure does NOT roll back
+		// the DB insert — the row is authoritative, the mail is a
+		// notification.
+		//
+		// #583. Docs previously said "no invite email is sent yet";
+		// updating those in the same PR.
+		if h.Mailer != nil && org != nil {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			inviterEmail := ""
+			if claims != nil {
+				inviterEmail = claims.Email
+			}
+			// Cosmetic fallback (#584 review 🟢): a missing inviter
+			// email would render "<strong></strong> has added
+			// you…". Substitute a generic label so the mail still
+			// reads well. Reaches this branch only if the auth
+			// middleware upstream ever ships claims without an
+			// email (defence-in-depth — the current password /
+			// SSO paths both populate it).
+			if inviterEmail == "" {
+				inviterEmail = "An organization admin"
+			}
+			invitedEmail := m.Email
+			orgName := org.Name
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := h.Mailer.SendPlatformOrgInvitationEmail(ctx, invitedEmail, orgName, inviterEmail); err != nil {
+					slog.Warn("org invitation email send failed — invite still committed",
+						"invited_email", invitedEmail,
+						"org_id", orgID,
+						"error", err)
+				}
+			}()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

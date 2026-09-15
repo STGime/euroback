@@ -3,7 +3,8 @@ package email
 import (
 	"bytes"
 	"fmt"
-	"html/template"
+	htmltemplate "html/template"
+	texttemplate "text/template"
 )
 
 // TemplateData holds the variables available in email templates.
@@ -12,6 +13,12 @@ type TemplateData struct {
 	ProjectName string
 	ActionURL   string
 	ExpiresIn   string
+	// OrgName / InviterEmail are only populated by the org_invitation
+	// template today. Other templates leave them empty and don't
+	// reference them; keeping them on the shared struct avoids a
+	// per-template data-shape sprawl.
+	OrgName      string
+	InviterEmail string
 }
 
 // DefaultTemplate holds the default subject and HTML body for a template type.
@@ -88,6 +95,22 @@ var defaultTemplates = map[string]DefaultTemplate{
 </p>
 <p style="margin:0;color:#71717a;font-size:12px">This link expires in {{.ExpiresIn}}. If you didn't request this, you can safely ignore this email.</p>`),
 	},
+	// org_invitation is a platform-level notification: an org admin
+	// added the recipient to their organization on Eurobase Console.
+	// No token — the DB row already grants membership; the mail is
+	// purely informational + a directional pointer to the SSO login.
+	"org_invitation": {
+		Subject: "You've been added to {{.OrgName}} on Eurobase",
+		BodyHTML: fmt.Sprintf(baseLayout,
+			"Eurobase Console",
+			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
+<p style="margin:0 0 16px;color:#3f3f46;font-size:14px;line-height:1.6"><strong>{{.InviterEmail}}</strong> has added you to <strong>{{.OrgName}}</strong> on Eurobase.</p>
+<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Sign in with SSO using this email address to access org-owned projects. If you don't already have an Eurobase account, sign up first — the invitation waits for you.</p>
+<p style="margin:0 0 24px;text-align:center">
+<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Sign in to Eurobase</a>
+</p>
+<p style="margin:0;color:#71717a;font-size:12px">If you weren't expecting this, you can safely ignore this email — the person listed above added you and can remove you at any time.</p>`),
+	},
 }
 
 // DefaultTemplates returns the built-in default templates.
@@ -112,12 +135,12 @@ func RenderTemplate(templateType, customSubject, customHTML string, data Templat
 		bodyTpl = customHTML
 	}
 
-	subject, err := renderString(subjectTpl, data)
+	subject, err := renderSubject(subjectTpl, data)
 	if err != nil {
 		return "", "", fmt.Errorf("render subject: %w", err)
 	}
 
-	body, err := renderString(bodyTpl, data)
+	body, err := renderBody(bodyTpl, data)
 	if err != nil {
 		return "", "", fmt.Errorf("render body: %w", err)
 	}
@@ -125,8 +148,29 @@ func RenderTemplate(templateType, customSubject, customHTML string, data Templat
 	return subject, body, nil
 }
 
-func renderString(tpl string, data TemplateData) (string, error) {
-	t, err := template.New("email").Parse(tpl)
+// renderSubject runs through text/template so plain-text runes
+// (ampersands, apostrophes, angle brackets in user-controlled fields
+// like OrgName) land in the mail client's Subject: header verbatim,
+// not as HTML entities. E.g. "Ben & Jerry's Bakery" must arrive as
+// "Ben & Jerry's Bakery", not "Ben &amp; Jerry&#39;s Bakery".
+// #584 review 🟡.
+func renderSubject(tpl string, data TemplateData) (string, error) {
+	t, err := texttemplate.New("email-subject").Parse(tpl)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// renderBody keeps html/template so context-aware escaping still
+// protects the HTML body against injection via user-controlled
+// fields (an OrgName containing "<script>…" renders inert).
+func renderBody(tpl string, data TemplateData) (string, error) {
+	t, err := htmltemplate.New("email-body").Parse(tpl)
 	if err != nil {
 		return "", err
 	}

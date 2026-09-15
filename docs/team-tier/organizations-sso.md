@@ -118,8 +118,13 @@ For each teammate:
      projects per project permissions.
 4. Save.
 
-No invite email is sent yet (roadmap). Tell the teammate
-out-of-band that they've been added.
+The invitee gets a notification email — sent from Eurobase, not
+from your IdP — telling them who added them and the name of the
+organization, with a **Sign in to Eurobase** button pointing at
+`console.eurobase.app/login`. The DB membership is written before
+the mail is sent, so a mail-provider hiccup never leaves them in
+a half-invited state — the email is a courtesy notification, not
+an accept-flow.
 
 ## Step 5 — Teammate signs in via SSO
 
