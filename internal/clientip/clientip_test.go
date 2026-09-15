@@ -24,6 +24,11 @@ func TestFromRequest_TrustedHops(t *testing.T) {
 		{"hops<1 treated as 1", "8.8.4.4, 203.0.113.7", "10.0.0.5:4444", true, 0, "203.0.113.7"},
 		{"empty entries dropped", "8.8.4.4,, 203.0.113.7 ,", "10.0.0.5:4444", true, 1, "203.0.113.7"},
 		{"ipv6 peer without port brackets", "", "[::1]:5555", true, 1, "::1"},
+		// Bare addresses with no port (hand-built requests) must come
+		// back intact — the old LastIndex(":") approach turned "::1"
+		// into ":".
+		{"bare ipv6, no port", "", "::1", true, 1, "::1"},
+		{"bare ipv4, no port", "", "198.51.100.9", true, 1, "198.51.100.9"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

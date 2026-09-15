@@ -177,9 +177,13 @@ func ClientIP(r *http.Request) string {
 //     availability issue (all requests key on one TCP peer), not a
 //     security issue.
 //
-// The Eurobase default is `TrustProxy=false, TrustedProxyHops=1`. See
-// the field comments in internal/tenant/auth_config.go for the full
-// trade-off walkthrough.
+// The per-project default is `TrustProxy=false, TrustedProxyHops=1` —
+// customers control their own ingress shape, so the safe default is to
+// ignore XFF until they opt in. The platform-wide ClientIP above uses
+// internal/clientip's default (trust, 1 hop) instead, because that
+// surface sits behind Eurobase's own known-shape ingress. See the field
+// comments in internal/tenant/auth_config.go for the full trade-off
+// walkthrough.
 //
 // trustedHops ≤ 0 is treated as 1 (belt + suspenders on top of the
 // EffectiveRateLimits merge that already normalises ≤0 → default).

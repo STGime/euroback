@@ -15,6 +15,7 @@
 package clientip
 
 import (
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -98,12 +99,14 @@ func SplitXFF(xff string) []string {
 }
 
 // RemoteAddrNoPort strips the port from r.RemoteAddr ("1.2.3.4:5678" →
-// "1.2.3.4", "[::1]:5678" → "::1"). Returns the raw value if there is
-// no port separator.
+// "1.2.3.4", "[::1]:5678" → "::1"). Uses net.SplitHostPort so a bare
+// IPv6 address with no port ("::1") is returned intact rather than
+// truncated at its last colon; net/http always supplies host:port, so
+// the fallback only matters for hand-built requests.
 func RemoteAddrNoPort(r *http.Request) string {
-	addr := r.RemoteAddr
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		addr = addr[:i]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	return strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	return host
 }
