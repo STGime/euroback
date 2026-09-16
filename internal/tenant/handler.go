@@ -470,6 +470,10 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 				http.Error(w, `{"error":"caller is not a member of the target organization"}`, http.StatusForbidden)
 				return
 			}
+			if errors.Is(err, ErrOrgAttachTargetGone) {
+				http.Error(w, `{"error":"target organization no longer exists; retry with a fresh org list"}`, http.StatusConflict)
+				return
+			}
 			slog.Error("set project org failed", "error", err, "project_id", projectID)
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 			return

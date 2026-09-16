@@ -294,3 +294,103 @@ func TestListProjects_OrgUnion(t *testing.T) {
 		t.Fatalf("expected bob to see alice's org-owned project via org_members union; got %d projects, none matching", len(got))
 	}
 }
+
+// TestListProjects_MergedOrderGlobalNewestFirst asserts that when
+// results come from BOTH the direct-member branch and the org
+// branch, the merged list is globally sorted newest-first — not two
+// separate sorted runs concatenated. Pins the fix for the round-1
+// review 🟢 note.
+func TestListProjects_MergedOrderGlobalNewestFirst(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-order@test.eurobase.local")
+	bob := insertTestPlatformUser(t, pool, "bob-order@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, bob})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice Order Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+
+	// Step 1: alice creates an OLD project attached to her org.
+	oldOrgProj, err := svc.CreateProject(ctx, alice, "alice-order@test.eurobase.local", CreateProjectRequest{
+		Name: "Old Org Project", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject (org): %v", err)
+	}
+	defer cleanupProject(t, pool, oldOrgProj.ID)
+
+	// Force old timestamp on the org-owned project so it's clearly
+	// older than bob's direct-member project below.
+	if _, err := pool.Exec(ctx,
+		`UPDATE projects SET created_at = now() - interval '1 day' WHERE id = $1::uuid`,
+		oldOrgProj.ID,
+	); err != nil {
+		t.Fatalf("backdate old org project: %v", err)
+	}
+
+	// Step 2: bob is a direct member of a fresh project (via
+	// project_members), and also an org member of Alice's org.
+	// Without global sort, bob's ListProjects would concatenate
+	// [bob's fresh direct proj] + [alice's old org proj] — that
+	// order is correct by luck here. So we build the opposite:
+	// alice creates a NEW org project (bob sees via union), and
+	// bob has a directly-owned OLDER project. Correct newest-first
+	// order must put alice's new org proj FIRST.
+	bobOld, err := (&TenantService{pool: pool}).CreateProject(ctx, bob, "bob-order@test.eurobase.local", CreateProjectRequest{
+		Name: "Bob Old Direct Project", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("bob CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, bobOld.ID)
+	if _, err := pool.Exec(ctx,
+		`UPDATE projects SET created_at = now() - interval '2 days' WHERE id = $1::uuid`,
+		bobOld.ID,
+	); err != nil {
+		t.Fatalf("backdate bob direct project: %v", err)
+	}
+
+	newOrgProj, err := svc.CreateProject(ctx, alice, "alice-order@test.eurobase.local", CreateProjectRequest{
+		Name: "New Org Project", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject (new org): %v", err)
+	}
+	defer cleanupProject(t, pool, newOrgProj.ID)
+	// newOrgProj.CreatedAt = now(), which is newer than bob's old
+	// direct project.
+
+	// Bob is invited to the org (no direct project_members row for
+	// alice's org-owned projects).
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'member', 'manual')
+		 ON CONFLICT DO NOTHING`,
+		aliceOrg.ID, bob,
+	); err != nil {
+		t.Fatalf("seed bob as org member: %v", err)
+	}
+
+	got, err := svc.ListProjects(ctx, bob)
+	if err != nil {
+		t.Fatalf("bob ListProjects: %v", err)
+	}
+
+	// Assert the merged list is globally newest-first: verify the
+	// timestamps are monotonically non-increasing.
+	for i := 1; i < len(got); i++ {
+		if got[i-1].CreatedAt.Before(got[i].CreatedAt) {
+			t.Fatalf("merged list not globally newest-first: %s (%s) before %s (%s)",
+				got[i-1].Name, got[i-1].CreatedAt, got[i].Name, got[i].CreatedAt)
+		}
+	}
+}

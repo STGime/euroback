@@ -31,6 +31,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -183,12 +184,17 @@ func (s *OrgsService) SSOConfigWritable() bool {
 // members) is unreachable.
 //
 // Single-org rule (first release): each user can create at most one
-// org. This removes the "which org do I attach this project to?"
-// branch from every downstream flow (see CreateProject auto-attach)
-// and matches the fact that Team-tier customers today need exactly
-// one org. Multi-org — with distinct SSO providers per logical team
-// — is a follow-up SKU. The guard is INSIDE the tx so a concurrent
-// second CreateOrg racing against the first is caught deterministically.
+// org. Enforced by the partial unique index `uq_organizations_one_per_creator`
+// (migration 000120) — the pre-INSERT SELECT below is a fast path
+// only, kept because it saves the round-trip when a repeat CreateOrg
+// hits the already-owns branch. The AUTHORITATIVE guard is the
+// index: a concurrent second CreateOrg that slips past the SELECT
+// under READ COMMITTED (SELECT then INSERT is not race-free by
+// itself, and 000114 declined a global UNIQUE on created_by to keep
+// multi-org open — 000120 adds the partial UNIQUE that gives us
+// determinism now while being trivially droppable when multi-org
+// ships) will fail the INSERT with SQLSTATE 23505 on the index,
+// which we map back to ErrOrgAlreadyExists.
 func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*Org, error) {
 	name = strings.TrimSpace(name)
 	if err := validateOrgName(name); err != nil {
@@ -201,11 +207,11 @@ func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*O
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Single-org guard. Keyed on created_by so being invited to
+	// Fast-path: skip the INSERT round-trip when the user already
+	// owns an org. Keyed on created_by so being invited to
 	// someone else's org (via org_members) does not block you from
-	// creating your own. `FOR UPDATE` is not needed — the row we'd
-	// lock doesn't exist yet; a concurrent second insert would still
-	// see the existing row via the subsequent SELECT in this branch.
+	// creating your own. This is NOT race-safe on its own — the
+	// partial unique index is what actually enforces the rule.
 	var existingID string
 	err = tx.QueryRow(ctx, `
 		SELECT id::text FROM public.organizations
@@ -230,6 +236,14 @@ func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*O
 		&org.CreatedByID, &org.CreatedAt, &org.UpdatedAt,
 	)
 	if err != nil {
+		// 23505 on uq_organizations_one_per_creator is the race-loser
+		// path — surface as the same sentinel the fast-path uses so
+		// the handler translates uniformly to 409.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+			pgErr.ConstraintName == "uq_organizations_one_per_creator" {
+			return nil, ErrOrgAlreadyExists
+		}
 		return nil, fmt.Errorf("insert org: %w", err)
 	}
 

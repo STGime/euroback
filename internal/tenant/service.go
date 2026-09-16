@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -136,6 +138,13 @@ func (s *TenantService) SetProviderRegistry(reg *dbprovider.Registry) {
 // a project to an org they are not a member of. Handler maps to 403.
 var ErrOrgAttachForbidden = errors.New("caller is not a member of the target organization")
 
+// ErrOrgAttachTargetGone is returned when SetProjectOrg / auto-attach
+// try to point projects.org_id at an org that no longer exists — a
+// race with DeleteOrg between the membership check and the write.
+// Handler maps to 409 so clients can retry (with a fresh org lookup)
+// rather than seeing a 500.
+var ErrOrgAttachTargetGone = errors.New("target organization no longer exists")
+
 // SetProjectOrg attaches a project to an org (orgID non-nil) or
 // detaches it (orgID nil, "personal" state). Only the project's
 // owner can move it. If orgID is set, the caller must also be a
@@ -189,9 +198,12 @@ func (s *TenantService) SetProjectOrg(ctx context.Context, projectID, platformUs
 		}
 	}
 
-	// Apply. FK is ON DELETE SET NULL (migration 000114:142) so a
-	// concurrent DeleteOrg would leave the project as personal, not
-	// error here.
+	// Apply. If a concurrent DeleteOrg between the membership check
+	// above and this UPDATE removed the target org, the FK raises
+	// 23503 (ON DELETE SET NULL only nulls existing children on
+	// parent-delete; a fresh UPDATE pointing at a gone parent
+	// errors). Surface as ErrOrgAttachTargetGone → 409 so the
+	// client can retry with a fresh org list rather than seeing 500.
 	if orgID != nil {
 		_, err = s.pool.Exec(ctx,
 			`UPDATE public.projects SET org_id = $1::uuid, updated_at = now() WHERE id = $2::uuid`,
@@ -202,6 +214,11 @@ func (s *TenantService) SetProjectOrg(ctx context.Context, projectID, platformUs
 			projectID)
 	}
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" &&
+			pgErr.ConstraintName == "projects_org_id_fkey" {
+			return ErrOrgAttachTargetGone
+		}
 		return fmt.Errorf("update project org_id: %w", err)
 	}
 	return nil
@@ -338,12 +355,15 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 	// org_id NULL, matching pre-#591 behaviour.
 	//
 	// Note: this is a separate query against developerPool (not the
-	// project-creation tx). A concurrent DeleteOrg between here and
-	// the INSERT below would leave the project with a dangling
-	// org_id, but the FK is ON DELETE SET NULL (migration
-	// 000114:142) so the row ends up as `org_id NULL` rather than a
-	// broken reference. Acceptable — DeleteOrg is admin-driven and
-	// rare.
+	// project-creation tx). If a concurrent DeleteOrg races between
+	// this SELECT and the INSERT below, the INSERT will fail with
+	// SQLSTATE 23503 on projects_org_id_fkey — the FK's ON DELETE
+	// SET NULL only nulls EXISTING children when the parent is
+	// deleted; it does NOT retroactively rescue a fresh insert that
+	// names an already-gone parent. That's caught below and mapped
+	// to ErrOrgAttachTargetGone so the handler can 409-retry rather
+	// than 500. DeleteOrg is admin-driven and rare, so this path is
+	// mostly theoretical.
 	var orgID *string
 	if s.developerPool != nil {
 		var id string
@@ -375,6 +395,17 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		ownerID, req.Name, slug, tempSchemaName, s3Bucket, req.Region, req.Plan, orgID,
 	).Scan(&projectID, &createdAt)
 	if err != nil {
+		// Auto-attach race: the org we looked up above was deleted
+		// before this INSERT landed. FK's ON DELETE SET NULL only
+		// nulls existing children, not fresh inserts pointing at a
+		// gone parent — that's why we see 23503 rather than a
+		// silently-nulled row. Surface as ErrOrgAttachTargetGone so
+		// the caller can retry.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" &&
+			pgErr.ConstraintName == "projects_org_id_fkey" {
+			return nil, ErrOrgAttachTargetGone
+		}
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
 
@@ -645,6 +676,14 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 					return projects, nil
 				}
 				projects = append(projects, extra...)
+				// Merge sort: each branch is newest-first, but
+				// concatenation leaves two sorted runs — a newer
+				// org-only project would land below an older direct-
+				// member project. Restore global newest-first so the
+				// console's assumption holds.
+				sort.SliceStable(projects, func(i, j int) bool {
+					return projects[i].CreatedAt.After(projects[j].CreatedAt)
+				})
 			}
 		}
 	}
