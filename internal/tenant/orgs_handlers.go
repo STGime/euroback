@@ -115,6 +115,13 @@ func (h *OrgsHandler) HandleCreateOrg() http.HandlerFunc {
 		}
 		org, err := h.Svc.CreateOrg(r.Context(), userID, body.Name)
 		if err != nil {
+			// Single-org first-release policy — 409 Conflict lets the
+			// UI distinguish "you already own one" from a validation
+			// error and render the roadmap message.
+			if errors.Is(err, ErrOrgAlreadyExists) {
+				writeJSONErr(w, http.StatusConflict, "you already own an organization; multi-org support is on the roadmap")
+				return
+			}
 			writeJSONErr(w, http.StatusBadRequest, err.Error())
 			return
 		}

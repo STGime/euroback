@@ -2701,6 +2701,28 @@ export const db = drizzle(client);</code></pre>
 				billing turns on.
 			</div>
 
+			<div class="rounded-xl border border-emerald-200 bg-emerald-50/50 p-5 mb-4 space-y-2">
+				<h3 class="text-base font-semibold text-gray-900">How Team billing works <span class="text-xs font-normal text-emerald-800">(post-beta)</span></h3>
+				<p class="text-sm text-gray-700">
+					A Team subscription is priced <strong>per organisation</strong>, not per project. First release: one org per user.
+				</p>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
+					<li><strong>€149/mo base</strong> per org — SSO (OIDC), invites, RBAC, priority support, SLA, and <em>one bundled Team-tier project</em> with dedicated Postgres.</li>
+					<li>Attach additional projects to the org at their per-project runtime rate:
+						<ul class="list-disc pl-5 mt-1 space-y-0.5 text-gray-600">
+							<li><strong>Pro project — €25/mo</strong> (shared cluster). 5 GB DB, 50 GB storage, 100k MAU, 1k rps. Right choice for most internal tooling.</li>
+							<li><strong>Free project — €0</strong>. For staging, scratch, demos. Free-tier limits apply.</li>
+							<li><strong>Extra Team project — €89/mo</strong> (dedicated PG). Only when a specific app genuinely needs its own Postgres.</li>
+						</ul>
+					</li>
+					<li><strong>Sample bills.</strong> €149 + 3×€25 = <strong>€224/mo</strong> (1 Team + 3 Pro). €149 + 5×€25 = <strong>€274/mo</strong> (org-only + Pro projects). €149 + €89 + €25 = <strong>€263/mo</strong> (2 Team + 1 Pro).</li>
+				</ul>
+				<p class="text-xs text-gray-600">
+					Multi-org (each with its own SSO provider) is on the roadmap; first release limits each user to one org they own.
+					Under the hood each project is a separate Mollie subscription line — you'll see one line per project on your bill rather than a single "base + extras" invoice. Unifying that is a UX cleanup we've scoped.
+				</p>
+			</div>
+
 			<div class="rounded-xl border border-gray-200 bg-white p-6 space-y-4">
 				<h3 class="text-base font-semibold text-gray-900">What Team unlocks (beyond Pro)</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1.5">

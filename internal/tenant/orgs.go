@@ -31,17 +31,24 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Public errors — callers pattern-match to shape HTTP responses.
 var (
-	ErrOrgNotFound      = errors.New("organization not found")
-	ErrOrgMemberMissing = errors.New("caller is not a member of the organization")
-	ErrOrgAdminOnly     = errors.New("operation requires org admin role")
+	ErrOrgNotFound       = errors.New("organization not found")
+	ErrOrgMemberMissing  = errors.New("caller is not a member of the organization")
+	ErrOrgAdminOnly      = errors.New("operation requires org admin role")
 	ErrOIDCNotConfigured = errors.New("organization has no OIDC configuration")
 	ErrMemberExists      = errors.New("member already exists in organization")
 	ErrUserNotFound      = errors.New("no platform_users row matches the email")
+	// ErrOrgAlreadyExists is returned by CreateOrg when the caller
+	// already owns an org (created_by = caller). First-release policy
+	// is one org per user; multi-org is a follow-up SKU. Keyed on
+	// created_by (not membership) so being INVITED to another org
+	// never blocks you from making your own.
+	ErrOrgAlreadyExists = errors.New("caller already owns an organization")
 )
 
 // Field bounds match migration 000114's CHECK constraints — belt +
@@ -175,6 +182,19 @@ func (s *OrgsService) SSOConfigWritable() bool {
 // CreateOrg inserts an org + the creator as its admin. All-or-none
 // via a transaction; a partial state (org exists but has no
 // members) is unreachable.
+//
+// Single-org rule (first release): each user can create at most one
+// org. Enforced by the partial unique index `uq_organizations_one_per_creator`
+// (migration 000120) — the pre-INSERT SELECT below is a fast path
+// only, kept because it saves the round-trip when a repeat CreateOrg
+// hits the already-owns branch. The AUTHORITATIVE guard is the
+// index: a concurrent second CreateOrg that slips past the SELECT
+// under READ COMMITTED (SELECT then INSERT is not race-free by
+// itself, and 000114 declined a global UNIQUE on created_by to keep
+// multi-org open — 000120 adds the partial UNIQUE that gives us
+// determinism now while being trivially droppable when multi-org
+// ships) will fail the INSERT with SQLSTATE 23505 on the index,
+// which we map back to ErrOrgAlreadyExists.
 func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*Org, error) {
 	name = strings.TrimSpace(name)
 	if err := validateOrgName(name); err != nil {
@@ -187,6 +207,24 @@ func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*O
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Fast-path: skip the INSERT round-trip when the user already
+	// owns an org. Keyed on created_by so being invited to
+	// someone else's org (via org_members) does not block you from
+	// creating your own. This is NOT race-safe on its own — the
+	// partial unique index is what actually enforces the rule.
+	var existingID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text FROM public.organizations
+		WHERE created_by = $1::uuid
+		LIMIT 1
+	`, creatorID).Scan(&existingID)
+	if err == nil {
+		return nil, ErrOrgAlreadyExists
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check existing org: %w", err)
+	}
+
 	var org Org
 	err = tx.QueryRow(ctx, `
 		INSERT INTO public.organizations (name, created_by)
@@ -198,6 +236,14 @@ func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*O
 		&org.CreatedByID, &org.CreatedAt, &org.UpdatedAt,
 	)
 	if err != nil {
+		// 23505 on uq_organizations_one_per_creator is the race-loser
+		// path — surface as the same sentinel the fast-path uses so
+		// the handler translates uniformly to 409.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+			pgErr.ConstraintName == "uq_organizations_one_per_creator" {
+			return nil, ErrOrgAlreadyExists
+		}
 		return nil, fmt.Errorf("insert org: %w", err)
 	}
 
