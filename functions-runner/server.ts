@@ -62,6 +62,10 @@ const LOG_OUTPUT_LIMIT = 10 * 1024;            // 10 KB per invocation
 interface CachedFunction {
   code: string;
   env_vars: Record<string, string>;
+  // allow_service_role: per-function opt-in for ctx.db.asService()
+  // (migration 000119). When false, an asService()-shaped RPC is
+  // rejected before touching the DB.
+  allow_service_role: boolean;
   cachedAt: number;
 }
 
@@ -157,6 +161,7 @@ async function loadFunction(functionId: string, version: string | null = null): 
         ef.env_vars_blob,
         ef.env_vars_nonce,
         ef.env_vars_key_version,
+        ef.allow_service_role,
         p.schema_name
       FROM edge_functions ef
       JOIN public.projects p ON p.id = ef.project_id
@@ -169,6 +174,7 @@ async function loadFunction(functionId: string, version: string | null = null): 
     const fn: CachedFunction = {
       code: row.code,
       env_vars: env,
+      allow_service_role: row.allow_service_role === true,
       cachedAt: Date.now(),
     };
     setCache(cacheKey, fn);
@@ -263,7 +269,19 @@ async function executeFunction(
   const logCapture = createLogCapture(projectId, LOG_OUTPUT_LIMIT);
 
   // deno-lint-ignore no-explicit-any
-  async function runDBSql(query: string, params: unknown[]): Promise<any> {
+  async function runDBSql(query: string, params: unknown[], mode?: "service"): Promise<any> {
+    const forceServiceRole = mode === "service";
+    if (forceServiceRole && !fn.allow_service_role) {
+      // Enforced here so the DB is never touched for a disallowed
+      // elevation. The worker's ctx.db.asService only exposes the
+      // handle when allow_service_role is true, but this is the
+      // authoritative gate — a stale worker code cache or a
+      // deliberately hand-crafted RPC message from a bug in user JS
+      // still fails closed.
+      throw new Error(
+        "ctx.db.asService() is not enabled for this function — set allow_service_role=true on the function to opt in",
+      );
+    }
     // deno-lint-ignore no-explicit-any
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
@@ -271,7 +289,11 @@ async function executeFunction(
       // Mirror the gateway's RLS context so auth_uid() /
       // is_service_role() behave the same in functions as in gateway
       // REST — see rlsContextStatements in role.ts. Closes #188.
-      for (const stmt of rlsContextStatements(userId)) {
+      // forceServiceRole is the ctx.db.asService() opt-in path
+      // (migration 000119): keep app.end_user_id set (audit) but flip
+      // end_user_role to 'service' so tenant policies see the service
+      // branch. Postgres role is unchanged — grants aren't widened.
+      for (const stmt of rlsContextStatements(userId, { forceServiceRole })) {
         await tx.unsafe(stmt.sql, stmt.params);
       }
       return await tx.unsafe(query, params);
@@ -350,7 +372,7 @@ async function runUserHandlerInWorker(opts: {
   serializedRequest: SerializedRequest;
   user: { id: string; email: string } | null;
   timeoutMs: number;
-  runDBSql: (query: string, params: unknown[]) => Promise<unknown>;
+  runDBSql: (query: string, params: unknown[], mode?: "service") => Promise<unknown>;
   // deno-lint-ignore no-explicit-any
   db: any;
   // deno-lint-ignore no-explicit-any
@@ -468,7 +490,7 @@ async function runUserHandlerInWorker(opts: {
           // Run the query under the per-tenant role and post the
           // result back. Errors are reported as `error` strings so the
           // worker's RPC layer can rebuild an Error.
-          runDBSql(msg.query, msg.params)
+          runDBSql(msg.query, msg.params, msg.mode)
             .then((rows) => {
               if (settled) return;
               const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };

@@ -20,11 +20,16 @@ type EdgeFunction struct {
 	Name      string    `json:"name"`
 	Code      string    `json:"code,omitempty"`
 	VerifyJWT bool      `json:"verify_jwt"`
-	EnvVars   map[string]string `json:"env_vars,omitempty"`
-	Status    string    `json:"status"`
-	Version   int       `json:"version"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	// AllowServiceRole is the per-function opt-in for ctx.db.asService()
+	// inside the runner (migration 000119). Default false; set true on
+	// functions that need to bypass RLS via app.end_user_role='service'
+	// for server-approved writes.
+	AllowServiceRole bool              `json:"allow_service_role"`
+	EnvVars          map[string]string `json:"env_vars,omitempty"`
+	Status           string            `json:"status"`
+	Version          int               `json:"version"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
 // EdgeFunctionLog represents a single function invocation log entry.
@@ -150,7 +155,7 @@ var validFnName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
 // List returns all edge functions for a project (code excluded for list view).
 func (s *Service) List(ctx context.Context, projectID string) ([]EdgeFunction, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, project_id, name, verify_jwt, status, version, created_at, updated_at
+		`SELECT id, project_id, name, verify_jwt, allow_service_role, status, version, created_at, updated_at
 		 FROM edge_functions
 		 WHERE project_id = $1
 		 ORDER BY name`, projectID)
@@ -162,7 +167,7 @@ func (s *Service) List(ctx context.Context, projectID string) ([]EdgeFunction, e
 	var fns []EdgeFunction
 	for rows.Next() {
 		var f EdgeFunction
-		if err := rows.Scan(&f.ID, &f.ProjectID, &f.Name, &f.VerifyJWT, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.ProjectID, &f.Name, &f.VerifyJWT, &f.AllowServiceRole, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan edge function: %w", err)
 		}
 		fns = append(fns, f)
@@ -189,12 +194,12 @@ func (s *Service) Get(ctx context.Context, projectID, name string) (*EdgeFunctio
 	var blob, nonce []byte
 	var version *int16
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, project_id, name, code, verify_jwt,
+		`SELECT id, project_id, name, code, verify_jwt, allow_service_role,
 		        env_vars, env_vars_blob, env_vars_nonce, env_vars_key_version,
 		        status, version, created_at, updated_at
 		 FROM edge_functions
 		 WHERE project_id = $1 AND name = $2`, projectID, name,
-	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT,
+	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.AllowServiceRole,
 		&legacy, &blob, &nonce, &version,
 		&f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
@@ -215,12 +220,12 @@ func (s *Service) GetByID(ctx context.Context, id string) (*EdgeFunction, error)
 	var blob, nonce []byte
 	var version *int16
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, project_id, name, code, verify_jwt,
+		`SELECT id, project_id, name, code, verify_jwt, allow_service_role,
 		        env_vars, env_vars_blob, env_vars_nonce, env_vars_key_version,
 		        status, version, created_at, updated_at
 		 FROM edge_functions
 		 WHERE id = $1`, id,
-	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT,
+	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.AllowServiceRole,
 		&legacy, &blob, &nonce, &version,
 		&f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
@@ -245,9 +250,10 @@ func derefInt16(p *int16) int16 {
 
 // CreateRequest is the payload for creating an edge function.
 type CreateRequest struct {
-	Name      string `json:"name"`
-	Code      string `json:"code"`
-	VerifyJWT *bool  `json:"verify_jwt,omitempty"`
+	Name             string `json:"name"`
+	Code             string `json:"code"`
+	VerifyJWT        *bool  `json:"verify_jwt,omitempty"`
+	AllowServiceRole *bool  `json:"allow_service_role,omitempty"`
 }
 
 // Create creates a new edge function.
@@ -272,14 +278,18 @@ func (s *Service) Create(ctx context.Context, projectID string, req CreateReques
 	if req.VerifyJWT != nil {
 		verifyJWT = *req.VerifyJWT
 	}
+	allowServiceRole := false
+	if req.AllowServiceRole != nil {
+		allowServiceRole = *req.AllowServiceRole
+	}
 
 	var f EdgeFunction
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO edge_functions (project_id, name, code, compiled_code, verify_jwt)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, project_id, name, code, verify_jwt, status, version, created_at, updated_at`,
-		projectID, req.Name, req.Code, compiled, verifyJWT,
-	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
+		`INSERT INTO edge_functions (project_id, name, code, compiled_code, verify_jwt, allow_service_role)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, project_id, name, code, verify_jwt, allow_service_role, status, version, created_at, updated_at`,
+		projectID, req.Name, req.Code, compiled, verifyJWT, allowServiceRole,
+	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.AllowServiceRole, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create edge function: %w", err)
 	}
@@ -290,10 +300,11 @@ func (s *Service) Create(ctx context.Context, projectID string, req CreateReques
 
 // UpdateRequest is the payload for updating an edge function.
 type UpdateRequest struct {
-	Code      *string           `json:"code,omitempty"`
-	VerifyJWT *bool             `json:"verify_jwt,omitempty"`
-	Status    *string           `json:"status,omitempty"`
-	EnvVars   map[string]string `json:"env_vars,omitempty"`
+	Code             *string           `json:"code,omitempty"`
+	VerifyJWT        *bool             `json:"verify_jwt,omitempty"`
+	AllowServiceRole *bool             `json:"allow_service_role,omitempty"`
+	Status           *string           `json:"status,omitempty"`
+	EnvVars          map[string]string `json:"env_vars,omitempty"`
 }
 
 // Update updates an existing edge function. Any non-nil field is updated.
@@ -306,6 +317,7 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 
 	code := existing.Code
 	verifyJWT := existing.VerifyJWT
+	allowServiceRole := existing.AllowServiceRole
 	status := existing.Status
 	envVars := existing.EnvVars
 	bumpVersion := false
@@ -325,6 +337,9 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 	}
 	if req.VerifyJWT != nil {
 		verifyJWT = *req.VerifyJWT
+	}
+	if req.AllowServiceRole != nil {
+		allowServiceRole = *req.AllowServiceRole
 	}
 	if req.Status != nil {
 		if *req.Status != "active" && *req.Status != "disabled" {
@@ -367,13 +382,13 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 		 SET code = $3, compiled_code = COALESCE($10, compiled_code),
 		     verify_jwt = $4, status = $5,
 		     env_vars = $6, env_vars_blob = $7, env_vars_nonce = $8, env_vars_key_version = $9,
-		     version = $11, updated_at = now()
+		     version = $11, allow_service_role = $12, updated_at = now()
 		 WHERE project_id = $1 AND name = $2
-		 RETURNING id, project_id, name, code, verify_jwt, status, version, created_at, updated_at`,
+		 RETURNING id, project_id, name, code, verify_jwt, allow_service_role, status, version, created_at, updated_at`,
 		projectID, name, code, verifyJWT, status,
 		legacyEnvVars, blob, nonce, nullIfZero(keyVersion),
-		compiled, version,
-	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
+		compiled, version, allowServiceRole,
+	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.AllowServiceRole, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("update edge function: %w", err)
 	}

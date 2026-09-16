@@ -150,6 +150,21 @@
     return {
       db: {
         sql: (query, params = []) => rpc("db.sql.call", { query, params }),
+        // Opt-in service-role handle. Same tenant Postgres role, same
+        // grants — only flips app.end_user_role to 'service' for the
+        // duration of the returned handle's queries so tenant RLS
+        // policies that gate on is_service_role() fire the service
+        // branch. app.end_user_id stays set to the verified JWT sub,
+        // so tenant audit triggers can still record who requested the
+        // elevated write. The parent enforces allow_service_role on
+        // the function row (migration 000119); calling this handle
+        // when the flag is false throws a clear error at query time.
+        asService() {
+          return {
+            sql: (query, params = []) =>
+              rpc("db.sql.call", { query, params, mode: "service" }),
+          };
+        },
       },
       vault: {
         get: (name) => rpc("vault.get.call", { name }),

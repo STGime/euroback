@@ -101,6 +101,23 @@ Deno.test("WorkerToParent.db.sql.call carries id, query, params", () => {
   assertEquals(clone.params.length, 1);
 });
 
+Deno.test("WorkerToParent.db.sql.call accepts mode:'service' for ctx.db.asService()", () => {
+  // The optional mode field is how ctx.db.asService() signals to the
+  // parent that it should flip app.end_user_role='service' for this
+  // one query. Absence of the field is the default (invoking-user
+  // context); presence with any value other than 'service' is a type
+  // error at compile time.
+  const m: WorkerToParent = {
+    type: "db.sql.call",
+    id: "rpc-2",
+    query: "INSERT INTO posts (title) VALUES ($1) RETURNING id",
+    params: ["hello"],
+    mode: "service",
+  };
+  const clone = structuredClone(m);
+  assertEquals(clone.mode, "service");
+});
+
 Deno.test("Headers tuples preserve case the way Headers normalises", () => {
   // Headers normalise names to lowercase. The serialized form should
   // capture that — round-tripping through the boundary should yield a
