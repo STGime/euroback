@@ -106,6 +106,40 @@ Deno.test("rlsContextStatements never interpolates the user id into SQL text", (
   assertEquals(stmts[0].params, ["'; SET ROLE postgres; --"]);
 });
 
+Deno.test("rlsContextStatements with forceServiceRole keeps end_user_id but flips role to service (ctx.db.asService)", () => {
+  // The asService() opt-in preserves the verified end-user id so tenant
+  // audit triggers can still record who requested the elevated write,
+  // while flipping the role so is_service_role()-gated policies fire the
+  // service branch.
+  const stmts = rlsContextStatements(
+    "8f4a2c1e-0000-4000-8000-000000000001",
+    { forceServiceRole: true },
+  );
+  assertEquals(stmts, [
+    {
+      sql: "SELECT set_config('app.end_user_id', $1, true)",
+      params: ["8f4a2c1e-0000-4000-8000-000000000001"],
+    },
+    {
+      sql: "SELECT set_config('app.end_user_role', 'service', true)",
+      params: [],
+    },
+  ]);
+});
+
+Deno.test("rlsContextStatements forceServiceRole without a user id is the JWT-less service path", () => {
+  // A cron/system invocation with no JWT calling asService() should be a
+  // no-op relative to its default context — still service, still no
+  // end_user_id. Symmetry with the auto path.
+  const stmts = rlsContextStatements("", { forceServiceRole: true });
+  assertEquals(stmts, [
+    {
+      sql: "SELECT set_config('app.end_user_role', 'service', true)",
+      params: [],
+    },
+  ]);
+});
+
 Deno.test("the full tenantFuncRole → quoteIdent pipeline produces safe SQL fragments", () => {
   const schema = "tenant_b24e9fa8_463f_452d_be4e_ee5127c3e8f7";
   const role = tenantFuncRole(schema);

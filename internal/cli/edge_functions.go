@@ -48,12 +48,13 @@ func efListCmd() *cobra.Command {
 			}
 
 			var fns []struct {
-				Name      string `json:"name"`
-				Status    string `json:"status"`
-				Version   int    `json:"version"`
-				VerifyJWT bool   `json:"verify_jwt"`
-				CreatedAt string `json:"created_at"`
-				UpdatedAt string `json:"updated_at"`
+				Name             string `json:"name"`
+				Status           string `json:"status"`
+				Version          int    `json:"version"`
+				VerifyJWT        bool   `json:"verify_jwt"`
+				AllowServiceRole bool   `json:"allow_service_role"`
+				CreatedAt        string `json:"created_at"`
+				UpdatedAt        string `json:"updated_at"`
 			}
 			if err := json.Unmarshal(data, &fns); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
@@ -65,18 +66,23 @@ func efListCmd() *cobra.Command {
 				return nil
 			}
 
-			headers := []string{"Name", "Status", "Version", "JWT Required", "Updated"}
+			headers := []string{"Name", "Status", "Version", "JWT Required", "asService", "Updated"}
 			var rows [][]string
 			for _, f := range fns {
 				jwt := "no"
 				if f.VerifyJWT {
 					jwt = "yes"
 				}
+				svc := "no"
+				if f.AllowServiceRole {
+					svc = "yes"
+				}
 				rows = append(rows, []string{
 					f.Name,
 					f.Status,
 					fmt.Sprintf("v%d", f.Version),
 					jwt,
+					svc,
 					f.UpdatedAt,
 				})
 			}
@@ -107,6 +113,7 @@ func efDeployCmd() *cobra.Command {
 
 			file, _ := cmd.Flags().GetString("file")
 			noJWT, _ := cmd.Flags().GetBool("no-verify-jwt")
+			allowServiceRole, _ := cmd.Flags().GetBool("allow-service-role")
 
 			var code string
 			if file != "" {
@@ -138,17 +145,19 @@ func efDeployCmd() *cobra.Command {
 
 			// Try update first, create if not found.
 			payload := map[string]interface{}{
-				"code":       code,
-				"verify_jwt": verifyJWT,
+				"code":               code,
+				"verify_jwt":         verifyJWT,
+				"allow_service_role": allowServiceRole,
 			}
 
 			_, err = client.Put("/platform/projects/"+cfg.ActiveProject+"/functions/"+args[0], payload)
 			if err != nil {
 				// Function doesn't exist yet — create it.
 				createPayload := map[string]interface{}{
-					"name":       args[0],
-					"code":       code,
-					"verify_jwt": verifyJWT,
+					"name":               args[0],
+					"code":               code,
+					"verify_jwt":         verifyJWT,
+					"allow_service_role": allowServiceRole,
 				}
 				_, createErr := client.Post("/platform/projects/"+cfg.ActiveProject+"/functions", createPayload)
 				if createErr != nil {
@@ -164,6 +173,7 @@ func efDeployCmd() *cobra.Command {
 	}
 	cmd.Flags().StringP("file", "f", "", "Path to the function file")
 	cmd.Flags().Bool("no-verify-jwt", false, "Allow unauthenticated invocations")
+	cmd.Flags().Bool("allow-service-role", false, "Enable ctx.db.asService() inside this function (RLS bypass via app.end_user_role='service'; Postgres role unchanged)")
 	return cmd
 }
 

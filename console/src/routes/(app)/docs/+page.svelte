@@ -1824,7 +1824,8 @@ export default handler</pre>
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-gray-100">
-							<tr><td class="px-4 py-2 font-mono text-xs">ctx.db.sql(query, params)</td><td class="px-4 py-2 text-gray-600">Execute SQL scoped to your project schema</td></tr>
+							<tr><td class="px-4 py-2 font-mono text-xs">ctx.db.sql(query, params)</td><td class="px-4 py-2 text-gray-600">Execute SQL scoped to your project schema (runs as the invoking user for RLS — see below)</td></tr>
+							<tr><td class="px-4 py-2 font-mono text-xs">ctx.db.asService().sql(query, params)</td><td class="px-4 py-2 text-gray-600">Run one query with <code class="bg-gray-100 rounded px-1">is_service_role()</code> true so RLS policies fire the service branch. Opt-in per function.</td></tr>
 							<tr><td class="px-4 py-2 font-mono text-xs">ctx.vault.get(name)</td><td class="px-4 py-2 text-gray-600">Read an encrypted secret from Vault</td></tr>
 							<tr><td class="px-4 py-2 font-mono text-xs">ctx.env</td><td class="px-4 py-2 text-gray-600">Per-function environment variables</td></tr>
 							<tr><td class="px-4 py-2 font-mono text-xs">ctx.user.id / ctx.user.email</td><td class="px-4 py-2 text-gray-600">Authenticated user (if JWT required)</td></tr>
@@ -1832,6 +1833,42 @@ export default handler</pre>
 						</tbody>
 					</table>
 				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Server-approved writes with <code>ctx.db.asService()</code></h3>
+				<p class="text-sm text-gray-700">
+					By default <code class="bg-gray-100 rounded px-1">ctx.db.sql(...)</code> in a JWT-verified function runs with the invoking user's RLS context — <code class="bg-gray-100 rounded px-1">is_service_role()</code> is false and <code class="bg-gray-100 rounded px-1">auth_uid()</code> is the caller. That's the right default: an injection or logic bug in your function can't do more than the caller could do themselves.
+				</p>
+				<p class="text-sm text-gray-700 mt-2">
+					When you need the function to write on behalf of the user through a stricter policy (e.g. "users can't insert posts directly, only the approval function can"), opt the function into <code class="bg-gray-100 rounded px-1">ctx.db.asService()</code>. Queries on the returned handle run with <code class="bg-gray-100 rounded px-1">app.end_user_role='service'</code> so any policy branch keyed on <code class="bg-gray-100 rounded px-1">is_service_role()</code> fires. The verified end-user id stays available in <code class="bg-gray-100 rounded px-1">app.end_user_id</code>, so your own audit triggers still record who requested the write.
+				</p>
+				<div class="rounded border border-amber-200 bg-amber-50 p-3 my-3">
+					<p class="text-sm text-amber-900"><strong>Opt-in required.</strong> Deploy the function with <code class="rounded bg-white/60 border border-amber-200 px-1 text-xs">--allow-service-role</code> (CLI) or set <code class="rounded bg-white/60 border border-amber-200 px-1 text-xs">allow_service_role: true</code> in the deploy request. Without it, calling <code class="rounded bg-white/60 border border-amber-200 px-1 text-xs">ctx.db.asService()</code> throws a clear error before touching the database.</p>
+				</div>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto whitespace-pre">{`// posts table has RLS: INSERT allowed only when is_service_role().
+export default async (req, ctx) => {
+  const { title, body } = await req.json();
+
+  // ctx.db.sql would be blocked here (invoking user isn't service).
+  // ctx.db.asService() flips the RLS branch for this one write; the
+  // Postgres role and grants are unchanged.
+  const rows = await ctx.db.asService().sql(
+    "INSERT INTO posts (author_id, title, body, approved) VALUES ($1, $2, $3, false) RETURNING id",
+    [ctx.user.id, title, body]
+  );
+  return Response.json({ id: rows[0].id });
+};`}</pre>
+				<p class="text-sm text-gray-700 mt-2">
+					<strong>Cross-tenant reach stays impossible.</strong> The connecting Postgres role is still your tenant's <code class="bg-gray-100 rounded px-1">&lt;schema&gt;_func</code>, granted only on your own schema. Grants aren't widened; only the RLS branch your policies take flips.
+				</p>
+				<p class="text-sm text-gray-700 mt-2">
+					<strong>Within-tenant fence.</strong> Eurobase's per-tenant platform system tables — <code class="bg-gray-100 rounded px-1">users</code>, <code class="bg-gray-100 rounded px-1">refresh_tokens</code>, <code class="bg-gray-100 rounded px-1">email_tokens</code>, <code class="bg-gray-100 rounded px-1">vault_secrets</code>, <code class="bg-gray-100 rounded px-1">storage_objects</code> — live in your schema and their RLS policies open under <code class="bg-gray-100 rounded px-1">is_service_role()</code>. To keep <code class="bg-gray-100 rounded px-1">asService()</code> from becoming an accidental account-takeover primitive (read password hashes, forge refresh tokens, overwrite passwords), the runner constrains what you can pass through the elevated handle: only <code class="bg-gray-100 rounded px-1">SELECT</code> / <code class="bg-gray-100 rounded px-1">INSERT</code> / <code class="bg-gray-100 rounded px-1">UPDATE</code> / <code class="bg-gray-100 rounded px-1">DELETE</code> / <code class="bg-gray-100 rounded px-1">WITH</code> statements are accepted (no <code class="bg-gray-100 rounded px-1">DO</code> blocks, no <code class="bg-gray-100 rounded px-1">PREPARE</code> / <code class="bg-gray-100 rounded px-1">EXECUTE</code>, no <code class="bg-gray-100 rounded px-1">SET</code>, no dollar-quoted bodies, no <code class="bg-gray-100 rounded px-1">U&amp;"..."</code> Unicode identifiers), and any direct reference to those platform tables is refused. Use the platform auth APIs, storage helpers, or vault operations for those surfaces.
+				</p>
+				<p class="text-sm text-gray-700 mt-2">
+					<strong>Caveat: this is a lexical guard, not a grant.</strong> A determined tenant can still stage session-scoped objects on the non-elevated <code class="bg-gray-100 rounded px-1">ctx.db.sql</code> path (e.g. temp views) that an <code class="bg-gray-100 rounded px-1">asService()</code> call could then read if it lands on the same pooled connection; and Postgres ships functions that execute a query passed as a string (<code class="bg-gray-100 rounded px-1">query_to_xml</code>, <code class="bg-gray-100 rounded px-1">query_to_xmlschema</code>, <code class="bg-gray-100 rounded px-1">table_to_xml</code>, <code class="bg-gray-100 rounded px-1">cursor_to_xml</code>) whose SQL body sits inside a string literal the identifier scanner cannot see — via those, an <code class="bg-gray-100 rounded px-1">asService()</code> caller can still read from the fenced platform tables (write paths remain blocked because these functions are <code class="bg-gray-100 rounded px-1">STABLE</code>). A follow-up will move the fence to grants — <code class="bg-gray-100 rounded px-1">REVOKE</code> the platform-table privileges from <code class="bg-gray-100 rounded px-1">&lt;schema&gt;_func</code> — so no in-SQL trick can reach those rows regardless of statement shape. Until then, treat <code class="bg-gray-100 rounded px-1">asService()</code> as raising the bar, not as an absolute boundary; still audit the JS it runs.
+				</p>
+				<p class="text-sm text-gray-700 mt-2">
+					<strong>When not to use it.</strong> If your write can be modelled as a <code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code> RPC (a Postgres function you own and grant EXECUTE to your <code class="bg-gray-100 rounded px-1">&lt;schema&gt;_func</code>), that's tighter — the elevated logic lives in SQL you audit once, not in JS you might edit under time pressure. Use <code class="bg-gray-100 rounded px-1">ctx.db.asService()</code> when the approval logic is easier to express in JavaScript (e.g. calling an external moderation API before the insert) than in plpgsql.
+				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Invoking Functions</h3>
 				<p class="text-sm text-gray-700">Functions are invoked via HTTP using your API key:</p>
