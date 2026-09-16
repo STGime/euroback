@@ -21,7 +21,7 @@ type EdgeFunction struct {
 	Code      string    `json:"code,omitempty"`
 	VerifyJWT bool      `json:"verify_jwt"`
 	// AllowServiceRole is the per-function opt-in for ctx.db.asService()
-	// inside the runner (migration 000119). Default false; set true on
+	// inside the runner (migration 000121). Default false; set true on
 	// functions that need to bypass RLS via app.end_user_role='service'
 	// for server-approved writes.
 	AllowServiceRole bool              `json:"allow_service_role"`

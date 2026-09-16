@@ -64,7 +64,7 @@ interface CachedFunction {
   code: string;
   env_vars: Record<string, string>;
   // allow_service_role: per-function opt-in for ctx.db.asService()
-  // (migration 000119). When false, an asService()-shaped RPC is
+  // (migration 000121). When false, an asService()-shaped RPC is
   // rejected before touching the DB.
   allow_service_role: boolean;
   cachedAt: number;
@@ -285,7 +285,7 @@ async function executeFunction(
       // is_service_role() behave the same in functions as in gateway
       // REST — see rlsContextStatements in role.ts. Closes #188.
       // forceServiceRole is the ctx.db.asService() opt-in path
-      // (migration 000119): keep app.end_user_id set (audit) but flip
+      // (migration 000121): keep app.end_user_id set (audit) but flip
       // end_user_role to 'service' so tenant policies see the service
       // branch. Postgres role is unchanged — grants aren't widened.
       for (const stmt of rlsContextStatements(userId, { forceServiceRole })) {
