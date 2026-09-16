@@ -9,6 +9,7 @@
  */
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
+import { checkAsServiceQuery } from "./asservice_guard.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -270,18 +271,12 @@ async function executeFunction(
 
   // deno-lint-ignore no-explicit-any
   async function runDBSql(query: string, params: unknown[], mode?: "service"): Promise<any> {
+    // Gate: opt-in check + platform-table fence. Extracted into a pure
+    // helper so a Deno unit test can pin the enforcement contract
+    // without spinning up Postgres.
+    const gate = checkAsServiceQuery(mode, fn.allow_service_role, query);
+    if (gate) throw new Error(gate);
     const forceServiceRole = mode === "service";
-    if (forceServiceRole && !fn.allow_service_role) {
-      // Enforced here so the DB is never touched for a disallowed
-      // elevation. The worker's ctx.db.asService only exposes the
-      // handle when allow_service_role is true, but this is the
-      // authoritative gate — a stale worker code cache or a
-      // deliberately hand-crafted RPC message from a bug in user JS
-      // still fails closed.
-      throw new Error(
-        "ctx.db.asService() is not enabled for this function — set allow_service_role=true on the function to opt in",
-      );
-    }
     // deno-lint-ignore no-explicit-any
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);

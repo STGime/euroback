@@ -340,6 +340,16 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 	}
 	if req.AllowServiceRole != nil {
 		allowServiceRole = *req.AllowServiceRole
+		// Revoking (or granting) the RLS-bypass switch must take effect
+		// promptly. The runner's function cache is keyed on
+		// (functionId, version) and has a 5-minute TTL — without a
+		// version bump on flag flip, a tenant who set allow_service_role
+		// back to false would still be elevated for up to 5 minutes.
+		// Version-bumping invalidates the runner cache on the next call
+		// to that function ID.
+		if allowServiceRole != existing.AllowServiceRole {
+			bumpVersion = true
+		}
 	}
 	if req.Status != nil {
 		if *req.Status != "active" && *req.Status != "disabled" {
