@@ -125,6 +125,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 	// Tenant service.
 	tenantSvc := tenant.NewTenantService(pool)
+	// developerPool is REVOKE-ALL'd on organizations / org_members
+	// tables (migration 000114) so tenant paths that touch org state
+	// (CreateProject auto-attach, ListProjects org-union, PATCH
+	// org-attach) must route through the platform-authenticated pool.
+	// In dev where developerPool defaults to gateway pool, org-attach
+	// paths silently no-op — SetDeveloperPool nil-guards that.
+	if developerPool != nil && developerPool != pool {
+		tenantSvc.SetDeveloperPool(developerPool)
+	}
 
 	// Audit service — shared across all route groups that need to log actions.
 	auditSvc := audit.NewService(pool)
@@ -1219,6 +1228,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// instance for Team-tier — otherwise Team-tier admins
 		// configuring OAuth get 500 on save.
 		r.With(tenant.PlatformTenantContext(pool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
+		// PATCH /{id}/org attaches/detaches a project to/from an org.
+		// Kept as a separate route from PATCH /{id} because the shape
+		// + auth check (owner + org membership) is entirely different
+		// from the auth_config flow.
+		r.Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
 		r.Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 

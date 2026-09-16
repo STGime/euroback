@@ -348,9 +348,13 @@
 				<span class="absolute -top-3 right-6 rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow">Closed beta</span>
 				<h2 class="text-xl font-semibold text-gray-900">Team</h2>
 				<p class="mt-1 text-sm text-gray-500">For SMBs running production on Eurobase.</p>
-				<div class="mt-6 flex items-baseline gap-1">
-					<span class="text-4xl font-bold text-emerald-700">Free</span>
-					<span class="text-sm text-gray-500">during closed beta</span>
+				<div class="mt-6">
+					<div class="flex items-baseline gap-1">
+						<span class="text-4xl font-bold text-gray-900">€149</span>
+						<span class="text-sm text-gray-500">/mo per organisation</span>
+					</div>
+					<p class="mt-1 text-xs text-emerald-700 font-medium">Free during closed beta.</p>
+					<p class="mt-2 text-xs text-gray-500">Base includes one Team-tier project (dedicated Postgres). Additional projects: <strong>€25/mo</strong> Pro (shared cluster, plenty for internal tooling) or <strong>€89/mo</strong> extra Team (dedicated PG).</p>
 				</div>
 				{#if hasTeamBeta}
 					<a href="/projects?new=team" class="mt-6 block rounded-lg bg-emerald-600 px-4 py-2.5 text-center text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 transition-colors">
@@ -371,10 +375,10 @@
 				{/if}
 				<ul class="mt-6 space-y-2 text-sm text-gray-600">
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Everything in Pro, plus:</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Dedicated Postgres instance</strong> per project — direct <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px] font-mono">DATABASE_URL</code> for Payload / Prisma / Drizzle</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Dedicated Postgres instance</strong> for the bundled project — direct <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px] font-mono">DATABASE_URL</code> for Payload / Prisma / Drizzle</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Daily backups + on-demand snapshots (7-day retention) — 1 restore/month included</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>SSO (OIDC)</strong> — Google Workspace, Microsoft Entra ID, Okta, Authentik, or any OIDC IdP. SAML <span class="text-xs italic text-amber-600">coming soon</span></span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Organizations</strong> — invite teammates, org-level admin / member roles, org-owned projects</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Organizations</strong> — invite teammates, org-level admin / member roles, org-owned projects (Team + Pro + Free)</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Priority email support (24 h SLA)</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SOC 2 Type II attestation <span class="text-xs italic text-amber-600">coming later</span></span></li>
 				</ul>
@@ -406,6 +410,39 @@
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Ready for §50 BRAO, §257 HGB, §147 AO</span></li>
 				</ul>
 			</div>
+		</div>
+	</section>
+
+	<!-- How Team billing works -->
+	<section class="mx-auto max-w-6xl px-6 pb-12">
+		<div class="rounded-2xl border border-emerald-200 bg-white p-6 sm:p-8">
+			<h2 class="text-xl font-semibold text-gray-900">How Team billing works</h2>
+			<p class="mt-2 text-sm text-gray-600 max-w-3xl">
+				A Team subscription is <strong>per organisation, not per project</strong>. First release: one org per user. The €149/mo base buys the org-level features (SSO, invites, RBAC, priority support, SLA) and bundles one Team-tier project (dedicated Postgres). Additional projects attach to that same org at their per-project runtime rate — mix and match Team-tier, Pro-tier, or Free-tier projects under one org.
+			</p>
+			<div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+				<div class="rounded-xl border border-gray-200 bg-gray-50/60 p-5">
+					<p class="text-xs font-semibold uppercase tracking-wide text-gray-500">Example bill</p>
+					<p class="mt-2 text-sm text-gray-700">Org + 1 Team project (bundled) + 3 Pro projects for internal tooling</p>
+					<p class="mt-3 text-2xl font-bold text-gray-900">€224<span class="text-sm font-normal text-gray-500">/mo</span></p>
+					<p class="mt-1 text-xs text-gray-500">€149 base + 3 × €25 Pro</p>
+				</div>
+				<div class="rounded-xl border border-gray-200 bg-gray-50/60 p-5">
+					<p class="text-xs font-semibold uppercase tracking-wide text-gray-500">Example bill</p>
+					<p class="mt-2 text-sm text-gray-700">Org + 5 Pro projects (all shared cluster; no extra Team-tier runtimes)</p>
+					<p class="mt-3 text-2xl font-bold text-gray-900">€274<span class="text-sm font-normal text-gray-500">/mo</span></p>
+					<p class="mt-1 text-xs text-gray-500">€149 base + 5 × €25 Pro</p>
+				</div>
+				<div class="rounded-xl border border-gray-200 bg-gray-50/60 p-5">
+					<p class="text-xs font-semibold uppercase tracking-wide text-gray-500">Example bill</p>
+					<p class="mt-2 text-sm text-gray-700">Org + 2 Team projects (both need dedicated PG) + 1 Pro</p>
+					<p class="mt-3 text-2xl font-bold text-gray-900">€263<span class="text-sm font-normal text-gray-500">/mo</span></p>
+					<p class="mt-1 text-xs text-gray-500">€149 base + 1 × €89 extra Team + €25 Pro</p>
+				</div>
+			</div>
+			<p class="mt-4 text-xs text-gray-500 max-w-3xl">
+				Rule of thumb: Team-tier projects only where you actually need a dedicated Postgres — everyday internal tooling (up to 100 k MAU) fits Pro. Free projects (scratch, staging, demos) don't add to the bill. Need a second org with a different SSO provider? That's on the roadmap — first release is one org per user.
+			</p>
 		</div>
 	</section>
 

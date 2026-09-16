@@ -420,6 +420,82 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 	}
 }
 
+// HandleSetProjectOrg handles PATCH /platform/projects/{id}/org.
+// Body: { "org_id": "<uuid>" }  attaches the project to that org.
+// Body: { "org_id": null }      detaches (project becomes personal).
+//
+// Caller must be the project owner (existing PATCH pattern) and,
+// when attaching, a member of the target org. Used by the console
+// to migrate personal projects into an org after the fact (0a
+// auto-attaches on create, this covers everything created before
+// the org existed).
+func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+
+		claims, _, ok := RequireRole(w, r, pool, projectID, "owner")
+		if !ok {
+			return
+		}
+
+		// Distinguish "org_id absent from body" from "org_id: null":
+		// absent = 400 (nothing to do), null = detach. json.Decode
+		// into a *string doesn't tell us which, so we decode raw.
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		orgRaw, present := raw["org_id"]
+		if !present {
+			http.Error(w, `{"error":"org_id field is required (use null to detach)"}`, http.StatusBadRequest)
+			return
+		}
+		var orgID *string
+		if string(orgRaw) != "null" {
+			var s string
+			if err := json.Unmarshal(orgRaw, &s); err != nil {
+				http.Error(w, `{"error":"org_id must be a UUID string or null"}`, http.StatusBadRequest)
+				return
+			}
+			orgID = &s
+		}
+
+		if err := svc.SetProjectOrg(r.Context(), projectID, claims.Subject, orgID); err != nil {
+			if errors.Is(err, ErrProjectNotFound) {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, ErrOrgAttachForbidden) {
+				http.Error(w, `{"error":"caller is not a member of the target organization"}`, http.StatusForbidden)
+				return
+			}
+			slog.Error("set project org failed", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
+			action := "project.org_attached"
+			if orgID == nil {
+				action = "project.org_detached"
+			}
+			auditSvc.Log(r.Context(), projectID, claims.Subject, claims.Email,
+				action,
+				audit.WithTarget("project", projectID),
+				audit.WithIP(r.RemoteAddr))
+		}
+
+		project, err := svc.GetProject(r.Context(), projectID)
+		if err != nil {
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(project)
+	}
+}
+
 // HandleDeleteProject deletes a project and its tenant schema.
 //
 // DELETE /v1/tenants/{id}

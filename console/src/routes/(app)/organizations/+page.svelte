@@ -14,6 +14,14 @@
 	// with 0 orgs briefly sees the non-Team "Upgrade to Team"
 	// nudge while getProfile is still in flight.
 	let profileLoaded = $state<boolean>(false);
+	// Single-org first-release policy: hide the "New Organization"
+	// affordance once the user owns one (server enforces via 409 on
+	// CreateOrg). Own is defined by created_by == caller — being
+	// INVITED to another org doesn't block making your own.
+	let currentUserId = $state<string>('');
+	let ownsAnOrg = $derived(
+		orgs.some((o) => o.created_by_id === currentUserId)
+	);
 
 	// New-org modal state
 	let showNewModal = $state(false);
@@ -30,6 +38,7 @@
 		]);
 		if (profile) {
 			hasTeamBeta = profile.team_beta_access === true;
+			currentUserId = profile.id;
 		}
 		profileLoaded = true;
 	});
@@ -99,7 +108,7 @@
 				<span class="ml-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">Team-tier</span>
 			</p>
 		</div>
-		{#if hasTeamBeta}
+		{#if hasTeamBeta && !ownsAnOrg}
 			<button
 				type="button"
 				onclick={openModal}
@@ -110,6 +119,13 @@
 				</svg>
 				New Organization
 			</button>
+		{:else if hasTeamBeta && ownsAnOrg}
+			<span
+				class="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm font-medium text-gray-500"
+				title="Multi-organization support is on the roadmap. First release limits each user to one org."
+			>
+				One org per user
+			</span>
 		{:else}
 			<a
 				href="/pricing"

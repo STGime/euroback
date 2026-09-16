@@ -87,6 +87,13 @@ type TenantService struct {
 	// DeleteProject still succeeds by hard-deleting the rows, but a
 	// leaked provider instance stays until manual ops cleanup.
 	providerRegistry *dbprovider.Registry
+	// developerPool is the platform-authenticated pool used for reads
+	// on tables the gateway pool has no grants on — chiefly
+	// public.organizations and public.org_members (migration 000114
+	// REVOKEs both from eurobase_gateway; see CLAUDE.md convention).
+	// Optional: when nil, org-attach paths that depend on org_members
+	// visibility fall back to leaving projects.org_id NULL.
+	developerPool *pgxpool.Pool
 }
 
 // NewTenantService creates a new TenantService backed by the given connection pool.
@@ -123,6 +130,93 @@ func (s *TenantService) SetSecretStore(store SecretStore) {
 // cleanup via the Scaleway console.
 func (s *TenantService) SetProviderRegistry(reg *dbprovider.Registry) {
 	s.providerRegistry = reg
+}
+
+// ErrOrgAttachForbidden is returned when the caller tries to attach
+// a project to an org they are not a member of. Handler maps to 403.
+var ErrOrgAttachForbidden = errors.New("caller is not a member of the target organization")
+
+// SetProjectOrg attaches a project to an org (orgID non-nil) or
+// detaches it (orgID nil, "personal" state). Only the project's
+// owner can move it. If orgID is set, the caller must also be a
+// member of the target org — enforced via developerPool since
+// migration 000114 REVOKEs org_members from the gateway pool.
+//
+// Returns ErrProjectNotFound if the project doesn't exist or isn't
+// owned by the caller; ErrOrgAttachForbidden if the caller lacks
+// membership in the target org.
+func (s *TenantService) SetProjectOrg(ctx context.Context, projectID, platformUserID string, orgID *string) error {
+	// Verify the caller owns the project. Using the gateway pool is
+	// fine — projects.owner_id is grant-visible.
+	var ownerID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT owner_id::text FROM public.projects WHERE id = $1::uuid`,
+		projectID,
+	).Scan(&ownerID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrProjectNotFound
+		}
+		return fmt.Errorf("lookup project owner: %w", err)
+	}
+	if ownerID != platformUserID {
+		// Same 404 shape as "doesn't exist" — don't leak existence to
+		// non-owners.
+		return ErrProjectNotFound
+	}
+
+	// If attaching, verify org membership via the developer pool.
+	// Detach (orgID nil) needs no org lookup — the owner can always
+	// remove their project from any org they moved it into.
+	if orgID != nil {
+		if s.developerPool == nil {
+			// Dev / partial-config: refuse rather than silently no-op,
+			// since a "attach" request that lands as personal would
+			// surprise the caller.
+			return fmt.Errorf("org attach unavailable: developer pool not configured")
+		}
+		var one int
+		err := s.developerPool.QueryRow(ctx,
+			`SELECT 1 FROM public.org_members
+			 WHERE org_id = $1::uuid AND platform_user_id = $2::uuid`,
+			*orgID, platformUserID,
+		).Scan(&one)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrOrgAttachForbidden
+			}
+			return fmt.Errorf("check org membership: %w", err)
+		}
+	}
+
+	// Apply. FK is ON DELETE SET NULL (migration 000114:142) so a
+	// concurrent DeleteOrg would leave the project as personal, not
+	// error here.
+	if orgID != nil {
+		_, err = s.pool.Exec(ctx,
+			`UPDATE public.projects SET org_id = $1::uuid, updated_at = now() WHERE id = $2::uuid`,
+			*orgID, projectID)
+	} else {
+		_, err = s.pool.Exec(ctx,
+			`UPDATE public.projects SET org_id = NULL, updated_at = now() WHERE id = $1::uuid`,
+			projectID)
+	}
+	if err != nil {
+		return fmt.Errorf("update project org_id: %w", err)
+	}
+	return nil
+}
+
+// SetDeveloperPool wires the platform-authenticated pool so paths
+// that need to read org tables (public.organizations,
+// public.org_members) can bypass the gateway pool's REVOKE-ALL from
+// migration 000114. Chief users: CreateProject's org auto-attach,
+// ListProjects's org-membership union, PATCH project's org-attach
+// membership check. Optional in dev — when nil, project-org
+// attachment is skipped and org-owned projects don't surface via
+// ListProjects for members-only-via-org callers.
+func (s *TenantService) SetDeveloperPool(devPool *pgxpool.Pool) {
+	s.developerPool = devPool
 }
 
 // CreateProjectForBilling is the adapter that satisfies
@@ -235,18 +329,50 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		return nil, fmt.Errorf("resolve platform user: %w", err)
 	}
 
+	// Org auto-attach: if the caller already owns an org (via
+	// public.organizations.created_by), stamp the new project with
+	// its org_id so org_members can see it via the union path in
+	// ListProjects. Runs on the developer pool because migration
+	// 000114 REVOKEs ALL from the gateway pool on organizations.
+	// Nil pool (dev / partial-config) → skip; project lands with
+	// org_id NULL, matching pre-#591 behaviour.
+	//
+	// Note: this is a separate query against developerPool (not the
+	// project-creation tx). A concurrent DeleteOrg between here and
+	// the INSERT below would leave the project with a dangling
+	// org_id, but the FK is ON DELETE SET NULL (migration
+	// 000114:142) so the row ends up as `org_id NULL` rather than a
+	// broken reference. Acceptable — DeleteOrg is admin-driven and
+	// rare.
+	var orgID *string
+	if s.developerPool != nil {
+		var id string
+		err := s.developerPool.QueryRow(ctx,
+			`SELECT id::text FROM public.organizations WHERE created_by = $1::uuid LIMIT 1`,
+			platformUserID,
+		).Scan(&id)
+		if err == nil {
+			orgID = &id
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("project org auto-attach: developer-pool query failed; project will land as personal",
+				"error", err, "platform_user_id", platformUserID)
+		}
+	}
+
 	// Derive temporary schema_name and s3_bucket.
 	tempSchemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(slug, "-", "_"))
 	s3Bucket := fmt.Sprintf("eurobase-%s", slug)
 
-	// Insert the project with status='provisioning'.
+	// Insert the project with status='provisioning'. org_id is
+	// nullable — NULL for the personal / no-org case, set for
+	// auto-attach.
 	var projectID string
 	var createdAt time.Time
 	err = tx.QueryRow(ctx,
-		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan, org_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid)
 		 RETURNING id, created_at`,
-		ownerID, req.Name, slug, tempSchemaName, s3Bucket, req.Region, req.Plan,
+		ownerID, req.Name, slug, tempSchemaName, s3Bucket, req.Region, req.Plan, orgID,
 	).Scan(&projectID, &createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert project: %w", err)
@@ -463,24 +589,72 @@ func (s *TenantService) annotateAuthConfig(ctx context.Context, schemaName strin
 }
 
 // ListProjects returns all projects the given platform user is a member of
-// (owner, admin, developer, or viewer).
+// (owner, admin, developer, or viewer) PLUS all projects owned by any
+// org the user is a member of.
 //
-// **Hotfix note (post-#536):** the earlier version of this function
-// added a UNION with `org_members` and a LEFT JOIN on
-// `organizations` to surface projects owned by any org the caller
-// was a member of. That query ran on the gateway pool
-// (`tenantSvc := NewTenantService(pool)` in router.go), and
-// migration 000114 explicitly REVOKEs ALL from eurobase_gateway on
-// both org tables (security property: org membership is NOT
-// SDK-facing). The listing therefore 500'd in prod because the pool
-// role couldn't SELECT from `organizations` / `org_members`. This
-// rollback drops the UNION + JOIN and keeps only `p.org_id`
-// (which lives on `projects` and IS grant-visible to the gateway).
-// The console org badge still renders. Org-membership access to
-// projects is Phase-2 work that must route through the developer
-// pool (or gain a narrow SELECT grant to the gateway) before it
-// can re-land.
+// Split-pool implementation (re-lands the Phase-2 work reverted after
+// #536): the direct-member query runs on the gateway pool as before
+// (`project_members` is grant-visible). The org-membership branch
+// runs on the developer pool because migration 000114 REVOKEs ALL
+// from eurobase_gateway on both org tables (security property: org
+// membership is NOT SDK-facing). Results are merged in Go and
+// deduped by project id — a user who is both directly added AND an
+// org member sees the row once, not twice.
+//
+// When developerPool is unset (dev / partial-config), the org branch
+// is skipped and behaviour matches the pre-#536 hotfix rollback.
+// Never emits SQLSTATE 42501 on org_members even when the org pool
+// is nil.
 func (s *TenantService) ListProjects(ctx context.Context, platformUserID string) ([]Project, error) {
+	// Direct-member branch. Runs on gateway pool as today.
+	projects, err := s.listDirectMemberProjects(ctx, platformUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Org-membership branch. Skipped when developerPool is nil; when
+	// present, fetches ids the user reaches via org_members and
+	// enriches with the same project columns. Deduped against the
+	// direct set by project id.
+	if s.developerPool != nil {
+		orgProjectIDs, err := s.listOrgProjectIDsForUser(ctx, platformUserID)
+		if err != nil {
+			// Log but don't fail the whole call — the direct-member set
+			// is already a useful answer. Under-count is a UX bug, not
+			// a security issue.
+			slog.Warn("ListProjects org branch failed; returning direct-member set only",
+				"error", err, "platform_user_id", platformUserID)
+			return projects, nil
+		}
+		if len(orgProjectIDs) > 0 {
+			seen := make(map[string]struct{}, len(projects))
+			for _, p := range projects {
+				seen[p.ID] = struct{}{}
+			}
+			missing := orgProjectIDs[:0]
+			for _, id := range orgProjectIDs {
+				if _, ok := seen[id]; !ok {
+					missing = append(missing, id)
+				}
+			}
+			if len(missing) > 0 {
+				extra, err := s.listProjectsByIDs(ctx, missing)
+				if err != nil {
+					slog.Warn("ListProjects org-projects fetch failed; returning direct-member set only",
+						"error", err, "platform_user_id", platformUserID)
+					return projects, nil
+				}
+				projects = append(projects, extra...)
+			}
+		}
+	}
+	return projects, nil
+}
+
+// listDirectMemberProjects returns projects where the caller has a
+// project_members row directly. Gateway-pool query — matches the
+// current (post-#536 hotfix) behaviour.
+func (s *TenantService) listDirectMemberProjects(ctx context.Context, platformUserID string) ([]Project, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
 		        p.region, p.plan, p.status, p.auth_config, p.created_at,
@@ -515,6 +689,86 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 		return nil, fmt.Errorf("iterate project rows: %w", err)
 	}
 
+	return projects, nil
+}
+
+// listOrgProjectIDsForUser returns project ids the caller reaches via
+// org_members (i.e. projects owned by an org the user is a member of).
+// Runs on the developer pool — gateway pool has REVOKE-ALL on both
+// org tables. Deliberately returns ONLY ids, not full rows: the org
+// membership check is the sensitive part, and the projects table is
+// grant-visible to the gateway pool for the enrichment step in
+// listProjectsByIDs. This split limits developer-pool query volume
+// (one small select for ids) and keeps most of the read pattern on
+// the gateway pool where indexes are already tuned.
+func (s *TenantService) listOrgProjectIDsForUser(ctx context.Context, platformUserID string) ([]string, error) {
+	rows, err := s.developerPool.Query(ctx,
+		`SELECT p.id::text
+		 FROM public.projects p
+		 JOIN public.org_members om ON om.org_id = p.org_id
+		 WHERE om.platform_user_id = $1::uuid AND p.org_id IS NOT NULL`,
+		platformUserID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query org projects: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan org project id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate org project ids: %w", err)
+	}
+	return ids, nil
+}
+
+// listProjectsByIDs enriches a set of project ids into full Project
+// rows using the gateway pool. Same column list as
+// listDirectMemberProjects so downstream JSON marshaling is uniform.
+// Preserves the caller-supplied newest-first ordering by leaning on
+// created_at DESC (matches the direct-member branch), so the merged
+// list stays in the shape the console expects.
+func (s *TenantService) listProjectsByIDs(ctx context.Context, ids []string) ([]Project, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT p.id, p.owner_id, p.name, p.slug, p.schema_name, p.s3_bucket,
+		        p.region, p.plan, p.status, p.auth_config, p.created_at,
+		        p.state, p.last_active_at, p.grandfathered_until,
+		        p.legacy_pro_grace_until,
+		        p.org_id::text
+		 FROM projects p
+		 WHERE p.id = ANY($1::uuid[])
+		 ORDER BY p.created_at DESC`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query projects by ids: %w", err)
+	}
+	defer rows.Close()
+
+	projects := make([]Project, 0, len(ids))
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status,
+			&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil,
+			&p.OrgID); err != nil {
+			return nil, fmt.Errorf("scan org project row: %w", err)
+		}
+		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
+		p.AuthConfig = s.annotateAuthConfig(ctx, p.SchemaName, p.AuthConfig)
+		projects = append(projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projects by ids: %w", err)
+	}
 	return projects, nil
 }
 

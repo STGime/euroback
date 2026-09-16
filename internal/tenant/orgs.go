@@ -36,12 +36,18 @@ import (
 
 // Public errors — callers pattern-match to shape HTTP responses.
 var (
-	ErrOrgNotFound      = errors.New("organization not found")
-	ErrOrgMemberMissing = errors.New("caller is not a member of the organization")
-	ErrOrgAdminOnly     = errors.New("operation requires org admin role")
+	ErrOrgNotFound       = errors.New("organization not found")
+	ErrOrgMemberMissing  = errors.New("caller is not a member of the organization")
+	ErrOrgAdminOnly      = errors.New("operation requires org admin role")
 	ErrOIDCNotConfigured = errors.New("organization has no OIDC configuration")
 	ErrMemberExists      = errors.New("member already exists in organization")
 	ErrUserNotFound      = errors.New("no platform_users row matches the email")
+	// ErrOrgAlreadyExists is returned by CreateOrg when the caller
+	// already owns an org (created_by = caller). First-release policy
+	// is one org per user; multi-org is a follow-up SKU. Keyed on
+	// created_by (not membership) so being INVITED to another org
+	// never blocks you from making your own.
+	ErrOrgAlreadyExists = errors.New("caller already owns an organization")
 )
 
 // Field bounds match migration 000114's CHECK constraints — belt +
@@ -175,6 +181,14 @@ func (s *OrgsService) SSOConfigWritable() bool {
 // CreateOrg inserts an org + the creator as its admin. All-or-none
 // via a transaction; a partial state (org exists but has no
 // members) is unreachable.
+//
+// Single-org rule (first release): each user can create at most one
+// org. This removes the "which org do I attach this project to?"
+// branch from every downstream flow (see CreateProject auto-attach)
+// and matches the fact that Team-tier customers today need exactly
+// one org. Multi-org — with distinct SSO providers per logical team
+// — is a follow-up SKU. The guard is INSIDE the tx so a concurrent
+// second CreateOrg racing against the first is caught deterministically.
 func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*Org, error) {
 	name = strings.TrimSpace(name)
 	if err := validateOrgName(name); err != nil {
@@ -186,6 +200,24 @@ func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*O
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Single-org guard. Keyed on created_by so being invited to
+	// someone else's org (via org_members) does not block you from
+	// creating your own. `FOR UPDATE` is not needed — the row we'd
+	// lock doesn't exist yet; a concurrent second insert would still
+	// see the existing row via the subsequent SELECT in this branch.
+	var existingID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text FROM public.organizations
+		WHERE created_by = $1::uuid
+		LIMIT 1
+	`, creatorID).Scan(&existingID)
+	if err == nil {
+		return nil, ErrOrgAlreadyExists
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check existing org: %w", err)
+	}
 
 	var org Org
 	err = tx.QueryRow(ctx, `
