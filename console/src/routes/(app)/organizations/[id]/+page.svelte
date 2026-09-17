@@ -29,8 +29,15 @@
 	let ssoError = $state('');
 	let ssoSuccess = $state('');
 
-	// Remove-member state (per-row spinner)
+	// Remove-member state — the confirm dialog is in-app (mirrors the
+	// invite modal styling below) so the browser's native confirm()
+	// doesn't hijack the console UX. `pendingRemove` carries the row
+	// so the modal can render the member's email; `removeError`
+	// surfaces backend failures (e.g. sole-admin refusal) inside the
+	// modal instead of a native alert().
 	let removingId = $state('');
+	let pendingRemove = $state<{ id: string; email: string } | null>(null);
+	let removeError = $state('');
 	// Caller's own platform_user id — used to hide the Remove button
 	// on the caller's own member row. Self-removal is a distinct flow
 	// ("Leave organization") that we haven't shipped yet; the backend
@@ -90,14 +97,28 @@
 		}
 	}
 
-	async function handleRemove(userId: string) {
-		if (!confirm('Remove this member from the organization?')) return;
-		removingId = userId;
+	function openRemove(userId: string, email: string) {
+		pendingRemove = { id: userId, email };
+		removeError = '';
+	}
+
+	function cancelRemove() {
+		if (removingId) return; // don't dismiss mid-flight
+		pendingRemove = null;
+		removeError = '';
+	}
+
+	async function confirmRemove() {
+		if (!pendingRemove) return;
+		const target = pendingRemove;
+		removingId = target.id;
+		removeError = '';
 		try {
-			await api.removeOrgMember(orgId, userId);
+			await api.removeOrgMember(orgId, target.id);
+			pendingRemove = null;
 			await load();
 		} catch (err) {
-			alert(err instanceof Error ? err.message : 'Failed to remove member');
+			removeError = err instanceof Error ? err.message : 'Failed to remove member';
 		} finally {
 			removingId = '';
 		}
@@ -214,7 +235,7 @@
 							{#if detail.role === 'admin' && m.platform_user_id !== callerUserID}
 								<button
 									type="button"
-									onclick={() => handleRemove(m.platform_user_id)}
+									onclick={() => openRemove(m.platform_user_id, m.email)}
 									disabled={removingId === m.platform_user_id}
 									class="text-xs font-medium text-red-600 hover:text-red-700 disabled:opacity-50 cursor-pointer"
 								>
@@ -395,6 +416,43 @@
 					</button>
 				</div>
 			</form>
+		</div>
+	</div>
+{/if}
+
+{#if pendingRemove}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="remove-title">
+		<div class="absolute inset-0 bg-black/50" onclick={cancelRemove}></div>
+		<div class="relative w-full max-w-md rounded-2xl bg-white p-6 shadow-xl mx-4">
+			<h2 id="remove-title" class="text-lg font-semibold text-gray-900">Remove member</h2>
+			<p class="mt-2 text-sm text-gray-600">
+				Remove <span class="font-medium text-gray-900">{pendingRemove.email}</span> from the organization? They'll lose access to every project owned by this org.
+			</p>
+
+			{#if removeError}
+				<div class="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">{removeError}</div>
+			{/if}
+
+			<div class="mt-6 flex justify-end gap-3">
+				<button
+					type="button"
+					onclick={cancelRemove}
+					disabled={!!removingId}
+					class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					onclick={confirmRemove}
+					disabled={!!removingId}
+					class="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+				>
+					{removingId ? 'Removing…' : 'Remove'}
+				</button>
+			</div>
 		</div>
 	</div>
 {/if}
