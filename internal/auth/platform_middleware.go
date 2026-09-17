@@ -70,6 +70,14 @@ func (m *PlatformAuthMiddleware) resolve(r *http.Request, tokenStr string) (*Cla
 	return m.svc.ValidatePlatformJWT(tokenStr)
 }
 
+// ValidatePlatformJWT parses the token and returns the full Claims —
+// used by callers that need LoginVia / SsoOrgID for
+// organizations.sso_required enforcement (realtime authorize).
+// ValidateToken returns only the subject and can't carry provenance.
+func (m *PlatformAuthMiddleware) ValidatePlatformJWT(tokenStr string) (*Claims, error) {
+	return m.svc.ValidatePlatformJWT(tokenStr)
+}
+
 // ValidateToken parses a raw JWT string and returns the subject claim.
 // Used by WebSocket handler where token comes as a query parameter.
 // Note: WS path stays JWT-only; PATs are not intended for streaming auth.
