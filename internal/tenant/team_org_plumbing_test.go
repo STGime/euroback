@@ -14,7 +14,27 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/eurobase/euroback/internal/auth"
 )
+
+// ssoOffClaims returns a Claims struct representing a password-
+// authenticated session for the given user. Existing ListProjects
+// tests seeded before migration 000121 shipped assume the SSO flag
+// defaults to false on orgs — a password session sees every org
+// project. New sso_required tests below use ssoOnClaimsFor with the
+// org id to represent an SSO-authenticated session.
+func ssoOffClaims(userID string) *auth.Claims {
+	return &auth.Claims{Subject: userID, LoginVia: auth.LoginViaPassword}
+}
+
+// ssoOnClaimsFor returns a Claims struct representing a session
+// authed via SSO for the given org. Only satisfies sso_required for
+// that specific org — SSO against a different org, or password, is
+// deliberately refused.
+func ssoOnClaimsFor(userID, orgID string) *auth.Claims {
+	return &auth.Claims{Subject: userID, LoginVia: auth.LoginViaSSO, SsoOrgID: orgID}
+}
 
 // TestCreateOrg_SingleOrgGuard asserts CreateOrg returns
 // ErrOrgAlreadyExists on the second attempt by the same creator.
@@ -423,7 +443,10 @@ func TestListProjects_OrgUnion(t *testing.T) {
 	}
 
 	// Bob's ListProjects must surface Alice's project via the union.
-	got, err := svc.ListProjects(ctx, bob)
+	// SSO enforcement is a no-op for this org (default sso_required=false),
+	// so an empty-loginVia session (Bob logged in via password) is
+	// treated as-if fully authorised.
+	got, err := svc.ListProjects(ctx, ssoOffClaims(bob))
 	if err != nil {
 		// Guard against the CLAUDE.md-recorded 42501 regression.
 		if strings.Contains(err.Error(), "42501") || strings.Contains(err.Error(), "permission denied") {
@@ -729,6 +752,139 @@ func TestCreateProject_ExplicitOrgIDNonAdminRejected(t *testing.T) {
 	}
 }
 
+// TestListProjects_SSORequired_HidesOrgProjectsFromPasswordSession
+// asserts that when an org has sso_required=true, a password-
+// authenticated session's ListProjects call does NOT include the
+// org-owned projects. Pins the enforcement contract migration
+// 000121 shipped.
+func TestListProjects_SSORequired_HidesOrgProjectsFromPasswordSession(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-ssoreq@test.eurobase.local")
+	bob := insertTestPlatformUser(t, pool, "bob-ssoreq@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, bob})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice SSO-Required Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+	aliceProj, err := svc.CreateProject(ctx, alice, "alice-ssoreq@test.eurobase.local", CreateProjectRequest{
+		Name: "Alice SSO Project", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, aliceProj.ID)
+
+	// Bob invited to the org.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'member', 'manual')`,
+		aliceOrg.ID, bob,
+	); err != nil {
+		t.Fatalf("seed bob as org member: %v", err)
+	}
+
+	// Baseline: with sso_required=false, Bob's password session sees
+	// alice's org project.
+	got, err := svc.ListProjects(ctx, ssoOffClaims(bob))
+	if err != nil {
+		t.Fatalf("bob ListProjects (sso off): %v", err)
+	}
+	baseline := false
+	for _, p := range got {
+		if p.ID == aliceProj.ID {
+			baseline = true
+		}
+	}
+	if !baseline {
+		t.Fatalf("baseline: bob should see alice's org project when sso_required=false; got %d projects", len(got))
+	}
+
+	// Flip sso_required=true directly in the DB (bypassing the OIDC-
+	// config-required guard on SetSSORequired, which we don't need to
+	// exercise here). SetSSORequired's own tests cover the guard.
+	if _, err := pool.Exec(ctx,
+		`UPDATE public.organizations SET sso_required = true WHERE id = $1::uuid`,
+		aliceOrg.ID,
+	); err != nil {
+		t.Fatalf("flip sso_required: %v", err)
+	}
+
+	// Bob's password session must NOT see the org project anymore.
+	got, err = svc.ListProjects(ctx, ssoOffClaims(bob))
+	if err != nil {
+		t.Fatalf("bob ListProjects (sso on, password session): %v", err)
+	}
+	for _, p := range got {
+		if p.ID == aliceProj.ID {
+			t.Fatalf("password session should not see sso_required-org project; found %s in ListProjects", aliceProj.ID)
+		}
+	}
+
+	// Bob's SSO session for this org SHOULD see it again.
+	got, err = svc.ListProjects(ctx, ssoOnClaimsFor(bob, aliceOrg.ID))
+	if err != nil {
+		t.Fatalf("bob ListProjects (sso on, sso session): %v", err)
+	}
+	found := false
+	for _, p := range got {
+		if p.ID == aliceProj.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sso session for the right org should see the project; got %d projects", len(got))
+	}
+
+	// Bob's SSO session for a DIFFERENT org must NOT satisfy — pins
+	// the sso_org_id equality check.
+	got, err = svc.ListProjects(ctx, ssoOnClaimsFor(bob, "00000000-0000-0000-0000-000000000000"))
+	if err != nil {
+		t.Fatalf("bob ListProjects (sso on, wrong org): %v", err)
+	}
+	for _, p := range got {
+		if p.ID == aliceProj.ID {
+			t.Fatalf("SSO session for a different org must not satisfy; found %s", aliceProj.ID)
+		}
+	}
+}
+
+// TestSessionSatisfiesSSOFor pins the pure predicate — no DB needed.
+func TestSessionSatisfiesSSOFor(t *testing.T) {
+	cases := []struct {
+		name        string
+		loginVia    string
+		ssoOrgID    string
+		targetOrg   string
+		ssoRequired bool
+		want        bool
+	}{
+		{"sso_required=false: password session passes", "password", "", "org-A", false, true},
+		{"sso_required=false: empty loginVia passes", "", "", "org-A", false, true},
+		{"sso_required=true: password session refused", "password", "", "org-A", true, false},
+		{"sso_required=true: empty loginVia refused", "", "", "org-A", true, false},
+		{"sso_required=true: SSO for same org passes", "sso", "org-A", "org-A", true, true},
+		{"sso_required=true: SSO for different org refused", "sso", "org-B", "org-A", true, false},
+		{"sso_required=true: SSO with empty sso_org_id refused", "sso", "", "org-A", true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := SessionSatisfiesSSOFor(c.loginVia, c.ssoOrgID, c.targetOrg, c.ssoRequired)
+			if got != c.want {
+				t.Fatalf("want %v, got %v", c.want, got)
+			}
+		})
+	}
+}
+
 // TestListProjects_MergedOrderGlobalNewestFirst asserts that when
 // results come from BOTH the direct-member branch and the org
 // branch, the merged list is globally sorted newest-first — not two
@@ -814,7 +970,7 @@ func TestListProjects_MergedOrderGlobalNewestFirst(t *testing.T) {
 		t.Fatalf("seed bob as org member: %v", err)
 	}
 
-	got, err := svc.ListProjects(ctx, bob)
+	got, err := svc.ListProjects(ctx, ssoOffClaims(bob))
 	if err != nil {
 		t.Fatalf("bob ListProjects: %v", err)
 	}

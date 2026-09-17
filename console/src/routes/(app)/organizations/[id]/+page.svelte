@@ -29,6 +29,15 @@
 	let ssoError = $state('');
 	let ssoSuccess = $state('');
 
+	// SSO enforcement toggle state. `ssoRequired` mirrors
+	// organizations.sso_required from the server; the toggle handler
+	// fires the PATCH and reloads on success. Failure (e.g. no OIDC
+	// configured) shows an inline error under the toggle without
+	// flipping the local checkbox.
+	let ssoRequired = $state(false);
+	let ssoRequiredSaving = $state(false);
+	let ssoRequiredError = $state('');
+
 	// Remove-member state — the confirm dialog is in-app (mirrors the
 	// invite modal styling below) so the browser's native confirm()
 	// doesn't hijack the console UX. `pendingRemove` carries the row
@@ -69,6 +78,7 @@
 				ssoClientID = detail.sso.client_id;
 				ssoRedirectURL = detail.sso.redirect_url;
 			}
+			ssoRequired = !!detail.org.sso_required;
 		} catch (err) {
 			if (err instanceof APIError && err.status === 404) {
 				error = 'Organization not found or you are not a member.';
@@ -148,6 +158,26 @@
 			ssoError = err instanceof Error ? err.message : 'Failed to save SSO configuration';
 		} finally {
 			ssoSaving = false;
+		}
+	}
+
+	async function handleSSORequiredToggle() {
+		// Optimistic-toggled `ssoRequired` is what the user just
+		// clicked; the local value has already flipped via bind:checked.
+		// Snapshot before the request so we can revert on failure
+		// (else the checkbox stays in the "requested" state despite
+		// the server refusing).
+		const requested = ssoRequired;
+		ssoRequiredSaving = true;
+		ssoRequiredError = '';
+		try {
+			await api.setOrgSSORequired(orgId, requested);
+			await load();
+		} catch (err) {
+			ssoRequired = !requested; // revert local UI
+			ssoRequiredError = err instanceof Error ? err.message : 'Failed to update SSO enforcement';
+		} finally {
+			ssoRequiredSaving = false;
 		}
 	}
 
@@ -350,6 +380,39 @@
 						</button>
 					</div>
 				</form>
+
+				<!-- SSO enforcement toggle: refuses password-authenticated
+				     sessions at every org-owned access site once enabled.
+				     Disabled until OIDC config exists (server-side guard
+				     mirrors this; refuses toggle to true otherwise). -->
+				<div class="mt-8 rounded-lg border border-amber-200 bg-amber-50/50 p-4">
+					<div class="flex items-start gap-3">
+						<div class="flex-1">
+							<h3 class="text-sm font-semibold text-gray-900">Require SSO for all members</h3>
+							<p class="mt-1 text-xs text-gray-600">
+								When enabled, members must sign in via <strong>this org's SSO</strong> to see any of its projects. Password login for members is refused with immediate effect — including your own if you haven't signed in via SSO yet.
+							</p>
+							{#if !detail.sso}
+								<p class="mt-2 text-xs text-red-700">
+									Configure OIDC above before enabling this — otherwise nobody (including admins) can sign in.
+								</p>
+							{/if}
+							{#if ssoRequiredError}
+								<p class="mt-2 text-xs text-red-700">{ssoRequiredError}</p>
+							{/if}
+						</div>
+						<label class="inline-flex cursor-pointer items-center gap-2">
+							<input
+								type="checkbox"
+								bind:checked={ssoRequired}
+								disabled={!detail.sso || ssoRequiredSaving}
+								onchange={handleSSORequiredToggle}
+								class="h-4 w-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500 disabled:opacity-40 disabled:cursor-not-allowed"
+							/>
+							<span class="text-xs font-medium text-gray-700">{ssoRequired ? 'Required' : 'Optional'}</span>
+						</label>
+					</div>
+				</div>
 			</section>
 		{:else if detail.sso}
 			<!-- Member view: SSO status only, no config edit. -->

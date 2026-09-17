@@ -70,6 +70,17 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 	fmt.Fprintf(w, `{"error":%q}`, msg)
 }
 
+// writeJSONErrCode adds a machine-readable `code` field so the
+// console can branch on the error class without substring-matching
+// the human message. Used for sso_required_for_org so the console
+// knows to bounce the user to /login?sso_required_for=<org> for a
+// fresh SSO handshake.
+func writeJSONErrCode(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	fmt.Fprintf(w, `{"error":%q,"code":%q}`, msg, code)
+}
+
 // requireTeamBeta gates every mutating org route on team_beta_access.
 // Fresh DB read (not JWT claim) so revocation via AdminRevokeTeamBeta
 // takes effect on the next request — see the comment on that
@@ -154,18 +165,27 @@ func (h *OrgsHandler) HandleListOrgs() http.HandlerFunc {
 // HandleGetOrg — GET /platform/orgs/{id}
 func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID, ok := requireCallerID(w, r)
-		if !ok {
+		claims, hasAuth := auth.ClaimsFromContext(r.Context())
+		if !hasAuth || claims == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "session missing")
 			return
 		}
 		orgID := chi.URLParam(r, "id")
-		org, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
+		org, role, err := h.Svc.GetOrgForMember(r.Context(), claims.Subject, orgID)
 		if err != nil {
 			if errors.Is(err, ErrOrgMemberMissing) {
 				writeJSONErr(w, http.StatusNotFound, "organization not found or not a member")
 				return
 			}
 			writeJSONErr(w, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		// SSO enforcement (migration 000121). If the org requires
+		// SSO and this session isn't SSO-backed for THIS org, refuse
+		// with a machine-readable code so the console can bounce to
+		// a fresh SSO handshake.
+		if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
+			writeJSONErrCode(w, http.StatusForbidden, "sso_required_for_org", "this organization requires SSO sign-in")
 			return
 		}
 		members, err := h.Svc.ListMembers(r.Context(), orgID)
@@ -385,5 +405,49 @@ func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// HandleSetSSORequired — PATCH /platform/orgs/{id}/sso-required
+//   {"sso_required": true|false}
+//
+// Admin-only, Team-tier gated. Enabling this refuses password-login
+// sessions at every org-owned access site until an SSO handshake
+// against this org's OIDC IdP mints a fresh session with
+// login_via='sso' + sso_org_id=this org. Disabling reverts.
+//
+// Guard against admin lockout: SetSSORequired refuses to flip the
+// toggle to true when the org has no OIDC config configured — that
+// state would let nobody in.
+func (h *OrgsHandler) HandleSetSSORequired() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := requireCallerID(w, r)
+		if !ok {
+			return
+		}
+		if !h.requireTeamBeta(w, r, userID) {
+			return
+		}
+		orgID := chi.URLParam(r, "id")
+		var body struct {
+			SsoRequired bool `json:"sso_required"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONErr(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if err := h.Svc.SetSSORequired(r.Context(), orgID, userID, body.SsoRequired); err != nil {
+			switch {
+			case errors.Is(err, ErrOrgMemberMissing):
+				writeJSONErr(w, http.StatusNotFound, "organization not found or not a member")
+			case errors.Is(err, ErrOrgAdminOnly):
+				writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
+			default:
+				writeJSONErr(w, http.StatusBadRequest, err.Error())
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"sso_required": body.SsoRequired})
 	}
 }

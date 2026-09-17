@@ -331,7 +331,7 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 			return
 		}
 
-		projects, err := svc.ListProjects(r.Context(), claims.Subject)
+		projects, err := svc.ListProjects(r.Context(), claims)
 		if err != nil {
 			slog.Error("failed to list projects", "error", err, "user_id", claims.Subject)
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)

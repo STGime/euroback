@@ -643,6 +643,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Get("/", h.HandleListOrgs())
 				r.Get("/{id}", h.HandleGetOrg())
 				r.Patch("/{id}/sso", h.HandleSetSSOConfig())
+				r.Patch("/{id}/sso-required", h.HandleSetSSORequired())
 				r.Post("/{id}/members", h.HandleInviteMember())
 				r.Delete("/{id}/members/{userId}", h.HandleRemoveMember())
 			} else {

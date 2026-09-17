@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/jackc/pgx/v5"
@@ -726,7 +727,11 @@ func (s *TenantService) annotateAuthConfig(ctx context.Context, schemaName strin
 // is skipped and behaviour matches the pre-#536 hotfix rollback.
 // Never emits SQLSTATE 42501 on org_members even when the org pool
 // is nil.
-func (s *TenantService) ListProjects(ctx context.Context, platformUserID string) ([]Project, error) {
+func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) ([]Project, error) {
+	if claims == nil {
+		return nil, fmt.Errorf("ListProjects: nil claims")
+	}
+	platformUserID := claims.Subject
 	// Direct-member branch. Runs on gateway pool as today.
 	projects, err := s.listDirectMemberProjects(ctx, platformUserID)
 	if err != nil {
@@ -737,8 +742,18 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 	// present, fetches ids the user reaches via org_members and
 	// enriches with the same project columns. Deduped against the
 	// direct set by project id.
+	//
+	// SSO enforcement (migration 000121): for each org-only project
+	// (i.e. the caller reaches it purely via org_members, not via a
+	// direct project_members row), we check the target org's
+	// sso_required flag against the session's login_via/sso_org_id
+	// claims. If the org requires SSO and the session isn't
+	// SSO-backed for that org, we drop the project from the response.
+	// This prevents a password-authenticated session from seeing
+	// (and clicking into) org-owned projects the customer paid for
+	// SSO enforcement on.
 	if s.developerPool != nil {
-		orgProjectIDs, err := s.listOrgProjectIDsForUser(ctx, platformUserID)
+		orgProjects, err := s.listOrgProjectRowsForUser(ctx, platformUserID)
 		if err != nil {
 			// Log but don't fail the whole call — the direct-member set
 			// is already a useful answer. Under-count is a UX bug, not
@@ -747,16 +762,25 @@ func (s *TenantService) ListProjects(ctx context.Context, platformUserID string)
 				"error", err, "platform_user_id", platformUserID)
 			return projects, nil
 		}
-		if len(orgProjectIDs) > 0 {
+		if len(orgProjects) > 0 {
 			seen := make(map[string]struct{}, len(projects))
 			for _, p := range projects {
 				seen[p.ID] = struct{}{}
 			}
-			missing := orgProjectIDs[:0]
-			for _, id := range orgProjectIDs {
-				if _, ok := seen[id]; !ok {
-					missing = append(missing, id)
+			// Filter out sso_required orgs the session can't satisfy,
+			// then dedupe against direct-member set.
+			missing := make([]string, 0, len(orgProjects))
+			for _, r := range orgProjects {
+				if _, dup := seen[r.projectID]; dup {
+					continue
 				}
+				if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, r.orgID, r.ssoRequired) {
+					// Session isn't SSO-backed for this org — omit
+					// the org-only row. Direct-member rows are
+					// unaffected (they were already in `projects`).
+					continue
+				}
+				missing = append(missing, r.projectID)
 			}
 			if len(missing) > 0 {
 				extra, err := s.listProjectsByIDs(ctx, missing)
@@ -821,20 +845,30 @@ func (s *TenantService) listDirectMemberProjects(ctx context.Context, platformUs
 	return projects, nil
 }
 
-// listOrgProjectIDsForUser returns project ids the caller reaches via
-// org_members (i.e. projects owned by an org the user is a member of).
-// Runs on the developer pool — gateway pool has REVOKE-ALL on both
-// org tables. Deliberately returns ONLY ids, not full rows: the org
-// membership check is the sensitive part, and the projects table is
-// grant-visible to the gateway pool for the enrichment step in
-// listProjectsByIDs. This split limits developer-pool query volume
-// (one small select for ids) and keeps most of the read pattern on
-// the gateway pool where indexes are already tuned.
-func (s *TenantService) listOrgProjectIDsForUser(ctx context.Context, platformUserID string) ([]string, error) {
+// orgProjectRow holds one (project id, org id, sso_required) triple
+// from the org-branch of ListProjects. Enforcement code in
+// ListProjects filters on ssoRequired against session claims before
+// enriching the project rows.
+type orgProjectRow struct {
+	projectID   string
+	orgID       string
+	ssoRequired bool
+}
+
+// listOrgProjectRowsForUser returns (project_id, org_id, sso_required)
+// for every project the caller reaches via org_members. Runs on the
+// developer pool — gateway pool has REVOKE-ALL on both org tables.
+//
+// Returning the flag with the id (rather than a second lookup) lets
+// ListProjects apply sso_required enforcement without an extra round
+// trip per row — the JOIN to organizations for the flag is cheap and
+// keyed on the same indexes we already hit.
+func (s *TenantService) listOrgProjectRowsForUser(ctx context.Context, platformUserID string) ([]orgProjectRow, error) {
 	rows, err := s.developerPool.Query(ctx,
-		`SELECT p.id::text
+		`SELECT p.id::text, p.org_id::text, o.sso_required
 		 FROM public.projects p
 		 JOIN public.org_members om ON om.org_id = p.org_id
+		 JOIN public.organizations o ON o.id = p.org_id
 		 WHERE om.platform_user_id = $1::uuid AND p.org_id IS NOT NULL`,
 		platformUserID,
 	)
@@ -843,18 +877,18 @@ func (s *TenantService) listOrgProjectIDsForUser(ctx context.Context, platformUs
 	}
 	defer rows.Close()
 
-	ids := make([]string, 0)
+	out := make([]orgProjectRow, 0)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan org project id: %w", err)
+		var r orgProjectRow
+		if err := rows.Scan(&r.projectID, &r.orgID, &r.ssoRequired); err != nil {
+			return nil, fmt.Errorf("scan org project row: %w", err)
 		}
-		ids = append(ids, id)
+		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate org project ids: %w", err)
+		return nil, fmt.Errorf("iterate org project rows: %w", err)
 	}
-	return ids, nil
+	return out, nil
 }
 
 // listProjectsByIDs enriches a set of project ids into full Project

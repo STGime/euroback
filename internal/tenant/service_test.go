@@ -259,7 +259,7 @@ func TestListProjects(t *testing.T) {
 		cleanupProject(t, pool, p1.ID)
 	})
 
-	projects, err := svc.ListProjects(ctx, uid)
+	projects, err := svc.ListProjects(ctx, ssoOffClaims(uid))
 	if err != nil {
 		t.Fatalf("ListProjects() returned error: %v", err)
 	}
