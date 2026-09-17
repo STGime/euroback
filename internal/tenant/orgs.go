@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -81,6 +82,12 @@ type Org struct {
 	Name                string     `json:"name"`
 	PrimaryEmailDomain  *string    `json:"primary_email_domain"`
 	OIDCConfigured      bool       `json:"oidc_configured"`
+	// SsoRequired mirrors organizations.sso_required (migration 000121).
+	// When true, sessions minted from password login are refused at
+	// every org-owned access site — GetOrgForMember, LoadProjectAccess
+	// (org-via), ListProjects (org-union filter). Only SSO sessions
+	// whose sso_org_id equals this org's id satisfy the check.
+	SsoRequired         bool       `json:"sso_required"`
 	CreatedByID         *string    `json:"created_by_id"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
@@ -235,6 +242,9 @@ func (s *OrgsService) CreateOrg(ctx context.Context, creatorID, name string) (*O
 		&org.ID, &org.Name, &org.PrimaryEmailDomain, &org.OIDCConfigured,
 		&org.CreatedByID, &org.CreatedAt, &org.UpdatedAt,
 	)
+	// SsoRequired defaults to false (column default) on a freshly
+	// inserted row — not selected here to avoid touching the
+	// INSERT RETURNING shape.
 	if err != nil {
 		// 23505 on uq_organizations_one_per_creator is the race-loser
 		// path — surface as the same sentinel the fast-path uses so
@@ -269,6 +279,7 @@ func (s *OrgsService) ListOrgsForUser(ctx context.Context, userID string) ([]Org
 	const q = `
 		SELECT o.id::text, o.name, o.primary_email_domain,
 		       (o.oidc_config IS NOT NULL) AS oidc_configured,
+		       o.sso_required,
 		       o.created_by::text, o.created_at, o.updated_at,
 		       om.role, om.created_at AS member_since
 		  FROM public.org_members om
@@ -288,6 +299,7 @@ func (s *OrgsService) ListOrgsForUser(ctx context.Context, userID string) ([]Org
 		var e OrgWithMembership
 		if err := rows.Scan(
 			&e.ID, &e.Name, &e.PrimaryEmailDomain, &e.OIDCConfigured,
+			&e.SsoRequired,
 			&e.CreatedByID, &e.CreatedAt, &e.UpdatedAt,
 			&e.Role, &e.MemberSince,
 		); err != nil {
@@ -311,6 +323,7 @@ func (s *OrgsService) GetOrgForMember(ctx context.Context, userID, orgID string)
 	err := s.pool.QueryRow(ctx, `
 		SELECT o.id::text, o.name, o.primary_email_domain,
 		       (o.oidc_config IS NOT NULL) AS oidc_configured,
+		       o.sso_required,
 		       o.created_by::text, o.created_at, o.updated_at,
 		       om.role
 		  FROM public.organizations o
@@ -320,6 +333,7 @@ func (s *OrgsService) GetOrgForMember(ctx context.Context, userID, orgID string)
 		 WHERE o.id = $2::uuid
 	`, userID, orgID).Scan(
 		&org.ID, &org.Name, &org.PrimaryEmailDomain, &org.OIDCConfigured,
+		&org.SsoRequired,
 		&org.CreatedByID, &org.CreatedAt, &org.UpdatedAt,
 		&role,
 	)
@@ -730,3 +744,127 @@ func isUniqueViolation(err error) bool {
 	// and matches the pattern used elsewhere in this codebase.
 	return err != nil && strings.Contains(err.Error(), "23505")
 }
+
+// ErrSSORequiredForOrg is returned by enforcement code when a
+// session backed by password auth (or SSO to a different org) tries
+// to access an org that has sso_required=true. Handler maps to 403
+// with `code: "sso_required_for_org"` — the console catches that
+// code and bounces the user to /login?sso_required_for=<org id> for
+// a fresh SSO handshake.
+var ErrSSORequiredForOrg = errors.New("this organization requires SSO sign-in")
+
+// SetSSORequired flips organizations.sso_required (migration 000121).
+// Caller must be an admin of the org. When set to true, every
+// existing session backed by password login (login_via != 'sso') or
+// backed by SSO to a different org (sso_org_id != this org) is
+// refused at every org-owned access site — GetOrgForMember,
+// LoadProjectAccess via-org, ListProjects org-union filter.
+//
+// Deliberately does NOT invalidate the caller's own session, even
+// when the caller is a password-backed admin: the caller has to be
+// able to disable the toggle again if they miscnfigured OIDC. The
+// admin who flips this to true will be locked out on their NEXT
+// action (any org-scoped call). Session-revocation-on-toggle is a
+// follow-up (needs coordinated JWT revocation infra, out of scope
+// for this PR).
+func (s *OrgsService) SetSSORequired(ctx context.Context, orgID, callerID string, value bool) error {
+	_, role, err := s.GetOrgForMember(ctx, callerID, orgID)
+	if err != nil {
+		return err
+	}
+	if role != RoleOrgAdmin {
+		return ErrOrgAdminOnly
+	}
+	// Enabling sso_required with no OIDC config configured is a
+	// lockout — nobody can log in via SSO because the org doesn't
+	// know where to send them. Refuse the toggle in that state.
+	if value {
+		cfg, err := s.GetOIDCConfigForOrg(ctx, orgID)
+		if err != nil || cfg == nil {
+			return fmt.Errorf("configure OIDC before requiring SSO — sso_required=true with no OIDC config would lock out every member")
+		}
+	}
+	_, err = s.pool.Exec(ctx,
+		`UPDATE public.organizations
+		    SET sso_required = $2, updated_at = now()
+		  WHERE id = $1::uuid`,
+		orgID, value,
+	)
+	if err != nil {
+		return fmt.Errorf("update sso_required: %w", err)
+	}
+	return nil
+}
+
+// EnforceOrgSSOForProject is the project-scoped gate that closes the
+// direct-project-members bypass. Given a project id and the caller's
+// claims, it looks up the project's org (if any) via the developer
+// pool, reads that org's sso_required flag, and returns
+// ErrSSORequiredForOrg if the session isn't SSO-backed for that org.
+//
+// Personal projects (org_id NULL) or projects in orgs where
+// sso_required=false always pass. The developer pool is required
+// because organizations is REVOKE-ALL from the gateway pool
+// (migration 000114). Nil developer pool → treat as "no
+// enforcement" (safe default for dev / partial-config), matches the
+// pre-fix behaviour where sso_required didn't exist.
+//
+// Returns nil for "no gate needed" (personal project, sso_required
+// off, no org) and (nil, ErrProjectNotFound) if the project row is
+// missing. Callers translate ErrSSORequiredForOrg → 403
+// sso_required_for_org.
+func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, claims *auth.Claims, projectID string) error {
+	if developerPool == nil || claims == nil {
+		return nil
+	}
+	var orgID *string
+	var ssoRequired *bool
+	err := developerPool.QueryRow(ctx,
+		`SELECT p.org_id::text, o.sso_required
+		 FROM public.projects p
+		 LEFT JOIN public.organizations o ON o.id = p.org_id
+		 WHERE p.id = $1::uuid`,
+		projectID,
+	).Scan(&orgID, &ssoRequired)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrProjectNotFound
+		}
+		return fmt.Errorf("lookup project sso_required: %w", err)
+	}
+	if orgID == nil || ssoRequired == nil || !*ssoRequired {
+		return nil
+	}
+	if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, *orgID, *ssoRequired) {
+		return ErrSSORequiredForOrg
+	}
+	return nil
+}
+
+// SessionSatisfiesSSOFor reports whether a session (represented by
+// its login_via + sso_org_id claims) satisfies the sso_required
+// contract for the given target org.
+//
+// Three-branch decision:
+//
+//  1. Org's sso_required = false → always true (no enforcement).
+//  2. Org's sso_required = true AND loginVia == auth.LoginViaSSO AND
+//     ssoOrgID == this org → true (session authed against the org's
+//     own OIDC IdP).
+//  3. Everything else → false: covers password sessions, sessions
+//     with an empty login_via (pre-fix JWTs — safe default), and
+//     sessions SSO-backed to a *different* org (SSO to org A doesn't
+//     grant SSO-satisfied access to org B).
+//
+// Runs on the gateway pool — organizations is REVOKE-ALL from
+// gateway (migration 000114), but the caller supplies the flag from
+// GetOrgForMember (which runs on the developer-facing platform pool
+// via OrgsService). This helper takes the flag as input rather than
+// re-querying to avoid an extra round-trip on every access.
+func SessionSatisfiesSSOFor(loginVia, ssoOrgID, targetOrgID string, ssoRequired bool) bool {
+	if !ssoRequired {
+		return true
+	}
+	return loginVia == auth.LoginViaSSO && ssoOrgID == targetOrgID
+}
+

@@ -579,6 +579,24 @@ export class EurobaseAPI {
 				}
 			}
 			const body = await res.text().catch(() => '');
+			// 403 sso_required_for_org: the target org needs an SSO
+			// handshake but the current session is password-authed (or
+			// SSO-authed against a different org). Bounce to /login
+			// with a hint the login page uses to prefill the SSO flow.
+			// Extract the target org id from the request path
+			// (/platform/orgs/<id>...) so /login can pass it forward
+			// to /platform/auth/sso/init.
+			if (res.status === 403 && typeof window !== 'undefined') {
+				try {
+					const parsed = JSON.parse(body);
+					if (parsed?.code === 'sso_required_for_org') {
+						const orgMatch = path.match(/\/platform\/orgs\/([0-9a-f-]{36})/i);
+						const targetOrg = orgMatch ? orgMatch[1] : '';
+						const q = targetOrg ? `?sso_required_for=${targetOrg}` : '';
+						window.location.href = `/login${q}`;
+					}
+				} catch { /* not a JSON error body */ }
+			}
 			throw new APIError(res.status, body || res.statusText);
 		}
 
@@ -2468,6 +2486,17 @@ export class EurobaseAPI {
 		});
 	}
 
+	/** Toggle whether members must sign in via this org's SSO to
+	 * access it (admin-only). Server refuses value=true when the org
+	 * has no OIDC config configured — the console guard mirrors that
+	 * (disables the toggle) but the server is authoritative. */
+	async setOrgSSORequired(orgId: string, value: boolean): Promise<{ sso_required: boolean }> {
+		return this.fetch(`/platform/orgs/${orgId}/sso-required`, {
+			method: 'PATCH',
+			body: JSON.stringify({ sso_required: value })
+		});
+	}
+
 	/** Invite a user to the org by email (admin-only). Role
 	 * defaults to "member" if omitted. */
 	async inviteOrgMember(orgId: string, email: string, role: 'admin' | 'member' = 'member'): Promise<OrgMember> {
@@ -2529,6 +2558,14 @@ export interface Org {
 	name: string;
 	primary_email_domain: string | null;
 	oidc_configured: boolean;
+	/**
+	 * When true, sessions from password login are refused at every
+	 * org-owned access site — the caller must sign in via this org's
+	 * OIDC IdP to see it. Toggled via {@link Api.setOrgSSORequired}
+	 * on the org-detail page. See migration 000121 for the server-side
+	 * contract.
+	 */
+	sso_required: boolean;
 	created_by_id: string | null;
 	created_at: string;
 	updated_at: string;

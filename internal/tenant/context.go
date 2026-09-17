@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -48,7 +49,14 @@ type TenantPoolResolver func(ctx context.Context, projectID string) *pgxpool.Poo
 // Editor, DDL) to the project's dedicated instance for Team-tier by
 // stashing the owner pool in ctx via query.ContextWithTenantPool. Pass
 // nil for Free/Pro-only deployments or tests.
-func PlatformTenantContext(pool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
+//
+// developerPool is threaded through so the org-sso_required enforcement
+// (migration 000121) can look up the project's org and check the
+// session against organizations.sso_required — the tables are
+// REVOKE-ALL from the gateway pool per 000114, so the check MUST run
+// on the developer pool. Pass nil in dev configurations to skip SSO
+// enforcement (safe default; matches pre-fix behaviour).
+func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := auth.ClaimsFromContext(r.Context())
@@ -71,6 +79,26 @@ func PlatformTenantContext(pool *pgxpool.Pool, resolver TenantPoolResolver) func
 					"user_id", claims.Subject,
 				)
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
+			// SSO enforcement (migration 000121): if the project's org
+			// requires SSO and the caller's session isn't SSO-backed
+			// for that org, refuse with 403 sso_required_for_org.
+			// Closes the direct-project-members bypass the reviewer
+			// flagged — org SSO enforcement now applies to everyone
+			// touching the project, not just callers reaching it via
+			// the org-membership union in ListProjects.
+			if err := EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
+				if errors.Is(err, ErrSSORequiredForOrg) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+					return
+				}
+				slog.Error("platform tenant context: sso enforcement",
+					"error", err, "project_id", projectID, "user_id", claims.Subject)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 				return
 			}
 
@@ -149,7 +177,13 @@ func PlatformTenantContext(pool *pgxpool.Pool, resolver TenantPoolResolver) func
 // PlatformStorageContext resolves the project slug from URL param {id} and
 // platform auth claims, then injects X-Project-Slug into the request header
 // so the existing storage handler can derive the bucket name.
-func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+//
+// developerPool: see PlatformTenantContext comment. SSO enforcement
+// on the storage surface is the same shape — the storage bucket
+// contents are project-scoped and belong to the org that owns the
+// project, so a password session can't reach them for an
+// sso_required org.
+func PlatformStorageContext(pool, developerPool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := auth.ClaimsFromContext(r.Context())
@@ -168,6 +202,21 @@ func PlatformStorageContext(pool *pgxpool.Pool) func(http.Handler) http.Handler 
 			role, roleErr := ResolveRole(r.Context(), pool, projectID, claims.Subject)
 			if roleErr != nil || role == "" {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
+			// SSO enforcement (migration 000121) — see
+			// PlatformTenantContext for rationale.
+			if err := EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
+				if errors.Is(err, ErrSSORequiredForOrg) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+					return
+				}
+				slog.Error("platform storage context: sso enforcement",
+					"error", err, "project_id", projectID, "user_id", claims.Subject)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 				return
 			}
 

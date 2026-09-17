@@ -306,8 +306,11 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 			return
 		}
 
-		// Issue the platform JWT.
-		accessToken, expiresIn, err := h.authSvc.IssuePlatformJWT(userID, vt.Claims.Email, isSuperadmin)
+		// Issue the platform JWT with SSO provenance so
+		// organizations.sso_required (migration 000121) can accept
+		// this session for the org that was actually authed
+		// against — and only that org.
+		accessToken, expiresIn, err := h.authSvc.IssuePlatformJWTForSSO(userID, vt.Claims.Email, isSuperadmin, claims.OrgID)
 		if err != nil {
 			slog.Error("sso callback: JWT issue", "error", err)
 			h.redirectWithError(w, r, "token_issue_failed", "could not issue session token")

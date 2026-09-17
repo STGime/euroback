@@ -102,35 +102,35 @@ var (
 // Lowercase keys; check against strings.ToLower(slug). Add to this list
 // if a new platform subdomain is planned.
 var reservedSlugs = map[string]bool{
-	"account":     true,
-	"admin":       true,
-	"api":         true,
-	"app":         true,
-	"auth":        true,
-	"billing":     true,
-	"blog":        true,
-	"callback":    true,
-	"cdn":         true,
-	"console":     true,
-	"dashboard":   true,
-	"docs":        true,
-	"eurobase":    true,
-	"help":        true,
-	"login":       true,
-	"mail":        true,
-	"marketing":   true,
-	"mcp":         true,
-	"oauth":       true,
-	"public":      true,
-	"security":    true,
-	"signup":      true,
-	"sso":         true,
-	"static":      true,
-	"status":      true,
-	"superadmin":  true,
-	"support":     true,
-	"system":      true,
-	"www":         true,
+	"account":    true,
+	"admin":      true,
+	"api":        true,
+	"app":        true,
+	"auth":       true,
+	"billing":    true,
+	"blog":       true,
+	"callback":   true,
+	"cdn":        true,
+	"console":    true,
+	"dashboard":  true,
+	"docs":       true,
+	"eurobase":   true,
+	"help":       true,
+	"login":      true,
+	"mail":       true,
+	"marketing":  true,
+	"mcp":        true,
+	"oauth":      true,
+	"public":     true,
+	"security":   true,
+	"signup":     true,
+	"sso":        true,
+	"static":     true,
+	"status":     true,
+	"superadmin": true,
+	"support":    true,
+	"system":     true,
+	"www":        true,
 }
 
 // slugIsReserved reports whether the slug collides with a platform-
@@ -331,7 +331,7 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 			return
 		}
 
-		projects, err := svc.ListProjects(r.Context(), claims.Subject)
+		projects, err := svc.ListProjects(r.Context(), claims)
 		if err != nil {
 			slog.Error("failed to list projects", "error", err, "user_id", claims.Subject)
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
@@ -495,6 +495,31 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			return
 		}
 
+		// SSO enforcement (migration 000121) BEFORE mutation. Without
+		// this a password-authed owner could detach an sso_required
+		// org's project (org_id → null) in a single request; the
+		// project would become personal and every downstream
+		// enforcement path would see org_id=NULL and pass. The
+		// one-request policy escape hatch the customer paid to
+		// prevent. Route is outside projectMembershipMiddleware
+		// (mounted at /{id}/org sibling to /{id}), so we enforce
+		// here directly.
+		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+			if errors.Is(err, ErrSSORequiredForOrg) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+				return
+			}
+			if errors.Is(err, ErrProjectNotFound) {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			slog.Error("set project org: sso enforcement", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+
 		// Distinguish "org_id absent from body" from "org_id: null":
 		// absent = 400 (nothing to do), null = detach. json.Decode
 		// into a *string doesn't tell us which, so we decode raw.
@@ -581,6 +606,14 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			return
 		}
 
+		// Authorization first, THEN SSO enforcement. Round-2 review
+		// caught that the previous ordering leaked project existence:
+		// SSO-block-returning-404 for missing project vs
+		// CanDeleteProject-returning-403 for unauthorised let a
+		// probing user distinguish "exists" (403) from "doesn't"
+		// (404). Doing authz first collapses both to 403 for anyone
+		// who isn't authorised, and only authorised callers ever
+		// reach the SSO check.
 		canDelete, err := svc.CanDeleteProject(r.Context(), projectID, claims.Subject)
 		if err != nil {
 			slog.Error("check delete permission", "error", err, "project_id", projectID)
@@ -589,6 +622,28 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		}
 		if !canDelete {
 			http.Error(w, `{"error":"forbidden: requires project owner role or org admin"}`, http.StatusForbidden)
+			return
+		}
+
+		// SSO enforcement (migration 000121) — now that we know the
+		// caller is authorised, apply the SSO gate.
+		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+			if errors.Is(err, ErrSSORequiredForOrg) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+				return
+			}
+			// ErrProjectNotFound would only fire on a race with
+			// concurrent delete; safe to surface as 404 here because
+			// authz already succeeded for this user against the row
+			// (no existence leak).
+			if errors.Is(err, ErrProjectNotFound) {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			slog.Error("delete project: sso enforcement", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 			return
 		}
 

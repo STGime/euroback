@@ -339,7 +339,7 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 
 	// Dev fallback (no email service): auto-confirmed above, so log in.
 	// New signups are never superadmin; that flag is granted out-of-band.
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, false)
+	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, false, LoginViaPassword, "")
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +452,7 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 
 	slog.Info("platform user signed in", "user_id", user.ID, "email", user.Email, "is_superadmin", isSuperadmin)
 
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin)
+	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin, LoginViaPassword, "")
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +494,7 @@ func (s *PlatformAuthService) VerifyEmail(ctx context.Context, rawToken string) 
 
 	slog.Info("platform user verified email", "user_id", user.ID, "email", user.Email)
 
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin)
+	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin, LoginViaPassword, "")
 	if err != nil {
 		return nil, err
 	}
@@ -534,19 +534,38 @@ func (s *PlatformAuthService) ResendVerification(ctx context.Context, email stri
 }
 
 // IssuePlatformJWT is the exported wrapper around generatePlatformJWT
-// for callers outside this file (the SSO handler, tests). Same JWT
-// shape and lifetime as password-based signin — a platform user
-// signed in via SSO is indistinguishable from one signed in via
-// password from the middleware's perspective.
+// for tests + external password-provenance callers. Production
+// password sites (SignUp, SignIn, VerifyEmail) currently call
+// generatePlatformJWT directly with LoginViaPassword; forgot-password
+// re-lands users on SignIn rather than minting from the reset flow.
+// Kept for API stability + the SSO handler's existing test seams.
+// login_via=password is implicit; downstream org sso_required
+// enforcement will refuse this session for orgs that require SSO.
 func (s *PlatformAuthService) IssuePlatformJWT(userID, email string, isSuperadmin bool) (string, int, error) {
-	return s.generatePlatformJWT(userID, email, isSuperadmin)
+	return s.generatePlatformJWT(userID, email, isSuperadmin, LoginViaPassword, "")
+}
+
+// IssuePlatformJWTForSSO mints a JWT with login_via='sso' and
+// sso_org_id set. Called by the SSO callback so
+// organizations.sso_required can distinguish a session backed by
+// that org's OIDC handshake from a password login. Being SSO-backed
+// for org A doesn't grant SSO-satisfied access to org B — see
+// SessionSatisfiesSSOFor.
+func (s *PlatformAuthService) IssuePlatformJWTForSSO(userID, email string, isSuperadmin bool, ssoOrgID string) (string, int, error) {
+	return s.generatePlatformJWT(userID, email, isSuperadmin, LoginViaSSO, ssoOrgID)
 }
 
 // generatePlatformJWT creates an HS256 JWT for a platform user. The
 // isSuperadmin flag is embedded in the token so downstream middleware can
 // gate admin routes without a per-request DB hit; it is re-verified from
 // platform_users on sensitive actions.
-func (s *PlatformAuthService) generatePlatformJWT(userID, email string, isSuperadmin bool) (string, int, error) {
+//
+// loginVia / ssoOrgID travel as JWT claims so
+// organizations.sso_required (migration 000121) can enforce at every
+// org-owned access site — otherwise password login would be
+// interchangeable with SSO login for a member, defeating the
+// enforcement contract the customer is buying.
+func (s *PlatformAuthService) generatePlatformJWT(userID, email string, isSuperadmin bool, loginVia, ssoOrgID string) (string, int, error) {
 	expiresIn := 24 * 3600 // 24 hours
 	now := time.Now()
 
@@ -558,6 +577,15 @@ func (s *PlatformAuthService) generatePlatformJWT(userID, email string, isSupera
 		"iat":           now.Unix(),
 		"exp":           now.Add(time.Duration(expiresIn) * time.Second).Unix(),
 		"is_superadmin": isSuperadmin,
+	}
+	// Omit empty values so pre-fix tokens (parsed after this deploy)
+	// still look consistent — a missing login_via is treated as
+	// LoginViaPassword by enforcement, which is the safe direction.
+	if loginVia != "" {
+		claims["login_via"] = loginVia
+	}
+	if ssoOrgID != "" {
+		claims["sso_org_id"] = ssoOrgID
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -698,6 +726,12 @@ func (s *PlatformAuthService) ValidatePlatformJWT(tokenStr string) (*Claims, err
 	sub, _ := mapClaims.GetSubject()
 	email, _ := mapClaims["email"].(string)
 	isSuperadmin, _ := mapClaims["is_superadmin"].(bool)
+	// login_via / sso_org_id are optional (empty on pre-fix tokens
+	// minted before migration 000121 shipped). Enforcement code
+	// treats an empty login_via as LoginViaPassword — the safe
+	// default for sso_required orgs.
+	loginVia, _ := mapClaims["login_via"].(string)
+	ssoOrgID, _ := mapClaims["sso_org_id"].(string)
 
 	if sub == "" {
 		return nil, fmt.Errorf("token missing subject")
@@ -707,6 +741,8 @@ func (s *PlatformAuthService) ValidatePlatformJWT(tokenStr string) (*Claims, err
 		Subject:      sub,
 		Email:        email,
 		IsSuperadmin: isSuperadmin,
+		LoginVia:     loginVia,
+		SsoOrgID:     ssoOrgID,
 	}, nil
 }
 

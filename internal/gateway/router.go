@@ -643,6 +643,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Get("/", h.HandleListOrgs())
 				r.Get("/{id}", h.HandleGetOrg())
 				r.Patch("/{id}/sso", h.HandleSetSSOConfig())
+				r.Patch("/{id}/sso-required", h.HandleSetSSORequired())
 				r.Post("/{id}/members", h.HandleInviteMember())
 				r.Delete("/{id}/members/{userId}", h.HandleRemoveMember())
 			} else {
@@ -831,7 +832,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Use(platformAuth.Handler)
 			}
 			// Verify the authenticated user is a member of this project.
-			r.Use(projectMembershipMiddleware(pool, isDev))
+			r.Use(projectMembershipMiddleware(pool, developerPool, isDev))
 			if logCh != nil {
 				r.Use(RequestLoggingMiddleware(logCh))
 			}
@@ -872,8 +873,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// also sets WithDeveloperRole, so withDeveloperRole
 			// becomes redundant but kept for defence-in-depth if the
 			// context middleware ever gets reordered.
-			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, tenantPoolResolver), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
-			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, tenantPoolResolver), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
 			// Tenant-level versioned migrations (#190). Platform auth +
 			// developer role; each migration runs under a per-tenant LOGIN
 			// role the gateway connects as (see MigrationExecutor), so a
@@ -928,7 +929,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// DB for Team-tier). Free/Pro get pool=nil stashed →
 			// tenantPool falls back to shared, unchanged behaviour.
 			if vaultSvc != nil && vaultSvc.Configured() {
-				r.With(tenant.RequireMinRole("admin"), tenant.PlatformTenantContext(pool, tenantPoolResolver)).Mount("/vault", vault.Routes(vaultSvc, pool))
+				r.With(tenant.RequireMinRole("admin"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
 
 			// Compliance (DPA report, sub-processor registry, DSAR exports).
@@ -1127,7 +1128,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// End-user admin is a "settings"-shaped capability (closes #50).
 			r.Route("/users", func(r chi.Router) {
 				r.Use(tenant.RequireMinRole("admin"))
-				r.Use(tenant.PlatformTenantContext(pool, tenantPoolResolver))
+				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
 				r.Mount("/", enduser.PlatformRoutes(pool, enduserPoolResolver, limiter))
 			})
 
@@ -1150,7 +1151,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// can see.
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
-					r.Use(tenant.PlatformStorageContext(pool))
+					r.Use(tenant.PlatformStorageContext(pool, developerPool))
 					// Console storage: route metadata reads/writes to
 					// the dedicated instance for Team-tier. The inner
 					// QueryEngine gets the same resolver so ownership
@@ -1179,7 +1180,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// internal/tenant/context.go) still uses the gateway pool —
 			// that's a public.* read.
 			r.Route("/data", func(r chi.Router) {
-				r.Use(tenant.PlatformTenantContext(pool, tenantPoolResolver))
+				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
 
 				queryEngine := query.NewQueryEngine(developerPool)
 				publisher := realtime.NewEventPublisher(nil, hub)
@@ -1227,7 +1228,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// so VaultService.tenantPool routes to the dedicated
 		// instance for Team-tier — otherwise Team-tier admins
 		// configuring OAuth get 500 on save.
-		r.With(tenant.PlatformTenantContext(pool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
+		r.With(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
 		// PATCH /{id}/org attaches/detaches a project to/from an org.
 		// Kept as a separate route from PATCH /{id} because the shape
 		// + auth check (owner + org membership) is entirely different
@@ -1245,7 +1246,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	if hub != nil {
 		var authorize realtime.Authorize
 		if !isDev {
-			authorize = buildRealtimeAuthorize(pool, platformAuth)
+			authorize = buildRealtimeAuthorize(pool, developerPool, platformAuth)
 		}
 		wsHandler := realtime.HandleWebSocket(hub, authorize, BuildOriginChecker(allowedOrigins), isDev)
 		// MaintenanceModeMiddleware intentionally not applied here.
@@ -1458,7 +1459,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 // projectMembershipMiddleware verifies the authenticated user is a member of
 // the project identified by the {id} URL parameter. Returns 404 if not.
-func projectMembershipMiddleware(pool *pgxpool.Pool, isDev bool) func(http.Handler) http.Handler {
+//
+// developerPool is threaded through so this middleware — which
+// guards the entire /platform/projects/{id} group — enforces
+// organizations.sso_required (migration 000121) for every route
+// underneath. The per-route wrappers PlatformTenantContext /
+// PlatformStorageContext still call the same helper (defence in
+// depth for the six routes that mount them independently), but the
+// group-level call here is what actually covers the connection /
+// members / DDL / storage / everything-else routes reviewer
+// enumerated in the round-2 audit.
+func projectMembershipMiddleware(pool, developerPool *pgxpool.Pool, isDev bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// In dev mode, skip membership check (dev user may not have real membership).
@@ -1482,6 +1493,31 @@ func projectMembershipMiddleware(pool *pgxpool.Pool, isDev bool) func(http.Handl
 			role, err := tenant.ResolveRole(r.Context(), pool, projectID, claims.Subject)
 			if err != nil || role == "" {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+
+			// SSO enforcement (migration 000121). Placed AFTER the
+			// membership 404 so a non-member can't distinguish "org
+			// requires SSO" from "project doesn't exist" — both are
+			// 404 to them. A member of an sso_required org whose
+			// session isn't SSO-backed gets 403 with the machine-
+			// readable code so the console can bounce.
+			if err := tenant.EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
+				if errors.Is(err, tenant.ErrSSORequiredForOrg) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+					return
+				}
+				// ErrProjectNotFound here would only fire on a race
+				// with delete between ResolveRole and this lookup;
+				// same 404 either way.
+				if errors.Is(err, tenant.ErrProjectNotFound) {
+					http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+					return
+				}
+				slog.Error("project membership: sso enforcement", "error", err, "project_id", projectID, "user_id", claims.Subject)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 				return
 			}
 
@@ -1623,7 +1659,7 @@ func sdkDDLAdapter(next http.Handler) http.Handler {
 //
 // Returns ErrUnauthorized for a bad token, ErrForbidden for a valid
 // token without access.
-func buildRealtimeAuthorize(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware) realtime.Authorize {
+func buildRealtimeAuthorize(pool, developerPool *pgxpool.Pool, platformAuth *auth.PlatformAuthMiddleware) realtime.Authorize {
 	return func(ctx context.Context, token, requestedProjectID string) (realtime.AuthorizedClient, error) {
 		// 1. API key path — covers the SDK realtime use case.
 		if strings.HasPrefix(token, "eb_pk_") || strings.HasPrefix(token, "eb_sk_") {
@@ -1653,13 +1689,26 @@ func buildRealtimeAuthorize(pool *pgxpool.Pool, platformAuth *auth.PlatformAuthM
 		//    membership on the requested project. Platform users
 		//    are admins for the project, so service=true (they see
 		//    every row regardless of owner column).
-		if subject, err := platformAuth.ValidateToken(token); err == nil && subject != "" {
-			role, roleErr := tenant.ResolveRole(ctx, pool, requestedProjectID, subject)
+		// Use ValidatePlatformJWT (not ValidateToken) so we get the
+		// full Claims incl. LoginVia / SsoOrgID needed for
+		// organizations.sso_required enforcement on the realtime
+		// stream. Round-2 review flagged that the previous
+		// ValidateToken path only returned the subject and left
+		// realtime unenforced — a departed employee could still
+		// subscribe to project events on an sso_required org.
+		if platformClaims, err := platformAuth.ValidatePlatformJWT(token); err == nil && platformClaims != nil && platformClaims.Subject != "" {
+			role, roleErr := tenant.ResolveRole(ctx, pool, requestedProjectID, platformClaims.Subject)
 			if roleErr != nil {
 				return realtime.AuthorizedClient{}, fmt.Errorf("resolve role: %w", roleErr)
 			}
 			if role == "" {
 				return realtime.AuthorizedClient{}, realtime.ErrForbidden
+			}
+			if err := tenant.EnforceOrgSSOForProject(ctx, developerPool, platformClaims, requestedProjectID); err != nil {
+				if errors.Is(err, tenant.ErrSSORequiredForOrg) {
+					return realtime.AuthorizedClient{}, realtime.ErrForbidden
+				}
+				return realtime.AuthorizedClient{}, fmt.Errorf("realtime sso enforcement: %w", err)
 			}
 			var plan string
 			if err := pool.QueryRow(ctx,
