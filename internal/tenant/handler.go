@@ -4,6 +4,7 @@ package tenant
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -18,11 +19,29 @@ import (
 )
 
 // CreateProjectRequest is the JSON body for creating a new project (tenant).
+//
+// OrgID / OrgIDExplicit encode a three-state input:
+//
+//   - Field omitted from the request body → OrgIDExplicit=false: fall
+//     back to auto-attach (attach to the caller's admin'd org if
+//     they have one, else personal). Matches pre-picker behaviour.
+//   - Field present as `"org_id": null` → OrgIDExplicit=true, OrgID=nil:
+//     force personal, skip auto-attach. Lets an org admin create a
+//     side project without it landing in the org.
+//   - Field present as `"org_id": "<uuid>"` → OrgIDExplicit=true,
+//     OrgID=&"<uuid>": attach to that specific org after verifying the
+//     caller admins it.
+//
+// OrgIDExplicit is set by the handler after peeking the raw JSON body
+// (json.Decoder can't distinguish absent from null via `*string`) and
+// is deliberately not serialised in the JSON tag.
 type CreateProjectRequest struct {
-	Name   string `json:"name"`
-	Slug   string `json:"slug,omitempty"`   // optional; derived from name if empty
-	Region string `json:"region,omitempty"` // defaults to "fr-par"
-	Plan   string `json:"plan,omitempty"`   // defaults to "free"
+	Name          string  `json:"name"`
+	Slug          string  `json:"slug,omitempty"`   // optional; derived from name if empty
+	Region        string  `json:"region,omitempty"` // defaults to "fr-par"
+	Plan          string  `json:"plan,omitempty"`   // defaults to "free"
+	OrgID         *string `json:"org_id,omitempty"`
+	OrgIDExplicit bool    `json:"-"`
 }
 
 // smsGateBlocks reports whether an auth-config save should be rejected
@@ -164,11 +183,41 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 			}
 		}
 
+		// Cap body at 16 KB. Legitimate CreateProjectRequest fits in
+		// well under 1 KB (name + slug + region + plan + org_id);
+		// bounding here matches the per-handler pattern used elsewhere
+		// (support / team-beta-request / contact) and stops a hostile
+		// client from streaming an unbounded payload into memory
+		// during the raw-JSON peek. On overflow the ReadAll returns
+		// http.MaxBytesError which we surface as 413.
+		r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			slog.Warn("read create tenant request body failed", "error", err)
+			var mbErr *http.MaxBytesError
+			if errors.As(err, &mbErr) {
+				http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
 		var req CreateProjectRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
 			slog.Warn("invalid create tenant request body", "error", err)
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
+		}
+		// Distinguish "org_id absent" from "org_id: null" — a *string in
+		// Go maps both to nil, so peek the raw JSON to know which the
+		// client actually sent. Present-and-null is the "force personal"
+		// signal (Owner: Personal in the console picker); absent is the
+		// legacy auto-attach behaviour.
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(bodyBytes, &probe); err == nil {
+			if _, ok := probe["org_id"]; ok {
+				req.OrgIDExplicit = true
+			}
 		}
 
 		// #70 diagnostic: log the decoded plan/region so a repro of
@@ -227,6 +276,14 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 			}
 			if errors.Is(err, ErrLegalTeamBetaRequired) {
 				http.Error(w, `{"error":"legal team plan requires closed-beta access","code":"legal_team_beta_required"}`, http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ErrOrgAttachForbidden) {
+				http.Error(w, `{"error":"you must be an admin of the target organization to attach a project to it","code":"org_attach_forbidden"}`, http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ErrOrgAttachTargetGone) {
+				http.Error(w, `{"error":"target organization no longer exists; retry with a fresh org list","code":"org_attach_target_gone"}`, http.StatusConflict)
 				return
 			}
 			if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
@@ -502,13 +559,36 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 
 // HandleDeleteProject deletes a project and its tenant schema.
 //
+// Two callers are authorised: the direct project owner (via
+// project_members.role='owner') AND, for org-owned projects, any admin
+// of the project's org (org_members.role='admin' on projects.org_id).
+// The org-admin path was added after the first Team-org customer
+// (qtune) hit the pre-org-plumbing gap: admin A creates the project,
+// admin B (also org admin) is stuck asking A to delete it — no way for
+// B to clean up if A leaves. GitHub / Google Workspace / Confluence all
+// let org admins delete resources they didn't personally create; this
+// mirrors that expectation. Same slug-confirm dialog still gates the
+// action (client-side); audit log captures the actor either way.
+//
 // DELETE /v1/tenants/{id}
 func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
-		claims, _, ok := RequireRole(w, r, pool, projectID, "owner")
-		if !ok {
+		claims, hasAuth := auth.ClaimsFromContext(r.Context())
+		if !hasAuth || claims == nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		canDelete, err := svc.CanDeleteProject(r.Context(), projectID, claims.Subject)
+		if err != nil {
+			slog.Error("check delete permission", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+		if !canDelete {
+			http.Error(w, `{"error":"forbidden: requires project owner role or org admin"}`, http.StatusForbidden)
 			return
 		}
 

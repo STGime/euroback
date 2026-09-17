@@ -443,6 +443,292 @@ func TestListProjects_OrgUnion(t *testing.T) {
 	}
 }
 
+// TestCanDeleteProject_OrgAdminNonCreator asserts that a non-creator
+// org admin can delete an org-owned project they didn't personally
+// create — the pre-org-plumbing gate refused this (only project
+// owner could delete), leaving a real operational gap when the
+// creator left the org.
+func TestCanDeleteProject_OrgAdminNonCreator(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-canadmin@test.eurobase.local")
+	bob := insertTestPlatformUser(t, pool, "bob-canadmin@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, bob})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice Delete Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+	// Bob invited as admin (non-creator admin).
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'admin', 'manual')`,
+		aliceOrg.ID, bob,
+	); err != nil {
+		t.Fatalf("seed bob as admin: %v", err)
+	}
+
+	// Alice creates the project (auto-attaches to her org).
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, alice, "alice-canadmin@test.eurobase.local", CreateProjectRequest{
+		Name: "Delete Target", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	// Bob (non-creator admin) should be authorised.
+	canBob, err := svc.CanDeleteProject(ctx, proj.ID, bob)
+	if err != nil {
+		t.Fatalf("CanDeleteProject bob: %v", err)
+	}
+	if !canBob {
+		t.Fatalf("expected non-creator admin bob to be authorised; got false")
+	}
+
+	// Alice (creator + owner) should also still be authorised.
+	canAlice, err := svc.CanDeleteProject(ctx, proj.ID, alice)
+	if err != nil {
+		t.Fatalf("CanDeleteProject alice: %v", err)
+	}
+	if !canAlice {
+		t.Fatalf("expected creator alice to still be authorised; got false")
+	}
+}
+
+// TestCanDeleteProject_RejectsUnrelatedUser asserts a plain user
+// with no project-membership and no org-membership can't delete an
+// org-owned project. Keeps the fence tight.
+func TestCanDeleteProject_RejectsUnrelatedUser(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-reject@test.eurobase.local")
+	carol := insertTestPlatformUser(t, pool, "carol-reject@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, carol})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	if _, err := orgsSvc.CreateOrg(ctx, alice, "Alice Fence Org"); err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, alice, "alice-reject@test.eurobase.local", CreateProjectRequest{
+		Name: "Fence Target", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	// Carol is neither a project member nor an org member — must be refused.
+	can, err := svc.CanDeleteProject(ctx, proj.ID, carol)
+	if err != nil {
+		t.Fatalf("CanDeleteProject carol: %v", err)
+	}
+	if can {
+		t.Fatalf("expected unrelated carol to be refused; got true")
+	}
+}
+
+// TestCanDeleteProject_RejectsAdminOfDifferentOrg asserts that an
+// admin of some OTHER org can't delete a project belonging to a
+// different org — pins the cross-org boundary the JOIN provides.
+// Without the join predicate `om.org_id = p.org_id`, a rogue admin
+// could reach any org-owned project.
+func TestCanDeleteProject_RejectsAdminOfDifferentOrg(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-crossorg@test.eurobase.local")
+	eve := insertTestPlatformUser(t, pool, "eve-crossorg@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, eve})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	// Alice creates her own org + a project in it.
+	if _, err := orgsSvc.CreateOrg(ctx, alice, "Alice Cross Org"); err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, alice, "alice-crossorg@test.eurobase.local", CreateProjectRequest{
+		Name: "Cross Org Target", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	// Eve creates her OWN separate org (she's admin there, not
+	// Alice's). She has no membership in Alice's org.
+	if _, err := orgsSvc.CreateOrg(ctx, eve, "Eve Own Org"); err != nil {
+		t.Fatalf("eve CreateOrg: %v", err)
+	}
+
+	// Eve, admin of her own org, should NOT be authorised to delete
+	// Alice's project — the join predicate `om.org_id = p.org_id`
+	// blocks the cross-org reach.
+	can, err := svc.CanDeleteProject(ctx, proj.ID, eve)
+	if err != nil {
+		t.Fatalf("CanDeleteProject eve: %v", err)
+	}
+	if can {
+		t.Fatalf("cross-org boundary broken: eve (admin of a different org) got authorised to delete alice's project")
+	}
+}
+
+// TestCanDeleteProject_RejectsMemberOnly asserts that a MEMBER (not
+// admin) of the org can't delete the project. Delete stays an
+// admin-role action.
+func TestCanDeleteProject_RejectsMemberOnly(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-memcheck@test.eurobase.local")
+	dave := insertTestPlatformUser(t, pool, "dave-memcheck@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, dave})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice Memcheck Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+	// Dave: MEMBER of the org, not admin.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'member', 'manual')`,
+		aliceOrg.ID, dave,
+	); err != nil {
+		t.Fatalf("seed dave as member: %v", err)
+	}
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, alice, "alice-memcheck@test.eurobase.local", CreateProjectRequest{
+		Name: "Member Check Target", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	can, err := svc.CanDeleteProject(ctx, proj.ID, dave)
+	if err != nil {
+		t.Fatalf("CanDeleteProject dave: %v", err)
+	}
+	if can {
+		t.Fatalf("expected org member (non-admin) dave to be refused; got true")
+	}
+}
+
+// TestCreateProject_ExplicitPersonalForcesNoAttach asserts that
+// OrgIDExplicit=true + OrgID=nil skips auto-attach even when the
+// caller admins an org. The picker's "Personal" option.
+func TestCreateProject_ExplicitPersonalForcesNoAttach(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	uid := insertTestPlatformUser(t, pool, "explicit-personal@test.eurobase.local")
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = $1`, uid) })
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	if _, err := orgsSvc.CreateOrg(ctx, uid, "Explicit Personal Org"); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, uid, "explicit-personal@test.eurobase.local", CreateProjectRequest{
+		Name: "Explicit Personal Project", Region: "fr-par", Plan: "free",
+		OrgIDExplicit: true, // present as null → force personal
+		OrgID:         nil,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	if proj.OrgID != nil {
+		t.Fatalf("expected personal (nil org_id) via explicit-null; got %s", *proj.OrgID)
+	}
+}
+
+// TestCreateProject_ExplicitOrgIDAttachAdminOK asserts that
+// OrgIDExplicit=true + OrgID=<uuid> attaches when the caller admins
+// the target org. Mirrors the picker's "choose an org" branch.
+func TestCreateProject_ExplicitOrgIDAttachAdminOK(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	uid := insertTestPlatformUser(t, pool, "explicit-attach@test.eurobase.local")
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = $1`, uid) })
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	org, err := orgsSvc.CreateOrg(ctx, uid, "Explicit Attach Org")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, uid, "explicit-attach@test.eurobase.local", CreateProjectRequest{
+		Name: "Explicit Attach Project", Region: "fr-par", Plan: "free",
+		OrgIDExplicit: true,
+		OrgID:         &org.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	if proj.OrgID == nil || *proj.OrgID != org.ID {
+		t.Fatalf("expected attach to org %s; got %+v", org.ID, proj.OrgID)
+	}
+}
+
+// TestCreateProject_ExplicitOrgIDNonAdminRejected asserts a caller
+// who isn't an admin of the target org gets ErrOrgAttachForbidden
+// on explicit-attach. Keeps the picker honest against a hand-crafted
+// request that names an org the caller doesn't admin.
+func TestCreateProject_ExplicitOrgIDNonAdminRejected(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-nonadmin@test.eurobase.local")
+	bob := insertTestPlatformUser(t, pool, "bob-nonadmin@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, bob})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice NonAdmin Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+	// Bob is NOT a member of Alice's org.
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+	_, err = svc.CreateProject(ctx, bob, "bob-nonadmin@test.eurobase.local", CreateProjectRequest{
+		Name: "Bob Bogus Attach", Region: "fr-par", Plan: "free",
+		OrgIDExplicit: true,
+		OrgID:         &aliceOrg.ID,
+	})
+	if !errors.Is(err, ErrOrgAttachForbidden) {
+		t.Fatalf("expected ErrOrgAttachForbidden for non-admin explicit attach; got %v", err)
+	}
+}
+
 // TestListProjects_MergedOrderGlobalNewestFirst asserts that when
 // results come from BOTH the direct-member branch and the org
 // branch, the merged list is globally sorted newest-first — not two

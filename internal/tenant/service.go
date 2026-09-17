@@ -135,8 +135,58 @@ func (s *TenantService) SetProviderRegistry(reg *dbprovider.Registry) {
 }
 
 // ErrOrgAttachForbidden is returned when the caller tries to attach
-// a project to an org they are not a member of. Handler maps to 403.
-var ErrOrgAttachForbidden = errors.New("caller is not a member of the target organization")
+// a project to an org they are not an admin of. Handler maps to 403.
+var ErrOrgAttachForbidden = errors.New("caller is not an admin of the target organization")
+
+// CanDeleteProject reports whether the caller is authorised to delete
+// the given project. Two paths grant permission:
+//
+//  1. Direct project owner (project_members.role='owner') — the
+//     pre-org-plumbing model. Runs on the gateway pool.
+//  2. Admin of the org the project belongs to (org_members.role='admin'
+//     AND org_id = projects.org_id). Runs on the developer pool because
+//     gateway has REVOKE-ALL on org tables (migration 000114). Skipped
+//     when the project is personal (org_id NULL) or when the developer
+//     pool isn't wired (dev / partial-config), matching the "owner-only"
+//     pre-#593 shape as a safe fallback.
+//
+// Returns (false, nil) for "not authorised" — a distinct signal from
+// "lookup failed." Callers translate the false → 403 in the handler.
+func (s *TenantService) CanDeleteProject(ctx context.Context, projectID, platformUserID string) (bool, error) {
+	// Path 1: direct project owner. Uses the gateway pool via ResolveRole.
+	role, err := ResolveRole(ctx, s.pool, projectID, platformUserID)
+	if err != nil {
+		return false, fmt.Errorf("resolve project role: %w", err)
+	}
+	if HasRole(role, "owner") {
+		return true, nil
+	}
+
+	// Path 2: org admin. Requires developer-pool routing since the
+	// join spans org_members (REVOKE-ALL on gateway per 000114). If
+	// the developer pool is nil, fall back to owner-only.
+	if s.developerPool == nil {
+		return false, nil
+	}
+	var one int
+	err = s.developerPool.QueryRow(ctx,
+		`SELECT 1
+		 FROM public.projects p
+		 JOIN public.org_members om ON om.org_id = p.org_id
+		 WHERE p.id = $1::uuid
+		   AND om.platform_user_id = $2::uuid
+		   AND om.role = 'admin'
+		   AND p.org_id IS NOT NULL`,
+		projectID, platformUserID,
+	).Scan(&one)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check org admin for project: %w", err)
+}
 
 // ErrOrgAttachTargetGone is returned when SetProjectOrg / auto-attach
 // try to point projects.org_id at an org that no longer exists — a
@@ -346,54 +396,76 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		return nil, fmt.Errorf("resolve platform user: %w", err)
 	}
 
-	// Org auto-attach: if the caller is an admin in an org (their own
-	// or one they were invited into as admin), stamp the new project
-	// with its org_id so org_members can see it via the union path in
-	// ListProjects. Runs on the developer pool because migration
-	// 000114 REVOKEs ALL from the gateway pool on organizations.
-	// Nil pool (dev / partial-config) → skip; project lands with
-	// org_id NULL, matching pre-#591 behaviour.
+	// Org attachment. Three input states from CreateProjectRequest,
+	// resolved here into a single orgID that goes into the INSERT:
 	//
-	// Admin-scoped (not member-scoped) so a regular member creating a
-	// project doesn't force it into visibility for every org admin
-	// without asking — a member's project stays personal by default,
-	// they can opt in via PATCH /platform/projects/{id}/org.
+	//  1. Explicit personal (OrgIDExplicit=true, OrgID=nil) — caller
+	//     ticked "Personal" in the console picker. Skip auto-attach;
+	//     project lands with org_id NULL regardless of any org
+	//     membership the caller has.
+	//  2. Explicit org (OrgIDExplicit=true, OrgID!=nil) — caller
+	//     chose a specific org in the picker. Verify they admin it
+	//     via developer pool before honouring the choice; otherwise
+	//     ErrOrgAttachForbidden.
+	//  3. Auto-attach (OrgIDExplicit=false) — legacy behaviour.
+	//     Attach to the caller's admin'd org if they have one, else
+	//     personal. Admin-scoped (not member-scoped) so a member's
+	//     project stays personal by default. Deterministic tiebreak:
+	//     prefer the org the caller CREATED (own > invited-admin),
+	//     then the oldest invited-admin org.
 	//
-	// Deterministic tiebreak: prefer the org the caller CREATED
-	// (created_by = caller), then fall back to the oldest org they
-	// were invited into as admin. Without ORDER BY, a user who's
-	// admin in two orgs (theirs + one they were invited into) would
-	// see non-deterministic auto-attach — a subtle surprise. The
-	// one-org rule (migration 000120) makes multi-created rare, but
-	// the invited-admin path stays open.
+	// Runs on the developer pool because migration 000114 REVOKEs
+	// ALL from the gateway pool on organizations / org_members. Nil
+	// pool (dev / partial-config) → skip auto-attach entirely; on
+	// the explicit-attach path a nil pool returns an error rather
+	// than silently landing personal, because "I asked for org X"
+	// should never silently become "personal."
 	//
-	// Note: this is a separate query against developerPool (not the
-	// project-creation tx). If a concurrent DeleteOrg races between
-	// this SELECT and the INSERT below, the INSERT will fail with
-	// SQLSTATE 23503 on projects_org_id_fkey — the FK's ON DELETE
-	// SET NULL only nulls EXISTING children when the parent is
-	// deleted; it does NOT retroactively rescue a fresh insert that
-	// names an already-gone parent. That's caught below and mapped
-	// to ErrOrgAttachTargetGone so the handler can 409-retry rather
-	// than 500. DeleteOrg is admin-driven and rare, so this path is
-	// mostly theoretical.
+	// A concurrent DeleteOrg racing between the membership check
+	// and the INSERT below will raise SQLSTATE 23503 on
+	// projects_org_id_fkey — ON DELETE SET NULL only nulls EXISTING
+	// children, not fresh inserts naming a gone parent. Handled
+	// below and mapped to ErrOrgAttachTargetGone → 409 retry.
 	var orgID *string
-	if s.developerPool != nil {
-		var id string
+	switch {
+	case req.OrgIDExplicit && req.OrgID == nil:
+		// Explicit personal — no attach.
+	case req.OrgIDExplicit && req.OrgID != nil:
+		if s.developerPool == nil {
+			return nil, fmt.Errorf("org attach unavailable: developer pool not configured")
+		}
+		var one int
 		err := s.developerPool.QueryRow(ctx,
-			`SELECT o.id::text
-			 FROM public.organizations o
-			 JOIN public.org_members om ON om.org_id = o.id
-			 WHERE om.platform_user_id = $1::uuid AND om.role = 'admin'
-			 ORDER BY (o.created_by = $1::uuid) DESC, o.created_at ASC
-			 LIMIT 1`,
-			platformUserID,
-		).Scan(&id)
-		if err == nil {
-			orgID = &id
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			slog.Warn("project org auto-attach: developer-pool query failed; project will land as personal",
-				"error", err, "platform_user_id", platformUserID)
+			`SELECT 1 FROM public.org_members
+			 WHERE org_id = $1::uuid AND platform_user_id = $2::uuid AND role = 'admin'`,
+			*req.OrgID, platformUserID,
+		).Scan(&one)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrOrgAttachForbidden
+			}
+			return nil, fmt.Errorf("check org admin membership: %w", err)
+		}
+		orgID = req.OrgID
+	default:
+		// Auto-attach.
+		if s.developerPool != nil {
+			var id string
+			err := s.developerPool.QueryRow(ctx,
+				`SELECT o.id::text
+				 FROM public.organizations o
+				 JOIN public.org_members om ON om.org_id = o.id
+				 WHERE om.platform_user_id = $1::uuid AND om.role = 'admin'
+				 ORDER BY (o.created_by = $1::uuid) DESC, o.created_at ASC
+				 LIMIT 1`,
+				platformUserID,
+			).Scan(&id)
+			if err == nil {
+				orgID = &id
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				slog.Warn("project org auto-attach: developer-pool query failed; project will land as personal",
+					"error", err, "platform_user_id", platformUserID)
+			}
 		}
 	}
 

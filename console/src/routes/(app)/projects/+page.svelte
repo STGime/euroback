@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { api, APIError, type Project } from '$lib/api.js';
+	import { api, APIError, type OrgWithMembership, type Project } from '$lib/api.js';
 	import { projects, projectsLoading, projectsError, loadProjects } from '$lib/stores.js';
 
 	// Modal state
@@ -16,6 +16,25 @@
 	// the plan picker.
 	let hasTeamBeta = $state(false);
 	let hasLegalTeamBeta = $state(false);
+	// Owner picker: orgs the caller ADMINS (member-role orgs don't
+	// show up here — a plain member's project stays personal by
+	// default, matching the server-side auto-attach rule). Loaded on
+	// mount so the picker doesn't flash the wrong initial state when
+	// the modal opens.
+	//
+	// newOwner encodes the picker's selection:
+	//   'personal' → project stays personal (sends org_id: null to
+	//                the server, which forces the picker branch and
+	//                skips auto-attach).
+	//   '<org-id>' → attach to that specific org (server verifies
+	//                the caller admins it before honouring).
+	//
+	// Defaulted to the first admin org (matches pre-picker
+	// auto-attach behaviour) so the modal keeps working with one
+	// click for the common case; the alternative is a single click
+	// to switch to "Personal."
+	let adminOrgs = $state<OrgWithMembership[]>([]);
+	let newOwner = $state<string>('personal');
 
 	// Derived slug from name
 	let newSlug = $derived(
@@ -179,16 +198,26 @@
 	}
 
 	onMount(async () => {
-		// Load profile in parallel with projects so the Team option
-		// is available immediately when the modal opens. Failure is
-		// non-fatal — hasTeamBeta stays false.
-		const [_, profile] = await Promise.all([
+		// Load profile + orgs in parallel with projects so the Team
+		// option + the owner picker are wired the moment the modal
+		// opens. Failures are non-fatal — hasTeamBeta stays false and
+		// the owner picker collapses to the "Personal" default.
+		const [_, profile, orgsRes] = await Promise.all([
 			loadProjects(),
-			api.getProfile().catch(() => null)
+			api.getProfile().catch(() => null),
+			api.listOrgs().catch(() => null)
 		]);
 		if (profile) {
 			hasTeamBeta = !!profile.team_beta_access;
 			hasLegalTeamBeta = !!profile.legal_team_beta_access;
+		}
+		if (orgsRes?.orgs) {
+			// Admin orgs only — matches the server-side auto-attach
+			// rule (a plain member's project stays personal). Sorted
+			// so the pick list is stable across renders.
+			adminOrgs = orgsRes.orgs
+				.filter((o) => o.role === 'admin')
+				.sort((a, b) => a.name.localeCompare(b.name));
 		}
 
 		// Post-Mollie return handling. If we're landing here from a
@@ -226,6 +255,11 @@
 			preselectPlan === 'legal_team' ? hasLegalTeamBeta :
 			preselectPlan !== undefined;
 		newPlan = preselectPlan && allowedPreselect ? preselectPlan : 'free';
+		// Default owner: first admin'd org if any, else Personal.
+		// Matches the pre-picker auto-attach behaviour so the common
+		// case (org admin creating org projects) stays one-click; the
+		// switch to Personal is a single click for the outlier case.
+		newOwner = adminOrgs.length > 0 ? adminOrgs[0].id : 'personal';
 		createError = '';
 		showNewModal = true;
 	}
@@ -286,11 +320,25 @@
 			// NULL on both plan_limits rows), so no Mollie checkout.
 			// When Legal Team ships as a paid SKU, mirror the pro
 			// branch above (plan_code:'legal_team').
+			//
+			// Owner picker (org attach) applies on this sync path.
+			// Pro's payment-first flow goes through Mollie webhook →
+			// CreateProjectForBilling and doesn't yet plumb the
+			// picker through; Pro projects fall back to server-side
+			// auto-attach for now. Follow-up: extend pending_projects
+			// to carry org_id + null-marker so the picker choice
+			// survives the round-trip.
 			await api.createProject({
 				name: newName.trim(),
 				slug: newSlug,
 				region: 'fr-par',
-				plan: newPlan
+				plan: newPlan,
+				// newOwner is either 'personal' or an org id. Server-side
+				// CreateProjectRequest distinguishes absent (auto-attach)
+				// from null (force personal) from set (attach to that
+				// org); this picker never emits "absent" — it always
+				// makes an explicit choice on behalf of the user.
+				org_id: newOwner === 'personal' ? null : newOwner
 			});
 			showNewModal = false;
 			await loadProjects();
@@ -591,6 +639,28 @@
 						<p class="mt-1 text-xs text-gray-400 font-mono">{newSlug}.eurobase.app</p>
 					{/if}
 				</div>
+
+				<!-- Owner picker: attach to an org the caller admins, or keep personal.
+				     Hidden entirely when the caller doesn't admin any org — no picker is
+				     better than a one-option picker for the common per-user case. -->
+				{#if adminOrgs.length > 0}
+					<div>
+						<label for="project-owner" class="block text-sm font-medium text-gray-700">Owner</label>
+						<select
+							id="project-owner"
+							bind:value={newOwner}
+							class="mt-1 block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						>
+							{#each adminOrgs as org}
+								<option value={org.id}>{org.name} (organization)</option>
+							{/each}
+							<option value="personal">Personal (not attached to any org)</option>
+						</select>
+						<p class="mt-1 text-xs text-gray-400">
+							Org projects are visible to all org members. Personal projects are yours alone until you attach them.
+						</p>
+					</div>
+				{/if}
 
 				<!-- Region (locked to Paris) -->
 				<div>

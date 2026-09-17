@@ -997,12 +997,19 @@ export class EurobaseAPI {
 		return project;
 	}
 
-	/** Create a new project (tenant). */
+	/** Create a new project (tenant).
+	 *
+	 * org_id encoding (matches CreateProjectRequest server-side):
+	 *   - omitted → server auto-attaches to caller's admin org if any
+	 *   - null    → force personal (explicit "Personal" picker)
+	 *   - string  → attach to that specific org (must be admin)
+	 */
 	async createProject(data: {
 		name: string;
 		slug?: string;
 		region?: string;
 		plan?: string;
+		org_id?: string | null;
 	}): Promise<Project> {
 		return this.fetch<Project>('/v1/tenants', {
 			method: 'POST',
