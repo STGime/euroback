@@ -160,7 +160,7 @@
 		{ label: 'Custom email templates', free: false, pro: true, team: !!(teamPlan?.custom_templates ?? true), legal: !!(legalPlan?.custom_templates ?? true) },
 		{ label: 'Custom domain (CNAME your own domain)', free: false, pro: 'Coming soon', team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Bring-your-own SMTP for auth mail', free: false, pro: true, team: !!(teamPlan?.byo_smtp ?? true), legal: !!(legalPlan?.byo_smtp ?? true) },
-		{ label: 'Slack / webhook quota alerts', free: false, pro: true, team: !!(teamPlan?.quota_alerts ?? true), legal: !!(legalPlan?.quota_alerts ?? true) },
+		{ label: 'Slack / webhook quota alerts', free: false, pro: 'Coming soon', team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Lifecycle' },
 		{ label: 'Idle-project pause after 30 days', free: 'Auto', pro: 'Never', team: 'Never', legal: 'Never' },
@@ -328,7 +328,7 @@
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{kmau(proPlan?.ws_connections, '10k')} realtime connections</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.edge_function_limit ?? 25} edge functions, unlimited cron &amp; webhooks</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.log_retention_days ?? 30}-day log retention, custom email templates</span></li>
-					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>BYO SMTP for auth mail, Slack quota alerts</span></li>
+					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>BYO SMTP for auth mail</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span><strong>Never pauses</strong> — Free projects idle-pause after 30 days</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span><strong>One-click DSAR exports</strong> (Article 15 + 20) — audit-trailed, EU-only</span></li>
 				</ul>
@@ -377,7 +377,8 @@
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Everything in Pro, plus:</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Dedicated Postgres instance</strong> for the bundled project — direct <code class="rounded bg-gray-100 px-1 py-0.5 text-[11px] font-mono">DATABASE_URL</code> for Payload / Prisma / Drizzle</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Daily backups + on-demand snapshots (7-day retention) — 1 restore/month included</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>SSO (OIDC)</strong> — Google Workspace, Microsoft Entra ID, Okta, Authentik, or any OIDC IdP. SAML <span class="text-xs italic text-amber-600">coming soon</span></span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>SSO (OIDC)</strong> — Google Workspace, Microsoft Entra ID, Okta, Authentik, or any OIDC IdP</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SSO (SAML) <span class="text-xs italic text-amber-600">coming soon</span></span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Organizations</strong> — invite teammates, org-level admin / member roles, org-owned projects (Team + Pro + Free)</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Priority email support (24 h SLA)</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SOC 2 Type II attestation <span class="text-xs italic text-amber-600">coming later</span></span></li>
