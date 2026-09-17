@@ -539,6 +539,54 @@ func TestCanDeleteProject_RejectsUnrelatedUser(t *testing.T) {
 	}
 }
 
+// TestCanDeleteProject_RejectsAdminOfDifferentOrg asserts that an
+// admin of some OTHER org can't delete a project belonging to a
+// different org — pins the cross-org boundary the JOIN provides.
+// Without the join predicate `om.org_id = p.org_id`, a rogue admin
+// could reach any org-owned project.
+func TestCanDeleteProject_RejectsAdminOfDifferentOrg(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-crossorg@test.eurobase.local")
+	eve := insertTestPlatformUser(t, pool, "eve-crossorg@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, eve})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	// Alice creates her own org + a project in it.
+	if _, err := orgsSvc.CreateOrg(ctx, alice, "Alice Cross Org"); err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, alice, "alice-crossorg@test.eurobase.local", CreateProjectRequest{
+		Name: "Cross Org Target", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	// Eve creates her OWN separate org (she's admin there, not
+	// Alice's). She has no membership in Alice's org.
+	if _, err := orgsSvc.CreateOrg(ctx, eve, "Eve Own Org"); err != nil {
+		t.Fatalf("eve CreateOrg: %v", err)
+	}
+
+	// Eve, admin of her own org, should NOT be authorised to delete
+	// Alice's project — the join predicate `om.org_id = p.org_id`
+	// blocks the cross-org reach.
+	can, err := svc.CanDeleteProject(ctx, proj.ID, eve)
+	if err != nil {
+		t.Fatalf("CanDeleteProject eve: %v", err)
+	}
+	if can {
+		t.Fatalf("cross-org boundary broken: eve (admin of a different org) got authorised to delete alice's project")
+	}
+}
+
 // TestCanDeleteProject_RejectsMemberOnly asserts that a MEMBER (not
 // admin) of the org can't delete the project. Delete stays an
 // admin-role action.

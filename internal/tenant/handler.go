@@ -183,9 +183,22 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 			}
 		}
 
+		// Cap body at 16 KB. Legitimate CreateProjectRequest fits in
+		// well under 1 KB (name + slug + region + plan + org_id);
+		// bounding here matches the per-handler pattern used elsewhere
+		// (support / team-beta-request / contact) and stops a hostile
+		// client from streaming an unbounded payload into memory
+		// during the raw-JSON peek. On overflow the ReadAll returns
+		// http.MaxBytesError which we surface as 413.
+		r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			slog.Warn("read create tenant request body failed", "error", err)
+			var mbErr *http.MaxBytesError
+			if errors.As(err, &mbErr) {
+				http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
