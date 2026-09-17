@@ -270,7 +270,11 @@ func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 		// SSO enforcement — password-authed admin can't rewrite the
 		// OIDC config on an sso_required org (would let them point
 		// SSO at an IdP they control).
-		if claims == nil { writeJSONErr(w, http.StatusUnauthorized, "session missing"); return } ; if !h.enforceOrgSSO(w, claims, org) {
+		if claims == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "session missing")
+			return
+		}
+		if !h.enforceOrgSSO(w, claims, org) {
 			return
 		}
 		var body struct {
@@ -332,7 +336,11 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
 			return
 		}
-		if claims == nil { writeJSONErr(w, http.StatusUnauthorized, "session missing"); return } ; if !h.enforceOrgSSO(w, claims, org) {
+		if claims == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "session missing")
+			return
+		}
+		if !h.enforceOrgSSO(w, claims, org) {
 			return
 		}
 		var body struct {
@@ -433,7 +441,11 @@ func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
 			return
 		}
-		if claims == nil { writeJSONErr(w, http.StatusUnauthorized, "session missing"); return } ; if !h.enforceOrgSSO(w, claims, org) {
+		if claims == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "session missing")
+			return
+		}
+		if !h.enforceOrgSSO(w, claims, org) {
 			return
 		}
 		if err := h.Svc.RemoveMember(r.Context(), orgID, targetID); err != nil {
@@ -445,7 +457,8 @@ func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 }
 
 // HandleSetSSORequired — PATCH /platform/orgs/{id}/sso-required
-//   {"sso_required": true|false}
+//
+//	{"sso_required": true|false}
 //
 // Admin-only, Team-tier gated. Enabling this refuses password-login
 // sessions at every org-owned access site until an SSO handshake
@@ -491,7 +504,11 @@ func (h *OrgsHandler) HandleSetSSORequired() http.HandlerFunc {
 			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
 			return
 		}
-		if claims == nil { writeJSONErr(w, http.StatusUnauthorized, "session missing"); return } ; if !h.enforceOrgSSO(w, claims, org) {
+		if claims == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "session missing")
+			return
+		}
+		if !h.enforceOrgSSO(w, claims, org) {
 			return
 		}
 		var body struct {
