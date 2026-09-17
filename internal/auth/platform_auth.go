@@ -534,8 +534,11 @@ func (s *PlatformAuthService) ResendVerification(ctx context.Context, email stri
 }
 
 // IssuePlatformJWT is the exported wrapper around generatePlatformJWT
-// for callers outside this file (tests, and the password-provenance
-// paths — SignUp, SignIn, VerifyEmail, forgot-password reset).
+// for tests + external password-provenance callers. Production
+// password sites (SignUp, SignIn, VerifyEmail) currently call
+// generatePlatformJWT directly with LoginViaPassword; forgot-password
+// re-lands users on SignIn rather than minting from the reset flow.
+// Kept for API stability + the SSO handler's existing test seams.
 // login_via=password is implicit; downstream org sso_required
 // enforcement will refuse this session for orgs that require SSO.
 func (s *PlatformAuthService) IssuePlatformJWT(userID, email string, isSuperadmin bool) (string, int, error) {

@@ -153,6 +153,11 @@ var ErrOrgAttachForbidden = errors.New("caller is not an admin of the target org
 //
 // Returns (false, nil) for "not authorised" — a distinct signal from
 // "lookup failed." Callers translate the false → 403 in the handler.
+//
+// The org-sso_required check is applied by the calling handler via
+// EnforceOrgSSOForProject before this method is reached; keeping it
+// out of the authz path makes the two failure modes (auth vs. SSO)
+// distinguishable in the handler for accurate error codes.
 func (s *TenantService) CanDeleteProject(ctx context.Context, projectID, platformUserID string) (bool, error) {
 	// Path 1: direct project owner. Uses the gateway pool via ResolveRole.
 	role, err := ResolveRole(ctx, s.pool, projectID, platformUserID)

@@ -581,6 +581,25 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			return
 		}
 
+		// SSO enforcement (migration 000121) — same pattern as
+		// PlatformTenantContext. Delete lives outside the mounted
+		// middleware group, so the check runs here directly.
+		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+			if errors.Is(err, ErrSSORequiredForOrg) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+				return
+			}
+			if errors.Is(err, ErrProjectNotFound) {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			slog.Error("delete project: sso enforcement", "error", err, "project_id", projectID)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+
 		canDelete, err := svc.CanDeleteProject(r.Context(), projectID, claims.Subject)
 		if err != nil {
 			slog.Error("check delete permission", "error", err, "project_id", projectID)

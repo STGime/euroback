@@ -857,6 +857,93 @@ func TestListProjects_SSORequired_HidesOrgProjectsFromPasswordSession(t *testing
 	}
 }
 
+// TestEnforceOrgSSOForProject asserts the project-scoped gate that
+// the round-1 review flagged as missing — direct project members of
+// an sso_required org must be refused when their session isn't
+// SSO-backed for that org. Pins the qtune scenario: a departed
+// employee with password + project_members row is no longer
+// authorised to open project routes once SSO is required.
+func TestEnforceOrgSSOForProject(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-enforceproj@test.eurobase.local")
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = $1`, alice) })
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice Enforce Proj Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, alice, "alice-enforceproj@test.eurobase.local", CreateProjectRequest{
+		Name: "Project Proj Enforce", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("alice CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	// Baseline: sso_required=false, password session passes.
+	if err := EnforceOrgSSOForProject(ctx, pool, ssoOffClaims(alice), proj.ID); err != nil {
+		t.Fatalf("baseline sso_required=false expected pass; got %v", err)
+	}
+
+	// Flip sso_required=true.
+	if _, err := pool.Exec(ctx,
+		`UPDATE public.organizations SET sso_required = true WHERE id = $1::uuid`,
+		aliceOrg.ID,
+	); err != nil {
+		t.Fatalf("flip sso_required: %v", err)
+	}
+
+	// Password session refused now.
+	if err := EnforceOrgSSOForProject(ctx, pool, ssoOffClaims(alice), proj.ID); !errors.Is(err, ErrSSORequiredForOrg) {
+		t.Fatalf("expected ErrSSORequiredForOrg for password session; got %v", err)
+	}
+
+	// SSO session for the RIGHT org passes.
+	if err := EnforceOrgSSOForProject(ctx, pool, ssoOnClaimsFor(alice, aliceOrg.ID), proj.ID); err != nil {
+		t.Fatalf("expected pass for sso session with matching org; got %v", err)
+	}
+
+	// SSO session for a DIFFERENT org refused (cross-org boundary).
+	if err := EnforceOrgSSOForProject(ctx, pool, ssoOnClaimsFor(alice, "00000000-0000-0000-0000-000000000000"), proj.ID); !errors.Is(err, ErrSSORequiredForOrg) {
+		t.Fatalf("expected ErrSSORequiredForOrg for SSO to different org; got %v", err)
+	}
+}
+
+// TestEnforceOrgSSOForProject_PersonalProject asserts personal
+// projects (org_id NULL) always pass — SSO enforcement is scoped
+// to org-owned projects only, doesn't leak into personal-project
+// access.
+func TestEnforceOrgSSOForProject_PersonalProject(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	uid := insertTestPlatformUser(t, pool, "personal-enforceproj@test.eurobase.local")
+
+	// Personal project — no org auto-attach because developer pool nil.
+	svc := &TenantService{pool: pool}
+	proj, err := svc.CreateProject(ctx, uid, "personal-enforceproj@test.eurobase.local", CreateProjectRequest{
+		Name: "Personal Enforce Target", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+	if proj.OrgID != nil {
+		t.Fatalf("expected personal project; got org_id=%s", *proj.OrgID)
+	}
+
+	// Password session must pass — the project has no org, so no
+	// enforcement applies.
+	if err := EnforceOrgSSOForProject(ctx, pool, ssoOffClaims(uid), proj.ID); err != nil {
+		t.Fatalf("personal project should always pass sso enforcement; got %v", err)
+	}
+}
+
 // TestSessionSatisfiesSSOFor pins the pure predicate — no DB needed.
 func TestSessionSatisfiesSSOFor(t *testing.T) {
 	cases := []struct {

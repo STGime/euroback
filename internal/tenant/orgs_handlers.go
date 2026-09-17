@@ -70,6 +70,27 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 	fmt.Fprintf(w, `{"error":%q}`, msg)
 }
 
+// enforceOrgSSO refuses the request when the target org requires SSO
+// and the caller's session isn't SSO-backed for it. Returns true on
+// success (allow), false when the response has already been written
+// with a 403 sso_required_for_org. Callers early-return on false.
+//
+// Applies to EVERY org-mutation handler (SetSSOConfig, InviteMember,
+// RemoveMember, SetSSORequired) — the initial round of the PR only
+// gated HandleGetOrg, which inverted the sensitivity model: a
+// password admin could still rewrite OIDC config / invite members
+// / flip sso_required back to false, while being refused only from
+// READING the org. Recovery from misconfig: superadmin escalation
+// (an out-of-band ops path); the "must have OIDC config to enable"
+// guard catches the common footgun of enabling before configuring.
+func (h *OrgsHandler) enforceOrgSSO(w http.ResponseWriter, claims *auth.Claims, org *Org) bool {
+	if SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
+		return true
+	}
+	writeJSONErrCode(w, http.StatusForbidden, "sso_required_for_org", "this organization requires SSO sign-in")
+	return false
+}
+
 // writeJSONErrCode adds a machine-readable `code` field so the
 // console can branch on the error class without substring-matching
 // the human message. Used for sso_required_for_org so the console
@@ -232,7 +253,8 @@ func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 			return
 		}
 		orgID := chi.URLParam(r, "id")
-		_, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		org, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
 		if err != nil {
 			if errors.Is(err, ErrOrgMemberMissing) {
 				writeJSONErr(w, http.StatusNotFound, "organization not found or not a member")
@@ -243,6 +265,12 @@ func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 		}
 		if role != RoleOrgAdmin {
 			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
+			return
+		}
+		// SSO enforcement — password-authed admin can't rewrite the
+		// OIDC config on an sso_required org (would let them point
+		// SSO at an IdP they control).
+		if claims != nil && !h.enforceOrgSSO(w, claims, org) {
 			return
 		}
 		var body struct {
@@ -290,6 +318,7 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 			return
 		}
 		orgID := chi.URLParam(r, "id")
+		claims, _ := auth.ClaimsFromContext(r.Context())
 		org, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
 		if err != nil {
 			if errors.Is(err, ErrOrgMemberMissing) {
@@ -301,6 +330,9 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 		}
 		if role != RoleOrgAdmin {
 			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
+			return
+		}
+		if claims != nil && !h.enforceOrgSSO(w, claims, org) {
 			return
 		}
 		var body struct {
@@ -387,7 +419,8 @@ func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 		}
 		orgID := chi.URLParam(r, "id")
 		targetID := chi.URLParam(r, "userId")
-		_, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		org, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
 		if err != nil {
 			if errors.Is(err, ErrOrgMemberMissing) {
 				writeJSONErr(w, http.StatusNotFound, "organization not found or not a member")
@@ -398,6 +431,9 @@ func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 		}
 		if role != RoleOrgAdmin {
 			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
+			return
+		}
+		if claims != nil && !h.enforceOrgSSO(w, claims, org) {
 			return
 		}
 		if err := h.Svc.RemoveMember(r.Context(), orgID, targetID); err != nil {
@@ -419,6 +455,13 @@ func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 // Guard against admin lockout: SetSSORequired refuses to flip the
 // toggle to true when the org has no OIDC config configured — that
 // state would let nobody in.
+//
+// SSO enforcement applies to BOTH directions of the toggle. A
+// password-authed admin cannot flip sso_required=false to escape the
+// policy they configured; recovery from a real OIDC misconfig is a
+// superadmin escalation (or a re-configure via the vault). Leaving
+// this path open to password sessions would defeat the entire
+// enforcement contract — the toggle would be a self-service opt-out.
 func (h *OrgsHandler) HandleSetSSORequired() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := requireCallerID(w, r)
@@ -429,6 +472,28 @@ func (h *OrgsHandler) HandleSetSSORequired() http.HandlerFunc {
 			return
 		}
 		orgID := chi.URLParam(r, "id")
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		// Fetch the org first so we can gate on its CURRENT
+		// sso_required value. If the toggle is already on, the
+		// caller must be SSO-backed to change it (in either
+		// direction). If the toggle is off, no gate — the admin
+		// is turning it on for the first time.
+		org, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
+		if err != nil {
+			if errors.Is(err, ErrOrgMemberMissing) {
+				writeJSONErr(w, http.StatusNotFound, "organization not found or not a member")
+				return
+			}
+			writeJSONErr(w, http.StatusInternalServerError, "auth check failed")
+			return
+		}
+		if role != RoleOrgAdmin {
+			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
+			return
+		}
+		if claims != nil && !h.enforceOrgSSO(w, claims, org) {
+			return
+		}
 		var body struct {
 			SsoRequired bool `json:"sso_required"`
 		}

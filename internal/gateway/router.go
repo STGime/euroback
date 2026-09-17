@@ -873,8 +873,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// also sets WithDeveloperRole, so withDeveloperRole
 			// becomes redundant but kept for defence-in-depth if the
 			// context middleware ever gets reordered.
-			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, tenantPoolResolver), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
-			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, tenantPoolResolver), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
 			// Tenant-level versioned migrations (#190). Platform auth +
 			// developer role; each migration runs under a per-tenant LOGIN
 			// role the gateway connects as (see MigrationExecutor), so a
@@ -929,7 +929,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// DB for Team-tier). Free/Pro get pool=nil stashed →
 			// tenantPool falls back to shared, unchanged behaviour.
 			if vaultSvc != nil && vaultSvc.Configured() {
-				r.With(tenant.RequireMinRole("admin"), tenant.PlatformTenantContext(pool, tenantPoolResolver)).Mount("/vault", vault.Routes(vaultSvc, pool))
+				r.With(tenant.RequireMinRole("admin"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Mount("/vault", vault.Routes(vaultSvc, pool))
 			}
 
 			// Compliance (DPA report, sub-processor registry, DSAR exports).
@@ -1128,7 +1128,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// End-user admin is a "settings"-shaped capability (closes #50).
 			r.Route("/users", func(r chi.Router) {
 				r.Use(tenant.RequireMinRole("admin"))
-				r.Use(tenant.PlatformTenantContext(pool, tenantPoolResolver))
+				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
 				r.Mount("/", enduser.PlatformRoutes(pool, enduserPoolResolver, limiter))
 			})
 
@@ -1151,7 +1151,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// can see.
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
-					r.Use(tenant.PlatformStorageContext(pool))
+					r.Use(tenant.PlatformStorageContext(pool, developerPool))
 					// Console storage: route metadata reads/writes to
 					// the dedicated instance for Team-tier. The inner
 					// QueryEngine gets the same resolver so ownership
@@ -1180,7 +1180,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// internal/tenant/context.go) still uses the gateway pool —
 			// that's a public.* read.
 			r.Route("/data", func(r chi.Router) {
-				r.Use(tenant.PlatformTenantContext(pool, tenantPoolResolver))
+				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
 
 				queryEngine := query.NewQueryEngine(developerPool)
 				publisher := realtime.NewEventPublisher(nil, hub)
@@ -1228,7 +1228,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// so VaultService.tenantPool routes to the dedicated
 		// instance for Team-tier — otherwise Team-tier admins
 		// configuring OAuth get 500 on save.
-		r.With(tenant.PlatformTenantContext(pool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
+		r.With(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
 		// PATCH /{id}/org attaches/detaches a project to/from an org.
 		// Kept as a separate route from PATCH /{id} because the shape
 		// + auth check (owner + org membership) is entirely different

@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -795,6 +796,51 @@ func (s *OrgsService) SetSSORequired(ctx context.Context, orgID, callerID string
 	return nil
 }
 
+// EnforceOrgSSOForProject is the project-scoped gate that closes the
+// direct-project-members bypass. Given a project id and the caller's
+// claims, it looks up the project's org (if any) via the developer
+// pool, reads that org's sso_required flag, and returns
+// ErrSSORequiredForOrg if the session isn't SSO-backed for that org.
+//
+// Personal projects (org_id NULL) or projects in orgs where
+// sso_required=false always pass. The developer pool is required
+// because organizations is REVOKE-ALL from the gateway pool
+// (migration 000114). Nil developer pool → treat as "no
+// enforcement" (safe default for dev / partial-config), matches the
+// pre-fix behaviour where sso_required didn't exist.
+//
+// Returns nil for "no gate needed" (personal project, sso_required
+// off, no org) and (nil, ErrProjectNotFound) if the project row is
+// missing. Callers translate ErrSSORequiredForOrg → 403
+// sso_required_for_org.
+func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, claims *auth.Claims, projectID string) error {
+	if developerPool == nil || claims == nil {
+		return nil
+	}
+	var orgID *string
+	var ssoRequired *bool
+	err := developerPool.QueryRow(ctx,
+		`SELECT p.org_id::text, o.sso_required
+		 FROM public.projects p
+		 LEFT JOIN public.organizations o ON o.id = p.org_id
+		 WHERE p.id = $1::uuid`,
+		projectID,
+	).Scan(&orgID, &ssoRequired)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrProjectNotFound
+		}
+		return fmt.Errorf("lookup project sso_required: %w", err)
+	}
+	if orgID == nil || ssoRequired == nil || !*ssoRequired {
+		return nil
+	}
+	if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, *orgID, *ssoRequired) {
+		return ErrSSORequiredForOrg
+	}
+	return nil
+}
+
 // SessionSatisfiesSSOFor reports whether a session (represented by
 // its login_via + sso_org_id claims) satisfies the sso_required
 // contract for the given target org.
@@ -802,7 +848,7 @@ func (s *OrgsService) SetSSORequired(ctx context.Context, orgID, callerID string
 // Three-branch decision:
 //
 //  1. Org's sso_required = false → always true (no enforcement).
-//  2. Org's sso_required = true AND loginVia == LoginViaSSO AND
+//  2. Org's sso_required = true AND loginVia == auth.LoginViaSSO AND
 //     ssoOrgID == this org → true (session authed against the org's
 //     own OIDC IdP).
 //  3. Everything else → false: covers password sessions, sessions
@@ -819,14 +865,6 @@ func SessionSatisfiesSSOFor(loginVia, ssoOrgID, targetOrgID string, ssoRequired 
 	if !ssoRequired {
 		return true
 	}
-	return loginVia == LoginViaSSO && ssoOrgID == targetOrgID
+	return loginVia == auth.LoginViaSSO && ssoOrgID == targetOrgID
 }
 
-// LoginViaSSO / LoginViaPassword constants are aliased from
-// internal/auth to keep this package's enforcement code readable
-// without a cross-import. Values must stay in sync — auth is the
-// source of truth.
-const (
-	LoginViaSSO      = "sso"
-	LoginViaPassword = "password"
-)
