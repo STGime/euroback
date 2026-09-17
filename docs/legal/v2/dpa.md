@@ -29,7 +29,7 @@ REVIEWER NOTES — read before publication (v2)
 
 # Data Processing Agreement
 
-**Version 2.1 — effective 2 October 2026**
+**Version 2.0 — effective 22 July 2026**
 
 This Data Processing Agreement ("**DPA**") is entered into between **Eurobase OÜ**, registered at **Ahtri 12, Tallinn 15551** ("**Eurobase**", "**Processor**"), and the customer identified in the Eurobase account ("**Customer**", "**Controller**"). It is incorporated by reference into the Terms of Service at /legal/terms and applies whenever Customer uses the Service to process personal data about its end-users.
 
@@ -170,7 +170,7 @@ The exact subset that applies to a given Project depends on the features the Cus
 
 ## Annex 3 — Authorised sub-processors
 
-The current list, with country, role, security certifications, and a link to each provider's own DPA, is published at **/legal/sub-processors**. As of 2 October 2026:
+The current list, with country, role, security certifications, and a link to each provider's own DPA, is published at **/legal/sub-processors**. As of 22 July 2026:
 
 | Sub-processor | Country | Role | Certs |
 |---|---|---|---|
