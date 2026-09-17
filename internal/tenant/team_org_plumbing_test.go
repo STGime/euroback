@@ -81,6 +81,154 @@ func TestCreateOrg_InvitedElsewhereStillAllowed(t *testing.T) {
 	}
 }
 
+// TestCreateProject_AutoAttachForInvitedAdmin asserts that a
+// non-creator admin (invited into the org with role=admin) gets
+// the same auto-attach treatment as the creator. Pins the widened
+// SELECT that keys on org_members.role = 'admin' rather than on
+// organizations.created_by alone.
+func TestCreateProject_AutoAttachForInvitedAdmin(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-widen@test.eurobase.local")
+	bob := insertTestPlatformUser(t, pool, "bob-widen@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, bob})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice Widen Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+
+	// Invite Bob as ADMIN — non-creator admin case.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'admin', 'manual')`,
+		aliceOrg.ID, bob,
+	); err != nil {
+		t.Fatalf("seed bob as admin: %v", err)
+	}
+
+	// Bob creates a project — should auto-attach to Alice's org.
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, bob, "bob-widen@test.eurobase.local", CreateProjectRequest{
+		Name: "Bob Widen Project", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("bob CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	if proj.OrgID == nil {
+		t.Fatalf("expected non-creator admin auto-attach; got nil org_id")
+	}
+	if *proj.OrgID != aliceOrg.ID {
+		t.Fatalf("expected org_id %s (alice's org), got %s", aliceOrg.ID, *proj.OrgID)
+	}
+}
+
+// TestCreateProject_AutoAttachSkipsForMember asserts that a plain
+// MEMBER (not admin) does NOT get auto-attach. Keeps the invariant
+// that a member's project stays personal by default; they'd have to
+// use PATCH /platform/projects/{id}/org to attach explicitly.
+func TestCreateProject_AutoAttachSkipsForMember(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-mem@test.eurobase.local")
+	bob := insertTestPlatformUser(t, pool, "bob-mem@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, bob})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice Member-scope Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+
+	// Invite Bob as MEMBER only.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'member', 'manual')`,
+		aliceOrg.ID, bob,
+	); err != nil {
+		t.Fatalf("seed bob as member: %v", err)
+	}
+
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, bob, "bob-mem@test.eurobase.local", CreateProjectRequest{
+		Name: "Bob Member Project", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("bob CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	if proj.OrgID != nil {
+		t.Fatalf("expected member-role project to stay personal (nil org_id); got %s", *proj.OrgID)
+	}
+}
+
+// TestCreateProject_AutoAttachPrefersOwnOrg asserts that when a
+// user is admin in TWO orgs (their own creation + one they were
+// invited into), auto-attach picks THEIR own org deterministically.
+// Pins the ORDER BY (o.created_by = caller) DESC tiebreak.
+func TestCreateProject_AutoAttachPrefersOwnOrg(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	alice := insertTestPlatformUser(t, pool, "alice-tie@test.eurobase.local")
+	bob := insertTestPlatformUser(t, pool, "bob-tie@test.eurobase.local")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE created_by = ANY($1::uuid[])`,
+			[]string{alice, bob})
+	})
+
+	orgsSvc, _ := NewOrgsService(pool, nil)
+
+	// Alice creates her org first.
+	aliceOrg, err := orgsSvc.CreateOrg(ctx, alice, "Alice Tie Org")
+	if err != nil {
+		t.Fatalf("alice CreateOrg: %v", err)
+	}
+	// Bob creates HIS own org.
+	bobOrg, err := orgsSvc.CreateOrg(ctx, bob, "Bob Tie Org")
+	if err != nil {
+		t.Fatalf("bob CreateOrg: %v", err)
+	}
+	// Then Bob is invited as admin into Alice's org too.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'admin', 'manual')`,
+		aliceOrg.ID, bob,
+	); err != nil {
+		t.Fatalf("seed bob as admin of alice's org: %v", err)
+	}
+
+	// Bob creates a project — should land under bob's own org, not
+	// alice's, even though he's admin in both.
+	svc := &TenantService{pool: pool, developerPool: pool}
+	proj, err := svc.CreateProject(ctx, bob, "bob-tie@test.eurobase.local", CreateProjectRequest{
+		Name: "Bob Tie Project", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("bob CreateProject: %v", err)
+	}
+	defer cleanupProject(t, pool, proj.ID)
+
+	if proj.OrgID == nil {
+		t.Fatalf("expected auto-attach; got nil")
+	}
+	if *proj.OrgID != bobOrg.ID {
+		t.Fatalf("expected bob's own org %s (created_by tiebreak), got %s", bobOrg.ID, *proj.OrgID)
+	}
+}
+
 // TestCreateProject_AutoAttachToOrg asserts that a project created
 // by a user who owns an org lands with projects.org_id = that org.
 func TestCreateProject_AutoAttachToOrg(t *testing.T) {

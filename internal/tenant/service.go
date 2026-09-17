@@ -346,13 +346,26 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		return nil, fmt.Errorf("resolve platform user: %w", err)
 	}
 
-	// Org auto-attach: if the caller already owns an org (via
-	// public.organizations.created_by), stamp the new project with
-	// its org_id so org_members can see it via the union path in
+	// Org auto-attach: if the caller is an admin in an org (their own
+	// or one they were invited into as admin), stamp the new project
+	// with its org_id so org_members can see it via the union path in
 	// ListProjects. Runs on the developer pool because migration
 	// 000114 REVOKEs ALL from the gateway pool on organizations.
 	// Nil pool (dev / partial-config) → skip; project lands with
 	// org_id NULL, matching pre-#591 behaviour.
+	//
+	// Admin-scoped (not member-scoped) so a regular member creating a
+	// project doesn't force it into visibility for every org admin
+	// without asking — a member's project stays personal by default,
+	// they can opt in via PATCH /platform/projects/{id}/org.
+	//
+	// Deterministic tiebreak: prefer the org the caller CREATED
+	// (created_by = caller), then fall back to the oldest org they
+	// were invited into as admin. Without ORDER BY, a user who's
+	// admin in two orgs (theirs + one they were invited into) would
+	// see non-deterministic auto-attach — a subtle surprise. The
+	// one-org rule (migration 000120) makes multi-created rare, but
+	// the invited-admin path stays open.
 	//
 	// Note: this is a separate query against developerPool (not the
 	// project-creation tx). If a concurrent DeleteOrg races between
@@ -368,7 +381,12 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 	if s.developerPool != nil {
 		var id string
 		err := s.developerPool.QueryRow(ctx,
-			`SELECT id::text FROM public.organizations WHERE created_by = $1::uuid LIMIT 1`,
+			`SELECT o.id::text
+			 FROM public.organizations o
+			 JOIN public.org_members om ON om.org_id = o.id
+			 WHERE om.platform_user_id = $1::uuid AND om.role = 'admin'
+			 ORDER BY (o.created_by = $1::uuid) DESC, o.created_at ASC
+			 LIMIT 1`,
 			platformUserID,
 		).Scan(&id)
 		if err == nil {
