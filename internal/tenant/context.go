@@ -109,29 +109,62 @@ func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// a single round-trip; a Free/Pro project simply gets
 			// HasDedicatedDB=false / ProjectDatabaseID=NULL and the
 			// resolver falls back to the shared pool.
+			//
+			// We also select `p.status` (without filtering by it) so we
+			// can distinguish "no such project id" (real 404) from
+			// "project exists but isn't active" (503 with a specific
+			// code). The old query collapsed both to `"project not
+			// found"`, which was misleading whenever a user landed on
+			// a `provisioning_failed` project — reported in prod
+			// (2026-09-18) when the async S3 bucket worker's
+			// markFailed set the whole row's status to
+			// `provisioning_failed`, and the next PATCH from the
+			// onboarding wizard 404'd with a message that suggested
+			// the project didn't exist at all.
 			var (
 				schemaName string
 				plan       string
+				status     string
 				pdID       *string
 			)
 			err := pool.QueryRow(r.Context(),
-				`SELECT p.schema_name, p.plan, pd.id
+				`SELECT p.schema_name, p.plan, p.status, pd.id
 				   FROM projects p
 				   LEFT JOIN public.project_databases pd
 				     ON pd.project_id = p.id
 				    AND pd.state IN ('provisioning', 'active', 'restoring')
 				    AND pd.deleted_at IS NULL
-				  WHERE p.id = $1 AND p.status = 'active'
+				  WHERE p.id = $1
 				  ORDER BY (pd.state = 'active') DESC NULLS LAST, pd.created_at DESC NULLS LAST
 				  LIMIT 1`,
 				projectID,
-			).Scan(&schemaName, &plan, &pdID)
+			).Scan(&schemaName, &plan, &status, &pdID)
 			if err != nil {
-				slog.Error("platform tenant context: project not found",
+				slog.Error("platform tenant context: project row lookup failed",
 					"error", err,
 					"project_id", projectID,
 				)
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			if status != "active" {
+				slog.Warn("platform tenant context: project exists but is not active",
+					"project_id", projectID,
+					"status", status,
+					"user_id", claims.Subject,
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				// Generic message; the `status` field lets clients tailor
+				// their own message (the onboarding wizard, for example,
+				// only ever sees this in the fresh-create case where
+				// `provisioning_failed` is the realistic value). Kept
+				// server-side message deliberately non-prescriptive
+				// because `status` here could also be `suspended` (billing)
+				// or `deleting` (in-flight delete), and telling a suspended
+				// customer to "delete and try again with a different name"
+				// would be wrong advice.
+				_, _ = w.Write([]byte(`{"error":"this project is not currently active (status: ` + status + `) — see status field for details","code":"project_not_active","status":"` + status + `"}`))
 				return
 			}
 
@@ -228,29 +261,58 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool) func(http.Handler
 			// storage_objects SELECTs, etc.) and every Team-tier
 			// download / delete / signed-URL would 42P01 on the
 			// shared pool.
+			//
+			// Same split as PlatformTenantContext above: select
+			// p.status without filtering by it, so "no such project
+			// id" and "row exists but isn't active" surface as
+			// distinct outcomes. Storage cares about the distinction
+			// because an S3-bucket provisioning failure marks the
+			// whole project non-active (see ProvisionProjectWorker in
+			// internal/workers/provision.go); the old blanket 404 hid
+			// what actually went wrong.
 			var (
-				slug, schema, plan string
-				pdID               *string
+				slug, schema, plan, status string
+				pdID                       *string
 			)
 			err := pool.QueryRow(r.Context(),
-				`SELECT p.slug, p.schema_name, p.plan, pd.id
+				`SELECT p.slug, p.schema_name, p.plan, p.status, pd.id
 				   FROM projects p
 				   LEFT JOIN public.project_databases pd
 				     ON pd.project_id = p.id
 				    AND pd.state IN ('provisioning', 'active', 'restoring')
 				    AND pd.deleted_at IS NULL
-				  WHERE p.id = $1 AND p.status = 'active'
+				  WHERE p.id = $1
 				  ORDER BY (pd.state = 'active') DESC NULLS LAST, pd.created_at DESC NULLS LAST
 				  LIMIT 1`,
 				projectID,
-			).Scan(&slug, &schema, &plan, &pdID)
+			).Scan(&slug, &schema, &plan, &status, &pdID)
 			if err != nil {
-				slog.Error("platform storage context: project not found",
+				slog.Error("platform storage context: project row lookup failed",
 					"error", err,
 					"project_id", projectID,
 					"user_id", claims.Subject,
 				)
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			if status != "active" {
+				slog.Warn("platform storage context: project exists but is not active",
+					"project_id", projectID,
+					"status", status,
+					"user_id", claims.Subject,
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				// Generic message; the `status` field lets clients tailor
+				// their own message (the onboarding wizard, for example,
+				// only ever sees this in the fresh-create case where
+				// `provisioning_failed` is the realistic value). Kept
+				// server-side message deliberately non-prescriptive
+				// because `status` here could also be `suspended` (billing)
+				// or `deleting` (in-flight delete), and telling a suspended
+				// customer to "delete and try again with a different name"
+				// would be wrong advice.
+				_, _ = w.Write([]byte(`{"error":"this project is not currently active (status: ` + status + `) — see status field for details","code":"project_not_active","status":"` + status + `"}`))
 				return
 			}
 
