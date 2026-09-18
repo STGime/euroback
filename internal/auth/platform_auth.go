@@ -43,7 +43,14 @@ var ErrEmailNotVerified = errors.New("email not verified")
 type DripEnqueuer func(ctx context.Context, tx pgx.Tx, userID string, signupTime time.Time) error
 
 type PlatformAuthService struct {
-	pool              *pgxpool.Pool
+	pool *pgxpool.Pool
+	// developerPool is the eurobase_developer-role connection used for
+	// queries against org tables — migration 000114 REVOKEs ALL on
+	// public.organizations / public.org_members from eurobase_gateway,
+	// so the gateway `pool` above can neither read nor write them.
+	// Optional: when unset (dev / older harness), any code path that
+	// needs it degrades gracefully (skips the org check with a warn).
+	developerPool     *pgxpool.Pool
 	jwtSecret         []byte
 	emailService      PlatformEmailer
 	dripEnqueuer      DripEnqueuer
@@ -69,6 +76,13 @@ func (s *PlatformAuthService) SetEmailService(svc PlatformEmailer) {
 // gets no drip mails. Runs inside the signup tx.
 func (s *PlatformAuthService) SetDripEnqueuer(fn DripEnqueuer) {
 	s.dripEnqueuer = fn
+}
+
+// SetDeveloperPool wires the eurobase_developer-role pool used for org
+// membership queries in DeleteAccount. Optional — when unset the
+// account-delete path skips the org sole-admin check (dev / test).
+func (s *PlatformAuthService) SetDeveloperPool(pool *pgxpool.Pool) {
+	s.developerPool = pool
 }
 
 // PlatformUser represents a row from public.platform_users.
@@ -677,7 +691,23 @@ func (s *PlatformAuthService) ChangePassword(ctx context.Context, userID, curren
 	return nil
 }
 
-// DeleteAccount removes a platform user after verifying all projects are deleted.
+// DeleteAccount removes a platform user after verifying all projects
+// are deleted and no org would be orphaned.
+//
+// Two classes of orgs the caller belongs to are handled explicitly:
+//
+//   - Sole-admin-of-a-shared-org: caller is the only admin AND other
+//     (non-admin) members exist. Refuse — deleting would leave those
+//     members with no admin. Caller must hand off admin first.
+//   - Solo org: caller is the ONLY member. Delete the org alongside
+//     the user. Without this, users end up unable to close their own
+//     account without ops help just because they created a personal
+//     org. Matches AdminDeleteUser.
+//
+// The org check runs on the developer pool (migration 000114 REVOKEs
+// ALL on org tables from eurobase_gateway). If no developer pool has
+// been wired (dev / test), the check is skipped and only the
+// project-count guard runs — preserving the pre-org behavior.
 func (s *PlatformAuthService) DeleteAccount(ctx context.Context, userID string) error {
 	var count int
 	err := s.pool.QueryRow(ctx,
@@ -691,12 +721,88 @@ func (s *PlatformAuthService) DeleteAccount(ctx context.Context, userID string) 
 		return fmt.Errorf("delete all projects before deleting your account")
 	}
 
+	var soloOrgIDs []string
+	if s.developerPool != nil {
+		rows, err := s.developerPool.Query(ctx,
+			`SELECT m.org_id::text,
+			        CASE
+			          WHEN EXISTS (
+			                 SELECT 1 FROM public.org_members m2
+			                  WHERE m2.org_id = m.org_id
+			                    AND m2.role = 'admin'
+			                    AND m2.platform_user_id <> m.platform_user_id
+			               ) THEN 'survives'
+			          WHEN EXISTS (
+			                 SELECT 1 FROM public.org_members m2
+			                  WHERE m2.org_id = m.org_id
+			                    AND m2.platform_user_id <> m.platform_user_id
+			               ) THEN 'orphaned'
+			          ELSE 'solo'
+			        END AS category
+			   FROM public.org_members m
+			  WHERE m.platform_user_id = $1::uuid`,
+			userID,
+		)
+		if err != nil {
+			return fmt.Errorf("check org membership: %w", err)
+		}
+		var orphaned int
+		for rows.Next() {
+			var orgID, category string
+			if err := rows.Scan(&orgID, &category); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan org membership: %w", err)
+			}
+			switch category {
+			case "solo":
+				soloOrgIDs = append(soloOrgIDs, orgID)
+			case "orphaned":
+				orphaned++
+			}
+		}
+		rows.Close()
+		if orphaned > 0 {
+			return fmt.Errorf("hand off admin of your organization(s) to another member before deleting your account")
+		}
+	} else {
+		slog.Warn("delete account: developer pool not wired — skipping org sole-admin check", "user_id", userID)
+	}
+
 	_, err = s.pool.Exec(ctx, `DELETE FROM platform_users WHERE id = $1`, userID)
 	if err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
 
-	slog.Info("platform user deleted account", "user_id", userID)
+	// Best-effort cleanup of the now-empty solo orgs. Non-fatal on
+	// error — the user is already gone; a leftover row is a cleanup
+	// task, not a caller-visible failure. The `NOT EXISTS` guards the
+	// narrow race where someone joins the org between the query above
+	// and this DELETE.
+	orgsDeleted := 0
+	if len(soloOrgIDs) > 0 && s.developerPool != nil {
+		for _, orgID := range soloOrgIDs {
+			del, err := s.developerPool.Exec(ctx,
+				`DELETE FROM public.organizations o
+				  WHERE o.id = $1::uuid
+				    AND NOT EXISTS (
+				      SELECT 1 FROM public.org_members m WHERE m.org_id = o.id
+				    )`,
+				orgID,
+			)
+			if err != nil {
+				slog.Warn("delete account: solo-org cleanup failed",
+					"user_id", userID, "org_id", orgID, "error", err)
+				continue
+			}
+			if del.RowsAffected() > 0 {
+				orgsDeleted++
+			}
+		}
+	}
+
+	slog.Info("platform user deleted account",
+		"user_id", userID,
+		"orgs_deleted", orgsDeleted)
 	return nil
 }
 

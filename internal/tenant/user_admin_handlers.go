@@ -47,9 +47,17 @@ import (
 //   - Refuses to delete another superadmin. Ops trying to demote /
 //     remove a peer must revoke is_superadmin first via SQL — a
 //     superadmin's project set is likely load-bearing.
-//   - Refuses to delete a user who is the sole admin of any org
-//     (would leave the org unmanageable + orphan any org-owned
-//     projects with a different owner_id).
+//   - Refuses to delete a user who is the sole admin of an org that
+//     ALSO has other (non-admin) members. Those other members would
+//     be left with no admin, unable to invite anyone, edit SSO, or
+//     transfer projects out. Ops must hand off admin first.
+//   - When the target is the sole member of an org entirely (no other
+//     admins, no other members), the org is deleted alongside the
+//     user. Otherwise every user with a personal org would need
+//     admin-side hand-off help to delete their account. Cascades to
+//     org_members (empty by construction); projects.org_id →
+//     ON DELETE SET NULL, so any attached project becomes a
+//     personal project again.
 //
 // URL param `id` is the target user's UUID.
 func AdminDeleteUser(pool, developerPool *pgxpool.Pool, svc *TenantService) http.HandlerFunc {
@@ -87,42 +95,73 @@ func AdminDeleteUser(pool, developerPool *pgxpool.Pool, svc *TenantService) http
 			return
 		}
 
-		// Refuse if the target is the sole admin of any organization.
-		// Deleting them cascades org_members away and leaves the org
-		// (and any org-owned projects with a different owner_id)
-		// unmanageable — no one can add members, edit SSO, or
-		// transfer projects out. Ops must hand off admin rights to
-		// another member first. Matches the same guard the ops
-		// runbook (docs/runbooks/grant-team-beta-access.md) documents
-		// for the team_beta_access revoke path.
+		// Sort orgs the target belongs to into three buckets, all in
+		// one round-trip. Reads org_members on the DEVELOPER pool:
+		// migration 000114 REVOKEs ALL on public.org_members from
+		// eurobase_gateway. Same rule ListProjects had to be split on
+		// (see the #538/#545/#546 lesson in CLAUDE.md) — reads of org
+		// tables live on the developer pool, DML on platform_users /
+		// projects stays on the gateway pool.
 		//
-		// Reads org_members on the DEVELOPER pool: migration 000114
-		// REVOKEs ALL on public.org_members from eurobase_gateway
-		// (the gateway pool). Same rule ListProjects had to be split
-		// on (see the #538/#545/#546 lesson in CLAUDE.md) — reads of
-		// org tables live on the developer pool, DML on
-		// platform_users / projects stays on the gateway pool.
-		var orphanedOrgs int
-		err = developerPool.QueryRow(r.Context(),
-			`SELECT count(*) FROM public.org_members m
-			  WHERE m.platform_user_id = $1::uuid
-			    AND m.role = 'admin'
-			    AND NOT EXISTS (
-			      SELECT 1 FROM public.org_members m2
-			       WHERE m2.org_id = m.org_id
-			         AND m2.role = 'admin'
-			         AND m2.platform_user_id <> m.platform_user_id
-			    )`,
+		//   category = 'survives'   → another admin exists; org lives
+		//                             on after cascade removes the
+		//                             target's membership.
+		//   category = 'orphaned'   → target is sole admin AND there
+		//                             are other (non-admin) members.
+		//                             REFUSE — hand-off required.
+		//   category = 'solo'       → target is the only member of any
+		//                             role. Delete the org alongside
+		//                             the user; nothing to orphan.
+		//
+		// The classification is per-org because a single target can
+		// simultaneously be a survives-org member and a solo-org owner.
+		orgRows, err := developerPool.Query(r.Context(),
+			`SELECT m.org_id::text,
+			        CASE
+			          WHEN EXISTS (
+			                 SELECT 1 FROM public.org_members m2
+			                  WHERE m2.org_id = m.org_id
+			                    AND m2.role = 'admin'
+			                    AND m2.platform_user_id <> m.platform_user_id
+			               ) THEN 'survives'
+			          WHEN EXISTS (
+			                 SELECT 1 FROM public.org_members m2
+			                  WHERE m2.org_id = m.org_id
+			                    AND m2.platform_user_id <> m.platform_user_id
+			               ) THEN 'orphaned'
+			          ELSE 'solo'
+			        END AS category
+			   FROM public.org_members m
+			  WHERE m.platform_user_id = $1::uuid`,
 			targetUserID,
-		).Scan(&orphanedOrgs)
+		)
 		if err != nil {
-			slog.Error("admin delete user: sole-admin check failed",
+			slog.Error("admin delete user: org classification failed",
 				"target_user_id", targetUserID, "error", err)
-			http.Error(w, `{"error":"sole-admin check failed"}`, http.StatusInternalServerError)
+			http.Error(w, `{"error":"org membership check failed"}`, http.StatusInternalServerError)
 			return
 		}
-		if orphanedOrgs > 0 {
-			http.Error(w, `{"error":"refusing to delete — user is sole admin of one or more organizations; hand off admin to another member first"}`, http.StatusConflict)
+		var soloOrgIDs []string
+		var orphanedCount int
+		for orgRows.Next() {
+			var orgID, category string
+			if err := orgRows.Scan(&orgID, &category); err != nil {
+				orgRows.Close()
+				slog.Error("admin delete user: scan org classification failed",
+					"target_user_id", targetUserID, "error", err)
+				http.Error(w, `{"error":"org membership scan failed"}`, http.StatusInternalServerError)
+				return
+			}
+			switch category {
+			case "solo":
+				soloOrgIDs = append(soloOrgIDs, orgID)
+			case "orphaned":
+				orphanedCount++
+			}
+		}
+		orgRows.Close()
+		if orphanedCount > 0 {
+			http.Error(w, `{"error":"refusing to delete — user is sole admin of one or more organizations that still have other members; hand off admin to another member first"}`, http.StatusConflict)
 			return
 		}
 
@@ -225,11 +264,52 @@ func AdminDeleteUser(pool, developerPool *pgxpool.Pool, svc *TenantService) http
 			writeAudit(r, audit.ActionUserDeleted, targetUserID)
 		}
 
+		// Clean up solo orgs — the target was the only member, so the
+		// FK cascade left the org row with created_by=NULL and zero
+		// members: unmanageable and useless. Runs after the user
+		// delete so the cascade has already emptied org_members.
+		//
+		// The extra `NOT EXISTS` in the DELETE guards a narrow race:
+		// someone accepts an invite between our classification query
+		// and here. If it fires, the org survives untouched — we skip
+		// this DELETE and leave the cleanup to whoever now owns it.
+		orgsDeleted := 0
+		for _, orgID := range soloOrgIDs {
+			del, err := developerPool.Exec(r.Context(),
+				`DELETE FROM public.organizations o
+				  WHERE o.id = $1::uuid
+				    AND NOT EXISTS (
+				      SELECT 1 FROM public.org_members m
+				       WHERE m.org_id = o.id
+				    )`,
+				orgID,
+			)
+			if err != nil {
+				// Non-fatal — the user is already gone. Log and move on;
+				// ops can sweep zombie orgs later. Alternative is 500
+				// with the user already deleted, which is worse.
+				slog.Warn("admin delete user: solo-org cleanup failed",
+					"org_id", orgID,
+					"target_user_id", targetUserID,
+					"error", err)
+				continue
+			}
+			if del.RowsAffected() > 0 {
+				orgsDeleted++
+			}
+		}
+		if orgsDeleted > 0 {
+			slog.Info("admin delete user: solo orgs cleaned up",
+				"target_user_id", targetUserID,
+				"orgs_deleted", orgsDeleted)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"deleted":          true,
 			"email":            email,
 			"projects_deleted": len(projectIDs),
+			"orgs_deleted":     orgsDeleted,
 		})
 	}
 }

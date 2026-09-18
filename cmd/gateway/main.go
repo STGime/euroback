@@ -147,6 +147,12 @@ func main() {
 
 	// ── Set up platform auth ──
 	platformAuthSvc := auth.NewPlatformAuthService(pool, platformJWTSecret)
+	// Wire the developer pool so /platform/auth/account/delete can read
+	// public.org_members (REVOKE'd from eurobase_gateway by 000114) when
+	// deciding whether the caller would orphan an org.
+	if developerPool != nil {
+		platformAuthSvc.SetDeveloperPool(developerPool)
+	}
 	platformAuthSvc.AllowPublicSignup = os.Getenv("ALLOW_PUBLIC_SIGNUP") == "true"
 	// Every IP-keyed limiter and audit-IP capture (platform auth routes,
 	// contact/support/sovereignty forms) resolves the client from the
