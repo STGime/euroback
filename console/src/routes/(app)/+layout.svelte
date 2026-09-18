@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import { user, logout } from '$lib/stores.js';
 	import { api, type Project } from '$lib/api.js';
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
@@ -15,6 +15,16 @@
 
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
+	// profileEmail is the CURRENT JWT's DB email — always reflects the
+	// row `claims.Subject` points at. The header pill has to prefer this
+	// over `$user.email`, which is the string the user *typed* at login
+	// and is a stale in-memory copy of localStorage. If the SSO callback
+	// resolved a different candidate row than the caller typed (Gmail-
+	// canonical fallback in lookupPlatformUserCandidates, or an IdP
+	// returning `googlemail.com` for a `gmail.com` account), the two
+	// diverge and the pill starts lying — the exact confusion that led
+	// to a "these emails act like the same user" report in prod.
+	let profileEmail = $state<string | null>(null);
 	let isSuperadmin = $state<boolean>(false);
 	// Team-tier org membership: gates the "Organizations" nav entry.
 	// A user with team_beta_access can create orgs; a user who's been
@@ -31,18 +41,33 @@
 	// decides visibility from sessionStorage + grace days left.
 	let legacyProProject: Project | null = $state(null);
 
-	onMount(async () => {
-		if (!$user) {
-			goto('/login');
-			return;
-		}
+	// Load everything that's keyed to the current session identity.
+	// Called from an $effect that tracks $user?.token, so a cross-tab
+	// sign-in / sign-out / SSO-into-open-tab triggers a full refresh
+	// instead of leaving mount-time state pointing at the previous
+	// session.
+	//
+	// `forToken` is the token snapshot at effect-fire time. After every
+	// `await` we compare it against the store's current token and bail
+	// silently if they differ — a later effect run is already handling
+	// the newer identity, and letting a stale response write into
+	// $state after the switch would reintroduce the exact desync this
+	// PR fixes. Bailing is normal, not exceptional: `user.set()` writes
+	// two localStorage keys (eurobase_token + eurobase_email), which
+	// fires two `storage` events, which triggers two effect runs — the
+	// first run must be a no-op once the second overtakes it.
+	async function refreshSessionState(forToken: string) {
+		const stillCurrent = () => get(user)?.token === forToken;
 		try {
 			const profile = await api.getProfile();
+			if (!stillCurrent()) return;
 			displayName = profile.display_name;
+			profileEmail = profile.email;
 			isSuperadmin = profile.is_superadmin === true;
 			hasTeamBeta = profile.team_beta_access === true;
 		} catch {
-			// Silently ignore — falls back to email display.
+			if (!stillCurrent()) return;
+			// Silently ignore — falls back to $user.email (stale) display.
 		}
 		// Only fire listOrgs for users who lack team_beta_access — the
 		// creators already see the nav entry via hasTeamBeta. This is
@@ -51,13 +76,18 @@
 		if (!hasTeamBeta) {
 			try {
 				const res = await api.listOrgs();
+				if (!stillCurrent()) return;
 				hasAnyOrgMembership = (res.orgs?.length ?? 0) > 0;
 			} catch {
+				if (!stillCurrent()) return;
 				hasAnyOrgMembership = false;
 			}
+		} else {
+			hasAnyOrgMembership = false;
 		}
 		try {
 			const projects = await api.listProjects();
+			if (!stillCurrent()) return;
 			// Pick the FIRST project that matches
 			// plan='pro' && legacy_pro_grace_until != null.
 			// Rationale: showing multiple modals stacked would
@@ -70,8 +100,42 @@
 					(p) => p.plan === 'pro' && !!p.legacy_pro_grace_until
 				) ?? null;
 		} catch {
+			if (!stillCurrent()) return;
 			// Non-fatal — modal simply doesn't render.
+			legacyProProject = null;
 		}
+	}
+
+	// React to session identity changes. Fires on initial mount AND
+	// whenever $user changes — including cross-tab sign-in/out via the
+	// storage listener in the user store (stores.ts). Two things happen
+	// on a change:
+	//
+	//   1. If $user is null (another tab signed out, or token expired
+	//      and api.ts cleared it) — bounce to /login. Previously the
+	//      mount-only guard let a null-in-mid-session tab keep
+	//      rendering the app shell until an API call 401'd.
+	//   2. Otherwise, clear identity-derived state before refetching
+	//      so the pill immediately falls back to the fresh
+	//      $user.email while getProfile() is in flight, instead of
+	//      briefly rendering the previous session's DB email via a
+	//      stale profileEmail.
+	$effect(() => {
+		const token = $user?.token;
+		if (!token) {
+			// Guard against re-firing during the goto redirect.
+			if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+				goto('/login');
+			}
+			return;
+		}
+		displayName = null;
+		profileEmail = null;
+		isSuperadmin = false;
+		hasTeamBeta = false;
+		hasAnyOrgMembership = false;
+		legacyProProject = null;
+		void refreshSessionState(token);
 	});
 
 	let navItems = $derived(
@@ -246,9 +310,9 @@
 
 			<!-- User menu -->
 			<div class="flex items-center gap-3">
-				<span class="text-sm text-gray-500 hidden sm:block">{displayName ?? $user?.email ?? ''}</span>
+				<span class="text-sm text-gray-500 hidden sm:block">{displayName ?? profileEmail ?? $user?.email ?? ''}</span>
 				<div class="flex h-8 w-8 items-center justify-center rounded-full bg-eurobase-100 text-sm font-medium text-eurobase-700">
-					{(displayName ?? $user?.email ?? '?')[0].toUpperCase()}
+					{(displayName ?? profileEmail ?? $user?.email ?? '?')[0].toUpperCase()}
 				</div>
 			</div>
 		</header>
