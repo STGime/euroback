@@ -66,6 +66,13 @@ func (e *WaitlistError) Error() string {
 	return "waitlist"
 }
 
+// ErrOrgHandoffRequired is returned by DeleteAccount when the caller
+// is the sole admin of an org that still has other members. The HTTP
+// handler maps it to 409 so a user-fixable condition surfaces as
+// something other than a 500 (which the console renders as a generic
+// failure and ops alerts count as a server fault).
+var ErrOrgHandoffRequired = errors.New("hand off admin of your organization(s) to another member before deleting your account")
+
 // SetEmailService sets the email service for password reset emails.
 func (s *PlatformAuthService) SetEmailService(svc PlatformEmailer) {
 	s.emailService = svc
@@ -760,9 +767,18 @@ func (s *PlatformAuthService) DeleteAccount(ctx context.Context, userID string) 
 				orphaned++
 			}
 		}
+		// rows.Err() surfaces mid-iteration failures (dropped conn,
+		// cancelled ctx). Without this check we'd fail OPEN: any
+		// `orphaned` row past the cut-off would be silently missed,
+		// orphaned would stay 0, and we'd strand the very members
+		// the guard exists to protect.
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return fmt.Errorf("iterate org membership: %w", rowsErr)
+		}
 		rows.Close()
 		if orphaned > 0 {
-			return fmt.Errorf("hand off admin of your organization(s) to another member before deleting your account")
+			return ErrOrgHandoffRequired
 		}
 	} else {
 		slog.Warn("delete account: developer pool not wired — skipping org sole-admin check", "user_id", userID)

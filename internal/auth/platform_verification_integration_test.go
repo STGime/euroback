@@ -204,3 +204,153 @@ func cleanupPlatformUser(ctx context.Context, pool *pgxpool.Pool, email string) 
 		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE id = $1`, id)
 	}
 }
+
+// TestDeleteAccount_RefusesSoleAdminOfSharedOrg pins the self-delete
+// mirror of AdminDeleteUser's sole-admin-with-other-members guard.
+// Sole admin of an org that still has other (non-admin) members must
+// hand off before self-deletion — returning the ErrOrgHandoffRequired
+// sentinel so the HTTP handler can map it to 409 rather than 500.
+func TestDeleteAccount_RefusesSoleAdminOfSharedOrg(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("DATABASE_URL not set; skipping self-delete org integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("cannot connect: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("cannot ping: %v", err)
+	}
+
+	adminEmail := fmt.Sprintf("selfdel-admin-%d@eurobase.test", os.Getpid())
+	memberEmail := fmt.Sprintf("selfdel-member-%d@eurobase.test", os.Getpid())
+	t.Cleanup(func() {
+		cleanupPlatformUser(context.Background(), pool, adminEmail)
+		cleanupPlatformUser(context.Background(), pool, memberEmail)
+	})
+	cleanupPlatformUser(ctx, pool, adminEmail)
+	cleanupPlatformUser(ctx, pool, memberEmail)
+
+	var adminID, memberID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+		 VALUES ($1, 'x', now()) RETURNING id::text`, adminEmail).Scan(&adminID); err != nil {
+		t.Fatalf("insert admin user: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+		 VALUES ($1, 'x', now()) RETURNING id::text`, memberEmail).Scan(&memberID); err != nil {
+		t.Fatalf("insert member user: %v", err)
+	}
+
+	var orgID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO public.organizations (name) VALUES ($1) RETURNING id::text`,
+		"selfdel fixture org",
+	).Scan(&orgID); err != nil {
+		t.Fatalf("insert org: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM public.organizations WHERE id = $1::uuid`, orgID)
+	})
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'admin', 'manual')`,
+		orgID, adminID); err != nil {
+		t.Fatalf("insert admin membership: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'member', 'manual')`,
+		orgID, memberID); err != nil {
+		t.Fatalf("insert plain membership: %v", err)
+	}
+
+	svc := NewPlatformAuthService(pool, "test-jwt-secret-please-ignore")
+	svc.SetDeveloperPool(pool) // same pool works in tests; prod splits them
+
+	err = svc.DeleteAccount(ctx, adminID)
+	if !errors.Is(err, ErrOrgHandoffRequired) {
+		t.Fatalf("DeleteAccount: got %v, want ErrOrgHandoffRequired", err)
+	}
+	// Admin row still present.
+	var still bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM platform_users WHERE id = $1::uuid)`, adminID).Scan(&still); err != nil {
+		t.Fatalf("check admin row: %v", err)
+	}
+	if !still {
+		t.Errorf("admin row should NOT have been deleted")
+	}
+}
+
+// TestDeleteAccount_DeletesSoloOrg pins the self-delete happy path
+// mirror of AdminDeleteUser: caller is the ONLY member of an org,
+// account-delete succeeds AND cleans up the now-empty org.
+func TestDeleteAccount_DeletesSoloOrg(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("DATABASE_URL not set; skipping self-delete solo-org test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("cannot connect: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("cannot ping: %v", err)
+	}
+
+	email := fmt.Sprintf("selfdel-solo-%d@eurobase.test", os.Getpid())
+	t.Cleanup(func() { cleanupPlatformUser(context.Background(), pool, email) })
+	cleanupPlatformUser(ctx, pool, email)
+
+	var userID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+		 VALUES ($1, 'x', now()) RETURNING id::text`, email).Scan(&userID); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	var orgID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO public.organizations (name) VALUES ($1) RETURNING id::text`,
+		"selfdel solo fixture",
+	).Scan(&orgID); err != nil {
+		t.Fatalf("insert org: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM public.organizations WHERE id = $1::uuid`, orgID)
+	})
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'admin', 'manual')`,
+		orgID, userID); err != nil {
+		t.Fatalf("insert solo membership: %v", err)
+	}
+
+	svc := NewPlatformAuthService(pool, "test-jwt-secret-please-ignore")
+	svc.SetDeveloperPool(pool)
+
+	if err := svc.DeleteAccount(ctx, userID); err != nil {
+		t.Fatalf("DeleteAccount: %v", err)
+	}
+	var userStill, orgStill bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM platform_users WHERE id = $1::uuid)`, userID).Scan(&userStill); err != nil {
+		t.Fatalf("check user row: %v", err)
+	}
+	if userStill {
+		t.Errorf("user row should have been deleted")
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM public.organizations WHERE id = $1::uuid)`, orgID).Scan(&orgStill); err != nil {
+		t.Fatalf("check org row: %v", err)
+	}
+	if orgStill {
+		t.Errorf("solo org row should have been deleted alongside the user")
+	}
+}

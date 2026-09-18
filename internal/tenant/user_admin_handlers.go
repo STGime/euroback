@@ -159,6 +159,18 @@ func AdminDeleteUser(pool, developerPool *pgxpool.Pool, svc *TenantService) http
 				orphanedCount++
 			}
 		}
+		// rows.Err() surfaces mid-iteration failures (conn drop,
+		// cancelled ctx). Without it we'd fail OPEN: an `orphaned`
+		// org past the cut-off would go uncounted and the guard
+		// would let the delete through, stranding the exact members
+		// it exists to protect.
+		if rowsErr := orgRows.Err(); rowsErr != nil {
+			orgRows.Close()
+			slog.Error("admin delete user: org classification iteration failed",
+				"target_user_id", targetUserID, "error", rowsErr)
+			http.Error(w, `{"error":"org membership iteration failed"}`, http.StatusInternalServerError)
+			return
+		}
 		orgRows.Close()
 		if orphanedCount > 0 {
 			http.Error(w, `{"error":"refusing to delete — user is sole admin of one or more organizations that still have other members; hand off admin to another member first"}`, http.StatusConflict)
