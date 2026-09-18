@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
+	import { get } from 'svelte/store';
 	import { user, logout } from '$lib/stores.js';
 	import { api, type Project } from '$lib/api.js';
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
@@ -45,14 +46,27 @@
 	// sign-in / sign-out / SSO-into-open-tab triggers a full refresh
 	// instead of leaving mount-time state pointing at the previous
 	// session.
-	async function refreshSessionState() {
+	//
+	// `forToken` is the token snapshot at effect-fire time. After every
+	// `await` we compare it against the store's current token and bail
+	// silently if they differ — a later effect run is already handling
+	// the newer identity, and letting a stale response write into
+	// $state after the switch would reintroduce the exact desync this
+	// PR fixes. Bailing is normal, not exceptional: `user.set()` writes
+	// two localStorage keys (eurobase_token + eurobase_email), which
+	// fires two `storage` events, which triggers two effect runs — the
+	// first run must be a no-op once the second overtakes it.
+	async function refreshSessionState(forToken: string) {
+		const stillCurrent = () => get(user)?.token === forToken;
 		try {
 			const profile = await api.getProfile();
+			if (!stillCurrent()) return;
 			displayName = profile.display_name;
 			profileEmail = profile.email;
 			isSuperadmin = profile.is_superadmin === true;
 			hasTeamBeta = profile.team_beta_access === true;
 		} catch {
+			if (!stillCurrent()) return;
 			// Silently ignore — falls back to $user.email (stale) display.
 		}
 		// Only fire listOrgs for users who lack team_beta_access — the
@@ -62,8 +76,10 @@
 		if (!hasTeamBeta) {
 			try {
 				const res = await api.listOrgs();
+				if (!stillCurrent()) return;
 				hasAnyOrgMembership = (res.orgs?.length ?? 0) > 0;
 			} catch {
+				if (!stillCurrent()) return;
 				hasAnyOrgMembership = false;
 			}
 		} else {
@@ -71,6 +87,7 @@
 		}
 		try {
 			const projects = await api.listProjects();
+			if (!stillCurrent()) return;
 			// Pick the FIRST project that matches
 			// plan='pro' && legacy_pro_grace_until != null.
 			// Rationale: showing multiple modals stacked would
@@ -83,6 +100,7 @@
 					(p) => p.plan === 'pro' && !!p.legacy_pro_grace_until
 				) ?? null;
 		} catch {
+			if (!stillCurrent()) return;
 			// Non-fatal — modal simply doesn't render.
 			legacyProProject = null;
 		}
@@ -117,7 +135,7 @@
 		hasTeamBeta = false;
 		hasAnyOrgMembership = false;
 		legacyProProject = null;
-		void refreshSessionState();
+		void refreshSessionState(token);
 	});
 
 	let navItems = $derived(
