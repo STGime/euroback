@@ -25,6 +25,24 @@ function createUserStore() {
 
 	const store = writable<User | null>(initial);
 
+	// Rehydrate on cross-tab localStorage changes. Without this, a tab
+	// that was open before another tab signed in (or before SSO landed
+	// in a redirect tab) keeps rendering a stale in-memory copy — the
+	// pill can end up displaying an email that doesn't match the JWT
+	// the API layer actually sends. api.ts already reads the token
+	// fresh via localStorage.getItem on every fetch, so requests are
+	// correct; only the UI display goes stale.
+	if (typeof window !== 'undefined') {
+		window.addEventListener('storage', (e) => {
+			if (e.key !== 'eurobase_token' && e.key !== 'eurobase_email') {
+				return;
+			}
+			const token = localStorage.getItem('eurobase_token');
+			const email = localStorage.getItem('eurobase_email');
+			store.set(token && email ? { token, email } : null);
+		});
+	}
+
 	return {
 		subscribe: store.subscribe,
 		set: (value: User | null) => {

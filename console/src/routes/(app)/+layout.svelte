@@ -15,6 +15,16 @@
 
 	let { children } = $props();
 	let displayName = $state<string | null>(null);
+	// profileEmail is the CURRENT JWT's DB email — always reflects the
+	// row `claims.Subject` points at. The header pill has to prefer this
+	// over `$user.email`, which is the string the user *typed* at login
+	// and is a stale in-memory copy of localStorage. If the SSO callback
+	// resolved a different candidate row than the caller typed (Gmail-
+	// canonical fallback in lookupPlatformUserCandidates, or an IdP
+	// returning `googlemail.com` for a `gmail.com` account), the two
+	// diverge and the pill starts lying — the exact confusion that led
+	// to a "these emails act like the same user" report in prod.
+	let profileEmail = $state<string | null>(null);
 	let isSuperadmin = $state<boolean>(false);
 	// Team-tier org membership: gates the "Organizations" nav entry.
 	// A user with team_beta_access can create orgs; a user who's been
@@ -39,10 +49,11 @@
 		try {
 			const profile = await api.getProfile();
 			displayName = profile.display_name;
+			profileEmail = profile.email;
 			isSuperadmin = profile.is_superadmin === true;
 			hasTeamBeta = profile.team_beta_access === true;
 		} catch {
-			// Silently ignore — falls back to email display.
+			// Silently ignore — falls back to $user.email (stale) display.
 		}
 		// Only fire listOrgs for users who lack team_beta_access — the
 		// creators already see the nav entry via hasTeamBeta. This is
@@ -246,9 +257,9 @@
 
 			<!-- User menu -->
 			<div class="flex items-center gap-3">
-				<span class="text-sm text-gray-500 hidden sm:block">{displayName ?? $user?.email ?? ''}</span>
+				<span class="text-sm text-gray-500 hidden sm:block">{displayName ?? profileEmail ?? $user?.email ?? ''}</span>
 				<div class="flex h-8 w-8 items-center justify-center rounded-full bg-eurobase-100 text-sm font-medium text-eurobase-700">
-					{(displayName ?? $user?.email ?? '?')[0].toUpperCase()}
+					{(displayName ?? profileEmail ?? $user?.email ?? '?')[0].toUpperCase()}
 				</div>
 			</div>
 		</header>
