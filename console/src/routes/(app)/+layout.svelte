@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { onMount } from 'svelte';
 	import { user, logout } from '$lib/stores.js';
 	import { api, type Project } from '$lib/api.js';
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
@@ -41,11 +40,12 @@
 	// decides visibility from sessionStorage + grace days left.
 	let legacyProProject: Project | null = $state(null);
 
-	onMount(async () => {
-		if (!$user) {
-			goto('/login');
-			return;
-		}
+	// Load everything that's keyed to the current session identity.
+	// Called from an $effect that tracks $user?.token, so a cross-tab
+	// sign-in / sign-out / SSO-into-open-tab triggers a full refresh
+	// instead of leaving mount-time state pointing at the previous
+	// session.
+	async function refreshSessionState() {
 		try {
 			const profile = await api.getProfile();
 			displayName = profile.display_name;
@@ -66,6 +66,8 @@
 			} catch {
 				hasAnyOrgMembership = false;
 			}
+		} else {
+			hasAnyOrgMembership = false;
 		}
 		try {
 			const projects = await api.listProjects();
@@ -82,7 +84,40 @@
 				) ?? null;
 		} catch {
 			// Non-fatal — modal simply doesn't render.
+			legacyProProject = null;
 		}
+	}
+
+	// React to session identity changes. Fires on initial mount AND
+	// whenever $user changes — including cross-tab sign-in/out via the
+	// storage listener in the user store (stores.ts). Two things happen
+	// on a change:
+	//
+	//   1. If $user is null (another tab signed out, or token expired
+	//      and api.ts cleared it) — bounce to /login. Previously the
+	//      mount-only guard let a null-in-mid-session tab keep
+	//      rendering the app shell until an API call 401'd.
+	//   2. Otherwise, clear identity-derived state before refetching
+	//      so the pill immediately falls back to the fresh
+	//      $user.email while getProfile() is in flight, instead of
+	//      briefly rendering the previous session's DB email via a
+	//      stale profileEmail.
+	$effect(() => {
+		const token = $user?.token;
+		if (!token) {
+			// Guard against re-firing during the goto redirect.
+			if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+				goto('/login');
+			}
+			return;
+		}
+		displayName = null;
+		profileEmail = null;
+		isSuperadmin = false;
+		hasTeamBeta = false;
+		hasAnyOrgMembership = false;
+		legacyProProject = null;
+		void refreshSessionState();
 	});
 
 	let navItems = $derived(
