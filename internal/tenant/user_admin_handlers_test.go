@@ -197,29 +197,33 @@ func TestAdminDeleteUser_NotFound(t *testing.T) {
 	}
 }
 
-// TestAdminDeleteUser_RefusesSoleAdminOfOrg pins the sole-admin org
-// guard. Seeds an org where the target is the ONLY admin, expects
-// 409 with the hand-off message. Regression test for the review-round
-// bug where the guard used the wrong column name (m.user_id vs
-// m.platform_user_id) and 500'd instead of 409'ing.
-func TestAdminDeleteUser_RefusesSoleAdminOfOrg(t *testing.T) {
+// TestAdminDeleteUser_DeletesSoloOrg pins the new "solo org gets
+// cleaned up alongside the user" behavior. Seeds an org where the
+// target is the ONLY member (admin or otherwise) and expects the
+// delete to succeed 200 AND the empty org to be removed. Before this
+// behavior existed, the sole-admin guard fired even in the solo case
+// and left users unable to close their own account without ops help
+// just because they'd created a personal org.
+func TestAdminDeleteUser_DeletesSoloOrg(t *testing.T) {
 	pool := setupTestDB(t)
 	ctx := context.Background()
 	svc := &TenantService{pool: pool}
 
-	targetEmail := "delete-sole-admin@test.eurobase.local"
+	targetEmail := "delete-solo-org@test.eurobase.local"
 	targetID := insertTestPlatformUser(t, pool, targetEmail)
-	actorID := insertTestPlatformUser(t, pool, "delete-actor-org@test.eurobase.local")
+	actorID := insertTestPlatformUser(t, pool, "delete-actor-solo@test.eurobase.local")
 
-	// Seed the org + membership. Only `name` is required on
-	// organizations; created_by is nullable (see migration 000114).
+	// Seed the org + membership. Target is the ONLY row in org_members
+	// for this org — the "solo" bucket.
 	var orgID string
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO public.organizations (name) VALUES ($1) RETURNING id::text`,
-		"Sole-admin fixture org",
+		"Solo-org fixture",
 	).Scan(&orgID); err != nil {
 		t.Fatalf("insert org: %v", err)
 	}
+	// Safety-net cleanup: if the delete under test doesn't remove the
+	// org, don't leak it across test runs.
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE id = $1::uuid`, orgID)
 	})
@@ -240,13 +244,102 @@ func TestAdminDeleteUser_RefusesSoleAdminOfOrg(t *testing.T) {
 	w := httptest.NewRecorder()
 	AdminDeleteUser(pool, pool, svc).ServeHTTP(w, req)
 
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	var body struct {
+		Deleted     bool `json:"deleted"`
+		OrgsDeleted int  `json:"orgs_deleted"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Deleted || body.OrgsDeleted != 1 {
+		t.Errorf("response mismatch: %+v", body)
+	}
+	// Target user row is gone.
+	var userStill bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM public.platform_users WHERE id = $1::uuid)`,
+		targetID,
+	).Scan(&userStill); err != nil {
+		t.Fatalf("check user row: %v", err)
+	}
+	if userStill {
+		t.Errorf("target user row should have been deleted")
+	}
+	// Solo org row is gone.
+	var orgStill bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM public.organizations WHERE id = $1::uuid)`,
+		orgID,
+	).Scan(&orgStill); err != nil {
+		t.Fatalf("check org row: %v", err)
+	}
+	if orgStill {
+		t.Errorf("solo org row should have been deleted alongside the user")
+	}
+}
+
+// TestAdminDeleteUser_RefusesSoleAdminWithOtherMembers pins the
+// remaining refusal case: target is the ONLY admin BUT the org has
+// other (non-admin) members. Deleting would leave those members
+// stranded with no admin — expect 409 and both user + org intact.
+// This is the case the pre-cleanup sole-admin guard was ACTUALLY
+// designed to catch; the solo-org half was collateral damage.
+func TestAdminDeleteUser_RefusesSoleAdminWithOtherMembers(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	svc := &TenantService{pool: pool}
+
+	targetEmail := "delete-sole-admin-multi@test.eurobase.local"
+	targetID := insertTestPlatformUser(t, pool, targetEmail)
+	memberID := insertTestPlatformUser(t, pool, "delete-orphaned-member@test.eurobase.local")
+	actorID := insertTestPlatformUser(t, pool, "delete-actor-multi@test.eurobase.local")
+
+	var orgID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO public.organizations (name) VALUES ($1) RETURNING id::text`,
+		"Sole-admin-with-members fixture",
+	).Scan(&orgID); err != nil {
+		t.Fatalf("insert org: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE id = $1::uuid`, orgID)
+	})
+	// Target is admin.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'admin', 'manual')`,
+		orgID, targetID,
+	); err != nil {
+		t.Fatalf("insert admin member: %v", err)
+	}
+	// Second user is a plain member — would be orphaned.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		 VALUES ($1::uuid, $2::uuid, 'member', 'manual')`,
+		orgID, memberID,
+	); err != nil {
+		t.Fatalf("insert plain member: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/platform/admin/users/"+targetID, nil)
+	rc := chi.NewRouteContext()
+	rc.URLParams.Add("id", targetID)
+	rctx := context.WithValue(req.Context(), chi.RouteCtxKey, rc)
+	rctx = auth.ContextWithClaims(rctx, &auth.Claims{Subject: actorID, IsSuperadmin: true})
+	req = req.WithContext(rctx)
+	w := httptest.NewRecorder()
+	AdminDeleteUser(pool, pool, svc).ServeHTTP(w, req)
+
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status: got %d, want 409 (body: %s)", w.Code, w.Body.String())
 	}
 	if !contains(w.Body.String(), "sole admin") {
 		t.Errorf("expected 'sole admin' in message, got: %s", w.Body.String())
 	}
-	// Target should still exist.
+	// Target user row still exists.
 	var stillThere bool
 	if err := pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM public.platform_users WHERE id = $1::uuid)`,
@@ -256,6 +349,17 @@ func TestAdminDeleteUser_RefusesSoleAdminOfOrg(t *testing.T) {
 	}
 	if !stillThere {
 		t.Errorf("target row should NOT have been deleted")
+	}
+	// Org row still exists.
+	var orgStill bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM public.organizations WHERE id = $1::uuid)`,
+		orgID,
+	).Scan(&orgStill); err != nil {
+		t.Fatalf("check org row: %v", err)
+	}
+	if !orgStill {
+		t.Errorf("org row should NOT have been deleted (still has orphaned members)")
 	}
 }
 

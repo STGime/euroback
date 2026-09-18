@@ -257,7 +257,15 @@ func HandleDeleteAccount(svc *PlatformAuthService) http.HandlerFunc {
 		if err := svc.DeleteAccount(r.Context(), claims.Subject); err != nil {
 			slog.Warn("delete account failed", "error", err)
 			status := http.StatusInternalServerError
-			if isUserError(err) {
+			switch {
+			case errors.Is(err, ErrOrgHandoffRequired):
+				// Sentinel — mirrors AdminDeleteUser's 409 for the
+				// same condition. Kept separate from isUserError so
+				// the status class matches the resource conflict
+				// (there IS a user + org state that has to change
+				// server-side; not a bad request from the caller).
+				status = http.StatusConflict
+			case isUserError(err):
 				status = http.StatusBadRequest
 			}
 			writeJSONError(w, err.Error(), status)
