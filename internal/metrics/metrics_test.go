@@ -97,3 +97,28 @@ func mustContain(t *testing.T, body, want string) {
 		t.Fatalf("metrics output missing %q\nfull body:\n%s", want, body)
 	}
 }
+
+// TestStatusRecorder_SatisfiesHijacker pins the fix for the 2026-09-20
+// realtime WS regression: gorilla/websocket's Upgrade() calls
+// `w.(http.Hijacker)`, so any ResponseWriter wrapper in the chain
+// MUST satisfy that interface — otherwise the type assertion fails
+// and gorilla returns HTTP 500 "response does not implement
+// http.Hijacker". Before the delegating methods landed, the assertion
+// silently failed for every /v1/realtime request and every WS upgrade
+// 500'd. This test would have caught it at CI.
+//
+// Same test for Flusher and Pusher — cheap insurance for server-sent
+// events / HTTP/2 push endpoints that might land under the same
+// middleware later.
+func TestStatusRecorder_SatisfiesResponseControllerInterfaces(t *testing.T) {
+	var w http.ResponseWriter = &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	if _, ok := w.(http.Hijacker); !ok {
+		t.Error("*statusRecorder must implement http.Hijacker — required for WebSocket / HTTP/1.1 upgrades")
+	}
+	if _, ok := w.(http.Flusher); !ok {
+		t.Error("*statusRecorder must implement http.Flusher — required for server-sent events / streaming responses")
+	}
+	if _, ok := w.(http.Pusher); !ok {
+		t.Error("*statusRecorder must implement http.Pusher — required for HTTP/2 server push")
+	}
+}

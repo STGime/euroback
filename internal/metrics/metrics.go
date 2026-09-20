@@ -8,8 +8,11 @@
 package metrics
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -258,6 +261,21 @@ func (r *Registry) Middleware(next http.Handler) http.Handler {
 }
 
 // statusRecorder captures the status code written to the response.
+//
+// It embeds http.ResponseWriter as an *interface* field. Go does not
+// promote methods that live outside the embedded interface's method
+// set, so a naive wrapper stops satisfying http.Hijacker / http.Flusher
+// / http.Pusher even when the underlying writer supports them. That
+// broke the /v1/realtime WebSocket upgrade (2026-09-20 report from
+// sport@sg-prenden-lanke.de): gorilla/websocket's Upgrade() does
+// `w.(http.Hijacker)`, the assertion failed, and gorilla returned
+// HTTP 500 "websocket: response does not implement http.Hijacker" —
+// the exact 500 the customer's SDK reported instead of the expected
+// 401/upgrade.
+//
+// The Hijack / Flush / Push methods below delegate to the underlying
+// writer if it supports them, so long-lived connections (WS,
+// server-sent events, HTTP/2 push) work through this middleware.
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
@@ -270,6 +288,34 @@ func (s *statusRecorder) WriteHeader(code int) {
 		s.wroteHeader = true
 	}
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack lets gorilla/websocket (and any HTTP/1.1 upgrade path) take
+// over the underlying connection. Bubbles up whatever the wrapped
+// writer says — same error shape as if the wrapper weren't there.
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := s.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, errors.New("metrics.statusRecorder: underlying ResponseWriter does not implement http.Hijacker")
+}
+
+// Flush lets server-sent events / streaming responses push bytes to
+// the client immediately.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Push enables HTTP/2 server push through the wrapper. No-op error
+// when the underlying writer doesn't support it — matching Go's
+// standard behaviour for non-HTTP/2 servers.
+func (s *statusRecorder) Push(target string, opts *http.PushOptions) error {
+	if p, ok := s.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
 }
 
 // statusClass reduces status codes to the bucket "2xx"/"3xx"/"4xx"/"5xx".
