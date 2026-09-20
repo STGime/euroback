@@ -65,6 +65,15 @@ func (sc *statusCapture) Push(target string, opts *http.PushOptions) error {
 	return http.ErrNotSupported
 }
 
+// Unwrap — see metrics.statusRecorder.Unwrap for the reasoning.
+func (sc *statusCapture) Unwrap() http.ResponseWriter { return sc.ResponseWriter }
+
+var (
+	_ http.Hijacker = (*statusCapture)(nil)
+	_ http.Flusher  = (*statusCapture)(nil)
+	_ http.Pusher   = (*statusCapture)(nil)
+)
+
 // RequestLoggingMiddleware returns middleware that sends log entries to the provided channel.
 func RequestLoggingMiddleware(logCh chan<- LogEntry) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

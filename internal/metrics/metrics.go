@@ -318,6 +318,27 @@ func (s *statusRecorder) Push(target string, opts *http.PushOptions) error {
 	return http.ErrNotSupported
 }
 
+// Unwrap exposes the wrapped ResponseWriter so Go 1.20+'s
+// http.ResponseController can walk through this middleware to any
+// optional interface the underlying writer supports — without us
+// having to enumerate every one (SetReadDeadline, SetWriteDeadline,
+// EnableFullDuplex, …). Cheap future-proofing; the explicit
+// Hijack/Flush/Push methods above stay to cover callers that
+// type-assert directly on the wrapper (gorilla/websocket v1.5.x
+// does that today).
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// Compile-time pins — cheaper than the runtime test at
+// TestStatusRecorder_SatisfiesResponseControllerInterfaces and fail
+// at `go build` if a future edit ever removes one of the methods.
+// The runtime test stays: it documents WHY these interfaces are
+// load-bearing (gorilla/websocket, SSE, HTTP/2 push).
+var (
+	_ http.Hijacker = (*statusRecorder)(nil)
+	_ http.Flusher  = (*statusRecorder)(nil)
+	_ http.Pusher   = (*statusRecorder)(nil)
+)
+
 // statusClass reduces status codes to the bucket "2xx"/"3xx"/"4xx"/"5xx".
 // Keeping cardinality low is the whole point; exact codes should live in logs
 // and in the eurobase_http_requests_total metric's path-level aggregation.
