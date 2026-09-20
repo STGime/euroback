@@ -328,18 +328,31 @@
 			// auto-attach for now. Follow-up: extend pending_projects
 			// to carry org_id + null-marker so the picker choice
 			// survives the round-trip.
-			await api.createProject({
+			// THREE-STATE contract on org_id (matches server-side
+			// CreateProjectRequest):
+			//   absent  → auto-attach to caller's admin org if any
+			//   null    → force personal
+			//   <uuid>  → attach to that specific org (server verifies)
+			// Only include org_id when the picker actually rendered
+			// (adminOrgs.length > 0). Otherwise the field would carry
+			// its default 'personal' → null and silently convert an
+			// admin's project to personal any time listOrgs failed
+			// (non-fatal .catch above) or the modal opened before
+			// Promise.all resolved. Same fix landed on the onboarding
+			// wizard in the same PR; this modal is currently
+			// unreachable from the primary UI but the latent bug is
+			// the same shape.
+			const pickerRendered = adminOrgs.length > 0;
+			const req: Parameters<typeof api.createProject>[0] = {
 				name: newName.trim(),
 				slug: newSlug,
 				region: 'fr-par',
 				plan: newPlan,
-				// newOwner is either 'personal' or an org id. Server-side
-				// CreateProjectRequest distinguishes absent (auto-attach)
-				// from null (force personal) from set (attach to that
-				// org); this picker never emits "absent" — it always
-				// makes an explicit choice on behalf of the user.
-				org_id: newOwner === 'personal' ? null : newOwner
-			});
+			};
+			if (pickerRendered) {
+				req.org_id = newOwner === 'personal' ? null : newOwner;
+			}
+			await api.createProject(req);
 			showNewModal = false;
 			await loadProjects();
 		} catch (err) {

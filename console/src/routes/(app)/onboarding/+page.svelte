@@ -328,20 +328,33 @@
 			// beta (price_cents NULL on both plan_limits rows), so
 			// no Mollie checkout. When Legal Team ships paid, mirror
 			// the pro branch (plan_code:'legal_team').
-			// org_id encoding matches CreateProjectRequest server-side:
-			//   'personal' → null  (forces personal, skips auto-attach)
-			//   '<uuid>'   → attach to that org (server verifies admin)
-			// If the picker didn't render (no admin orgs), newOwner
-			// stays at its default 'personal' and we send null — same
-			// outcome as pre-picker auto-attach for a user with no
-			// admin org.
-			const project = await api.createProject({
+			// org_id encoding matches CreateProjectRequest server-side.
+			// THREE-STATE contract:
+			//   absent  → client has no opinion; server auto-attaches
+			//             to the caller's admin org if any.
+			//   null    → force personal (skip auto-attach).
+			//   <uuid>  → attach to that specific org (server verifies
+			//             the caller admins it).
+			// Only include org_id when the picker actually rendered
+			// (adminOrgs.length > 0 AND we're on a plan that carries
+			// it). If it didn't render — no admin orgs, or Pro-plan
+			// checkout that ignores org_id, or listOrgs failed and
+			// silently collapsed the picker — omit the field so the
+			// server auto-attaches. Sending null unconditionally would
+			// convert an admin's project to personal any time the
+			// picker was hidden by accident, which is a silent
+			// regression the review caught (round 1, PR #608).
+			const pickerRendered = adminOrgs.length > 0 && plan !== 'pro';
+			const req: Parameters<typeof api.createProject>[0] = {
 				name: projectName.trim(),
 				slug: slug,
 				region: 'fr-par',
 				plan: plan,
-				org_id: newOwner === 'personal' ? null : newOwner,
-			});
+			};
+			if (pickerRendered) {
+				req.org_id = newOwner === 'personal' ? null : newOwner;
+			}
+			const project = await api.createProject(req);
 			createdProject = project;
 			await loadProjects();
 			step = 'auth';
@@ -521,10 +534,17 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				</div>
 
 				<!-- Owner picker: attach to an org the caller admins, or keep personal.
-				     Hidden entirely when the caller doesn't admin any org — no picker is
-				     better than a one-option picker for the common per-user case. Mirrors
-				     the shape in routes/(app)/projects/+page.svelte:643-663. -->
-				{#if adminOrgs.length > 0}
+				     Hidden when:
+				       * the caller doesn't admin any org (a one-option picker is worse
+				         than none for the common per-user case), OR
+				       * the plan is Pro — Pro goes through api.startProjectCheckout
+				         (Mollie), whose request shape doesn't carry org_id today
+				         (pending_projects schema, see api.ts:868). Showing the control
+				         and then silently ignoring it would create "I picked Personal
+				         and it attached anyway" tickets — the exact bug this PR is
+				         trying to prevent. Note under the plan card explains it.
+				     Mirrors the shape in routes/(app)/projects/+page.svelte:643-663. -->
+				{#if adminOrgs.length > 0 && plan !== 'pro'}
 					<div>
 						<label for="onb-owner" class="block text-sm font-medium text-gray-700">Owner</label>
 						<select
@@ -540,6 +560,10 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 						<p class="mt-1.5 text-xs text-gray-400">
 							Org projects are visible to all org members. Personal projects are yours alone until you attach them.
 						</p>
+					</div>
+				{:else if adminOrgs.length > 0 && plan === 'pro'}
+					<div class="rounded-lg border border-gray-200 bg-gray-50 px-3.5 py-2.5 text-xs text-gray-500">
+						Pro projects are created in your organization by default. You can detach or move them from the project settings after creation.
 					</div>
 				{/if}
 
