@@ -56,12 +56,21 @@ type ProjectAccess struct {
 //     auth check (org admins can attach/detach org projects), so
 //     "admin of the org that owns this project" ≈ "admin of the
 //     project" is the least-surprise mapping.
-//   - Org **member** → project 'developer'. Members should be able
-//     to work in an org's projects (query the DB, invoke functions,
-//     manage storage) without being able to add/remove other members
-//     or delete the project itself. 'developer' is the middle rung
-//     that fits.
-//   - Anything else → ” (no access via org).
+//   - Org **member** → project 'viewer' (deliberately conservative
+//     default). RequireMinRole("developer") gates a lot of
+//     dangerous edges — arbitrary /sql & /sql/transaction, DDL
+//     endpoints, function deploy/update (incl. the RLS-bypass
+//     allow_service_role flag), storage upload/delete, migrations,
+//     webhooks, cron. Automatically granting all of that to every
+//     org member on every org project by mere org attachment would
+//     be a much larger surface than the least-privilege intent of
+//     the whole SSO/org series. An org admin who wants a specific
+//     member to have write access can promote them per-project via
+//     the project's Members tab (chapter 19), which is the audit
+//     trail we want anyway. If the "viewer only" default proves too
+//     restrictive in practice we can widen — the reverse (narrowing
+//     after users depend on writes) is much harder.
+//   - Anything else → "" (no access via org).
 //
 // Not calling this "roleMap" so grep doesn't confuse it with the
 // hierarchy in members.go.
@@ -70,7 +79,7 @@ func mapOrgRoleToProjectRole(orgRole string) string {
 	case RoleOrgAdmin:
 		return "admin"
 	case RoleOrgMember:
-		return "developer"
+		return "viewer"
 	default:
 		return ""
 	}
@@ -84,6 +93,30 @@ func higherRole(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// composeEffectiveRole folds the three access paths on a ProjectAccess
+// into a single effective project role using higherRole. Extracted
+// from IsProjectAccessible so tests exercise the real production
+// path instead of duplicating the folding logic.
+//
+// Empty return means "no access via any path" — caller should treat
+// as Accessible=false (which IsProjectAccessible sets in tandem).
+func composeEffectiveRole(pa *ProjectAccess) string {
+	if pa == nil {
+		return ""
+	}
+	var eff string
+	if pa.ViaOwner {
+		eff = "owner"
+	}
+	if pa.ViaMember {
+		eff = higherRole(eff, pa.MemberRole)
+	}
+	if pa.ViaOrg {
+		eff = higherRole(eff, mapOrgRoleToProjectRole(pa.OrgRole))
+	}
+	return eff
 }
 
 // IsProjectAccessible unions the three access paths (owner_id +
@@ -130,20 +163,6 @@ func IsProjectAccessible(ctx context.Context, pool *pgxpool.Pool, userID, projec
 		return nil, fmt.Errorf("project access lookup: %w", err)
 	}
 	pa.Accessible = pa.ViaOwner || pa.ViaMember || pa.ViaOrg
-
-	// Derive effective role from the highest-privilege path. Owner
-	// beats everything ('owner' rank 4). Then direct project_members
-	// role. Then the org-derived role. Empty when Accessible=false.
-	var effective string
-	if pa.ViaOwner {
-		effective = "owner"
-	}
-	if pa.ViaMember {
-		effective = higherRole(effective, pa.MemberRole)
-	}
-	if pa.ViaOrg {
-		effective = higherRole(effective, mapOrgRoleToProjectRole(pa.OrgRole))
-	}
-	pa.EffectiveRole = effective
+	pa.EffectiveRole = composeEffectiveRole(&pa)
 	return &pa, nil
 }

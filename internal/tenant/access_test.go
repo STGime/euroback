@@ -6,13 +6,14 @@ import "testing"
 // decision baked into IsProjectAccessible. Changing this table is a
 // product-visible change (org members would gain/lose privileges on
 // every org project simultaneously), so the test acts as the change-
-// review checkpoint.
+// review checkpoint. See the doc comment on mapOrgRoleToProjectRole
+// for the rationale behind the conservative viewer default.
 func TestMapOrgRoleToProjectRole(t *testing.T) {
 	cases := map[string]string{
-		"admin":   "admin",     // org admin manages the org, gets 'admin' on every org project
-		"member":  "developer", // org member works in projects but can't manage them
-		"":        "",          // no org role → no access
-		"unknown": "",          // future values (e.g. billing_admin) fall through until mapped
+		"admin":   "admin",  // org admin manages the org, gets 'admin' on every org project
+		"member":  "viewer", // org member: read-only by default; per-project promote via chapter 19
+		"":        "",       // no org role → no access
+		"unknown": "",       // future values (e.g. billing_admin) fall through until mapped
 	}
 	for orgRole, want := range cases {
 		got := mapOrgRoleToProjectRole(orgRole)
@@ -48,95 +49,81 @@ func TestHigherRole(t *testing.T) {
 	}
 }
 
-// TestProjectAccess_EffectiveRole_Composition exercises the union
-// logic that IsProjectAccessible applies after the DB scan. Uses the
-// helper directly with pre-populated ProjectAccess fields so we don't
-// need a live DB — the DB-integration path is covered by
-// TestIsProjectAccessible_Integration when DATABASE_URL is set.
+// TestComposeEffectiveRole exercises the union logic that
+// IsProjectAccessible applies after the DB scan by calling the
+// extracted composeEffectiveRole helper directly — no DB required,
+// and (crucially) no re-implementation of the logic in the test
+// body. A bug in composeEffectiveRole now fails the test.
 //
-// The scenarios encode #612's regression matrix:
+// Scenarios encode #612's regression matrix + the round-1 review
+// mapping change (org member → viewer, not developer):
 //
-//   - org member with NO direct membership → 'developer' (was: "" → 404)
-//   - org admin with NO direct membership   → 'admin'    (was: "" → 404)
+//   - org member with NO direct membership → 'viewer' (was: "" → 404 before #612)
+//   - org admin  with NO direct membership → 'admin'  (was: "" → 404 before #612)
 //   - direct owner → 'owner' regardless of org
 //   - both direct member (viewer) + org admin → 'admin' (org path wins)
 //   - both direct owner + org member → 'owner' (owner path wins)
+//   - both direct developer + org member (viewer) → 'developer' (direct wins)
 //   - not accessible at all → EffectiveRole = ""
-func TestProjectAccess_EffectiveRole_Composition(t *testing.T) {
+func TestComposeEffectiveRole(t *testing.T) {
 	cases := []struct {
-		name         string
-		pa           ProjectAccess
-		wantRole     string
-		wantAccessOK bool
+		name     string
+		pa       ProjectAccess
+		wantRole string
 	}{
 		{
 			name:     "org member only",
 			pa:       ProjectAccess{ViaOrg: true, OrgRole: "member"},
-			wantRole: "developer", wantAccessOK: true,
+			wantRole: "viewer",
 		},
 		{
 			name:     "org admin only",
 			pa:       ProjectAccess{ViaOrg: true, OrgRole: "admin"},
-			wantRole: "admin", wantAccessOK: true,
+			wantRole: "admin",
 		},
 		{
 			name:     "direct owner only",
 			pa:       ProjectAccess{ViaOwner: true},
-			wantRole: "owner", wantAccessOK: true,
+			wantRole: "owner",
 		},
 		{
 			name:     "direct project viewer only",
 			pa:       ProjectAccess{ViaMember: true, MemberRole: "viewer"},
-			wantRole: "viewer", wantAccessOK: true,
+			wantRole: "viewer",
 		},
 		{
 			name:     "direct viewer + org admin — org wins",
 			pa:       ProjectAccess{ViaMember: true, MemberRole: "viewer", ViaOrg: true, OrgRole: "admin"},
-			wantRole: "admin", wantAccessOK: true,
+			wantRole: "admin",
 		},
 		{
 			name:     "direct owner + org member — owner wins",
 			pa:       ProjectAccess{ViaOwner: true, ViaOrg: true, OrgRole: "member"},
-			wantRole: "owner", wantAccessOK: true,
+			wantRole: "owner",
 		},
 		{
-			name:     "direct admin + org member — direct wins",
-			pa:       ProjectAccess{ViaMember: true, MemberRole: "admin", ViaOrg: true, OrgRole: "member"},
-			wantRole: "admin", wantAccessOK: true,
+			name:     "direct developer + org member — direct wins",
+			pa:       ProjectAccess{ViaMember: true, MemberRole: "developer", ViaOrg: true, OrgRole: "member"},
+			wantRole: "developer",
 		},
 		{
 			name:     "no access at all",
 			pa:       ProjectAccess{},
-			wantRole: "", wantAccessOK: false,
+			wantRole: "",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			// Mirror the composition logic from IsProjectAccessible
-			// without needing a DB. If this test drifts from the
-			// production computation, it's a signal the helper needs
-			// a testable extraction — for now the code is short
-			// enough to duplicate.
-			pa := c.pa
-			pa.Accessible = pa.ViaOwner || pa.ViaMember || pa.ViaOrg
-			var eff string
-			if pa.ViaOwner {
-				eff = "owner"
-			}
-			if pa.ViaMember {
-				eff = higherRole(eff, pa.MemberRole)
-			}
-			if pa.ViaOrg {
-				eff = higherRole(eff, mapOrgRoleToProjectRole(pa.OrgRole))
-			}
-			pa.EffectiveRole = eff
-
-			if pa.Accessible != c.wantAccessOK {
-				t.Errorf("Accessible = %v, want %v", pa.Accessible, c.wantAccessOK)
-			}
-			if pa.EffectiveRole != c.wantRole {
-				t.Errorf("EffectiveRole = %q, want %q", pa.EffectiveRole, c.wantRole)
+			got := composeEffectiveRole(&c.pa)
+			if got != c.wantRole {
+				t.Errorf("composeEffectiveRole = %q, want %q", got, c.wantRole)
 			}
 		})
+	}
+
+	// Nil safety — the helper should return "" not panic. Callers
+	// guard against nil upstream, but a defensive fold is cheap.
+	if got := composeEffectiveRole(nil); got != "" {
+		t.Errorf("composeEffectiveRole(nil) = %q, want empty", got)
 	}
 }

@@ -188,6 +188,15 @@ func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 					ctx = query.ContextWithTenantPool(ctx, tp)
 				}
 			}
+			// Stash the resolved role so RequireRole (called by
+			// handlers that live outside the membership-middleware
+			// group, e.g. HandleUpdateProject on PATCH /v1/tenants/{id})
+			// picks up the org-aware EffectiveRole instead of falling
+			// back to a fresh gateway-pool ResolveRole. Round-1 review
+			// on PR #614 caught this: without stashing here, RequireRole
+			// in members.go silently bypassed the org path for org
+			// admins doing project-management calls.
+			ctx = WithRole(ctx, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -323,6 +332,9 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool) func(http.Handler
 			// change swaps the lookup order).
 			ctx = query.ContextWithSchema(ctx, schema)
 			ctx = query.ContextWithProjectID(ctx, projectID)
+			// Stash the org-aware effective role for RequireRole
+			// downstream — same rationale as PlatformTenantContext.
+			ctx = WithRole(ctx, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
