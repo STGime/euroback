@@ -2936,9 +2936,15 @@ export const db = drizzle(client);</code></pre>
 				<h3 class="text-base font-semibold text-gray-900 pt-2">6. Attach a project to the org</h3>
 				<p class="text-sm text-gray-700">
 					Projects attach to an org <strong>at creation time</strong>. Every project Alex creates while admin of LexVault auto-attaches to LexVault by default,
-					and the create-project wizard now shows an <strong>Owner</strong> picker (see chapter 2) so Alex can pick <strong>Personal</strong> per-project when they don't want a project to be org-visible.
-					Any org-attached project shows up in <em>every</em> LexVault member's project list with an <strong>Org</strong> badge — no separate "invite this member to this project" step for org projects.
+					and the create-project wizard shows an <strong>Owner</strong> picker (see chapter 2) so Alex can pick <strong>Personal</strong> per-project when they don't want a project to be org-visible.
+					Any org-attached project shows up in <em>every</em> LexVault member's project list with an <strong>Org</strong> badge.
 				</p>
+				<div class="rounded-md bg-red-50 border border-red-200 p-3 text-xs text-red-900">
+					<strong>Known limitation — org membership surfaces projects but doesn't grant per-project access yet.</strong>
+					Attaching a project to LexVault makes it appear in Bea's project list (with the Org badge), but clicking through to open it currently returns <code class="rounded bg-red-100 px-1">404 project not found</code>
+					because every project-scoped route authorises on <code class="rounded bg-red-100 px-1">project_members</code>, not on org membership.
+					<strong>Workaround today:</strong> also add Bea under the project's <strong>Members</strong> tab (see chapter 19 — Team Collaboration) with the role you want her to have. The `org_members` row alone won't let her open the project. We're tracking the org-aware access lift as a follow-up.
+				</div>
 				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
 					<strong>Existing projects (created before the org): no self-serve move today.</strong>
 					The API endpoint (<code class="rounded bg-amber-100 px-1">PATCH /platform/projects/{'{id}'}/org</code>) exists, but no console UI is wired to it yet.
@@ -2955,19 +2961,23 @@ export const db = drizzle(client);</code></pre>
 					Once SSO is configured, you can lock every project the org owns behind SSO login. Turning this on stops password sessions from reaching any project attached to the org — even for the admin who flipped the switch, until they re-sign-in via SSO.
 				</p>
 				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
-					<li>Console → <strong>Organizations</strong> → LexVault → <strong>Require SSO</strong> toggle → ON.</li>
-					<li>Confirm the warning modal ("password login is refused effective immediately").</li>
+					<li>
+						Console → <strong>Organizations</strong> → LexVault → <strong>Require SSO</strong> toggle → ON.
+						The toggle fires the PATCH the moment you click it — there is no confirmation modal today, so the switch is live before you finish reading this sentence. Have an SSO login ready first (see the red callout below).
+					</li>
 					<li>
 						Any subsequent request from a password session hits <code class="rounded bg-gray-100 px-1 text-[11px]">403 sso_required_for_org</code>
 						at every org-owned access site — ListProjects filters the org's projects out; the project middleware refuses direct navigation; the org detail page refuses reads; the WebSocket realtime upgrade refuses subscribes. Enforcement is re-checked on every request, so flipping the toggle takes effect without waiting for sessions to expire.
 					</li>
-					<li>Users get bounced to <code class="rounded bg-gray-100 px-1 text-[11px]">/login?sso_required_for=&lt;org&gt;</code> where they can re-authenticate via SSO for that org.</li>
+					<li>
+						When a user's password session hits an org-owned <em>org detail</em> route (<code class="rounded bg-gray-100 px-1 text-[11px]">/platform/orgs/&lt;id&gt;</code>), the console sends them to <code class="rounded bg-gray-100 px-1 text-[11px]">/login?sso_required_for=&lt;org&gt;</code>. On project or realtime 403s the browser goes to plain <code class="rounded bg-gray-100 px-1 text-[11px]">/login</code>; the user picks <strong>Sign in with SSO</strong> themselves and enters their email. Deep-link handling of the <code class="rounded bg-gray-100 px-1 text-[11px]">sso_required_for</code> query param on the login page is a follow-up.
+					</li>
 				</ol>
 				<div class="rounded-md bg-red-50 border border-red-200 p-3 text-xs text-red-900">
 					<strong>No admin exemption.</strong> The <em>Require SSO</em> toggle applies to every session equally — admin, member, or superadmin. If you flip it while signed in with a password, your <em>very next request</em> to a project belonging to the org gets 403. Have an SSO login ready before you enable it, or you'll immediately lock yourself out until you re-sign-in via SSO.
 				</div>
 				<div class="rounded-md bg-gray-50 border border-gray-200 p-3 text-xs text-gray-700">
-					<strong>Turning it off.</strong> Same toggle. Password sessions immediately regain access on the next request; no session invalidation, no re-login. Enforcement is stored on the org row (<code class="rounded bg-gray-100 px-1">organizations.sso_required</code>) and read fresh on every check.
+					<strong>Turning it off.</strong> Same toggle — but only from an SSO-authed session for this org. The <code class="rounded bg-gray-100 px-1">PATCH /platform/orgs/&lt;id&gt;/sso-required</code> handler applies the same SSO gate to itself once <code class="rounded bg-gray-100 px-1">sso_required</code> is on, so a password session can't turn it back off (that's the "lock yourself out" case above — sign in via SSO first). Once flipped off, password sessions immediately regain access on the next request; no session invalidation, no re-login. Enforcement lives on the org row (<code class="rounded bg-gray-100 px-1">organizations.sso_required</code>) and is read fresh on every check.
 				</div>
 				<div class="rounded-md bg-gray-50 border border-gray-200 p-3 text-xs text-gray-700">
 					<strong>SSO for org A doesn't unlock org B.</strong> If a user is a member of two orgs — both with <em>Require SSO</em> on — signing in via A's IdP grants access to A's projects only. B still refuses that session until the user signs in via B's IdP. Cross-org access requires SSO for each org whose <em>Require SSO</em> is on.
