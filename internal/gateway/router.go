@@ -1490,7 +1490,25 @@ func projectMembershipMiddleware(pool, developerPool *pgxpool.Pool, isDev bool) 
 				return
 			}
 
-			role, err := tenant.ResolveRole(r.Context(), pool, projectID, claims.Subject)
+			// Access via any path — direct project_members OR
+			// projects.owner_id OR org_members on projects.org_id.
+			// Uses the developer pool because org_members is
+			// REVOKE-ALL from eurobase_gateway (migration 000114).
+			// Fixes #612: this middleware guards the entire
+			// /platform/projects/{id} group, so its ResolveRole-only
+			// check was the primary source of "org member sees the
+			// project but 404s on click".
+			var role string
+			var err error
+			if developerPool != nil {
+				pa, paErr := tenant.IsProjectAccessible(r.Context(), developerPool, claims.Subject, projectID)
+				err = paErr
+				if paErr == nil && pa.Accessible {
+					role = pa.EffectiveRole
+				}
+			} else {
+				role, err = tenant.ResolveRole(r.Context(), pool, projectID, claims.Subject)
+			}
 			if err != nil || role == "" {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 				return
@@ -1697,9 +1715,25 @@ func buildRealtimeAuthorize(pool, developerPool *pgxpool.Pool, platformAuth *aut
 		// realtime unenforced — a departed employee could still
 		// subscribe to project events on an sso_required org.
 		if platformClaims, err := platformAuth.ValidatePlatformJWT(token); err == nil && platformClaims != nil && platformClaims.Subject != "" {
-			role, roleErr := tenant.ResolveRole(ctx, pool, requestedProjectID, platformClaims.Subject)
-			if roleErr != nil {
-				return realtime.AuthorizedClient{}, fmt.Errorf("resolve role: %w", roleErr)
+			// Access via any path — direct project_members OR
+			// projects.owner_id OR org_members on projects.org_id.
+			// Uses developer pool for the org_members join (000114).
+			// Fixes #612: without this, an org member's WebSocket
+			// subscribe was ErrForbidden even though they saw the
+			// project in their list.
+			var role string
+			var accessErr error
+			if developerPool != nil {
+				pa, paErr := tenant.IsProjectAccessible(ctx, developerPool, platformClaims.Subject, requestedProjectID)
+				accessErr = paErr
+				if paErr == nil && pa.Accessible {
+					role = pa.EffectiveRole
+				}
+			} else {
+				role, accessErr = tenant.ResolveRole(ctx, pool, requestedProjectID, platformClaims.Subject)
+			}
+			if accessErr != nil {
+				return realtime.AuthorizedClient{}, fmt.Errorf("resolve access: %w", accessErr)
 			}
 			if role == "" {
 				return realtime.AuthorizedClient{}, realtime.ErrForbidden

@@ -2939,11 +2939,15 @@ export const db = drizzle(client);</code></pre>
 					and the create-project wizard shows an <strong>Owner</strong> picker (see chapter 2) so Alex can pick <strong>Personal</strong> per-project when they don't want a project to be org-visible.
 					Any org-attached project shows up in <em>every</em> LexVault member's project list with an <strong>Org</strong> badge.
 				</p>
-				<div class="rounded-md bg-red-50 border border-red-200 p-3 text-xs text-red-900">
-					<strong>Known limitation — org membership surfaces projects but doesn't grant per-project access yet.</strong>
-					Attaching a project to LexVault makes it appear in Bea's project list (with the Org badge), but clicking through to open it currently returns <code class="rounded bg-red-100 px-1">404 project not found</code>
-					because every project-scoped route authorises on <code class="rounded bg-red-100 px-1">project_members</code>, not on org membership.
-					<strong>Workaround today:</strong> also add Bea under the project's <strong>Members</strong> tab (see chapter 19 — Team Collaboration) with the role you want her to have. The <code class="rounded bg-red-100 px-1">org_members</code> row alone won't let her open the project. We're tracking the org-aware access lift as a follow-up (<a href="https://github.com/STGime/euroback/issues/612" target="_blank" rel="noopener noreferrer" class="underline hover:no-underline">#612</a>).
+				<div class="rounded-md bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-900">
+					<strong>Org membership grants project access.</strong> Every route on an org-attached project — project middleware, storage, realtime, DDL — unions the caller's direct <code class="rounded bg-emerald-100 px-1">project_members</code> row (chapter 19) with the org's <code class="rounded bg-emerald-100 px-1">org_members</code> row via <code class="rounded bg-emerald-100 px-1">IsProjectAccessible</code>. Bea sees the project in her list AND can open it in a single click — no separate per-project invite required for read access.
+					<br /><br />
+					<strong>Role mapping</strong> (conservative by default; see chapter 19 to widen per-project):
+					<ul class="list-disc pl-5 mt-1 space-y-1">
+						<li>Org <strong>admin</strong> → project <strong>admin</strong>. Mirrors <code class="rounded bg-emerald-100 px-1">SetProjectOrg</code>'s auth check — "admin of the org that owns the project" ≈ "admin of the project." Can manage members, save Settings, run DDL, deploy edge functions, etc.</li>
+						<li>Org <strong>member</strong> → project <strong>viewer</strong> (read-only). Can open the project, browse tables, read rows, read logs. Cannot run <code class="rounded bg-emerald-100 px-1">/sql</code> writes, deploy edge functions, change schema, upload storage, manage webhooks / cron / migrations. To grant an org member write access to a specific project, add them under that project's <strong>Members</strong> tab (chapter 19) with the role you want — the effective role is the higher of the direct membership and the org-derived one.</li>
+					</ul>
+					<span class="italic">Why viewer as the default:</span> RequireMinRole("developer") gates arbitrary SQL, DDL, function deploy (including RLS-bypass flags), storage writes, and more. Granting all that to every org member on every org project automatically would be a much larger surface than the least-privilege intent of the org / SSO series. Widening later is easy; narrowing after users depend on writes is not.
 				</div>
 				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
 					<strong>Existing projects (created before the org): no self-serve move today.</strong>

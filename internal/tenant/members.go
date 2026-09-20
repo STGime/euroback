@@ -86,6 +86,18 @@ func ResolveRole(ctx context.Context, pool *pgxpool.Pool, projectID, userID stri
 
 // RequireRole is a helper that resolves the caller's role from the request
 // context and returns 403 if insufficient. Returns the role on success.
+//
+// Prefers the role stashed on the context by projectMembershipMiddleware
+// (which now uses IsProjectAccessible — the org-aware helper — to
+// derive an EffectiveRole spanning direct project_members +
+// projects.owner_id + org_members). Falls back to a fresh ResolveRole
+// on the gateway pool for handlers that live outside the
+// membership-middleware group. Without this preference, #612's fix
+// stopped at the middleware — HandleListMembers / HandleUpdateProject /
+// HandleGDPRExport / HandleConnect / invite / remove all bypassed the
+// stashed role and re-checked project_members only, so an org admin
+// could open a project but couldn't manage its members or save
+// settings. Round-1 review on PR #614 flagged this.
 func RequireRole(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, projectID, minRole string) (claims *auth.Claims, role string, ok bool) {
 	c, hasAuth := auth.ClaimsFromContext(r.Context())
 	if !hasAuth || c == nil {
@@ -93,11 +105,15 @@ func RequireRole(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, pro
 		return nil, "", false
 	}
 
-	resolved, err := ResolveRole(r.Context(), pool, projectID, c.Subject)
-	if err != nil {
-		slog.Error("resolve role failed", "error", err)
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-		return nil, "", false
+	resolved := RoleFromContext(r.Context())
+	if resolved == "" {
+		var err error
+		resolved, err = ResolveRole(r.Context(), pool, projectID, c.Subject)
+		if err != nil {
+			slog.Error("resolve role failed", "error", err)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return nil, "", false
+		}
 	}
 	if resolved == "" || !HasRole(resolved, minRole) {
 		http.Error(w, `{"error":"forbidden: requires `+minRole+` role"}`, http.StatusForbidden)
