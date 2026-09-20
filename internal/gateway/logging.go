@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -22,6 +25,16 @@ type LogEntry struct {
 }
 
 // statusCapture wraps http.ResponseWriter to capture the status code.
+//
+// Same Hijacker / Flusher / Pusher delegation as metrics.statusRecorder
+// — see the comment there for the WebSocket-upgrade class of bug.
+// This wrapper is currently applied only to /platform/projects/{id}
+// (no WS upgrade lives under that prefix today), so the fix is
+// defensive rather than in response to a report — but the moment a
+// future WS or SSE endpoint lands under that route the wrapper would
+// otherwise silently 500 the upgrade, and the failure signature is
+// hard to reproduce locally when metrics/log middleware aren't in
+// the chain.
 type statusCapture struct {
 	http.ResponseWriter
 	code int
@@ -31,6 +44,35 @@ func (sc *statusCapture) WriteHeader(code int) {
 	sc.code = code
 	sc.ResponseWriter.WriteHeader(code)
 }
+
+func (sc *statusCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := sc.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, errors.New("gateway.statusCapture: underlying ResponseWriter does not implement http.Hijacker")
+}
+
+func (sc *statusCapture) Flush() {
+	if f, ok := sc.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (sc *statusCapture) Push(target string, opts *http.PushOptions) error {
+	if p, ok := sc.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+// Unwrap — see metrics.statusRecorder.Unwrap for the reasoning.
+func (sc *statusCapture) Unwrap() http.ResponseWriter { return sc.ResponseWriter }
+
+var (
+	_ http.Hijacker = (*statusCapture)(nil)
+	_ http.Flusher  = (*statusCapture)(nil)
+	_ http.Pusher   = (*statusCapture)(nil)
+)
 
 // RequestLoggingMiddleware returns middleware that sends log entries to the provided channel.
 func RequestLoggingMiddleware(logCh chan<- LogEntry) func(http.Handler) http.Handler {
