@@ -71,12 +71,31 @@ func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 				return
 			}
 
-			// Check membership (any role grants read access at the schema level).
-			role, roleErr := ResolveRole(r.Context(), pool, projectID, claims.Subject)
-			if roleErr != nil || role == "" {
-				slog.Error("platform tenant context: no membership",
+			// Check access via any path — direct project_members,
+			// projects.owner_id, OR org_members on projects.org_id.
+			// Uses the developer pool because org_members is
+			// REVOKE-ALL from eurobase_gateway (migration 000114).
+			// Empty developerPool (dev / tests) falls back to the
+			// project_members-only path to preserve pre-fix behaviour.
+			// Fixes #612: without this, org members saw org projects
+			// in their list (ListProjects org-union) but 404'd when
+			// they clicked through.
+			var role string
+			var accessErr error
+			if developerPool != nil {
+				pa, err := IsProjectAccessible(r.Context(), developerPool, claims.Subject, projectID)
+				accessErr = err
+				if err == nil && pa.Accessible {
+					role = pa.EffectiveRole
+				}
+			} else {
+				role, accessErr = ResolveRole(r.Context(), pool, projectID, claims.Subject)
+			}
+			if accessErr != nil || role == "" {
+				slog.Error("platform tenant context: no access",
 					"project_id", projectID,
 					"user_id", claims.Subject,
+					"error", accessErr,
 				)
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 				return
@@ -198,9 +217,24 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool) func(http.Handler
 				return
 			}
 
-			// Check membership (any role grants storage access at the project level).
-			role, roleErr := ResolveRole(r.Context(), pool, projectID, claims.Subject)
-			if roleErr != nil || role == "" {
+			// Check access via any path — direct project_members,
+			// projects.owner_id, OR org_members on projects.org_id.
+			// Same shape and rationale as PlatformTenantContext above
+			// (see the doc comment there). Fixes #612 for the storage
+			// surface: org members had storage access via the org-union
+			// project list but 404'd on every storage call.
+			var role string
+			var accessErr error
+			if developerPool != nil {
+				pa, err := IsProjectAccessible(r.Context(), developerPool, claims.Subject, projectID)
+				accessErr = err
+				if err == nil && pa.Accessible {
+					role = pa.EffectiveRole
+				}
+			} else {
+				role, accessErr = ResolveRole(r.Context(), pool, projectID, claims.Subject)
+			}
+			if accessErr != nil || role == "" {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 				return
 			}

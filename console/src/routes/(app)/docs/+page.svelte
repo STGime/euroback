@@ -2939,11 +2939,10 @@ export const db = drizzle(client);</code></pre>
 					and the create-project wizard shows an <strong>Owner</strong> picker (see chapter 2) so Alex can pick <strong>Personal</strong> per-project when they don't want a project to be org-visible.
 					Any org-attached project shows up in <em>every</em> LexVault member's project list with an <strong>Org</strong> badge.
 				</p>
-				<div class="rounded-md bg-red-50 border border-red-200 p-3 text-xs text-red-900">
-					<strong>Known limitation — org membership surfaces projects but doesn't grant per-project access yet.</strong>
-					Attaching a project to LexVault makes it appear in Bea's project list (with the Org badge), but clicking through to open it currently returns <code class="rounded bg-red-100 px-1">404 project not found</code>
-					because every project-scoped route authorises on <code class="rounded bg-red-100 px-1">project_members</code>, not on org membership.
-					<strong>Workaround today:</strong> also add Bea under the project's <strong>Members</strong> tab (see chapter 19 — Team Collaboration) with the role you want her to have. The <code class="rounded bg-red-100 px-1">org_members</code> row alone won't let her open the project. We're tracking the org-aware access lift as a follow-up (<a href="https://github.com/STGime/euroback/issues/612" target="_blank" rel="noopener noreferrer" class="underline hover:no-underline">#612</a>).
+				<div class="rounded-md bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-900">
+					<strong>Org membership grants project access.</strong> Every route on an org-attached project — project middleware, storage, realtime, DDL — now unions the caller's direct <code class="rounded bg-emerald-100 px-1">project_members</code> row (chapter 19) with the org's <code class="rounded bg-emerald-100 px-1">org_members</code> row via <code class="rounded bg-emerald-100 px-1">IsProjectAccessible</code>. Bea sees the project in her list AND can open it, work in the DB, invoke functions, use storage — all in a single click, no separate per-project invite required.
+					<br /><br />
+					<strong>Role mapping</strong> for org-derived access: org <em>admin</em> → project <strong>admin</strong> (mirrors <code class="rounded bg-emerald-100 px-1">SetProjectOrg</code>'s auth check — "admin of the org that owns the project" ≈ "admin of the project"). Org <em>member</em> → project <strong>developer</strong> (can query the DB, invoke functions, manage storage; can't add/remove other members or delete the project). Direct <code class="rounded bg-emerald-100 px-1">project_members</code> rows still work as chapter 19 documents, and the effective role is the higher of the two paths when both apply.
 				</div>
 				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
 					<strong>Existing projects (created before the org): no self-serve move today.</strong>
