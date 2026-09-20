@@ -355,10 +355,18 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 				AuthConfig: p.AuthConfig,
 				CreatedAt:  p.CreatedAt,
 				OrgID:      p.OrgID,
-				// OrgName intentionally omitted post-hotfix: resolving
-				// the name requires JOIN to `organizations`, which the
-				// gateway pool cannot SELECT. The console falls back to
-				// showing a generic "Org" badge from org_id.
+				// PR #615: OrgName is populated by ListProjects's
+				// enrichOrgNames pass via the developer pool
+				// (organizations is REVOKE-ALL from eurobase_gateway per
+				// migration 000114, so the enrichment can't run on the
+				// gateway pool — the stale comment that used to live
+				// here said "gateway pool cannot SELECT organizations"
+				// as if that closed the case; the workaround is a
+				// separate developer-pool round-trip in the service).
+				// Forwarding the field lets the console render
+				// "Org: <name>" instead of a bare "Org" badge; nil
+				// when enrichment failed → client falls back gracefully.
+				OrgName: p.OrgName,
 			}
 		}
 
