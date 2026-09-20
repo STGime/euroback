@@ -1,8 +1,8 @@
 # Eurobase Project: 
 
 ## API
-- Base URL: https://newtek2.eurobase.app
-- Project ID: b24e9fa8-463f-452d-be4e-ee5127c3e8f7
+- Base URL: https://newtek.eurobase.app
+- Project ID: 93df6379-8b4c-4056-8e61-647bffd9aa7c
 
 ## Database
 - Connection: see .env for DATABASE_URL
