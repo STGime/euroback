@@ -22,15 +22,15 @@ import (
 
 // Project represents a provisioned tenant project.
 type Project struct {
-	ID         string    `json:"id"`
-	OwnerID    string    `json:"owner_id"`
-	Name       string    `json:"name"`
-	Slug       string    `json:"slug"`
-	SchemaName string    `json:"schema_name"`
-	S3Bucket   string    `json:"s3_bucket"`
-	Region     string    `json:"region"`
-	Plan       string    `json:"plan"`
-	Status     string    `json:"status"`
+	ID         string          `json:"id"`
+	OwnerID    string          `json:"owner_id"`
+	Name       string          `json:"name"`
+	Slug       string          `json:"slug"`
+	SchemaName string          `json:"schema_name"`
+	S3Bucket   string          `json:"s3_bucket"`
+	Region     string          `json:"region"`
+	Plan       string          `json:"plan"`
+	Status     string          `json:"status"`
 	APIURL     string          `json:"api_url"`
 	AuthConfig json.RawMessage `json:"auth_config,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
@@ -342,18 +342,18 @@ var ErrLegalTeamBetaRequired = errors.New("legal team plan requires closed-beta 
 // The platformUserID is the platform_users.id (UUID), and email is the user's email.
 //
 // Team-tier dispatch (M2): if req.Plan == "team":
-//   1. Verify the platform_user has team_beta_access = true. If not,
-//      return ErrTeamBetaRequired (the beta window is admin-managed —
-//      users must be granted via the admin panel first).
-//   2. Provision the shared-cluster tenant schema like any other
-//      project (SDK / REST still land there for M2; gateway routing
-//      to the dedicated instance is a follow-up).
-//   3. After the tx commits, enqueue ProvisionTeamDatabaseArgs so
-//      the worker (internal/workers/provision_team_db.go) spins up
-//      the per-project dedicated managed-PG instance.
-//   4. Also enqueue a beta_grant subscription via billing.RecordBetaGrant
-//      so the console's /billing screen shows the "Team (closed beta)"
-//      status instead of "no active subscription."
+//  1. Verify the platform_user has team_beta_access = true. If not,
+//     return ErrTeamBetaRequired (the beta window is admin-managed —
+//     users must be granted via the admin panel first).
+//  2. Provision the shared-cluster tenant schema like any other
+//     project (SDK / REST still land there for M2; gateway routing
+//     to the dedicated instance is a follow-up).
+//  3. After the tx commits, enqueue ProvisionTeamDatabaseArgs so
+//     the worker (internal/workers/provision_team_db.go) spins up
+//     the per-project dedicated managed-PG instance.
+//  4. Also enqueue a beta_grant subscription via billing.RecordBetaGrant
+//     so the console's /billing screen shows the "Team (closed beta)"
+//     status instead of "no active subscription."
 func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email string, req CreateProjectRequest) (*Project, error) {
 	slug := req.Slug
 	if slug == "" {
@@ -806,7 +806,80 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 			}
 		}
 	}
+
+	// Enrich org-attached projects with their org name so the
+	// console can render "Org: LexVault" on the project card
+	// instead of the anonymous "Org" badge. Runs on the developer
+	// pool because organizations is REVOKE-ALL from eurobase_gateway
+	// (migration 000114). Nil developer pool → leave OrgName unset;
+	// client's `project.org_name ?? 'Org'` fallback still renders.
+	//
+	// One round-trip regardless of how many projects — a single
+	// SELECT ... WHERE id = ANY($1) gathers every distinct org_id.
+	if s.developerPool != nil {
+		s.enrichOrgNames(ctx, projects)
+	}
+
 	return projects, nil
+}
+
+// enrichOrgNames populates OrgName on every project with a set
+// OrgID by looking up organizations.name in one round-trip on the
+// developer pool. Silent on lookup failure — the "Org" fallback
+// on the client is a valid, if less informative, render.
+func (s *TenantService) enrichOrgNames(ctx context.Context, projects []Project) {
+	if len(projects) == 0 {
+		return
+	}
+	seen := make(map[string]struct{})
+	orgIDs := make([]string, 0)
+	for _, p := range projects {
+		if p.OrgID == nil || *p.OrgID == "" {
+			continue
+		}
+		if _, dup := seen[*p.OrgID]; dup {
+			continue
+		}
+		seen[*p.OrgID] = struct{}{}
+		orgIDs = append(orgIDs, *p.OrgID)
+	}
+	if len(orgIDs) == 0 {
+		return
+	}
+	rows, err := s.developerPool.Query(ctx,
+		`SELECT id::text, name FROM public.organizations WHERE id = ANY($1::uuid[])`,
+		orgIDs,
+	)
+	if err != nil {
+		slog.Warn("ListProjects org-name enrichment failed; badges will render 'Org'",
+			"error", err, "org_id_count", len(orgIDs))
+		return
+	}
+	defer rows.Close()
+	names := make(map[string]string, len(orgIDs))
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			slog.Warn("ListProjects org-name enrichment scan failed",
+				"error", err)
+			return
+		}
+		names[id] = name
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("ListProjects org-name enrichment iterate failed",
+			"error", err)
+		return
+	}
+	for i := range projects {
+		if projects[i].OrgID == nil {
+			continue
+		}
+		if n, ok := names[*projects[i].OrgID]; ok {
+			nameCopy := n
+			projects[i].OrgName = &nameCopy
+		}
+	}
 }
 
 // listDirectMemberProjects returns projects where the caller has a
