@@ -2943,7 +2943,7 @@ export const db = drizzle(client);</code></pre>
 					<strong>Known limitation — org membership surfaces projects but doesn't grant per-project access yet.</strong>
 					Attaching a project to LexVault makes it appear in Bea's project list (with the Org badge), but clicking through to open it currently returns <code class="rounded bg-red-100 px-1">404 project not found</code>
 					because every project-scoped route authorises on <code class="rounded bg-red-100 px-1">project_members</code>, not on org membership.
-					<strong>Workaround today:</strong> also add Bea under the project's <strong>Members</strong> tab (see chapter 19 — Team Collaboration) with the role you want her to have. The `org_members` row alone won't let her open the project. We're tracking the org-aware access lift as a follow-up.
+					<strong>Workaround today:</strong> also add Bea under the project's <strong>Members</strong> tab (see chapter 19 — Team Collaboration) with the role you want her to have. The <code class="rounded bg-red-100 px-1">org_members</code> row alone won't let her open the project. We're tracking the org-aware access lift as a follow-up (<a href="https://github.com/STGime/euroback/issues/612" target="_blank" rel="noopener noreferrer" class="underline hover:no-underline">#612</a>).
 				</div>
 				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
 					<strong>Existing projects (created before the org): no self-serve move today.</strong>
