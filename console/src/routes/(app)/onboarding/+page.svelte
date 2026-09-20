@@ -563,7 +563,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 					</div>
 				{:else if adminOrgs.length > 0 && plan === 'pro'}
 					<div class="rounded-lg border border-gray-200 bg-gray-50 px-3.5 py-2.5 text-xs text-gray-500">
-						Pro projects are created in your organization by default. You can detach or move them from the project settings after creation.
+						Pro projects are created in your organization by default. Changing an existing project's owner isn't wired into the console yet — contact support if you need one moved.
 					</div>
 				{/if}
 
