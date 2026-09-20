@@ -242,13 +242,27 @@
 				<div class="flex items-start gap-3">
 					<span class="flex h-7 w-7 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700 shrink-0">2</span>
 					<div>
+						<p class="text-sm font-medium text-gray-900">Pick the owner <span class="text-xs font-normal text-gray-500">(org admins only)</span></p>
+						<p class="text-sm text-gray-600">
+							If you're an <strong>admin</strong> of any organization, an <strong>Owner</strong> dropdown appears between Project name and Region:
+							pick your org (default) or <strong>Personal (not attached to any org)</strong>. Org-attached projects are visible to every
+							org member; personal projects are yours alone. Not an admin of an org? The picker is hidden — projects land personal by default,
+							same as before. See chapter 27 for how orgs work. <span class="italic">Pro plan today creates the project in your org by default;
+							choosing an owner isn't wired through the payment flow yet.</span>
+						</p>
+					</div>
+				</div>
+
+				<div class="flex items-start gap-3">
+					<span class="flex h-7 w-7 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700 shrink-0">3</span>
+					<div>
 						<p class="text-sm font-medium text-gray-900">Choose a region</p>
 						<p class="text-sm text-gray-600">All regions are within the EU. Alex selects <strong>Paris (fr-par)</strong>. Your database, object storage, and compute are provisioned there.</p>
 					</div>
 				</div>
 
 				<div class="flex items-start gap-3">
-					<span class="flex h-7 w-7 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700 shrink-0">3</span>
+					<span class="flex h-7 w-7 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700 shrink-0">4</span>
 					<div>
 						<p class="text-sm font-medium text-gray-900">Configure authentication</p>
 						<p class="text-sm text-gray-600">Toggle email/password auth on (default). Set password requirements and session duration.</p>
@@ -256,7 +270,7 @@
 				</div>
 
 				<div class="flex items-start gap-3">
-					<span class="flex h-7 w-7 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700 shrink-0">4</span>
+					<span class="flex h-7 w-7 items-center justify-center rounded-full bg-eurobase-100 text-xs font-bold text-eurobase-700 shrink-0">5</span>
 					<div>
 						<p class="text-sm font-medium text-gray-900">Get your API keys</p>
 						<p class="text-sm text-gray-600">On completion, you receive a <strong>public key</strong> (safe for client-side) and a <strong>secret key</strong> (server-side only).</p>
@@ -2823,10 +2837,20 @@ export const db = drizzle(client);</code></pre>
 				</ul>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">1. Create the organization</h3>
+				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
+					<strong>Team-tier feature.</strong> Organizations require <code class="rounded bg-amber-100 px-1">team_beta_access</code> on your account.
+					Fresh accounts don't have it and won't see the <strong>Organizations</strong> entry in the sidebar or the <strong>Create organization</strong> button.
+					Email <a href="mailto:contact@eurobase.app" class="underline hover:no-underline">contact@eurobase.app</a> or use the request form on the pricing page to ask for the beta grant.
+				</div>
 				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
 					<li>Console → <strong>Organizations</strong> → <strong>Create organization</strong>.</li>
 					<li>Give it a name (<em>"LexVault"</em>) and submit.</li>
 					<li>Alex is now the sole admin. Nothing broke on the project side — Alex still owns their existing project directly.</li>
+					<li>
+						<strong>One org per user, first release.</strong> After you create your first org, the <strong>Create organization</strong> button
+						hides and the API refuses a second org for the same creator with <code class="rounded bg-gray-100 px-1 text-[11px]">409 you already own an organization</code>.
+						Multi-org support (each with its own SSO) is on the roadmap; ping us on Discord if it blocks your setup.
+					</li>
 				</ol>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">2. Register Eurobase as an OIDC client at Google</h3>
@@ -2909,15 +2933,45 @@ export const db = drizzle(client);</code></pre>
 					<li>Bea lands on the projects page with LexVault's project visible.</li>
 				</ol>
 
-				<h3 class="text-base font-semibold text-gray-900 pt-2">6. Point a project at the org</h3>
+				<h3 class="text-base font-semibold text-gray-900 pt-2">6. Attach a project to the org</h3>
 				<p class="text-sm text-gray-700">
-					To share the Team project with everyone in LexVault, transfer ownership from Alex to the org:
+					Projects attach to an org <strong>at creation time</strong>. Every project Alex creates while admin of LexVault auto-attaches to LexVault by default,
+					and the create-project wizard now shows an <strong>Owner</strong> picker (see chapter 2) so Alex can pick <strong>Personal</strong> per-project when they don't want a project to be org-visible.
+					Any org-attached project shows up in <em>every</em> LexVault member's project list with an <strong>Org</strong> badge — no separate "invite this member to this project" step for org projects.
+				</p>
+				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
+					<strong>Existing projects (created before the org): no self-serve move today.</strong>
+					The API endpoint (<code class="rounded bg-amber-100 px-1">PATCH /platform/projects/{'{id}'}/org</code>) exists, but no console UI is wired to it yet.
+					If you have a personal project that predates your org and want to move it in (or vice versa), reply to any support email or ping us on Discord — we'll flip <code class="rounded bg-amber-100 px-1">org_id</code> for you.
+					A self-serve <em>Owner</em> control on the project settings page is tracked as a follow-up.
+				</div>
+				<div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-900">
+					<strong>Pro plan today keeps auto-attach only.</strong> Pro projects go through the Mollie checkout, which doesn't yet carry the picker's choice end-to-end, so the wizard hides the picker on Pro and the project lands in your org by default.
+					Free / Team / Legal Team all use the sync path and honour the picker.
+				</div>
+
+				<h3 class="text-base font-semibold text-gray-900 pt-2">7. Require SSO for every org project</h3>
+				<p class="text-sm text-gray-700">
+					Once SSO is configured, you can lock every project the org owns behind SSO login. Turning this on stops password sessions from reaching any project attached to the org — even for the admin who flipped the switch, until they re-sign-in via SSO.
 				</p>
 				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1.5">
-					<li>Open the project → <strong>Settings → Ownership</strong>.</li>
-					<li>Choose <strong>Transfer to organization</strong> → pick LexVault → confirm.</li>
-					<li>Members of LexVault (Alex + Bea today, whoever gets invited tomorrow) now see it in their project list, with an org badge on the sidebar card.</li>
+					<li>Console → <strong>Organizations</strong> → LexVault → <strong>Require SSO</strong> toggle → ON.</li>
+					<li>Confirm the warning modal ("password login is refused effective immediately").</li>
+					<li>
+						Any subsequent request from a password session hits <code class="rounded bg-gray-100 px-1 text-[11px]">403 sso_required_for_org</code>
+						at every org-owned access site — ListProjects filters the org's projects out; the project middleware refuses direct navigation; the org detail page refuses reads; the WebSocket realtime upgrade refuses subscribes. Enforcement is re-checked on every request, so flipping the toggle takes effect without waiting for sessions to expire.
+					</li>
+					<li>Users get bounced to <code class="rounded bg-gray-100 px-1 text-[11px]">/login?sso_required_for=&lt;org&gt;</code> where they can re-authenticate via SSO for that org.</li>
 				</ol>
+				<div class="rounded-md bg-red-50 border border-red-200 p-3 text-xs text-red-900">
+					<strong>No admin exemption.</strong> The <em>Require SSO</em> toggle applies to every session equally — admin, member, or superadmin. If you flip it while signed in with a password, your <em>very next request</em> to a project belonging to the org gets 403. Have an SSO login ready before you enable it, or you'll immediately lock yourself out until you re-sign-in via SSO.
+				</div>
+				<div class="rounded-md bg-gray-50 border border-gray-200 p-3 text-xs text-gray-700">
+					<strong>Turning it off.</strong> Same toggle. Password sessions immediately regain access on the next request; no session invalidation, no re-login. Enforcement is stored on the org row (<code class="rounded bg-gray-100 px-1">organizations.sso_required</code>) and read fresh on every check.
+				</div>
+				<div class="rounded-md bg-gray-50 border border-gray-200 p-3 text-xs text-gray-700">
+					<strong>SSO for org A doesn't unlock org B.</strong> If a user is a member of two orgs — both with <em>Require SSO</em> on — signing in via A's IdP grants access to A's projects only. B still refuses that session until the user signs in via B's IdP. Cross-org access requires SSO for each org whose <em>Require SSO</em> is on.
+				</div>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">Troubleshooting</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1.5">
