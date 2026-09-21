@@ -481,7 +481,27 @@
 			await api.updateProject(createdProject.id, { auth_config: config });
 			step = 'success';
 		} catch (err) {
-			authError = err instanceof Error ? err.message : 'Failed to save auth config';
+			// project_not_active surfaces from the new middleware
+			// branch (internal/tenant/context.go) when the project's
+			// row exists but its status isn't 'active' — most often
+			// because the async S3 bucket worker's markFailed set
+			// status='provisioning_failed'. The old server response
+			// was a blanket "project not found" 404, which sent the
+			// user chasing a phantom deletion. Show the actual
+			// situation + the recovery path; the wizard only ever
+			// hits this on a fresh-create, so provisioning_failed is
+			// the realistic value.
+			if (err instanceof APIError && err.code === 'project_not_active') {
+				const statusMatch = err.body.match(/"status":"([^"]+)"/);
+				const projStatus = statusMatch?.[1] ?? '';
+				if (projStatus === 'provisioning_failed') {
+					authError = 'Provisioning failed for this project (usually a storage-bucket collision from a prior attempt with the same name). Delete this project and try again with a different name.';
+				} else {
+					authError = `This project is not yet active (status: ${projStatus || 'unknown'}). Try again in a moment, or delete and recreate.`;
+				}
+			} else {
+				authError = err instanceof Error ? err.message : 'Failed to save auth config';
+			}
 		} finally {
 			savingAuth = false;
 		}
