@@ -210,6 +210,7 @@
 		<div class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
 			<a href="/" class="text-lg font-bold text-gray-900">Eurobase</a>
 			<div class="flex items-center gap-3 text-sm">
+				<a href="/docs" class="text-gray-600 hover:text-gray-900">Docs</a>
 				{#if signedIn}
 					<a href="/projects" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Back to dashboard</a>
 				{:else}
