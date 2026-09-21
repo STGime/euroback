@@ -320,10 +320,43 @@ func (s *TenantService) CreateProjectForBilling(ctx context.Context, ownerID, em
 		OrgID:         orgID,
 		OrgIDExplicit: orgIDExplicit,
 	})
+	// Admin-revoked mid-payment fallback (#610 option A, #617 round-1
+	// fix). If the caller was an admin of the target org at checkout-
+	// start time but got demoted before Mollie confirmed payment,
+	// CreateProject's explicit-attach branch returns ErrOrgAttachForbidden.
+	// The billing webhook's only error path is refund-orphaned-payment,
+	// which contradicts option A's "no lost money" promise. Retry once
+	// as personal so the customer keeps the paid project; log loudly so
+	// ops sees the demotion race. The race column (requested_org_id on
+	// pending_projects) carries the intended-but-lost org id — a future
+	// console banner (adjacent to #609's Owner UI) can walk the audit
+	// log and prompt re-attach.
+	if errors.Is(err, ErrOrgAttachForbidden) {
+		slog.Warn("CreateProjectForBilling: admin revoked mid-payment; falling back to personal",
+			"owner_id", ownerID, "slug", slug, "requested_org_id", derefString(orgID))
+		proj, err = s.CreateProject(ctx, ownerID, email, CreateProjectRequest{
+			Name:          name,
+			Slug:          slug,
+			Region:        region,
+			Plan:          plan,
+			OrgID:         nil,
+			OrgIDExplicit: true, // force personal
+		})
+	}
 	if err != nil {
 		return "", err
 	}
 	return proj.ID, nil
+}
+
+// derefString safely dereferences a *string for logging — nil → "".
+// Extracted so the fallback log above doesn't crash on the (unlikely)
+// nil-orgID + ErrOrgAttachForbidden combination.
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // SetBetaGrantRecorder wires an optional beta-grant recorder

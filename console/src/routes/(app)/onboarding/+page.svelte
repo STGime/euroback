@@ -123,17 +123,20 @@
 		// Resume-from-profile-form: /billing/profile?next=
 		// /onboarding?resume_checkout=1 lands here after the user
 		// saved the billing details we needed for the Pro checkout.
-		// Restore the intent from sessionStorage, re-populate the
-		// wizard fields, then trigger handleCreate() to continue
-		// straight to Mollie — user sees no extra click.
+		// Restore the intent from sessionStorage and call the Mollie
+		// checkout directly — DO NOT re-fire handleCreate() from live
+		// state (round-1 review on #617). onMount above just reset
+		// newOwner to the first admin org, so any handleCreate call
+		// here would read the default org instead of the user's
+		// original picker choice. Reading straight from the stored
+		// intent (via startProCheckoutFromIntent) preserves the
+		// user's actual pick.
 		const resumeCheckout = $page.url.searchParams.get('resume_checkout');
 		if (resumeCheckout === '1') {
 			const raw = sessionStorage.getItem(PROFILE_RESUME_KEY);
 			if (raw) {
 				try {
-					const intent = JSON.parse(raw) as {
-						name: string; slug: string; region: string; plan: string;
-					};
+					const intent = JSON.parse(raw) as ProCheckoutIntent;
 					projectName = intent.name;
 					plan = intent.plan;
 					sessionStorage.removeItem(PROFILE_RESUME_KEY);
@@ -142,10 +145,11 @@
 						url.searchParams.delete('resume_checkout');
 						window.history.replaceState({}, '', url.toString());
 					}
-					// Fire the checkout on the next tick so the state
-					// mutations above are applied before handleCreate
-					// reads them.
-					queueMicrotask(() => void handleCreate());
+					// Fire the checkout directly from the stored intent —
+					// picker choice included. queueMicrotask is unnecessary
+					// (we don't depend on any reactive state mutations
+					// completing first) but the tick delay is harmless.
+					queueMicrotask(() => void startProCheckoutFromIntent(intent));
 					return;
 				} catch {
 					// Fall through to the normal create step.
@@ -277,6 +281,54 @@
 	// filling in their billing details.
 	const PROFILE_RESUME_KEY = 'eurobase.onboarding_pending_checkout';
 
+	// Intent shape shared between the initial checkout call and the
+	// billing-profile detour's resume path. Extracted as an explicit
+	// type after round-1 review on #617 flagged that the older
+	// {name, slug, region, plan, returnTo} shape silently dropped the
+	// picker choice on resume — which reintroduced the exact
+	// "picked Personal, got the org anyway" bug this PR closes.
+	type ProCheckoutIntent = {
+		name: string;
+		slug: string;
+		region: string;
+		plan: string;
+		returnTo?: string;
+		picker_rendered: boolean;
+		picked_org_id: string | null;
+	};
+
+	// Fires the Mollie checkout from a fully-materialised intent
+	// object. Persists PENDING_KEY, redirects to Mollie. Same shape
+	// used by both the direct-click path in handleCreate and the
+	// billing-profile-detour resume path in onMount. The point of
+	// factoring this out is that the resume path MUST NOT re-read
+	// picker state from live component state — onMount has already
+	// reset newOwner to the first admin org by then, so the caller's
+	// original pick would be lost. The intent carries picker_rendered
+	// + picked_org_id explicitly so the checkout call uses the
+	// user's actual choice regardless of when it runs.
+	async function startProCheckoutFromIntent(intent: ProCheckoutIntent) {
+		const checkoutReq: Parameters<typeof api.startProjectCheckout>[0] = {
+			name: intent.name,
+			slug: intent.slug,
+			region: intent.region,
+			plan_code: 'pro',
+		};
+		// Include org_id only when the picker rendered at intent-create
+		// time. Sending null unconditionally would silently convert an
+		// org admin's Pro checkout to personal any time listOrgs failed
+		// — same three-state trap the sync path avoids.
+		if (intent.picker_rendered) {
+			checkoutReq.org_id = intent.picked_org_id;
+		}
+		const res = await api.startProjectCheckout(checkoutReq);
+		sessionStorage.setItem(
+			PENDING_KEY,
+			JSON.stringify({ pendingId: res.pending_project_id, ...intent })
+		);
+		window.location.href = res.checkout_url;
+	}
+
 	async function handleCreate() {
 		if (!projectName.trim()) return;
 		creating = true;
@@ -302,12 +354,25 @@
 				// with step 2 (auth config) as if the project had
 				// been created synchronously. See the ?resume=<id>
 				// branch in onMount below for the pickup.
+				//
+				// The intent MUST carry the picker choice too — round-1
+				// review on #617 caught that omitting it here silently
+				// reintroduced the "picked Personal, got the org anyway"
+				// bug on the billing-profile detour: onMount resets
+				// newOwner to adminOrgs[0].id, so a resume that fires
+				// handleCreate off live state would read the default
+				// org, not the user's original pick.
 				const intent = {
 					name: projectName.trim(),
 					slug: slug,
 					region: 'fr-par',
 					plan: plan,
 					returnTo: '/onboarding',
+					// picker_rendered=false → send no org_id (auto-attach).
+					// picker_rendered=true  → send picked_org_id (may be null
+					//                          for "force personal").
+					picker_rendered: pickerRendered,
+					picked_org_id: pickedOrgID ?? null,
 				};
 				// Client-side gate: no billing profile ⇒ persist the
 				// intent under PROFILE_RESUME_KEY and bounce to the
@@ -322,25 +387,7 @@
 					await goto('/billing/profile?next=' + encodeURIComponent('/onboarding?resume_checkout=1'));
 					return;
 				}
-				const checkoutReq: Parameters<typeof api.startProjectCheckout>[0] = {
-					name: intent.name,
-					slug: intent.slug,
-					region: intent.region,
-					plan_code: 'pro',
-				};
-				// Include org_id only when the picker rendered. Sending
-				// null unconditionally would silently convert an org
-				// admin's Pro checkout to personal any time listOrgs
-				// failed — same three-state trap the sync path avoids.
-				if (pickerRendered) {
-					checkoutReq.org_id = pickedOrgID as string | null;
-				}
-				const res = await api.startProjectCheckout(checkoutReq);
-				sessionStorage.setItem(
-					PENDING_KEY,
-					JSON.stringify({ pendingId: res.pending_project_id, ...intent })
-				);
-				window.location.href = res.checkout_url;
+				await startProCheckoutFromIntent(intent);
 				return; // redirect in flight — don't reset `creating`
 			}
 

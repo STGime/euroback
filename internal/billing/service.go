@@ -747,13 +747,23 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 	// 2. INSERT under the same lock. The partial unique index
 	// backstops a lost-lock scenario (pod restart mid-flight);
 	// on 23505 we surface ErrPendingCheckoutInFlight.
+	// requested_org_id snapshots what the user asked for at checkout
+	// time; org_id gets nulled by the FK cascade if the target org is
+	// deleted, requested_org_id doesn't. Populated only when the caller
+	// explicitly picked an org (i.e. not for Personal picks) — Personal
+	// leaves both NULL so it's cleanly distinguishable from the "picked
+	// org X, X vanished" case in the webhook (#617 round-1 fix).
+	var requestedOrgID *string
+	if req.OrgIDExplicit && req.OrgID != nil {
+		requestedOrgID = req.OrgID
+	}
 	var pendingID string
 	err = lockTx.QueryRow(ctx,
 		`INSERT INTO public.pending_projects
-		    (owner_id, name, slug, region, plan, org_id, org_id_explicit)
-		 VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7)
+		    (owner_id, name, slug, region, plan, org_id, org_id_explicit, requested_org_id)
+		 VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8::uuid)
 		 RETURNING id`,
-		userID, req.Name, req.Slug, req.Region, req.Plan, req.OrgID, req.OrgIDExplicit,
+		userID, req.Name, req.Slug, req.Region, req.Plan, req.OrgID, req.OrgIDExplicit, requestedOrgID,
 	).Scan(&pendingID)
 	if err != nil {
 		var pgErr *pgconn.PgError

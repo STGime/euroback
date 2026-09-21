@@ -35,13 +35,17 @@
 BEGIN;
 
 ALTER TABLE public.pending_projects
-    ADD COLUMN org_id          UUID    NULL REFERENCES public.organizations(id) ON DELETE SET NULL,
-    ADD COLUMN org_id_explicit BOOLEAN NOT NULL DEFAULT false;
+    ADD COLUMN org_id             UUID    NULL REFERENCES public.organizations(id) ON DELETE SET NULL,
+    ADD COLUMN org_id_explicit    BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN requested_org_id   UUID    NULL;
 
 COMMENT ON COLUMN public.pending_projects.org_id IS
-    'Target org for the project at checkout time. See migration 000122 for the three-state encoding: (explicit=false, org_id=NULL) means auto-attach, (true, NULL) means personal, (true, UUID) means attach to that org. ON DELETE SET NULL: if the target org is deleted before Mollie confirms payment, the null triggers the personal fallback (option A in the #610 design).';
+    'Target org for the project at checkout time. See migration 000122 for the three-state encoding: (explicit=false, org_id=NULL) means auto-attach, (true, NULL) means personal OR SET NULL after target deletion — disambiguated via requested_org_id, (true, UUID) means attach to that org. ON DELETE SET NULL: if the target org is deleted before Mollie confirms payment, the null triggers the personal fallback (option A in the #610 design).';
 
 COMMENT ON COLUMN public.pending_projects.org_id_explicit IS
     'True when the caller explicitly picked an owner in the wizard (org UUID or Personal). False (default) means the caller did not opt in and the webhook falls back to auto-attach. Matches CreateProjectRequest.OrgIDExplicit on the sync path.';
+
+COMMENT ON COLUMN public.pending_projects.requested_org_id IS
+    'What the caller actually requested at checkout time. NOT a foreign key — never nulled by cascade. Only populated when org_id_explicit=true AND the caller picked a specific org (i.e. NOT for Personal picks). Sole purpose: disambiguate the (org_id_explicit=true, org_id=NULL) collision between "user picked Personal" and "user picked org X, X was deleted → SET NULL fired." Webhook logs the race (target-gone) only when requested_org_id IS NOT NULL AND org_id IS NULL.';
 
 COMMIT;

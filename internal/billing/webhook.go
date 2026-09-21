@@ -380,22 +380,23 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 	// Load the pending intent. If missing, the payment arrived
 	// after the sweeper expired the row — refund and log.
 	var (
-		ownerID       string
-		name          string
-		slug          string
-		region        string
-		planCode      string
-		userEmail     string
-		orgID         *string
-		orgIDExplicit bool
+		ownerID        string
+		name           string
+		slug           string
+		region         string
+		planCode       string
+		userEmail      string
+		orgID          *string
+		orgIDExplicit  bool
+		requestedOrgID *string
 	)
 	err = s.pool.QueryRow(ctx,
-		`SELECT pp.owner_id::text, pp.name, pp.slug, pp.region, pp.plan, pu.email, pp.org_id::text, pp.org_id_explicit
+		`SELECT pp.owner_id::text, pp.name, pp.slug, pp.region, pp.plan, pu.email, pp.org_id::text, pp.org_id_explicit, pp.requested_org_id::text
 		   FROM public.pending_projects pp
 		   JOIN public.platform_users pu ON pu.id = pp.owner_id
 		  WHERE pp.id = $1`,
 		pendingID,
-	).Scan(&ownerID, &name, &slug, &region, &planCode, &userEmail, &orgID, &orgIDExplicit)
+	).Scan(&ownerID, &name, &slug, &region, &planCode, &userEmail, &orgID, &orgIDExplicit, &requestedOrgID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		slog.Error("billing.webhook.pending_project_missing_will_refund",
 			"pending_project_id", pendingID,
@@ -449,16 +450,20 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// Fresh path — no project yet, create one. Race-log for #610
-		// option A: if the caller explicitly picked an org but the
-		// FK cascade nulled pp.org_id (target org deleted mid-payment),
-		// we're about to attach as personal. Surface as a WARN so ops
-		// can see how often this happens; a future console banner
-		// can walk the audit log to prompt the user to re-attach.
-		if orgIDExplicit && orgID == nil {
+		// option A: only fires when the caller explicitly picked a
+		// specific org AND the FK cascade nulled pp.org_id (target
+		// org deleted mid-payment). Detected via requested_org_id
+		// (never nulled by cascade) not org_id_explicit alone, since
+		// the latter is also true for ordinary Personal picks.
+		// Round-1 review on #617 caught that the old signal would
+		// warn on every Personal Pro checkout and had no distinct
+		// signal for the actual race.
+		if requestedOrgID != nil && orgID == nil {
 			slog.Warn("billing.webhook.explicit_org_gone_falling_back_to_personal",
 				"pending_project_id", pendingID,
 				"owner_id", ownerID,
 				"slug", slug,
+				"requested_org_id", *requestedOrgID,
 			)
 		}
 		projectID, err = s.projectCreator.CreateProjectForBilling(ctx, ownerID, userEmail, name, slug, region, planCode, orgID, orgIDExplicit)

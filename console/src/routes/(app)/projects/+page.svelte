@@ -289,11 +289,21 @@
 				// sessionStorage the intent so we can restore the
 				// modal on cancel/fail or navigate to the created
 				// project on success.
+				//
+				// Intent carries the picker choice too — round-1 review
+				// on #617 caught that omitting it on the onboarding side
+				// silently reintroduced the "picked Personal, got the
+				// org anyway" bug on the billing-profile detour. Same
+				// shape here for symmetry, even though /projects's
+				// ?resume=1 path is currently unhandled (reopens the
+				// modal from scratch; no auto-fire).
 				const intent = {
 					name: newName.trim(),
 					slug: newSlug,
 					region: 'fr-par',
 					plan: newPlan,
+					picker_rendered: pickerRendered,
+					picked_org_id: pickedOrgID ?? null,
 				};
 				// Client-side gate: no billing profile ⇒ persist the
 				// intent and bounce to the profile form. On save, the
