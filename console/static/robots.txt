@@ -1,3 +1,17 @@
-# allow crawling everything by default
+# Public, server-rendered surfaces (docs, pricing, legal) are crawlable.
+# App routes are a client-only SPA behind login: nothing to index there.
 User-agent: *
-Disallow:
+Disallow: /projects
+Disallow: /p/
+Disallow: /account
+Disallow: /organizations
+Disallow: /admin
+Disallow: /billing
+Disallow: /onboarding
+Disallow: /login
+Disallow: /invite
+Disallow: /reset-password
+Disallow: /verify-email
+Allow: /
+
+Sitemap: https://console.eurobase.app/sitemap.xml

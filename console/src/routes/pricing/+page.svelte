@@ -523,7 +523,7 @@
 	<section class="border-t border-gray-200 bg-white">
 		<div class="mx-auto max-w-5xl px-6 py-12 text-center">
 			<h2 class="text-2xl font-semibold text-gray-900">Made in Berlin. Hosted in France.</h2>
-			<p class="mt-3 text-sm text-gray-600 max-w-2xl mx-auto">All Eurobase data lives in EU jurisdiction (Scaleway, France). GDPR by design — DPA report (Article 30), sub-processor list, audit log, and DSAR exports (Article 15 + 20) are built in. <a href="/docs#compliance" class="text-eurobase-600 hover:text-eurobase-700 underline">Read the docs</a>.</p>
+			<p class="mt-3 text-sm text-gray-600 max-w-2xl mx-auto">All Eurobase data lives in EU jurisdiction (Scaleway, France). GDPR by design — DPA report (Article 30), sub-processor list, audit log, and DSAR exports (Article 15 + 20) are built in. <a href="/docs/compliance" class="text-eurobase-600 hover:text-eurobase-700 underline">Read the docs</a>.</p>
 			<div class="mt-6 flex items-center justify-center gap-4 text-sm">
 				<a href="https://bsky.app/profile/eurobasebaas.bsky.social" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-gray-600 hover:text-eurobase-700 transition-colors">
 					<svg class="h-4 w-4" viewBox="0 0 600 530" fill="currentColor" aria-hidden="true">
