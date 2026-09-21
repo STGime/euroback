@@ -76,6 +76,15 @@ var (
 	// refund before surfacing this error.
 	ErrPendingProjectNotFound = errors.New("billing: pending project not found (may have expired)")
 
+	// ErrOrgAttachForbidden is returned when NewProjectCheckout's
+	// caller explicitly asked to attach a Pro project to an org
+	// they are not an admin of. Checked BEFORE opening a Mollie
+	// payment so the user doesn't pay-then-403 on the webhook.
+	// Mirrors tenant.ErrOrgAttachForbidden without the cross-package
+	// import — the two errors have the same handler-side mapping
+	// (HTTP 403 with code "org_attach_forbidden"). See issue #610.
+	ErrOrgAttachForbidden = errors.New("billing: caller is not an admin of the target organization")
+
 	// ErrSlugTaken is returned by NewProjectCheckout when the
 	// requested slug already identifies an existing project (any
 	// owner — projects.slug is globally UNIQUE). Rejected BEFORE
@@ -130,7 +139,7 @@ type WebhookMetrics interface {
 // billing doesn't have to import internal/tenant (billing↔tenant
 // wiring goes through interfaces in both directions).
 type ProjectCreator interface {
-	CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string) (projectID string, err error)
+	CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string, orgID *string, orgIDExplicit bool) (projectID string, err error)
 }
 
 // LimitsChecker is the subset of plans.LimitsService that
@@ -152,7 +161,7 @@ type LimitsChecker interface {
 // every request — safe because Client, Pool, and the config strings
 // are read-only after construction.
 type Service struct {
-	pool           *pgxpool.Pool
+	pool *pgxpool.Pool
 	// developerPool is the eurobase_developer connection used for
 	// billing-PII paths (billing_profiles reads/writes + invoice
 	// render JOIN). Migration 000106 REVOKEs public.billing_profiles
@@ -520,6 +529,25 @@ type NewProjectCheckoutRequest struct {
 	Slug   string
 	Region string
 	Plan   string // must be "pro" — Free and Team don't use this path
+
+	// Owner-picker choice (issue #610). Mirrors CreateProjectRequest's
+	// three-state contract exactly:
+	//   OrgIDExplicit=false, OrgID=nil → auto-attach at project-creation
+	//                                    time (webhook picks caller's
+	//                                    admin org if any). Pre-#610
+	//                                    behaviour; the default when
+	//                                    the picker didn't render.
+	//   OrgIDExplicit=true,  OrgID=nil → force personal.
+	//   OrgIDExplicit=true,  OrgID=<>  → attach to that org (handler
+	//                                    verified admin at start; the
+	//                                    ON DELETE SET NULL on
+	//                                    pending_projects.org_id
+	//                                    handles the target-deleted
+	//                                    race by nulling the field →
+	//                                    webhook treats as personal
+	//                                    plus audit log entry).
+	OrgIDExplicit bool
+	OrgID         *string
 }
 
 // NewProjectCheckoutResult carries the outbound values the handler
@@ -542,7 +570,7 @@ type NewProjectCheckoutResult struct {
 //   - no ownership check (the project doesn't exist yet)
 //   - inserts into pending_projects instead of subscriptions
 //   - Mollie metadata carries pending_project_id (not subscription_id
-//     + project_id)
+//   - project_id)
 //   - no invoice row created here — that happens in the webhook so
 //     the invoice's project_id column can point at the real project
 //   - concurrent-click guard: rejects (with the in-flight
@@ -597,6 +625,36 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 	}
 	if slugTaken {
 		return nil, ErrSlugTaken
+	}
+
+	// 0c. Verify the org-attach choice BEFORE opening a Mollie
+	// payment (#610). Same rationale as the slug + quota checks
+	// above — if the caller explicitly asked to attach to org X
+	// but doesn't admin X, refuse now so we don't pay-then-403.
+	// The webhook re-checks admin membership before the INSERT so
+	// a race (org admin revoked between checkout-start and payment
+	// confirmation) still lands cleanly on the "personal fallback"
+	// path via ON DELETE SET NULL, but the common case surfaces
+	// here.
+	if req.OrgIDExplicit && req.OrgID != nil {
+		if s.developerPool == nil {
+			// Configuration bug — the sync path returns the same
+			// error class. Prefer failing loud over silently
+			// attaching to personal.
+			return nil, fmt.Errorf("billing: org attach unavailable: developer pool not configured")
+		}
+		var one int
+		err := s.developerPool.QueryRow(ctx,
+			`SELECT 1 FROM public.org_members
+			 WHERE org_id = $1::uuid AND platform_user_id = $2::uuid AND role = 'admin'`,
+			*req.OrgID, userID,
+		).Scan(&one)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrOrgAttachForbidden
+			}
+			return nil, fmt.Errorf("billing: check org admin membership: %w", err)
+		}
 	}
 
 	price, err := s.resolvePriceCents(ctx, req.Plan)
@@ -689,13 +747,23 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 	// 2. INSERT under the same lock. The partial unique index
 	// backstops a lost-lock scenario (pod restart mid-flight);
 	// on 23505 we surface ErrPendingCheckoutInFlight.
+	// requested_org_id snapshots what the user asked for at checkout
+	// time; org_id gets nulled by the FK cascade if the target org is
+	// deleted, requested_org_id doesn't. Populated only when the caller
+	// explicitly picked an org (i.e. not for Personal picks) — Personal
+	// leaves both NULL so it's cleanly distinguishable from the "picked
+	// org X, X vanished" case in the webhook (#617 round-1 fix).
+	var requestedOrgID *string
+	if req.OrgIDExplicit && req.OrgID != nil {
+		requestedOrgID = req.OrgID
+	}
 	var pendingID string
 	err = lockTx.QueryRow(ctx,
 		`INSERT INTO public.pending_projects
-		    (owner_id, name, slug, region, plan)
-		 VALUES ($1::uuid, $2, $3, $4, $5)
+		    (owner_id, name, slug, region, plan, org_id, org_id_explicit, requested_org_id)
+		 VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7, $8::uuid)
 		 RETURNING id`,
-		userID, req.Name, req.Slug, req.Region, req.Plan,
+		userID, req.Name, req.Slug, req.Region, req.Plan, req.OrgID, req.OrgIDExplicit, requestedOrgID,
 	).Scan(&pendingID)
 	if err != nil {
 		var pgErr *pgconn.PgError

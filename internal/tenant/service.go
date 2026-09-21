@@ -299,20 +299,77 @@ func (s *TenantService) SetDeveloperPool(devPool *pgxpool.Pool) {
 // signature so the billing package doesn't have to import
 // tenant.CreateProjectRequest.
 //
+// orgID + orgIDExplicit thread the wizard's Owner picker choice
+// through from the pending_projects row (#610). Three-state
+// contract matches CreateProjectRequest exactly:
+//   - orgIDExplicit=false, orgID=nil → auto-attach to caller's admin
+//     org if any (pre-#610 behaviour).
+//   - orgIDExplicit=true,  orgID=nil → force personal.
+//   - orgIDExplicit=true,  orgID=<>  → attach to that org (server
+//     re-verifies admin membership).
+//
 // Returns the newly-created project's ID string. The webhook uses
 // it to insert the corresponding subscriptions + invoices rows in
 // the same transaction as the project creation.
-func (s *TenantService) CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string) (string, error) {
+func (s *TenantService) CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string, orgID *string, orgIDExplicit bool) (string, error) {
 	proj, err := s.CreateProject(ctx, ownerID, email, CreateProjectRequest{
-		Name:   name,
-		Slug:   slug,
-		Region: region,
-		Plan:   plan,
+		Name:          name,
+		Slug:          slug,
+		Region:        region,
+		Plan:          plan,
+		OrgID:         orgID,
+		OrgIDExplicit: orgIDExplicit,
 	})
+	// Two mid-payment races that both contradict option A's "user
+	// keeps their paid project; no lost money" promise unless we
+	// retry as personal (#610 option A, #617 round-1 + round-2 fix):
+	//
+	//   * ErrOrgAttachForbidden — caller was admin of the target org
+	//     at checkout-start time but got demoted before Mollie
+	//     confirmed payment. Org still exists; explicit-attach branch
+	//     of CreateProject re-checks admin membership and refuses.
+	//   * ErrOrgAttachTargetGone — the target org was deleted in the
+	//     millisecond window between the webhook's SELECT of
+	//     pp.org_id and CreateProject's INSERT of the projects row.
+	//     ON DELETE SET NULL on pending_projects.org_id closes the
+	//     wider race (any deletion before the SELECT nulls the FK
+	//     and personal-fallback fires in the webhook), but not this
+	//     sub-second sliver — the SELECT already latched the UUID
+	//     and the INSERT's own FK check raises 23503.
+	//
+	// Retry once as (nil, true) → force personal. The retry lands in
+	// CreateProject's explicit-personal branch which does no org
+	// lookup, so it cannot re-raise either error. Any other failure
+	// still propagates to the webhook's refund path. The race column
+	// (requested_org_id on pending_projects) carries the intended-
+	// but-lost org id — a future console banner (adjacent to #609's
+	// Owner UI) can walk the audit log and prompt re-attach.
+	if errors.Is(err, ErrOrgAttachForbidden) || errors.Is(err, ErrOrgAttachTargetGone) {
+		slog.Warn("CreateProjectForBilling: org attach failed mid-payment; falling back to personal",
+			"owner_id", ownerID, "slug", slug, "requested_org_id", derefString(orgID), "reason", err.Error())
+		proj, err = s.CreateProject(ctx, ownerID, email, CreateProjectRequest{
+			Name:          name,
+			Slug:          slug,
+			Region:        region,
+			Plan:          plan,
+			OrgID:         nil,
+			OrgIDExplicit: true, // force personal
+		})
+	}
 	if err != nil {
 		return "", err
 	}
 	return proj.ID, nil
+}
+
+// derefString safely dereferences a *string for logging — nil → "".
+// Extracted so the fallback log above doesn't crash on the (unlikely)
+// nil-orgID + ErrOrgAttachForbidden combination.
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // SetBetaGrantRecorder wires an optional beta-grant recorder

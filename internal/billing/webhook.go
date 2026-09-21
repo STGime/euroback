@@ -91,10 +91,10 @@ func resourceFromID(id string) string {
 //
 // ID prefixes documented at https://docs.mollie.com/reference/:
 //
-//   tr_   — Payment
-//   sub_  — Subscription
-//   re_   — Refund (not handled here; refunds are created by our
-//                  own action in PR 8, not webhook-driven)
+//	tr_   — Payment
+//	sub_  — Subscription
+//	re_   — Refund (not handled here; refunds are created by our
+//	               own action in PR 8, not webhook-driven)
 //
 // Anything else is a no-op with a warn — resilient to new Mollie
 // resource types added after us.
@@ -113,16 +113,16 @@ func (s *Service) ProcessMollieWebhook(ctx context.Context, id string) error {
 // processPaymentWebhook handles /v2/payments state changes. There
 // are three paths that matter:
 //
-//   1. sequenceType=first + status=paid    → activate: create the
-//      Mollie recurring subscription against the mandate captured
-//      by the first payment, flip our subscriptions row to
-//      'active', mark the invoice paid, flip projects.plan.
-//   2. sequenceType=recurring + status=paid → renewal: insert a
-//      new invoice row, bump subscriptions.next_charge_at.
-//   3. status=failed on any recurring/first attempt → mark the
-//      subscription past_due (idempotent: only sets past_due_since
-//      on the first transition, subsequent same-signal writes are
-//      no-ops).
+//  1. sequenceType=first + status=paid    → activate: create the
+//     Mollie recurring subscription against the mandate captured
+//     by the first payment, flip our subscriptions row to
+//     'active', mark the invoice paid, flip projects.plan.
+//  2. sequenceType=recurring + status=paid → renewal: insert a
+//     new invoice row, bump subscriptions.next_charge_at.
+//  3. status=failed on any recurring/first attempt → mark the
+//     subscription past_due (idempotent: only sets past_due_since
+//     on the first transition, subsequent same-signal writes are
+//     no-ops).
 //
 // The other Mollie payment states (open, pending, canceled,
 // expired, authorized) are logged and ignored — we react to
@@ -380,20 +380,23 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 	// Load the pending intent. If missing, the payment arrived
 	// after the sweeper expired the row — refund and log.
 	var (
-		ownerID   string
-		name      string
-		slug      string
-		region    string
-		planCode  string
-		userEmail string
+		ownerID        string
+		name           string
+		slug           string
+		region         string
+		planCode       string
+		userEmail      string
+		orgID          *string
+		orgIDExplicit  bool
+		requestedOrgID *string
 	)
 	err = s.pool.QueryRow(ctx,
-		`SELECT pp.owner_id::text, pp.name, pp.slug, pp.region, pp.plan, pu.email
+		`SELECT pp.owner_id::text, pp.name, pp.slug, pp.region, pp.plan, pu.email, pp.org_id::text, pp.org_id_explicit, pp.requested_org_id::text
 		   FROM public.pending_projects pp
 		   JOIN public.platform_users pu ON pu.id = pp.owner_id
 		  WHERE pp.id = $1`,
 		pendingID,
-	).Scan(&ownerID, &name, &slug, &region, &planCode, &userEmail)
+	).Scan(&ownerID, &name, &slug, &region, &planCode, &userEmail, &orgID, &orgIDExplicit, &requestedOrgID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		slog.Error("billing.webhook.pending_project_missing_will_refund",
 			"pending_project_id", pendingID,
@@ -446,8 +449,24 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 	).Scan(&projectID, &existingOwner)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		// Fresh path — no project yet, create one.
-		projectID, err = s.projectCreator.CreateProjectForBilling(ctx, ownerID, userEmail, name, slug, region, planCode)
+		// Fresh path — no project yet, create one. Race-log for #610
+		// option A: only fires when the caller explicitly picked a
+		// specific org AND the FK cascade nulled pp.org_id (target
+		// org deleted mid-payment). Detected via requested_org_id
+		// (never nulled by cascade) not org_id_explicit alone, since
+		// the latter is also true for ordinary Personal picks.
+		// Round-1 review on #617 caught that the old signal would
+		// warn on every Personal Pro checkout and had no distinct
+		// signal for the actual race.
+		if requestedOrgID != nil && orgID == nil {
+			slog.Warn("billing.webhook.explicit_org_gone_falling_back_to_personal",
+				"pending_project_id", pendingID,
+				"owner_id", ownerID,
+				"slug", slug,
+				"requested_org_id", *requestedOrgID,
+			)
+		}
+		projectID, err = s.projectCreator.CreateProjectForBilling(ctx, ownerID, userEmail, name, slug, region, planCode, orgID, orgIDExplicit)
 		if err != nil {
 			slog.Error("billing.webhook.create_project_failed_will_refund",
 				"pending_project_id", pendingID,

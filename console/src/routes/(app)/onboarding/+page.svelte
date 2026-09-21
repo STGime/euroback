@@ -123,17 +123,20 @@
 		// Resume-from-profile-form: /billing/profile?next=
 		// /onboarding?resume_checkout=1 lands here after the user
 		// saved the billing details we needed for the Pro checkout.
-		// Restore the intent from sessionStorage, re-populate the
-		// wizard fields, then trigger handleCreate() to continue
-		// straight to Mollie — user sees no extra click.
+		// Restore the intent from sessionStorage and call the Mollie
+		// checkout directly — DO NOT re-fire handleCreate() from live
+		// state (round-1 review on #617). onMount above just reset
+		// newOwner to the first admin org, so any handleCreate call
+		// here would read the default org instead of the user's
+		// original picker choice. Reading straight from the stored
+		// intent (via startProCheckoutFromIntent) preserves the
+		// user's actual pick.
 		const resumeCheckout = $page.url.searchParams.get('resume_checkout');
 		if (resumeCheckout === '1') {
 			const raw = sessionStorage.getItem(PROFILE_RESUME_KEY);
 			if (raw) {
 				try {
-					const intent = JSON.parse(raw) as {
-						name: string; slug: string; region: string; plan: string;
-					};
+					const intent = JSON.parse(raw) as ProCheckoutIntent;
 					projectName = intent.name;
 					plan = intent.plan;
 					sessionStorage.removeItem(PROFILE_RESUME_KEY);
@@ -142,10 +145,11 @@
 						url.searchParams.delete('resume_checkout');
 						window.history.replaceState({}, '', url.toString());
 					}
-					// Fire the checkout on the next tick so the state
-					// mutations above are applied before handleCreate
-					// reads them.
-					queueMicrotask(() => void handleCreate());
+					// Fire the checkout directly from the stored intent —
+					// picker choice included. queueMicrotask is unnecessary
+					// (we don't depend on any reactive state mutations
+					// completing first) but the tick delay is harmless.
+					queueMicrotask(() => void startProCheckoutFromIntent(intent));
 					return;
 				} catch {
 					// Fall through to the normal create step.
@@ -277,11 +281,72 @@
 	// filling in their billing details.
 	const PROFILE_RESUME_KEY = 'eurobase.onboarding_pending_checkout';
 
+	// Intent shape shared between the initial checkout call and the
+	// billing-profile detour's resume path. Extracted as an explicit
+	// type after round-1 review on #617 flagged that the older
+	// {name, slug, region, plan, returnTo} shape silently dropped the
+	// picker choice on resume — which reintroduced the exact
+	// "picked Personal, got the org anyway" bug this PR closes.
+	type ProCheckoutIntent = {
+		name: string;
+		slug: string;
+		region: string;
+		plan: string;
+		returnTo?: string;
+		picker_rendered: boolean;
+		picked_org_id: string | null;
+	};
+
+	// Fires the Mollie checkout from a fully-materialised intent
+	// object. Persists PENDING_KEY, redirects to Mollie. Same shape
+	// used by both the direct-click path in handleCreate and the
+	// billing-profile-detour resume path in onMount. The point of
+	// factoring this out is that the resume path MUST NOT re-read
+	// picker state from live component state — onMount has already
+	// reset newOwner to the first admin org by then, so the caller's
+	// original pick would be lost. The intent carries picker_rendered
+	// + picked_org_id explicitly so the checkout call uses the
+	// user's actual choice regardless of when it runs.
+	async function startProCheckoutFromIntent(intent: ProCheckoutIntent) {
+		const checkoutReq: Parameters<typeof api.startProjectCheckout>[0] = {
+			name: intent.name,
+			slug: intent.slug,
+			region: intent.region,
+			plan_code: 'pro',
+		};
+		// Include org_id only when the picker rendered at intent-create
+		// time. Sending null unconditionally would silently convert an
+		// org admin's Pro checkout to personal any time listOrgs failed
+		// — same three-state trap the sync path avoids.
+		if (intent.picker_rendered) {
+			checkoutReq.org_id = intent.picked_org_id;
+		}
+		const res = await api.startProjectCheckout(checkoutReq);
+		sessionStorage.setItem(
+			PENDING_KEY,
+			JSON.stringify({ pendingId: res.pending_project_id, ...intent })
+		);
+		window.location.href = res.checkout_url;
+	}
+
 	async function handleCreate() {
 		if (!projectName.trim()) return;
 		creating = true;
 		createError = '';
 		try {
+			// Compute the picker's Owner choice once — used by both
+			// the Pro (Mollie) branch and the sync Free/Team/Legal-Team
+			// branch below. Three-state contract:
+			//   pickerRendered=false → omit org_id (server auto-attach)
+			//   'personal' → send null (force personal)
+			//   <uuid>     → send the uuid (attach to that org)
+			// Post-#610 the picker is rendered on Pro too because
+			// pending_projects now carries org_id + org_id_explicit.
+			const pickerRendered = adminOrgs.length > 0;
+			const pickedOrgID: string | null | undefined = pickerRendered
+				? (newOwner === 'personal' ? null : newOwner)
+				: undefined;
+
 			if (plan === 'pro') {
 				// Payment-first flow (#406). Stash returnTo so the
 				// /projects Mollie return handler navigates BACK to
@@ -289,12 +354,25 @@
 				// with step 2 (auth config) as if the project had
 				// been created synchronously. See the ?resume=<id>
 				// branch in onMount below for the pickup.
+				//
+				// The intent MUST carry the picker choice too — round-1
+				// review on #617 caught that omitting it here silently
+				// reintroduced the "picked Personal, got the org anyway"
+				// bug on the billing-profile detour: onMount resets
+				// newOwner to adminOrgs[0].id, so a resume that fires
+				// handleCreate off live state would read the default
+				// org, not the user's original pick.
 				const intent = {
 					name: projectName.trim(),
 					slug: slug,
 					region: 'fr-par',
 					plan: plan,
 					returnTo: '/onboarding',
+					// picker_rendered=false → send no org_id (auto-attach).
+					// picker_rendered=true  → send picked_org_id (may be null
+					//                          for "force personal").
+					picker_rendered: pickerRendered,
+					picked_org_id: pickedOrgID ?? null,
 				};
 				// Client-side gate: no billing profile ⇒ persist the
 				// intent under PROFILE_RESUME_KEY and bounce to the
@@ -309,17 +387,7 @@
 					await goto('/billing/profile?next=' + encodeURIComponent('/onboarding?resume_checkout=1'));
 					return;
 				}
-				const res = await api.startProjectCheckout({
-					name: intent.name,
-					slug: intent.slug,
-					region: intent.region,
-					plan_code: 'pro',
-				});
-				sessionStorage.setItem(
-					PENDING_KEY,
-					JSON.stringify({ pendingId: res.pending_project_id, ...intent })
-				);
-				window.location.href = res.checkout_url;
+				await startProCheckoutFromIntent(intent);
 				return; // redirect in flight — don't reset `creating`
 			}
 
@@ -328,23 +396,6 @@
 			// beta (price_cents NULL on both plan_limits rows), so
 			// no Mollie checkout. When Legal Team ships paid, mirror
 			// the pro branch (plan_code:'legal_team').
-			// org_id encoding matches CreateProjectRequest server-side.
-			// THREE-STATE contract:
-			//   absent  → client has no opinion; server auto-attaches
-			//             to the caller's admin org if any.
-			//   null    → force personal (skip auto-attach).
-			//   <uuid>  → attach to that specific org (server verifies
-			//             the caller admins it).
-			// Only include org_id when the picker actually rendered
-			// (adminOrgs.length > 0 AND we're on a plan that carries
-			// it). If it didn't render — no admin orgs, or Pro-plan
-			// checkout that ignores org_id, or listOrgs failed and
-			// silently collapsed the picker — omit the field so the
-			// server auto-attaches. Sending null unconditionally would
-			// convert an admin's project to personal any time the
-			// picker was hidden by accident, which is a silent
-			// regression the review caught (round 1, PR #608).
-			const pickerRendered = adminOrgs.length > 0 && plan !== 'pro';
 			const req: Parameters<typeof api.createProject>[0] = {
 				name: projectName.trim(),
 				slug: slug,
@@ -352,7 +403,7 @@
 				plan: plan,
 			};
 			if (pickerRendered) {
-				req.org_id = newOwner === 'personal' ? null : newOwner;
+				req.org_id = pickedOrgID as string | null;
 			}
 			const project = await api.createProject(req);
 			createdProject = project;
@@ -534,17 +585,13 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 				</div>
 
 				<!-- Owner picker: attach to an org the caller admins, or keep personal.
-				     Hidden when:
-				       * the caller doesn't admin any org (a one-option picker is worse
-				         than none for the common per-user case), OR
-				       * the plan is Pro — Pro goes through api.startProjectCheckout
-				         (Mollie), whose request shape doesn't carry org_id today
-				         (pending_projects schema, see api.ts:868). Showing the control
-				         and then silently ignoring it would create "I picked Personal
-				         and it attached anyway" tickets — the exact bug this PR is
-				         trying to prevent. Note under the plan card explains it.
-				     Mirrors the shape in routes/(app)/projects/+page.svelte:643-663. -->
-				{#if adminOrgs.length > 0 && plan !== 'pro'}
+				     Hidden only when the caller doesn't admin any org — a
+				     one-option picker is worse than none for the common
+				     per-user case. Pro-plan carve-out is gone as of #610:
+				     pending_projects now carries org_id + org_id_explicit
+				     through the Mollie round-trip so the picker's choice
+				     survives payment. Mirrors routes/(app)/projects/+page.svelte:643-663. -->
+				{#if adminOrgs.length > 0}
 					<div>
 						<label for="onb-owner" class="block text-sm font-medium text-gray-700">Owner</label>
 						<select
@@ -560,10 +607,6 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 						<p class="mt-1.5 text-xs text-gray-400">
 							Org projects are visible to all org members. Personal projects are yours alone until you attach them.
 						</p>
-					</div>
-				{:else if adminOrgs.length > 0 && plan === 'pro'}
-					<div class="rounded-lg border border-gray-200 bg-gray-50 px-3.5 py-2.5 text-xs text-gray-500">
-						Pro projects are created in your organization by default. Changing an existing project's owner isn't wired into the console yet — contact support if you need one moved.
 					</div>
 				{/if}
 

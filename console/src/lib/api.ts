@@ -866,7 +866,21 @@ export class EurobaseAPI {
 	 *   - 503 billing_disabled → billing turned off in this env
 	 */
 	async startProjectCheckout(
-		req: { name: string; slug: string; region: string; plan_code: 'pro' }
+		req: {
+			name: string;
+			slug: string;
+			region: string;
+			plan_code: 'pro';
+			/**
+			 * Owner picker choice (#610). Three-state:
+			 *   - omitted → server auto-attaches to caller's admin org if any
+			 *   - null    → force personal
+			 *   - string  → attach to that specific org (server verifies admin)
+			 * Server persists onto pending_projects and forwards to
+			 * CreateProject in the payment-confirmation webhook.
+			 */
+			org_id?: string | null;
+		}
 	): Promise<{ pending_project_id: string; checkout_url: string }> {
 		return this.fetch('/platform/billing/checkout/new-project', {
 			method: 'POST',

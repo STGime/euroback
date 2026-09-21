@@ -247,8 +247,7 @@
 							If you're an <strong>admin</strong> of any organization, an <strong>Owner</strong> dropdown appears between Project name and Region:
 							pick your org (default) or <strong>Personal (not attached to any org)</strong>. Org-attached projects are visible to every
 							org member; personal projects are yours alone. Not an admin of an org? The picker is hidden — projects land personal by default,
-							same as before. See chapter 27 for how orgs work. <span class="italic">Pro plan today creates the project in your org by default;
-							choosing an owner isn't wired through the payment flow yet.</span>
+							same as before. See chapter 27 for how orgs work. Works on every plan — Free, Pro, Team, Legal Team — the Pro payment flow now threads your Owner choice through the webhook.
 						</p>
 					</div>
 				</div>
@@ -2956,8 +2955,7 @@ export const db = drizzle(client);</code></pre>
 					A self-serve <em>Owner</em> control on the project settings page is tracked as a follow-up.
 				</div>
 				<div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-900">
-					<strong>Pro plan today keeps auto-attach only.</strong> Pro projects go through the Mollie checkout, which doesn't yet carry the picker's choice end-to-end, so the wizard hides the picker on Pro and the project lands in your org by default.
-					Free / Team / Legal Team all use the sync path and honour the picker.
+					<strong>Pro checkout now honours the picker.</strong> The wizard's Owner choice is persisted on the checkout intent (including across the billing-profile detour) and passed to project creation in the Mollie payment webhook. Two edge cases fall back safely to personal so nobody loses money after paying: (1) target org deleted between checkout and payment confirmation, and (2) caller's admin membership revoked between the two. Both events log a distinct WARN for ops. Every plan — Free, Pro, Team, Legal Team — respects the picker.
 				</div>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">7. Require SSO for every org project</h3>
