@@ -7,7 +7,7 @@
 	// before they've committed to the US-hosted incumbents that
 	// won't survive an auditor's first question.
 	//
-	// Not a technical docs page — that lives at /docs#legal-tech and
+	// Not a technical docs page — that lives at /docs/legal-tech and
 	// covers what's built. This page is the pitch to a legal-tech
 	// founder who's searching for a solution to a specific statutory
 	// retention problem.
@@ -112,7 +112,7 @@
 			<a href="/" class="text-lg font-bold text-gray-900">Eurobase</a>
 			<div class="flex items-center gap-3 text-sm">
 				<a href="/pricing" class="text-gray-600 hover:text-gray-900">Pricing</a>
-				<a href="/docs#legal-tech" class="text-gray-600 hover:text-gray-900">Docs</a>
+				<a href="/docs/legal-tech" class="text-gray-600 hover:text-gray-900">Docs</a>
 				{#if signedIn}
 					<a href="/projects" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Back to dashboard</a>
 				{:else}
@@ -136,7 +136,7 @@
 			<a href="mailto:contact@eurobase.app?subject=Legal%20Team%20beta%20access" class="rounded-lg bg-eurobase-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">
 				Request beta access
 			</a>
-			<a href="/docs#legal-tech" class="rounded-lg border border-gray-300 bg-white px-6 py-3 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors">
+			<a href="/docs/legal-tech" class="rounded-lg border border-gray-300 bg-white px-6 py-3 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors">
 				Read the technical docs
 			</a>
 		</div>
@@ -275,7 +275,7 @@
 				</a>
 			</div>
 			<p class="mt-6 text-xs text-gray-500">
-				Prefer to see the technical details first? Read the <a href="/docs#legal-tech" class="text-eurobase-700 hover:text-eurobase-800 underline">Legal Team docs</a> or the <a href="/pricing" class="text-eurobase-700 hover:text-eurobase-800 underline">full pricing comparison</a>.
+				Prefer to see the technical details first? Read the <a href="/docs/legal-tech" class="text-eurobase-700 hover:text-eurobase-800 underline">Legal Team docs</a> or the <a href="/pricing" class="text-eurobase-700 hover:text-eurobase-800 underline">full pricing comparison</a>.
 			</p>
 		</div>
 	</section>
