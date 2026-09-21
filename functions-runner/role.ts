@@ -54,6 +54,15 @@ export function quoteIdent(s: string): string {
 // branch is deliberately not mirrored: anonymous *end-user* access only
 // makes sense for client-issued queries, not for tenant-deployed code.
 //
+// opts.forceServiceRole is the ctx.db.asService() path: even for a
+// JWT-verified invocation, emit app.end_user_role='service' while
+// KEEPING app.end_user_id set to the verified sub. Tenant policies that
+// gate by is_service_role() will fire the service branch for this one
+// query; tenant audit triggers can still read app.end_user_id to record
+// which end-user requested the elevated action. The Postgres role
+// stays <schema>_func — grants aren't widened; only the RLS branch
+// changes. Callers must gate this on edge_functions.allow_service_role.
+//
 // SECURITY: X-User-ID now drives the RLS *identity* (app.end_user_id +
 // the authenticated role), not just ctx.user, so a forged value would
 // impersonate that user at the row-security layer for every table. This
@@ -64,23 +73,25 @@ export function quoteIdent(s: string): string {
 // fact that it now governs database row security, not only ctx.user.
 export function rlsContextStatements(
   userId: string,
+  opts?: { forceServiceRole?: boolean },
 ): Array<{ sql: string; params: string[] }> {
+  const forceServiceRole = opts?.forceServiceRole === true;
+  const stmts: Array<{ sql: string; params: string[] }> = [];
   if (userId) {
-    return [
-      {
-        sql: "SELECT set_config('app.end_user_id', $1, true)",
-        params: [userId],
-      },
-      {
-        sql: "SELECT set_config('app.end_user_role', 'authenticated', true)",
-        params: [],
-      },
-    ];
+    stmts.push({
+      sql: "SELECT set_config('app.end_user_id', $1, true)",
+      params: [userId],
+    });
   }
-  return [
-    {
+  const roleStmt = forceServiceRole || !userId
+    ? {
       sql: "SELECT set_config('app.end_user_role', 'service', true)",
-      params: [],
-    },
-  ];
+      params: [] as string[],
+    }
+    : {
+      sql: "SELECT set_config('app.end_user_role', 'authenticated', true)",
+      params: [] as string[],
+    };
+  stmts.push(roleStmt);
+  return stmts;
 }

@@ -9,6 +9,7 @@
  */
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
+import { checkAsServiceQuery } from "./asservice_guard.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -62,6 +63,10 @@ const LOG_OUTPUT_LIMIT = 10 * 1024;            // 10 KB per invocation
 interface CachedFunction {
   code: string;
   env_vars: Record<string, string>;
+  // allow_service_role: per-function opt-in for ctx.db.asService()
+  // (migration 000121). When false, an asService()-shaped RPC is
+  // rejected before touching the DB.
+  allow_service_role: boolean;
   cachedAt: number;
 }
 
@@ -157,6 +162,7 @@ async function loadFunction(functionId: string, version: string | null = null): 
         ef.env_vars_blob,
         ef.env_vars_nonce,
         ef.env_vars_key_version,
+        ef.allow_service_role,
         p.schema_name
       FROM edge_functions ef
       JOIN public.projects p ON p.id = ef.project_id
@@ -169,6 +175,7 @@ async function loadFunction(functionId: string, version: string | null = null): 
     const fn: CachedFunction = {
       code: row.code,
       env_vars: env,
+      allow_service_role: row.allow_service_role === true,
       cachedAt: Date.now(),
     };
     setCache(cacheKey, fn);
@@ -263,7 +270,13 @@ async function executeFunction(
   const logCapture = createLogCapture(projectId, LOG_OUTPUT_LIMIT);
 
   // deno-lint-ignore no-explicit-any
-  async function runDBSql(query: string, params: unknown[]): Promise<any> {
+  async function runDBSql(query: string, params: unknown[], mode?: "service"): Promise<any> {
+    // Gate: opt-in check + platform-table fence. Extracted into a pure
+    // helper so a Deno unit test can pin the enforcement contract
+    // without spinning up Postgres.
+    const gate = checkAsServiceQuery(mode, fn.allow_service_role, query);
+    if (gate) throw new Error(gate);
+    const forceServiceRole = mode === "service";
     // deno-lint-ignore no-explicit-any
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
@@ -271,7 +284,11 @@ async function executeFunction(
       // Mirror the gateway's RLS context so auth_uid() /
       // is_service_role() behave the same in functions as in gateway
       // REST — see rlsContextStatements in role.ts. Closes #188.
-      for (const stmt of rlsContextStatements(userId)) {
+      // forceServiceRole is the ctx.db.asService() opt-in path
+      // (migration 000121): keep app.end_user_id set (audit) but flip
+      // end_user_role to 'service' so tenant policies see the service
+      // branch. Postgres role is unchanged — grants aren't widened.
+      for (const stmt of rlsContextStatements(userId, { forceServiceRole })) {
         await tx.unsafe(stmt.sql, stmt.params);
       }
       return await tx.unsafe(query, params);
@@ -350,7 +367,7 @@ async function runUserHandlerInWorker(opts: {
   serializedRequest: SerializedRequest;
   user: { id: string; email: string } | null;
   timeoutMs: number;
-  runDBSql: (query: string, params: unknown[]) => Promise<unknown>;
+  runDBSql: (query: string, params: unknown[], mode?: "service") => Promise<unknown>;
   // deno-lint-ignore no-explicit-any
   db: any;
   // deno-lint-ignore no-explicit-any
@@ -468,7 +485,7 @@ async function runUserHandlerInWorker(opts: {
           // Run the query under the per-tenant role and post the
           // result back. Errors are reported as `error` strings so the
           // worker's RPC layer can rebuild an Error.
-          runDBSql(msg.query, msg.params)
+          runDBSql(msg.query, msg.params, msg.mode)
             .then((rows) => {
               if (settled) return;
               const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };
