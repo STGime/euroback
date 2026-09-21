@@ -320,20 +320,33 @@ func (s *TenantService) CreateProjectForBilling(ctx context.Context, ownerID, em
 		OrgID:         orgID,
 		OrgIDExplicit: orgIDExplicit,
 	})
-	// Admin-revoked mid-payment fallback (#610 option A, #617 round-1
-	// fix). If the caller was an admin of the target org at checkout-
-	// start time but got demoted before Mollie confirmed payment,
-	// CreateProject's explicit-attach branch returns ErrOrgAttachForbidden.
-	// The billing webhook's only error path is refund-orphaned-payment,
-	// which contradicts option A's "no lost money" promise. Retry once
-	// as personal so the customer keeps the paid project; log loudly so
-	// ops sees the demotion race. The race column (requested_org_id on
-	// pending_projects) carries the intended-but-lost org id — a future
-	// console banner (adjacent to #609's Owner UI) can walk the audit
-	// log and prompt re-attach.
-	if errors.Is(err, ErrOrgAttachForbidden) {
-		slog.Warn("CreateProjectForBilling: admin revoked mid-payment; falling back to personal",
-			"owner_id", ownerID, "slug", slug, "requested_org_id", derefString(orgID))
+	// Two mid-payment races that both contradict option A's "user
+	// keeps their paid project; no lost money" promise unless we
+	// retry as personal (#610 option A, #617 round-1 + round-2 fix):
+	//
+	//   * ErrOrgAttachForbidden — caller was admin of the target org
+	//     at checkout-start time but got demoted before Mollie
+	//     confirmed payment. Org still exists; explicit-attach branch
+	//     of CreateProject re-checks admin membership and refuses.
+	//   * ErrOrgAttachTargetGone — the target org was deleted in the
+	//     millisecond window between the webhook's SELECT of
+	//     pp.org_id and CreateProject's INSERT of the projects row.
+	//     ON DELETE SET NULL on pending_projects.org_id closes the
+	//     wider race (any deletion before the SELECT nulls the FK
+	//     and personal-fallback fires in the webhook), but not this
+	//     sub-second sliver — the SELECT already latched the UUID
+	//     and the INSERT's own FK check raises 23503.
+	//
+	// Retry once as (nil, true) → force personal. The retry lands in
+	// CreateProject's explicit-personal branch which does no org
+	// lookup, so it cannot re-raise either error. Any other failure
+	// still propagates to the webhook's refund path. The race column
+	// (requested_org_id on pending_projects) carries the intended-
+	// but-lost org id — a future console banner (adjacent to #609's
+	// Owner UI) can walk the audit log and prompt re-attach.
+	if errors.Is(err, ErrOrgAttachForbidden) || errors.Is(err, ErrOrgAttachTargetGone) {
+		slog.Warn("CreateProjectForBilling: org attach failed mid-payment; falling back to personal",
+			"owner_id", ownerID, "slug", slug, "requested_org_id", derefString(orgID), "reason", err.Error())
 		proj, err = s.CreateProject(ctx, ownerID, email, CreateProjectRequest{
 			Name:          name,
 			Slug:          slug,
