@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	let copiedId = $state('');
 	async function copyCode(code: string, id: string) {
 		try {
@@ -9,11 +8,6 @@
 		} catch {
 			// clipboard unavailable — silently ignore
 		}
-	}
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
 	}
 </script>
 
@@ -66,8 +60,8 @@ curl -X DELETE https://lexvault.eurobase.app/api/v1/db/clients?eq.id=some-uuid \
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('webhooks')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/webhooks" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Webhooks &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="team-tier" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">26. Team tier <span class="text-sm font-normal text-emerald-700">(closed beta)</span></h2>
 			<p class="text-sm italic text-gray-500 mb-4">
@@ -50,7 +41,7 @@
 					<li><strong>On-demand snapshots</strong> with an optional tag — take one before a risky migration, restore in a few clicks. Retention window shared with daily backups.</li>
 					<li><strong>Self-serve restore</strong> from any snapshot, no support ticket. 1 restore per calendar month is included.</li>
 					<li><strong>Organizations + OIDC SSO</strong> so a company can share access under one identity provider — covered in the next chapter.</li>
-					<li><strong>Direct Postgres connection URL</strong> — the DSN reveal from chapter <button onclick={() => scrollTo('connect-db')} class="text-eurobase-700 hover:underline cursor-pointer">25</button>.</li>
+					<li><strong>Direct Postgres connection URL</strong> — the DSN reveal from chapter <a href="/docs/connect-db" class="text-eurobase-700 hover:underline cursor-pointer">25</a>.</li>
 				</ul>
 
 				<div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-900">
@@ -129,7 +120,7 @@
 					Any data written after the snapshot is lost — the point of the snapshot is that Alex chose that moment.
 					Storage objects in the project's S3 bucket are <strong>not</strong> included; those have their own
 					lifecycle and can be handled via Legal Team's retention holds if you need them locked (chapter
-					<button onclick={() => scrollTo('legal-tech')} class="text-eurobase-700 hover:underline cursor-pointer">28</button>).
+					<a href="/docs/legal-tech" class="text-eurobase-700 hover:underline cursor-pointer">28</a>).
 				</div>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">4. Connecting external tools</h3>
@@ -137,7 +128,7 @@
 					Team also unlocks the direct <code class="rounded bg-gray-100 px-1 text-[11px]">DATABASE_URL</code> surface
 					so Prisma / Drizzle / Payload / <code class="rounded bg-gray-100 px-1 text-[11px]">psql</code> / migration
 					runners can connect straight to the dedicated instance. Chapter
-					<button onclick={() => scrollTo('connect-db')} class="text-eurobase-700 hover:underline cursor-pointer">25</button>
+					<a href="/docs/connect-db" class="text-eurobase-700 hover:underline cursor-pointer">25</a>
 					walks that path in detail.
 				</p>
 
@@ -150,8 +141,8 @@
 			</div>
 
 			<div class="mt-4">
-				<button onclick={() => scrollTo('orgs-sso')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/orgs-sso" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Organizations &amp; SSO (OIDC) &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="rls" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">12. Row-Level Security (RLS)</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs each law firm employee to only see their own cases.</p>
@@ -159,8 +150,8 @@
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('vault')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/vault" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Vault &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

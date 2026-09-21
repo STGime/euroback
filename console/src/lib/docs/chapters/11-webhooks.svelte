@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	let copiedId = $state('');
 	async function copyCode(code: string, id: string) {
 		try {
@@ -9,11 +8,6 @@
 		} catch {
 			// clipboard unavailable — silently ignore
 		}
-	}
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
 	}
 </script>
 
@@ -96,8 +90,8 @@ app.post('/webhooks/eurobase', express.raw({'{'} type: 'application/json' {'}'})
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('rls')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/rls" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Row-Level Security &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

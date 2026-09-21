@@ -1,6 +1,3 @@
-<script lang="ts">
-</script>
-
 		<section id="next" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">What's Next</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex has a fully configured backend. Time to build LexVault's frontend.</p>

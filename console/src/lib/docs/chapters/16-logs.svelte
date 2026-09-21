@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="logs" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">16. Monitoring with Logs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex notices slow responses and wants to investigate API traffic.</p>
@@ -40,8 +31,8 @@
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('compliance')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/compliance" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Compliance, Audit Log &amp; DSAR &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	let copiedId = $state('');
 	async function copyCode(code: string, id: string) {
 		try {
@@ -9,11 +8,6 @@
 		} catch {
 			// clipboard unavailable — silently ignore
 		}
-	}
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
 	}
 </script>
 
@@ -111,9 +105,9 @@ try {'{'}
 				</p>
 
 				<div class="mt-6 text-right">
-					<button onclick={() => scrollTo('custom-smtp')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					<a href="/docs/custom-smtp" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 						Next: Custom SMTP &rarr;
-					</button>
+					</a>
 				</div>
 			</div>
 		</section>

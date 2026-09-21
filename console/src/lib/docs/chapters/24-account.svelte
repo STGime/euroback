@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="account" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">24. Your Account</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
@@ -30,7 +21,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Personal Access Tokens</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Long-lived bearer tokens for tooling that needs to act as you outside the browser &mdash; the <button onclick={() => scrollTo('mcp')} class="text-eurobase-600 hover:underline cursor-pointer">MCP server</button>, the CLI, CI pipelines, scripts. Mint and revoke them in the <strong>Personal Access Tokens</strong> card on the Account page.
+					Long-lived bearer tokens for tooling that needs to act as you outside the browser &mdash; the <a href="/docs/mcp" class="text-eurobase-600 hover:underline cursor-pointer">MCP server</a>, the CLI, CI pipelines, scripts. Mint and revoke them in the <strong>Personal Access Tokens</strong> card on the Account page.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					<strong>Creating a token:</strong> click <em>+ New token</em>, give it a memorable name (e.g. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">my laptop</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">ci-prod</code>), optionally set an expiry date, and click <em>Create</em>. The plaintext token (e.g. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eb_pat_205d71172180a3ca3ea0e26f07156429</code>) appears in an amber banner once. Copy it immediately into a password manager or your shell rc &mdash; <strong>it is not retrievable afterwards.</strong> The console only stores a SHA-256 hash.
@@ -74,8 +65,8 @@
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('connect-db')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/connect-db" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Direct Postgres connection &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

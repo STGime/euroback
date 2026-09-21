@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	let copiedId = $state('');
 	async function copyCode(code: string, id: string) {
 		try {
@@ -9,11 +8,6 @@
 		} catch {
 			// clipboard unavailable — silently ignore
 		}
-	}
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
 	}
 </script>
 
@@ -142,8 +136,8 @@ await eb.db
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('storage')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/storage" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: File Storage &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

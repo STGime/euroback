@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="custom-smtp" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">8. Custom SMTP</h2>
 			<p class="text-sm italic text-gray-500 mb-4">LexVault grows past the platform email cap. Alex's signups start hitting the 2-emails-per-hour ceiling. He plugs in the firm's own SMTP provider and the ceiling disappears.</p>
@@ -87,9 +78,9 @@
 				</p>
 
 				<div class="mt-6 text-right">
-					<button onclick={() => scrollTo('users')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+					<a href="/docs/users" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 						Next: Managing End Users &rarr;
-					</button>
+					</a>
 				</div>
 			</div>
 		</section>

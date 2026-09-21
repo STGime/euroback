@@ -1,6 +1,3 @@
-<script lang="ts">
-</script>
-
 		<section id="migrations" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">21. Schema Migrations</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants schema changes that are versioned, reviewable, and repeatable across environments.</p>

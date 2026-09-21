@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	let copiedId = $state('');
 	async function copyCode(code: string, id: string) {
 		try {
@@ -10,11 +9,6 @@
 			// clipboard unavailable — silently ignore
 		}
 	}
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
 </script>
 
 		<section id="mcp" class="scroll-mt-20">
@@ -23,7 +17,7 @@
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The configs in <button onclick={() => scrollTo('connect')} class="text-eurobase-600 hover:underline cursor-pointer">section 22</button> teach an AI assistant <em>about</em> your project. The MCP server lets it <em>operate</em> on your project. Eurobase ships a hosted <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Model Context Protocol</a> server at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">https://mcp.eurobase.app/mcp</code> that exposes the platform API as tool calls.
+					The configs in <a href="/docs/connect" class="text-eurobase-600 hover:underline cursor-pointer">section 22</a> teach an AI assistant <em>about</em> your project. The MCP server lets it <em>operate</em> on your project. Eurobase ships a hosted <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Model Context Protocol</a> server at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">https://mcp.eurobase.app/mcp</code> that exposes the platform API as tool calls.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900">What it can do</h3>
@@ -79,8 +73,8 @@ claude mcp add --transport http eurobase https://mcp.eurobase.app/mcp \
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('account')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/account" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Your Account &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

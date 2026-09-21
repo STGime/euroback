@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="legal-tech" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">28. German legal-tech retention <span class="text-sm font-normal text-emerald-700">(Legal Team)</span></h2>
 			<p class="text-sm italic text-gray-500 mb-4">
@@ -74,14 +65,14 @@
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">Related</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
-					<li>Compliance overview → section <button onclick={() => scrollTo('compliance')} class="text-eurobase-700 hover:underline cursor-pointer">17</button> (DPA report, sub-processors, DSAR baseline).</li>
-					<li>Direct Postgres connection → section <button onclick={() => scrollTo('connect-db')} class="text-eurobase-700 hover:underline cursor-pointer">25</button> (Legal Team includes the dedicated instance from the Team tier).</li>
+					<li>Compliance overview → section <a href="/docs/compliance" class="text-eurobase-700 hover:underline cursor-pointer">17</a> (DPA report, sub-processors, DSAR baseline).</li>
+					<li>Direct Postgres connection → section <a href="/docs/connect-db" class="text-eurobase-700 hover:underline cursor-pointer">25</a> (Legal Team includes the dedicated instance from the Team tier).</li>
 				</ul>
 			</div>
 
 			<div class="mt-4">
-				<button onclick={() => scrollTo('next')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/next" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: What's Next &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

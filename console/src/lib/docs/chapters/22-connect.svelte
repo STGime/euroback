@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="connect" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">22. Connecting Your IDE</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants their AI coding assistant to understand the LexVault schema.</p>
@@ -57,8 +48,8 @@
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('mcp')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/mcp" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: MCP Server &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

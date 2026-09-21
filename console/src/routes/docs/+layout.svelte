@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { user } from '$lib/stores';
 	import { chapters } from '$lib/docs/registry';
 
 	let { children } = $props();
@@ -13,8 +14,10 @@
 </script>
 
 <div class="min-h-screen bg-gray-50">
-	<!-- Public header: no auth state, so the page renders identically for
-	     crawlers, anonymous visitors and signed-in users. -->
+	<!-- Public header. The prerendered HTML is the anonymous variant (the
+	     user store is null on the server); after hydration a signed-in
+	     reader gets a single "Go to console" link instead of the
+	     sign-in / sign-up pair. -->
 	<header class="border-b border-gray-200 bg-white">
 		<div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
 			<div class="flex items-center gap-6">
@@ -26,8 +29,12 @@
 				</nav>
 			</div>
 			<div class="flex items-center gap-3 text-sm">
-				<a href="/login" class="text-gray-600 hover:text-gray-900">Sign in</a>
-				<a href="/login" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Get started</a>
+				{#if $user}
+					<a href="/projects" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Go to console</a>
+				{:else}
+					<a href="/login" class="text-gray-600 hover:text-gray-900">Sign in</a>
+					<a href="/login?signup=1" class="rounded-lg bg-eurobase-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-eurobase-700 transition-colors">Get started</a>
+				{/if}
 			</div>
 		</div>
 	</header>
@@ -67,7 +74,7 @@
 			</button>
 			{#if tocOpen}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div class="fixed inset-0 z-40" onclick={() => (tocOpen = false)} onkeydown={() => {}}></div>
+				<div class="fixed inset-0 z-40" onclick={() => (tocOpen = false)} onkeydown={(e) => e.key === 'Escape' && (tocOpen = false)}></div>
 				<div class="absolute right-0 mt-1 w-64 rounded-xl bg-white border border-gray-200 shadow-lg z-50 py-2 max-h-[70vh] overflow-y-auto">
 					{#each chapters as ch}
 						<a

@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="welcome" class="scroll-mt-20">
 			<h1 class="text-3xl font-bold text-gray-900 mb-2">Documentation</h1>
 			<p class="text-base text-gray-600 mb-6">A guided tour of Eurobase through the eyes of a real project.</p>
@@ -32,8 +23,8 @@
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('signup')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/signup" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Start with Chapter 1: Signing Up &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

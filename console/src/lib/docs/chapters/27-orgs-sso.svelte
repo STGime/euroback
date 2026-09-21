@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="orgs-sso" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">27. Organizations &amp; SSO <span class="text-sm font-normal text-emerald-700">(Team &amp; Legal Team)</span></h2>
 			<p class="text-sm italic text-gray-500 mb-4">
@@ -207,8 +198,8 @@
 			</div>
 
 			<div class="mt-4">
-				<button onclick={() => scrollTo('legal-tech')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/legal-tech" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: German legal-tech retention (Legal Team) &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

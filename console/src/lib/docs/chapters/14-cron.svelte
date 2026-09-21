@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="cron" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">14. Scheduled Jobs</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex needs to clean up expired sessions and send weekly reports automatically.</p>
@@ -102,7 +93,7 @@
 				</p>
 
 				<div class="rounded-lg border border-amber-200 bg-amber-50/60 px-4 py-3 mt-2">
-					<p class="text-sm text-amber-900"><span class="font-semibold">RPC vs Cron Job vs DB Trigger vs Edge Function:</span> Eurobase has four kinds of "server-side code" and the distinction matters. Quick gist: RPC = callable SQL (this section). Cron Job = scheduled SQL (above). DB Trigger = reactive SQL fired by row events on a table (managed in Database &rarr; Triggers). <button onclick={() => scrollTo('edge-functions')} class="text-amber-900 underline cursor-pointer">Edge Function</button> = TypeScript in a Deno container, for external API calls and JS-ecosystem things. The <button onclick={() => scrollTo('edge-functions')} class="text-amber-900 underline cursor-pointer">full comparison table</button> in the Edge Functions chapter has language, transactional semantics, and use cases side by side.</p>
+					<p class="text-sm text-amber-900"><span class="font-semibold">RPC vs Cron Job vs DB Trigger vs Edge Function:</span> Eurobase has four kinds of "server-side code" and the distinction matters. Quick gist: RPC = callable SQL (this section). Cron Job = scheduled SQL (above). DB Trigger = reactive SQL fired by row events on a table (managed in Database &rarr; Triggers). <a href="/docs/edge-functions" class="text-amber-900 underline cursor-pointer">Edge Function</a> = TypeScript in a Deno container, for external API calls and JS-ecosystem things. The <a href="/docs/edge-functions" class="text-amber-900 underline cursor-pointer">full comparison table</a> in the Edge Functions chapter has language, transactional semantics, and use cases side by side.</p>
 				</div>
 
 				<h4 class="text-sm font-semibold text-gray-700 mt-4">Creating a function</h4>
@@ -175,8 +166,8 @@ console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 			</div>
 
 			<div class="mt-6 text-right">
-				<button onclick={() => scrollTo('edge-functions')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/edge-functions" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Edge Functions &rarr;
-				</button>
+				</a>
 			</div>
 		</section>

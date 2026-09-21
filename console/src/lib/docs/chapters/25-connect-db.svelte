@@ -1,12 +1,3 @@
-<script lang="ts">
-	import { goto } from '$app/navigation';
-	// In the single-page docs this scrolled; each chapter is now its own
-	// URL, so cross-references navigate instead.
-	function scrollTo(id: string) {
-		goto(`/docs/${id}`);
-	}
-</script>
-
 		<section id="connect-db" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">25. Direct Postgres connection <span class="text-sm font-normal text-emerald-700">(Team &amp; Legal Team)</span></h2>
 			<p class="text-sm italic text-gray-500 mb-4">
@@ -96,16 +87,16 @@ export const db = drizzle(client);</code></pre>
 				<p class="text-sm text-gray-700">
 					If you don't need direct connection, all Free/Pro projects can still work with tools that speak
 					our SDK / REST — see chapters
-					<button onclick={() => scrollTo('database')} class="text-eurobase-700 hover:underline cursor-pointer">4</button>,
-					<button onclick={() => scrollTo('api')} class="text-eurobase-700 hover:underline cursor-pointer">10</button>,
-					<button onclick={() => scrollTo('mcp')} class="text-eurobase-700 hover:underline cursor-pointer">23</button>.
+					<a href="/docs/database" class="text-eurobase-700 hover:underline cursor-pointer">4</a>,
+					<a href="/docs/api" class="text-eurobase-700 hover:underline cursor-pointer">10</a>,
+					<a href="/docs/mcp" class="text-eurobase-700 hover:underline cursor-pointer">23</a>.
 					When you're ready for a stack that wants raw Postgres, upgrade to Team from Project → Settings.
 				</p>
 			</div>
 
 			<div class="mt-4">
-				<button onclick={() => scrollTo('team-tier')} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
+				<a href="/docs/team-tier" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: Team tier — dedicated Postgres, backups, snapshots &rarr;
-				</button>
+				</a>
 			</div>
 		</section>
