@@ -274,6 +274,15 @@
 		creating = true;
 		createError = '';
 		try {
+			// Owner picker's choice, used by both branches below.
+			// Three-state: undefined = omit (auto-attach); null = force
+			// personal; string = attach to that org. Pro path threads
+			// this through pending_projects since PR #610.
+			const pickerRendered = adminOrgs.length > 0;
+			const pickedOrgID: string | null | undefined = pickerRendered
+				? (newOwner === 'personal' ? null : newOwner)
+				: undefined;
+
 			if (newPlan === 'pro') {
 				// Payment-first flow (#406). Start Mollie checkout;
 				// project is created by the webhook after payment.
@@ -301,12 +310,16 @@
 					await goto('/billing/profile?next=' + encodeURIComponent('/projects?resume=1'));
 					return;
 				}
-				const res = await api.startProjectCheckout({
+				const checkoutReq: Parameters<typeof api.startProjectCheckout>[0] = {
 					name: intent.name,
 					slug: intent.slug,
 					region: intent.region,
 					plan_code: 'pro',
-				});
+				};
+				if (pickerRendered) {
+					checkoutReq.org_id = pickedOrgID as string | null;
+				}
+				const res = await api.startProjectCheckout(checkoutReq);
 				sessionStorage.setItem(
 					PENDING_KEY,
 					JSON.stringify({ pendingId: res.pending_project_id, ...intent })
@@ -322,27 +335,8 @@
 			// branch above (plan_code:'legal_team').
 			//
 			// Owner picker (org attach) applies on this sync path.
-			// Pro's payment-first flow goes through Mollie webhook →
-			// CreateProjectForBilling and doesn't yet plumb the
-			// picker through; Pro projects fall back to server-side
-			// auto-attach for now. Follow-up: extend pending_projects
-			// to carry org_id + null-marker so the picker choice
-			// survives the round-trip.
-			// THREE-STATE contract on org_id (matches server-side
-			// CreateProjectRequest):
-			//   absent  → auto-attach to caller's admin org if any
-			//   null    → force personal
-			//   <uuid>  → attach to that specific org (server verifies)
-			// Only include org_id when the picker actually rendered
-			// (adminOrgs.length > 0). Otherwise the field would carry
-			// its default 'personal' → null and silently convert an
-			// admin's project to personal any time listOrgs failed
-			// (non-fatal .catch above) or the modal opened before
-			// Promise.all resolved. Same fix landed on the onboarding
-			// wizard in the same PR; this modal is currently
-			// unreachable from the primary UI but the latent bug is
-			// the same shape.
-			const pickerRendered = adminOrgs.length > 0;
+			// pickerRendered + pickedOrgID computed at the top of
+			// handleCreate, shared with the Pro branch above.
 			const req: Parameters<typeof api.createProject>[0] = {
 				name: newName.trim(),
 				slug: newSlug,
@@ -350,7 +344,7 @@
 				plan: newPlan,
 			};
 			if (pickerRendered) {
-				req.org_id = newOwner === 'personal' ? null : newOwner;
+				req.org_id = pickedOrgID as string | null;
 			}
 			await api.createProject(req);
 			showNewModal = false;

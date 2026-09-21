@@ -299,15 +299,26 @@ func (s *TenantService) SetDeveloperPool(devPool *pgxpool.Pool) {
 // signature so the billing package doesn't have to import
 // tenant.CreateProjectRequest.
 //
+// orgID + orgIDExplicit thread the wizard's Owner picker choice
+// through from the pending_projects row (#610). Three-state
+// contract matches CreateProjectRequest exactly:
+//   - orgIDExplicit=false, orgID=nil → auto-attach to caller's admin
+//     org if any (pre-#610 behaviour).
+//   - orgIDExplicit=true,  orgID=nil → force personal.
+//   - orgIDExplicit=true,  orgID=<>  → attach to that org (server
+//     re-verifies admin membership).
+//
 // Returns the newly-created project's ID string. The webhook uses
 // it to insert the corresponding subscriptions + invoices rows in
 // the same transaction as the project creation.
-func (s *TenantService) CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string) (string, error) {
+func (s *TenantService) CreateProjectForBilling(ctx context.Context, ownerID, email, name, slug, region, plan string, orgID *string, orgIDExplicit bool) (string, error) {
 	proj, err := s.CreateProject(ctx, ownerID, email, CreateProjectRequest{
-		Name:   name,
-		Slug:   slug,
-		Region: region,
-		Plan:   plan,
+		Name:          name,
+		Slug:          slug,
+		Region:        region,
+		Plan:          plan,
+		OrgID:         orgID,
+		OrgIDExplicit: orgIDExplicit,
 	})
 	if err != nil {
 		return "", err

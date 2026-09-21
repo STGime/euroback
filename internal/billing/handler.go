@@ -3,6 +3,7 @@ package billing
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -34,11 +35,11 @@ type checkoutResponse struct {
 //
 // Error → status mapping:
 //
-//   ErrBillingDisabled     → 503 (billing not enabled in this env)
-//   ErrProjectNotFound     → 404 (not-found = not-owned; deliberate)
-//   ErrAlreadySubscribed   → 409 (also fired by the unique index race)
-//   ErrInvalidPlan         → 400
-//   everything else        → 500 + slog.Error with the wrapped chain
+//	ErrBillingDisabled     → 503 (billing not enabled in this env)
+//	ErrProjectNotFound     → 404 (not-found = not-owned; deliberate)
+//	ErrAlreadySubscribed   → 409 (also fired by the unique index race)
+//	ErrInvalidPlan         → 400
+//	everything else        → 500 + slog.Error with the wrapped chain
 //
 // The 503 branch fires *before* JSON parsing so an accidental
 // enablement-check inversion doesn't leak internal error details in
@@ -119,6 +120,14 @@ type newProjectCheckoutRequest struct {
 	Slug     string `json:"slug"`
 	Region   string `json:"region"`
 	PlanCode string `json:"plan_code"`
+	// OrgID carries the wizard's Owner picker choice through to the
+	// webhook (#610). Three-state encoding matches CreateProjectRequest:
+	// absent (JSON key omitted) → auto-attach at project-creation
+	// time; null → force personal; UUID → attach to that org (handler
+	// verifies admin at checkout-start time; webhook re-verifies).
+	// The absent-vs-null distinction is preserved by peeking the raw
+	// body below, same trick HandleCreateProject uses.
+	OrgID *string `json:"org_id,omitempty"`
 }
 
 // newProjectCheckoutResponse mirrors NewProjectCheckoutResult with
@@ -157,10 +166,29 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 			return
 		}
 
-		var req newProjectCheckoutRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16*1024))
+		if err != nil {
+			var mbErr *http.MaxBytesError
+			if errors.As(err, &mbErr) {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "body_too_large", "request body too large")
+				return
+			}
 			writeJSONError(w, http.StatusBadRequest, "invalid_body", "request body must be JSON")
 			return
+		}
+		var req newProjectCheckoutRequest
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_body", "request body must be JSON")
+			return
+		}
+		// Distinguish "org_id absent" from "org_id: null" — same trick
+		// HandleCreateProject uses. A *string flattens both to nil, so
+		// peek the raw JSON to know which the client actually sent.
+		// Present-and-null → force personal; absent → auto-attach.
+		var orgIDExplicit bool
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(bodyBytes, &probe); err == nil {
+			_, orgIDExplicit = probe["org_id"]
 		}
 		if req.Name == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing_name", "name is required")
@@ -180,10 +208,12 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 		}
 
 		res, err := svc.NewProjectCheckout(r.Context(), claims.Subject, NewProjectCheckoutRequest{
-			Name:   req.Name,
-			Slug:   req.Slug,
-			Region: req.Region,
-			Plan:   strings.ToLower(req.PlanCode),
+			Name:          req.Name,
+			Slug:          req.Slug,
+			Region:        req.Region,
+			Plan:          strings.ToLower(req.PlanCode),
+			OrgIDExplicit: orgIDExplicit,
+			OrgID:         req.OrgID,
 		})
 		if err != nil {
 			switch {
@@ -199,6 +229,8 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 				writeJSONError(w, http.StatusConflict, "pending_checkout_in_flight", "another checkout is already in progress for your account — please complete it first or wait a few minutes")
 			case errors.Is(err, ErrBillingProfileRequired):
 				writeJSONError(w, http.StatusConflict, "billing_profile_required", "please add your billing details before continuing")
+			case errors.Is(err, ErrOrgAttachForbidden):
+				writeJSONError(w, http.StatusForbidden, "org_attach_forbidden", "you must be an admin of the target organization to attach a project to it")
 			default:
 				reqID := middleware.GetReqID(r.Context())
 				slog.Error("billing: new-project checkout failed",
