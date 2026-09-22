@@ -569,6 +569,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// INSERT only.
 		r.Route("/public", func(r chi.Router) {
 			r.Post("/contact", tenant.HandlePublicContactRequest(pool, limiter))
+			// Platform-wide sub-processor list — the page the DPA
+			// (Section 7 + Annex 3), Privacy Policy and Terms cite as
+			// /legal/sub-processors; the console renders it server-side
+			// from this endpoint. Read-only SELECT on sub_processors
+			// (gateway pool has table-wide SELECT, migration 000037),
+			// no input, Cache-Control 5 min. Residency config is
+			// irrelevant to this list, hence the default.
+			r.Get("/sub-processors", compliance.HandlePublicSubProcessors(
+				compliance.NewComplianceService(pool, compliance.DefaultResidencyConfig())))
 			// CLOUD Act Exposure Checker (Tool 1 of the growth spec,
 			// issue #548). Anonymous surface — the checker is a
 			// public lead-magnet. Create runs on the gateway pool
