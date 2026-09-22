@@ -91,6 +91,16 @@ const eb = createClient({'{'}
 				</div>
 			</div>
 
+			<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 mt-4">
+				<p class="text-xs font-semibold text-amber-900 mb-1">Free plan: idle pause after 30 days &mdash; what counts as activity</p>
+				<p class="text-xs text-amber-900 leading-relaxed">
+					A Free project pauses when it has gone <strong>30 days without a request to its own endpoint</strong>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">&lt;slug&gt;.eurobase.app</code> &mdash; that is anything the SDK, the REST API, realtime or an edge-function call sends. Two things do <strong>not</strong> count: scheduled cron jobs running inside the project, and console, CLI or export calls on the platform API (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">api.eurobase.app</code>). So a nightly export script will not keep a project awake, but any visitor to your app will.
+				</p>
+				<p class="text-xs text-amber-900 leading-relaxed mt-1.5">
+					Pausing deletes nothing: the database keeps running, your data stays exactly where it is, and cron jobs keep firing. The only effect is that the <strong>first request after a pause takes about 30 seconds</strong> while the project flips back to active; every request after that is instant. Pro and higher plans never pause.
+				</p>
+			</div>
+
 			<div class="mt-6 text-right">
 				<a href="/docs/dashboard" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">
 					Next: The Project Dashboard &rarr;

@@ -54,12 +54,43 @@
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-3">Full Project Export &mdash; Article 20 (data portability)</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Exports every row of every table in your tenant schema, plus the auth user records, storage object manifest, and audit log, as a single zip. Pick <strong>JSON</strong> for round-trippable structure or <strong>CSV</strong> for spreadsheets. Use this when a customer hands you "we're leaving, give us our data" or when a regulator asks for a full snapshot.
+					Exports every table in your tenant schema (up to 100,000 rows per table) including the auth <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">users</code> table, plus the project audit log (latest 10,000 entries) and a <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">_metadata.json</code> describing the run, as a single zip. Uploaded files in storage are <strong>not</strong> in the archive &mdash; fetch those through the storage API. Pick <strong>JSON</strong> for round-trippable structure or <strong>CSV</strong> for spreadsheets. The one-click button in this tab is Pro and above; on Free the same export is available through the API (next section). Use this when a customer hands you "we're leaving, give us our data" or when a regulator asks for a full snapshot.
 				</p>
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-3">Single-User Export &mdash; Article 15 (subject access request)</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Search by email or paste a user UUID; the export contains only that user's auth record and every row in your tenant tables that references their <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">user_id</code>. Rate-limited to one export per <em>data subject</em> per 24 hours (so any admin calling for that user is gated by the same window) &mdash; this stops a runaway script or a hostile actor with a leaked admin token from exfiltrating the user table one row at a time.
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-3">Scripting exports &mdash; nightly backups from the API</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Both exports are plain platform-API calls, so a cron job on your side can run them on every tier, including Free. The project's public and service keys cannot call them: they are <em>platform</em> endpoints on <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">api.eurobase.app</code>, authenticated as <em>you</em>. Create a <a href="/docs/account" class="text-eurobase-600 hover:underline cursor-pointer">Personal Access Token</a> (Account &rarr; Personal Access Tokens, starts with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb_pat_</code>) and send it as a Bearer token. The token owner must be an <strong>admin</strong> of the project.
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre># 1. request a full export (json or csv)
+curl -X POST https://api.eurobase.app/platform/projects/$PROJECT_ID/compliance/export \
+  -H "Authorization: Bearer $EUROBASE_PAT" -H "Content-Type: application/json" \
+  -d '{'{'}"format":"json"{'}'}'
+# &rarr; 202 {'{'}"id":"&lt;exportId&gt;","status":"pending",...{'}'}
+
+# 2. poll until status is "completed", then download
+curl https://api.eurobase.app/platform/projects/$PROJECT_ID/compliance/exports/$EXPORT_ID \
+  -H "Authorization: Bearer $EUROBASE_PAT"
+# &rarr; {'{'}"status":"completed","download_url":"https://...","expires_at":"..."{'}'}</pre>
+				</div>
+				<ul class="text-sm text-gray-700 leading-relaxed list-disc pl-5 mt-2 space-y-1">
+					<li><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">download_url</code> is a presigned link valid for <strong>1 hour</strong>; request the status again for a fresh one. The archive itself is kept for <strong>7 days</strong>, then deleted.</li>
+					<li>Rate limit: <strong>one full-project export per hour</strong> per project (single-user exports: one per data subject per 24 h). A nightly job fits comfortably.</li>
+					<li>Export calls go through the platform API, so they do <strong>not</strong> count as project activity for the Free-tier idle pause (see <a href="/docs/create-project" class="text-eurobase-600 hover:underline cursor-pointer">chapter 2</a>). A paused project still exports fine.</li>
+					<li>Every request, completion and failure lands in the Audit Log with the token owner's email and IP.</li>
+				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Your Data Processing Agreement (Art. 28 GDPR)</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The DPA report above is a description of processing (Article 30). The <em>contract</em> that makes Eurobase your processor is the <strong>Data Processing Agreement v2</strong>, which you accepted click-through when you created your account &mdash; that is a valid written form under Art. 28(9), and it applies on every tier, including Free. The full text is at <a href="/legal/dpa" class="text-eurobase-600 hover:underline cursor-pointer">/legal/dpa</a>: it names the contracting entity (Eurobase OÜ, Ahtri 12, Tallinn 15551, Estonia, registry code 17557586), sets out the technical and organisational measures, and carries the sub-processor annex. Print it or save it as PDF for your records; the sub-processors actually engaged by <em>your</em> project's enabled features are listed live in the DPA Report tab.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Need a <strong>countersigned copy</strong> on Eurobase letterhead with the sub-processor list attached, for example because your auditor or Verein board wants a wet-ink or PDF-signed document? That is a paid-tier service: available on Pro and above on request via <a href="mailto:dpo@eurobase.app" class="text-eurobase-600 hover:underline">dpo@eurobase.app</a>. On Free, the click-through DPA at /legal/dpa is your contract.
 				</p>
 
 				<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 mt-3">
