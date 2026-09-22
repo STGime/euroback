@@ -532,10 +532,12 @@
 				{/if}
 			</div>
 
-			<div class="mt-6 flex justify-center gap-3 text-xs">
+			<div class="mt-6 flex justify-center flex-wrap gap-x-3 gap-y-1 text-xs">
 				<a href="/docs" class="text-gray-500 hover:text-gray-900">Docs</a>
 				<span class="text-gray-300">·</span>
 				<a href="/pricing" class="text-gray-500 hover:text-gray-900">Pricing</a>
+				<span class="text-gray-300">·</span>
+				<a href="https://eurobase.app/sovereignty-check" class="text-gray-500 hover:text-gray-900">Check your stack for CLOUD Act exposure</a>
 			</div>
 
 			<p class="mt-4 text-center text-xs text-gray-400">
