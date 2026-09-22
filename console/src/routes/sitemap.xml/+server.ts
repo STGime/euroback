@@ -16,6 +16,7 @@ export function GET(): Response {
 		'/legal/terms',
 		'/legal/privacy',
 		'/legal/dpa',
+		'/legal/sub-processors',
 		'/docs',
 		...pageChapters.map((c) => `/docs/${c.id}`)
 	];
