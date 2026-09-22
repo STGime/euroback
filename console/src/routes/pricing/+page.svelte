@@ -151,6 +151,9 @@
 		{ label: 'SSO (OIDC) for console sign-in — Google Workspace, Microsoft Entra ID, Okta, Authentik, any OIDC IdP', free: false, pro: false, team: true, legal: true },
 		{ label: 'SSO (SAML) for console sign-in', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Organizations — invite teammates, org-level admin / member roles', free: false, pro: false, team: true, legal: true },
+		{ label: 'Email notification on org invite', free: false, pro: false, team: true, legal: true },
+		{ label: 'Enforce SSO for org members (password sessions cannot reach org projects)', free: false, pro: false, team: true, legal: true },
+		{ label: 'Mix Team / Pro / Free projects under one org', free: false, pro: false, team: true, legal: true },
 		{ label: 'Project RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Automation & integrations' },
@@ -380,7 +383,8 @@
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Daily backups + on-demand snapshots (7-day retention) — 1 restore/month included</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>SSO (OIDC)</strong> — Google Workspace, Microsoft Entra ID, Okta, Authentik, or any OIDC IdP</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SSO (SAML) <span class="text-xs italic text-amber-600">coming soon</span></span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Organizations</strong> — invite teammates, org-level admin / member roles, org-owned projects (Team + Pro + Free)</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Organizations</strong> — invite teammates by email, org-level admin / member roles, org-owned projects (mix Team + Pro + Free under one org)</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span><strong>Enforce SSO for members</strong> — org-level switch: password sessions can't reach org projects, members are sent to your IdP</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>Priority email support (24 h SLA)</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>SOC 2 Type II attestation <span class="text-xs italic text-amber-600">coming later</span></span></li>
 				</ul>
