@@ -83,6 +83,14 @@ REVOKE ALL ON public.platform_webauthn_challenges FROM eurobase_gateway;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.platform_passkey_credentials TO eurobase_developer;
 GRANT SELECT, INSERT, DELETE ON public.platform_webauthn_challenges TO eurobase_developer;
 
+-- Password reset on a passkey account updates platform_users.password_hash
+-- and deletes the passkeys in ONE transaction on the developer pool (so a
+-- partial failure can't strip MFA while leaving the old password). Grant
+-- the exact columns explicitly rather than relying on eurobase_developer's
+-- INHERIT membership in the owning migrator role — prod managed-PG role
+-- option defaults differ from local PG (see scripts/ops notes).
+GRANT SELECT (id, email), UPDATE (password_hash) ON public.platform_users TO eurobase_developer;
+
 COMMENT ON TABLE public.platform_passkey_credentials IS
   'WebAuthn / passkey credentials for console (platform) users (#621). >= 1 row = MFA on for that user. Developer pool only.';
 COMMENT ON TABLE public.platform_webauthn_challenges IS
