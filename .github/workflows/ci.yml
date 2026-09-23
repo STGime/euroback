@@ -388,6 +388,15 @@ jobs:
           # Health monitor → Discord #alerts. Reads DISCORD_ALERTS_WEBHOOK
           # from eurobase-secrets (optional key); no-ops if it's unset.
           kubectl apply -f deploy/k8s/health-monitor-cronjob.yaml
+          # TLS cert monitor → Discord #alerts. Reads the same
+          # DISCORD_ALERTS_WEBHOOK secret. Warns when the served cert
+          # has < 14 days left (day 76 of a 90-day Let's Encrypt cert —
+          # 16 days after cert-manager's day-60 renewal should have
+          # happened), pages at expiry. Runs hourly. Its absence is
+          # what caused the silent 2026-09-23 *.eurobase.app outage
+          # (30-day-stuck day-60 renewal that no one saw fail) — see
+          # issue #625.
+          kubectl apply -f deploy/k8s/cert-monitor-cronjob.yaml
 
       - name: Run database migrations
         if: steps.fresh.outputs.stale != 'true'
