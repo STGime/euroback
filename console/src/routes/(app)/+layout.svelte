@@ -10,6 +10,7 @@
 	import BlueskyIcon from '$lib/BlueskyIcon.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
 	import LegacyProModal from '$lib/LegacyProModal.svelte';
+	import PasskeyNudge from '$lib/PasskeyNudge.svelte';
 
 	const BLUESKY_URL = 'https://bsky.app/profile/eurobasebaas.bsky.social';
 
@@ -319,6 +320,7 @@
 
 		<!-- Page content -->
 		<main class="flex-1 p-6 lg:p-8 min-w-0 overflow-hidden">
+			<PasskeyNudge />
 			{@render children()}
 		</main>
 	</div>

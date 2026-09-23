@@ -148,6 +148,7 @@
 		{ label: 'Realtime concurrent connections', free: String(freePlan?.ws_connections ?? 50), pro: kmau(proPlan?.ws_connections, '10k'), team: kmau(teamPlan?.ws_connections, '50k'), legal: kmau(legalPlan?.ws_connections, '50k') },
 		{ label: 'Email + password, magic links, social login (Google / GitHub / LinkedIn / Apple)', free: true, pro: true, team: true, legal: true },
 		{ label: 'Phone (SMS OTP) sign-in', free: false, pro: true, team: true, legal: true },
+		{ label: 'Passkey multi-factor authentication for console sign-in (Face ID, Touch ID, Windows Hello, security keys)', free: true, pro: true, team: true, legal: true },
 		{ label: 'SSO (OIDC) for console sign-in — Google Workspace, Microsoft Entra ID, Okta, Authentik, any OIDC IdP', free: false, pro: false, team: true, legal: true },
 		{ label: 'SSO (SAML) for console sign-in', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 		{ label: 'Organizations — invite teammates, org-level admin / member roles', free: false, pro: false, team: true, legal: true },

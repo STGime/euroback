@@ -30,6 +30,12 @@
   - unset/other → soft mode (warn-only on missing); invalid signature still 401. Use during rollout window.
 - Gateway aborts startup if the secret is missing in production (`ENV=production` or `DOMAIN_SUFFIX` ends with `eurobase.app`).
 
+## Console passkey MFA (#621)
+- WebAuthn relying party defaults to the `CONSOLE_URL` host (`console.eurobase.app` in prod) — deliberately **not** `eurobase.app`, which tenant apps share. `WEBAUTHN_RP_ID` / `WEBAUTHN_RP_ORIGINS` (comma-separated) override. Changing the RP id orphans every enrolled passkey — treat it as permanent.
+- ≥ 1 row in `platform_passkey_credentials` = MFA on for that user: `SignIn` returns `mfa_required` + a single-use step-up token instead of a session. Passkey sessions mint `login_via=passkey`, which `sso_required` orgs refuse (only `sso` for the matching org passes).
+- Both passkey tables (migration `000123`) are REVOKEd from `eurobase_gateway` — all passkey queries run on the developer pool. The gateway **aborts startup** if the developer pool is set but WebAuthn setup fails (running without passkeys would let MFA accounts sign in with the password alone).
+- Password reset clears all passkeys + sends a notice email (MVP recovery, accepted trade-off). Follow-ups: #628 (org "require MFA"), #629 (IdP-MFA verification for SSO), #630 (end-user passkeys).
+
 ## Team-tier runtime password (M2.5 part 2b)
 - `RUNTIME_PASSWORD_SECRET` (≥32 bytes) in `eurobase-secrets` derives the deterministic `eurobase_gateway` login password on each dedicated managed-PG instance: `HMAC-SHA256(secret, project_database_id)`, hex64. Same pattern as `DDL_PASSWORD_SECRET`. Deterministic derivation is what lets concurrent runners (provision retry + backfill sweeper) set the same live Scaleway password so the persisted ciphertext in `project_databases.runtime_*` can't diverge from what Scaleway holds. Generate via `openssl rand -hex 32`.
 - Empty is legal (dev) — worker skips the bootstrap step and leaves `runtime_username` NULL; SDK routing falls back to shared cluster. Too-short (< 32 bytes) fails worker startup rather than silently deriving from a weak HMAC key.

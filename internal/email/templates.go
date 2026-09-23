@@ -113,6 +113,44 @@ var defaultTemplates = map[string]DefaultTemplate{
 	},
 }
 
+// platformTemplates are console-account (platform) notices. Kept out of
+// defaultTemplates so they never appear in a tenant's customisable
+// email-template list.
+var platformTemplates = map[string]DefaultTemplate{
+	// passkeys_cleared: a password reset on an account with passkey MFA
+	// removed every passkey (#621 — the MVP lost-all-passkeys recovery
+	// path). Security notice so an unexpected reset is noticed.
+	"passkeys_cleared": {
+		Subject: "Your Eurobase password was reset and your passkeys were removed",
+		BodyHTML: fmt.Sprintf(baseLayout,
+			"Eurobase Console",
+			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
+<p style="margin:0 0 16px;color:#3f3f46;font-size:14px;line-height:1.6">The password for your Eurobase Console account <strong>{{.UserEmail}}</strong> was just reset using an emailed reset link. As part of the reset, <strong>all passkeys on your account were removed</strong>, so multi-factor authentication is now off.</p>
+<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">If this was you, sign in and add a passkey again under Account settings to turn multi-factor authentication back on.</p>
+<p style="margin:0 0 24px;text-align:center">
+<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Open account settings</a>
+</p>
+<p style="margin:0;color:#b91c1c;font-size:12px">If you did not reset your password, your email account may be compromised. Secure your email first, then reset your Eurobase password again and contact support@eurobase.app.</p>`),
+	},
+}
+
+// RenderPlatformTemplate renders a console-account notice template.
+func RenderPlatformTemplate(templateType string, data TemplateData) (string, string, error) {
+	def, ok := platformTemplates[templateType]
+	if !ok {
+		return "", "", fmt.Errorf("unknown platform template type: %s", templateType)
+	}
+	subject, err := renderSubject(def.Subject, data)
+	if err != nil {
+		return "", "", fmt.Errorf("render subject: %w", err)
+	}
+	body, err := renderBody(def.BodyHTML, data)
+	if err != nil {
+		return "", "", fmt.Errorf("render body: %w", err)
+	}
+	return subject, body, nil
+}
+
 // DefaultTemplates returns the built-in default templates.
 func DefaultTemplates() map[string]DefaultTemplate {
 	return defaultTemplates

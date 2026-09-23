@@ -136,6 +136,15 @@ const (
 	ActionConnectionURLViewed         = "team.connection.url_viewed"
 	ActionConnectionURLRotated        = "team.connection.url_rotated"
 	ActionConnectionRetryProvisioning = "team.connection.retry_provisioning"
+
+	// Console passkey MFA (#621). Platform-level (project_id NULL →
+	// global chain). Sign-in entries carry metadata.mode =
+	// "passkey" (username-less) | "password_step_up".
+	ActionPasskeyRegistered      = "platform_auth.passkey_registered"
+	ActionPasskeyRemoved         = "platform_auth.passkey_removed"
+	ActionPasskeySignIn          = "platform_auth.passkey_signin"
+	ActionPasskeySignInFailed    = "platform_auth.passkey_signin_failed"
+	ActionPasskeysClearedByReset = "platform_auth.passkeys_cleared_by_reset"
 )
 
 // Entry represents a single audit log row.

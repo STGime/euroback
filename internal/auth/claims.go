@@ -1,7 +1,10 @@
 // Package auth provides authentication middleware and helpers for the Eurobase platform.
 package auth
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // contextKey is a type-safe key for context values in this package.
 type contextKey int
@@ -15,6 +18,10 @@ const claimsKey contextKey = iota
 const (
 	LoginViaPassword = "password"
 	LoginViaSSO      = "sso"
+	// LoginViaPasskey: passkey-only sign-in or password → passkey
+	// step-up (#621). Not accepted by organizations.sso_required —
+	// only LoginViaSSO for the matching org is.
+	LoginViaPasskey = "passkey"
 )
 
 // Claims holds the authenticated user's identity extracted from a JWT.
@@ -31,6 +38,10 @@ type Claims struct {
 	// organizations.sso_required accepts the session only when
 	// SsoOrgID matches the target org.
 	SsoOrgID string
+	// IssuedAt is the JWT iat. Zero for PATs. Used by the passkey
+	// re-auth window (a fresh session may manage passkeys without
+	// re-entering the password).
+	IssuedAt time.Time
 }
 
 // ClaimsFromContext extracts the authenticated claims from the request context.

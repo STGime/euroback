@@ -210,6 +210,38 @@ export interface ContactRequestEntry {
 	resolution_note: string | null;
 }
 
+/** One enrolled console passkey (#621). No key material is exposed. */
+export interface Passkey {
+	id: string;
+	nickname: string | null;
+	created_at: string;
+	last_used_at: string | null;
+	/** Synced passkey (iCloud Keychain, Google Password Manager, 1Password …). */
+	backed_up: boolean;
+	transports: string[];
+}
+
+/** Begin half of a WebAuthn ceremony: hand `options` to navigator.credentials. */
+export interface PasskeyChallenge {
+	challenge_id: string;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	options: any;
+}
+
+/**
+ * Sign-in response. With MFA on (the account has a passkey) a correct
+ * password returns `mfa_required` + `mfa_token` + `passkey_options`
+ * and NO access_token — complete it with `passkeyStepUp`.
+ */
+export interface PlatformSignInResponse {
+	access_token?: string;
+	user: { id: string; email: string };
+	mfa_required?: boolean;
+	mfa_token?: string;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	passkey_options?: any;
+}
+
 export interface PersonalAccessToken {
 	id: string;
 	user_id: string;
@@ -714,13 +746,80 @@ export class EurobaseAPI {
 	}
 
 	/** Sign in an existing platform user. */
-	async signIn(email: string, password: string): Promise<{ access_token: string; user: { id: string; email: string } }> {
-		const resp = await this.fetch<{ access_token: string; user: { id: string; email: string } }>('/platform/auth/signin', {
+	async signIn(email: string, password: string): Promise<PlatformSignInResponse> {
+		const resp = await this.fetch<PlatformSignInResponse>('/platform/auth/signin', {
 			method: 'POST',
 			body: JSON.stringify({ email, password })
 		});
-		this.setToken(resp.access_token);
+		// MFA step-up responses carry no token yet.
+		if (resp.access_token) this.setToken(resp.access_token);
 		return resp;
+	}
+
+	// ---- Passkeys (#621) ----
+
+	/** Start a username-less passkey sign-in. */
+	async passkeyLoginBegin(): Promise<PasskeyChallenge> {
+		return this.fetchUnauthed('/platform/auth/passkey/login/begin', { method: 'POST', body: '{}' });
+	}
+
+	/** Finish a username-less passkey sign-in; stores the session token. */
+	async passkeyLoginFinish(challengeId: string, credential: unknown): Promise<PlatformSignInResponse> {
+		const resp = await this.fetchUnauthed<PlatformSignInResponse>('/platform/auth/passkey/login/finish', {
+			method: 'POST',
+			body: JSON.stringify({ challenge_id: challengeId, credential })
+		});
+		if (resp.access_token) this.setToken(resp.access_token);
+		return resp;
+	}
+
+	/** Complete password → passkey sign-in with the mfa_token from signIn. */
+	async passkeyStepUp(mfaToken: string, credential: unknown): Promise<PlatformSignInResponse> {
+		const resp = await this.fetchUnauthed<PlatformSignInResponse>('/platform/auth/passkey/step-up', {
+			method: 'POST',
+			body: JSON.stringify({ mfa_token: mfaToken, credential })
+		});
+		if (resp.access_token) this.setToken(resp.access_token);
+		return resp;
+	}
+
+	/** List the current user's passkeys. `mfa_enabled` = at least one. */
+	async listPasskeys(): Promise<{ passkeys: Passkey[]; mfa_enabled: boolean }> {
+		return this.fetch('/platform/auth/account/passkeys');
+	}
+
+	/**
+	 * Start enrolling a passkey. `currentPassword` is only required when
+	 * the session is older than ~10 minutes — the gateway answers 403
+	 * `reauth_required` otherwise.
+	 */
+	async passkeyRegisterBegin(currentPassword = ''): Promise<PasskeyChallenge> {
+		return this.fetch('/platform/auth/account/passkeys/register/begin', {
+			method: 'POST',
+			body: JSON.stringify({ current_password: currentPassword })
+		});
+	}
+
+	async passkeyRegisterFinish(challengeId: string, credential: unknown, nickname: string): Promise<Passkey> {
+		return this.fetch('/platform/auth/account/passkeys/register/finish', {
+			method: 'POST',
+			body: JSON.stringify({ challenge_id: challengeId, credential, nickname })
+		});
+	}
+
+	async renamePasskey(id: string, nickname: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/auth/account/passkeys/${id}`, {
+			method: 'PATCH',
+			body: JSON.stringify({ nickname })
+		});
+	}
+
+	/** Remove a passkey. Same re-auth rule as passkeyRegisterBegin. */
+	async deletePasskey(id: string, currentPassword = ''): Promise<void> {
+		return this.fetch(`/platform/auth/account/passkeys/${id}/delete`, {
+			method: 'POST',
+			body: JSON.stringify({ current_password: currentPassword })
+		});
 	}
 
 	// ---- Account methods ----

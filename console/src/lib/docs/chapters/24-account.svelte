@@ -1,6 +1,6 @@
 		<section id="account" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">24. Your Account</h2>
-			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name and update their password.</p>
+			<p class="text-sm italic text-gray-500 mb-4">Alex wants to set a display name, update their password, and turn on multi-factor authentication with a passkey.</p>
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
@@ -17,6 +17,21 @@
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Change password</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Enter your current password, then your new password twice. The new password must be at least 8 characters.
+				</p>
+
+				<h3 id="passkeys" class="text-lg font-semibold text-gray-900 mt-4">Passkeys &amp; multi-factor authentication</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Protect your console account with a <strong>passkey</strong> &mdash; Face ID, Touch ID, Windows Hello, your phone, or a hardware security key. Passkeys are available on <strong>every plan, Free included</strong>. Add one in the <strong>Passkeys &amp; multi-factor authentication</strong> card on the Account page; you can add up to ten (for example laptop + phone + a YubiKey) and give each a name.
+				</p>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>MFA turns on automatically</strong> as soon as you have one passkey. From then on your password alone no longer signs you in: after the password, the console asks for your passkey.</li>
+					<li><strong>Or skip the password entirely:</strong> click <em>Sign in with a passkey</em> on the login page. A passkey unlocked with your fingerprint, face or device PIN already counts as two factors.</li>
+					<li><strong>Removing your last passkey turns MFA off</strong> again. Adding or removing a passkey asks for your current password unless you signed in within the last 10 minutes.</li>
+					<li><strong>Lost every passkey?</strong> Use <em>Forgot password</em>. The emailed reset removes all passkeys on the account (MFA off) and sends you a security notice &mdash; sign in and add a new passkey straight away. Keep a second passkey registered so you rarely need this.</li>
+					<li><strong>SSO sign-in is unchanged.</strong> If you sign in through your organization's SSO, your identity provider handles MFA. Organizations that <a href="/docs/orgs-sso" class="text-eurobase-600 hover:underline cursor-pointer">require SSO</a> still require it &mdash; a passkey session reaches your personal projects but not that organization's projects.</li>
+				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Personal Access Tokens can't add or remove passkeys, and every passkey sign-in, failed attempt, registration and removal is recorded in the platform audit log.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Personal Access Tokens</h3>
