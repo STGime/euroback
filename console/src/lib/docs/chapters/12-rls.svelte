@@ -147,6 +147,17 @@
 						<p class="mt-1"><strong>Secret API key</strong> (<code class="bg-white/50 rounded px-1">eb_sk_</code>) bypasses RLS entirely &mdash; use it for server-side admin access, never in client code.</p>
 					</div>
 				</div>
+
+				<div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 flex gap-3 mt-3">
+					<svg class="h-5 w-5 text-red-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+					</svg>
+					<div class="text-sm text-red-900">
+						<p><strong>Common gotcha: <code class="bg-red-100 rounded px-1">row-level security policy denied this operation</code> on INSERT, even with <code class="bg-red-100 rounded px-1">WITH CHECK (true)</code>.</strong></p>
+						<p class="mt-1.5 leading-relaxed">The SDK executes every insert as <code class="bg-red-100 rounded px-1">INSERT ... RETURNING *</code> so it can return the created row to your client. On <code class="bg-red-100 rounded px-1">RETURNING</code>, Postgres applies RLS <em>twice</em>: the INSERT policy's <code class="bg-red-100 rounded px-1">WITH CHECK</code> when writing the row, then the SELECT policy's <code class="bg-red-100 rounded px-1">USING</code> when reading it back. If you have an INSERT policy but no matching SELECT policy, the write rolls back with the same error text as a real INSERT failure &mdash; misleading, but that is the wire format.</p>
+						<p class="mt-1.5 leading-relaxed"><strong>Fix</strong>: add a SELECT policy that permits the authenticated user to read the row they just wrote &mdash; usually the same predicate as the INSERT policy. If your INSERT policy is <code class="bg-red-100 rounded px-1">WITH CHECK (user_id = auth_uid())</code>, add <code class="bg-red-100 rounded px-1">FOR SELECT USING (user_id = auth_uid())</code>. The Table Editor bypasses this because it runs through the elevated <code class="bg-red-100 rounded px-1">is_service_role()</code> branch, which is why the same insert succeeds there and fails from the SDK.</p>
+					</div>
+				</div>
 			</div>
 
 			<div class="mt-6 text-right">
