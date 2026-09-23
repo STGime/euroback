@@ -59,9 +59,11 @@ spec:
           restartPolicy: Never
           containers:
             - name: probe
-              # alpine has openssl + curl in the base layers; no apk add
-              # needed for what we use (`openssl s_client`, `openssl
-              # x509 -checkend`, `curl`).
+              # Alpine base — openssl + curl are NOT in the base layers
+              # (only libssl3 / libcrypto3 shared libraries + busybox
+              # ssl_client); the CLIs live in separate apk packages.
+              # The script's first line runs `apk add openssl curl`
+              # from the pod's egress to dl-cdn.alpinelinux.org.
               #
               # Pinned by digest — supply-chain hygiene, mirrors the
               # #116 precedent: any image with a Secret mounted
@@ -69,8 +71,7 @@ spec:
               # is in scope, even when the container isn't privileged.
               # Tag kept alongside for human readability; the digest is
               # what k8s actually resolves. Bump procedure:
-              #   crane manifest --platform linux/amd64 alpine:3.20 \
-              #     | sha256sum
+              #   crane digest alpine:3.20
               # update both the tag (for the reader) and the digest.
               image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
               resources:
@@ -106,13 +107,25 @@ spec:
                 - -c
                 - |
                   set -u
+                  # openssl + curl are NOT in the alpine base layers —
+                  # only libssl3 / libcrypto3 shared libs + busybox
+                  # ssl_client are. Install the CLIs on every run. If
+                  # apk fails (no egress to dl-cdn.alpinelinux.org, or
+                  # the mirror is down), exit CRITICAL so failedJobs-
+                  # HistoryLimit surfaces it — a silent probe is the
+                  # exact failure mode that caused #625.
+                  apk add --no-cache openssl curl >/dev/null 2>&1 \
+                    || { echo "CRITICAL apk add openssl curl failed"; exit 2; }
                   WARN_SECS=$((WARN_DAYS * 86400))
                   worst=0
                   report=""
 
                   for host in $HOSTS; do
                     [ -z "$host" ] && continue
-                    cert=$(echo | openssl s_client -servername "$host" \
+                    # `timeout 20` guards against a black-holed host
+                    # (kernel SYN wait is ~2 min; five hosts would
+                    # exceed activeDeadlineSeconds).
+                    cert=$(echo | timeout 20 openssl s_client -servername "$host" \
                              -connect "$host:443" -showcerts 2>/dev/null \
                            | openssl x509 2>/dev/null)
                     if [ -z "$cert" ]; then
@@ -159,9 +172,20 @@ spec:
 
                   # Discord embed description has a hard 4096-char cap;
                   # the report is at most a few hundred bytes per host so
-                  # this is plenty, but truncate to be safe.
-                  desc=$(printf '%s' "$report" | head -c 3500)
-                  payload=$(printf '{"content":"%s","embeds":[{"title":"%s","description":"\`\`\`\n%s\n\`\`\`","color":%s}]}' \
+                  # this is plenty, but truncate to be safe. JSON
+                  # strings forbid literal newlines and unescaped
+                  # backslashes / double quotes: escape backslashes and
+                  # quotes with sed, then fold newlines into literal \n
+                  # with awk (portable across busybox sed / BSD sed /
+                  # GNU sed — a label-based sed one-liner works on GNU
+                  # but not the other two). The prior version emitted
+                  # raw newlines + literal backticks from a single-
+                  # quoted printf format and Discord returned 400 on
+                  # every call.
+                  desc=$(printf '%s' "$report" | head -c 3500 \
+                         | sed 's/\\/\\\\/g; s/"/\\"/g' \
+                         | awk 'BEGIN{ORS=""} NR>1{print "\\n"} {print}')
+                  payload=$(printf '{"content":"%s","embeds":[{"title":"%s","description":"```\\n%s\\n```","color":%s}]}' \
                     "$mention" "$title" "$desc" "$color")
                   curl -fsS -X POST "$DISCORD_ALERTS_WEBHOOK" \
                     -H "Content-Type: application/json" \
