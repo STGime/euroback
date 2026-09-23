@@ -11,13 +11,14 @@
 --     followed by a passkey assertion (or the user signs in with the
 --     passkey directly).
 --
---   * platform_webauthn_challenges — single-use server-side ceremony
---     state between the begin/finish halves of a registration, login
---     or password->passkey step-up. Stored server-side (not in a signed
---     client blob) so a captured assertion can't be replayed against the
---     same challenge within its TTL: finish DELETEs the row RETURNING it,
---     so a challenge is consumable exactly once. For the step-up purpose
+--   * platform_webauthn_challenges — single-use ceremony state.
+--     'register' / 'step_up': stored at begin, consumed at finish with
+--     DELETE … RETURNING, so a challenge works exactly once; for step_up
 --     the row id doubles as the "password already verified" token.
+--     'login' (username-less): begin is stateless (HMAC-signed token, so
+--     the unauthenticated endpoint writes nothing); a row is INSERTed
+--     only when an assertion verifies, as the used-marker that makes a
+--     replay of the same token fail (ON CONFLICT on id).
 --
 -- Grants: both tables are platform auth config, never SDK-facing. Same
 -- #443-class pitfall as organizations / support_requests: 000037's
@@ -94,4 +95,4 @@ GRANT SELECT (id, email), UPDATE (password_hash) ON public.platform_users TO eur
 COMMENT ON TABLE public.platform_passkey_credentials IS
   'WebAuthn / passkey credentials for console (platform) users (#621). >= 1 row = MFA on for that user. Developer pool only.';
 COMMENT ON TABLE public.platform_webauthn_challenges IS
-  'Single-use WebAuthn ceremony state (register / login / step_up). Consumed via DELETE ... RETURNING. Developer pool only.';
+  'Single-use WebAuthn ceremony state: register / step_up rows consumed via DELETE ... RETURNING; login rows are used-markers for stateless challenge tokens. Developer pool only.';
