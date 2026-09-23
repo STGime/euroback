@@ -295,6 +295,15 @@ func main() {
 		}
 		slog.Info("console passkeys enabled", "rp_id", pkCfg.RPID, "origins", pkCfg.RPOrigins)
 	} else {
+		// Without the developer pool passkeys are off, and SignIn would
+		// hand password-only sessions to accounts that enrolled one.
+		// Acceptable in local dev; never in production.
+		env := strings.ToLower(os.Getenv("ENV"))
+		suffix := strings.ToLower(os.Getenv("DOMAIN_SUFFIX"))
+		if env == "production" || env == "prod" || strings.HasSuffix(suffix, "eurobase.app") {
+			slog.Error("DATABASE_URL_DEVELOPER not set on a production-looking environment — console passkey MFA cannot be enforced; refusing to start")
+			os.Exit(1)
+		}
 		slog.Warn("DATABASE_URL_DEVELOPER not set — console passkeys disabled")
 	}
 

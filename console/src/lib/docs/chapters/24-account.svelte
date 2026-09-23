@@ -26,7 +26,7 @@
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>MFA turns on automatically</strong> as soon as you have one passkey. From then on your password alone no longer signs you in: after the password, the console asks for your passkey.</li>
 					<li><strong>Or skip the password entirely:</strong> click <em>Sign in with a passkey</em> on the login page. A passkey unlocked with your fingerprint, face or device PIN already counts as two factors.</li>
-					<li><strong>Removing your last passkey turns MFA off</strong> again. Adding or removing a passkey asks for your current password unless you signed in within the last 10 minutes.</li>
+					<li><strong>Removing your last passkey turns MFA off</strong> again. Adding or removing a passkey asks for your current password unless you signed in with your password or a passkey within the last 10 minutes (a fresh SSO sign-in always needs the password here).</li>
 					<li><strong>Lost every passkey?</strong> Use <em>Forgot password</em>. The emailed reset removes all passkeys on the account (MFA off) and sends you a security notice &mdash; sign in and add a new passkey straight away. Keep a second passkey registered so you rarely need this.</li>
 					<li><strong>SSO sign-in is unchanged.</strong> If you sign in through your organization's SSO, your identity provider handles MFA. Organizations that <a href="/docs/orgs-sso" class="text-eurobase-600 hover:underline cursor-pointer">require SSO</a> still require it &mdash; a passkey session reaches your personal projects but not that organization's projects.</li>
 				</ul>

@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +48,10 @@ type softAuthenticator struct {
 	origin   string
 	skipUV   bool
 	rpIDHash []byte
+	// zeroCounter mimics synced passkeys (iCloud / Google), which
+	// always report sign count 0 — so clone detection can't catch a
+	// replay and single-use challenges must.
+	zeroCounter bool
 }
 
 func newSoftAuthenticator(t *testing.T) *softAuthenticator {
@@ -148,7 +154,9 @@ func (a *softAuthenticator) register(t *testing.T, ch *PasskeyChallenge) []byte 
 // assert builds the assertion response for navigator.credentials.get.
 func (a *softAuthenticator) assert(t *testing.T, options json.RawMessage) []byte {
 	t.Helper()
-	a.counter++
+	if !a.zeroCounter {
+		a.counter++
+	}
 	var authData bytes.Buffer
 	authData.Write(a.rpIDHash)
 	authData.WriteByte(a.flags(false))
@@ -188,10 +196,12 @@ type memPasskeyStore struct {
 	mu         sync.Mutex
 	creds      map[string][]storedPasskey // userID → creds
 	challenges map[string]memChallenge
+	used       map[string]bool
+	passwords  map[string]string
 }
 
 func newMemPasskeyStore() *memPasskeyStore {
-	return &memPasskeyStore{creds: map[string][]storedPasskey{}, challenges: map[string]memChallenge{}}
+	return &memPasskeyStore{creds: map[string][]storedPasskey{}, challenges: map[string]memChallenge{}, used: map[string]bool{}, passwords: map[string]string{}}
 }
 
 func (m *memPasskeyStore) ListCredentials(_ context.Context, userID string) ([]storedPasskey, error) {
@@ -264,12 +274,23 @@ func (m *memPasskeyStore) DeleteCredential(_ context.Context, userID, id string)
 	return ErrPasskeyNotFound
 }
 
-func (m *memPasskeyStore) DeleteAllForUser(_ context.Context, userID string) (int, error) {
+func (m *memPasskeyStore) ResetPasswordClearingPasskeys(_ context.Context, userID, passwordHash string) (string, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := len(m.creds[userID])
 	delete(m.creds, userID)
-	return n, nil
+	m.passwords[userID] = passwordHash
+	return userID + "@example.eu", n, nil
+}
+
+func (m *memPasskeyStore) MarkChallengeUsed(_ context.Context, id string, _ time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.used[id] {
+		return false, nil
+	}
+	m.used[id] = true
+	return true, nil
 }
 
 func (m *memPasskeyStore) SaveChallenge(_ context.Context, userID, purpose string, sd *webauthn.SessionData) (string, error) {
@@ -437,6 +458,7 @@ func TestPasskey_ChallengeIsSingleUse(t *testing.T) {
 	ctx := context.Background()
 	uid := f.addUser("carol@example.eu")
 	a := f.enrol(t, uid)
+	a.zeroCounter = true
 
 	ch, _ := f.svc.BeginPasskeyLogin(ctx)
 	assertion := a.assert(t, ch.Options)
@@ -583,9 +605,12 @@ func TestPasskey_ClearForReset(t *testing.T) {
 	f.enrol(t, uid)
 	f.enrol(t, uid)
 
-	n, err := f.svc.clearPasskeysForReset(ctx, uid)
+	_, n, err := f.svc.resetPasswordClearingPasskeys(ctx, uid, "new-hash")
 	if err != nil || n != 2 {
 		t.Fatalf("clear = %d, %v; want 2", n, err)
+	}
+	if f.store.passwords[uid] != "new-hash" {
+		t.Fatal("password not updated in the same operation")
 	}
 	if c, _ := f.store.CountCredentials(ctx, uid); c != 0 {
 		t.Fatalf("passkeys left after reset: %d", c)
@@ -641,5 +666,68 @@ func TestPasskeyConfigFromConsoleURL(t *testing.T) {
 	}
 	if _, err := PasskeyConfigFromConsoleURL("", "", ""); err == nil {
 		t.Fatal("empty config should error")
+	}
+}
+
+func TestPasskey_LoginChallengeTokenTamperAndExpiry(t *testing.T) {
+	f := newPasskeyFixture(t)
+	ctx := context.Background()
+	uid := f.addUser("jo@example.eu")
+	a := f.enrol(t, uid)
+
+	ch, _ := f.svc.BeginPasskeyLogin(ctx)
+	body, sig, _ := strings.Cut(ch.ChallengeID, ".")
+	// Flip a byte of the signed payload.
+	tampered := body[:len(body)-2] + "AA" + "." + sig
+	if _, err := f.svc.FinishPasskeyLogin(ctx, tampered, a.assert(t, ch.Options), PasskeyRequestMeta{}); !errors.Is(err, ErrPasskeyChallengeInvalid) {
+		t.Fatalf("tampered token: got %v", err)
+	}
+	// A token signed with a different secret (another environment).
+	other := newPasskeyFixture(t)
+	other.svc.jwtSecret = []byte("some-other-secret-some-other-secret")
+	och, _ := other.svc.BeginPasskeyLogin(ctx)
+	if _, err := f.svc.FinishPasskeyLogin(ctx, och.ChallengeID, a.assert(t, och.Options), PasskeyRequestMeta{}); !errors.Is(err, ErrPasskeyChallengeInvalid) {
+		t.Fatalf("foreign-key token: got %v", err)
+	}
+	// Expired token.
+	sd := webauthn.SessionData{Challenge: "x"}
+	payload, _ := json.Marshal(loginChallenge{ID: uuid.NewString(), Session: sd, Exp: time.Now().Add(-time.Minute).Unix()})
+	b := base64.RawURLEncoding.EncodeToString(payload)
+	m := hmac.New(sha256.New, f.svc.loginChallengeKey())
+	m.Write([]byte(b))
+	expired := b + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+	if _, err := f.svc.verifyLoginChallenge(expired); !errors.Is(err, ErrPasskeyChallengeInvalid) {
+		t.Fatalf("expired token: got %v", err)
+	}
+}
+
+func TestPasskey_SSOSessionNeedsPasswordForReauth(t *testing.T) {
+	f := newPasskeyFixture(t)
+	fresh := &Claims{Subject: "u", LoginVia: LoginViaSSO, IssuedAt: time.Now()}
+	if err := f.svc.CheckPasskeyReauth(context.Background(), fresh, ""); !errors.Is(err, ErrReauthRequired) {
+		t.Fatalf("fresh SSO session without password: got %v", err)
+	}
+	if err := f.svc.CheckPasskeyReauth(context.Background(), fresh, "correct horse battery staple"); err != nil {
+		t.Fatalf("SSO session with password: %v", err)
+	}
+}
+
+func TestPasskey_FailedLoginNotAuditedAgainstForeignHandle(t *testing.T) {
+	f := newPasskeyFixture(t)
+	ctx := context.Background()
+	victim := f.addUser("victim2@example.eu")
+	f.enrol(t, victim)
+	attacker := f.addUser("attacker2@example.eu")
+	a := f.enrol(t, attacker)
+
+	// Attacker presents their own credential but claims the victim's
+	// user handle.
+	a.userHandle, _ = userHandle(victim)
+	ch, _ := f.svc.BeginPasskeyLogin(ctx)
+	if _, err := f.svc.FinishPasskeyLogin(ctx, ch.ChallengeID, a.assert(t, ch.Options), PasskeyRequestMeta{}); !errors.Is(err, ErrPasskeyVerificationFailed) {
+		t.Fatalf("got %v", err)
+	}
+	if f.auditor.has(victim, audit.ActionPasskeySignInFailed) {
+		t.Fatal("failure audited against an account whose credential wasn't presented")
 	}
 }

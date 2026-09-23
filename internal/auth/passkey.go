@@ -22,7 +22,11 @@ package auth
 // runs on the developer pool.
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -175,12 +179,16 @@ type passkeyStore interface {
 	RecordUse(ctx context.Context, credentialID []byte, signCount uint32, flags protocol.AuthenticatorFlags) error
 	RenameCredential(ctx context.Context, userID, id string, nickname *string) error
 	DeleteCredential(ctx context.Context, userID, id string) error
-	DeleteAllForUser(ctx context.Context, userID string) (int, error)
 	SaveChallenge(ctx context.Context, userID string, purpose string, sd *webauthn.SessionData) (string, error)
 	// ConsumeChallenge atomically deletes and returns an unexpired
-	// challenge of the given purpose. userID is "" for discoverable
-	// login challenges.
+	// register / step_up challenge of the given purpose.
 	ConsumeChallenge(ctx context.Context, id, purpose string) (userID string, sd *webauthn.SessionData, err error)
+	// MarkChallengeUsed records a stateless login challenge id as
+	// consumed. false = already used (replay).
+	MarkChallengeUsed(ctx context.Context, id string, expires time.Time) (bool, error)
+	// ResetPasswordClearingPasskeys updates platform_users.password_hash
+	// and deletes all the user's passkeys atomically.
+	ResetPasswordClearingPasskeys(ctx context.Context, userID, passwordHash string) (email string, cleared int, err error)
 }
 
 // passkeyIdentity is the platform_users data a passkey session needs.
@@ -344,8 +352,14 @@ func marshalOptions(v interface{}) (json.RawMessage, error) {
 // CheckPasskeyReauth enforces the re-auth rule for adding / removing a
 // passkey: either the session is fresh (issued within
 // passkeyReauthWindow) or currentPassword matches.
+//
+// SSO sessions never get the fresh-session exemption: whoever controls
+// an org's IdP can mint an SSO session for a member, and must not be
+// able to enrol their own passkey on (or strip MFA from) that member's
+// personal account with it.
 func (s *PlatformAuthService) CheckPasskeyReauth(ctx context.Context, claims *Claims, currentPassword string) error {
-	if !claims.IssuedAt.IsZero() && time.Since(claims.IssuedAt) < passkeyReauthWindow {
+	fresh := !claims.IssuedAt.IsZero() && time.Since(claims.IssuedAt) < passkeyReauthWindow
+	if fresh && claims.LoginVia != LoginViaSSO {
 		return nil
 	}
 	if currentPassword == "" {
@@ -496,6 +510,14 @@ func (s *PlatformAuthService) DeletePasskey(ctx context.Context, userID, userEma
 
 // BeginPasskeyLogin starts a username-less (discoverable) sign-in: the
 // browser offers every passkey it holds for this RP.
+//
+// Stateless: the challenge travels to the client as an HMAC-signed
+// token (see signLoginChallenge) instead of a DB row, so this
+// unauthenticated endpoint writes nothing and needs no rate limit — a
+// per-IP limit would be product-wide behind the LB (see
+// internal/ratelimit/auth.go) and let one client lock everyone out of
+// passkey sign-in. Single use is enforced at finish, where a verified
+// assertion records the challenge id (MarkChallengeUsed).
 func (s *PlatformAuthService) BeginPasskeyLogin(ctx context.Context) (*PasskeyChallenge, error) {
 	if !s.passkeysEnabled() {
 		return nil, ErrPasskeysUnavailable
@@ -504,7 +526,7 @@ func (s *PlatformAuthService) BeginPasskeyLogin(ctx context.Context) (*PasskeyCh
 	if err != nil {
 		return nil, fmt.Errorf("begin discoverable login: %w", err)
 	}
-	id, err := s.passkeys.SaveChallenge(ctx, "", challengePurposeLogin, sd)
+	token, err := s.signLoginChallenge(sd)
 	if err != nil {
 		return nil, err
 	}
@@ -512,7 +534,66 @@ func (s *PlatformAuthService) BeginPasskeyLogin(ctx context.Context) (*PasskeyCh
 	if err != nil {
 		return nil, err
 	}
-	return &PasskeyChallenge{ChallengeID: id, Options: opts}, nil
+	return &PasskeyChallenge{ChallengeID: token, Options: opts}, nil
+}
+
+// loginChallenge is the signed payload of a discoverable-login token.
+type loginChallenge struct {
+	ID      string               `json:"id"`
+	Session webauthn.SessionData `json:"sd"`
+	Exp     int64                `json:"exp"`
+}
+
+// loginChallengeKey derives a dedicated HMAC key from the platform JWT
+// secret (domain-separated, so a challenge token can never verify as a
+// JWT or vice versa).
+func (s *PlatformAuthService) loginChallengeKey() []byte {
+	m := hmac.New(sha256.New, s.jwtSecret)
+	m.Write([]byte("eurobase/passkey-login-challenge/v1"))
+	return m.Sum(nil)
+}
+
+func (s *PlatformAuthService) signLoginChallenge(sd *webauthn.SessionData) (string, error) {
+	payload, err := json.Marshal(loginChallenge{
+		ID:      uuid.NewString(),
+		Session: *sd,
+		Exp:     time.Now().Add(challengeTTL).Unix(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal login challenge: %w", err)
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	m := hmac.New(sha256.New, s.loginChallengeKey())
+	m.Write([]byte(body))
+	return body + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil)), nil
+}
+
+func (s *PlatformAuthService) verifyLoginChallenge(token string) (*loginChallenge, error) {
+	body, sig, ok := strings.Cut(token, ".")
+	if !ok {
+		return nil, ErrPasskeyChallengeInvalid
+	}
+	got, err := base64.RawURLEncoding.DecodeString(sig)
+	if err != nil {
+		return nil, ErrPasskeyChallengeInvalid
+	}
+	m := hmac.New(sha256.New, s.loginChallengeKey())
+	m.Write([]byte(body))
+	if !hmac.Equal(got, m.Sum(nil)) {
+		return nil, ErrPasskeyChallengeInvalid
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return nil, ErrPasskeyChallengeInvalid
+	}
+	var lc loginChallenge
+	if err := json.Unmarshal(payload, &lc); err != nil {
+		return nil, ErrPasskeyChallengeInvalid
+	}
+	if time.Now().Unix() > lc.Exp {
+		return nil, ErrPasskeyChallengeInvalid
+	}
+	return &lc, nil
 }
 
 // FinishPasskeyLogin verifies a discoverable assertion and mints a
@@ -521,7 +602,7 @@ func (s *PlatformAuthService) FinishPasskeyLogin(ctx context.Context, challengeI
 	if !s.passkeysEnabled() {
 		return nil, ErrPasskeysUnavailable
 	}
-	_, sd, err := s.passkeys.ConsumeChallenge(ctx, challengeID, challengePurposeLogin)
+	lc, err := s.verifyLoginChallenge(challengeID)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +613,10 @@ func (s *PlatformAuthService) FinishPasskeyLogin(ctx context.Context, challengeI
 	}
 
 	// Resolve the user from the authenticator's userHandle. Captured
-	// so the failure audit can name the account when we got that far.
+	// for the failure audit — but only when the presented credential
+	// really belongs to that user: the userHandle is caller-chosen, so
+	// otherwise anyone knowing a user's UUID could spam "sign-in
+	// failed" entries onto their account.
 	var ident *passkeyIdentity
 	handler := func(rawID, handle []byte) (webauthn.User, error) {
 		id, err := uuid.FromBytes(handle)
@@ -543,10 +627,15 @@ func (s *PlatformAuthService) FinishPasskeyLogin(ctx context.Context, challengeI
 		if err != nil {
 			return nil, err
 		}
-		ident = idn
+		for _, c := range u.creds {
+			if bytes.Equal(c.ID, rawID) {
+				ident = idn
+				break
+			}
+		}
 		return u, nil
 	}
-	cred, err := s.webAuthn.ValidateDiscoverableLogin(handler, *sd, parsed)
+	cred, err := s.webAuthn.ValidateDiscoverableLogin(handler, lc.Session, parsed)
 	if err == nil && cred.Authenticator.CloneWarning {
 		err = errors.New("sign counter regression (possible cloned authenticator)")
 	}
@@ -559,6 +648,16 @@ func (s *PlatformAuthService) FinishPasskeyLogin(ctx context.Context, challengeI
 			})
 		}
 		return nil, ErrPasskeyVerificationFailed
+	}
+	// Single use: record the challenge id now that the assertion
+	// verified. A replay of the same token + assertion loses the
+	// INSERT race and is refused.
+	fresh, err := s.passkeys.MarkChallengeUsed(ctx, lc.ID, time.Unix(lc.Exp, 0))
+	if err != nil {
+		return nil, err
+	}
+	if !fresh {
+		return nil, ErrPasskeyChallengeInvalid
 	}
 	if !ident.EmailConfirmed {
 		return nil, ErrEmailNotVerified
@@ -648,15 +747,15 @@ func (s *PlatformAuthService) completePasskeySession(ctx context.Context, ident 
 	}, nil
 }
 
-// clearPasskeysForReset deletes every passkey on the account as part of
-// a password reset — the MVP lost-all-passkeys escape hatch (#621,
-// "option 1": email compromise ⇒ account compromise is an accepted
-// trade-off until recovery codes land). Returns how many were removed.
-func (s *PlatformAuthService) clearPasskeysForReset(ctx context.Context, userID string) (int, error) {
-	if !s.passkeysEnabled() {
-		return 0, nil
-	}
-	return s.passkeys.DeleteAllForUser(ctx, userID)
+// resetPasswordClearingPasskeys sets the new password hash and deletes
+// every passkey on the account in ONE transaction — the MVP
+// lost-all-passkeys escape hatch (#621, "option 1": email compromise ⇒
+// account compromise is an accepted trade-off until recovery codes
+// land). Atomic so a failure can't leave MFA stripped with the old
+// password still in place and no notice sent. Returns the account
+// email and how many passkeys were removed.
+func (s *PlatformAuthService) resetPasswordClearingPasskeys(ctx context.Context, userID, passwordHash string) (string, int, error) {
+	return s.passkeys.ResetPasswordClearingPasskeys(ctx, userID, passwordHash)
 }
 
 func normalizeNickname(nickname string) (*string, error) {
@@ -823,16 +922,6 @@ func (p *pgPasskeyStore) DeleteCredential(ctx context.Context, userID, id string
 	return nil
 }
 
-func (p *pgPasskeyStore) DeleteAllForUser(ctx context.Context, userID string) (int, error) {
-	tag, err := p.pool.Exec(ctx,
-		`DELETE FROM public.platform_passkey_credentials WHERE platform_user_id = $1::uuid`,
-		userID)
-	if err != nil {
-		return 0, fmt.Errorf("clear passkeys: %w", err)
-	}
-	return int(tag.RowsAffected()), nil
-}
-
 func (p *pgPasskeyStore) SaveChallenge(ctx context.Context, userID, purpose string, sd *webauthn.SessionData) (string, error) {
 	data, err := json.Marshal(sd)
 	if err != nil {
@@ -859,6 +948,48 @@ func (p *pgPasskeyStore) SaveChallenge(ctx context.Context, userID, purpose stri
 		return "", fmt.Errorf("store challenge: %w", err)
 	}
 	return id, nil
+}
+
+func (p *pgPasskeyStore) MarkChallengeUsed(ctx context.Context, id string, expires time.Time) (bool, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return false, ErrPasskeyChallengeInvalid
+	}
+	// Row lives until the token itself would have expired; the sweep
+	// in SaveChallenge removes it afterwards.
+	tag, err := p.pool.Exec(ctx,
+		`INSERT INTO public.platform_webauthn_challenges (id, purpose, session_data, expires_at)
+		 VALUES ($1::uuid, 'login', '{}'::jsonb, $2)
+		 ON CONFLICT (id) DO NOTHING`,
+		id, expires)
+	if err != nil {
+		return false, fmt.Errorf("mark challenge used: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (p *pgPasskeyStore) ResetPasswordClearingPasskeys(ctx context.Context, userID, passwordHash string) (string, int, error) {
+	// Developer pool: eurobase_developer reaches platform_users via its
+	// INHERIT membership in the owning eurobase_migrator role.
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return "", 0, fmt.Errorf("begin reset tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // committed path returns first
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM public.platform_passkey_credentials WHERE platform_user_id = $1::uuid`, userID)
+	if err != nil {
+		return "", 0, fmt.Errorf("clear passkeys: %w", err)
+	}
+	var email string
+	if err := tx.QueryRow(ctx,
+		`UPDATE public.platform_users SET password_hash = $1 WHERE id = $2::uuid RETURNING email`,
+		passwordHash, userID).Scan(&email); err != nil {
+		return "", 0, fmt.Errorf("update password: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", 0, fmt.Errorf("commit reset: %w", err)
+	}
+	return email, int(tag.RowsAffected()), nil
 }
 
 func (p *pgPasskeyStore) ConsumeChallenge(ctx context.Context, id, purpose string) (string, *webauthn.SessionData, error) {

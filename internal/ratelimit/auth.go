@@ -42,15 +42,6 @@ const (
 	MagicLinkWindow      = 15 * time.Minute
 	PhoneOTPLimit        = 3
 	PhoneOTPWindow       = 15 * time.Minute
-	// Console passkey sign-in begin (#621). Each begin writes a
-	// single-use challenge row, so this bounds platform_webauthn_challenges
-	// growth. Keyed per IP but — like SignupLimit above — effectively
-	// product-wide until the LB preserves the client IP, hence the
-	// generous number. The console only calls begin on an explicit
-	// "Sign in with passkey" click (no conditional-UI prefetch on page
-	// load) so organic traffic stays far below it.
-	PasskeyBeginLimit  = 300
-	PasskeyBeginWindow = 15 * time.Minute
 )
 
 // CheckAuthRate checks the rate limit for an auth action and writes a 429

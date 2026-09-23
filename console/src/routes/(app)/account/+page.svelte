@@ -51,6 +51,13 @@
 	// than ~10 minutes needs the current password (403 reauth_required).
 	let reauthAction = $state<null | { kind: 'add' } | { kind: 'delete'; id: string }>(null);
 	let reauthPassword = $state('');
+	// A begun-but-unfinished registration. Browsers (notably Safari) may
+	// refuse navigator.credentials.create when it isn't directly inside
+	// a click — e.g. right after the re-auth password round-trip. The
+	// challenge stays valid for 5 minutes, so "Create passkey" retries
+	// it from a fresh click instead of starting over.
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let pendingRegistration = $state<{ challenge_id: string; options: any } | null>(null);
 
 	// Mailing preferences
 	let mailingPrefs = $state<MailingPreference[]>([]);
@@ -97,6 +104,35 @@
 		return err instanceof APIError && err.code === 'reauth_required';
 	}
 
+	async function completeRegistration(ch: { challenge_id: string; options: unknown }) {
+		pendingRegistration = null;
+		try {
+			const credential = await createPasskey(ch.options);
+			const created = await api.passkeyRegisterFinish(ch.challenge_id, credential, newPasskeyName.trim());
+			passkeys = [...passkeys, created];
+			newPasskeyName = '';
+			try { sessionStorage.removeItem('eb_passkey_nudge'); } catch { /* ignore */ }
+		} catch (err) {
+			if (err instanceof DOMException && err.name === 'NotAllowedError') {
+				// Cancelled, timed out, or no user gesture — keep the
+				// challenge so the user can retry with one click.
+				pendingRegistration = ch;
+			}
+			passkeysError = err instanceof APIError ? err.message : passkeyErrorMessage(err);
+		}
+	}
+
+	async function retryRegistration() {
+		if (!pendingRegistration) return;
+		passkeysError = '';
+		addingPasskey = true;
+		try {
+			await completeRegistration(pendingRegistration);
+		} finally {
+			addingPasskey = false;
+		}
+	}
+
 	async function handleAddPasskey(password = '') {
 		passkeysError = '';
 		addingPasskey = true;
@@ -104,11 +140,7 @@
 			const ch = await api.passkeyRegisterBegin(password);
 			reauthAction = null;
 			reauthPassword = '';
-			const credential = await createPasskey(ch.options);
-			const created = await api.passkeyRegisterFinish(ch.challenge_id, credential, newPasskeyName.trim());
-			passkeys = [...passkeys, created];
-			newPasskeyName = '';
-			try { sessionStorage.removeItem('eb_passkey_nudge'); } catch { /* ignore */ }
+			await completeRegistration(ch);
 		} catch (err) {
 			if (isReauth(err)) {
 				if (password) passkeysError = 'That password is incorrect.';
@@ -533,12 +565,17 @@
 							<button type="button" disabled={!reauthPassword || addingPasskey || !!deletingPasskeyId} onclick={submitReauth} class="rounded-lg bg-eurobase-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-eurobase-700 disabled:opacity-50 cursor-pointer">Confirm</button>
 							<button type="button" onclick={() => { reauthAction = null; reauthPassword = ''; passkeysError = ''; }} class="rounded-lg px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 cursor-pointer">Cancel</button>
 						</div>
-						<p class="text-[11px] text-amber-800">Signed in with SSO or a passkey and don't know your password? Sign out and back in, then try again within 10 minutes.</p>
+						<p class="text-[11px] text-amber-800">Don't know your password? Sign out and back in with your password or a passkey, then try again within 10 minutes. (A fresh SSO sign-in doesn't count — your organization's identity provider can't manage your personal passkeys.)</p>
 					</div>
 				{/if}
 
 				{#if passkeysError}
 					<p class="text-xs text-red-600">{passkeysError}</p>
+				{/if}
+				{#if pendingRegistration}
+					<button type="button" disabled={addingPasskey} onclick={retryRegistration} class="inline-flex items-center rounded-lg border border-eurobase-300 bg-white px-3 py-1.5 text-sm font-medium text-eurobase-700 hover:bg-eurobase-50 disabled:opacity-50 cursor-pointer">
+						{addingPasskey ? 'Waiting for passkey…' : 'Create passkey'}
+					</button>
 				{/if}
 
 				{#if passkeySupported}

@@ -982,22 +982,24 @@ func (s *PlatformAuthService) ResetPasswordWithToken(ctx context.Context, rawTok
 
 	// Passkey accounts (#621): the email reset is the MVP recovery path
 	// for a user who lost every passkey, so it clears them — otherwise
-	// the new password would still hit the passkey step-up. Cleared
-	// BEFORE the password changes so a failure here leaves the account
-	// exactly as it was (still passkey-protected); the burned token
-	// just means requesting a new link.
-	cleared, err := s.clearPasskeysForReset(ctx, userID)
-	if err != nil {
-		return err
-	}
-
+	// the new password would still hit the passkey step-up. Password
+	// update + passkey delete run in one transaction (developer pool)
+	// so a failure leaves the account exactly as it was.
 	var userEmail string
-	err = s.pool.QueryRow(ctx,
-		`UPDATE platform_users SET password_hash = $1 WHERE id = $2 RETURNING email`,
-		string(hash), userID,
-	).Scan(&userEmail)
-	if err != nil {
-		return fmt.Errorf("update password: %w", err)
+	cleared := 0
+	if s.passkeysEnabled() {
+		userEmail, cleared, err = s.resetPasswordClearingPasskeys(ctx, userID, string(hash))
+		if err != nil {
+			return err
+		}
+	} else {
+		err = s.pool.QueryRow(ctx,
+			`UPDATE platform_users SET password_hash = $1 WHERE id = $2 RETURNING email`,
+			string(hash), userID,
+		).Scan(&userEmail)
+		if err != nil {
+			return fmt.Errorf("update password: %w", err)
+		}
 	}
 
 	slog.Info("platform user reset password via token", "user_id", userID, "passkeys_cleared", cleared)

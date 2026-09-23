@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -75,16 +76,11 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 // ── Sign-in (unauthenticated) ──────────────────────────────────────
 
 // HandlePasskeyLoginBegin — POST /platform/auth/passkey/login/begin.
-// Rate-limited per IP: every begin writes a challenge row.
-func HandlePasskeyLoginBegin(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
-	var check AuthRateLimiter
-	if len(rateFn) > 0 {
-		check = rateFn[0]
-	}
+// Stateless (signed challenge token, no DB write) — deliberately not
+// rate-limited: behind the LB a per-IP limit is product-wide, so one
+// client could lock everyone out of passkey sign-in.
+func HandlePasskeyLoginBegin(svc *PlatformAuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if check != nil && check(w, r, "platform_passkey_begin", clientIP(r)) {
-			return
-		}
 		ch, err := svc.BeginPasskeyLogin(r.Context())
 		if err != nil {
 			writePasskeyError(w, err)
@@ -154,6 +150,24 @@ func requireConsoleSession(w http.ResponseWriter, r *http.Request) (*Claims, boo
 	return claims, true
 }
 
+// checkPasskeyReauth applies the re-auth rule, counting wrong passwords
+// against the same per-account signin_fail budget as the login form so
+// a stolen (older) session can't brute-force the password here.
+func checkPasskeyReauth(w http.ResponseWriter, r *http.Request, svc *PlatformAuthService, claims *Claims, password string, check AuthRateLimiter) bool {
+	key := "platform:" + strings.ToLower(strings.TrimSpace(claims.Email))
+	if password != "" && check != nil && check(w, r, "signin_fail", key) {
+		return false
+	}
+	if err := svc.CheckPasskeyReauth(r.Context(), claims, password); err != nil {
+		if errors.Is(err, ErrReauthRequired) && password != "" && check != nil {
+			check(w, r, "signin_fail_record", key)
+		}
+		writePasskeyError(w, err)
+		return false
+	}
+	return true
+}
+
 // HandleListPasskeys — GET /platform/auth/account/passkeys.
 func HandleListPasskeys(svc *PlatformAuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +190,11 @@ func HandleListPasskeys(svc *PlatformAuthService) http.HandlerFunc {
 // HandlePasskeyRegisterBegin — POST /platform/auth/account/passkeys/register/begin.
 // Body: {"current_password": "..."} — required unless the session is
 // fresh (see passkeyReauthWindow).
-func HandlePasskeyRegisterBegin(svc *PlatformAuthService) http.HandlerFunc {
+func HandlePasskeyRegisterBegin(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
+	var check AuthRateLimiter
+	if len(rateFn) > 0 {
+		check = rateFn[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := requireConsoleSession(w, r)
 		if !ok {
@@ -188,8 +206,7 @@ func HandlePasskeyRegisterBegin(svc *PlatformAuthService) http.HandlerFunc {
 		if !decodePasskeyBody(w, r, &req) {
 			return
 		}
-		if err := svc.CheckPasskeyReauth(r.Context(), claims, req.CurrentPassword); err != nil {
-			writePasskeyError(w, err)
+		if !checkPasskeyReauth(w, r, svc, claims, req.CurrentPassword, check) {
 			return
 		}
 		ch, err := svc.BeginPasskeyRegistration(r.Context(), claims.Subject)
@@ -249,7 +266,11 @@ func HandleRenamePasskey(svc *PlatformAuthService) http.HandlerFunc {
 
 // HandleDeletePasskey — POST /platform/auth/account/passkeys/{id}/delete.
 // POST (not DELETE) because it carries a body: the re-auth password.
-func HandleDeletePasskey(svc *PlatformAuthService) http.HandlerFunc {
+func HandleDeletePasskey(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
+	var check AuthRateLimiter
+	if len(rateFn) > 0 {
+		check = rateFn[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := requireConsoleSession(w, r)
 		if !ok {
@@ -261,8 +282,7 @@ func HandleDeletePasskey(svc *PlatformAuthService) http.HandlerFunc {
 		if !decodePasskeyBody(w, r, &req) {
 			return
 		}
-		if err := svc.CheckPasskeyReauth(r.Context(), claims, req.CurrentPassword); err != nil {
-			writePasskeyError(w, err)
+		if !checkPasskeyReauth(w, r, svc, claims, req.CurrentPassword, check) {
 			return
 		}
 		if err := svc.DeletePasskey(r.Context(), claims.Subject, claims.Email, chi.URLParam(r, "id"), passkeyMeta(r)); err != nil {

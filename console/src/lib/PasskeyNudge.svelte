@@ -5,14 +5,25 @@
 	// with one, the password alone mints no session). "Not now" hides
 	// it for this session; "Don't ask again" persists in localStorage.
 	import { onMount } from 'svelte';
+	import { api } from '$lib/api.js';
 
 	let visible = $state(false);
 
-	onMount(() => {
+	onMount(async () => {
+		let wanted = false;
 		try {
-			visible =
+			wanted =
 				sessionStorage.getItem('eb_passkey_nudge') === '1' &&
 				localStorage.getItem('eb_passkey_nudge_dismissed') !== '1';
+		} catch {
+			wanted = false;
+		}
+		if (!wanted) return;
+		// Only nudge when the server actually has passkeys enabled (a 503
+		// here means it doesn't) and the account still has none.
+		try {
+			const res = await api.listPasskeys();
+			visible = res.passkeys.length === 0;
 		} catch {
 			visible = false;
 		}

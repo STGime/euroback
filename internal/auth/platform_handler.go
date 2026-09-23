@@ -118,6 +118,14 @@ func HandlePlatformSignIn(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 				})
 				return
 			}
+			// Internal failures (DB errors from the user / passkey
+			// lookups, challenge storage) must not leak driver text to
+			// an unauthenticated caller, and aren't credential failures.
+			if err.Error() != "invalid email or password" && !isUserError(err) {
+				slog.Error("platform signin error", "error", err)
+				writeJSONError(w, "internal error", http.StatusInternalServerError)
+				return
+			}
 			slog.Warn("platform signin failed", "error", err, "email", req.Email)
 			// Record the failure for rate limiting (call check to increment counter).
 			if email != "" && check != nil {
