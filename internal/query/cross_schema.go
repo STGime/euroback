@@ -274,6 +274,9 @@ const (
 type token struct {
 	kind  tokKind
 	value string
+	// quoted: the identifier was double-quoted ("grant") — a name, never
+	// a keyword. Used by ValidateNoPrivilegeStatements.
+	quoted bool
 }
 
 // scanIdentifiersAndDots produces a token stream of identifiers and dots
@@ -319,7 +322,7 @@ func scanIdentifiersAndDots(sql string) []token {
 				b.WriteByte(s[i])
 				i++
 			}
-			out = append(out, token{kind: tokIdent, value: b.String()})
+			out = append(out, token{kind: tokIdent, value: b.String(), quoted: true})
 		case c == '-' && i+1 < n && s[i+1] == '-':
 			// Line comment.
 			i += 2
