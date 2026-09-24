@@ -65,18 +65,27 @@ CREATE TABLE public.retention_holds (
 -- the DSAR path checks "is this row under hold?" once per candidate.
 -- JSONB has a GIN index; combined with project_id + target_type it
 -- keeps the check to microseconds.
+--
+-- #632: originally `WHERE expires_at > now()` — invalid on every
+-- PostgreSQL version (index predicates must be IMMUTABLE; now() is
+-- STABLE). This migration never ran in prod (silently skipped, see
+-- 000094), which recreated the index without the predicate. Matched here
+-- so fresh databases end up identical to prod; the expiry filter lives
+-- in the queries. (The legal_basis CHECK above never reached prod either;
+-- 000124 adds it there.)
 CREATE INDEX ix_retention_holds_lookup
-    ON public.retention_holds(project_id, target_type)
-    WHERE expires_at > now();
+    ON public.retention_holds(project_id, target_type);
 
 CREATE INDEX ix_retention_holds_targetref
     ON public.retention_holds USING GIN (target_ref jsonb_path_ops);
 
 -- Sweeper query: expired holds. Small index; the sweeper runs
 -- daily and expects O(dozens) rows per run.
+-- #632: the original `WHERE expires_at > '1970-01-01'` predicate matched
+-- every row; prod has the plain index (created by 000094), so fresh DBs
+-- match it.
 CREATE INDEX ix_retention_holds_expiry
-    ON public.retention_holds(expires_at)
-    WHERE expires_at > '1970-01-01';
+    ON public.retention_holds(expires_at);
 
 GRANT SELECT, INSERT, DELETE ON public.retention_holds TO eurobase_gateway;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.retention_holds TO eurobase_developer;

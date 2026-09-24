@@ -7,10 +7,14 @@ services:
       - "5433:5432"
     environment:
       POSTGRES_DB: eurobase
-      POSTGRES_USER: eurobase_api
-      POSTGRES_PASSWORD: localdev
+      # Built-in superuser is NOT eurobase_api: migration 000037 REASSIGNs
+      # everything owned by eurobase_api, which PostgreSQL refuses for the
+      # bootstrap superuser. scripts/db/apply-migrations.sh creates
+      # eurobase_api (password localdev) and the runtime roles (#632).
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U eurobase_api -d eurobase"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d eurobase"]
       interval: 5s
       timeout: 5s
       retries: 10

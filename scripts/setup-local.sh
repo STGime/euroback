@@ -6,12 +6,16 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
+for bin in docker psql; do
+    command -v "$bin" > /dev/null || { echo "ERROR: '$bin' not found on PATH (psql: brew install libpq && brew link --force libpq)"; exit 1; }
+done
+
 echo "==> Starting local dev services..."
 docker compose up -d
 
 echo "==> Waiting for PostgreSQL to be healthy..."
 for i in $(seq 1 30); do
-    if docker compose exec -T postgres pg_isready -U eurobase_api -d eurobase > /dev/null 2>&1; then
+    if docker compose exec -T postgres pg_isready -U postgres -d eurobase > /dev/null 2>&1; then
         echo "    PostgreSQL is ready."
         break
     fi
@@ -22,11 +26,19 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# Same path as production (#632): prod role shapes, the golang-migrate
+# CLI, and a hard stop on the first failing migration. Re-running only
+# applies what's new.
+# Volumes created before #632 used eurobase_api as the built-in superuser
+# and have no "postgres" role — they can't be migrated in place.
+if ! docker compose exec -T postgres psql -U postgres -d eurobase -c 'SELECT 1' > /dev/null 2>&1; then
+    echo "ERROR: this local database predates the #632 setup (no 'postgres' superuser)."
+    echo "       Recreate it (deletes local data): docker compose down -v && scripts/setup-local.sh"
+    exit 1
+fi
+
 echo "==> Running database migrations..."
-for f in migrations/*.up.sql; do
-    echo "    Applying $f..."
-    docker compose exec -T postgres psql -U eurobase_api -d eurobase < "$f" 2>/dev/null || true
-done
+"$SCRIPT_DIR/db/apply-migrations.sh" "postgres://postgres:postgres@localhost:5433/eurobase?sslmode=disable"
 
 echo "==> Running River schema migrations..."
 DATABASE_URL="postgres://eurobase_api:localdev@localhost:5433/eurobase?sslmode=disable"

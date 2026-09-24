@@ -23,7 +23,27 @@
 BEGIN;
 
 -- Idempotent: re-running is safe; PG silently no-ops a redundant GRANT.
-GRANT eurobase_gateway TO eurobase_migrator;
+--
+-- WITH INHERIT TRUE is explicit (#632): eurobase_migrator is NOINHERIT
+-- on Scaleway, and on PG16 a grant's inherit option defaults to the
+-- member's INHERIT attribute — so a plain GRANT gives membership without
+-- inherited privileges and the USAGE check below fails on any freshly
+-- built database. Prod passed originally because the grant had already
+-- been done by hand (see header); editing in place is safe, prod's
+-- schema_migrations is far past this version.
+-- Skip if already present (e.g. granted during the console bootstrap);
+-- otherwise grant — needs ADMIN on eurobase_gateway — or fail with the
+-- console command.
+DO $$
+BEGIN
+    IF NOT pg_has_role('eurobase_migrator', 'eurobase_gateway', 'USAGE') THEN
+        BEGIN
+            GRANT eurobase_gateway TO eurobase_migrator WITH INHERIT TRUE;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE EXCEPTION 'eurobase_migrator does not inherit eurobase_gateway and the migrating role cannot grant it. Run as the Scaleway admin: GRANT eurobase_gateway TO eurobase_migrator WITH INHERIT TRUE;';
+        END;
+    END IF;
+END$$;
 
 -- Verify the membership took effect — fail fast if it didn't.
 DO $$
