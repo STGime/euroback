@@ -46,3 +46,45 @@ func TestValidateNoPrivilegeStatements(t *testing.T) {
 		}
 	}
 }
+
+// Review follow-ups: tokenizer desync, quoted/indirect forms, and no
+// false positives on ordinary UPDATE … SET of role-named columns.
+func TestValidateNoPrivilegeStatements_ReviewCases(t *testing.T) {
+	blocked := []string{
+		`SELECT E'\'', set_config('x','y',true)`,
+		`SELECT E'\''; RESET ROLE; SELECT 'x'`,
+		`SELECT 1 AS ä$x$; RESET ROLE; SELECT 1 AS ö$x$`,
+		`SELECT 1 AS foo$x$; RESET ROLE; SELECT 1 AS bar$x$`,
+		`SET "role" TO 'x'`,
+		`RESET "role"`,
+		`SET "search_path" TO x`,
+		`SET U&"search\005fpath" TO x`,
+		`SELECT "set_config"('a','b',true)`,
+		`SET session_authorization = 'x'`,
+		`SET SESSION AUTHORIZATION DEFAULT`,
+		`CREATE SCHEMA s AUTHORIZATION x`,
+		`UPDATE pg_settings SET setting = 'x' WHERE name = 'y'`,
+		`SET role = 'x'`,
+		`SET LOCAL ROLE x`,
+	}
+	for _, q := range blocked {
+		if err := ValidateNoPrivilegeStatements(q); err == nil {
+			t.Errorf("expected rejection: %q", q)
+		}
+	}
+	allowed := []string{
+		`UPDATE t SET role = $1 WHERE id = $2`,
+		`UPDATE t SET name = $1, role = $2`,
+		`INSERT INTO m (id, role) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role`,
+		`UPDATE t SET ärole = 1`,
+		`SELECT E'it\'s fine' AS s`,
+		`SELECT U&'\0041' AS s`,
+		`SELECT col$1 FROM t`,
+		`SELECT $1::text`,
+	}
+	for _, q := range allowed {
+		if err := ValidateNoPrivilegeStatements(q); err != nil {
+			t.Errorf("unexpected rejection of %q: %v", q, err)
+		}
+	}
+}

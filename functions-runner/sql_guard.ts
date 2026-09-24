@@ -1,43 +1,70 @@
 // Statement guard for customer SQL (ctx.db.sql). Mirrors
 // internal/query/privilege_guard.go: role, session, search_path,
 // privilege and ownership management is never allowed from function
-// code — the runner sets the tenant role and search_path itself, and
-// customer SQL must not be able to change either.
+// code — the runner sets the tenant role and search_path itself.
 //
-// Comment-, string-, dollar-quote- and quoted-identifier-aware, so
-// keywords inside literals or "quoted" names are ignored.
+// This is a lexical BACKSTOP, not the primary control: it cannot see
+// inside function bodies or dynamically built SQL. On this path it also
+// refuses DO blocks and CREATE FUNCTION/PROCEDURE (never needed from an
+// edge function) to shrink that blind spot. The real boundary is the
+// database role the SQL runs as.
 
 /** UUID shape check for HMAC-verified header values. */
 export const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Lower-cased keyword/identifier tokens; quoted identifiers become "". */
-export function sqlWords(sql: string): string[] {
-  const out: string[] = [];
+export interface SqlWord {
+  kw: string; // lower-cased keyword; "" for quoted identifiers
+  name: string; // lower-cased identifier value (quoted or not)
+}
+
+// PostgreSQL identifiers: letters, '_' and any non-ASCII char may start
+// one; digits and '$' may also continue one.
+const identStart = /[A-Za-z_\u0080-￿]/;
+const identCont = /[A-Za-z0-9_$\u0080-￿]/;
+
+/** Skips a quoted region starting at sql[i] === q; returns [nextIndex, content]. */
+function skipQuoted(sql: string, i: number, q: string, backslash: boolean): [number, string] {
+  const n = sql.length;
+  let out = "";
+  i++;
+  while (i < n) {
+    const c = sql[i];
+    if (backslash && c === "\\" && i + 1 < n) {
+      out += sql[i + 1];
+      i += 2;
+    } else if (c === q && sql[i + 1] === q) {
+      out += q;
+      i += 2;
+    } else if (c === q) {
+      return [i + 1, out];
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return [n, out];
+}
+
+class UnicodeIdentError extends Error {}
+
+/** Splits SQL into statements of words; strings, comments and dollar quotes are skipped. */
+export function sqlStatements(sql: string): SqlWord[][] {
+  const stmts: SqlWord[][] = [];
+  let cur: SqlWord[] = [];
   const n = sql.length;
   let i = 0;
   while (i < n) {
     const c = sql[i];
     if (c === "'") {
-      i++;
-      while (i < n) {
-        if (sql[i] === "'") {
-          if (sql[i + 1] === "'") { i += 2; continue; }
-          i++;
-          break;
-        }
-        i++;
-      }
+      [i] = skipQuoted(sql, i, "'", false);
     } else if (c === '"') {
+      let v: string;
+      [i, v] = skipQuoted(sql, i, '"', false);
+      cur.push({ kw: "", name: v.toLowerCase() });
+    } else if (c === ";") {
+      stmts.push(cur);
+      cur = [];
       i++;
-      while (i < n) {
-        if (sql[i] === '"') {
-          if (sql[i + 1] === '"') { i += 2; continue; }
-          i++;
-          break;
-        }
-        i++;
-      }
-      out.push("");
     } else if (c === "-" && sql[i + 1] === "-") {
       while (i < n && sql[i] !== "\n") i++;
     } else if (c === "/" && sql[i + 1] === "*") {
@@ -57,60 +84,97 @@ export function sqlWords(sql: string): string[] {
       } else {
         i++;
       }
-    } else if (/[A-Za-z_]/.test(c)) {
+    } else if (identStart.test(c)) {
       let j = i + 1;
-      while (j < n && /[A-Za-z0-9_$]/.test(sql[j])) j++;
-      out.push(sql.slice(i, j).toLowerCase());
+      while (j < n && identCont.test(sql[j])) j++;
+      const word = sql.slice(i, j);
       i = j;
+      // String / identifier prefixes: E'..' (backslash escapes),
+      // U&'..' / U&".." (unicode escapes, not decoded).
+      if ((word === "E" || word === "e") && sql[i] === "'") {
+        [i] = skipQuoted(sql, i, "'", true);
+        continue;
+      }
+      if ((word === "U" || word === "u") && sql[i] === "&" && (sql[i + 1] === "'" || sql[i + 1] === '"')) {
+        if (sql[i + 1] === '"') throw new UnicodeIdentError();
+        [i] = skipQuoted(sql, i + 1, "'", false);
+        continue;
+      }
+      const lw = word.toLowerCase();
+      cur.push({ kw: lw, name: lw });
     } else {
       i++;
     }
   }
-  return out;
+  stmts.push(cur);
+  return stmts;
 }
 
 /** Returns an error message, or null when the SQL is acceptable. */
 export function privilegeStatementError(sql: string): string | null {
-  const w = sqlWords(sql);
-  const at = (i: number) => (i >= 0 && i < w.length ? w[i] : "");
   const deny = (what: string) =>
     `${what} is not allowed in function SQL: role, session and privilege management is handled by the platform`;
-  for (let i = 0; i < w.length; i++) {
-    switch (w[i]) {
-      case "grant":
-      case "revoke":
-      case "reassign":
-      case "set_config":
-      case "search_path":
-        return deny(w[i].toUpperCase());
-      case "privileges":
-        if (at(i - 1) === "default") return deny("ALTER DEFAULT PRIVILEGES");
-        break;
-      case "authorization":
-        if (at(i - 1) === "session") return deny("SESSION AUTHORIZATION");
-        break;
-      case "role":
-      case "user":
-      case "group": {
-        const prev = at(i - 1);
-        if (w[i] === "role" && ["set", "reset", "local", "session"].includes(prev)) {
-          return deny("SET/RESET ROLE");
-        }
-        if (["create", "alter", "drop"].includes(prev)) return deny(`${prev} ${w[i]}`.toUpperCase());
-        break;
+  let stmts: SqlWord[][];
+  try {
+    stmts = sqlStatements(sql);
+  } catch (e) {
+    if (e instanceof UnicodeIdentError) return deny('U&"…" identifiers');
+    throw e;
+  }
+
+  for (const st of stmts) {
+    const kw = (i: number) => (i >= 0 && i < st.length ? st[i].kw : "");
+    const first = kw(0);
+
+    // Function-path extras: no anonymous blocks or new routines.
+    if (first === "do") return deny("DO");
+    if (first === "create") {
+      let j = 1;
+      if (kw(j) === "or" && kw(j + 1) === "replace") j += 2;
+      if (kw(j) === "function" || kw(j) === "procedure") return deny(`CREATE ${kw(j).toUpperCase()}`);
+    }
+
+    // SET / RESET as a command (statement start only, so UPDATE … SET
+    // role = … stays allowed).
+    if (first === "set" || first === "reset") {
+      let j = 1;
+      while (kw(j) === "local" || kw(j) === "session") j++;
+      const target = j < st.length ? st[j].name : "";
+      if (["role", "all", "search_path", "session", "authorization", "session_authorization"].includes(target)) {
+        return deny(`${first} ${target}`.toUpperCase());
       }
-      case "all":
-        if (at(i - 1) === "reset") return deny("RESET ALL");
-        break;
-      case "owned":
-        if (at(i - 1) === "drop") return deny("DROP OWNED");
-        break;
-      case "owner":
-        if (at(i + 1) === "to") return deny("OWNER TO");
-        break;
-      case "definer":
-        if (at(i - 1) === "security") return deny("SECURITY DEFINER");
-        break;
+    }
+
+    for (let i = 0; i < st.length; i++) {
+      const w = st[i];
+      if (["search_path", "set_config", "session_authorization", "pg_settings"].includes(w.name)) {
+        return deny(w.name.toUpperCase());
+      }
+      switch (w.kw) {
+        case "grant":
+        case "revoke":
+        case "reassign":
+          return deny(w.kw.toUpperCase());
+        case "authorization":
+          return deny("AUTHORIZATION");
+        case "privileges":
+          if (kw(i - 1) === "default") return deny("ALTER DEFAULT PRIVILEGES");
+          break;
+        case "role":
+        case "user":
+        case "group":
+          if (["create", "alter", "drop"].includes(kw(i - 1))) return deny(`${kw(i - 1)} ${w.kw}`.toUpperCase());
+          break;
+        case "owned":
+          if (kw(i - 1) === "drop") return deny("DROP OWNED");
+          break;
+        case "owner":
+          if (kw(i + 1) === "to") return deny("OWNER TO");
+          break;
+        case "definer":
+          if (kw(i - 1) === "security") return deny("SECURITY DEFINER");
+          break;
+      }
     }
   }
   return null;

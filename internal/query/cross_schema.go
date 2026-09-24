@@ -269,6 +269,7 @@ type tokKind int
 const (
 	tokIdent tokKind = iota
 	tokDot
+	tokSemi // statement boundary ';' — used by ValidateNoPrivilegeStatements
 )
 
 type token struct {
@@ -277,6 +278,34 @@ type token struct {
 	// quoted: the identifier was double-quoted ("grant") — a name, never
 	// a keyword. Used by ValidateNoPrivilegeStatements.
 	quoted bool
+	// unicodeEscaped: a U&"..." identifier, whose escapes aren't decoded.
+	unicodeEscaped bool
+}
+
+// skipQuoted advances past a quoted region that starts at s[i] == q and
+// returns the index after the closing quote plus the raw content. A
+// doubled quote is an escaped quote; with backslash=true (E” strings)
+// a backslash escapes the next byte.
+func skipQuoted(s string, i int, q byte, backslash bool) (int, string) {
+	n := len(s)
+	i++
+	var b strings.Builder
+	for i < n {
+		switch {
+		case backslash && s[i] == '\\' && i+1 < n:
+			b.WriteByte(s[i+1])
+			i += 2
+		case s[i] == q && i+1 < n && s[i+1] == q:
+			b.WriteByte(q)
+			i += 2
+		case s[i] == q:
+			return i + 1, b.String()
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return n, b.String()
 }
 
 // scanIdentifiersAndDots produces a token stream of identifiers and dots
@@ -292,37 +321,18 @@ func scanIdentifiersAndDots(sql string) []token {
 		c := s[i]
 		switch {
 		case c == '\'':
-			// Single-quoted string.
-			i++
-			for i < n {
-				if s[i] == '\'' {
-					if i+1 < n && s[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
+			// Single-quoted string (standard_conforming_strings: no
+			// backslash escapes; E'' strings are handled with the
+			// identifier branch below).
+			i, _ = skipQuoted(s, i, '\'', false)
 		case c == '"':
 			// Double-quoted identifier — emit as ident.
+			var v string
+			i, v = skipQuoted(s, i, '"', false)
+			out = append(out, token{kind: tokIdent, value: v, quoted: true})
+		case c == ';':
+			out = append(out, token{kind: tokSemi})
 			i++
-			var b strings.Builder
-			for i < n {
-				if s[i] == '"' {
-					if i+1 < n && s[i+1] == '"' {
-						b.WriteByte('"')
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				b.WriteByte(s[i])
-				i++
-			}
-			out = append(out, token{kind: tokIdent, value: b.String(), quoted: true})
 		case c == '-' && i+1 < n && s[i+1] == '-':
 			// Line comment.
 			i += 2
@@ -372,7 +382,23 @@ func scanIdentifiersAndDots(sql string) []token {
 			for i < n && isIdentCont(s[i]) {
 				i++
 			}
-			out = append(out, token{kind: tokIdent, value: s[start:i]})
+			word := s[start:i]
+			// String / identifier prefixes: E'..' (backslash escapes),
+			// U&'..' and U&".." (unicode escapes), B'' X'' N'' (plain).
+			if i < n && s[i] == '\'' && (word == "E" || word == "e") {
+				i, _ = skipQuoted(s, i, '\'', true)
+				continue
+			}
+			if (word == "U" || word == "u") && i+1 < n && s[i] == '&' && (s[i+1] == '\'' || s[i+1] == '"') {
+				var v string
+				q := s[i+1]
+				i, v = skipQuoted(s, i+1, q, false)
+				if q == '"' {
+					out = append(out, token{kind: tokIdent, value: v, quoted: true, unicodeEscaped: true})
+				}
+				continue
+			}
+			out = append(out, token{kind: tokIdent, value: word})
 		default:
 			i++
 		}
@@ -387,10 +413,14 @@ func isCrossSchemaDollarTagChar(c byte, first bool) bool {
 	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
+// PostgreSQL identifiers: letters, '_' and any byte >= 0x80 (multibyte
+// UTF-8) may start one; digits and '$' may also continue one. Treating
+// '$' inside an identifier as a dollar-quote opener would desync the
+// scanner, so it must be consumed here.
 func isIdentStart(c byte) bool {
-	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
 }
 
 func isIdentCont(c byte) bool {
-	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	return isIdentStart(c) || (c >= '0' && c <= '9') || c == '$'
 }

@@ -17,6 +17,21 @@ Deno.test("privilegeStatementError blocks role/session/privilege statements", ()
     "CREATE ROLE x",
     "ALTER TABLE t OWNER TO x",
     "CREATE FUNCTION f() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ select 1 $$",
+    // review follow-ups
+    "SELECT E'\\'', set_config('x','y',true)",
+    "SELECT E'\\''; RESET ROLE; SELECT 'x'",
+    "SELECT 1 AS ä$x$; RESET ROLE; SELECT 1 AS ö$x$",
+    'SET "role" TO \'x\'',
+    'RESET "role"',
+    'SET "search_path" TO x',
+    'SET U&"search\\005fpath" TO x',
+    'SELECT "set_config"(\'a\',\'b\',true)',
+    "SET session_authorization = 'x'",
+    "CREATE SCHEMA s AUTHORIZATION x",
+    "UPDATE pg_settings SET setting = 'x' WHERE name = 'y'",
+    "DO $$ BEGIN PERFORM 1; END $$",
+    "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS $$ select 1 $$",
+    "create procedure p() language sql as $$ select 1 $$",
   ];
   for (const q of blocked) assert(privilegeStatementError(q) !== null, `expected block: ${q}`);
 });
@@ -31,6 +46,11 @@ Deno.test("privilegeStatementError allows normal tenant SQL", () => {
     "INSERT INTO posts (owner, title) VALUES ($1, $2)",
     "SELECT $tag$ RESET ROLE $tag$",
     "UPDATE settings SET value = $1 WHERE key = 'search'",
+    "UPDATE t SET role = $1 WHERE id = $2",
+    "INSERT INTO m (id, role) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role",
+    "SELECT E'it\\'s fine' AS s",
+    "SELECT col$1 FROM t",
+    "UPDATE t SET ärole = 1",
   ];
   for (const q of allowed) assertEquals(privilegeStatementError(q), null, q);
 });

@@ -6,75 +6,114 @@ import (
 )
 
 // ValidateNoPrivilegeStatements rejects SQL that changes roles, session
-// identity, search_path, privileges or ownership. Customer SQL on the
-// platform paths (console SQL editor, MCP, transaction endpoint) runs
-// with elevated database privileges, so none of these statement shapes
-// may be accepted there: they are never needed to manage a tenant's own
-// tables, and each one can change who the rest of the transaction runs
-// as or what other roles may access.
+// identity, search_path, privileges or ownership. These statement shapes
+// are never needed to manage a tenant's own tables, and each can change
+// who the rest of a transaction runs as or what other roles may access.
 //
-// Uses the same comment/string-aware tokenizer as the cross-schema
-// check, so keywords inside literals, quoted identifiers and comments
-// are ignored. Deliberately strict: a false positive costs a customer a
-// rewrite; a false negative is a privilege problem.
+// This is a lexical backstop, not the primary control: it cannot see
+// inside function bodies, DO blocks or dynamically built SQL (the same
+// residual documented for ValidateNoCatalogRefs). The real boundary is
+// the database role the SQL runs as.
+//
+// Uses the comment/string-aware tokenizer shared with the cross-schema
+// check. Quoted identifiers are names, never keywords — but they are
+// still compared (case-folded) against the configuration-parameter names
+// below, because `SET "role"` / `"set_config"(…)` resolve the same way.
 func ValidateNoPrivilegeStatements(sql string) error {
-	toks := scanIdentifiersAndDots(sql)
-	words := make([]string, 0, len(toks))
-	for _, t := range toks {
-		switch {
-		case t.kind == tokIdent && t.quoted:
-			// A quoted identifier is a name, never a keyword.
-			words = append(words, "")
-		case t.kind == tokIdent:
-			words = append(words, strings.ToLower(t.value))
+	var stmts [][]privWord
+	cur := []privWord{}
+	for _, t := range scanIdentifiersAndDots(sql) {
+		switch t.kind {
+		case tokSemi:
+			stmts = append(stmts, cur)
+			cur = []privWord{}
+		case tokDot:
+			cur = append(cur, privWord{})
 		default:
-			words = append(words, ".")
+			if t.unicodeEscaped {
+				return privErr(`U&"…" identifiers`)
+			}
+			w := privWord{name: strings.ToLower(t.value)}
+			if !t.quoted {
+				w.kw = w.name
+			}
+			cur = append(cur, w)
 		}
 	}
-	at := func(i int) string {
-		if i >= 0 && i < len(words) {
-			return words[i]
+	stmts = append(stmts, cur)
+
+	for _, st := range stmts {
+		if err := checkPrivilegeStatement(st); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// privWord is one token of a statement for the privilege guard.
+type privWord struct {
+	kw   string // lower-cased keyword; "" for quoted identifiers and dots
+	name string // lower-cased value for identifiers (quoted or not)
+}
+
+func checkPrivilegeStatement(st []privWord) error {
+	kw := func(i int) string {
+		if i >= 0 && i < len(st) {
+			return st[i].kw
 		}
 		return ""
 	}
+	first := kw(0)
 
-	for i, w := range words {
-		switch w {
+	// SET / RESET as a *command* (statement start). `UPDATE … SET col`
+	// never reaches this branch, so role/owner-named columns stay usable.
+	if first == "set" || first == "reset" {
+		j := 1
+		for kw(j) == "local" || kw(j) == "session" {
+			j++
+		}
+		target := ""
+		if j < len(st) {
+			target = st[j].name
+		}
+		switch target {
+		case "role", "all", "search_path", "session", "authorization", "session_authorization":
+			return privErr(strings.ToUpper(first + " " + target))
+		}
+	}
+
+	for i, w := range st {
+		// Configuration-parameter names and the catalog view that
+		// writes them: denied wherever they appear, quoted or not.
+		switch w.name {
+		case "search_path", "set_config", "session_authorization", "pg_settings":
+			return privErr(strings.ToUpper(w.name))
+		}
+		switch w.kw {
 		case "grant", "revoke", "reassign":
-			return privErr(strings.ToUpper(w))
-		case "set_config", "search_path":
-			return privErr(strings.ToUpper(w))
+			return privErr(strings.ToUpper(w.kw))
+		case "authorization":
+			// SESSION AUTHORIZATION, CREATE SCHEMA … AUTHORIZATION.
+			return privErr("AUTHORIZATION")
 		case "privileges":
-			if at(i-1) == "default" {
+			if kw(i-1) == "default" {
 				return privErr("ALTER DEFAULT PRIVILEGES")
 			}
-		case "authorization":
-			if at(i-1) == "session" {
-				return privErr("SESSION AUTHORIZATION")
-			}
 		case "role", "user", "group":
-			switch at(i - 1) {
-			case "set", "reset", "local", "session":
-				if w == "role" {
-					return privErr("SET/RESET ROLE")
-				}
+			switch kw(i - 1) {
 			case "create", "alter", "drop":
-				return privErr(strings.ToUpper(at(i-1) + " " + w))
-			}
-		case "all":
-			if at(i-1) == "reset" {
-				return privErr("RESET ALL")
+				return privErr(strings.ToUpper(kw(i-1) + " " + w.kw))
 			}
 		case "owned":
-			if at(i-1) == "drop" {
+			if kw(i-1) == "drop" {
 				return privErr("DROP OWNED")
 			}
 		case "owner":
-			if at(i+1) == "to" {
+			if kw(i+1) == "to" {
 				return privErr("OWNER TO")
 			}
 		case "definer":
-			if at(i-1) == "security" {
+			if kw(i-1) == "security" {
 				return privErr("SECURITY DEFINER")
 			}
 		}
