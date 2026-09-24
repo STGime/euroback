@@ -135,6 +135,11 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
 				return
 			}
+			// No role / session / privilege management on this path.
+			if err := ValidateNoPrivilegeStatements(stmt); err != nil {
+				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
+				return
+			}
 		}
 
 		start := time.Now()
@@ -222,6 +227,12 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		// it via developer → migrator → gateway). Cross-tenant
 		// disclosure — see ValidateNoCatalogRefs.
 		if err := ValidateNoCatalogRefs(req.SQL); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Both paths: no role / session / privilege management.
+		if err := ValidateNoPrivilegeStatements(req.SQL); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}

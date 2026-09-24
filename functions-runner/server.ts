@@ -9,6 +9,7 @@
  */
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
+import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -130,10 +131,15 @@ async function getDB() {
 
 // ── Load function code ──
 
-async function loadFunction(functionId: string, version: string | null = null): Promise<CachedFunction | null> {
-  // Key by id+version so a redeploy is effective immediately instead of
-  // after TTL expiry — see cache_key.ts (closes #200).
-  const cacheKey = functionCacheKey(functionId, version);
+async function loadFunction(
+  functionId: string,
+  projectId: string,
+  version: string | null = null,
+): Promise<CachedFunction | null> {
+  // Key by project+id+version so a redeploy is effective immediately
+  // instead of after TTL expiry (see cache_key.ts, closes #200), and so a
+  // cached entry is only ever served to the project it belongs to.
+  const cacheKey = functionCacheKey(`${projectId}:${functionId}`, version);
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
@@ -150,18 +156,35 @@ async function loadFunction(functionId: string, version: string | null = null): 
     // HKDF-derived AES-256-GCM key. We JOIN projects to get
     // schema_name (the HKDF salt — same one functions-runner/vault.ts
     // already uses for ctx.vault.get).
-    const [row] = await db`
-      SELECT
-        COALESCE(ef.compiled_code, ef.code) AS code,
-        ef.env_vars              AS env_vars_legacy,
-        ef.env_vars_blob,
-        ef.env_vars_nonce,
-        ef.env_vars_key_version,
-        p.schema_name
-      FROM edge_functions ef
-      JOIN public.projects p ON p.id = ef.project_id
-      WHERE ef.id = ${functionId} AND ef.status = 'active'
-    `;
+    //
+    // Loaded through public.runner_get_function (migration 000125), a
+    // SECURITY DEFINER lookup scoped to the calling project, so the runner
+    // role needs no direct table access. The direct query is a fallback
+    // only for the rollout window before 000125 exists (undefined_function).
+    // deno-lint-ignore no-explicit-any
+    let row: any;
+    try {
+      [row] = await db`
+        SELECT code, env_vars_legacy, env_vars_blob, env_vars_nonce,
+               env_vars_key_version, schema_name
+          FROM public.runner_get_function(${functionId}::uuid, ${projectId}::uuid)
+      `;
+    } catch (err) {
+      // deno-lint-ignore no-explicit-any
+      if ((err as any)?.code !== "42883") throw err;
+      [row] = await db`
+        SELECT
+          COALESCE(ef.compiled_code, ef.code) AS code,
+          ef.env_vars              AS env_vars_legacy,
+          ef.env_vars_blob,
+          ef.env_vars_nonce,
+          ef.env_vars_key_version,
+          p.schema_name
+        FROM edge_functions ef
+        JOIN public.projects p ON p.id = ef.project_id
+        WHERE ef.id = ${functionId} AND ef.project_id = ${projectId}::uuid AND ef.status = 'active'
+      `;
+    }
     if (!row) return null;
 
     const env = await resolveEnvVars(row);
@@ -264,6 +287,9 @@ async function executeFunction(
 
   // deno-lint-ignore no-explicit-any
   async function runDBSql(query: string, params: unknown[]): Promise<any> {
+    // Customer SQL must not change the role or search_path set below.
+    const guardErr = privilegeStatementError(query);
+    if (guardErr) throw new Error(guardErr);
     // deno-lint-ignore no-explicit-any
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
@@ -673,7 +699,11 @@ Deno.serve({ port: PORT }, async (req: Request): Promise<Response> => {
     }
 
     // Load function code.
-    const fn = await loadFunction(functionId, functionVersion);
+    const projectIdHeader = req.headers.get("X-Project-ID") ?? "";
+    if (!uuidRe.test(projectIdHeader)) {
+      return jsonResponse({ error: "invalid project id", requestId }, 400);
+    }
+    const fn = await loadFunction(functionId, projectIdHeader, functionVersion);
     if (!fn) {
       return jsonResponse({ error: "Function not found or disabled", requestId }, 404);
     }
