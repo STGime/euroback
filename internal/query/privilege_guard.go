@@ -65,6 +65,15 @@ func checkPrivilegeStatement(st []privWord) error {
 	}
 	first := kw(0)
 
+	// Transaction control: the platform scopes each request inside its own
+	// transaction, so customer SQL may not end, nest or split it (same
+	// rule as the tenant-migrations validator). Statement-start only, so
+	// CASE … END is unaffected.
+	switch first {
+	case "begin", "commit", "rollback", "savepoint", "release", "end", "abort", "start", "prepare":
+		return privErr(strings.ToUpper(first) + " (transaction control)")
+	}
+
 	// SET / RESET as a *command* (statement start). `UPDATE … SET col`
 	// never reaches this branch, so role/owner-named columns stay usable.
 	if first == "set" || first == "reset" {

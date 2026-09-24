@@ -19,8 +19,8 @@ export interface SqlWord {
 
 // PostgreSQL identifiers: letters, '_' and any non-ASCII char may start
 // one; digits and '$' may also continue one.
-const identStart = /[A-Za-z_\u0080-￿]/;
-const identCont = /[A-Za-z0-9_$\u0080-￿]/;
+const identStart = /[A-Za-z_\u0080-\uFFFF]/;
+const identCont = /[A-Za-z0-9_$\u0080-\uFFFF]/;
 
 /** Skips a quoted region starting at sql[i] === q; returns [nextIndex, content]. */
 function skipQuoted(sql: string, i: number, q: string, backslash: boolean): [number, string] {
@@ -125,6 +125,13 @@ export function privilegeStatementError(sql: string): string | null {
   for (const st of stmts) {
     const kw = (i: number) => (i >= 0 && i < st.length ? st[i].kw : "");
     const first = kw(0);
+
+    // Transaction control: the runner scopes each call inside its own
+    // transaction; customer SQL may not end, nest or split it.
+    // Statement-start only, so CASE … END is unaffected.
+    if (["begin", "commit", "rollback", "savepoint", "release", "end", "abort", "start", "prepare"].includes(first)) {
+      return deny(`${first.toUpperCase()} (transaction control)`);
+    }
 
     // Function-path extras: no anonymous blocks or new routines.
     if (first === "do") return deny("DO");

@@ -32,6 +32,13 @@ Deno.test("privilegeStatementError blocks role/session/privilege statements", ()
     "DO $$ BEGIN PERFORM 1; END $$",
     "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS $$ select 1 $$",
     "create procedure p() language sql as $$ select 1 $$",
+    "COMMIT",
+    "select 1; commit; select 2",
+    "ROLLBACK",
+    "SAVEPOINT a",
+    "BEGIN",
+    "START TRANSACTION",
+    "END",
   ];
   for (const q of blocked) assert(privilegeStatementError(q) !== null, `expected block: ${q}`);
 });
@@ -51,6 +58,7 @@ Deno.test("privilegeStatementError allows normal tenant SQL", () => {
     "SELECT E'it\\'s fine' AS s",
     "SELECT col$1 FROM t",
     "UPDATE t SET ärole = 1",
+    "SELECT CASE WHEN a THEN 1 ELSE 0 END FROM t",
   ];
   for (const q of allowed) assertEquals(privilegeStatementError(q), null, q);
 });

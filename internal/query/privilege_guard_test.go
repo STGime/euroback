@@ -66,6 +66,16 @@ func TestValidateNoPrivilegeStatements_ReviewCases(t *testing.T) {
 		`UPDATE pg_settings SET setting = 'x' WHERE name = 'y'`,
 		`SET role = 'x'`,
 		`SET LOCAL ROLE x`,
+		`COMMIT`,
+		`select 1; commit; select 2`,
+		`ROLLBACK`,
+		`SAVEPOINT a`,
+		`RELEASE SAVEPOINT a`,
+		`BEGIN`,
+		`START TRANSACTION`,
+		`END`,
+		`ABORT`,
+		`PREPARE TRANSACTION 'x'`,
 	}
 	for _, q := range blocked {
 		if err := ValidateNoPrivilegeStatements(q); err == nil {
@@ -81,6 +91,8 @@ func TestValidateNoPrivilegeStatements_ReviewCases(t *testing.T) {
 		`SELECT U&'\0041' AS s`,
 		`SELECT col$1 FROM t`,
 		`SELECT $1::text`,
+		`SELECT CASE WHEN a THEN 1 ELSE 0 END FROM t`,
+		`UPDATE t SET status = 'end'`,
 	}
 	for _, q := range allowed {
 		if err := ValidateNoPrivilegeStatements(q); err != nil {
