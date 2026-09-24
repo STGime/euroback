@@ -11,8 +11,15 @@ export interface EurobaseConfig {
   projectId?: string
 }
 
+/**
+ * Query parameters. The pair-array form lets a key repeat — needed for
+ * several filters on one column, e.g. a date range
+ * (`created_at=gte.A&created_at=lte.B`).
+ */
+export type QueryParams = Record<string, string> | Array<[string, string]>
+
 export interface HttpClient {
-  get(path: string, params?: Record<string, string>): Promise<any>
+  get(path: string, params?: QueryParams): Promise<any>
   post(path: string, body?: any): Promise<any>
   patch(path: string, body?: any): Promise<any>
   del(path: string): Promise<any>
@@ -30,10 +37,10 @@ export function httpClient(config: EurobaseConfig): HttpClient {
   const baseUrl = config.url.replace(/\/+$/, '')
   let accessToken: string | null = null
 
-  function buildUrl(path: string, params?: Record<string, string>): string {
+  function buildUrl(path: string, params?: QueryParams): string {
     let url = `${baseUrl}${path}`
-    if (params && Object.keys(params).length > 0) {
-      const qs = new URLSearchParams(params).toString()
+    const qs = params ? new URLSearchParams(params).toString() : ''
+    if (qs) {
       url += `?${qs}`
     }
     return url
@@ -84,7 +91,7 @@ export function httpClient(config: EurobaseConfig): HttpClient {
       return accessToken
     },
 
-    async get(path: string, params?: Record<string, string>): Promise<any> {
+    async get(path: string, params?: QueryParams): Promise<any> {
       try {
         const res = await fetch(buildUrl(path, params), {
           method: 'GET',

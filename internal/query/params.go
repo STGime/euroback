@@ -4,6 +4,7 @@ package query
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -24,6 +25,13 @@ type QueryParams struct {
 	Aggregate string        // aggregate function, e.g. "count", "sum:price"
 	Relations []Relation    // related tables to embed via LEFT JOIN
 }
+
+// MaxFilters caps the WHERE clauses one data-API read may carry. A
+// column may repeat (ranges), so the table's column count no longer
+// bounds the filter list; without a cap a single request line could
+// carry ~1,000 filters (e.g. repeated `fts`) and multiply per-row work.
+// 64 is far above any real query.
+const MaxFilters = 64
 
 // Filter represents a single WHERE clause condition.
 type Filter struct {
@@ -153,17 +161,25 @@ func ParseQueryParams(r *http.Request) QueryParams {
 	}
 
 	// Parse filters: any query param not in reservedParams is a filter.
-	for key, values := range q {
+	// A column may repeat (`?created_at=gte.A&created_at=lte.B` for a
+	// range); every value becomes its own filter, ANDed by the builder.
+	// Reading only values[0] silently dropped all but the first bound.
+	// Keys are sorted so the same logical query always yields the same
+	// SQL text (map iteration is random) — stable for pgx's statement
+	// cache. Values keep their request order within a key.
+	keys := make([]string, 0, len(q))
+	for key := range q {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		if reservedParams[key] {
 			continue
 		}
-		if len(values) == 0 {
-			continue
-		}
-		val := values[0]
-		f := parseFilter(key, val)
-		if f != nil {
-			params.Filters = append(params.Filters, *f)
+		for _, val := range q[key] {
+			if f := parseFilter(key, val); f != nil {
+				params.Filters = append(params.Filters, *f)
+			}
 		}
 	}
 

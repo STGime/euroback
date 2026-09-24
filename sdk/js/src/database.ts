@@ -227,32 +227,38 @@ export class QueryBuilder<T = Record<string, any>> implements PromiseLike<QueryR
    * Build URL query parameters matching the gateway's PostgREST-style format:
    *   ?select=id,name
    *   ?name=eq.Stefan
+   *   ?created_at=gte.2026-01-01&created_at=lte.2026-01-31
    *   ?order=created_at.desc
    *   ?limit=20&offset=0
+   *
+   * Returned as [key, value] pairs, not an object: a column can carry
+   * several filters (a range), and keying by column name made the last
+   * one silently overwrite the others.
    */
-  private buildParams(): Record<string, string> {
-    const params: Record<string, string> = {}
+  private buildParams(): Array<[string, string]> {
+    const params: Array<[string, string]> = []
 
     if (this.columns.length > 0) {
-      params['select'] = this.columns.join(',')
+      params.push(['select', this.columns.join(',')])
     }
 
     for (const f of this.filters) {
-      params[f.column] = `${f.operator}.${f.value}`
+      params.push([f.column, `${f.operator}.${f.value}`])
     }
 
     if (this.orders.length > 0) {
-      params['order'] = this.orders
-        .map(o => `${o.column}.${o.descending ? 'desc' : 'asc'}`)
-        .join(',')
+      params.push([
+        'order',
+        this.orders.map(o => `${o.column}.${o.descending ? 'desc' : 'asc'}`).join(','),
+      ])
     }
 
     if (this.limitCount !== null) {
-      params['limit'] = String(this.limitCount)
+      params.push(['limit', String(this.limitCount)])
     }
 
     if (this.offsetCount !== null) {
-      params['offset'] = String(this.offsetCount)
+      params.push(['offset', String(this.offsetCount)])
     }
 
     return params

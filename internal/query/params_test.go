@@ -1,8 +1,13 @@
 package query
 
 import (
+	"context"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestParseSelectParam(t *testing.T) {
@@ -200,5 +205,76 @@ func TestParseNoFilterForReservedParams(t *testing.T) {
 
 	if len(params.Filters) != 0 {
 		t.Errorf("expected 0 filters for reserved params, got %d", len(params.Filters))
+	}
+}
+
+// TestParseRepeatedColumnFilters pins the date-range case: two filters
+// on the same column must both survive (previously only values[0] was
+// read, so `.gte(col, a).lte(col, b)` applied a single bound).
+func TestParseRepeatedColumnFilters(t *testing.T) {
+	req := httptest.NewRequest("GET",
+		"/events?created_at=gte.2026-01-01&created_at=lte.2026-01-31&status=eq.open", nil)
+	params := ParseQueryParams(req)
+
+	if len(params.Filters) != 3 {
+		t.Fatalf("expected 3 filters, got %d: %+v", len(params.Filters), params.Filters)
+	}
+	got := map[string]string{}
+	for _, f := range params.Filters {
+		got[f.Column+"."+f.Operator] = f.Value
+	}
+	if got["created_at.gte"] != "2026-01-01" || got["created_at.lte"] != "2026-01-31" || got["status.eq"] != "open" {
+		t.Fatalf("unexpected filters: %+v", params.Filters)
+	}
+}
+
+// Both bounds of a same-column range must reach the WHERE clause.
+func TestBuildSelectQueryRepeatedColumnRange(t *testing.T) {
+	req := httptest.NewRequest("GET", "/events?created_at=gte.2026-01-01&created_at=lte.2026-01-31", nil)
+	sql, args := buildSelectQuery("tenant_x", "events", ParseQueryParams(req))
+
+	if len(args) < 2 {
+		t.Fatalf("expected both bounds as args, got %v (sql: %s)", args, sql)
+	}
+	if !strings.Contains(sql, ">=") || !strings.Contains(sql, "<=") || !strings.Contains(sql, " AND ") {
+		t.Fatalf("expected a >= AND <= range, got: %s", sql)
+	}
+}
+
+// More than MaxFilters filters is refused with 400 before any SQL runs
+// (nil engine: reaching the engine would panic).
+func TestSelectRowsRejectsTooManyFilters(t *testing.T) {
+	q := make([]string, 0, MaxFilters+1)
+	for i := 0; i <= MaxFilters; i++ {
+		q = append(q, "body=fts.x")
+	}
+	req := httptest.NewRequest("GET", "/v1/db/events?"+strings.Join(q, "&"), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("table", "events")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	req = req.WithContext(ContextWithSchema(ctx, "tenant_x"))
+
+	rec := httptest.NewRecorder()
+	handleSelectRows(nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "too many filters") {
+		t.Fatalf("got %d %s, want 400 too many filters", rec.Code, rec.Body.String())
+	}
+}
+
+// Filter order is deterministic (sorted keys, request order within a
+// key), so identical queries produce identical SQL text.
+func TestParseFiltersDeterministicOrder(t *testing.T) {
+	url := "/events?status=eq.open&created_at=gte.2026-01-01&created_at=lte.2026-01-31&amount=gt.5"
+	want := []string{"amount.gt", "created_at.gte", "created_at.lte", "status.eq"}
+	for i := 0; i < 50; i++ {
+		f := ParseQueryParams(httptest.NewRequest("GET", url, nil)).Filters
+		if len(f) != len(want) {
+			t.Fatalf("got %d filters", len(f))
+		}
+		for j, w := range want {
+			if got := f[j].Column + "." + f[j].Operator; got != w {
+				t.Fatalf("run %d: filter %d = %s, want %s", i, j, got, w)
+			}
+		}
 	}
 }
