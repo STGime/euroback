@@ -40,16 +40,19 @@ END$$;
 -- grant membership in itself, so when this runs AS eurobase_migrator the
 -- GRANT is refused. On a fresh environment the membership is therefore
 -- part of the console bootstrap (as the admin, with the roles):
---   GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE;
--- Skip when it's already there; otherwise try, and fail with that hint.
+--   GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE, SET TRUE;
+-- (INHERIT: ownership-equivalent privileges; SET: the platform pool's
+-- SET LOCAL ROLE eurobase_migrator.) Skip when both are already there;
+-- otherwise try, and fail with that hint.
 -- Editing in place is safe: prod's schema_migrations is past 000044.
 DO $$
 BEGIN
-    IF NOT pg_has_role('eurobase_developer', 'eurobase_migrator', 'MEMBER') THEN
+    IF NOT (pg_has_role('eurobase_developer', 'eurobase_migrator', 'USAGE')
+            AND pg_has_role('eurobase_developer', 'eurobase_migrator', 'SET')) THEN
         BEGIN
-            GRANT eurobase_migrator TO eurobase_developer;
+            GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE, SET TRUE;
         EXCEPTION WHEN insufficient_privilege THEN
-            RAISE EXCEPTION 'eurobase_developer is not a member of eurobase_migrator and the migrating role cannot grant it. Run as the Scaleway admin: GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE;';
+            RAISE EXCEPTION 'eurobase_developer is not a member of eurobase_migrator and the migrating role cannot grant it. Run as the Scaleway admin: GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE, SET TRUE;';
         END;
     END IF;
 END$$;

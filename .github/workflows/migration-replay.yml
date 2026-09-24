@@ -4,7 +4,11 @@ name: Migration replay
 # production role shapes and the same golang-migrate CLI image as the prod
 # migrate Job (#632). Catches migrations that only "work" on prod because
 # of hand-applied state — the class of bug that broke 000044/45/52/89 for
-# any freshly built database (new env, DR rebuild, local dev).
+# any freshly built database (new env, DR rebuild, local dev). On PRs it
+# also checks new migrations are numbered above main's highest version.
+#
+# Path-filtered: don't make this a *required* check without dropping the
+# filter, or unrelated PRs will wait on it forever.
 
 on:
   pull_request:
@@ -12,6 +16,7 @@ on:
       - migrations/**
       - scripts/db/**
       - scripts/replay-migrations.sh
+      - deploy/docker/Dockerfile.migrations
       - .github/workflows/migration-replay.yml
   push:
     branches: [main]
@@ -19,7 +24,12 @@ on:
       - migrations/**
       - scripts/db/**
       - scripts/replay-migrations.sh
+      - deploy/docker/Dockerfile.migrations
+      - .github/workflows/migration-replay.yml
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   replay:
@@ -41,6 +51,16 @@ jobs:
           --health-retries 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the order check diffs against the base branch
+
+      - name: New migrations are numbered above main
+        if: github.event_name == 'pull_request'
+        run: scripts/db/check-migration-order.sh "origin/${{ github.base_ref }}"
+
+      - name: Ensure psql client
+        run: command -v psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
+
       - name: Replay all migrations
         env:
           PGURL: postgres://postgres:replay-ci-ephemeral@localhost:5432/eurobase?sslmode=disable

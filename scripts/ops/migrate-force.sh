@@ -4,15 +4,16 @@
 # schema_migrations bookkeeping (version=V, dirty=false) — it runs NO SQL and
 # changes NO schema.
 #
-# Default forces version 62 (the last good migration before 000063 failed and
-# rolled back). After this, the next deploy's `migrate up` re-applies the
-# fixed 000063. Pass a different version as $1 if migrate-status showed
-# something other than 63-dirty.
+# Pass the last GOOD version (the one before the dirty one migrate-status
+# shows). After this, the next deploy's `migrate up` re-applies everything
+# above it. There is deliberately no default: the old default (62, from the
+# 000063 incident) would today make `up` re-run 63–124 against tables that
+# already exist and leave the DB dirty again (#632 review).
 #
-# Usage: ./scripts/ops/migrate-force.sh [version]   (default 62)
+# Usage: ./scripts/ops/migrate-force.sh <version>
 set -euo pipefail
 
-VERSION="${1:-62}"
+VERSION="${1:?usage: migrate-force.sh <last-good-version> — check scripts/ops/migrate-status.sh first}"
 NS=eurobase
 JOB=migrate-force
 IMG=rg.fr-par.scw.cloud/eurobase-app/migrations:latest

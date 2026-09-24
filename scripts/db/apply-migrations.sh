@@ -23,20 +23,34 @@
 # Re-running on an up-to-date database is a no-op; on a database already
 # past 37 only step 3 runs (incremental local updates).
 #
+# Local / CI reference only — NOT a Scaleway DR tool: it creates roles
+# (incl. a SUPERUSER stand-in), uses one password for all of them and
+# connects with sslmode=disable. For a real environment follow the console
+# bootstrap in CLAUDE.md § Postgres roles.
+#
 # Env: ROLE_PASSWORD (default "localdev") — password for all runtime
-# roles; MIGRATE_IMAGE — golang-migrate CLI image (default matches
-# deploy/docker/Dockerfile.migrations).
+# roles; MIGRATE_IMAGE — golang-migrate CLI image (default: the FROM line
+# of deploy/docker/Dockerfile.migrations).
 set -euo pipefail
 
 ADMIN_URL="${1:?usage: apply-migrations.sh <superuser-url>}"
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-MIGRATE_IMAGE="${MIGRATE_IMAGE:-migrate/migrate:v4.18.3}"
+# Same golang-migrate image as the prod migrate Job.
+MIGRATE_IMAGE="${MIGRATE_IMAGE:-$(sed -nE 's/^FROM[[:space:]]+([^[:space:]]+).*/\1/p' "$REPO_ROOT/deploy/docker/Dockerfile.migrations" | head -1)}"
 ROLE_PASSWORD="${ROLE_PASSWORD:-localdev}"
 LAST_PRE_SPLIT=37 # 000037_role_split (run by the admin role) hands ownership to eurobase_migrator
 
 # Host + db from the URL; the golang-migrate container needs to reach it.
-HOSTPORT="$(echo "$ADMIN_URL" | sed -E 's#^postgres(ql)?://[^@]+@([^/]+)/.*#\2#')"
-DBNAME="$(echo "$ADMIN_URL" | sed -E 's#^.*/([^/?]+)(\?.*)?$#\1#')"
+URL_NOQUERY="${ADMIN_URL%%\?*}"
+case "$URL_NOQUERY" in
+    postgres://*@*/*|postgresql://*@*/*) ;;
+    *) echo "expected postgres://user:pass@host:port/db, got: ${URL_NOQUERY%%@*}@…" >&2; exit 2 ;;
+esac
+HOSTPORT="$(echo "$URL_NOQUERY" | sed -E 's#^postgres(ql)?://[^@]+@([^/]+)/.*#\2#')"
+DBNAME="${URL_NOQUERY##*/}"
+case "$ROLE_PASSWORD" in
+    *[@/?#%:]*) echo "ROLE_PASSWORD must not contain @ / ? # % : (it's embedded in a URL)" >&2; exit 2 ;;
+esac
 if [ "$(uname)" = "Darwin" ]; then
     # Docker Desktop: reach the host's published ports via host.docker.internal.
     HOSTPORT="$(echo "$HOSTPORT" | sed -E 's#^(localhost|127\.0\.0\.1)#host.docker.internal#')"
@@ -72,7 +86,9 @@ fi
 
 echo "── Console bootstrap (roles + grants, idempotent) ──"
 sql -v pw="$ROLE_PASSWORD" <<'SQL'
+\o /dev/null
 SELECT set_config('replay.pw', :'pw', false);
+\o
 DO $$
 DECLARE pw text := current_setting('replay.pw');
 BEGIN
@@ -94,16 +110,22 @@ BEGIN
     END IF;
 END$$;
 -- Grants eurobase_migrator holds on Scaleway on objects it does NOT own
--- (the DB and schema public belong to _rdb_superadmin / pg_database_owner),
--- obtained once from Scaleway support.
+-- (the DB and schema public belong to _rdb_superadmin / pg_database_owner).
+-- Only CONNECT and USAGE carry GRANT OPTION — the two documented Scaleway-
+-- support grants (CLAUDE.md § Postgres roles). CREATE is granted WITHOUT
+-- it, so a migration that tries to re-grant CREATE fails here too instead
+-- of passing CI and becoming a silent no-op in prod.
 DO $$
 BEGIN
-    EXECUTE format('GRANT CONNECT, CREATE ON DATABASE %I TO eurobase_migrator WITH GRANT OPTION', current_database());
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO eurobase_migrator WITH GRANT OPTION', current_database());
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO eurobase_migrator', current_database());
 END$$;
-GRANT USAGE, CREATE ON SCHEMA public TO eurobase_migrator WITH GRANT OPTION;
+GRANT USAGE  ON SCHEMA public TO eurobase_migrator WITH GRANT OPTION;
+GRANT CREATE ON SCHEMA public TO eurobase_migrator;
 -- Memberships the migrator can't grant itself on PG16 (no self-grant, no
--- ADMIN on console-created roles). 000044 / 000045 verify them.
-GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE;
+-- ADMIN on console-created roles). Options spelled out: managed-PG defaults
+-- unspecified options to FALSE. 000044 / 000045 verify them.
+GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE, SET TRUE;
 GRANT eurobase_gateway  TO eurobase_migrator  WITH INHERIT TRUE;
 SQL
 

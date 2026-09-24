@@ -6,6 +6,10 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
+for bin in docker psql; do
+    command -v "$bin" > /dev/null || { echo "ERROR: '$bin' not found on PATH (psql: brew install libpq && brew link --force libpq)"; exit 1; }
+done
+
 echo "==> Starting local dev services..."
 docker compose up -d
 
