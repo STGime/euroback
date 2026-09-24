@@ -10,6 +10,7 @@
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
+import { isAuthError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -121,6 +122,27 @@ async function getBootstrapBlobUrl(): Promise<string> {
 // SQL runs with the executing tenant's grants only.
 // deno-lint-ignore no-explicit-any
 let sql: any = null;
+
+// Per-tenant logins (stage B phase 1a): enabled when FUNC_PASSWORD_SECRET
+// is set. ctx.db.sql then runs on a connection authenticated as the
+// tenant's `<schema>_func` role; the shared connection is used only for
+// the platform lookups (runner_get_function / vault_get_for_runner).
+const FUNC_PASSWORD_SECRET = Deno.env.get("FUNC_PASSWORD_SECRET") ?? "";
+const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "20");
+let tenantPool: TenantDBPool | null = null;
+
+async function getTenantPool(): Promise<TenantDBPool | null> {
+  if (FUNC_PASSWORD_SECRET.length < 32 || !DB_URL) return null;
+  if (tenantPool) return tenantPool;
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
+  tenantPool = new TenantDBPool(
+    DB_URL,
+    FUNC_PASSWORD_SECRET,
+    (url: string) => postgres(url, { max: 1, idle_timeout: 30 }),
+    TENANT_CONN_CAP,
+  );
+  return tenantPool;
+}
 
 async function getDB() {
   if (sql) return sql;
@@ -270,6 +292,32 @@ async function executeFunction(
     // Customer SQL must not change the role or search_path set below.
     const guardErr = privilegeStatementError(query);
     if (guardErr) throw new Error(guardErr);
+
+    // Preferred: a connection that logs in as the tenant's own role — no
+    // role switch, so the session identity is the boundary.
+    const tp = await getTenantPool();
+    if (tp) {
+      try {
+        const tdb = await tp.get(schemaName, funcRole);
+        // deno-lint-ignore no-explicit-any
+        return await tdb.begin(async (tx: any) => {
+          await tx.unsafe(setPathSQL);
+          for (const stmt of rlsContextStatements(userId)) {
+            await tx.unsafe(stmt.sql, stmt.params);
+          }
+          return await tx.unsafe(query, params);
+        });
+      } catch (err) {
+        // Login not ready yet (worker hasn't applied the password for a
+        // brand-new tenant): drop the client and use the legacy path
+        // below. Any other error is the customer's query error.
+        if (!isAuthError(err)) throw err;
+        await tp.evict(schemaName);
+        console.warn(`[tenant-db] login for ${funcRole} not ready, using shared connection`);
+      }
+    }
+
+    // Legacy (phase 1b removes it): shared connection + role switch.
     // deno-lint-ignore no-explicit-any
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
