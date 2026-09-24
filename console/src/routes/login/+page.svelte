@@ -149,8 +149,8 @@
 	}
 
 	// Username-less sign-in: the browser offers every passkey it holds
-	// for the console. Begin is only called on click (never prefetched)
-	// — every begin writes a single-use challenge row server-side.
+	// for the console. Begin is stateless server-side (signed challenge
+	// token); single use is enforced when the assertion is verified.
 	async function handlePasskeySignIn() {
 		error = '';
 		passkeyBusy = true;
@@ -402,7 +402,7 @@
 					<div class="mt-6 space-y-4">
 						<div class="rounded-lg bg-eurobase-50 border border-eurobase-200 p-4 text-sm text-eurobase-800">
 							<p class="font-medium">Confirm it's you</p>
-							<p class="mt-1 text-eurobase-700">Multi-factor authentication is on for <strong>{email}</strong>. Use one of your passkeys to finish signing in.</p>
+							<p class="mt-1 text-eurobase-700">Multi-factor authentication is on for <strong>{email}</strong>. Use one of your passkeys to finish signing in. If no prompt appeared, click <strong>Use passkey</strong>.</p>
 						</div>
 						<button
 							type="button"

@@ -659,6 +659,12 @@ func (s *PlatformAuthService) FinishPasskeyLogin(ctx context.Context, challengeI
 	if !fresh {
 		return nil, ErrPasskeyChallengeInvalid
 	}
+	// ident is only set when the presented credential belongs to the
+	// resolved user; go-webauthn refuses otherwise, but keep the
+	// invariant local rather than relying on library internals.
+	if ident == nil {
+		return nil, ErrPasskeyVerificationFailed
+	}
 	if !ident.EmailConfirmed {
 		return nil, ErrEmailNotVerified
 	}
