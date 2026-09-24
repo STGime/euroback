@@ -7,7 +7,8 @@
 // legacy shared-connection role switch.
 //
 // Budget (shared cluster, max_connections=100): one connection per
-// tenant, a global cap, idle close, LRU eviction.
+// tenant, a soft global cap, idle close, LRU eviction of *idle* entries
+// only — a connection with a transaction in flight is never closed.
 
 const enc = new TextEncoder();
 
@@ -31,56 +32,115 @@ export type SqlClient = any;
 export type ClientFactory = (url: string) => SqlClient;
 
 interface Entry {
-  client: SqlClient;
+  client: Promise<SqlClient>;
   lastUsed: number;
+  inUse: number;
 }
 
-/** LRU cache of per-tenant clients with a global cap. */
+export interface Lease {
+  client: SqlClient;
+  release: () => void;
+}
+
+/** How long a failed login keeps a tenant on the fallback path. */
+export const AUTH_FAILURE_COOLDOWN_MS = 60_000;
+
+/** LRU cache of per-tenant clients with a soft global cap. */
 export class TenantDBPool {
   private entries = new Map<string, Entry>();
+  private authFailedAt = new Map<string, number>();
 
   constructor(
     private readonly baseUrl: string,
     private readonly secret: string,
     private readonly factory: ClientFactory,
     private readonly cap = 20,
+    private readonly now: () => number = Date.now,
   ) {}
 
   get size(): number {
     return this.entries.size;
   }
 
-  async get(schema: string, role: string): Promise<SqlClient> {
-    const hit = this.entries.get(schema);
-    if (hit) {
-      hit.lastUsed = Date.now();
-      return hit.client;
+  /** True while a recent login failure keeps this tenant on the fallback path. */
+  authCoolingDown(schema: string): boolean {
+    const at = this.authFailedAt.get(schema);
+    if (at === undefined) return false;
+    if (this.now() - at < AUTH_FAILURE_COOLDOWN_MS) return true;
+    this.authFailedAt.delete(schema);
+    return false;
+  }
+
+  /** Records a login failure and drops the tenant's client. */
+  markAuthFailed(schema: string): void {
+    this.authFailedAt.set(schema, this.now());
+    this.drop(schema);
+  }
+
+  /**
+   * Leases the tenant's client. Concurrent first calls share one client;
+   * the caller must release() when its transaction has finished.
+   */
+  async acquire(schema: string, role: string): Promise<Lease> {
+    let entry = this.entries.get(schema);
+    if (!entry) {
+      this.evictIdleOverCap();
+      const client = funcPassword(this.secret, schema).then((pw) => this.factory(tenantDbUrl(this.baseUrl, role, pw)));
+      entry = { client, lastUsed: this.now(), inUse: 0 };
+      this.entries.set(schema, entry);
     }
-    if (this.entries.size >= this.cap) {
+    entry.inUse++;
+    entry.lastUsed = this.now();
+    const e = entry;
+    let released = false;
+    try {
+      const client = await e.client;
+      return {
+        client,
+        release: () => {
+          if (released) return;
+          released = true;
+          e.inUse--;
+          e.lastUsed = this.now();
+        },
+      };
+    } catch (err) {
+      e.inUse--;
+      if (this.entries.get(schema) === e) this.entries.delete(schema);
+      throw err;
+    }
+  }
+
+  /** Evicts least-recently-used *idle* entries while at/over the cap. */
+  private evictIdleOverCap(): void {
+    while (this.entries.size >= this.cap) {
       let oldest: string | null = null;
       let oldestAt = Infinity;
       for (const [k, v] of this.entries) {
-        if (v.lastUsed < oldestAt) {
+        if (v.inUse === 0 && v.lastUsed < oldestAt) {
           oldest = k;
           oldestAt = v.lastUsed;
         }
       }
-      if (oldest !== null) await this.evict(oldest);
+      if (oldest === null) return; // all busy: soft cap, idle_timeout reclaims later
+      this.drop(oldest);
     }
-    const pw = await funcPassword(this.secret, schema);
-    const client = this.factory(tenantDbUrl(this.baseUrl, role, pw));
-    this.entries.set(schema, { client, lastUsed: Date.now() });
-    return client;
   }
 
-  async evict(schema: string): Promise<void> {
+  /** Removes an entry and closes its client in the background once idle. */
+  private drop(schema: string): void {
     const e = this.entries.get(schema);
     if (!e) return;
     this.entries.delete(schema);
-    try {
-      await e.client.end({ timeout: 5 });
-    } catch {
-      // closing a broken client is best-effort
+    const close = () =>
+      e.client.then((c) => c.end({ timeout: 5 })).catch(() => {
+        // closing a broken client is best-effort
+      });
+    if (e.inUse === 0) {
+      close();
+    } else {
+      // In-flight transactions finish; postgres.js idle_timeout then
+      // closes the connection. Never kill a running transaction.
     }
   }
 }

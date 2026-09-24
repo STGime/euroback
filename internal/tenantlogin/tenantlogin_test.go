@@ -1,6 +1,9 @@
 package tenantlogin
 
-import "testing"
+import (
+	"regexp"
+	"testing"
+)
 
 // Pinned vector — functions-runner/tenant_db_test.ts asserts the same
 // value, so Go (sets the password) and the runner (connects with it)
@@ -30,5 +33,23 @@ func TestSchemaValidation(t *testing.T) {
 	}
 	if !schemaRe.MatchString("tenant_0515e4e2_e195_4018_ab19_f18aae213e2a") {
 		t.Error("real tenant schema rejected")
+	}
+}
+
+func TestScramVerifierShapeAndDeterminism(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	v1, err := ScramVerifier(secret, "tenant_abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, _ := ScramVerifier(secret, "tenant_abc")
+	if v1 != v2 {
+		t.Fatal("verifier must be deterministic")
+	}
+	if !regexp.MustCompile(`^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$`).MatchString(v1) {
+		t.Fatalf("unexpected verifier shape: %s", v1)
+	}
+	if other, _ := ScramVerifier(secret, "tenant_abd"); other == v1 {
+		t.Fatal("different schemas must get different verifiers")
 	}
 }

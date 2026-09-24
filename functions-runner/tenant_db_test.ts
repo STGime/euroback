@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { funcPassword, isAuthError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
+import { AUTH_FAILURE_COOLDOWN_MS, funcPassword, isAuthError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
 
 Deno.test("funcPassword matches the Go vector (internal/tenantlogin)", async () => {
   assertEquals(
@@ -17,26 +17,52 @@ Deno.test("tenantDbUrl swaps credentials, keeps host/db/params", () => {
   assertEquals(u.searchParams.get("sslmode"), "require");
 });
 
-Deno.test("TenantDBPool reuses per tenant and evicts LRU at the cap", async () => {
+function fakeFactory() {
   const created: string[] = [];
   const ended: string[] = [];
   const factory = (url: string) => {
     const user = new URL(url).username;
     created.push(user);
-    return { end: () => { ended.push(user); return Promise.resolve(); } };
+    return { user, end: () => { ended.push(user); return Promise.resolve(); } };
   };
-  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), factory, 2);
-  const a1 = await pool.get("tenant_a", "tenant_a_func");
-  const a2 = await pool.get("tenant_a", "tenant_a_func");
-  assert(a1 === a2, "same tenant reuses its client");
-  await new Promise((r) => setTimeout(r, 2));
-  await pool.get("tenant_b", "tenant_b_func");
-  await new Promise((r) => setTimeout(r, 2));
-  await pool.get("tenant_a", "tenant_a_func"); // touch a → b is now LRU
-  await pool.get("tenant_c", "tenant_c_func"); // over cap → evict b
-  assertEquals(pool.size, 2);
-  assertEquals(ended, ["tenant_b_func"]);
-  assertEquals(created, ["tenant_a_func", "tenant_b_func", "tenant_c_func"]);
+  return { created, ended, factory };
+}
+
+Deno.test("concurrent first acquire shares one client", async () => {
+  const f = fakeFactory();
+  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5);
+  const [a, b] = await Promise.all([pool.acquire("tenant_a", "tenant_a_func"), pool.acquire("tenant_a", "tenant_a_func")]);
+  assert(a.client === b.client);
+  assertEquals(f.created, ["tenant_a_func"]);
+  a.release();
+  b.release();
+});
+
+Deno.test("LRU evicts only idle entries; busy entries survive over the cap", async () => {
+  let t = 0;
+  const f = fakeFactory();
+  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 2, () => ++t);
+  const a = await pool.acquire("tenant_a", "tenant_a_func"); // busy
+  const b = await pool.acquire("tenant_b", "tenant_b_func");
+  b.release(); // idle
+  await pool.acquire("tenant_c", "tenant_c_func"); // over cap → evict idle b, not busy a
+  await new Promise((r) => setTimeout(r, 0));
+  assertEquals(f.ended, ["tenant_b_func"]);
+  const d = await pool.acquire("tenant_d", "tenant_d_func"); // a and c busy → soft cap, nothing killed
+  assertEquals(f.ended, ["tenant_b_func"]);
+  assertEquals(pool.size, 3);
+  a.release();
+  d.release();
+});
+
+Deno.test("auth failure cools a tenant down, then expires", () => {
+  let t = 1000;
+  const f = fakeFactory();
+  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5, () => t);
+  pool.markAuthFailed("tenant_a");
+  assert(pool.authCoolingDown("tenant_a"));
+  t += AUTH_FAILURE_COOLDOWN_MS + 1;
+  assert(!pool.authCoolingDown("tenant_a"));
 });
 
 Deno.test("isAuthError", () => {

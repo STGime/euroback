@@ -293,14 +293,23 @@ async function executeFunction(
     const guardErr = privilegeStatementError(query);
     if (guardErr) throw new Error(guardErr);
 
+    // Statement timeout per transaction, matching the invocation budget,
+    // so a query from an invocation that already timed out can't keep a
+    // per-tenant connection busy.
+    const timeoutSQL = `SET LOCAL statement_timeout = ${timeoutMs}`;
+
     // Preferred: a connection that logs in as the tenant's own role — no
     // role switch, so the session identity is the boundary.
     const tp = await getTenantPool();
-    if (tp) {
+    if (tp && !tp.authCoolingDown(schemaName)) {
+      let started = false;
+      let lease;
       try {
-        const tdb = await tp.get(schemaName, funcRole);
+        lease = await tp.acquire(schemaName, funcRole);
         // deno-lint-ignore no-explicit-any
-        return await tdb.begin(async (tx: any) => {
+        return await lease.client.begin(async (tx: any) => {
+          started = true;
+          await tx.unsafe(timeoutSQL);
           await tx.unsafe(setPathSQL);
           for (const stmt of rlsContextStatements(userId)) {
             await tx.unsafe(stmt.sql, stmt.params);
@@ -308,12 +317,15 @@ async function executeFunction(
           return await tx.unsafe(query, params);
         });
       } catch (err) {
-        // Login not ready yet (worker hasn't applied the password for a
-        // brand-new tenant): drop the client and use the legacy path
-        // below. Any other error is the customer's query error.
-        if (!isAuthError(err)) throw err;
-        await tp.evict(schemaName);
-        console.warn(`[tenant-db] login for ${funcRole} not ready, using shared connection`);
+        // Fall back only when the transaction never started, i.e. the
+        // connection/login itself failed (login not applied yet for a
+        // brand-new tenant). Errors raised by the customer's SQL — even
+        // with an auth-like SQLSTATE — are returned to the customer.
+        if (started || !isAuthError(err)) throw err;
+        tp.markAuthFailed(schemaName);
+        console.warn(`[tenant-db] login for ${funcRole} not ready, using shared connection for 60s`);
+      } finally {
+        lease?.release();
       }
     }
 
@@ -321,6 +333,7 @@ async function executeFunction(
     // deno-lint-ignore no-explicit-any
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
+      await tx.unsafe(timeoutSQL);
       await tx.unsafe(setPathSQL);
       // Mirror the gateway's RLS context so auth_uid() /
       // is_service_role() behave the same in functions as in gateway
