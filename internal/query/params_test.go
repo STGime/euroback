@@ -260,3 +260,21 @@ func TestSelectRowsRejectsTooManyFilters(t *testing.T) {
 		t.Fatalf("got %d %s, want 400 too many filters", rec.Code, rec.Body.String())
 	}
 }
+
+// Filter order is deterministic (sorted keys, request order within a
+// key), so identical queries produce identical SQL text.
+func TestParseFiltersDeterministicOrder(t *testing.T) {
+	url := "/events?status=eq.open&created_at=gte.2026-01-01&created_at=lte.2026-01-31&amount=gt.5"
+	want := []string{"amount.gt", "created_at.gte", "created_at.lte", "status.eq"}
+	for i := 0; i < 50; i++ {
+		f := ParseQueryParams(httptest.NewRequest("GET", url, nil)).Filters
+		if len(f) != len(want) {
+			t.Fatalf("got %d filters", len(f))
+		}
+		for j, w := range want {
+			if got := f[j].Column + "." + f[j].Operator; got != w {
+				t.Fatalf("run %d: filter %d = %s, want %s", i, j, got, w)
+			}
+		}
+	}
+}

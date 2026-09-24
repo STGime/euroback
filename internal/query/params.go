@@ -4,6 +4,7 @@ package query
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -163,11 +164,19 @@ func ParseQueryParams(r *http.Request) QueryParams {
 	// A column may repeat (`?created_at=gte.A&created_at=lte.B` for a
 	// range); every value becomes its own filter, ANDed by the builder.
 	// Reading only values[0] silently dropped all but the first bound.
-	for key, values := range q {
+	// Keys are sorted so the same logical query always yields the same
+	// SQL text (map iteration is random) — stable for pgx's statement
+	// cache. Values keep their request order within a key.
+	keys := make([]string, 0, len(q))
+	for key := range q {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		if reservedParams[key] {
 			continue
 		}
-		for _, val := range values {
+		for _, val := range q[key] {
 			if f := parseFilter(key, val); f != nil {
 				params.Filters = append(params.Filters, *f)
 			}
