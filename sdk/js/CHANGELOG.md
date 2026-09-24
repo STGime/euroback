@@ -18,9 +18,11 @@ sent only `created_at=lte.2026-01-31` and returned every row up to the end date.
 
 **Requires the matching gateway fix** (same release): the gateway previously read only the first value of a repeated parameter. Against an older gateway, 0.7.1 would apply only the *first* bound. `eurobase.app` is updated, so hosted projects are unaffected. The earlier workaround (a single filter plus client-side filtering, or raw SQL through an edge function) is no longer needed.
 
+Gateway notes for direct REST callers: a repeated column parameter is now ANDed (`?status=eq.a&status=eq.b` used to apply only the first filter; PostgREST semantics). A read may carry at most 64 filters; more returns `400 too many filters (max 64)`.
+
 ### Fixed — Node processes no longer hang after sign-in
 
-The automatic token-refresh timer kept the Node event loop alive, so a script that signed in (seed scripts, cron jobs, tests) didn't exit until the token was close to expiry — about an hour. The timer is now `unref()`'d in Node. Browsers are unaffected, and refresh still happens while the process is running for other reasons.
+The automatic token-refresh timer kept the Node event loop alive, so a script that signed in (seed scripts, cron jobs, tests) didn't exit until the token was close to expiry — about an hour. The timer is now `unref()`'d in Node and Bun. Deno still keeps the process alive until the timer fires. Browsers and Workers are unaffected, and refresh still happens while the process is running for other reasons.
 
 ## 0.7.0 — 2026-08-27
 

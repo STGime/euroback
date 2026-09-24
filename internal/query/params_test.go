@@ -1,9 +1,13 @@
 package query
 
 import (
+	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestParseSelectParam(t *testing.T) {
@@ -234,5 +238,25 @@ func TestBuildSelectQueryRepeatedColumnRange(t *testing.T) {
 	}
 	if !strings.Contains(sql, ">=") || !strings.Contains(sql, "<=") || !strings.Contains(sql, " AND ") {
 		t.Fatalf("expected a >= AND <= range, got: %s", sql)
+	}
+}
+
+// More than MaxFilters filters is refused with 400 before any SQL runs
+// (nil engine: reaching the engine would panic).
+func TestSelectRowsRejectsTooManyFilters(t *testing.T) {
+	q := make([]string, 0, MaxFilters+1)
+	for i := 0; i <= MaxFilters; i++ {
+		q = append(q, "body=fts.x")
+	}
+	req := httptest.NewRequest("GET", "/v1/db/events?"+strings.Join(q, "&"), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("table", "events")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	req = req.WithContext(ContextWithSchema(ctx, "tenant_x"))
+
+	rec := httptest.NewRecorder()
+	handleSelectRows(nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "too many filters") {
+		t.Fatalf("got %d %s, want 400 too many filters", rec.Code, rec.Body.String())
 	}
 }

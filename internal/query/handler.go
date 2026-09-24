@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -260,6 +261,10 @@ func handleSelectRows(engine *QueryEngine) http.HandlerFunc {
 		}
 
 		params := ParseQueryParams(r)
+		if len(params.Filters) > MaxFilters {
+			jsonError(w, fmt.Sprintf("too many filters (max %d)", MaxFilters), http.StatusBadRequest)
+			return
+		}
 
 		// If an aggregate is requested, use AggregateQuery instead.
 		if params.Aggregate != "" {
@@ -327,6 +332,10 @@ func handleSelectRowByID(engine *QueryEngine) http.HandlerFunc {
 		}
 
 		params := ParseQueryParams(r)
+		if len(params.Filters) > MaxFilters {
+			jsonError(w, fmt.Sprintf("too many filters (max %d)", MaxFilters), http.StatusBadRequest)
+			return
+		}
 		params.Filters = append(params.Filters, Filter{
 			Column:   "id",
 			Operator: "eq",

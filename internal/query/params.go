@@ -25,6 +25,13 @@ type QueryParams struct {
 	Relations []Relation    // related tables to embed via LEFT JOIN
 }
 
+// MaxFilters caps the WHERE clauses one data-API read may carry. A
+// column may repeat (ranges), so the table's column count no longer
+// bounds the filter list; without a cap a single request line could
+// carry ~1,000 filters (e.g. repeated `fts`) and multiply per-row work.
+// 64 is far above any real query.
+const MaxFilters = 64
+
 // Filter represents a single WHERE clause condition.
 type Filter struct {
 	Column   string
