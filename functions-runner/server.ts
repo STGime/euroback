@@ -157,34 +157,14 @@ async function loadFunction(
     // schema_name (the HKDF salt — same one functions-runner/vault.ts
     // already uses for ctx.vault.get).
     //
-    // Loaded through public.runner_get_function (migration 000125), a
-    // SECURITY DEFINER lookup scoped to the calling project, so the runner
-    // role needs no direct table access. The direct query is a fallback
-    // only for the rollout window before 000125 exists (undefined_function).
-    // deno-lint-ignore no-explicit-any
-    let row: any;
-    try {
-      [row] = await db`
-        SELECT code, env_vars_legacy, env_vars_blob, env_vars_nonce,
-               env_vars_key_version, schema_name
-          FROM public.runner_get_function(${functionId}::uuid, ${projectId}::uuid)
-      `;
-    } catch (err) {
-      // deno-lint-ignore no-explicit-any
-      if ((err as any)?.code !== "42883") throw err;
-      [row] = await db`
-        SELECT
-          COALESCE(ef.compiled_code, ef.code) AS code,
-          ef.env_vars              AS env_vars_legacy,
-          ef.env_vars_blob,
-          ef.env_vars_nonce,
-          ef.env_vars_key_version,
-          p.schema_name
-        FROM edge_functions ef
-        JOIN public.projects p ON p.id = ef.project_id
-        WHERE ef.id = ${functionId} AND ef.project_id = ${projectId}::uuid AND ef.status = 'active'
-      `;
-    }
+    // Loaded through public.runner_get_function (migrations 000125/000126):
+    // a SECURITY DEFINER lookup scoped to the calling project. The runner
+    // role has no direct access to platform tables.
+    const [row] = await db`
+      SELECT code, env_vars_legacy, env_vars_blob, env_vars_nonce,
+             env_vars_key_version, schema_name
+        FROM public.runner_get_function(${functionId}::uuid, ${projectId}::uuid)
+    `;
     if (!row) return null;
 
     const env = await resolveEnvVars(row);
