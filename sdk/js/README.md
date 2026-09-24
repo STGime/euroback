@@ -163,6 +163,14 @@ const { error } = await eb.db
 | `.ilike(col, pattern)` | `col ILIKE pattern` (case-insensitive) |
 | `.in(col, [a, b])` | `col IN (a, b)` |
 
+Filters are combined with `AND`, and you can put several on the same column, for example a date range (SDK ≥ 0.7.1):
+
+```ts
+const { data } = await eurobase.db.from('events')
+  .gte('created_at', '2026-01-01')
+  .lt('created_at', '2026-02-01')
+```
+
 Pagination: `.limit(n)` and `.offset(n)`.
 
 ## Schema (DDL)

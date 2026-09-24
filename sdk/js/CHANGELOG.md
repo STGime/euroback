@@ -2,6 +2,26 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.1 — 2026-09-24
+
+### Fixed — multiple filters on the same column
+
+`QueryBuilder` keyed its query parameters by column name, so a second filter on the same column silently replaced the first. A date range like
+
+```ts
+await eurobase.db.from('events')
+  .gte('created_at', '2026-01-01')
+  .lte('created_at', '2026-01-31')
+```
+
+sent only `created_at=lte.2026-01-31` and returned every row up to the end date. Filters are now collected as `[column, value]` pairs and sent as repeated query parameters (`created_at=gte.…&created_at=lte.…`), which the gateway ANDs together.
+
+**Requires the matching gateway fix** (same release): the gateway previously read only the first value of a repeated parameter. Against an older gateway, 0.7.1 would apply only the *first* bound. `eurobase.app` is updated, so hosted projects are unaffected. The earlier workaround (a single filter plus client-side filtering, or raw SQL through an edge function) is no longer needed.
+
+### Fixed — Node processes no longer hang after sign-in
+
+The automatic token-refresh timer kept the Node event loop alive, so a script that signed in (seed scripts, cron jobs, tests) didn't exit until the token was close to expiry — about an hour. The timer is now `unref()`'d in Node. Browsers are unaffected, and refresh still happens while the process is running for other reasons.
+
 ## 0.7.0 — 2026-08-27
 
 ### Added — TypeScript types for the Edge Function runtime

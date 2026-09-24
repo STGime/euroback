@@ -2,6 +2,7 @@ package query
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -200,5 +201,38 @@ func TestParseNoFilterForReservedParams(t *testing.T) {
 
 	if len(params.Filters) != 0 {
 		t.Errorf("expected 0 filters for reserved params, got %d", len(params.Filters))
+	}
+}
+
+// TestParseRepeatedColumnFilters pins the date-range case: two filters
+// on the same column must both survive (previously only values[0] was
+// read, so `.gte(col, a).lte(col, b)` applied a single bound).
+func TestParseRepeatedColumnFilters(t *testing.T) {
+	req := httptest.NewRequest("GET",
+		"/events?created_at=gte.2026-01-01&created_at=lte.2026-01-31&status=eq.open", nil)
+	params := ParseQueryParams(req)
+
+	if len(params.Filters) != 3 {
+		t.Fatalf("expected 3 filters, got %d: %+v", len(params.Filters), params.Filters)
+	}
+	got := map[string]string{}
+	for _, f := range params.Filters {
+		got[f.Column+"."+f.Operator] = f.Value
+	}
+	if got["created_at.gte"] != "2026-01-01" || got["created_at.lte"] != "2026-01-31" || got["status.eq"] != "open" {
+		t.Fatalf("unexpected filters: %+v", params.Filters)
+	}
+}
+
+// Both bounds of a same-column range must reach the WHERE clause.
+func TestBuildSelectQueryRepeatedColumnRange(t *testing.T) {
+	req := httptest.NewRequest("GET", "/events?created_at=gte.2026-01-01&created_at=lte.2026-01-31", nil)
+	sql, args := buildSelectQuery("tenant_x", "events", ParseQueryParams(req))
+
+	if len(args) < 2 {
+		t.Fatalf("expected both bounds as args, got %v (sql: %s)", args, sql)
+	}
+	if !strings.Contains(sql, ">=") || !strings.Contains(sql, "<=") || !strings.Contains(sql, " AND ") {
+		t.Fatalf("expected a >= AND <= range, got: %s", sql)
 	}
 }

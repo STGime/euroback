@@ -466,6 +466,10 @@ export class AuthClient {
     this.refreshTimer = setTimeout(() => {
       this.refreshSession()
     }, refreshIn)
+    // In Node the pending refresh must not keep the process alive — a
+    // script that signs in would otherwise hang until the token nears
+    // expiry (~1 h). Browsers return a number here, so this is a no-op.
+    ;(this.refreshTimer as { unref?: () => void }).unref?.()
   }
 
   private emit(event: AuthEvent, session: AuthSession | null) {

@@ -153,17 +153,17 @@ func ParseQueryParams(r *http.Request) QueryParams {
 	}
 
 	// Parse filters: any query param not in reservedParams is a filter.
+	// A column may repeat (`?created_at=gte.A&created_at=lte.B` for a
+	// range); every value becomes its own filter, ANDed by the builder.
+	// Reading only values[0] silently dropped all but the first bound.
 	for key, values := range q {
 		if reservedParams[key] {
 			continue
 		}
-		if len(values) == 0 {
-			continue
-		}
-		val := values[0]
-		f := parseFilter(key, val)
-		if f != nil {
-			params.Filters = append(params.Filters, *f)
+		for _, val := range values {
+			if f := parseFilter(key, val); f != nil {
+				params.Filters = append(params.Filters, *f)
+			}
 		}
 	}
 
