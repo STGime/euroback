@@ -532,6 +532,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.Post("/auth/verify-email", auth.HandlePlatformVerifyEmail(platformAuthSvc))
 		r.Post("/auth/resend-verification", auth.HandlePlatformResendVerification(platformAuthSvc, platformRateCheck))
 
+		// Passkey sign-in (#621). login/* is the username-less passkey
+		// flow; step-up completes password → passkey for accounts with
+		// MFA on (SignIn returned mfa_required + mfa_token). All three
+		// answer 503 passkeys_unavailable when WebAuthn isn't wired.
+		r.Post("/auth/passkey/login/begin", auth.HandlePasskeyLoginBegin(platformAuthSvc))
+		r.Post("/auth/passkey/login/finish", auth.HandlePasskeyLoginFinish(platformAuthSvc))
+		r.Post("/auth/passkey/step-up", auth.HandlePasskeyStepUp(platformAuthSvc))
+
 		// SSO — Team-tier organizations sign in via their configured
 		// OIDC IdP. Both routes are unauthenticated (the whole point
 		// of SSO is that the caller has no session yet). The
@@ -609,6 +617,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Patch("/profile", auth.HandleUpdateProfile(platformAuthSvc))
 			r.Post("/change-password", auth.HandleChangePassword(platformAuthSvc))
 			r.Post("/delete", auth.HandleDeleteAccount(platformAuthSvc))
+
+			// Passkeys (#621). Console JWT sessions only — PATs are
+			// refused in-handler. Adding / removing needs a fresh
+			// session or the current password.
+			r.Get("/passkeys", auth.HandleListPasskeys(platformAuthSvc))
+			r.Post("/passkeys/register/begin", auth.HandlePasskeyRegisterBegin(platformAuthSvc, platformRateCheck))
+			r.Post("/passkeys/register/finish", auth.HandlePasskeyRegisterFinish(platformAuthSvc))
+			r.Patch("/passkeys/{id}", auth.HandleRenamePasskey(platformAuthSvc))
+			r.Post("/passkeys/{id}/delete", auth.HandleDeletePasskey(platformAuthSvc, platformRateCheck))
 
 			// Personal Access Tokens.
 			r.Get("/tokens", auth.HandleListPATs(patSvc))

@@ -2,7 +2,8 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { user, logout } from '$lib/stores.js';
-	import { api, type PlatformProfile, type PersonalAccessToken, type MailingPreference } from '$lib/api.js';
+	import { api, APIError, type PlatformProfile, type PersonalAccessToken, type MailingPreference, type Passkey } from '$lib/api.js';
+	import { passkeysSupported, createPasskey, passkeyErrorMessage } from '$lib/webauthn';
 
 	let profile = $state<PlatformProfile | null>(null);
 	let profileLoading = $state(true);
@@ -35,6 +36,29 @@
 	let copiedToken = $state(false);
 	let revokingTokenId = $state('');
 
+	// Passkeys / MFA (#621)
+	let passkeys = $state<Passkey[]>([]);
+	let passkeysLoading = $state(true);
+	let passkeysError = $state('');
+	let passkeySupported = $state(false);
+	let newPasskeyName = $state('');
+	let addingPasskey = $state(false);
+	let renamingId = $state('');
+	let renameValue = $state('');
+	let confirmDeleteId = $state('');
+	let deletingPasskeyId = $state('');
+	// Re-auth prompt: adding / removing a passkey on a session older
+	// than ~10 minutes needs the current password (403 reauth_required).
+	let reauthAction = $state<null | { kind: 'add' } | { kind: 'delete'; id: string }>(null);
+	let reauthPassword = $state('');
+	// A begun-but-unfinished registration. Browsers (notably Safari) may
+	// refuse navigator.credentials.create when it isn't directly inside
+	// a click — e.g. right after the re-auth password round-trip. The
+	// challenge stays valid for 5 minutes, so "Create passkey" retries
+	// it from a fresh click instead of starting over.
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let pendingRegistration = $state<{ challenge_id: string; options: any } | null>(null);
+
 	// Mailing preferences
 	let mailingPrefs = $state<MailingPreference[]>([]);
 	let mailingLoading = $state(true);
@@ -55,9 +79,118 @@
 		} finally {
 			profileLoading = false;
 		}
+		passkeySupported = passkeysSupported();
+		await loadPasskeys();
 		await loadTokens();
 		await loadMailingPrefs();
+		if (typeof window !== 'undefined' && window.location.hash === '#passkeys') {
+			document.getElementById('passkeys')?.scrollIntoView();
+		}
 	});
+
+	async function loadPasskeys() {
+		passkeysLoading = true;
+		passkeysError = '';
+		try {
+			passkeys = (await api.listPasskeys()).passkeys;
+		} catch (err) {
+			passkeysError = err instanceof Error ? err.message : 'Failed to load passkeys';
+		} finally {
+			passkeysLoading = false;
+		}
+	}
+
+	function isReauth(err: unknown): boolean {
+		return err instanceof APIError && err.code === 'reauth_required';
+	}
+
+	async function completeRegistration(ch: { challenge_id: string; options: unknown }) {
+		pendingRegistration = null;
+		try {
+			const credential = await createPasskey(ch.options);
+			const created = await api.passkeyRegisterFinish(ch.challenge_id, credential, newPasskeyName.trim());
+			passkeys = [...passkeys, created];
+			newPasskeyName = '';
+			try { sessionStorage.removeItem('eb_passkey_nudge'); } catch { /* ignore */ }
+		} catch (err) {
+			if (err instanceof DOMException && err.name === 'NotAllowedError') {
+				// Cancelled, timed out, or no user gesture — keep the
+				// challenge so the user can retry with one click.
+				pendingRegistration = ch;
+			}
+			passkeysError = err instanceof APIError ? err.message : passkeyErrorMessage(err);
+		}
+	}
+
+	async function retryRegistration() {
+		if (!pendingRegistration) return;
+		passkeysError = '';
+		addingPasskey = true;
+		try {
+			await completeRegistration(pendingRegistration);
+		} finally {
+			addingPasskey = false;
+		}
+	}
+
+	async function handleAddPasskey(password = '') {
+		passkeysError = '';
+		addingPasskey = true;
+		try {
+			const ch = await api.passkeyRegisterBegin(password);
+			reauthAction = null;
+			reauthPassword = '';
+			await completeRegistration(ch);
+		} catch (err) {
+			if (isReauth(err)) {
+				if (password) passkeysError = 'That password is incorrect.';
+				reauthAction = { kind: 'add' };
+			} else {
+				passkeysError = err instanceof APIError ? err.message : passkeyErrorMessage(err);
+			}
+		} finally {
+			addingPasskey = false;
+		}
+	}
+
+	async function handleDeletePasskey(id: string, password = '') {
+		passkeysError = '';
+		deletingPasskeyId = id;
+		try {
+			await api.deletePasskey(id, password);
+			passkeys = passkeys.filter((p) => p.id !== id);
+			confirmDeleteId = '';
+			reauthAction = null;
+			reauthPassword = '';
+		} catch (err) {
+			if (isReauth(err)) {
+				if (password) passkeysError = 'That password is incorrect.';
+				reauthAction = { kind: 'delete', id };
+			} else {
+				passkeysError = err instanceof Error ? err.message : 'Failed to remove passkey';
+			}
+		} finally {
+			deletingPasskeyId = '';
+		}
+	}
+
+	function submitReauth() {
+		const action = reauthAction;
+		if (!action || !reauthPassword) return;
+		if (action.kind === 'add') void handleAddPasskey(reauthPassword);
+		else void handleDeletePasskey(action.id, reauthPassword);
+	}
+
+	async function saveRename(id: string) {
+		passkeysError = '';
+		try {
+			await api.renamePasskey(id, renameValue);
+			passkeys = passkeys.map((p) => (p.id === id ? { ...p, nickname: renameValue.trim() || null } : p));
+			renamingId = '';
+		} catch (err) {
+			passkeysError = err instanceof Error ? err.message : 'Failed to rename passkey';
+		}
+	}
 
 	async function loadMailingPrefs() {
 		mailingLoading = true;
@@ -342,6 +475,132 @@
 			>
 				{passwordSaving ? 'Updating...' : 'Update Password'}
 			</button>
+		</div>
+	</div>
+
+	<!-- Card 3b: Passkeys & MFA (#621) -->
+	<div id="passkeys" class="rounded-xl border border-gray-200 bg-white overflow-hidden scroll-mt-6">
+		<div class="px-5 py-3 border-b border-gray-100 flex items-center justify-between gap-4">
+			<div>
+				<h3 class="text-sm font-semibold text-gray-900">Passkeys &amp; multi-factor authentication</h3>
+				<p class="mt-0.5 text-xs text-gray-500">Sign in with Face ID, Touch ID, Windows Hello, your phone or a security key. Once you add a passkey, your password alone can no longer sign in.</p>
+			</div>
+			{#if !passkeysLoading}
+				<span class="shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {passkeys.length > 0 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}">
+					MFA {passkeys.length > 0 ? 'on' : 'off'}
+				</span>
+			{/if}
+		</div>
+		<div class="px-5 py-4 space-y-3">
+			{#if passkeysLoading}
+				<p class="text-sm text-gray-400">Loading...</p>
+			{:else}
+				{#if passkeys.length === 0}
+					<p class="text-sm text-gray-500">No passkeys yet. Add one to turn on multi-factor authentication for your console account.</p>
+				{:else}
+					<div class="space-y-2">
+						{#each passkeys as pk (pk.id)}
+							<div class="rounded-lg border border-gray-200 px-3 py-2">
+								<div class="flex items-center justify-between gap-3">
+									<div class="min-w-0 flex-1">
+										{#if renamingId === pk.id}
+											<div class="flex items-center gap-2">
+												<input
+													type="text"
+													bind:value={renameValue}
+													maxlength={64}
+													placeholder="e.g. MacBook, YubiKey"
+													class="flex-1 rounded-md border border-gray-300 px-2 py-1 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none"
+												/>
+												<button type="button" onclick={() => saveRename(pk.id)} class="rounded-md bg-eurobase-600 px-2 py-1 text-xs font-medium text-white hover:bg-eurobase-700 cursor-pointer">Save</button>
+												<button type="button" onclick={() => { renamingId = ''; }} class="rounded-md px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 cursor-pointer">Cancel</button>
+											</div>
+										{:else}
+											<div class="flex items-center gap-2">
+												<p class="text-sm font-medium text-gray-900 truncate">{pk.nickname ?? 'Passkey'}</p>
+												<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium bg-gray-100 text-gray-700">{pk.backed_up ? 'synced' : 'device-bound'}</span>
+											</div>
+										{/if}
+										<p class="mt-0.5 text-[11px] text-gray-400">
+											Added {new Date(pk.created_at).toLocaleDateString('en-GB')}
+											{#if pk.last_used_at} · Last used {new Date(pk.last_used_at).toLocaleDateString('en-GB')}{:else} · Never used{/if}
+										</p>
+									</div>
+									{#if renamingId !== pk.id}
+										<div class="flex items-center gap-1.5">
+											<button type="button" onclick={() => { renamingId = pk.id; renameValue = pk.nickname ?? ''; }} class="rounded-md border border-gray-200 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 cursor-pointer">Rename</button>
+											<button type="button" onclick={() => { confirmDeleteId = pk.id; }} class="rounded-md border border-gray-200 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 cursor-pointer">Remove</button>
+										</div>
+									{/if}
+								</div>
+								{#if confirmDeleteId === pk.id}
+									<div class="mt-2 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800">
+										{#if passkeys.length === 1}
+											This is your last passkey. Removing it turns multi-factor authentication <strong>off</strong> — your password alone will sign in again.
+										{:else}
+											Remove this passkey? You won't be able to sign in with it anymore.
+										{/if}
+										<div class="mt-2 flex gap-2">
+											<button type="button" disabled={deletingPasskeyId === pk.id} onclick={() => handleDeletePasskey(pk.id)} class="rounded-md bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-50 cursor-pointer">{deletingPasskeyId === pk.id ? 'Removing…' : 'Remove'}</button>
+											<button type="button" onclick={() => { confirmDeleteId = ''; }} class="rounded-md px-2 py-1 text-red-800 hover:bg-red-100 cursor-pointer">Cancel</button>
+										</div>
+									</div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+
+				{#if reauthAction}
+					<div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 space-y-2">
+						<p class="text-xs text-amber-900">For your security, confirm your current password to {reauthAction.kind === 'add' ? 'add' : 'remove'} a passkey.</p>
+						<div class="flex gap-2">
+							<input
+								type="password"
+								bind:value={reauthPassword}
+								placeholder="Current password"
+								onkeydown={(e) => { if (e.key === 'Enter') submitReauth(); }}
+								class="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none"
+							/>
+							<button type="button" disabled={!reauthPassword || addingPasskey || !!deletingPasskeyId} onclick={submitReauth} class="rounded-lg bg-eurobase-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-eurobase-700 disabled:opacity-50 cursor-pointer">Confirm</button>
+							<button type="button" onclick={() => { reauthAction = null; reauthPassword = ''; passkeysError = ''; }} class="rounded-lg px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 cursor-pointer">Cancel</button>
+						</div>
+						<p class="text-[11px] text-amber-800">Don't know your password? Sign out and back in with your password or a passkey, then try again within 10 minutes. (A fresh SSO sign-in doesn't count — your organization's identity provider can't manage your personal passkeys.)</p>
+					</div>
+				{/if}
+
+				{#if passkeysError}
+					<p class="text-xs text-red-600">{passkeysError}</p>
+				{/if}
+				{#if pendingRegistration}
+					<button type="button" disabled={addingPasskey} onclick={retryRegistration} class="inline-flex items-center rounded-lg border border-eurobase-300 bg-white px-3 py-1.5 text-sm font-medium text-eurobase-700 hover:bg-eurobase-50 disabled:opacity-50 cursor-pointer">
+						{addingPasskey ? 'Waiting for passkey…' : 'Create passkey'}
+					</button>
+				{/if}
+
+				{#if passkeySupported}
+					<div class="flex items-center gap-2 pt-1">
+						<input
+							type="text"
+							bind:value={newPasskeyName}
+							maxlength={64}
+							placeholder="Name (optional), e.g. MacBook"
+							class="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none"
+						/>
+						<button
+							type="button"
+							disabled={addingPasskey || passkeys.length >= 10}
+							onclick={() => handleAddPasskey()}
+							class="inline-flex items-center rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 cursor-pointer"
+						>
+							{addingPasskey ? 'Waiting for passkey…' : '+ Add passkey'}
+						</button>
+					</div>
+					<p class="text-[11px] text-gray-400">Tip: add a second passkey (e.g. your phone) so you're never locked out. If you lose all of them, resetting your password by email removes them and turns MFA off.</p>
+				{:else}
+					<p class="text-xs text-gray-500">This browser doesn't support passkeys. Use a current version of Chrome, Safari, Edge or Firefox to add one.</p>
+				{/if}
+			{/if}
 		</div>
 	</div>
 

@@ -118,7 +118,7 @@ Supabase's overage model ($0.00325 per MAU, $0.125 per GB DB, etc.) works becaus
 - **No paywall on DSAR API.** Statutory legal obligation; free-tier users must be able to comply. Console flow stays Pro-only (already the case).
 - **No Free-tier project deletion.** Idle-pause, not delete. A paused Scaleway compute is cheap; a lost customer relationship isn't.
 - **No compute add-ons** (Supabase's Micro→16XL menu). Adds pricing complexity; wait for demand signal.
-- **No SMS/MFA add-ons.** Bundle into Team tier when the enterprise MFA work happens.
+- **No SMS/MFA add-ons.** Console passkey MFA ships on every tier, Free included (#621) — universal MFA is a stronger security claim than a Team-only feature. Team-tier differentiation is org-level *enforcement* (#628) and IdP-MFA verification for SSO (#629), not MFA itself.
 
 ## Migration order (rough sizing, not a hard plan)
 

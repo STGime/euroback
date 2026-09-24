@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,10 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/eurobase/euroback/internal/audit"
 )
 
 // PlatformAuthService handles sign-up, sign-in, and JWT generation
@@ -55,6 +59,14 @@ type PlatformAuthService struct {
 	emailService      PlatformEmailer
 	dripEnqueuer      DripEnqueuer
 	AllowPublicSignup bool // when false, only emails in platform_allowlist can sign up
+
+	// Passkey MFA (#621) — wired by EnablePasskeys; nil in dev / tests
+	// without a developer pool. See passkey.go.
+	webAuthn       *webauthn.WebAuthn
+	passkeys       passkeyStore
+	auditor        auditLogger
+	lookupIdentity func(ctx context.Context, userID string) (*passkeyIdentity, error)
+	checkPassword  func(ctx context.Context, userID, password string) (bool, error)
 }
 
 // WaitlistError is returned when a signup attempt is blocked by the allowlist.
@@ -133,6 +145,14 @@ type PlatformAuthResponse struct {
 	User        PlatformUser `json:"user"`
 
 	EmailVerificationRequired bool `json:"email_verification_required,omitempty"`
+
+	// MFA step-up (#621). Set when the password was correct but the
+	// account has >= 1 passkey: no session is issued; the console runs
+	// navigator.credentials.get(PasskeyOptions) and POSTs the assertion
+	// with MFAToken to /platform/auth/passkey/step-up.
+	MFARequired    bool            `json:"mfa_required,omitempty"`
+	MFAToken       string          `json:"mfa_token,omitempty"`
+	PasskeyOptions json.RawMessage `json:"passkey_options,omitempty"`
 }
 
 // NewPlatformAuthService creates a new service for platform auth.
@@ -465,6 +485,30 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 		return nil, ErrEmailNotVerified
 	}
 
+	// MFA (#621): an account with >= 1 passkey can't sign in with the
+	// password alone. Issue a single-use step-up challenge instead of a
+	// session. Fails closed — if we can't tell whether the user has
+	// passkeys, we don't hand out a password-only session.
+	if s.passkeysEnabled() {
+		n, err := s.passkeys.CountCredentials(ctx, user.ID)
+		if err != nil {
+			return nil, fmt.Errorf("check passkeys: %w", err)
+		}
+		if n > 0 {
+			ch, err := s.beginStepUp(ctx, user.ID)
+			if err != nil {
+				return nil, err
+			}
+			slog.Info("platform user password ok, passkey step-up required", "user_id", user.ID)
+			return &PlatformAuthResponse{
+				User:           user,
+				MFARequired:    true,
+				MFAToken:       ch.ChallengeID,
+				PasskeyOptions: ch.Options,
+			}, nil
+		}
+	}
+
 	// Update last sign-in timestamp.
 	_, _ = s.pool.Exec(ctx,
 		`UPDATE platform_users SET last_sign_in_at = now() WHERE id = $1`,
@@ -514,6 +558,21 @@ func (s *PlatformAuthService) VerifyEmail(ctx context.Context, rawToken string) 
 	}
 
 	slog.Info("platform user verified email", "user_id", user.ID, "email", user.Email)
+
+	// MFA (#621): a verification link must not become a passkey bypass.
+	// A leftover link (e.g. an earlier "resend" still inside its 24h
+	// TTL) clicked after the user confirmed and enrolled a passkey would
+	// otherwise mint a session without the passkey step. Such an
+	// account is already verified — send them to the normal sign-in.
+	if s.passkeysEnabled() {
+		n, err := s.passkeys.CountCredentials(ctx, user.ID)
+		if err != nil {
+			return nil, fmt.Errorf("check passkeys: %w", err)
+		}
+		if n > 0 {
+			return nil, fmt.Errorf("invalid or expired token")
+		}
+	}
 
 	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin, LoginViaPassword, "")
 	if err != nil {
@@ -854,6 +913,10 @@ func (s *PlatformAuthService) ValidatePlatformJWT(tokenStr string) (*Claims, err
 	// default for sso_required orgs.
 	loginVia, _ := mapClaims["login_via"].(string)
 	ssoOrgID, _ := mapClaims["sso_org_id"].(string)
+	var issuedAt time.Time
+	if iat, err := mapClaims.GetIssuedAt(); err == nil && iat != nil {
+		issuedAt = iat.Time
+	}
 
 	if sub == "" {
 		return nil, fmt.Errorf("token missing subject")
@@ -865,6 +928,7 @@ func (s *PlatformAuthService) ValidatePlatformJWT(tokenStr string) (*Claims, err
 		IsSuperadmin: isSuperadmin,
 		LoginVia:     loginVia,
 		SsoOrgID:     ssoOrgID,
+		IssuedAt:     issuedAt,
 	}, nil
 }
 
@@ -916,14 +980,55 @@ func (s *PlatformAuthService) ResetPasswordWithToken(ctx context.Context, rawTok
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	_, err = s.pool.Exec(ctx,
-		`UPDATE platform_users SET password_hash = $1 WHERE id = $2`,
-		string(hash), userID,
-	)
-	if err != nil {
-		return fmt.Errorf("update password: %w", err)
+	// Passkey accounts (#621): the email reset is the MVP recovery path
+	// for a user who lost every passkey, so it clears them — otherwise
+	// the new password would still hit the passkey step-up. Password
+	// update + passkey delete run in one transaction (developer pool)
+	// so a failure leaves the account exactly as it was.
+	var userEmail string
+	cleared := 0
+	if s.passkeysEnabled() {
+		userEmail, cleared, err = s.resetPasswordClearingPasskeys(ctx, userID, string(hash))
+		if err != nil {
+			return err
+		}
+	} else {
+		err = s.pool.QueryRow(ctx,
+			`UPDATE platform_users SET password_hash = $1 WHERE id = $2 RETURNING email`,
+			string(hash), userID,
+		).Scan(&userEmail)
+		if err != nil {
+			return fmt.Errorf("update password: %w", err)
+		}
 	}
 
-	slog.Info("platform user reset password via token", "user_id", userID)
+	slog.Info("platform user reset password via token", "user_id", userID, "passkeys_cleared", cleared)
+	if cleared > 0 {
+		s.audit(ctx, userID, userEmail, audit.ActionPasskeysClearedByReset, PasskeyRequestMeta{}, map[string]interface{}{
+			"passkeys_cleared": cleared,
+		})
+		if notifier, ok := s.emailService.(passkeyNoticeEmailer); ok {
+			if err := notifier.SendPlatformPasskeysClearedEmail(ctx, userEmail); err != nil {
+				slog.Error("failed to send passkeys-cleared notice", "error", err, "user_id", userID)
+			}
+		}
+	}
 	return nil
+}
+
+// passwordMatches reports whether password is the user's current one.
+// Used by the passkey re-auth check.
+func (s *PlatformAuthService) passwordMatches(ctx context.Context, userID, password string) (bool, error) {
+	var hash *string
+	err := s.pool.QueryRow(ctx, `SELECT password_hash FROM platform_users WHERE id = $1`, userID).Scan(&hash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("query user: %w", err)
+	}
+	if hash == nil {
+		return false, nil
+	}
+	return bcrypt.CompareHashAndPassword([]byte(*hash), []byte(password)) == nil, nil
 }

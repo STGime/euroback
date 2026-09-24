@@ -272,6 +272,22 @@ func (s *EmailService) SendPlatformPasswordResetEmail(ctx context.Context, userI
 	return s.client.Send(ctx, userEmail, subject, body)
 }
 
+// SendPlatformPasskeysClearedEmail notifies a console user that a
+// password reset removed every passkey on their account (#621). No
+// token — informational security notice. Satisfies the auth package's
+// optional passkeyNoticeEmailer interface.
+func (s *EmailService) SendPlatformPasskeysClearedEmail(ctx context.Context, userEmail string) error {
+	subject, body, err := RenderPlatformTemplate("passkeys_cleared", TemplateData{
+		UserEmail:   userEmail,
+		ProjectName: "Eurobase Console",
+		ActionURL:   s.consoleURL + "/account",
+	})
+	if err != nil {
+		return fmt.Errorf("render passkeys-cleared email: %w", err)
+	}
+	return s.client.Send(ctx, userEmail, subject, body)
+}
+
 // SendPlatformVerificationEmail sends an email-verification link for a
 // console (platform) user. Mirrors SendPlatformPasswordResetEmail: a
 // 'verification' token in public.platform_email_tokens (24h, matching

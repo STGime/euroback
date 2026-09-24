@@ -7,6 +7,7 @@
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
+	import { passkeysSupported, getPasskeyAssertion, passkeyErrorMessage } from '$lib/webauthn';
 
 	let email = $state('');
 	let password = $state('');
@@ -55,6 +56,15 @@
 	// Phase A). Versions match legal_documents seed rows from migration
 	// 000073; if we bump the docs to v3 later, these strings + the
 	// checkbox labels update in the same PR.
+	// Passkeys (#621). `passkeyAvailable` is resolved on mount so SSR
+	// never renders the button for a browser that can't use it.
+	// `stepUp` holds the MFA challenge after a correct password on an
+	// account that has a passkey — the password alone issues no session.
+	let passkeyAvailable = $state(false);
+	let passkeyBusy = $state(false);
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let stepUp = $state<{ token: string; options: any } | null>(null);
+
 	let acceptedTerms = $state(false);
 	let acceptedDPA = $state(false);
 	const LEGAL_VERSION = '2.0';
@@ -121,8 +131,75 @@
 	}
 
 	onMount(() => {
+		passkeyAvailable = passkeysSupported();
 		void handleSSOFragment();
 	});
+
+	// A session was just minted by password alone — the account has no
+	// passkey yet. The app shell shows a one-time "add a passkey" nudge.
+	function flagPasskeyNudge() {
+		try {
+			if (passkeysSupported()) sessionStorage.setItem('eb_passkey_nudge', '1');
+		} catch { /* storage blocked — skip the nudge */ }
+	}
+
+	async function finishLogin(token: string, signedInEmail: string) {
+		user.set({ token, email: signedInEmail });
+		await redirectAfterLogin();
+	}
+
+	// Username-less sign-in: the browser offers every passkey it holds
+	// for the console. Begin is stateless server-side (signed challenge
+	// token); single use is enforced when the assertion is verified.
+	async function handlePasskeySignIn() {
+		error = '';
+		passkeyBusy = true;
+		try {
+			const ch = await api.passkeyLoginBegin();
+			const credential = await getPasskeyAssertion(ch.options);
+			const res = await api.passkeyLoginFinish(ch.challenge_id, credential);
+			await finishLogin(res.access_token!, res.user.email);
+		} catch (err) {
+			if (err instanceof APIError && err.code === 'email_not_verified') {
+				needsVerification = true;
+				return;
+			}
+			error = err instanceof APIError ? parseError(err.message) : passkeyErrorMessage(err);
+		} finally {
+			passkeyBusy = false;
+		}
+	}
+
+	// Password was correct; confirm with a passkey. The first attempt is
+	// kicked off right after the password submit; the "Use passkey"
+	// button retries (some browsers need a fresh user gesture).
+	async function handleStepUp() {
+		if (!stepUp) return;
+		error = '';
+		passkeyBusy = true;
+		try {
+			const credential = await getPasskeyAssertion(stepUp.options);
+			const res = await api.passkeyStepUp(stepUp.token, credential);
+			stepUp = null;
+			await finishLogin(res.access_token!, res.user.email);
+		} catch (err) {
+			if (err instanceof APIError) {
+				// The MFA token is single-use: any server-side failure
+				// means starting over from the password.
+				stepUp = null;
+				password = '';
+				error = err.code === 'passkey_challenge_invalid'
+					? 'Your sign-in expired. Please enter your password again.'
+					: 'Passkey verification failed. Please sign in again.';
+			} else {
+				// Cancelled / timed out in the browser — the token is
+				// still valid, let the user retry.
+				error = passkeyErrorMessage(err);
+			}
+		} finally {
+			passkeyBusy = false;
+		}
+	}
 
 	async function handleSSOSubmit(e: Event) {
 		e.preventDefault();
@@ -170,8 +247,15 @@
 					verificationSent = true;
 					return;
 				}
-				user.set({ token: result.access_token!, email });
-				await redirectAfterLogin();
+				// MFA on: the password was right, now the passkey.
+				if (!isSignUp && 'mfa_required' in result && result.mfa_required) {
+					stepUp = { token: result.mfa_token!, options: result.passkey_options };
+					submitting = false;
+					void handleStepUp();
+					return;
+				}
+				if (!isSignUp) flagPasskeyNudge();
+				await finishLogin(result.access_token!, email);
 			}
 		} catch (err) {
 			// Correct password but unverified email → offer a resend
@@ -313,7 +397,34 @@
 					</div>
 				{/if}
 
-				{#if ssoMode}
+				{#if stepUp}
+					<!-- MFA step-up (#621): password accepted, confirm with a passkey. -->
+					<div class="mt-6 space-y-4">
+						<div class="rounded-lg bg-eurobase-50 border border-eurobase-200 p-4 text-sm text-eurobase-800">
+							<p class="font-medium">Confirm it's you</p>
+							<p class="mt-1 text-eurobase-700">Multi-factor authentication is on for <strong>{email}</strong>. Use one of your passkeys to finish signing in. If no prompt appeared, click <strong>Use passkey</strong>.</p>
+						</div>
+						<button
+							type="button"
+							onclick={handleStepUp}
+							disabled={passkeyBusy}
+							class="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-eurobase-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.75" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
+							</svg>
+							{passkeyBusy ? 'Waiting for your passkey…' : 'Use passkey'}
+						</button>
+						<p class="text-center text-xs text-gray-500">
+							Lost access to all your passkeys?
+							<button type="button" onclick={() => { stepUp = null; isForgotPassword = true; error = ''; }} class="text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Reset your password</button>
+							— this removes your passkeys.
+						</p>
+						<div class="text-center">
+							<button type="button" onclick={() => { stepUp = null; password = ''; error = ''; }} class="text-xs text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to sign in</button>
+						</div>
+					</div>
+				{:else if ssoMode}
 					<!-- Team-tier SSO flow: email-only form; backend
 					     resolves the org and returns the IdP URL. -->
 					<form onsubmit={handleSSOSubmit} class="mt-6 space-y-4">
@@ -503,6 +614,21 @@
 							<span class="text-xs text-gray-400 uppercase tracking-wide">or</span>
 							<div class="h-px flex-1 bg-gray-200"></div>
 						</div>
+						{#if passkeyAvailable}
+							<!-- Passkey sign-in (#621) — no email needed; the
+							     browser lists the passkeys it holds. -->
+							<button
+								type="button"
+								onclick={handlePasskeySignIn}
+								disabled={passkeyBusy}
+								class="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								<svg class="h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.75" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
+								</svg>
+								{passkeyBusy ? 'Waiting for your passkey…' : 'Sign in with a passkey'}
+							</button>
+						{/if}
 						<button
 							type="button"
 							onclick={() => { ssoMode = true; error = ''; }}

@@ -277,6 +277,36 @@ func main() {
 	// Wire email into platform auth.
 	platformAuthSvc.SetEmailService(emailService)
 
+	// ── Console passkey MFA (#621) ──
+	// RP id / origin default to the CONSOLE_URL host (console.eurobase.app
+	// in prod — deliberately not the eurobase.app suffix, which tenant
+	// apps share). WEBAUTHN_RP_ID / WEBAUTHN_RP_ORIGINS override.
+	// Fails closed: with the developer pool present, a WebAuthn setup
+	// error aborts startup — running without passkeys would let accounts
+	// that enrolled one sign in with the password alone.
+	if developerPool != nil {
+		pkCfg, err := auth.PasskeyConfigFromConsoleURL(consoleURL, os.Getenv("WEBAUTHN_RP_ID"), os.Getenv("WEBAUTHN_RP_ORIGINS"))
+		if err == nil {
+			err = platformAuthSvc.EnablePasskeys(pkCfg)
+		}
+		if err != nil {
+			slog.Error("failed to configure console passkeys", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("console passkeys enabled", "rp_id", pkCfg.RPID, "origins", pkCfg.RPOrigins)
+	} else {
+		// Without the developer pool passkeys are off, and SignIn would
+		// hand password-only sessions to accounts that enrolled one.
+		// Acceptable in local dev; never in production.
+		env := strings.ToLower(os.Getenv("ENV"))
+		suffix := strings.ToLower(os.Getenv("DOMAIN_SUFFIX"))
+		if env == "production" || env == "prod" || strings.HasSuffix(suffix, "eurobase.app") {
+			slog.Error("DATABASE_URL_DEVELOPER not set on a production-looking environment — console passkey MFA cannot be enforced; refusing to start")
+			os.Exit(1)
+		}
+		slog.Warn("DATABASE_URL_DEVELOPER not set — console passkeys disabled")
+	}
+
 	// ── Set up GatewayAPI SMS client (optional — degrades gracefully) ──
 	smsAPIToken := os.Getenv("GATEWAYAPI_TOKEN")
 	smsSender := os.Getenv("SMS_SENDER")

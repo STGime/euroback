@@ -28,6 +28,13 @@ func ssoOffClaims(userID string) *auth.Claims {
 	return &auth.Claims{Subject: userID, LoginVia: auth.LoginViaPassword}
 }
 
+// passkeyClaims represents a console session minted by passkey sign-in
+// or password → passkey step-up (#621). MFA-backed, but NOT SSO: it
+// must be refused by sso_required orgs exactly like a password session.
+func passkeyClaims(userID string) *auth.Claims {
+	return &auth.Claims{Subject: userID, LoginVia: auth.LoginViaPasskey}
+}
+
 // ssoOnClaimsFor returns a Claims struct representing a session
 // authed via SSO for the given org. Only satisfies sso_required for
 // that specific org — SSO against a different org, or password, is
@@ -903,6 +910,12 @@ func TestEnforceOrgSSOForProject(t *testing.T) {
 		t.Fatalf("expected ErrSSORequiredForOrg for password session; got %v", err)
 	}
 
+	// Passkey session refused too (#621): MFA at Eurobase does not
+	// substitute for the org's IdP when the org requires SSO.
+	if err := EnforceOrgSSOForProject(ctx, pool, passkeyClaims(alice), proj.ID); !errors.Is(err, ErrSSORequiredForOrg) {
+		t.Fatalf("expected ErrSSORequiredForOrg for passkey session; got %v", err)
+	}
+
 	// SSO session for the RIGHT org passes.
 	if err := EnforceOrgSSOForProject(ctx, pool, ssoOnClaimsFor(alice, aliceOrg.ID), proj.ID); err != nil {
 		t.Fatalf("expected pass for sso session with matching org; got %v", err)
@@ -942,6 +955,10 @@ func TestEnforceOrgSSOForProject_PersonalProject(t *testing.T) {
 	if err := EnforceOrgSSOForProject(ctx, pool, ssoOffClaims(uid), proj.ID); err != nil {
 		t.Fatalf("personal project should always pass sso enforcement; got %v", err)
 	}
+	// Same for a passkey session (#621).
+	if err := EnforceOrgSSOForProject(ctx, pool, passkeyClaims(uid), proj.ID); err != nil {
+		t.Fatalf("personal project should pass for a passkey session; got %v", err)
+	}
 }
 
 // TestSessionSatisfiesSSOFor pins the pure predicate — no DB needed.
@@ -961,6 +978,8 @@ func TestSessionSatisfiesSSOFor(t *testing.T) {
 		{"sso_required=true: SSO for same org passes", "sso", "org-A", "org-A", true, true},
 		{"sso_required=true: SSO for different org refused", "sso", "org-B", "org-A", true, false},
 		{"sso_required=true: SSO with empty sso_org_id refused", "sso", "", "org-A", true, false},
+		{"sso_required=false: passkey session passes", "passkey", "", "org-A", false, true},
+		{"sso_required=true: passkey session refused", "passkey", "", "org-A", true, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
