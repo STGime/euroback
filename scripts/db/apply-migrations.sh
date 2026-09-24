@@ -16,9 +16,10 @@
 #   2. Migrations 1–37 as eurobase_api (the pre-split admin role;
 #      SUPERUSER here stands in for the Scaleway admin user). 000037 hands
 #      ownership to eurobase_migrator.
-#   3. REASSIGN OWNED BY eurobase_api (what deploy/docker/migrate-entrypoint.sh
-#      does before every prod run), then every later migration AS
-#      eurobase_migrator — the prod migrate Job's role.
+#   3. Every later migration through the REAL prod migrations image
+#      (deploy/docker/Dockerfile.migrations, built from this tree) with the
+#      prod Job's args, AS eurobase_migrator — so migrate-entrypoint.sh's
+#      own GRANT + REASSIGN runs exactly as it does before every prod `up`.
 #
 # Re-running on an up-to-date database is a no-op; on a database already
 # past 37 only step 3 runs (incremental local updates).
@@ -138,11 +139,17 @@ if [ "${CURRENT:-0}" -lt "$LAST_PRE_SPLIT" ]; then
     migrate_as eurobase_api goto "$LAST_PRE_SPLIT" || fail
 fi
 
-echo "── REASSIGN OWNED BY eurobase_api TO eurobase_migrator ──"
-sql -c "REASSIGN OWNED BY eurobase_api TO eurobase_migrator" || fail
+# Build the prod migrations image from this tree. Minimal context (only what
+# the Dockerfile COPYs) so local node_modules etc. aren't sent to Docker.
+PROD_IMAGE=eurobase-migrations:replay
+echo "── Building $PROD_IMAGE (deploy/docker/Dockerfile.migrations) ──"
+(cd "$REPO_ROOT" && tar -cf - migrations deploy/docker/Dockerfile.migrations deploy/docker/migrate-entrypoint.sh) \
+    | docker build -q -f deploy/docker/Dockerfile.migrations -t "$PROD_IMAGE" - >/dev/null || fail
 
-echo "── Remaining migrations as eurobase_migrator ──"
-migrate_as eurobase_migrator up || fail
+echo "── Remaining migrations via the prod image/entrypoint as eurobase_migrator ──"
+MIGRATOR_URL="$(role_url eurobase_migrator)"
+docker run --rm "${DOCKER_NET[@]}" -e DATABASE_URL_MIGRATOR="$MIGRATOR_URL" \
+    "$PROD_IMAGE" -database "$MIGRATOR_URL" up || fail
 
 LATEST="$(ls "$REPO_ROOT"/migrations/*.up.sql | sed -E 's#.*/0*([0-9]+)_.*#\1#' | sort -n | tail -1)"
 APPLIED="$(sql -c "SELECT version FROM schema_migrations WHERE NOT dirty")"

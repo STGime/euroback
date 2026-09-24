@@ -31,7 +31,12 @@ END$$;
 
 -- Migrator needs membership in eurobase_api so REASSIGN OWNED works.
 -- Running as a Scaleway admin role, which can grant any role to any role.
-GRANT eurobase_api TO eurobase_migrator;
+-- WITH INHERIT TRUE (#632): REASSIGN needs the *privileges of* eurobase_api,
+-- and eurobase_migrator is NOINHERIT — on PG16 a plain grant then carries
+-- inherit=false and the migrate Job's entrypoint (REASSIGN as the
+-- migrator before every `up`) fails on any freshly built database.
+-- Editing in place is safe: prod's schema_migrations is far past 000037.
+GRANT eurobase_api TO eurobase_migrator WITH INHERIT TRUE;
 
 -- Transfer every object currently owned by eurobase_api to eurobase_migrator.
 -- Covers public.* tables, sequences, functions, and every tenant_* schema
