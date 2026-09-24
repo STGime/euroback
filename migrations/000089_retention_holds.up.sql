@@ -65,9 +65,15 @@ CREATE TABLE public.retention_holds (
 -- the DSAR path checks "is this row under hold?" once per candidate.
 -- JSONB has a GIN index; combined with project_id + target_type it
 -- keeps the check to microseconds.
+--
+-- #632: originally `WHERE expires_at > now()` — invalid on every
+-- PostgreSQL version (index predicates must be IMMUTABLE; now() is
+-- STABLE). This migration never ran in prod (silently skipped, see
+-- 000094), which recreated the index without the predicate. Matched here
+-- so fresh databases end up identical to prod; the expiry filter lives
+-- in the queries.
 CREATE INDEX ix_retention_holds_lookup
-    ON public.retention_holds(project_id, target_type)
-    WHERE expires_at > now();
+    ON public.retention_holds(project_id, target_type);
 
 CREATE INDEX ix_retention_holds_targetref
     ON public.retention_holds USING GIN (target_ref jsonb_path_ops);

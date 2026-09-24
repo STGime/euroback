@@ -22,6 +22,15 @@
 -- own transaction by default, and an explicit COMMIT inside would
 -- commit the runner's outer tx prematurely (same footgun as #121).
 
+-- The unqualified `users` below only resolves at call time (tenant
+-- search_path). On a fresh database there is no `users` in the
+-- migrator's search_path, and PostgreSQL validates SQL-function bodies
+-- at CREATE time, so the CREATE fails (#632). Skip body validation for
+-- this migration only — the function itself is unchanged. RESET at the
+-- end so later migrations in the same migrate run validate normally.
+-- Editing in place is safe: prod's schema_migrations is past 000052.
+SET check_function_bodies = off;
+
 -- ── 1. Global auth.email() (added by 000048) ─────────────────────────
 -- search_path is set per-request to the tenant schema + public, so
 -- the unqualified `users` reference resolves to the caller's tenant.
@@ -281,3 +290,5 @@ END;
 $fn$;
 
 ALTER FUNCTION public.provision_tenant(UUID, TEXT, TEXT) OWNER TO eurobase_migrator;
+
+RESET check_function_bodies;

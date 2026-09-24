@@ -36,7 +36,23 @@ END$$;
 
 -- Idempotency: this migration may be re-run during recovery; skip the
 -- grant if it's already in place.
-GRANT eurobase_migrator TO eurobase_developer;
+-- Membership check first (#632): on PostgreSQL 16 a role can no longer
+-- grant membership in itself, so when this runs AS eurobase_migrator the
+-- GRANT is refused. On a fresh environment the membership is therefore
+-- part of the console bootstrap (as the admin, with the roles):
+--   GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE;
+-- Skip when it's already there; otherwise try, and fail with that hint.
+-- Editing in place is safe: prod's schema_migrations is past 000044.
+DO $$
+BEGIN
+    IF NOT pg_has_role('eurobase_developer', 'eurobase_migrator', 'MEMBER') THEN
+        BEGIN
+            GRANT eurobase_migrator TO eurobase_developer;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE EXCEPTION 'eurobase_developer is not a member of eurobase_migrator and the migrating role cannot grant it. Run as the Scaleway admin: GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE;';
+        END;
+    END IF;
+END$$;
 
 GRANT CONNECT ON DATABASE eurobase TO eurobase_developer;
 
