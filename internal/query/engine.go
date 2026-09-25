@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/eurobase/euroback/internal/db"
@@ -1009,7 +1008,8 @@ func normalizeValue(v interface{}) interface{} {
 // reset — after COMMIT the next statement may reach a different server
 // connection (see AGENTS.md § Connection pooling prerequisites).
 func releaseClean(conn *pgxpool.Conn, pool *pgxpool.Pool) {
-	if poolResetsOnRelease(pool) {
+	// Config() copies the config — cheap next to the round trips here.
+	if pool.Config().AfterRelease != nil {
 		conn.Release()
 		return
 	}
@@ -1019,19 +1019,6 @@ func releaseClean(conn *pgxpool.Conn, pool *pgxpool.Pool) {
 		conn.Conn().Close(ctx) //nolint:errcheck
 	}
 	conn.Release()
-}
-
-// hookedPools caches whether a pool has an AfterRelease hook
-// (pgxpool.Pool.Config copies the whole config on every call).
-var hookedPools sync.Map // *pgxpool.Pool -> bool
-
-func poolResetsOnRelease(pool *pgxpool.Pool) bool {
-	if v, ok := hookedPools.Load(pool); ok {
-		return v.(bool)
-	}
-	hooked := pool.Config().AfterRelease != nil
-	hookedPools.Store(pool, hooked)
-	return hooked
 }
 
 // execCustomerStatement runs one customer statement over the extended

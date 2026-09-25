@@ -11,7 +11,8 @@ package query
 // Note: pgx's Exec only uses the extended protocol when there are
 // arguments; with none it sends the simple protocol, which runs every
 // statement. Callers that need the server to enforce a single statement
-// use PgConn.ExecParams (see cron's execExtended). This guard rejects such input on single-statement
+// use PgConn.ExecParams (the engine's execCustomerStatement, cron's
+// execExtended). This guard rejects such input on single-statement
 // endpoints with a clear error so callers cannot mistake a partial
 // run for success.
 func HasMultipleStatements(sql string) bool {
