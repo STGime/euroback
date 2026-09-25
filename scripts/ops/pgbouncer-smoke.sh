@@ -20,6 +20,8 @@ const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.
 function pooled(raw: string, user?: string, pw?: string): string {
   const u = new URL(raw);
   u.hostname = "pgbouncer.eurobase.svc.cluster.local"; u.port = "6432";
+  // Tenants use the tenant alias (its own server-connection cap), like the runner.
+  if (user) u.pathname = u.pathname.replace(/\/?$/, "") + "_tenant";
   u.searchParams.set("sslmode", "disable"); // in-cluster hop; pooler → RDB uses TLS
   if (user) { u.username = encodeURIComponent(user); u.password = encodeURIComponent(pw!); }
   return u.toString();
