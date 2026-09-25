@@ -21,6 +21,8 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/k8sapi"
+	"github.com/eurobase/euroback/internal/pgbouncerconf"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenantlogin"
@@ -292,6 +294,56 @@ func main() {
 				}
 			}
 		}()
+	}
+
+	// Publish the runner pooler's tenant userlist (#653): SCRAM verifiers
+	// derived here, so the pooler pod — reachable from tenant code — needs
+	// neither FUNC_PASSWORD_SECRET nor a database URL. Every 15 s; writes
+	// only when the tenant set changed.
+	if name := os.Getenv("PGB_USERLIST_SECRET"); name != "" {
+		secret := []byte(os.Getenv("FUNC_PASSWORD_SECRET"))
+		kc, kerr := k8sapi.InCluster()
+		upstream, uerr := pgbouncerconf.UpstreamOf(databaseURL)
+		switch {
+		case len(secret) < tenantlogin.MinSecretLen:
+			slog.Error("pgbouncer userlist publisher: FUNC_PASSWORD_SECRET missing or too short")
+		case kerr != nil:
+			slog.Error("pgbouncer userlist publisher: no in-cluster API access", "error", kerr)
+		case uerr != nil:
+			slog.Error("pgbouncer userlist publisher: upstream", "error", uerr)
+		default:
+			pub := &pgbouncerconf.Publisher{Store: pgbouncerconf.SecretStore{Client: kc, Name: name}, Secret: secret, Upstream: upstream}
+			go func() {
+				publish := func() {
+					pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					defer cancel()
+					conn, err := pool.Acquire(pctx)
+					if err != nil {
+						slog.Error("pgbouncer userlist publish: acquire", "error", err)
+						return
+					}
+					defer conn.Release()
+					wrote, err := pub.Publish(pctx, conn.Conn())
+					switch {
+					case err != nil:
+						slog.Error("pgbouncer userlist publish failed", "error", err)
+					case wrote:
+						slog.Info("pgbouncer tenant userlist published", "secret", name)
+					}
+				}
+				publish()
+				t := time.NewTicker(15 * time.Second)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						publish()
+					}
+				}
+			}()
+		}
 	}
 
 	// Shared plans.LimitsService — resolves plan_limits from the

@@ -401,6 +401,19 @@ jobs:
           # tenant connections use its `eurobase_tenant` alias, so the
           # pooler must be rolled (with the current config) before a
           # runner pod can start using it.
+          # #653: the runner's pooler reads the tenant userlist the WORKER
+          # publishes. Roll the worker (RBAC + publisher) first and wait
+          # until the Secret has data, so new pooler pods never start
+          # without tenants (their init container also refuses to).
+          kubectl apply -f deploy/k8s/pgbouncer-userlist-rbac.yaml
+          kubectl apply -f deploy/k8s/worker.yaml
+          kubectl rollout status deployment/worker -n eurobase --timeout=180s
+          for i in $(seq 1 36); do
+            [ -n "$(kubectl -n eurobase get secret pgbouncer-tenant-userlist -o jsonpath='{.data.upstream}')" ] && break
+            sleep 5
+          done
+          [ -n "$(kubectl -n eurobase get secret pgbouncer-tenant-userlist -o jsonpath='{.data.upstream}')" ] \
+            || { echo "worker never published the pgbouncer tenant userlist"; kubectl -n eurobase logs deployment/worker -c worker --tail=50; exit 1; }
           # Pinned to the content tag: unchanged inputs = no pooler restart.
           # Two poolers (#651): the runner's and the gateway's.
           for f in pgbouncer pgbouncer-gateway; do
@@ -410,7 +423,6 @@ jobs:
           kubectl rollout status deployment/pgbouncer -n eurobase --timeout=180s
           kubectl rollout status deployment/pgbouncer-gateway -n eurobase --timeout=180s
           kubectl apply -f deploy/k8s/gateway.yaml
-          kubectl apply -f deploy/k8s/worker.yaml
           kubectl apply -f deploy/k8s/console.yaml
           # NetworkPolicy must apply BEFORE the pod rollout so the new
           # net-allowed worker permissions never have a window of

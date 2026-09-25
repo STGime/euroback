@@ -47,8 +47,12 @@ spec:
         prometheus.io/port: "9127"
         prometheus.io/path: "/metrics"
     spec:
-      # The userlist sidecar SIGHUPs the pgbouncer process on change.
+      # The userlist sidecar SIGHUPs the pgbouncer process on change. With
+      # no secrets in the pod (#653) the shared namespace exposes nothing
+      # beyond the verifiers pgbouncer already holds.
       shareProcessNamespace: true
+      serviceAccountName: pgbouncer-runner
+      automountServiceAccountToken: false
       # preStop waits for in-flight transactions: tenant statement_timeout
       # is the invocation budget (60 s on Pro), + preStop sleep + margin.
       # Only rolls when the pooler's own inputs change (content-tagged
@@ -64,20 +68,15 @@ spec:
           image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
           command: ["pgbouncer-userlist", "init"]
           env: &pgbEnv
-            # The runner's pooler (#651): tenant roles only, NO platform
-            # passwords — user code can reach this process. The runner
-            # role's URL is used only for the upstream host and the
-            # read-only tenant listing.
-            - name: DATABASE_URL_FUNCTION_RUNNER
-              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_FUNCTION_RUNNER } }
-            - name: PGB_UPSTREAM_URL_VAR
-              value: DATABASE_URL_FUNCTION_RUNNER
+            # The runner's pooler (#651, #653): tenant roles only and NO
+            # secrets at all in this pod — user code can reach it. The
+            # tenant verifiers and the upstream address are published by
+            # the worker to the Secret below (read-only via the projected
+            # service-account token); no FUNC_PASSWORD_SECRET, no DB URL.
+            - name: PGB_TENANT_SOURCE
+              value: k8s-secret:pgbouncer-tenant-userlist
             - name: PGB_PLATFORM_URL_VARS
               value: ""
-            - name: PGB_INCLUDE_TENANTS
-              value: "1"
-            - name: FUNC_PASSWORD_SECRET
-              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: FUNC_PASSWORD_SECRET } }
             - name: PGB_DIR
               value: /run/pgbouncer
             - name: PGB_SERVER_TLS
@@ -93,8 +92,9 @@ spec:
             # Keep equal to spec.replicas (tenant connection budget check).
             - name: PGB_REPLICAS
               value: "2"
-          volumeMounts:
+          volumeMounts: &saMounts
             - { name: run, mountPath: /run/pgbouncer }
+            - { name: sa, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
           securityContext: &restricted
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -135,8 +135,7 @@ spec:
           ports:
             - { name: metrics, containerPort: 9127 }
           env: *pgbEnv
-          volumeMounts:
-            - { name: run, mountPath: /run/pgbouncer }
+          volumeMounts: *saMounts
           securityContext: *restricted
           resources:
             requests: { cpu: 10m, memory: 32Mi }
@@ -144,6 +143,14 @@ spec:
       volumes:
         - name: run
           emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        # Service-account token for the render/userlist containers only
+        # (get on pgbouncer-tenant-userlist); not mounted into pgbouncer.
+        - name: sa
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, expirationSeconds: 3600 }
+              - configMap: { name: kube-root-ca.crt, items: [{ key: ca.crt, path: ca.crt }] }
+              - downwardAPI: { items: [{ path: namespace, fieldRef: { fieldPath: metadata.namespace } }] }
 ---
 apiVersion: v1
 kind: Service
