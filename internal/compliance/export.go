@@ -417,9 +417,11 @@ func resolveBucket(ctx context.Context, pool *pgxpool.Pool, projectID string) st
 // none — and the export used to report success with those tables left
 // out. The export therefore reads as a role that owns, or inherits the
 // ownership of, every table in the tenant schema: in production the
-// worker's developer pool with Role "eurobase_migrator", which owns the
-// platform and SQL-editor tables and inherits `<schema>_ddl` (tenant
-// migrations) and eurobase_gateway.
+// worker's developer pool as eurobase_developer itself, with no Role.
+// It owns tables legacy MCP DDL created and, via INHERIT, has the
+// privileges of eurobase_migrator (platform and SQL-editor tables),
+// `<schema>_ddl` (tenant migrations) and eurobase_gateway (legacy SDK
+// DDL). SET ROLE eurobase_migrator would lose the developer-owned ones.
 //
 // The read also runs with row_security = off, so a table where a policy
 // would still apply (FORCE ROW LEVEL SECURITY, an owner outside that set)
@@ -598,7 +600,10 @@ type TableRef struct {
 // user_id-like column (either named user_id or a single-column FK to
 // users.id). It reads pg_catalog, not information_schema, so tables the
 // caller has no privilege on are still found (information_schema would
-// hide them, and the export would silently skip them — #654).
+// hide them, and the export would silently skip them — #654). A column
+// named user_id counts only if its type can hold the subject's id (uuid
+// or text-like, domains included): an integer user_id is some other id,
+// and comparing it to a UUID would fail the table in every DSAR.
 func DiscoverUserTables(ctx context.Context, q querier, schemaName string) ([]TableRef, error) {
 	rows, err := q.Query(ctx,
 		`SELECT DISTINCT c.relname, a.attname
@@ -609,7 +614,10 @@ func DiscoverUserTables(ctx context.Context, q querier, schemaName string) ([]Ta
 		   AND c.relkind IN ('r', 'p') AND NOT c.relispartition
 		   AND c.relname <> 'users'
 		   AND (
-		       a.attname = 'user_id'
+		       (a.attname = 'user_id'
+		        AND (SELECT CASE WHEN t.typtype = 'd' THEN t.typbasetype ELSE t.oid END
+		             FROM pg_type t WHERE t.oid = a.atttypid)
+		            IN ('uuid'::regtype, 'text'::regtype, 'character varying'::regtype))
 		       OR EXISTS (
 		           SELECT 1
 		           FROM pg_constraint k

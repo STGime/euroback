@@ -32,7 +32,8 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 	dev := mustPool(t, devURL)
 	gw := mustPool(t, gwURL)
 	projectID, schema, userID := provisionRLSFixture(t, dev)
-	src := ExportSource{Pool: dev, Role: "eurobase_migrator"}
+	// Production source: the developer pool as eurobase_developer itself.
+	src := ExportSource{Pool: dev}
 
 	t.Run("reads every row as the owner; FORCE RLS table is reported, not dropped", func(t *testing.T) {
 		res, entries, meta := runTenantExport(t, gw, src, schema, projectID)
@@ -42,6 +43,8 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 			"tables/user_identities.json": 1, // platform table
 			"tables/users.json":           1,
 			"tables/empty_table.json":     0, // empty tables get a file
+			"tables/legacy_dev.json":      3, // eurobase_developer-owned (legacy MCP DDL)
+			"tables/legacy_gw.json":       2, // eurobase_gateway-owned (legacy SDK DDL)
 		} {
 			if got := jsonRows(t, entries, file); got != want {
 				t.Errorf("%s: %d rows, want %d", file, got, want)
@@ -83,6 +86,16 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		}
 		if u := jsonObjects(t, entries, "tables/users.json"); len(u) == 1 && u[0]["email"] != "member@export.test" {
 			t.Errorf("users row lost its other columns: %v", u[0])
+		}
+	})
+
+	// Why the source is eurobase_developer and not SET ROLE
+	// eurobase_migrator: the migrator doesn't inherit eurobase_developer,
+	// so developer-owned tables would be refused.
+	t.Run("SET ROLE eurobase_migrator would lose developer-owned tables", func(t *testing.T) {
+		_, _, meta := runTenantExport(t, gw, ExportSource{Pool: dev, Role: "eurobase_migrator"}, schema, projectID)
+		if d := findTable(meta.Tables, "legacy_dev"); d == nil || d.Status != TableFailed {
+			t.Errorf("legacy_dev as migrator = %+v, want failed", d)
 		}
 	})
 
@@ -157,6 +170,10 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		if !res.Complete {
 			t.Errorf("user export incomplete: %q", res.Warnings)
 		}
+		// integer user_id can't hold the subject's id: not a user table.
+		if _, ok := entries["tables/scores.json"]; ok || findTable(res2Tables(t, entries), "scores") != nil {
+			t.Error("user export included a table whose user_id is an integer")
+		}
 	})
 
 	t.Run("completeness is recorded on the export request", func(t *testing.T) {
@@ -220,6 +237,23 @@ func provisionRLSFixture(t *testing.T, dev *pgxpool.Pool) (projectID, schema, us
 		`INSERT INTO `+s+`.users (id, email, password_hash) VALUES ('`+userID+`', 'member@export.test', '$2a$12$not.a.real.hash')`,
 		`INSERT INTO `+s+`.refresh_tokens (user_id, token_hash, expires_at) VALUES ('`+userID+`', 'hash-of-a-refresh-token', now() + interval '1 day')`,
 		`INSERT INTO `+s+`.user_identities (user_id, provider, provider_user_id) VALUES ('`+userID+`', 'google', 'g1')`,
+		// Legacy owners: MCP DDL once ran as eurobase_developer, SDK DDL
+		// as eurobase_gateway (#40–#42); 000063 never reassigned those.
+		`GRANT CREATE ON SCHEMA `+s+` TO eurobase_developer`,
+		`RESET ROLE`,
+		`CREATE TABLE `+s+`.legacy_dev (id int)`,
+		`ALTER TABLE `+s+`.legacy_dev ENABLE ROW LEVEL SECURITY`,
+		`CREATE POLICY p ON `+s+`.legacy_dev USING (false)`,
+		`INSERT INTO `+s+`.legacy_dev VALUES (1), (2), (3)`,
+		`SET LOCAL ROLE eurobase_gateway`,
+		`CREATE TABLE `+s+`.legacy_gw (id int)`,
+		`ALTER TABLE `+s+`.legacy_gw ENABLE ROW LEVEL SECURITY`,
+		`CREATE POLICY p ON `+s+`.legacy_gw USING (false)`,
+		`INSERT INTO `+s+`.legacy_gw VALUES (1), (2)`,
+		// A user_id that is some other id (integer).
+		`SET LOCAL ROLE `+d,
+		`CREATE TABLE `+s+`.scores (id serial, user_id integer, points int)`,
+		`INSERT INTO `+s+`.scores (user_id, points) VALUES (7, 10)`,
 	)
 	t.Cleanup(func() {
 		// Best effort: audit rows are append-only, so the project row may
@@ -300,6 +334,16 @@ func jsonRows(t *testing.T, entries map[string][]byte, name string) int {
 		return -1
 	}
 	return len(rows)
+}
+
+// res2Tables returns the tables list from an archive's _metadata.json.
+func res2Tables(t *testing.T, entries map[string][]byte) []TableExport {
+	t.Helper()
+	var meta ExportMetadata
+	if err := json.Unmarshal(entries["_metadata.json"], &meta); err != nil {
+		t.Fatalf("_metadata.json: %v", err)
+	}
+	return meta.Tables
 }
 
 func jsonObjects(t *testing.T, entries map[string][]byte, name string) []map[string]any {

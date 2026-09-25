@@ -202,13 +202,16 @@ func main() {
 		S3:     s3Client,
 		DBPool: pool,
 	})
-	// Exports read tenant tables as eurobase_migrator, which owns or
-	// inherits every tenant table, so RLS written for end users can't
-	// hide rows from them (#654). Without a developer pool (dev), they
-	// read on `pool` and report RLS-limited tables as not exported.
+	// Exports read tenant tables as eurobase_developer itself (no SET
+	// ROLE): it owns the tables legacy MCP DDL created and, via INHERIT,
+	// has the privileges of eurobase_migrator, <schema>_ddl and
+	// eurobase_gateway — every tenant table's owner — so RLS written for
+	// end users can't hide rows from the export (#654). Without a
+	// developer pool (dev), exports read on `pool` and report RLS-limited
+	// tables as not exported.
 	var exportData compliance.ExportSource
 	if developerPool != pool {
-		exportData = compliance.ExportSource{Pool: developerPool, Role: "eurobase_migrator"}
+		exportData = compliance.ExportSource{Pool: developerPool}
 	}
 	river.AddWorker(riverWorkers, &workers.TenantExportWorker{
 		DBPool: pool,
