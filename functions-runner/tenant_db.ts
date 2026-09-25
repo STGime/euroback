@@ -157,11 +157,13 @@ export function isPoolerBusyError(err: unknown): boolean {
 
 /**
  * The connection closed or reset before a transaction started (pooler
- * restart, idle-close race) — safe to retry on a fresh client.
+ * restart, idle-close race) — safe to retry on a fresh client. A draining
+ * PgBouncer (SIGINT safe shutdown) refuses a new BEGIN with
+ * `08P01 server shutting down`; the retry lands on the other replica.
  */
 export function isConnectionDrop(err: unknown): boolean {
   // deno-lint-ignore no-explicit-any
-  const code = (err as any)?.code;
-  return code === "CONNECTION_CLOSED" || code === "CONNECTION_ENDED" || code === "CONNECTION_DESTROYED" ||
-    code === "ECONNRESET" || code === "EPIPE";
+  const e = err as any;
+  if (e?.code === "08P01" && /server shutting down/i.test(String(e?.message ?? ""))) return true;
+  return ["CONNECTION_CLOSED", "CONNECTION_ENDED", "CONNECTION_DESTROYED", "ECONNRESET", "EPIPE"].includes(e?.code);
 }

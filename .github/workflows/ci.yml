@@ -327,8 +327,10 @@ jobs:
         id: pgb
         if: steps.fresh.outputs.stale != 'true'
         run: |
-          TAG=pgb-$(git ls-files -s deploy/docker/Dockerfile.pgbouncer cmd/pgbouncer-userlist \
-                     internal/pgbouncerconf internal/tenantlogin go.mod go.sum \
+          # ISO week in the hash: the image (alpine + PgBouncer security
+          # fixes) is rebuilt at least weekly, even if no input changed.
+          TAG=pgb-$( { git ls-files -s deploy/docker/Dockerfile.pgbouncer cmd/pgbouncer-userlist \
+                         internal/pgbouncerconf internal/tenantlogin go.mod go.sum; date -u +%G-W%V; } \
                    | sha256sum | cut -c1-16)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           IMG=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer
@@ -406,11 +408,11 @@ jobs:
           kubectl apply -f deploy/k8s/gateway.yaml
           kubectl apply -f deploy/k8s/worker.yaml
           kubectl apply -f deploy/k8s/console.yaml
-          kubectl apply -f deploy/k8s/functions.yaml
           # NetworkPolicy must apply BEFORE the pod rollout so the new
           # net-allowed worker permissions never have a window of
           # reaching cluster-internal IPs.
           kubectl apply -f deploy/k8s/functions-networkpolicy.yaml
+          kubectl apply -f deploy/k8s/functions.yaml
           kubectl apply -f deploy/k8s/mcp-server.yaml
           # Health monitor → Discord #alerts. Reads DISCORD_ALERTS_WEBHOOK
           # from eurobase-secrets (optional key); no-ops if it's unset.

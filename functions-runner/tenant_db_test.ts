@@ -101,6 +101,10 @@ Deno.test("isPoolerBusyError", () => {
 Deno.test("isConnectionDrop", () => {
   assert(isConnectionDrop({ code: "CONNECTION_CLOSED" }));
   assert(isConnectionDrop({ code: "ECONNRESET" }));
+  // Draining PgBouncer refusing BEGIN (SIGINT safe shutdown).
+  assert(isConnectionDrop({ code: "08P01", message: "server shutting down" }));
+  assert(!isPoolerBusyError({ code: "08P01", message: "server shutting down" }));
+  assert(!isLoginError({ code: "08P01", message: "server shutting down" }));
   assert(!isConnectionDrop({ code: "08P01" }));
   assert(!isConnectionDrop({ code: "42P01" }));
 });

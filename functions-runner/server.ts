@@ -22,6 +22,7 @@ import { newVerifier, type Verifier } from "./hmac.ts";
 import { openSealed, resolveVaultSecret } from "./vault.ts";
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
+import { onWorkerError } from "./worker_errors.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner's own login
 // (`eurobase_function_runner`) has no grants on any tenant schema and,
@@ -527,13 +528,9 @@ async function runUserHandlerInWorker(opts: {
       respondError(504, "Function timed out");
     }, timeoutMs);
 
-    worker.addEventListener("error", (e: ErrorEvent) => {
-      // An uncaught error / unhandled rejection in the tenant's code must
-      // fail only this invocation — without preventDefault Deno re-raises
-      // it in the parent and the whole runner exits.
-      e.preventDefault();
-      console.error(`[fn:${projectId}] Worker error:`, e.message);
-      respondError(500, e.message || "worker error");
+    onWorkerError(worker, (message) => {
+      console.error(`[fn:${projectId}] Worker error:`, message);
+      respondError(500, message || "worker error");
     });
 
     worker.addEventListener("message", (event: MessageEvent) => {
