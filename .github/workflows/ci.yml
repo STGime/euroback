@@ -320,16 +320,24 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:${{ github.sha }}
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:latest
 
+      # The pooler image is tagged by the content of its inputs, so a deploy
+      # that doesn't touch them leaves the tag — and the running pooler,
+      # which carries live tenant traffic — unchanged (no restart).
       - name: Build and push pgbouncer
+        id: pgb
         if: steps.fresh.outputs.stale != 'true'
         run: |
-          docker build \
-            -f deploy/docker/Dockerfile.pgbouncer \
-            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
-            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:latest \
-            .
-          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }}
-          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:latest
+          TAG=pgb-$(git ls-files -s deploy/docker/Dockerfile.pgbouncer cmd/pgbouncer-userlist \
+                     internal/pgbouncerconf internal/tenantlogin go.mod go.sum \
+                   | sha256sum | cut -c1-16)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          IMG=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer
+          if docker manifest inspect "$IMG:$TAG" >/dev/null 2>&1; then
+            echo "pgbouncer image $TAG already in the registry — not rebuilding"
+          else
+            docker build -f deploy/docker/Dockerfile.pgbouncer -t "$IMG:$TAG" .
+            docker push "$IMG:$TAG"
+          fi
 
       - name: Build and push migrations image
         if: steps.fresh.outputs.stale != 'true'
@@ -391,7 +399,9 @@ jobs:
           # tenant connections use its `eurobase_tenant` alias, so the
           # pooler must be rolled (with the current config) before a
           # runner pod can start using it.
-          kubectl apply -f deploy/k8s/pgbouncer.yaml
+          # Pinned to the content tag: unchanged inputs = no pooler restart.
+          sed "s|eurobase-app/pgbouncer:latest|eurobase-app/pgbouncer:${{ steps.pgb.outputs.tag }}|" \
+            deploy/k8s/pgbouncer.yaml | kubectl apply -f -
           kubectl rollout status deployment/pgbouncer -n eurobase --timeout=180s
           kubectl apply -f deploy/k8s/gateway.yaml
           kubectl apply -f deploy/k8s/worker.yaml
@@ -437,14 +447,6 @@ jobs:
       - name: Deploy to Kapsule
         if: steps.fresh.outputs.stale != 'true'
         run: |
-          # PgBouncer first, and healthy before anything that uses it rolls
-          # (the functions runner's tenant connections go through it).
-          kubectl set image deployment/pgbouncer \
-            render=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
-            pgbouncer=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
-            userlist=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
-            -n eurobase
-          kubectl rollout status deployment/pgbouncer -n eurobase --timeout=180s
           kubectl set image deployment/gateway \
             gateway=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:${{ github.sha }} \
             -n eurobase

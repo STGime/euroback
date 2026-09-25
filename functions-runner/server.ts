@@ -10,7 +10,7 @@
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
-import { isLoginError, isPoolerBusyError, TenantDBPool } from "./tenant_db.ts";
+import { isConnectionDrop, isLoginError, isPoolerBusyError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -43,7 +43,13 @@ const DB_URL = Deno.env.get("DATABASE_URL_FUNCTION_RUNNER") ?? Deno.env.get("DAT
 globalThis.addEventListener("unhandledrejection", (e) => {
   e.preventDefault();
   const r = e.reason as { code?: string; message?: string } | undefined;
-  console.error(`[runner] unhandled rejection kept from crashing the process: ${r?.code ?? ""} ${r?.message ?? String(e.reason)}`);
+  if (r?.code) {
+    // Database driver error (postgres.js); the pending query was rejected too.
+    console.warn(`[runner] db connection error (unhandled rejection): ${r.code} ${r.message ?? ""}`);
+  } else {
+    // Anything else is a runner bug: log loudly with a stable prefix to alert on.
+    console.error(`[runner] BUG unhandled rejection: ${r?.message ?? String(e.reason)}`, (e.reason as Error)?.stack ?? "");
+  }
 });
 const PORT = parseInt(Deno.env.get("PORT") ?? "8000");
 const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50");
@@ -319,43 +325,52 @@ async function executeFunction(
     if (!tp) {
       throw new Error("database access is not configured on this runner (FUNC_PASSWORD_SECRET)");
     }
-    let started = false;
-    let lease;
-    try {
-      lease = await tp.acquire(schemaName, funcRole);
-      // deno-lint-ignore no-explicit-any
-      return await lease.client.begin(async (tx: any) => {
-        started = true;
-        await tx.unsafe(timeoutSQL);
-        await tx.unsafe(setPathSQL);
-        // Server tokenizes string literals the way sql_guard.ts does,
-        // whatever earlier customer code changed (transaction-local).
-        await tx.unsafe("SET LOCAL standard_conforming_strings = on");
-        // Mirror the gateway's RLS context so auth_uid() /
-        // is_service_role() behave the same in functions as in gateway
-        // REST — see rlsContextStatements in role.ts. Closes #188.
-        for (const stmt of rlsContextStatements(userId)) {
-          await tx.unsafe(stmt.sql, stmt.params);
+    // One retry when the connection drops before the transaction started
+    // (pooler restart, idle-close race): no SQL has run yet, so it's safe.
+    for (let attempt = 1; ; attempt++) {
+      let started = false;
+      let lease;
+      try {
+        lease = await tp.acquire(schemaName, funcRole);
+        // deno-lint-ignore no-explicit-any
+        return await lease.client.begin(async (tx: any) => {
+          started = true;
+          await tx.unsafe(timeoutSQL);
+          await tx.unsafe(setPathSQL);
+          // Server tokenizes string literals the way sql_guard.ts does,
+          // whatever earlier customer code changed (transaction-local).
+          await tx.unsafe("SET LOCAL standard_conforming_strings = on");
+          // Mirror the gateway's RLS context so auth_uid() /
+          // is_service_role() behave the same in functions as in gateway
+          // REST — see rlsContextStatements in role.ts. Closes #188.
+          for (const stmt of rlsContextStatements(userId)) {
+            await tx.unsafe(stmt.sql, stmt.params);
+          }
+          return await tx.unsafe(query, params);
+        });
+      } catch (err) {
+        // Errors raised once the transaction started (customer SQL, even
+        // with an auth-like SQLSTATE) pass through unchanged.
+        if (started) throw err;
+        if (isConnectionDrop(err) && attempt === 1) {
+          lease?.invalidate();
+          console.warn(`[tenant-db] connection for ${funcRole} dropped before the transaction; retrying once`);
+          continue;
         }
-        return await tx.unsafe(query, params);
-      });
-    } catch (err) {
-      // A failed login (not applied yet for a brand-new project) gets a
-      // retryable message and a fresh client next time. Errors raised by
-      // the customer's SQL — even with an auth-like SQLSTATE — pass
-      // through unchanged.
-      if (started) throw err;
-      if (isPoolerBusyError(err)) {
+        if (isPoolerBusyError(err)) {
+          lease?.invalidate();
+          console.warn(`[tenant-db] pooler busy for ${funcRole}`);
+          throw new Error("the database is busy for this project; retry shortly");
+        }
+        // A failed login (not applied yet for a brand-new project) gets a
+        // retryable message and a fresh client next time.
+        if (!isLoginError(err)) throw err;
         lease?.invalidate();
-        console.warn(`[tenant-db] pooler busy for ${funcRole}`);
-        throw new Error("the database is busy for this project; retry shortly");
+        console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
+        throw new Error("database login for this project is unavailable; retry shortly");
+      } finally {
+        lease?.release();
       }
-      if (!isLoginError(err)) throw err;
-      lease?.invalidate();
-      console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
-      throw new Error("database login for this project is unavailable; retry shortly");
-    } finally {
-      lease?.release();
     }
   }
 
@@ -513,6 +528,10 @@ async function runUserHandlerInWorker(opts: {
     }, timeoutMs);
 
     worker.addEventListener("error", (e: ErrorEvent) => {
+      // An uncaught error / unhandled rejection in the tenant's code must
+      // fail only this invocation — without preventDefault Deno re-raises
+      // it in the parent and the whole runner exits.
+      e.preventDefault();
       console.error(`[fn:${projectId}] Worker error:`, e.message);
       respondError(500, e.message || "worker error");
     });

@@ -46,7 +46,7 @@ jobs:
       # The runner's driver (postgres.js) probe in test-pgbouncer.sh.
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
+          deno-version: v2.1.0 # matches deploy/docker/Dockerfile.fn
       - name: Ensure psql client
         run: command -v psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
       - name: PgBouncer end-to-end

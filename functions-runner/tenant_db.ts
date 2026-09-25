@@ -154,3 +154,14 @@ export function isPoolerBusyError(err: unknown): boolean {
   return e?.code === "08P01" &&
     /query_wait_timeout|no more connections allowed|server login/i.test(String(e?.message ?? ""));
 }
+
+/**
+ * The connection closed or reset before a transaction started (pooler
+ * restart, idle-close race) — safe to retry on a fresh client.
+ */
+export function isConnectionDrop(err: unknown): boolean {
+  // deno-lint-ignore no-explicit-any
+  const code = (err as any)?.code;
+  return code === "CONNECTION_CLOSED" || code === "CONNECTION_ENDED" || code === "CONNECTION_DESTROYED" ||
+    code === "ECONNRESET" || code === "EPIPE";
+}

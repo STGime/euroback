@@ -43,9 +43,11 @@ spec:
     spec:
       # The userlist sidecar SIGHUPs the pgbouncer process on change.
       shareProcessNamespace: true
-      # preStop waits for in-flight transactions (statement_timeout <= 30 s
-      # on the tenant paths).
-      terminationGracePeriodSeconds: 45
+      # preStop waits for in-flight transactions: tenant statement_timeout
+      # is the invocation budget (60 s on Pro), + preStop sleep + margin.
+      # Only rolls when the pooler's own inputs change (content-tagged
+      # image in CI).
+      terminationGracePeriodSeconds: 90
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

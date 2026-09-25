@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { funcPassword, isLoginError, isPoolerBusyError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
+import { funcPassword, isConnectionDrop, isLoginError, isPoolerBusyError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
 
 Deno.test("funcPassword matches the Go vector (internal/tenantlogin)", async () => {
   assertEquals(
@@ -96,4 +96,11 @@ Deno.test("isPoolerBusyError", () => {
   assert(isPoolerBusyError({ code: "08P01", message: "no more connections allowed (max_client_conn)" }));
   assert(!isPoolerBusyError({ code: "08P01", message: "SASL authentication failed" }));
   assert(!isPoolerBusyError({ code: "57014", message: "canceling statement due to statement timeout" }));
+});
+
+Deno.test("isConnectionDrop", () => {
+  assert(isConnectionDrop({ code: "CONNECTION_CLOSED" }));
+  assert(isConnectionDrop({ code: "ECONNRESET" }));
+  assert(!isConnectionDrop({ code: "08P01" }));
+  assert(!isConnectionDrop({ code: "42P01" }));
 });
