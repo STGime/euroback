@@ -36,7 +36,10 @@ import (
 //     data. Real work in follow-up team-tier/upgrade-worker-copy:
 //     1. Replay public.tenant_migrations against the dedicated DB
 //     2. Copy per-project public.* rows (edge_functions, cron_jobs,
-//        email_templates, function_triggers, backup_snapshots)
+//        email_templates, function_triggers, backup_snapshots).
+//        cron_jobs: copy run_as explicitly — the column default is
+//        'service', so relying on it would flip legacy 'none' jobs
+//        (migration 000128, #643).
 //     3. Copy tenant schema data (COPY BINARY, FK-ordered)
 //   - cutting_over: 5-sec drain wait, flip projects.plan to the
 //     target tier, clear maintenance_mode, stamp cutover_at.
