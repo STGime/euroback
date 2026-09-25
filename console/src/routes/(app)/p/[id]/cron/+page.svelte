@@ -15,6 +15,7 @@
 	let formName = $state('');
 	let formSchedule = $state('');
 	let formActionType: 'sql' | 'rpc' = $state('sql');
+	let formRunAs: 'service' | 'none' = $state('service');
 	let formAction = $state('');
 	let formError: string | null = $state(null);
 	let saving = $state(false);
@@ -229,6 +230,7 @@
 		formName = '';
 		formSchedule = '';
 		formActionType = 'sql';
+		formRunAs = 'service';
 		formAction = '';
 		formError = null;
 		testResult = null;
@@ -248,6 +250,7 @@
 		formName = job.name;
 		formSchedule = job.schedule;
 		formActionType = job.action_type as 'sql' | 'rpc';
+		formRunAs = job.run_as ?? 'none';
 		formAction = job.action;
 		formError = null;
 		testResult = null;
@@ -291,14 +294,16 @@
 					name: formName.trim(),
 					schedule: formSchedule.trim(),
 					action_type: formActionType,
-					action: formAction.trim()
+					action: formAction.trim(),
+					run_as: formRunAs
 				});
 			} else {
 				await api.createCronJob(projectId, {
 					name: formName.trim(),
 					schedule: formSchedule.trim(),
 					action_type: formActionType,
-					action: formAction.trim()
+					action: formAction.trim(),
+					run_as: formRunAs
 				});
 			}
 			showForm = false;
@@ -453,6 +458,9 @@
 							<div class="flex items-center gap-2">
 								<span class="font-medium text-sm text-gray-900">{job.name}</span>
 								<span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-gray-500">{job.action_type}</span>
+								{#if job.action_type !== 'function' && job.run_as === 'service'}
+									<span class="rounded bg-eurobase-50 px-1.5 py-0.5 text-[10px] font-medium text-eurobase-700" title="Runs as the service role: row-level security policies that allow the service role apply (this project only)">service</span>
+								{/if}
 							</div>
 							<div class="mt-1 flex items-center gap-3 text-xs text-gray-400">
 								<span class="font-mono">{job.schedule}</span>
@@ -1079,6 +1087,17 @@
 						<p class="mt-1 text-xs text-gray-400">Runs in your project's database. One statement against your project's own tables (UPDATE, INSERT, DELETE, or calling your functions) — the same rules as the SQL editor apply: no other schemas, system catalogs, or role/permission statements. The number of affected rows is recorded. Use the Test Run button below to verify your SQL before scheduling.</p>
 					{/if}
 				</div>
+
+				<!-- RLS identity (#643) -->
+				<label class="flex items-start gap-2 cursor-pointer">
+					<input type="checkbox" class="mt-0.5 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500"
+						checked={formRunAs === 'service'}
+						onchange={(e) => (formRunAs = (e.currentTarget as HTMLInputElement).checked ? 'service' : 'none')} />
+					<span>
+						<span class="text-sm font-medium text-gray-900">Run as service role</span>
+						<span class="block text-xs text-gray-500">Row-level security policies see the job as the service role, like an edge function called without a user — policies that allow the service role (such as the built-in presets) apply, so housekeeping jobs can reach rows across users. The job still only has access to this project's tables. Turn off to run without any user context (only rows your policies allow to everyone).</span>
+					</span>
+				</label>
 
 				<!-- Test Run -->
 				{#if formActionType === 'sql'}

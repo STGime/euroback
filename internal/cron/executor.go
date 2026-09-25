@@ -206,7 +206,7 @@ func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
 		if err := validateCronSQLAction(job.Action, job.SchemaName); err != nil {
 			return err
 		}
-		return e.runInTenantTx(ctx, job.SchemaName, func(ctx context.Context, tx pgx.Tx) error {
+		return e.runInTenantTx(ctx, job.SchemaName, job.RunAs, func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := execExtended(ctx, tx, job.Action); err != nil {
 				return fmt.Errorf("execute sql: %w", err)
 			}
@@ -216,7 +216,7 @@ func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
 		if err := validateCronRPCName(job.Action); err != nil {
 			return err
 		}
-		return e.runInTenantTx(ctx, job.SchemaName, func(ctx context.Context, tx pgx.Tx) error {
+		return e.runInTenantTx(ctx, job.SchemaName, job.RunAs, func(ctx context.Context, tx pgx.Tx) error {
 			sql := fmt.Sprintf("SELECT %s()", quoteIdent(job.Action))
 			if _, err := execExtended(ctx, tx, sql); err != nil {
 				return fmt.Errorf("execute rpc: %w", err)
@@ -322,7 +322,7 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 // transaction with `SET LOCAL search_path` and `statement_timeout`.
 // search_path does NOT include `public`; qualified references outside
 // the tenant are also refused by validateCronSQLAction.
-func (e *Executor) runInTenantTx(ctx context.Context, schemaName string, fn func(context.Context, pgx.Tx) error) error {
+func (e *Executor) runInTenantTx(ctx context.Context, schemaName, runAs string, fn func(context.Context, pgx.Tx) error) error {
 	if e.tenantBase == nil || len(e.tenantSecret) == 0 {
 		return fmt.Errorf("sql/rpc cron actions need per-tenant logins (FUNC_PASSWORD_SECRET) on the worker")
 	}
@@ -354,6 +354,15 @@ func (e *Executor) runInTenantTx(ctx context.Context, schemaName string, fn func
 	}
 	if _, err := tx.Exec(cctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
 		return fmt.Errorf("set statement_timeout: %w", err)
+	}
+	// RLS identity (#643): "service" matches a user-less edge-function
+	// invocation (functions-runner/role.ts rlsContextStatements), so
+	// tenant policies' is_service_role() branch applies. Transaction-
+	// local; the tenant role still limits the job to its own schema.
+	if runAs == RunAsService {
+		if _, err := tx.Exec(cctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
+			return fmt.Errorf("set rls role: %w", err)
+		}
 	}
 	if err := fn(cctx, tx); err != nil {
 		return err

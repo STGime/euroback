@@ -35,6 +35,7 @@ type CronJob struct {
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	Headers     json.RawMessage `json:"headers,omitempty"`
 	Enabled     bool            `json:"enabled"`
+	RunAs       string          `json:"run_as"`
 	LastRunAt   *time.Time      `json:"last_run_at"`
 	LastError   *string         `json:"last_error"`
 	RunCount    int             `json:"run_count"`
@@ -63,6 +64,23 @@ type CreateCronJobRequest struct {
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	Headers     json.RawMessage `json:"headers,omitempty"`
 	Enabled     *bool           `json:"enabled,omitempty"`
+	// RunAs is the RLS identity for sql / rpc actions: "service" (default
+	// for new jobs; policies see is_service_role() = true, like a
+	// user-less edge function) or "none" (no end-user context).
+	RunAs *string `json:"run_as,omitempty"`
+}
+
+// RunAs values (cron_jobs.run_as, migration 000128).
+const (
+	RunAsService = "service"
+	RunAsNone    = "none"
+)
+
+func validateRunAs(v *string) error {
+	if v != nil && *v != RunAsService && *v != RunAsNone {
+		return fmt.Errorf("run_as must be 'service' or 'none'")
+	}
+	return nil
 }
 
 // Validate checks that all required fields are present and valid.
@@ -81,6 +99,9 @@ func (r *CreateCronJobRequest) Validate() error {
 			return fmt.Errorf("invalid timezone %q: %w", r.Timezone, err)
 		}
 	}
+	if err := validateRunAs(r.RunAs); err != nil {
+		return err
+	}
 	return validateCronSchedule(r.Schedule)
 }
 
@@ -95,6 +116,7 @@ type UpdateCronJobRequest struct {
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	Headers     json.RawMessage `json:"headers,omitempty"`
 	Enabled     *bool           `json:"enabled,omitempty"`
+	RunAs       *string         `json:"run_as,omitempty"`
 }
 
 // CronService handles CRUD operations for cron jobs.
@@ -108,13 +130,13 @@ func NewCronService(pool *pgxpool.Pool) *CronService {
 }
 
 const cronJobColumns = `id, project_id, name, schedule, timezone, action_type, action,
-		description, payload, headers, enabled,
+		description, payload, headers, enabled, run_as,
 		last_run_at, last_error, run_count, created_at, updated_at`
 
 func scanCronJob(row pgx.Row, j *CronJob) error {
 	return row.Scan(&j.ID, &j.ProjectID, &j.Name, &j.Schedule, &j.Timezone,
 		&j.ActionType, &j.Action, &j.Description, &j.Payload, &j.Headers,
-		&j.Enabled, &j.LastRunAt, &j.LastError, &j.RunCount,
+		&j.Enabled, &j.RunAs, &j.LastRunAt, &j.LastError, &j.RunCount,
 		&j.CreatedAt, &j.UpdatedAt)
 }
 
@@ -188,15 +210,19 @@ func (s *CronService) Create(ctx context.Context, projectID string, req CreateCr
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	runAs := RunAsService
+	if req.RunAs != nil {
+		runAs = *req.RunAs
+	}
 
 	var j CronJob
 	err := scanCronJob(s.pool.QueryRow(ctx,
 		`INSERT INTO cron_jobs (project_id, name, schedule, timezone, action_type, action,
-		                        description, payload, headers, enabled)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		                        description, payload, headers, enabled, run_as)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING `+cronJobColumns,
 		projectID, req.Name, req.Schedule, tz, req.ActionType, req.Action,
-		req.Description, nullableJSON(req.Payload), nullableJSON(req.Headers), enabled,
+		req.Description, nullableJSON(req.Payload), nullableJSON(req.Headers), enabled, runAs,
 	), &j)
 	if err != nil {
 		// 23505 is unique_violation — fires on cron_jobs_project_name_uq.
@@ -233,6 +259,9 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 	}
 	if req.ActionType != nil && *req.ActionType != "sql" && *req.ActionType != "rpc" && *req.ActionType != "function" {
 		return nil, fmt.Errorf("action_type must be 'sql', 'rpc', or 'function'")
+	}
+	if err := validateRunAs(req.RunAs); err != nil {
+		return nil, err
 	}
 	// Validate the SQL the job will run after this update: the new action
 	// and/or type merged over the stored row.
@@ -273,6 +302,7 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 	args = append(args,
 		req.Name, req.Schedule, req.Timezone, req.ActionType, req.Action,
 		req.Description, nullableJSON(req.Payload), nullableJSON(req.Headers), req.Enabled,
+		req.RunAs,
 	)
 	q := `UPDATE cron_jobs SET
 			name        = COALESCE($3, name),
@@ -284,6 +314,7 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 			payload     = COALESCE($9, payload),
 			headers     = COALESCE($10, headers),
 			enabled     = COALESCE($11, enabled),
+			run_as      = COALESCE($12, run_as),
 			updated_at  = now()
 		 WHERE ` + whereClause + `
 		 RETURNING ` + cronJobColumns
@@ -332,7 +363,7 @@ func (s *CronService) DeleteByName(ctx context.Context, projectID, name string) 
 func (s *CronService) GetDueJobs(ctx context.Context) ([]DueJob, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT cj.id, cj.project_id, cj.name, cj.schedule, cj.timezone, cj.action_type,
-		        cj.action, cj.description, cj.payload, cj.headers, cj.enabled,
+		        cj.action, cj.description, cj.payload, cj.headers, cj.enabled, cj.run_as,
 		        cj.last_run_at, cj.last_error, cj.run_count,
 		        cj.created_at, cj.updated_at, p.schema_name, COALESCE(p.plan, 'free')
 		 FROM cron_jobs cj
@@ -348,7 +379,7 @@ func (s *CronService) GetDueJobs(ctx context.Context) ([]DueJob, error) {
 		var d DueJob
 		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.Schedule, &d.Timezone,
 			&d.ActionType, &d.Action, &d.Description, &d.Payload, &d.Headers,
-			&d.Enabled, &d.LastRunAt, &d.LastError, &d.RunCount,
+			&d.Enabled, &d.RunAs, &d.LastRunAt, &d.LastError, &d.RunCount,
 			&d.CreatedAt, &d.UpdatedAt, &d.SchemaName, &d.Plan); err != nil {
 			return nil, fmt.Errorf("scan due job: %w", err)
 		}
