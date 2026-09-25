@@ -16,7 +16,7 @@ kubectl -n "$NS" delete configmap "$POD" --ignore-not-found >/dev/null 2>&1 || t
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"; kubectl -n "$NS" delete pod "$POD" --ignore-not-found >/dev/null 2>&1; kubectl -n "$NS" delete configmap "$POD" --ignore-not-found >/dev/null 2>&1' EXIT
 cat > "$TMP/smoke.ts" <<'EOF'
 import { funcPassword } from "/app/tenant_db.ts";
-const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
+const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
 function pooled(raw: string, user?: string, pw?: string): string {
   const u = new URL(raw);
   u.hostname = "pgbouncer.eurobase.svc.cluster.local"; u.port = "6432";

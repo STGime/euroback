@@ -10,7 +10,7 @@
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
-import { isLoginError, TenantDBPool } from "./tenant_db.ts";
+import { isLoginError, isPoolerBusyError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -35,6 +35,16 @@ import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
 // DATABASE_URL_FUNCTION_RUNNER is in every environment, the fallback
 // can be removed.
 const DB_URL = Deno.env.get("DATABASE_URL_FUNCTION_RUNNER") ?? Deno.env.get("DATABASE_URL") ?? "";
+
+// One tenant's broken connection must never take down the runner for
+// everyone: postgres.js can emit a connection error as an unhandled
+// rejection (e.g. when PgBouncer closes a client after query_wait_timeout)
+// in addition to rejecting the pending query. Log it and keep serving.
+globalThis.addEventListener("unhandledrejection", (e) => {
+  e.preventDefault();
+  const r = e.reason as { code?: string; message?: string } | undefined;
+  console.error(`[runner] unhandled rejection kept from crashing the process: ${r?.code ?? ""} ${r?.message ?? String(e.reason)}`);
+});
 const PORT = parseInt(Deno.env.get("PORT") ?? "8000");
 const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50");
 const CODE_CACHE_SIZE = parseInt(Deno.env.get("CODE_CACHE_SIZE") ?? "200");
@@ -124,16 +134,22 @@ let sql: any = null;
 // authenticated as the tenant's `<schema>_func` role. Requires
 // FUNC_PASSWORD_SECRET; without it ctx.db.sql fails.
 const FUNC_PASSWORD_SECRET = Deno.env.get("FUNC_PASSWORD_SECRET") ?? "";
-// Per pod; see the connection budget note on the HPA in deploy/k8s/functions.yaml.
-const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "10");
+// Tenant connections go through PgBouncer when set (#641 PR 3), e.g.
+// postgres://pgbouncer.eurobase.svc.cluster.local:6432/eurobase_tenant?sslmode=disable
+// (user/password are filled in per tenant). Unset: straight to Postgres.
+const FUNC_DB_POOLER_URL = Deno.env.get("FUNC_DB_POOLER_URL") ?? "";
+// Per pod. With FUNC_DB_POOLER_URL these are client connections to
+// PgBouncer (cheap; its max_client_conn is 500 per replica) — see the
+// budget note on the HPA in deploy/k8s/functions.yaml.
+const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? (FUNC_DB_POOLER_URL ? "30" : "10"));
 let tenantPool: TenantDBPool | null = null;
 
 async function getTenantPool(): Promise<TenantDBPool | null> {
   if (FUNC_PASSWORD_SECRET.length < 32 || !DB_URL) return null;
   if (tenantPool) return tenantPool;
-  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
   tenantPool = new TenantDBPool(
-    DB_URL,
+    FUNC_DB_POOLER_URL || DB_URL,
     FUNC_PASSWORD_SECRET,
     (url: string) => postgres(url, { max: 1, idle_timeout: 30 }),
     TENANT_CONN_CAP,
@@ -143,7 +159,7 @@ async function getTenantPool(): Promise<TenantDBPool | null> {
 
 async function getDB() {
   if (sql) return sql;
-  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
   sql = postgres(DB_URL, { max: 3 }); // platform lookups only
   return sql;
 }
@@ -328,7 +344,13 @@ async function executeFunction(
       // retryable message and a fresh client next time. Errors raised by
       // the customer's SQL — even with an auth-like SQLSTATE — pass
       // through unchanged.
-      if (started || !isLoginError(err)) throw err;
+      if (started) throw err;
+      if (isPoolerBusyError(err)) {
+        lease?.invalidate();
+        console.warn(`[tenant-db] pooler busy for ${funcRole}`);
+        throw new Error("the database is busy for this project; retry shortly");
+      }
+      if (!isLoginError(err)) throw err;
       lease?.invalidate();
       console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
       throw new Error("database login for this project is unavailable; retry shortly");

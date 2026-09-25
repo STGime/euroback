@@ -71,6 +71,11 @@ spec:
             # signs its requests.
             - name: FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED
               value: "true"
+            # #641 PR 3: tenant (ctx.db.sql) connections go through
+            # PgBouncer's tenant alias; user/password are set per tenant.
+            # The runner's own platform lookups stay direct.
+            - name: FUNC_DB_POOLER_URL
+              value: postgres://pgbouncer.eurobase.svc.cluster.local:6432/eurobase_tenant?sslmode=disable
       imagePullSecrets:
         - name: scw-registry
 ---
@@ -101,14 +106,16 @@ spec:
     kind: Deployment
     name: functions
   minReplicas: 1
-  # Linked to the DB connection budget (max_connections=100, 3 reserved):
-  # each pod holds up to RUNNER_TENANT_CONN_CAP (10) per-tenant
-  # connections + 3 shared; a rollout at max scale runs 5 pods (default
-  # 25% surge) => 5 x 13 = 65, + ~25 gateway/worker = ~90. And
-  # tenantlogin.FuncConnLimit (8) must cover maxReplicas + 1 surging pod
-  # + 1 cron job connection (worker) + 1 console dry run (gateway).
-  # Raise these together (or add a pooler).
-  maxReplicas: 4
+  # DB connection budget (max_connections=100, 3 reserved). Since #641
+  # PR 3 tenant connections are *client* connections to PgBouncer; the
+  # server connections they use are capped by the pooler (tenant alias:
+  # PGB_TENANT_MAX_DB_CONNECTIONS 15 × 2 replicas = 30; per tenant
+  # PGB_TENANT_POOL_SIZE 2 × 2 = 4, + cron + dry run <= FuncConnLimit 8).
+  # Each runner pod still holds up to 3 direct platform-lookup
+  # connections: 7 pods (6 + surge) × 3 = 21. With ~35 direct from
+  # gateway/worker that is ~86 worst case. RUNNER_TENANT_CONN_CAP
+  # (client connections to the pooler per pod) no longer counts here.
+  maxReplicas: 6
   metrics:
     - type: Resource
       resource:

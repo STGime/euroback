@@ -9,14 +9,15 @@
 #   - sidecar `userlist`: re-renders every 10 s, SIGHUPs pgbouncer on
 #     change (new projects become poolable within seconds)
 #
-# PR 2 deploys it with NO traffic: nothing points at pgbouncer:6432 yet.
-# PR 3 moves the functions runner's tenant connections, PR 4 the gateway.
+# PR 3: the functions runner's tenant connections (ctx.db.sql) go through
+# it, via the tenant alias `eurobase_tenant`. PR 4 (gateway) needs a
+# separate pooler deployment first (AGENTS.md).
 # Never route through it: golang-migrate, tenant `_ddl` apply
 # connections, the worker (River LISTEN) — see AGENTS.md § Connection
 # pooling prerequisites.
 #
-# Budget: max_db_connections is per instance (2 replicas × 20 = 40 server
-# connections at most); pools open lazily, so an idle pooler holds none.
+# Budget per replica: platform alias 10, tenant alias 15 server connections
+# (× 2 replicas); pools open lazily, so an idle pooler holds none.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,6 +43,9 @@ spec:
     spec:
       # The userlist sidecar SIGHUPs the pgbouncer process on change.
       shareProcessNamespace: true
+      # preStop waits for in-flight transactions (statement_timeout <= 30 s
+      # on the tenant paths).
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -62,8 +66,12 @@ spec:
               value: /run/pgbouncer
             - name: PGB_SERVER_TLS
               value: require
+            # Server connections per replica: platform alias (unused until
+            # PR 4) and tenant alias, capped separately.
             - name: PGB_MAX_DB_CONNECTIONS
-              value: "20"
+              value: "10"
+            - name: PGB_TENANT_MAX_DB_CONNECTIONS
+              value: "15"
             - name: PGB_TENANT_POOL_SIZE
               value: "2"
             # Keep equal to spec.replicas (tenant connection budget check).
@@ -82,6 +90,14 @@ spec:
         - name: pgbouncer
           image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
           command: ["pgbouncer", "/run/pgbouncer/pgbouncer.ini"]
+          # Graceful stop: wait for the endpoint removal to propagate, then
+          # SIGINT = "safe shutdown" (finish in-flight transactions, then
+          # exit). Kubernetes' SIGTERM would be "super safe" (wait for
+          # clients to disconnect), which pooled clients never do.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5; kill -INT $(pidof pgbouncer); while pidof pgbouncer >/dev/null; do sleep 1; done"]
           ports:
             - { name: pgbouncer, containerPort: 6432 }
           readinessProbe:

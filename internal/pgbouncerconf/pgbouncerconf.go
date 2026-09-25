@@ -37,10 +37,16 @@ type Settings struct {
 	ServerTLS string
 	// AuthFile is the path PgBouncer reads the userlist from.
 	AuthFile string
-	// MaxDBConnections caps server connections to the database per
-	// PgBouncer instance (all users together) — the budget against
-	// max_connections.
+	// MaxDBConnections caps server connections per PgBouncer instance for
+	// the platform alias (Database: gateway / runner / developer roles).
 	MaxDBConnections int
+	// TenantMaxDBConnections caps server connections per instance for the
+	// tenant alias (TenantDatabase), separately, so busy tenants can never
+	// take the platform roles' connections (#641 PR 3).
+	TenantMaxDBConnections int
+	// QueryWaitTimeout is how long a client queues for a server connection
+	// before PgBouncer fails its query (seconds).
+	QueryWaitTimeout int
 	// TenantPoolSize is the per-tenant pool (default_pool_size) per
 	// replica. Replicas × TenantPoolSize plus the role's direct users must
 	// fit in tenantlogin.FuncConnLimit (see CheckTenantBudget).
@@ -71,10 +77,24 @@ func (s *Settings) UpstreamFromURL(databaseURL string) error {
 	return nil
 }
 
+// TenantDatabase is the alias tenant `<schema>_func` clients connect to.
+// It maps to the same Postgres database with its own server-connection
+// cap (Settings.TenantMaxDBConnections).
+func (s Settings) TenantDatabase() string { return s.Database + "_tenant" }
+
 // RenderINI returns pgbouncer.ini.
 func RenderINI(s Settings) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[databases]\n%s = host=%s port=%d dbname=%s\n\n", s.Database, s.Host, s.Port, s.Database)
+	tenantMax := s.TenantMaxDBConnections
+	if tenantMax <= 0 {
+		tenantMax = s.MaxDBConnections
+	}
+	wait := s.QueryWaitTimeout
+	if wait <= 0 {
+		wait = 15
+	}
+	fmt.Fprintf(&b, "[databases]\n%s = host=%s port=%d dbname=%s max_db_connections=%d\n", s.Database, s.Host, s.Port, s.Database, s.MaxDBConnections)
+	fmt.Fprintf(&b, "%s = host=%s port=%d dbname=%s max_db_connections=%d\n\n", s.TenantDatabase(), s.Host, s.Port, s.Database, tenantMax)
 
 	users := make([]string, 0, len(s.PlatformPoolSizes))
 	for u := range s.PlatformPoolSizes {
@@ -100,11 +120,11 @@ pool_mode = transaction
 ; here; cap them well below file-descriptor limits
 max_client_conn = 500
 default_pool_size = %d
-max_db_connections = %d
+; per-database caps are set on the [databases] entries above
 ; unauthenticated clients can't hold slots for long
 client_login_timeout = 5
 ; clients queue for a server connection instead of failing
-query_wait_timeout = 15
+query_wait_timeout = %d
 server_idle_timeout = 60
 server_lifetime = 1800
 ; protocol-level prepared statements (pgx cache modes, postgres.js)
@@ -120,7 +140,7 @@ ignore_startup_parameters = extra_float_digits
 log_connections = 0
 log_disconnections = 0
 stats_period = 60
-`, s.AuthFile, s.TenantPoolSize, s.MaxDBConnections, s.ServerTLS)
+`, s.AuthFile, s.TenantPoolSize, wait, s.ServerTLS)
 	return b.String()
 }
 
@@ -188,9 +208,10 @@ func quote(s string) string {
 
 // DirectFuncConnections is how many connections a tenant's `<schema>_func`
 // role can hold outside the pooler: one cron job (worker) and one console
-// dry run (gateway). The functions runner's own per-pod connections are
-// not counted — once it routes through the pooler (PR 3) it holds none
-// directly; plan that cutover so the transition stays within the limit.
+// dry run (gateway). The functions runner routes through the pooler
+// (PR 3) and holds none directly; while a runner rollout still has old
+// pods connecting directly, a busy tenant can briefly exceed the limit
+// (53300, retryable).
 const DirectFuncConnections = 2
 
 // CheckTenantBudget verifies that all pooler replicas together plus the

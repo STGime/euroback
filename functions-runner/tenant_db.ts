@@ -131,11 +131,26 @@ export class TenantDBPool {
 }
 
 /**
- * SQLSTATEs for a failed tenant login: bad password / role not loginable
- * (28P01, 28000) or the role's CONNECTION LIMIT reached (53300).
+ * A failed tenant login: bad password / role not loginable (28P01, 28000),
+ * the role's CONNECTION LIMIT reached (53300), or PgBouncer refusing the
+ * login (it reports auth failures as 08P01 "SASL authentication failed").
  */
 export function isLoginError(err: unknown): boolean {
   // deno-lint-ignore no-explicit-any
-  const code = (err as any)?.code;
-  return code === "28P01" || code === "28000" || code === "53300";
+  const e = err as any;
+  const code = e?.code;
+  if (code === "28P01" || code === "28000" || code === "53300") return true;
+  return code === "08P01" && /authentication failed/i.test(String(e?.message ?? ""));
+}
+
+/**
+ * PgBouncer could not serve the client in time: the tenant's pool stayed
+ * full past query_wait_timeout, or the pooler is out of client slots.
+ * Both arrive as 08P01 and close the connection; the call is retryable.
+ */
+export function isPoolerBusyError(err: unknown): boolean {
+  // deno-lint-ignore no-explicit-any
+  const e = err as any;
+  return e?.code === "08P01" &&
+    /query_wait_timeout|no more connections allowed|server login/i.test(String(e?.message ?? ""));
 }
