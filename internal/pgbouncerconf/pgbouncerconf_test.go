@@ -60,3 +60,12 @@ func TestPlatformUserFromURL(t *testing.T) {
 		t.Error("want error for URL without credentials")
 	}
 }
+
+func TestCheckTenantBudget(t *testing.T) {
+	if err := CheckTenantBudget(Settings{Replicas: 2, TenantPoolSize: 2}); err != nil {
+		t.Errorf("2×2+2 within FuncConnLimit: %v", err)
+	}
+	if err := CheckTenantBudget(Settings{Replicas: 4, TenantPoolSize: 2}); err == nil {
+		t.Error("4×2+2 > FuncConnLimit: want error")
+	}
+}

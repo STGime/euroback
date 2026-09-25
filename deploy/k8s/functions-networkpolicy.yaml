@@ -53,16 +53,6 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    # Allow the PgBouncer pooler (#641) — in-cluster, so otherwise blocked
-    # by the RFC1918 exclusion below. Unused until the runner's tenant
-    # connections move to it (PR 3).
-    - to:
-        - podSelector:
-            matchLabels:
-              app: pgbouncer
-      ports:
-        - protocol: TCP
-          port: 6432
     # Allow everything to the public internet, except RFC1918 and
     # link-local. This covers Scaleway's managed Postgres/Redis (they
     # sit on public IPs) plus any third-party API the function calls.

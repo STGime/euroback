@@ -10,7 +10,8 @@
 // Environment:
 //
 //	DATABASE_URL                  gateway role — upstream host/db, lists tenant schemas
-//	DATABASE_URL_DEVELOPER        developer role (optional; not set until PR 4)
+//	DATABASE_URL_DEVELOPER        developer role, only with PGB_INCLUDE_DEVELOPER=1 (PR 4)
+//	PGB_REPLICAS                  PgBouncer replicas (tenant connection budget check)
 //	DATABASE_URL_FUNCTION_RUNNER  runner role (optional)
 //	FUNC_PASSWORD_SECRET          derives tenant function-role verifiers
 //	PGB_DIR                       output directory (default /run/pgbouncer)
@@ -95,9 +96,14 @@ func loadConfig() (*config, error) {
 	if len(c.secret) < tenantlogin.MinSecretLen {
 		return nil, fmt.Errorf("FUNC_PASSWORD_SECRET must be at least %d bytes", tenantlogin.MinSecretLen)
 	}
-	// DATABASE_URL_DEVELOPER (migrator-equivalent) is only added when the
-	// developer pool actually routes through the pooler (PR 4).
-	for _, key := range []string{"DATABASE_URL", "DATABASE_URL_DEVELOPER", "DATABASE_URL_FUNCTION_RUNNER"} {
+	// DATABASE_URL_DEVELOPER (migrator-equivalent) is only added with an
+	// explicit PGB_INCLUDE_DEVELOPER=1, set when the developer pool routes
+	// through the pooler (PR 4) — so a future envFrom can't slip it in.
+	keys := []string{"DATABASE_URL", "DATABASE_URL_FUNCTION_RUNNER"}
+	if os.Getenv("PGB_INCLUDE_DEVELOPER") == "1" {
+		keys = append(keys, "DATABASE_URL_DEVELOPER")
+	}
+	for _, key := range keys {
 		v := os.Getenv(key)
 		if v == "" {
 			continue
@@ -121,8 +127,9 @@ func loadConfig() (*config, error) {
 	for _, p := range c.platform {
 		s.PlatformPoolSizes[p.User] = envInt("PGB_POOL_SIZE_"+strings.ToUpper(p.User), 10)
 	}
-	if s.TenantPoolSize >= tenantlogin.FuncConnLimit {
-		return nil, fmt.Errorf("PGB_TENANT_POOL_SIZE %d must stay below FuncConnLimit %d", s.TenantPoolSize, tenantlogin.FuncConnLimit)
+	s.Replicas = envInt("PGB_REPLICAS", 1)
+	if err := pgbouncerconf.CheckTenantBudget(s); err != nil {
+		return nil, err
 	}
 	c.settings = s
 	if d, err := time.ParseDuration(envOr("PGB_SYNC_INTERVAL", "10s")); err == nil && d > 0 {

@@ -66,6 +66,9 @@ spec:
               value: "20"
             - name: PGB_TENANT_POOL_SIZE
               value: "2"
+            # Keep equal to spec.replicas (tenant connection budget check).
+            - name: PGB_REPLICAS
+              value: "2"
           volumeMounts:
             - { name: run, mountPath: /run/pgbouncer }
           securityContext: &restricted
@@ -149,6 +152,8 @@ spec:
         - podSelector:
             matchLabels:
               app: gateway
+        # functions: allowed here, but the runner's egress policy only
+        # opens the pooler in PR 3.
         - podSelector:
             matchLabels:
               app: functions

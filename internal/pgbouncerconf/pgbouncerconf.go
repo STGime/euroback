@@ -41,9 +41,12 @@ type Settings struct {
 	// PgBouncer instance (all users together) — the budget against
 	// max_connections.
 	MaxDBConnections int
-	// TenantPoolSize is the per-tenant pool (default_pool_size); must stay
-	// below tenantlogin.FuncConnLimit.
+	// TenantPoolSize is the per-tenant pool (default_pool_size) per
+	// replica. Replicas × TenantPoolSize plus the role's direct users must
+	// fit in tenantlogin.FuncConnLimit (see CheckTenantBudget).
 	TenantPoolSize int
+	// Replicas is the number of PgBouncer instances.
+	Replicas int
 	// PlatformPoolSizes sets a per-user pool for the platform roles.
 	PlatformPoolSizes map[string]int
 }
@@ -98,6 +101,8 @@ pool_mode = transaction
 max_client_conn = 500
 default_pool_size = %d
 max_db_connections = %d
+; unauthenticated clients can't hold slots for long
+client_login_timeout = 5
 ; clients queue for a server connection instead of failing
 query_wait_timeout = 15
 server_idle_timeout = 60
@@ -179,4 +184,25 @@ func RenderUserlist(platform []PlatformUser, secret []byte, schemas []string) (s
 // quote renders a userlist field: double-quoted, inner quotes doubled.
 func quote(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// DirectFuncConnections is how many connections a tenant's `<schema>_func`
+// role can hold outside the pooler: one cron job (worker) and one console
+// dry run (gateway). The functions runner's own per-pod connections are
+// not counted — once it routes through the pooler (PR 3) it holds none
+// directly; plan that cutover so the transition stays within the limit.
+const DirectFuncConnections = 2
+
+// CheckTenantBudget verifies that all pooler replicas together plus the
+// direct users of a tenant role fit in the role's CONNECTION LIMIT.
+func CheckTenantBudget(s Settings) error {
+	replicas := s.Replicas
+	if replicas < 1 {
+		replicas = 1
+	}
+	if need := replicas*s.TenantPoolSize + DirectFuncConnections; need > tenantlogin.FuncConnLimit {
+		return fmt.Errorf("tenant budget: %d replicas × pool %d + %d direct = %d > FuncConnLimit %d",
+			replicas, s.TenantPoolSize, DirectFuncConnections, need, tenantlogin.FuncConnLimit)
+	}
+	return nil
 }

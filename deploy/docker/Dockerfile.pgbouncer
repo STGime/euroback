@@ -13,6 +13,7 @@ FROM alpine:3.21
 # 1.23.x: protocol-level prepared statements (max_prepared_statements)
 # and SCRAM pass-through, both required by the config we render.
 RUN apk add --no-cache pgbouncer ca-certificates \
+ && pgbouncer --version | grep -Eq 'PgBouncer 1\.(2[3-9]|[3-9][0-9])' \
  && adduser -D -H -u 10001 pgb \
  && mkdir -p /run/pgbouncer && chown pgb /run/pgbouncer
 COPY --from=builder /app/pgbouncer-userlist /usr/local/bin/pgbouncer-userlist

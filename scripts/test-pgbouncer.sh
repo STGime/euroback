@@ -21,7 +21,8 @@ cleanup
 docker network create "$NET" >/dev/null
 
 docker run -d --name "$PG" --network "$NET" -p "$PG_PORT:5432" \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=eurobase postgres:16-alpine >/dev/null
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=eurobase \
+  -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 postgres:16-alpine >/dev/null
 for _ in $(seq 1 30); do docker exec "$PG" pg_isready -U postgres -d eurobase >/dev/null 2>&1 && break; sleep 1; done
 sleep 1
 "$REPO_ROOT/scripts/db/apply-migrations.sh" "postgres://postgres:postgres@localhost:$PG_PORT/eurobase?sslmode=disable" | tail -1
