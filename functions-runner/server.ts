@@ -10,7 +10,7 @@
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
-import { isAuthError, TenantDBPool } from "./tenant_db.ts";
+import { isLoginError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -124,7 +124,8 @@ let sql: any = null;
 // authenticated as the tenant's `<schema>_func` role. Requires
 // FUNC_PASSWORD_SECRET; without it ctx.db.sql fails.
 const FUNC_PASSWORD_SECRET = Deno.env.get("FUNC_PASSWORD_SECRET") ?? "";
-const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "20");
+// Per pod; see the connection budget note on the HPA in deploy/k8s/functions.yaml.
+const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "12");
 let tenantPool: TenantDBPool | null = null;
 
 async function getTenantPool(): Promise<TenantDBPool | null> {
@@ -143,7 +144,7 @@ async function getTenantPool(): Promise<TenantDBPool | null> {
 async function getDB() {
   if (sql) return sql;
   const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
-  sql = postgres(DB_URL, { max: 10 });
+  sql = postgres(DB_URL, { max: 3 }); // platform lookups only
   return sql;
 }
 
@@ -324,7 +325,7 @@ async function executeFunction(
       // retryable message and a fresh client next time. Errors raised by
       // the customer's SQL — even with an auth-like SQLSTATE — pass
       // through unchanged.
-      if (started || !isAuthError(err)) throw err;
+      if (started || !isLoginError(err)) throw err;
       lease?.invalidate();
       console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
       throw new Error("database login for this project is unavailable; retry shortly");

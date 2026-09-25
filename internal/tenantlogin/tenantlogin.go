@@ -33,9 +33,10 @@ import (
 const MinSecretLen = 32
 
 // FuncConnLimit is the per-tenant connection limit on `<schema>_func`.
-// The runner holds at most one connection per tenant per pod; 3 leaves
-// room for a rolling restart (two pods) plus one.
-const FuncConnLimit = 3
+// The runner holds at most one connection per tenant per pod, so this
+// must cover the functions HPA maxReplicas (4, deploy/k8s/functions.yaml)
+// plus one surging pod during a rollout, plus one spare.
+const FuncConnLimit = 6
 
 // scramIterations matches PostgreSQL's default scram_iterations.
 const scramIterations = 4096
@@ -152,8 +153,14 @@ func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
 		pgx.Identifier{role}.Sanitize(), FuncConnLimit, verifier)); err != nil {
 		return fmt.Errorf("set login on %s: %w", role, err)
 	}
+	// Both scopes: role-wide and per-database defaults (a role may set
+	// either on itself).
 	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s RESET ALL", pgx.Identifier{role}.Sanitize())); err != nil {
 		return fmt.Errorf("reset role settings on %s: %w", role, err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s IN DATABASE %s RESET ALL",
+		pgx.Identifier{role}.Sanitize(), pgx.Identifier{e.database}.Sanitize())); err != nil {
+		return fmt.Errorf("reset per-database role settings on %s: %w", role, err)
 	}
 	var canConnect bool
 	if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", role, e.database).Scan(&canConnect); err != nil {

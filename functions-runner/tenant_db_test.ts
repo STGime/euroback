@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { funcPassword, isAuthError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
+import { funcPassword, isLoginError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
 
 Deno.test("funcPassword matches the Go vector (internal/tenantlogin)", async () => {
   assertEquals(
@@ -81,9 +81,10 @@ Deno.test("a stale lease.invalidate does not evict a newer client", async () => 
   again.release();
 });
 
-Deno.test("isAuthError", () => {
-  assert(isAuthError({ code: "28P01" }));
-  assert(isAuthError({ code: "28000" }));
-  assert(!isAuthError({ code: "42501" }));
-  assert(!isAuthError(new Error("x")));
+Deno.test("isLoginError", () => {
+  assert(isLoginError({ code: "28P01" }));
+  assert(isLoginError({ code: "28000" }));
+  assert(isLoginError({ code: "53300" }));
+  assert(!isLoginError({ code: "42501" }));
+  assert(!isLoginError(new Error("x")));
 });

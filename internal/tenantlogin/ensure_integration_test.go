@@ -2,6 +2,7 @@ package tenantlogin
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -54,6 +55,10 @@ func TestEnsureOneIntegration(t *testing.T) {
 	if _, err := conn.Exec(ctx, "ALTER ROLE CURRENT_USER SET work_mem = '1GB'"); err != nil {
 		t.Fatalf("self SET (expected allowed by Postgres): %v", err)
 	}
+	if _, err := conn.Exec(ctx, fmt.Sprintf("ALTER ROLE CURRENT_USER IN DATABASE %s SET work_mem = '1GB'",
+		pgx.Identifier{cfg.Database}.Sanitize())); err != nil {
+		t.Fatalf("self SET IN DATABASE (expected allowed by Postgres): %v", err)
+	}
 
 	if err := e.EnsureOne(ctx, schema); err != nil {
 		t.Fatalf("second EnsureOne: %v", err)
@@ -61,8 +66,9 @@ func TestEnsureOneIntegration(t *testing.T) {
 	var limit int
 	var settings []string
 	if err := pool.QueryRow(ctx,
-		`SELECT r.rolconnlimit, COALESCE(s.setconfig, '{}')
-		   FROM pg_roles r LEFT JOIN pg_db_role_setting s ON s.setrole = r.oid AND s.setdatabase = 0
+		`SELECT r.rolconnlimit,
+		        COALESCE((SELECT array_agg(c) FROM pg_db_role_setting s, unnest(s.setconfig) c WHERE s.setrole = r.oid), '{}')
+		   FROM pg_roles r
 		  WHERE r.rolname = $1`, role).Scan(&limit, &settings); err != nil {
 		t.Fatal(err)
 	}

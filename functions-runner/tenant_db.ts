@@ -130,9 +130,12 @@ export class TenantDBPool {
   }
 }
 
-/** Postgres auth-failure SQLSTATEs (password / role not yet loginable). */
-export function isAuthError(err: unknown): boolean {
+/**
+ * SQLSTATEs for a failed tenant login: bad password / role not loginable
+ * (28P01, 28000) or the role's CONNECTION LIMIT reached (53300).
+ */
+export function isLoginError(err: unknown): boolean {
   // deno-lint-ignore no-explicit-any
   const code = (err as any)?.code;
-  return code === "28P01" || code === "28000";
+  return code === "28P01" || code === "28000" || code === "53300";
 }
