@@ -183,7 +183,7 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
 	switch job.ActionType {
 	case "sql":
-		if err := validateCronSQLAction(job.Action); err != nil {
+		if err := validateCronSQLAction(job.Action, job.SchemaName); err != nil {
 			return err
 		}
 		return e.runInTenantTx(ctx, job.SchemaName, func(tx pgx.Tx) error {
@@ -299,7 +299,8 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 // runInTenantTx wraps a cron action in a transaction with `SET LOCAL
 // search_path` and `SET LOCAL statement_timeout`. Both reset on commit.
 // search_path intentionally does NOT include `public` — qualified
-// references are blocked by validateCronSQLAction; this stops accidental
+// references are blocked by validateCronSQLAction (the same checks as the
+// SQL endpoints); this stops accidental
 // resolution of unqualified names (`projects`, `api_keys`) into the
 // platform schema.
 func (e *Executor) runInTenantTx(ctx context.Context, schemaName string, fn func(pgx.Tx) error) error {
