@@ -324,12 +324,12 @@
 		testResult = null;
 		testError = null;
 		try {
-			const resp = await api.executeSQL(projectId, formAction.trim());
-			if (resp.row_count != null) {
-				testResult = `${resp.row_count} row(s) affected. Execution time: ${resp.execution_time_ms}ms`;
-			} else {
-				testResult = 'Query executed successfully.';
-			}
+			const resp = await api.testCronJob(projectId, {
+				action_type: formActionType,
+				action: formAction.trim(),
+				run_as: formRunAs
+			});
+			testResult = `Dry run: ${resp.rows_affected} row(s) would be affected (${resp.execution_time_ms}ms). Nothing was changed — the test ran as the scheduled job will and was rolled back.`;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : 'Execution failed';
 			const m = msg.match(/\{"error":"(.+?)"\}/);
@@ -1113,7 +1113,7 @@
 								Running...
 							{:else}
 								<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z" /></svg>
-								Test Run Now
+								Test Run (dry run)
 							{/if}
 						</button>
 						{#if testResult}

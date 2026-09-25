@@ -137,6 +137,30 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 		}
 	}
 
+	// DryRun (#645): reports what the job would do, then rolls back.
+	res, err := e.DryRun(ctx, schemaA, "sql", "DELETE FROM svc_only", RunAsService)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if res.RowsAffected != 1 || !res.DryRun {
+		t.Errorf("DryRun = %+v, want 1 row affected, dry_run", res)
+	}
+	var still int
+	if err := e.runInTenantTx(ctx, schemaA, RunAsService, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, "SELECT count(*) FROM svc_only").Scan(&still)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if still != 1 {
+		t.Errorf("after DryRun the table has %d rows, want 1 (rolled back)", still)
+	}
+	if res, err := e.DryRun(ctx, schemaA, "sql", "DELETE FROM svc_only", RunAsNone); err != nil || res.RowsAffected != 0 {
+		t.Errorf("DryRun as none = %+v, %v; want 0 rows", res, err)
+	}
+	if _, err := e.DryRun(ctx, schemaA, "sql", "GRANT SELECT ON svc_only TO PUBLIC", RunAsService); err == nil {
+		t.Error("DryRun accepted a GRANT")
+	}
+
 	// The tenant role has no access to another tenant's schema.
 	err = e.runInTenantTx(ctx, schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, "SELECT count(*) FROM "+pgx.Identifier{schemaB, "todos"}.Sanitize())

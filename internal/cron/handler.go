@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
@@ -20,11 +21,13 @@ const (
 )
 
 // Routes returns a chi.Router for cron job CRUD operations.
-// Mounted at /platform/projects/{id}/cron
-func Routes(svc *CronService) chi.Router {
+// Mounted at /platform/projects/{id}/cron. dry may be nil (no per-tenant
+// logins configured): POST /test then returns 503.
+func Routes(svc *CronService, dry *Executor) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", handleList(svc))
 	r.Post("/", handleCreate(svc))
+	r.Post("/test", handleTest(svc, dry))
 	r.Patch("/{jobId}", handleUpdate(svc))
 	r.Delete("/{jobId}", handleDelete(svc))
 	r.Get("/{jobId}/runs", handleListRuns(svc))
@@ -339,4 +342,44 @@ func jsonError(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// testRequest is the body of POST /cron/test.
+type testRequest struct {
+	ActionType string  `json:"action_type"`
+	Action     string  `json:"action"`
+	RunAs      *string `json:"run_as,omitempty"`
+}
+
+// handleTest dry-runs a sql / rpc action as the scheduled job would run
+// it (tenant login, run_as) and rolls back (#645).
+func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if dry == nil {
+			jsonError(w, "test runs are not available on this server", http.StatusServiceUnavailable)
+			return
+		}
+		projectID := chi.URLParam(r, "id")
+		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleBodyBytes)
+		var req testRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		runAs := RunAsService
+		if req.RunAs != nil {
+			runAs = *req.RunAs
+		}
+		schema, err := svc.projectSchema(r.Context(), projectID)
+		if err != nil {
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		res, err := dry.DryRun(r.Context(), schema, req.ActionType, strings.TrimSpace(req.Action), runAs)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, res, http.StatusOK)
+	}
 }

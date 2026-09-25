@@ -444,3 +444,52 @@ func partMatches(part string, value int) bool {
 	}
 	return value == n
 }
+
+// errDryRunRollback makes runInTenantTx roll back after a dry run.
+var errDryRunRollback = errors.New("dry run: rolled back")
+
+// DryRunResult reports what a job would have done.
+type DryRunResult struct {
+	RowsAffected int64 `json:"rows_affected"`
+	DurationMs   int64 `json:"execution_time_ms"`
+	DryRun       bool  `json:"dry_run"`
+}
+
+// DryRun executes a sql / rpc action exactly like a scheduled run — same
+// validation, tenant login, run_as and timeouts — and always rolls back.
+// Backs the console's Test Run (#645). Side effects outside the database
+// (none are reachable from the tenant role today) would not be undone.
+func (e *Executor) DryRun(ctx context.Context, schemaName, actionType, action, runAs string) (*DryRunResult, error) {
+	var sql string
+	switch actionType {
+	case "sql":
+		if err := validateCronSQLAction(action, schemaName); err != nil {
+			return nil, err
+		}
+		sql = action
+	case "rpc":
+		if err := validateCronRPCName(action); err != nil {
+			return nil, err
+		}
+		sql = fmt.Sprintf("SELECT %s()", quoteIdent(action))
+	default:
+		return nil, fmt.Errorf("dry run supports action_type 'sql' or 'rpc'")
+	}
+	if err := validateRunAs(&runAs); err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	var rows int64
+	err := e.runInTenantTx(ctx, schemaName, runAs, func(ctx context.Context, tx pgx.Tx) error {
+		n, err := execExtended(ctx, tx, sql)
+		if err != nil {
+			return err
+		}
+		rows = n
+		return errDryRunRollback
+	})
+	if err != nil && !errors.Is(err, errDryRunRollback) {
+		return nil, err
+	}
+	return &DryRunResult{RowsAffected: rows, DurationMs: time.Since(start).Milliseconds(), DryRun: true}, nil
+}
