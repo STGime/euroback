@@ -1677,7 +1677,7 @@ export class EurobaseAPI {
 		return this.fetch<CronJob[]>(`/platform/projects/${projectId}/cron`);
 	}
 
-	async createCronJob(projectId: string, data: { name: string; schedule: string; action_type: string; action: string }): Promise<CronJob> {
+	async createCronJob(projectId: string, data: { name: string; schedule: string; action_type: string; action: string; run_as?: 'service' | 'none' }): Promise<CronJob> {
 		return this.fetch<CronJob>(`/platform/projects/${projectId}/cron`, {
 			method: 'POST',
 			body: JSON.stringify(data)
@@ -2819,6 +2819,8 @@ export interface CronJob {
 	action_type: string;
 	action: string;
 	enabled: boolean;
+	/** RLS identity for sql / rpc jobs (#643): 'service' bypasses row-level security in the project's own tables. */
+	run_as: 'service' | 'none';
 	last_run_at: string | null;
 	last_error: string | null;
 	run_count: number;

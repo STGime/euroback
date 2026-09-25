@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,14 +35,14 @@ func TestCronService_ValidatesSQLOnSave(t *testing.T) {
 
 	var ownerID, projectID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO platform_users (email) VALUES ('cron-validate@test.eurobase.local') RETURNING id`,
+		`INSERT INTO platform_users (email) VALUES ($1) RETURNING id`, "cron-validate-"+uuid.NewString()+"@test.eurobase.local",
 	).Scan(&ownerID); err != nil {
 		t.Fatalf("insert platform user: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
-		 VALUES ($1, 'cron validate', 'cron-validate', 'tenant_cron_validate', 'b-cron-validate', 'fr-par', 'free', 'active')
-		 RETURNING id`, ownerID,
+		 VALUES ($1, 'cron validate', $2, $3, $2, 'fr-par', 'free', 'active')
+		 RETURNING id`, ownerID, "cron-validate-"+uuid.NewString()[:8], "tenant_cron_validate_"+strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
 	).Scan(&projectID); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
@@ -102,5 +103,85 @@ func TestCronService_ValidatesSQLOnSave(t *testing.T) {
 	sqlType := "sql"
 	if _, err := svc.Update(ctx, projectID, rpc.ID, UpdateCronJobRequest{ActionType: &sqlType, Action: &foreign}); !isValidationErr(err) {
 		t.Fatalf("Update to sql with SQL referencing another tenant: err = %v, want a validation error", err)
+	}
+}
+
+// run_as (#643): new jobs default to service; explicit values and updates
+// are kept; anything else is refused.
+func TestCronService_RunAs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Skipf("connect: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("ping: %v", err)
+	}
+	var ownerID, projectID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email) VALUES ($1) RETURNING id`, "cron-runas-"+uuid.NewString()+"@test.eurobase.local",
+	).Scan(&ownerID); err != nil {
+		t.Fatalf("insert platform user: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
+		 VALUES ($1, 'cron runas', $2, $3, $2, 'fr-par', 'free', 'active')
+		 RETURNING id`, ownerID, "cron-runas-"+uuid.NewString()[:8], "tenant_cron_runas_"+strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
+	).Scan(&projectID); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(ctx, `DELETE FROM cron_jobs WHERE project_id = $1`, projectID) //nolint:errcheck
+		pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)          //nolint:errcheck
+		pool.Exec(ctx, `DELETE FROM platform_users WHERE id = $1`, ownerID)      //nolint:errcheck
+	})
+	svc := NewCronService(pool)
+
+	def, err := svc.Create(ctx, projectID, CreateCronJobRequest{
+		Name: "default", Schedule: "0 * * * *", ActionType: "sql", Action: "DELETE FROM events WHERE old",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.RunAs != RunAsService {
+		t.Errorf("new job run_as = %q, want %q", def.RunAs, RunAsService)
+	}
+
+	none := RunAsNone
+	explicit, err := svc.Create(ctx, projectID, CreateCronJobRequest{
+		Name: "explicit", Schedule: "0 * * * *", ActionType: "sql", Action: "DELETE FROM events WHERE old", RunAs: &none,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.RunAs != RunAsNone {
+		t.Errorf("explicit run_as = %q, want %q", explicit.RunAs, RunAsNone)
+	}
+
+	service := RunAsService
+	upd, err := svc.Update(ctx, projectID, explicit.ID, UpdateCronJobRequest{RunAs: &service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upd.RunAs != RunAsService {
+		t.Errorf("updated run_as = %q, want %q", upd.RunAs, RunAsService)
+	}
+
+	bad := "admin"
+	if _, err := svc.Create(ctx, projectID, CreateCronJobRequest{
+		Name: "bad", Schedule: "0 * * * *", ActionType: "sql", Action: "DELETE FROM events WHERE old", RunAs: &bad,
+	}); err == nil {
+		t.Error("Create accepted run_as=admin")
+	}
+	if _, err := svc.Update(ctx, projectID, def.ID, UpdateCronJobRequest{RunAs: &bad}); err == nil {
+		t.Error("Update accepted run_as=admin")
 	}
 }

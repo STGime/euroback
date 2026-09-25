@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/eurobase/euroback/internal/tenantlogin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -53,8 +54,8 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 		}
 		return "tenant_" + strings.ReplaceAll(id, "-", "_")
 	}
-	schemaA := provision("aaaaaaaa-0000-4000-8000-00000000c0a1")
-	schemaB := provision("bbbbbbbb-0000-4000-8000-00000000c0b2")
+	schemaA := provision(uuid.NewString())
+	schemaB := provision(uuid.NewString())
 
 	secret := []byte(strings.Repeat("s", 32))
 	ens, err := tenantlogin.NewEnsurer(dev, dev.Config().ConnConfig.Database, secret)
@@ -72,7 +73,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	e := (&Executor{}).WithTenantLogins(base, secret)
 
 	var who, path string
-	if err := e.runInTenantTx(ctx, schemaA, func(ctx context.Context, tx pgx.Tx) error {
+	if err := e.runInTenantTx(ctx, schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, "SELECT session_user, current_setting('search_path')").Scan(&who, &path)
 	}); err != nil {
 		t.Fatalf("runInTenantTx: %v", err)
@@ -84,8 +85,60 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 		t.Errorf("search_path = %q, want tenant schema", path)
 	}
 
+	// run_as: "service" sets the RLS role for the job's transaction only;
+	// "none" leaves it unset.
+	for _, tc := range []struct{ runAs, want string }{{RunAsService, "service"}, {RunAsNone, ""}} {
+		var role string
+		if err := e.runInTenantTx(ctx, schemaA, tc.runAs, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, "SELECT coalesce(current_setting('app.end_user_role', true), '')").Scan(&role)
+		}); err != nil {
+			t.Fatalf("runInTenantTx(%s): %v", tc.runAs, err)
+		}
+		if role != tc.want {
+			t.Errorf("run_as=%s: app.end_user_role = %q, want %q", tc.runAs, role, tc.want)
+		}
+	}
+
+	// RLS: a service-only table is visible to run_as=service, not to none.
+	setup := []string{
+		"CREATE TABLE " + pgx.Identifier{schemaA, "svc_only"}.Sanitize() + " (v int)",
+		"INSERT INTO " + pgx.Identifier{schemaA, "svc_only"}.Sanitize() + " VALUES (1)",
+		"ALTER TABLE " + pgx.Identifier{schemaA, "svc_only"}.Sanitize() + " ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY svc ON " + pgx.Identifier{schemaA, "svc_only"}.Sanitize() + " USING (public.is_service_role())",
+		"GRANT SELECT ON " + pgx.Identifier{schemaA, "svc_only"}.Sanitize() + " TO " + pgx.Identifier{schemaA + "_func"}.Sanitize(),
+	}
+	tx, err := dev.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range setup {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		runAs string
+		want  int
+	}{{RunAsService, 1}, {RunAsNone, 0}} {
+		var n int
+		if err := e.runInTenantTx(ctx, schemaA, tc.runAs, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, "SELECT count(*) FROM svc_only").Scan(&n)
+		}); err != nil {
+			t.Fatalf("count as %s: %v", tc.runAs, err)
+		}
+		if n != tc.want {
+			t.Errorf("run_as=%s sees %d rows of a service-only table, want %d", tc.runAs, n, tc.want)
+		}
+	}
+
 	// The tenant role has no access to another tenant's schema.
-	err = e.runInTenantTx(ctx, schemaA, func(ctx context.Context, tx pgx.Tx) error {
+	err = e.runInTenantTx(ctx, schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, "SELECT count(*) FROM "+pgx.Identifier{schemaB, "todos"}.Sanitize())
 		return err
 	})
@@ -94,7 +147,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	}
 
 	// The server refuses a second statement on this path.
-	err = e.runInTenantTx(ctx, schemaA, func(ctx context.Context, tx pgx.Tx) error {
+	err = e.runInTenantTx(ctx, schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := execExtended(ctx, tx, "SELECT 1; SELECT 2")
 		return err
 	})
@@ -103,7 +156,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	}
 
 	// Not configured => refuse rather than fall back to a shared role.
-	if err := (&Executor{}).runInTenantTx(ctx, schemaA, func(context.Context, pgx.Tx) error { return nil }); err == nil {
+	if err := (&Executor{}).runInTenantTx(ctx, schemaA, RunAsNone, func(context.Context, pgx.Tx) error { return nil }); err == nil {
 		t.Error("runInTenantTx without tenant logins: want error")
 	}
 }
