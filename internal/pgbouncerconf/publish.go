@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/eurobase/euroback/internal/k8sapi"
 	"github.com/eurobase/euroback/internal/tenantlogin"
@@ -17,9 +18,12 @@ import (
 // FUNC_PASSWORD_SECRET anyway — derives each tenant's SCRAM verifier and
 // publishes the userlist lines plus the upstream address; the runner's
 // pooler only reads them. So the pooler pod, which tenant code can reach,
-// holds no master secret and no database password: a compromise there
-// yields verifiers only (no login without the password; offline brute
-// force of a 64-hex HMAC is not practical).
+// holds no master secret and no database password. What a compromised
+// pooler still gets: the verifiers (no login from them alone; offline
+// brute force of a 64-hex HMAC is impractical) and — inherent to SCRAM
+// pass-through — the ClientKey of every tenant that connects while it is
+// compromised, usable until FUNC_PASSWORD_SECRET is rotated. Idle and
+// future tenants are not exposed, and no key derives the others.
 const (
 	KeyUserlist = "userlist" // tenant `"<schema>_func" "<verifier>"` lines
 	KeyUpstream = "upstream" // "host:port/database" (no credentials)
@@ -109,11 +113,17 @@ type Publisher struct {
 	Store    Store
 	Secret   []byte
 	Upstream string
-	last     string
+	// Refresh re-writes even an unchanged list this often (default 5 min),
+	// so a wiped / re-created Secret heals without a worker restart.
+	Refresh time.Duration
+
+	last      string
+	lastWrite time.Time
 }
 
-// Publish lists tenant schemas and writes the userlist when it changed.
-// Returns whether it wrote.
+// Publish lists tenant schemas and writes the userlist on the first call
+// (even with zero tenants — the pooler's init waits for a first publish),
+// when it changed, and every Refresh. Returns whether it wrote.
 func (p *Publisher) Publish(ctx context.Context, conn *pgx.Conn) (bool, error) {
 	schemas, err := TenantSchemas(ctx, conn)
 	if err != nil {
@@ -123,12 +133,16 @@ func (p *Publisher) Publish(ctx context.Context, conn *pgx.Conn) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if body == p.last {
+	refresh := p.Refresh
+	if refresh <= 0 {
+		refresh = 5 * time.Minute
+	}
+	if !p.lastWrite.IsZero() && body == p.last && time.Since(p.lastWrite) < refresh {
 		return false, nil
 	}
 	if err := p.Store.Put(ctx, map[string][]byte{KeyUserlist: []byte(body), KeyUpstream: []byte(p.Upstream)}); err != nil {
 		return false, err
 	}
-	p.last = body
+	p.last, p.lastWrite = body, time.Now()
 	return true, nil
 }

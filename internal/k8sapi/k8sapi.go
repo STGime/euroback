@@ -126,7 +126,11 @@ func (c *Client) do(ctx context.Context, method, name, contentType string, body 
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, ErrNotFound
 	case resp.StatusCode >= 300:
-		return nil, fmt.Errorf("k8s %s secret %s: %s", method, name, resp.Status)
+		msg := string(b)
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return nil, fmt.Errorf("k8s %s secret %s: %s: %s", method, name, resp.Status, strings.TrimSpace(msg))
 	}
 	return b, nil
 }

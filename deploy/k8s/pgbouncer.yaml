@@ -140,11 +140,15 @@ spec:
           resources:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 64Mi }
+      imagePullSecrets:
+        - name: scw-registry
       volumes:
         - name: run
           emptyDir: { medium: Memory, sizeLimit: 16Mi }
-        # Service-account token for the render/userlist containers only
-        # (get on pgbouncer-tenant-userlist); not mounted into pgbouncer.
+        # Service-account token for the render/userlist containers (get on
+        # pgbouncer-tenant-userlist). Not mounted into pgbouncer — though with
+        # the shared process namespace + UID it could read it via /proc; it
+        # only grants read access to data pgbouncer already holds.
         - name: sa
           projected:
             sources:

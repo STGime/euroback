@@ -107,6 +107,8 @@ spec:
           resources:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 64Mi }
+      imagePullSecrets:
+        - name: scw-registry
       volumes:
         - name: run
           emptyDir: { medium: Memory, sizeLimit: 16Mi }

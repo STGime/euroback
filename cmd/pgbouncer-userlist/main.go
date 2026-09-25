@@ -87,10 +87,8 @@ func main() {
 		slog.Info("pgbouncer config written", "dir", cfg.dir)
 	case "sync":
 		runSync(ctx, cfg)
-	case "publish":
-		runPublish(ctx)
 	default:
-		fail("usage", fmt.Errorf("unknown mode %q (init|sync)", mode))
+		fail("usage", fmt.Errorf("unknown mode %q (init|sync|publish)", mode))
 	}
 }
 

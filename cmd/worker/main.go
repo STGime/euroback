@@ -298,8 +298,9 @@ func main() {
 
 	// Publish the runner pooler's tenant userlist (#653): SCRAM verifiers
 	// derived here, so the pooler pod — reachable from tenant code — needs
-	// neither FUNC_PASSWORD_SECRET nor a database URL. Every 15 s; writes
-	// only when the tenant set changed.
+	// neither FUNC_PASSWORD_SECRET nor a database URL. Every 5 s (a new
+	// project's tenant becomes poolable within ~15 s incl. the pooler's
+	// 10 s sync); writes on change and every 5 min.
 	if name := os.Getenv("PGB_USERLIST_SECRET"); name != "" {
 		secret := []byte(os.Getenv("FUNC_PASSWORD_SECRET"))
 		kc, kerr := k8sapi.InCluster()
@@ -332,7 +333,7 @@ func main() {
 					}
 				}
 				publish()
-				t := time.NewTicker(15 * time.Second)
+				t := time.NewTicker(5 * time.Second)
 				defer t.Stop()
 				for {
 					select {
