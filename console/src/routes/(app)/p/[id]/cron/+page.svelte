@@ -459,7 +459,7 @@
 								<span class="font-medium text-sm text-gray-900">{job.name}</span>
 								<span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-gray-500">{job.action_type}</span>
 								{#if job.action_type !== 'function' && job.run_as === 'service'}
-									<span class="rounded bg-eurobase-50 px-1.5 py-0.5 text-[10px] font-medium text-eurobase-700" title="Runs as the service role (bypasses row-level security in this project)">service</span>
+									<span class="rounded bg-eurobase-50 px-1.5 py-0.5 text-[10px] font-medium text-eurobase-700" title="Runs as the service role: row-level security policies that allow the service role apply (this project only)">service</span>
 								{/if}
 							</div>
 							<div class="mt-1 flex items-center gap-3 text-xs text-gray-400">
@@ -1095,7 +1095,7 @@
 						onchange={(e) => (formRunAs = (e.currentTarget as HTMLInputElement).checked ? 'service' : 'none')} />
 					<span>
 						<span class="text-sm font-medium text-gray-900">Run as service role</span>
-						<span class="block text-xs text-gray-500">Row-level security policies see the job as the service role, like an edge function called without a user — so housekeeping jobs can reach every user's rows. The job still only has access to this project's tables. Turn off to run without any user context (only rows your policies allow to everyone).</span>
+						<span class="block text-xs text-gray-500">Row-level security policies see the job as the service role, like an edge function called without a user — policies that allow the service role (such as the built-in presets) apply, so housekeeping jobs can reach rows across users. The job still only has access to this project's tables. Turn off to run without any user context (only rows your policies allow to everyone).</span>
 					</span>
 				</label>
 

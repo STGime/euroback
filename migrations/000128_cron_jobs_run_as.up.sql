@@ -13,6 +13,9 @@
 --
 -- No explicit BEGIN/COMMIT: golang-migrate wraps each .up.sql in its own tx.
 
+-- Don't queue every cron_jobs reader behind a long-held lock.
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE public.cron_jobs
     ADD COLUMN IF NOT EXISTS run_as text NOT NULL DEFAULT 'none'
     CONSTRAINT cron_jobs_run_as_check CHECK (run_as IN ('none', 'service'));

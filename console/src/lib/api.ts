@@ -2819,7 +2819,7 @@ export interface CronJob {
 	action_type: string;
 	action: string;
 	enabled: boolean;
-	/** RLS identity for sql / rpc jobs (#643): 'service' bypasses row-level security in the project's own tables. */
+	/** RLS identity for sql / rpc jobs (#643): 'service' makes is_service_role() true, so policies that allow the service role apply (project's own tables only). */
 	run_as: 'service' | 'none';
 	last_run_at: string | null;
 	last_error: string | null;

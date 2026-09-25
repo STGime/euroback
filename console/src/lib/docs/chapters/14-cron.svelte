@@ -85,7 +85,7 @@
 					<div class="text-sm text-eurobase-800">
 						<p><strong>Plan limits:</strong> Free plan includes 2 scheduled jobs. Pro plan has unlimited jobs.</p>
 						<p class="mt-1">Jobs run in your project's own schema, as your project's database role &mdash; they can't reach other schemas. One statement per job; the same rules as the SQL editor apply.</p>
-						<p class="mt-1"><strong>Run as service role</strong> (default for new jobs): row-level security policies see the job as the service role, like an edge function called without a user, so housekeeping jobs (purging expired rows, rollups) reach every user's rows. With it off, the job has no user context and only sees rows your policies allow to everyone. Jobs created before this option existed have it off; switch it on in the job's settings.</p>
+						<p class="mt-1"><strong>Run as service role</strong> (default for new jobs): row-level security policies see the job as the service role, like an edge function called without a user, so policies that allow the service role apply and housekeeping jobs (purging expired rows, rollups) can reach rows across users. Custom policies that don't check for the service role still apply as written. With it off, the job has no user context and only sees rows your policies allow to everyone. Jobs created before this option existed have it off; switch it on in the job's settings.</p>
 					</div>
 				</div>
 			<h3 class="text-lg font-semibold text-gray-900 mt-6">RPC Functions</h3>
