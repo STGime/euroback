@@ -1,0 +1,45 @@
+name: PgBouncer e2e
+
+# Builds the PgBouncer image and runs scripts/test-pgbouncer.sh: a real
+# PgBouncer (as rendered by pgbouncer-userlist) in front of a migrated
+# PG16 — platform + new-tenant SCRAM login, prepared statements across
+# transactions, no session state between clients (#641).
+#
+# Path-filtered: don't make this a *required* check without dropping the
+# filter, or unrelated PRs will wait on it forever.
+
+on:
+  pull_request:
+    paths:
+      - cmd/pgbouncer-userlist/**
+      - internal/pgbouncerconf/**
+      - internal/tenantlogin/**
+      - deploy/docker/Dockerfile.pgbouncer
+      - scripts/test-pgbouncer.sh
+      - .github/workflows/pgbouncer-e2e.yml
+  push:
+    branches: [main]
+    paths:
+      - cmd/pgbouncer-userlist/**
+      - internal/pgbouncerconf/**
+      - internal/tenantlogin/**
+      - deploy/docker/Dockerfile.pgbouncer
+      - scripts/test-pgbouncer.sh
+      - .github/workflows/pgbouncer-e2e.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Ensure psql client
+        run: command -v psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
+      - name: PgBouncer end-to-end
+        run: scripts/test-pgbouncer.sh
