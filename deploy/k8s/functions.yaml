@@ -101,10 +101,12 @@ spec:
     kind: Deployment
     name: functions
   minReplicas: 1
-  # Linked to the DB connection budget (max_connections=100): each pod
-  # holds up to RUNNER_TENANT_CONN_CAP (12) per-tenant connections + 3
-  # shared, and tenantlogin.FuncConnLimit (6) must cover maxReplicas + 1
-  # surging pod. Raise all three together (or add a pooler).
+  # Linked to the DB connection budget (max_connections=100, 3 reserved):
+  # each pod holds up to RUNNER_TENANT_CONN_CAP (10) per-tenant
+  # connections + 3 shared; a rollout at max scale runs 5 pods (default
+  # 25% surge) => 5 x 13 = 65, + ~25 gateway/worker = ~90. And
+  # tenantlogin.FuncConnLimit (6) must cover maxReplicas + 1 surging pod.
+  # Raise these together (or add a pooler).
   maxReplicas: 4
   metrics:
     - type: Resource

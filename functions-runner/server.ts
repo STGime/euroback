@@ -125,7 +125,7 @@ let sql: any = null;
 // FUNC_PASSWORD_SECRET; without it ctx.db.sql fails.
 const FUNC_PASSWORD_SECRET = Deno.env.get("FUNC_PASSWORD_SECRET") ?? "";
 // Per pod; see the connection budget note on the HPA in deploy/k8s/functions.yaml.
-const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "12");
+const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "10");
 let tenantPool: TenantDBPool | null = null;
 
 async function getTenantPool(): Promise<TenantDBPool | null> {
