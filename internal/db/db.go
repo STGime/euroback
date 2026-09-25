@@ -16,8 +16,10 @@ type Option func(*pgxpool.Config)
 // WithSessionReset resets every connection's session state when it is
 // released back to the pool (ResetSession). Use it for pools that run
 // customer SQL or customer code (RPC bodies, triggers): the gateway's
-// runtime and developer pools, and Team PoolCache pools. Not for the
-// worker pool — River keeps a LISTEN there.
+// runtime and developer pools, and Team PoolCache pools. The worker pool
+// doesn't need it: it runs no customer SQL (cron uses per-tenant
+// connections) — River's LISTEN is on a hijacked connection, so the hook
+// would not affect it either way.
 func WithSessionReset() Option {
 	return func(c *pgxpool.Config) { c.AfterRelease = ResetSession }
 }

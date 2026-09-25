@@ -1,13 +1,14 @@
 package query
 
 import (
-	"github.com/eurobase/euroback/internal/db"
 	"context"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/eurobase/euroback/internal/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -62,7 +63,6 @@ func (e *QueryEngine) resolvePool(ctx context.Context) *pgxpool.Pool {
 	return e.pool
 }
 
-
 // applyRLSContext sets the three app.end_user_* GUCs on the provided tx
 // based on the request context. Secret keys get role='service' (bypasses
 // RLS via the is_service_role() branch in policies). End-user JWTs get
@@ -97,7 +97,6 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 	}
 	return nil
 }
-
 
 // WithTenantTx runs fn inside a transaction with search_path set to the
 // tenant schema AND the end-user RLS context applied. Every tenant-schema
@@ -1010,7 +1009,7 @@ func normalizeValue(v interface{}) interface{} {
 // reset — after COMMIT the next statement may reach a different server
 // connection (see AGENTS.md § Connection pooling prerequisites).
 func releaseClean(conn *pgxpool.Conn, pool *pgxpool.Pool) {
-	if pool.Config().AfterRelease != nil {
+	if poolResetsOnRelease(pool) {
 		conn.Release()
 		return
 	}
@@ -1020,6 +1019,19 @@ func releaseClean(conn *pgxpool.Conn, pool *pgxpool.Pool) {
 		conn.Conn().Close(ctx) //nolint:errcheck
 	}
 	conn.Release()
+}
+
+// hookedPools caches whether a pool has an AfterRelease hook
+// (pgxpool.Pool.Config copies the whole config on every call).
+var hookedPools sync.Map // *pgxpool.Pool -> bool
+
+func poolResetsOnRelease(pool *pgxpool.Pool) bool {
+	if v, ok := hookedPools.Load(pool); ok {
+		return v.(bool)
+	}
+	hooked := pool.Config().AfterRelease != nil
+	hookedPools.Store(pool, hooked)
+	return hooked
 }
 
 // execCustomerStatement runs one customer statement over the extended

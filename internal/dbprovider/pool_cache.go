@@ -27,12 +27,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/eurobase/euroback/internal/db"
 	"log/slog"
 	"net/url"
 	"sync"
 	"time"
 
+	"github.com/eurobase/euroback/internal/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
