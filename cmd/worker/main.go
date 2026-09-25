@@ -15,6 +15,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/eurobase/euroback/internal/audit/export"
+	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/dbprovider"
@@ -201,13 +202,23 @@ func main() {
 		S3:     s3Client,
 		DBPool: pool,
 	})
+	// Exports read tenant tables as eurobase_migrator, which owns or
+	// inherits every tenant table, so RLS written for end users can't
+	// hide rows from them (#654). Without a developer pool (dev), they
+	// read on `pool` and report RLS-limited tables as not exported.
+	var exportData compliance.ExportSource
+	if developerPool != pool {
+		exportData = compliance.ExportSource{Pool: developerPool, Role: "eurobase_migrator"}
+	}
 	river.AddWorker(riverWorkers, &workers.TenantExportWorker{
 		DBPool: pool,
 		S3:     s3Client,
+		Data:   exportData,
 	})
 	river.AddWorker(riverWorkers, &workers.UserExportWorker{
 		DBPool: pool,
 		S3:     s3Client,
+		Data:   exportData,
 	})
 	river.AddWorker(riverWorkers, &workers.SendDripEmailWorker{
 		DBPool:     pool,

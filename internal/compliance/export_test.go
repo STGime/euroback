@@ -127,12 +127,12 @@ func TestWriteTenantExport_StreamsZipStructure(t *testing.T) {
 	for _, format := range []string{"json", "csv"} {
 		t.Run("format="+format, func(t *testing.T) {
 			var buf bytes.Buffer
-			total, err := WriteTenantExport(ctx, pool, &buf, schema, projectID, "exp-"+format, format)
+			res, err := WriteTenantExport(ctx, pool, ExportSource{Pool: pool}, &buf, schema, projectID, "exp-"+format, format)
 			if err != nil {
 				t.Fatalf("WriteTenantExport: %v", err)
 			}
-			if total < 3 {
-				t.Fatalf("expected ≥3 rows total (2 todos + 1 user), got %d", total)
+			if total := res.TotalRows; total < 5 {
+				t.Fatalf("expected ≥5 rows total (3 todos + 2 users), got %d", res.TotalRows)
 			}
 
 			zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
@@ -166,8 +166,14 @@ func TestWriteTenantExport_StreamsZipStructure(t *testing.T) {
 				if err := json.Unmarshal(body, &rows); err != nil {
 					t.Fatalf("todos.json not array of objects: %v\nbody:\n%s", err, body)
 				}
-				if len(rows) != 2 {
-					t.Errorf("todos.json: got %d rows, want 2", len(rows))
+				// The fixture inserts three todos (A1, A2, B1).
+				if len(rows) != 3 {
+					t.Errorf("todos.json: got %d rows, want 3", len(rows))
+				}
+				for _, r := range rows {
+					if id, ok := r["id"].(string); !ok || len(id) != 36 {
+						t.Errorf("todos.json id is not a UUID string: %#v", r["id"])
+					}
 				}
 			case "csv":
 				rdr := csv.NewReader(bytes.NewReader(body))
@@ -175,8 +181,8 @@ func TestWriteTenantExport_StreamsZipStructure(t *testing.T) {
 				if err != nil {
 					t.Fatalf("todos.csv not parseable: %v", err)
 				}
-				if len(records) != 3 { // header + 2 rows
-					t.Errorf("todos.csv: got %d records (incl header), want 3", len(records))
+				if len(records) != 4 { // header + 3 rows
+					t.Errorf("todos.csv: got %d records (incl header), want 4", len(records))
 				}
 			}
 
@@ -227,12 +233,12 @@ func TestWriteUserExport_FiltersToOneUser(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	total, err := WriteUserExport(ctx, pool, &buf, schema, projectID, userAID, "exp-user", "json")
+	res, err := WriteUserExport(ctx, pool, ExportSource{Pool: pool}, &buf, schema, projectID, userAID, "exp-user", "json")
 	if err != nil {
 		t.Fatalf("WriteUserExport: %v", err)
 	}
-	if total < 1 {
-		t.Fatalf("expected ≥1 row, got %d", total)
+	if res.TotalRows < 1 {
+		t.Fatalf("expected ≥1 row, got %d", res.TotalRows)
 	}
 
 	zr, _ := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
@@ -286,12 +292,12 @@ func TestWriteTenantExport_AcceptsArbitraryWriter(t *testing.T) {
 	defer cleanup()
 
 	cw := &countingWriter{}
-	total, err := WriteTenantExport(ctx, pool, cw, schema, projectID, "exp-cw", "json")
+	res, err := WriteTenantExport(ctx, pool, ExportSource{Pool: pool}, cw, schema, projectID, "exp-cw", "json")
 	if err != nil {
 		t.Fatalf("WriteTenantExport into counting writer: %v", err)
 	}
-	if total < 3 {
-		t.Errorf("rows: got %d want ≥3", total)
+	if res.TotalRows < 3 {
+		t.Errorf("rows: got %d want ≥3", res.TotalRows)
 	}
 	if cw.bytes < 100 {
 		t.Errorf("counting writer received only %d bytes — zip wasn't streamed", cw.bytes)
@@ -464,10 +470,20 @@ func setupExportFixture(t *testing.T, pool *pgxpool.Pool) (schema, projectID str
 	// created via the platform migrator. Our test users table has no
 	// policies so plain SELECT works.
 
+	// The slug is passed separately: a parameter used both as uuid and as
+	// text fails with "inconsistent types deduced", which used to skip
+	// every test using this fixture.
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO projects (id, slug, name, schema_name, s3_bucket)
-		 VALUES ($1, 'dsar-test-' || substr($1::text, 1, 8), 'DSAR Test', $2, 'dsar-test-bucket')`,
-		projectID, schema,
+		`INSERT INTO platform_users (id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		projectID, "dsar-owner-"+projectID[:8]+"@test.local",
+	); err != nil {
+		cleanupFn()
+		t.Skipf("insert platform user: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO projects (id, owner_id, slug, name, schema_name, s3_bucket)
+		 VALUES ($1, $1, $3, 'DSAR Test', $2, 'dsar-test-bucket')`,
+		projectID, schema, "dsar-test-"+projectID[:8],
 	); err != nil {
 		cleanupFn()
 		t.Skipf("insert project row: %v", err)

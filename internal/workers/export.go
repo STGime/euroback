@@ -21,6 +21,10 @@ type TenantExportWorker struct {
 	DBPool   *pgxpool.Pool
 	S3       *storage.S3Client
 	AuditSvc *audit.Service
+	// Data is where tenant tables are read from (compliance.ExportSource,
+	// #654): the developer pool as eurobase_migrator in production. Unset
+	// = DBPool, where RLS-limited tables are reported as not exported.
+	Data compliance.ExportSource
 }
 
 func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.TenantExportArgs]) error {
@@ -59,10 +63,16 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 	}
 
 	logger.Info("streaming tenant export zip to temp file")
+	var result *compliance.ExportResult
 	tmpFile, size, totalRows, err := streamExportToTempFile(
 		ctx, args.ExportID,
 		func(out io.Writer) (int, error) {
-			return compliance.WriteTenantExport(ctx, w.DBPool, out, schemaName, args.ProjectID, args.ExportID, args.Format)
+			res, err := compliance.WriteTenantExport(ctx, w.DBPool, exportSource(w.Data, w.DBPool), out, schemaName, args.ProjectID, args.ExportID, args.Format)
+			if err != nil {
+				return 0, err
+			}
+			result = res
+			return res.TotalRows, nil
 		},
 	)
 	if err != nil {
@@ -79,8 +89,11 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 		return fmt.Errorf("upload: %w", err)
 	}
 
-	if err := exportSvc.MarkCompleted(ctx, args.ExportID, s3Key, size); err != nil {
+	if err := exportSvc.MarkCompleted(ctx, args.ExportID, s3Key, size, result); err != nil {
 		return fmt.Errorf("mark completed: %w", err)
+	}
+	if !result.Complete {
+		logger.Warn("tenant export is incomplete", "warnings", result.Warnings)
 	}
 
 	// Closes #100. The request-time audit row was written by the
@@ -98,6 +111,8 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 				"file_size": size,
 				"rows":      totalRows,
 				"scope":     "tenant",
+				"complete":  result.Complete,
+				"warnings":  result.Warnings,
 			}))
 	}
 
@@ -111,6 +126,8 @@ type UserExportWorker struct {
 	DBPool   *pgxpool.Pool
 	S3       *storage.S3Client
 	AuditSvc *audit.Service
+	// Data: see TenantExportWorker.Data.
+	Data compliance.ExportSource
 }
 
 func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExportArgs]) error {
@@ -144,10 +161,16 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 	}
 
 	logger.Info("streaming user export zip to temp file")
+	var result *compliance.ExportResult
 	tmpFile, size, totalRows, err := streamExportToTempFile(
 		ctx, args.ExportID,
 		func(out io.Writer) (int, error) {
-			return compliance.WriteUserExport(ctx, w.DBPool, out, schemaName, args.ProjectID, args.UserID, args.ExportID, args.Format)
+			res, err := compliance.WriteUserExport(ctx, w.DBPool, exportSource(w.Data, w.DBPool), out, schemaName, args.ProjectID, args.UserID, args.ExportID, args.Format)
+			if err != nil {
+				return 0, err
+			}
+			result = res
+			return res.TotalRows, nil
 		},
 	)
 	if err != nil {
@@ -164,8 +187,11 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 		return fmt.Errorf("upload: %w", err)
 	}
 
-	if err := exportSvc.MarkCompleted(ctx, args.ExportID, s3Key, size); err != nil {
+	if err := exportSvc.MarkCompleted(ctx, args.ExportID, s3Key, size, result); err != nil {
 		return fmt.Errorf("mark completed: %w", err)
+	}
+	if !result.Complete {
+		logger.Warn("user export is incomplete", "warnings", result.Warnings)
 	}
 
 	// Closes #100, per-user / self-serve variant.
@@ -179,11 +205,22 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 				"rows":           totalRows,
 				"scope":          "user",
 				"target_user_id": args.UserID,
+				"complete":       result.Complete,
+				"warnings":       result.Warnings,
 			}))
 	}
 
 	logger.Info("user export completed", "size", size, "rows", totalRows)
 	return nil
+}
+
+// exportSource returns the configured tenant-data source, or the
+// worker's own pool when none is set (dev without a developer pool).
+func exportSource(data compliance.ExportSource, fallback *pgxpool.Pool) compliance.ExportSource {
+	if data.Pool != nil {
+		return data
+	}
+	return compliance.ExportSource{Pool: fallback}
 }
 
 // streamExportToTempFile drives one of the compliance.Write*Export
