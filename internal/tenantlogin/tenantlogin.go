@@ -35,8 +35,9 @@ const MinSecretLen = 32
 // FuncConnLimit is the per-tenant connection limit on `<schema>_func`.
 // The runner holds at most one connection per tenant per pod, so this
 // must cover the functions HPA maxReplicas (4, deploy/k8s/functions.yaml)
-// plus one surging pod during a rollout, plus one spare.
-const FuncConnLimit = 6
+// plus one surging pod during a rollout, plus one cron job connection
+// (worker), plus one spare.
+const FuncConnLimit = 7
 
 // scramIterations matches PostgreSQL's default scram_iterations.
 const scramIterations = 4096

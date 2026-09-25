@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -34,6 +36,23 @@ type Executor struct {
 	pool     *pgxpool.Pool
 	invoker  *FunctionInvoker
 	location *time.Location // fallback timezone when a job's tz fails to load
+
+	// Customer SQL (sql / rpc actions) runs on a connection that logs in
+	// as the tenant's own `<schema>_func` role — the same identity as
+	// edge-function SQL — never on the shared pool, whose role can reach
+	// every tenant schema. Unset => sql / rpc jobs fail (no fallback).
+	tenantBase   *pgx.ConnConfig
+	tenantSecret []byte
+}
+
+// WithTenantLogins configures the per-tenant logins used for sql / rpc
+// actions: base is the worker's own connection config (host, db, TLS);
+// user and password are replaced per job with `<schema>_func` and
+// tenantlogin.FuncPassword(secret, schema).
+func (e *Executor) WithTenantLogins(base *pgx.ConnConfig, secret []byte) *Executor {
+	e.tenantBase = base
+	e.tenantSecret = secret
+	return e
 }
 
 // NewExecutor creates a new cron job executor.
@@ -173,9 +192,10 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 //  3. Sets `search_path` and `statement_timeout` via `SET LOCAL` so they
 //     auto-reset on commit/rollback and never leak into other handlers
 //     sharing the connection.
-//  4. Executes the action via `tx.Exec` — the extended query protocol,
-//     which runs only the first statement (defence-in-depth on top of
-//     the multi-statement rejection).
+//  4. Executes the action with PgConn.ExecParams — the extended query
+//     protocol, where the server itself refuses more than one statement
+//     (pgx's tx.Exec would fall back to the simple protocol for a query
+//     without arguments).
 //
 // `function` action_type is dispatched out-of-band to the Deno runner
 // over HTTP (same HMAC-signed path the SDK uses), so SQL-injection
@@ -183,11 +203,11 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
 	switch job.ActionType {
 	case "sql":
-		if err := validateCronSQLAction(job.Action); err != nil {
+		if err := validateCronSQLAction(job.Action, job.SchemaName); err != nil {
 			return err
 		}
-		return e.runInTenantTx(ctx, job.SchemaName, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, job.Action); err != nil {
+		return e.runInTenantTx(ctx, job.SchemaName, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := execExtended(ctx, tx, job.Action); err != nil {
 				return fmt.Errorf("execute sql: %w", err)
 			}
 			return nil
@@ -196,9 +216,9 @@ func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
 		if err := validateCronRPCName(job.Action); err != nil {
 			return err
 		}
-		return e.runInTenantTx(ctx, job.SchemaName, func(tx pgx.Tx) error {
+		return e.runInTenantTx(ctx, job.SchemaName, func(ctx context.Context, tx pgx.Tx) error {
 			sql := fmt.Sprintf("SELECT %s()", quoteIdent(job.Action))
-			if _, err := tx.Exec(ctx, sql); err != nil {
+			if _, err := execExtended(ctx, tx, sql); err != nil {
 				return fmt.Errorf("execute rpc: %w", err)
 			}
 			return nil
@@ -296,28 +316,59 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 	return nil
 }
 
-// runInTenantTx wraps a cron action in a transaction with `SET LOCAL
-// search_path` and `SET LOCAL statement_timeout`. Both reset on commit.
-// search_path intentionally does NOT include `public` — qualified
-// references are blocked by validateCronSQLAction; this stops accidental
-// resolution of unqualified names (`projects`, `api_keys`) into the
-// platform schema.
-func (e *Executor) runInTenantTx(ctx context.Context, schemaName string, fn func(pgx.Tx) error) error {
-	tx, err := e.pool.Begin(ctx)
+// runInTenantTx runs a cron action as the tenant: a short-lived
+// connection logged in as `<schema>_func` (only that schema's grants;
+// temp objects and session state die with the connection), inside a
+// transaction with `SET LOCAL search_path` and `statement_timeout`.
+// search_path does NOT include `public`; qualified references outside
+// the tenant are also refused by validateCronSQLAction.
+func (e *Executor) runInTenantTx(ctx context.Context, schemaName string, fn func(context.Context, pgx.Tx) error) error {
+	if e.tenantBase == nil || len(e.tenantSecret) == 0 {
+		return fmt.Errorf("sql/rpc cron actions need per-tenant logins (FUNC_PASSWORD_SECRET) on the worker")
+	}
+	cfg := e.tenantBase.Copy()
+	cfg.User = tenantlogin.FuncRole(schemaName)
+	cfg.Password = tenantlogin.FuncPassword(e.tenantSecret, schemaName)
+	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(cctx, cfg)
+	if err != nil {
+		// The driver error names the role and the internal host; keep it
+		// in the logs, not in cron_job_runs (visible to the tenant).
+		slog.Error("cron: connect as tenant role", "schema", schemaName, "error", err)
+		return errors.New("could not connect as the project's database role; it may still be provisioning — the job will retry at its next run")
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		conn.Close(closeCtx) //nolint:errcheck
+	}()
+
+	tx, err := conn.Begin(cctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", quoteIdent(schemaName))); err != nil {
+	defer tx.Rollback(cctx) //nolint:errcheck
+	if _, err := tx.Exec(cctx, fmt.Sprintf("SET LOCAL search_path TO %s", quoteIdent(schemaName))); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
+	if _, err := tx.Exec(cctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
 		return fmt.Errorf("set statement_timeout: %w", err)
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(cctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return tx.Commit(cctx)
+}
+
+// execExtended runs sql (no arguments) over the extended query protocol,
+// so the server refuses more than one statement.
+func execExtended(ctx context.Context, tx pgx.Tx, sql string) (int64, error) {
+	res := tx.Conn().PgConn().ExecParams(ctx, sql, nil, nil, nil, nil).Read()
+	if res.Err != nil {
+		return 0, res.Err
+	}
+	return res.CommandTag.RowsAffected(), nil
 }
 
 // quoteIdent quotes an identifier to prevent SQL injection.

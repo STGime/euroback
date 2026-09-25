@@ -169,6 +169,16 @@ func (s *CronService) Create(ctx context.Context, projectID string, req CreateCr
 			return nil, err
 		}
 	}
+	if req.ActionType == "sql" {
+		if err := s.validateSQLActionFor(ctx, projectID, req.Action); err != nil {
+			return nil, err
+		}
+	}
+	if req.ActionType == "rpc" {
+		if err := validateCronRPCName(req.Action); err != nil {
+			return nil, err
+		}
+	}
 
 	tz := req.Timezone
 	if tz == "" {
@@ -223,6 +233,40 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 	}
 	if req.ActionType != nil && *req.ActionType != "sql" && *req.ActionType != "rpc" && *req.ActionType != "function" {
 		return nil, fmt.Errorf("action_type must be 'sql', 'rpc', or 'function'")
+	}
+	// Validate the SQL the job will run after this update: the new action
+	// and/or type merged over the stored row.
+	if req.ActionType != nil || req.Action != nil {
+		var projectID, actionType, action string
+		err := s.pool.QueryRow(ctx,
+			`SELECT project_id::text, action_type, action FROM cron_jobs WHERE `+whereClause,
+			whereArgs...).Scan(&projectID, &actionType, &action)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("cron: load job for validation", "error", err)
+			return nil, errors.New("could not validate the cron job; try again")
+		}
+		if err == nil {
+			if req.ActionType != nil {
+				actionType = *req.ActionType
+			}
+			if req.Action != nil {
+				action = *req.Action
+			}
+			switch actionType {
+			case "sql":
+				if err := s.validateSQLActionFor(ctx, projectID, action); err != nil {
+					return nil, err
+				}
+			case "rpc":
+				if err := validateCronRPCName(action); err != nil {
+					return nil, err
+				}
+			case "function":
+				if err := validateFunctionName(action); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 
 	args := append([]any{}, whereArgs...)
@@ -431,4 +475,16 @@ func isUniqueViolation(err error) bool {
 		return pe.SQLState() == "23505"
 	}
 	return false
+}
+
+// validateSQLActionFor runs validateCronSQLAction against the project's
+// tenant schema, so a bad SQL action is refused when it is saved rather
+// than only when it first runs.
+func (s *CronService) validateSQLActionFor(ctx context.Context, projectID, action string) error {
+	var schema string
+	if err := s.pool.QueryRow(ctx, `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schema); err != nil {
+		slog.Error("cron: resolve project schema", "error", err, "project_id", projectID)
+		return errors.New("could not validate the sql action; try again")
+	}
+	return validateCronSQLAction(action, schema)
 }
