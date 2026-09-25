@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -113,7 +114,15 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 // with 42704 role-does-not-exist.
 func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
 	pool, routed := e.pickPool(ctx)
-	tx, err := pool.Begin(ctx)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+	// Tenant queries can run customer code (RPC bodies, triggers), which
+	// may leave session state behind: reset before the connection goes
+	// back to the shared pool (runs after the deferred rollback below).
+	defer releaseClean(conn)
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -808,7 +817,7 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	}
 
 	// DML/DDL: execute and return affected rows.
-	tag, err := tx.Exec(ctx, rawSQL)
+	tag, err := execCustomerStatement(ctx, tx, rawSQL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("execute query: %w", err)
 	}
@@ -926,7 +935,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 			continue
 		}
 
-		tag, err := tx.Exec(ctx, stmt)
+		tag, err := execCustomerStatement(ctx, tx, stmt)
 		if err != nil {
 			return results, fmt.Errorf("statement %d: %w", i, err)
 		}
@@ -982,19 +991,32 @@ func normalizeValue(v interface{}) interface{} {
 	}
 }
 
-// releaseClean returns a connection that ran customer SQL to its pool
-// with no session state left behind. A committed plain `SET x = …`,
-// `set_config(…, false)`, temp tables, LISTEN or prepared statements
-// would otherwise persist on a pooled connection and reach the next
-// request — another customer's — that acquires it (#641). DISCARD ALL
-// resets all of that; DeallocateAll also clears pgx's client-side
-// statement/description caches so they don't point at statements the
-// server just dropped. If the reset fails the connection is closed, so
-// the pool discards it rather than reusing it.
+// releaseClean returns a connection that ran customer SQL (or customer
+// code: RPC bodies, triggers) to its pool with no session state left
+// behind. A committed plain `SET x = …`, `set_config(…, false)`, temp
+// table, LISTEN or prepared statement would otherwise persist on the
+// pooled connection and reach the next request — another customer's —
+// that acquires it (#641). DISCARD ALL resets all of that. When the
+// connection's exec mode caches statements or descriptions (pgx default,
+// Team PoolCache pools), DeallocateAll first clears those caches too; the
+// shared pools use DescribeExec, which caches nothing, so they need only
+// the one round trip.
+// If the reset fails the connection is closed, so the pool discards it.
+//
+// Note: this is not a substitute for a transaction-mode pooler's own
+// reset — after COMMIT the next statement may reach a different server
+// connection (see AGENTS.md § Connection pooling prerequisites).
 func releaseClean(conn *pgxpool.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := conn.Conn().DeallocateAll(ctx); err == nil {
+	var err error
+	switch conn.Conn().Config().DefaultQueryExecMode {
+	case pgx.QueryExecModeCacheStatement, pgx.QueryExecModeCacheDescribe:
+		// pgx caches statements / descriptions on this connection; clear
+		// them so they don't point at what DISCARD ALL drops.
+		err = conn.Conn().DeallocateAll(ctx)
+	}
+	if err == nil {
 		if _, err = conn.Exec(ctx, "DISCARD ALL"); err == nil {
 			conn.Release()
 			return
@@ -1002,4 +1024,13 @@ func releaseClean(conn *pgxpool.Conn) {
 	}
 	conn.Conn().Close(ctx) //nolint:errcheck
 	conn.Release()
+}
+
+// execCustomerStatement runs one customer statement over the extended
+// query protocol, where the server itself refuses more than one
+// statement — the backstop behind HasMultipleStatements. (pgx's Exec
+// without arguments would use the simple protocol, which runs them all.)
+func execCustomerStatement(ctx context.Context, tx pgx.Tx, sql string) (pgconn.CommandTag, error) {
+	res := tx.Conn().PgConn().ExecParams(ctx, sql, nil, nil, nil, nil).Read()
+	return res.CommandTag, res.Err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -16,6 +17,9 @@ func TestExecuteSQL_ResetsSessionState(t *testing.T) {
 
 	cfg := base.Config()
 	cfg.MaxConns = 1
+	// Production's shared pools use DescribeExec (internal/db); the RPC
+	// test below covers pgx's default statement-caching mode.
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -59,5 +63,60 @@ func TestExecuteSQL_ResetsSessionState(t *testing.T) {
 	}
 	if r["wm"] == "64MB" {
 		t.Error("work_mem from the transaction endpoint leaked")
+	}
+}
+
+// RPC bodies (and triggers) are customer code on the shared pool: their
+// session-level changes must not survive onto the next request.
+func TestCallFunction_ResetsSessionState(t *testing.T) {
+	base, schema, _ := setupTestDB(t)
+	ctx := context.Background()
+	cfg := base.Config()
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	e := NewQueryEngine(pool)
+
+	fn := pgx.Identifier{schema, "leaky"}.Sanitize()
+	if _, err := pool.Exec(ctx, "CREATE FUNCTION "+fn+`() RETURNS int LANGUAGE plpgsql AS $$
+		BEGIN
+			PERFORM set_config('app.end_user_id', '00000000-0000-0000-0000-000000000002', false);
+			CREATE TEMP TABLE IF NOT EXISTS rpc_leak (x int);
+			RETURN 1;
+		END $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.CallFunction(ctx, schema, "leaky", nil); err != nil {
+		t.Fatalf("CallFunction: %v", err)
+	}
+	var uid string
+	var noTemp bool
+	if err := pool.QueryRow(ctx, `SELECT coalesce(current_setting('app.end_user_id', true), ''),
+		to_regclass('pg_temp.rpc_leak') IS NULL`).Scan(&uid, &noTemp); err != nil {
+		t.Fatal(err)
+	}
+	if uid != "" {
+		t.Errorf("app.end_user_id leaked from an RPC body: %q", uid)
+	}
+	if !noTemp {
+		t.Error("temp table leaked from an RPC body")
+	}
+}
+
+// The server refuses a second statement on the customer-statement path,
+// independent of the lexical checks.
+func TestExecCustomerStatement_SingleStatement(t *testing.T) {
+	pool, _, _ := setupTestDB(t)
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := execCustomerStatement(ctx, tx, "SELECT 1; SELECT 2"); err == nil {
+		t.Error("execCustomerStatement ran two statements, want an error")
 	}
 }

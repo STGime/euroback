@@ -102,8 +102,12 @@ func checkPrivilegeStatement(st []privWord) error {
 	for i, w := range st {
 		// Configuration-parameter names and the catalog view that
 		// writes them: denied wherever they appear, quoted or not.
+		// The string-literal settings change how the server tokenizes
+		// quotes, so the lexical checks here would read later text
+		// differently from the server — never allowed.
 		switch w.name {
-		case "search_path", "set_config", "session_authorization", "pg_settings":
+		case "search_path", "set_config", "session_authorization", "pg_settings",
+			"standard_conforming_strings", "backslash_quote", "escape_string_warning":
 			return privErr(strings.ToUpper(w.name))
 		}
 		switch w.kw {

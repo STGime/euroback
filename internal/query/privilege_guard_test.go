@@ -100,3 +100,24 @@ func TestValidateNoPrivilegeStatements_ReviewCases(t *testing.T) {
 		}
 	}
 }
+
+// Settings that change how string literals are tokenized are refused in
+// every form, so the lexical checks and the server always agree.
+func TestValidateNoPrivilegeStatements_StringLiteralSettings(t *testing.T) {
+	for _, s := range []string{
+		"SET standard_conforming_strings = off",
+		"SET LOCAL standard_conforming_strings TO off",
+		"SET SESSION backslash_quote = on",
+		"RESET standard_conforming_strings",
+		`SET "standard_conforming_strings" = off`,
+		"SET escape_string_warning = off",
+		"SELECT current_setting('x'), 1 FROM t WHERE standard_conforming_strings",
+	} {
+		if err := ValidateNoPrivilegeStatements(s); err == nil {
+			t.Errorf("%q: want error", s)
+		}
+	}
+	if err := ValidateNoPrivilegeStatements("SELECT 'standard_conforming_strings' AS doc"); err != nil {
+		t.Errorf("string literal mentioning the setting: %v", err)
+	}
+}
