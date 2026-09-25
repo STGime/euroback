@@ -50,7 +50,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool, err := db.NewPool(ctx, databaseURL)
+	pool, err := db.NewPool(ctx, databaseURL, db.WithSessionReset())
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
@@ -66,7 +66,7 @@ func main() {
 	// migrator and can't SET ROLE. Falls back to `pool` in dev.
 	developerPool := pool
 	if devURL := os.Getenv("DATABASE_URL_DEVELOPER"); devURL != "" {
-		dp, err := db.NewPool(ctx, devURL)
+		dp, err := db.NewPool(ctx, devURL, db.WithSessionReset())
 		if err != nil {
 			slog.Error("failed to connect to developer database", "error", err)
 			os.Exit(1)

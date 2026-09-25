@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/db"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -60,7 +62,6 @@ func (e *QueryEngine) resolvePool(ctx context.Context) *pgxpool.Pool {
 	return e.pool
 }
 
-
 // applyRLSContext sets the three app.end_user_* GUCs on the provided tx
 // based on the request context. Secret keys get role='service' (bypasses
 // RLS via the is_service_role() branch in policies). End-user JWTs get
@@ -96,7 +97,6 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-
 // WithTenantTx runs fn inside a transaction with search_path set to the
 // tenant schema AND the end-user RLS context applied. Every tenant-schema
 // query on the gateway must go through this wrapper so RLS policies can
@@ -113,7 +113,15 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 // with 42704 role-does-not-exist.
 func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
 	pool, routed := e.pickPool(ctx)
-	tx, err := pool.Begin(ctx)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+	// Tenant queries can run customer code (RPC bodies, triggers), which
+	// may leave session state behind: reset before the connection goes
+	// back to the shared pool (runs after the deferred rollback below).
+	defer releaseClean(conn, pool)
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -732,7 +740,9 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquire connection: %w", err)
 	}
-	defer conn.Release()
+	// Customer SQL: reset session state before the connection goes back
+	// to the shared pool (runs after the deferred tx rollback below).
+	defer releaseClean(conn, pool)
 
 	tx, err := conn.Begin(ctx)
 	if err != nil {
@@ -785,6 +795,9 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	if isSelect {
 		// SELECT: wrap with LIMIT and return rows.
 		wrappedSQL := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", rawSQL, maxRows)
+		if err := pinStringParsing(ctx, tx); err != nil {
+			return nil, nil, err
+		}
 		rows, err := tx.Query(ctx, wrappedSQL)
 		if err != nil {
 			return nil, nil, fmt.Errorf("execute query: %w", err)
@@ -806,7 +819,7 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	}
 
 	// DML/DDL: execute and return affected rows.
-	tag, err := tx.Exec(ctx, rawSQL)
+	tag, err := execCustomerStatement(ctx, tx, rawSQL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("execute query: %w", err)
 	}
@@ -846,7 +859,9 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	if err != nil {
 		return nil, fmt.Errorf("acquire connection: %w", err)
 	}
-	defer conn.Release()
+	// Customer SQL: reset session state before the connection goes back
+	// to the shared pool (runs after the deferred tx rollback below).
+	defer releaseClean(conn, pool)
 
 	tx, err := conn.Begin(ctx)
 	if err != nil {
@@ -897,6 +912,9 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 
 		if isSelect {
 			wrapped := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", stmt, maxRows)
+			if err := pinStringParsing(ctx, tx); err != nil {
+				return results, fmt.Errorf("statement %d: %w", i, err)
+			}
 			rows, err := tx.Query(ctx, wrapped)
 			if err != nil {
 				return results, fmt.Errorf("statement %d: %w", i, err)
@@ -922,7 +940,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 			continue
 		}
 
-		tag, err := tx.Exec(ctx, stmt)
+		tag, err := execCustomerStatement(ctx, tx, stmt)
 		if err != nil {
 			return results, fmt.Errorf("statement %d: %w", i, err)
 		}
@@ -976,4 +994,49 @@ func normalizeValue(v interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+// releaseClean returns a connection that ran customer SQL (or customer
+// code: RPC bodies, triggers) to its pool with no session state left
+// behind (#641). Production pools reset every connection on release via
+// their AfterRelease hook (db.WithSessionReset / PoolCache), off the
+// request path; for a pool without a hook (tests, tools) the reset runs
+// here, synchronously. If it fails the connection is closed, so the pool
+// discards it.
+//
+// Note: this is not a substitute for a transaction-mode pooler's own
+// reset — after COMMIT the next statement may reach a different server
+// connection (see AGENTS.md § Connection pooling prerequisites).
+func releaseClean(conn *pgxpool.Conn, pool *pgxpool.Pool) {
+	// Config() copies the config — cheap next to the round trips here.
+	if pool.Config().AfterRelease != nil {
+		conn.Release()
+		return
+	}
+	if !db.ResetSession(conn.Conn()) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Conn().Close(ctx) //nolint:errcheck
+	}
+	conn.Release()
+}
+
+// execCustomerStatement runs one customer statement over the extended
+// query protocol, where the server itself refuses more than one
+// statement — the backstop behind HasMultipleStatements. (pgx's Exec
+// without arguments would use the simple protocol, which runs them all.)
+func execCustomerStatement(ctx context.Context, tx pgx.Tx, sql string) (pgconn.CommandTag, error) {
+	if err := pinStringParsing(ctx, tx); err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	res := tx.Conn().PgConn().ExecParams(ctx, sql, nil, nil, nil, nil).Read()
+	return res.CommandTag, res.Err
+}
+
+// pinStringParsing makes the server tokenize string literals the way the
+// lexical guards do, even if earlier customer code in the same
+// transaction (a DO body, a function) changed it. Transaction-local.
+func pinStringParsing(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, "SET LOCAL standard_conforming_strings = on")
+	return err
 }

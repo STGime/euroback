@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eurobase/euroback/internal/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -229,6 +230,9 @@ func (c *PoolCache) get(ctx context.Context, projectID string, ownerMode bool) (
 	cfg.MaxConns = c.maxConn
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
+	// SDK / console traffic (customer SQL, RPC, triggers) runs here:
+	// reset session state on release (#641).
+	cfg.AfterRelease = db.ResetSession
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

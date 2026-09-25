@@ -68,3 +68,15 @@ Deno.test("uuidRe", () => {
   assert(!uuidRe.test("not-a-uuid"));
   assert(!uuidRe.test("2c8a49f2-3970-485f-83a8-336ef87b9fe0' OR 1=1"));
 });
+
+Deno.test("privilegeStatementError refuses string-literal settings", () => {
+  for (const s of [
+    "SET standard_conforming_strings = off",
+    "SET LOCAL backslash_quote = on",
+    'SET "standard_conforming_strings" = off',
+    "RESET escape_string_warning",
+  ]) {
+    assert(privilegeStatementError(s) !== null, s);
+  }
+  assertEquals(privilegeStatementError("SELECT 'standard_conforming_strings' AS doc"), null);
+});

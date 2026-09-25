@@ -154,7 +154,10 @@ export function privilegeStatementError(sql: string): string | null {
 
     for (let i = 0; i < st.length; i++) {
       const w = st[i];
-      if (["search_path", "set_config", "session_authorization", "pg_settings"].includes(w.name)) {
+      // String-literal settings change how the server tokenizes quotes, so
+      // this lexical guard would read later text differently — never allowed.
+      if (["search_path", "set_config", "session_authorization", "pg_settings",
+           "standard_conforming_strings", "backslash_quote", "escape_string_warning"].includes(w.name)) {
         return deny(w.name.toUpperCase());
       }
       switch (w.kw) {

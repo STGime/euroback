@@ -355,6 +355,11 @@ func (e *Executor) runInTenantTx(ctx context.Context, schemaName, runAs string, 
 	if _, err := tx.Exec(cctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
 		return fmt.Errorf("set statement_timeout: %w", err)
 	}
+	// Tokenize string literals the way the validators do, whatever the
+	// tenant role's own defaults say (transaction-local).
+	if _, err := tx.Exec(cctx, "SET LOCAL standard_conforming_strings = on"); err != nil {
+		return fmt.Errorf("pin string parsing: %w", err)
+	}
 	// RLS identity (#643): "service" matches a user-less edge-function
 	// invocation (functions-runner/role.ts rlsContextStatements), so
 	// tenant policies' is_service_role() branch applies. Transaction-

@@ -10,8 +10,43 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Option configures NewPool.
+type Option func(*pgxpool.Config)
+
+// WithSessionReset resets every connection's session state when it is
+// released back to the pool (ResetSession). Use it for every pool whose
+// queries touch tenant tables: that runs tenant-defined code (RLS policy
+// expressions and the functions they call, triggers, defaults), not only
+// customer-supplied SQL — the gateway's runtime and developer pools, the
+// worker's pools (exports read tenant tables), and Team PoolCache pools.
+// River's LISTEN is on a hijacked connection, so the hook doesn't touch it.
+func WithSessionReset() Option {
+	return func(c *pgxpool.Config) { c.AfterRelease = ResetSession }
+}
+
+// ResetSession is a pgxpool AfterRelease hook (pgx runs it in a goroutine,
+// off the request path). It drops all session state a customer statement
+// or customer code could have left on the connection — a committed plain
+// SET, set_config(…, false), temp tables, LISTEN, prepared statements —
+// so it never reaches the next request, which may be another customer's
+// (#641). When the connection's exec mode caches statements or
+// descriptions, DeallocateAll first clears pgx's caches too. Returning
+// false (reset failed) makes the pool destroy the connection.
+func ResetSession(conn *pgx.Conn) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	switch conn.Config().DefaultQueryExecMode {
+	case pgx.QueryExecModeCacheStatement, pgx.QueryExecModeCacheDescribe:
+		if err := conn.DeallocateAll(ctx); err != nil {
+			return false
+		}
+	}
+	_, err := conn.Exec(ctx, "DISCARD ALL")
+	return err == nil
+}
+
 // NewPool creates a new pgxpool connection pool with sensible defaults.
-func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+func NewPool(ctx context.Context, databaseURL string, opts ...Option) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
@@ -26,6 +61,9 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	// Use DescribeExec so that cached prepared statements are automatically
 	// re-described when the schema changes (e.g. after DROP/ADD COLUMN).
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
+	for _, o := range opts {
+		o(config)
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
