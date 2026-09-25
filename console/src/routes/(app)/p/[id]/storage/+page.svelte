@@ -329,8 +329,16 @@
 		try {
 			// List all objects under the old prefix
 			const res = await api.listFiles(projectId, { prefix: oldPrefix, limit: 1000 });
-			// Copy each object to new key, then delete old
+			// Copy each object to new key, then delete old. Compliance
+			// export archives stay where they are: they're read-only
+			// (copying them out would take a full data dump out of the
+			// admin-only namespace, and the delete would be refused).
+			let keptExports = 0;
 			for (const obj of res.objects) {
+				if (isExportArchive(obj.key)) {
+					keptExports++;
+					continue;
+				}
 				const newKey = obj.key.replace(oldPrefix, newPrefix);
 				// Download and re-upload (S3 doesn't have a rename)
 				const blob = await api.downloadFile(projectId, obj.key);
@@ -340,6 +348,9 @@
 			}
 			showRenameFolderModal = false;
 			await loadFiles();
+			if (keptExports > 0) {
+				showToast(`${keptExports} compliance export ${keptExports === 1 ? 'archive was' : 'archives were'} left in place (read-only).`);
+			}
 		} catch (err_) {
 			alert(err_ instanceof Error ? err_.message : 'Failed to rename folder');
 		}

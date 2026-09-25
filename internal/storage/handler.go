@@ -251,22 +251,38 @@ func (h *StorageHandler) assertObjectVisible(r *http.Request, key string) (bool,
 //     the expiry cleanup write S3 directly, not through this handler);
 //   - listing: shown only to callers who may download them.
 
-// errExportsReadOnly is returned for writes into the export namespace.
-const errExportsReadOnly = `{"error":"exports/ for this project holds compliance export archives and is read-only; they expire automatically"}`
+// ErrExportsReadOnlyJSON is the error body for writes into the export
+// namespace (shared with the edge-functions storage handler).
+const ErrExportsReadOnlyJSON = `{"error":"exports/ for this project holds compliance export archives and is read-only; they expire automatically"}`
 
-// exportKeyPrefix is this project's export namespace ("" without a project).
+// ExportArchivePrefix is the namespace holding projectID's compliance
+// export archives. The export worker builds its keys from it; every
+// storage entry point (this handler, the edge-functions storage handler,
+// cmd/backfill-storage) treats it as platform-managed.
+func ExportArchivePrefix(projectID string) string {
+	return "exports/" + projectID + "/"
+}
+
+// IsExportArchiveKey reports whether key is in projectID's export namespace.
+func IsExportArchiveKey(projectID, key string) bool {
+	return projectID != "" && strings.HasPrefix(key, ExportArchivePrefix(projectID))
+}
+
+// exportKeyPrefix is this request's project export namespace ("" without
+// a project).
 func exportKeyPrefix(r *http.Request) string {
 	pc, ok := auth.ProjectFromContext(r.Context())
 	if !ok || pc == nil || pc.ProjectID == "" {
 		return ""
 	}
-	return "exports/" + pc.ProjectID + "/"
+	return ExportArchivePrefix(pc.ProjectID)
 }
 
-// isExportKey reports whether key is in this project's export namespace.
+// isExportKey reports whether key is in this request's project export
+// namespace.
 func isExportKey(r *http.Request, key string) bool {
-	p := exportKeyPrefix(r)
-	return p != "" && strings.HasPrefix(key, p)
+	pc, ok := auth.ProjectFromContext(r.Context())
+	return ok && pc != nil && IsExportArchiveKey(pc.ProjectID, key)
 }
 
 // mayReadExports reports whether the caller may see export archives at
@@ -501,7 +517,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isExportKey(r, key) {
-		http.Error(w, errExportsReadOnly, http.StatusForbidden)
+		http.Error(w, ErrExportsReadOnlyJSON, http.StatusForbidden)
 		return
 	}
 
@@ -696,7 +712,7 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isExportKey(r, key) {
-		http.Error(w, errExportsReadOnly, http.StatusForbidden)
+		http.Error(w, ErrExportsReadOnlyJSON, http.StatusForbidden)
 		return
 	}
 
@@ -896,7 +912,7 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if req.Operation == "upload" && isExportKey(r, req.Key) {
-		http.Error(w, errExportsReadOnly, http.StatusForbidden)
+		http.Error(w, ErrExportsReadOnlyJSON, http.StatusForbidden)
 		return
 	}
 
