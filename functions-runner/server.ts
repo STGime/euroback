@@ -10,6 +10,7 @@
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
+import { isAuthError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -121,6 +122,27 @@ async function getBootstrapBlobUrl(): Promise<string> {
 // SQL runs with the executing tenant's grants only.
 // deno-lint-ignore no-explicit-any
 let sql: any = null;
+
+// Per-tenant logins (stage B phase 1a): enabled when FUNC_PASSWORD_SECRET
+// is set. ctx.db.sql then runs on a connection authenticated as the
+// tenant's `<schema>_func` role; the shared connection is used only for
+// the platform lookups (runner_get_function / vault_get_for_runner).
+const FUNC_PASSWORD_SECRET = Deno.env.get("FUNC_PASSWORD_SECRET") ?? "";
+const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "20");
+let tenantPool: TenantDBPool | null = null;
+
+async function getTenantPool(): Promise<TenantDBPool | null> {
+  if (FUNC_PASSWORD_SECRET.length < 32 || !DB_URL) return null;
+  if (tenantPool) return tenantPool;
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
+  tenantPool = new TenantDBPool(
+    DB_URL,
+    FUNC_PASSWORD_SECRET,
+    (url: string) => postgres(url, { max: 1, idle_timeout: 30 }),
+    TENANT_CONN_CAP,
+  );
+  return tenantPool;
+}
 
 async function getDB() {
   if (sql) return sql;
@@ -270,9 +292,48 @@ async function executeFunction(
     // Customer SQL must not change the role or search_path set below.
     const guardErr = privilegeStatementError(query);
     if (guardErr) throw new Error(guardErr);
+
+    // Statement timeout per transaction, matching the invocation budget,
+    // so a query from an invocation that already timed out can't keep a
+    // per-tenant connection busy.
+    const timeoutSQL = `SET LOCAL statement_timeout = ${timeoutMs}`;
+
+    // Preferred: a connection that logs in as the tenant's own role — no
+    // role switch, so the session identity is the boundary.
+    const tp = await getTenantPool();
+    if (tp && !tp.authCoolingDown(schemaName)) {
+      let started = false;
+      let lease;
+      try {
+        lease = await tp.acquire(schemaName, funcRole);
+        // deno-lint-ignore no-explicit-any
+        return await lease.client.begin(async (tx: any) => {
+          started = true;
+          await tx.unsafe(timeoutSQL);
+          await tx.unsafe(setPathSQL);
+          for (const stmt of rlsContextStatements(userId)) {
+            await tx.unsafe(stmt.sql, stmt.params);
+          }
+          return await tx.unsafe(query, params);
+        });
+      } catch (err) {
+        // Fall back only when the transaction never started, i.e. the
+        // connection/login itself failed (login not applied yet for a
+        // brand-new tenant). Errors raised by the customer's SQL — even
+        // with an auth-like SQLSTATE — are returned to the customer.
+        if (started || !isAuthError(err)) throw err;
+        tp.markAuthFailed(schemaName);
+        console.warn(`[tenant-db] login for ${funcRole} not ready, using shared connection for 60s`);
+      } finally {
+        lease?.release();
+      }
+    }
+
+    // Legacy (phase 1b removes it): shared connection + role switch.
     // deno-lint-ignore no-explicit-any
     return await db.begin(async (tx: any) => {
       await tx.unsafe(setRoleSQL);
+      await tx.unsafe(timeoutSQL);
       await tx.unsafe(setPathSQL);
       // Mirror the gateway's RLS context so auth_uid() /
       // is_service_role() behave the same in functions as in gateway

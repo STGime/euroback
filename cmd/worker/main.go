@@ -22,9 +22,11 @@ import (
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
-	"github.com/eurobase/euroback/internal/vault"
+	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/upgrade"
+	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivermigrate"
@@ -239,6 +241,43 @@ func main() {
 		slog.Error("RUNTIME_PASSWORD_SECRET too short — must be at least 32 bytes",
 			"len", len(runtimePwSecret), "min", runtimePwSecretMinLen)
 		os.Exit(1)
+	}
+
+	// ── Per-tenant function-role logins (stage B phase 1a) ──
+	// Makes every shared-cluster `<schema>_func` role loginable with a
+	// derived password so the functions runner can connect as the tenant
+	// instead of switching roles on a shared connection. Off (no-op) until
+	// FUNC_PASSWORD_SECRET is set; too-short secret fails startup, same
+	// rule as RUNTIME_PASSWORD_SECRET / DDL_PASSWORD_SECRET.
+	if fnCfg, err := pgx.ParseConfig(databaseURL); err != nil {
+		slog.Error("parse DATABASE_URL for tenant function logins", "error", err)
+	} else if ensurer, err := tenantlogin.NewEnsurer(developerPool, fnCfg.Database, []byte(os.Getenv("FUNC_PASSWORD_SECRET"))); err != nil {
+		slog.Error("tenant function logins misconfigured", "error", err)
+		os.Exit(1)
+	} else if ensurer == nil {
+		slog.Warn("FUNC_PASSWORD_SECRET not set — functions runner keeps the shared-connection role switch")
+	} else {
+		go func() {
+			run := func() {
+				n, err := ensurer.EnsureAll(ctx)
+				if err != nil {
+					slog.Error("tenant function logins: some roles failed", "ensured", n, "error", err)
+					return
+				}
+				slog.Info("tenant function logins ensured", "roles", n)
+			}
+			run()
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					run()
+				}
+			}
+		}()
 	}
 
 	// Shared plans.LimitsService — resolves plan_limits from the
