@@ -732,7 +732,9 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquire connection: %w", err)
 	}
-	defer conn.Release()
+	// Customer SQL: reset session state before the connection goes back
+	// to the shared pool (runs after the deferred tx rollback below).
+	defer releaseClean(conn)
 
 	tx, err := conn.Begin(ctx)
 	if err != nil {
@@ -846,7 +848,9 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	if err != nil {
 		return nil, fmt.Errorf("acquire connection: %w", err)
 	}
-	defer conn.Release()
+	// Customer SQL: reset session state before the connection goes back
+	// to the shared pool (runs after the deferred tx rollback below).
+	defer releaseClean(conn)
 
 	tx, err := conn.Begin(ctx)
 	if err != nil {
@@ -976,4 +980,26 @@ func normalizeValue(v interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+// releaseClean returns a connection that ran customer SQL to its pool
+// with no session state left behind. A committed plain `SET x = …`,
+// `set_config(…, false)`, temp tables, LISTEN or prepared statements
+// would otherwise persist on a pooled connection and reach the next
+// request — another customer's — that acquires it (#641). DISCARD ALL
+// resets all of that; DeallocateAll also clears pgx's client-side
+// statement/description caches so they don't point at statements the
+// server just dropped. If the reset fails the connection is closed, so
+// the pool discards it rather than reusing it.
+func releaseClean(conn *pgxpool.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Conn().DeallocateAll(ctx); err == nil {
+		if _, err = conn.Exec(ctx, "DISCARD ALL"); err == nil {
+			conn.Release()
+			return
+		}
+	}
+	conn.Conn().Close(ctx) //nolint:errcheck
+	conn.Release()
 }

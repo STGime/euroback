@@ -38,3 +38,30 @@ func TestHasMultipleStatements(t *testing.T) {
 		})
 	}
 }
+
+// E'…' escape strings and U& identifiers are read the same way as by the
+// other guards (shared tokenizer).
+func TestHasMultipleStatements_EscapeStrings(t *testing.T) {
+	multi := []string{
+		`SELECT E'\''; DELETE FROM todos --'`,
+		`SELECT e'a\'b'; SELECT 2`,
+		`SELECT 1; SELECT U&"d\0061ta" FROM t`,
+	}
+	for _, s := range multi {
+		if !HasMultipleStatements(s) {
+			t.Errorf("HasMultipleStatements(%q) = false, want true", s)
+		}
+	}
+	single := []string{
+		`SELECT E'a;b'`,
+		`SELECT E'\';'`,
+		`SELECT 'x;y' ; `,
+		`SELECT 1; -- trailing comment`,
+		`SELECT 1; /* c */`,
+	}
+	for _, s := range single {
+		if HasMultipleStatements(s) {
+			t.Errorf("HasMultipleStatements(%q) = true, want false", s)
+		}
+	}
+}
