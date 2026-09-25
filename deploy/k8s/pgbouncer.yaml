@@ -1,0 +1,166 @@
+# PgBouncer in front of the shared cluster (#641, PR 2).
+#
+# Transaction pooling; authenticates every client itself against a
+# generated userlist (platform roles + one derived SCRAM verifier per
+# tenant `<schema>_func` role — SCRAM passes through to Postgres, so the
+# pooler never holds a tenant's plaintext password). Config and userlist
+# are rendered by `pgbouncer-userlist` (cmd/pgbouncer-userlist):
+#   - init container `render`: pgbouncer.ini + userlist.txt
+#   - sidecar `userlist`: re-renders every 10 s, SIGHUPs pgbouncer on
+#     change (new projects become poolable within seconds)
+#
+# PR 2 deploys it with NO traffic: nothing points at pgbouncer:6432 yet.
+# PR 3 moves the functions runner's tenant connections, PR 4 the gateway.
+# Never route through it: golang-migrate, tenant `_ddl` apply
+# connections, the worker (River LISTEN) — see AGENTS.md § Connection
+# pooling prerequisites.
+#
+# Budget: max_db_connections is per instance (2 replicas × 20 = 40 server
+# connections at most); pools open lazily, so an idle pooler holds none.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgbouncer
+  namespace: eurobase
+  labels:
+    app: pgbouncer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pgbouncer
+  strategy:
+    # No surge pod: its max_db_connections would come on top of the
+    # budget. With 2 replicas one always stays up (PDB minAvailable 1).
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        app: pgbouncer
+    spec:
+      # The userlist sidecar SIGHUPs the pgbouncer process on change.
+      shareProcessNamespace: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      initContainers:
+        - name: render
+          image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
+          command: ["pgbouncer-userlist", "init"]
+          env: &pgbEnv
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL } }
+            - name: DATABASE_URL_FUNCTION_RUNNER
+              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_FUNCTION_RUNNER } }
+            - name: FUNC_PASSWORD_SECRET
+              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: FUNC_PASSWORD_SECRET } }
+            - name: PGB_DIR
+              value: /run/pgbouncer
+            - name: PGB_SERVER_TLS
+              value: require
+            - name: PGB_MAX_DB_CONNECTIONS
+              value: "20"
+            - name: PGB_TENANT_POOL_SIZE
+              value: "2"
+            # Keep equal to spec.replicas (tenant connection budget check).
+            - name: PGB_REPLICAS
+              value: "2"
+          volumeMounts:
+            - { name: run, mountPath: /run/pgbouncer }
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+      containers:
+        - name: pgbouncer
+          image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
+          command: ["pgbouncer", "/run/pgbouncer/pgbouncer.ini"]
+          ports:
+            - { name: pgbouncer, containerPort: 6432 }
+          readinessProbe:
+            tcpSocket: { port: 6432 }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 6432 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          volumeMounts:
+            - { name: run, mountPath: /run/pgbouncer }
+          securityContext: *restricted
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+        - name: userlist
+          image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
+          command: ["pgbouncer-userlist", "sync"]
+          env: *pgbEnv
+          volumeMounts:
+            - { name: run, mountPath: /run/pgbouncer }
+          securityContext: *restricted
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+      volumes:
+        - name: run
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgbouncer
+  namespace: eurobase
+  labels:
+    app: pgbouncer
+spec:
+  selector:
+    app: pgbouncer
+  ports:
+    - { name: pgbouncer, port: 6432, targetPort: 6432 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pgbouncer
+  namespace: eurobase
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pgbouncer
+---
+# Only the gateway, the functions runner and the ops smoke test may connect.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pgbouncer-ingress
+  namespace: eurobase
+spec:
+  podSelector:
+    matchLabels:
+      app: pgbouncer
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+        # functions: allowed here, but the runner's egress policy only
+        # opens the pooler in PR 3.
+        - podSelector:
+            matchLabels:
+              app: functions
+        # scripts/ops/pgbouncer-smoke.sh (one-off verification pod)
+        - podSelector:
+            matchLabels:
+              app: pgbouncer-smoke
+      ports:
+        - protocol: TCP
+          port: 6432

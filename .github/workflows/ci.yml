@@ -320,6 +320,17 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:${{ github.sha }}
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:latest
 
+      - name: Build and push pgbouncer
+        if: steps.fresh.outputs.stale != 'true'
+        run: |
+          docker build \
+            -f deploy/docker/Dockerfile.pgbouncer \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:latest \
+            .
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:latest
+
       - name: Build and push migrations image
         if: steps.fresh.outputs.stale != 'true'
         run: |
@@ -384,6 +395,8 @@ jobs:
           # net-allowed worker permissions never have a window of
           # reaching cluster-internal IPs.
           kubectl apply -f deploy/k8s/functions-networkpolicy.yaml
+          # PgBouncer (#641): deployed, not yet used by any client.
+          kubectl apply -f deploy/k8s/pgbouncer.yaml
           kubectl apply -f deploy/k8s/mcp-server.yaml
           # Health monitor → Discord #alerts. Reads DISCORD_ALERTS_WEBHOOK
           # from eurobase-secrets (optional key); no-ops if it's unset.
@@ -435,6 +448,11 @@ jobs:
           kubectl set image deployment/mcp-server \
             mcp-server=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:${{ github.sha }} \
             -n eurobase
+          kubectl set image deployment/pgbouncer \
+            render=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
+            pgbouncer=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
+            userlist=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
+            -n eurobase
 
       - name: Verify rollout
         if: steps.fresh.outputs.stale != 'true'
@@ -450,6 +468,7 @@ jobs:
           kubectl rollout status deployment/console -n eurobase --timeout=120s
           kubectl rollout status deployment/functions -n eurobase --timeout=120s
           kubectl rollout status deployment/mcp-server -n eurobase --timeout=120s
+          kubectl rollout status deployment/pgbouncer -n eurobase --timeout=120s
 
       # ----------------------------------------------------------------------
       # Discord #deploys notifications. Configure the channel webhook URL as

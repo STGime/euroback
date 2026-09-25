@@ -1,0 +1,22 @@
+# PgBouncer for the shared cluster (#641) + the pgbouncer-userlist
+# helper (renders pgbouncer.ini / userlist.txt; keeps the userlist current).
+# Built in CI and pushed to the Scaleway registry — no third-party image.
+
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o pgbouncer-userlist ./cmd/pgbouncer-userlist/
+
+FROM alpine:3.21
+# 1.23.x: protocol-level prepared statements (max_prepared_statements)
+# and SCRAM pass-through, both required by the config we render.
+RUN apk add --no-cache pgbouncer ca-certificates \
+ && pgbouncer --version | grep -Eq 'PgBouncer 1\.(2[3-9]|[3-9][0-9])' \
+ && adduser -D -H -u 10001 pgb \
+ && mkdir -p /run/pgbouncer && chown pgb /run/pgbouncer
+COPY --from=builder /app/pgbouncer-userlist /usr/local/bin/pgbouncer-userlist
+USER 10001
+EXPOSE 6432
+CMD ["pgbouncer", "/run/pgbouncer/pgbouncer.ini"]
