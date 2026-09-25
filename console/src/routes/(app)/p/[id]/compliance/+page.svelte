@@ -181,6 +181,10 @@
 		user_id?: string;
 		file_size?: number;
 		download_url?: string;
+		// #654: false when the archive is missing something (see warnings);
+		// null/absent for exports made before this was recorded.
+		complete?: boolean | null;
+		warnings?: string[];
 		created_at: string;
 		completed_at?: string;
 		expires_at?: string;
@@ -1146,13 +1150,31 @@
 						{#each exports as exp}
 							<tr>
 								<td class="px-4 py-2 text-xs">
-									<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium
-										{exp.status === 'completed' ? 'bg-green-100 text-green-700' :
-										 exp.status === 'failed' ? 'bg-red-100 text-red-700' :
-										 exp.status === 'running' ? 'bg-blue-100 text-blue-700' :
-										 'bg-gray-100 text-gray-700'}">
-										{exp.status}
-									</span>
+									{#if exp.status === 'completed' && exp.complete === false}
+										<span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
+											incomplete
+										</span>
+										{#if exp.warnings?.length}
+											<details class="mt-1 max-w-xs">
+												<summary class="cursor-pointer text-[11px] text-amber-800">
+													{exp.warnings.length} {exp.warnings.length === 1 ? 'item' : 'items'} missing
+												</summary>
+												<ul class="mt-1 list-disc space-y-0.5 pl-4 text-[11px] text-gray-600">
+													{#each exp.warnings as w}
+														<li>{w}</li>
+													{/each}
+												</ul>
+											</details>
+										{/if}
+									{:else}
+										<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium
+											{exp.status === 'completed' ? 'bg-green-100 text-green-700' :
+											 exp.status === 'failed' ? 'bg-red-100 text-red-700' :
+											 exp.status === 'running' ? 'bg-blue-100 text-blue-700' :
+											 'bg-gray-100 text-gray-700'}">
+											{exp.status}
+										</span>
+									{/if}
 								</td>
 								<td class="px-4 py-2 text-xs text-gray-700">
 									{#if exp.user_id}

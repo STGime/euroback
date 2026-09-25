@@ -917,6 +917,21 @@ on push to main:
 | Console billing page (plan selector, payment methods, invoice history) | 3 days | Planned |
 | Dunning flow + payment_overdue project suspension | 2 days | Planned |
 
+### Sprint 8: Team-tier infrastructure
+
+| Feature | Effort | Status |
+|---------|--------|--------|
+| Managed connection pooler in front of dedicated Postgres (Team) | 1 week | In progress (priority) |
+
+The Team-tier dedicated Postgres instance currently exposes its `DATABASE_URL`
+directly, with no pooler in front, so a client connects straight to Postgres and
+is bound by the instance's `max_connections` (the Scaleway managed default for the
+node size — not overridden by the platform). Serverless / edge deployments and
+high-fan-out workloads exhaust that quickly. A managed transaction-mode pooler
+(PgBouncer-style) in front of the dedicated instance lets a project run far more
+concurrent clients than raw `max_connections`, and is the recommended answer to
+"how many connections can I open". Prioritised off customer demand (rob@cattlegrid.uk).
+
 ### CLI Tool — Scope (v1 vs v2)
 
 **v1 (1 week):** Daily developer workflow — 30 commands

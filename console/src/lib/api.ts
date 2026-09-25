@@ -3051,6 +3051,9 @@ export interface ExportRequestRow {
 	requested_by: string;
 	requested_by_type: 'platform' | 'enduser';
 	download_url?: string;
+	/** #654: false when the archive is missing something (see warnings); null for exports made before this was recorded. */
+	complete?: boolean | null;
+	warnings?: string[];
 	started_at?: string | null;
 	completed_at?: string | null;
 	expires_at?: string | null;

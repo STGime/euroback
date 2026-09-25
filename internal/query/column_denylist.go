@@ -54,6 +54,14 @@ var sensitiveColumns = map[string]map[string]bool{
 	"vault_secrets":  {"secret": true, "nonce": true},
 }
 
+// SensitiveSystemColumns reports the credential columns of a per-tenant
+// system table (nil if none). The compliance export redacts them: its
+// archives can go to an end user and sit in object storage for days
+// (#654).
+func SensitiveSystemColumns(table string) map[string]bool {
+	return sensitiveColumns[table]
+}
+
 // sqlPathDeniedColumns is the denied-column set for the raw SDK SQL
 // endpoint (/v1/db/sql). It is intentionally NARROWER than
 // sensitiveColumns: on the raw-SQL path the table a column belongs to

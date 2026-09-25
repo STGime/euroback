@@ -87,6 +87,10 @@ When adding a new third-party data processor, three things must be updated:
 
 This ensures the compliance DPA report automatically includes the processor when the feature is enabled.
 
+## Compliance exports (#654)
+- Exports (`compliance.WriteTenantExport` / `WriteUserExport`) read tenant tables through `compliance.ExportSource`: the worker's developer pool as `eurobase_developer` itself (**no** `SET ROLE`), which owns the tables legacy MCP DDL created and via INHERIT has the privileges of every other tenant-table owner (`eurobase_migrator`: platform + SQL-editor tables; `<schema>_ddl`; `eurobase_gateway`: legacy SDK DDL) — `SET ROLE eurobase_migrator` would lose the developer-owned ones — in one `REPEATABLE READ READ ONLY` snapshot with **`row_security = off`**. Owners bypass RLS, and `row_security = off` makes any read RLS would still limit (FORCE RLS, a foreign owner) **raise an error instead of returning fewer rows**. **CONVENTION:** never read export data through a runtime role — that silently dropped every table with end-user RLS (user_identities, owner-only tables) until #654.
+- Tables are listed from `pg_catalog`, not `information_schema` (privilege-filtered). Every table gets a file (empty ones too) and an entry in `_metadata.json` `tables` (rows, `exported` / `truncated` / `failed` + reason); `complete` / `warnings` go into `_metadata.json` and `export_requests` (000129) and are shown in the console. Credential columns of the system tables (`query.SensitiveSystemColumns`: `password_hash`, `token_hash`, vault `secret` / `nonce`) are redacted and listed as `redacted_columns`.
+
 ## Sovereignty
 - All infrastructure runs in EU (France) on Scaleway
 - No US cloud services permitted (AWS, GCP, Azure, Cloudflare, Stripe, Vercel)
