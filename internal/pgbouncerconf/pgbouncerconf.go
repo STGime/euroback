@@ -55,6 +55,12 @@ type Settings struct {
 	Replicas int
 	// PlatformPoolSizes sets a per-user pool for the platform roles.
 	PlatformPoolSizes map[string]int
+	// IncludeTenants renders the tenant alias (the runner's pooler). The
+	// gateway's pooler (#651) serves platform roles only.
+	IncludeTenants bool
+	// StatsUser, if set, may run SHOW commands on the admin console (the
+	// sidecar's /metrics); it is in the userlist with a per-pod password.
+	StatsUser string
 }
 
 // UpstreamFromURL fills Host/Port/Database from a postgres:// URL.
@@ -94,7 +100,10 @@ func RenderINI(s Settings) string {
 		wait = 15
 	}
 	fmt.Fprintf(&b, "[databases]\n%s = host=%s port=%d dbname=%s max_db_connections=%d\n", s.Database, s.Host, s.Port, s.Database, s.MaxDBConnections)
-	fmt.Fprintf(&b, "%s = host=%s port=%d dbname=%s max_db_connections=%d\n\n", s.TenantDatabase(), s.Host, s.Port, s.Database, tenantMax)
+	if s.IncludeTenants {
+		fmt.Fprintf(&b, "%s = host=%s port=%d dbname=%s max_db_connections=%d\n", s.TenantDatabase(), s.Host, s.Port, s.Database, tenantMax)
+	}
+	b.WriteString("\n")
 
 	users := make([]string, 0, len(s.PlatformPoolSizes))
 	for u := range s.PlatformPoolSizes {
@@ -141,6 +150,9 @@ log_connections = 0
 log_disconnections = 0
 stats_period = 60
 `, s.AuthFile, s.TenantPoolSize, wait, s.ServerTLS)
+	if s.StatsUser != "" {
+		fmt.Fprintf(&b, "stats_users = %s\n", s.StatsUser)
+	}
 	return b.String()
 }
 
@@ -180,7 +192,8 @@ func TenantSchemas(ctx context.Context, conn *pgx.Conn) ([]string, error) {
 }
 
 // RenderUserlist returns the auth_file contents: platform users with
-// plaintext passwords, tenant function roles with derived SCRAM verifiers.
+// plaintext passwords (the stats user is passed the same way), tenant
+// function roles with derived SCRAM verifiers.
 func RenderUserlist(platform []PlatformUser, secret []byte, schemas []string) (string, error) {
 	seen := map[string]bool{}
 	var b strings.Builder

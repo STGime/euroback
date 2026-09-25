@@ -187,3 +187,57 @@ groups:
             Any sustained non-zero webhook-failure rate for 30 min likely
             means an outright bug in the state machine (Mollie API change,
             missing metadata, DB drift). Page immediately.
+
+  # ── PgBouncer (#641 / #651) ──────────────────────────────────────────────
+  # Metrics from the pgbouncer-userlist sidecar (:9127) on both poolers:
+  # app="pgbouncer" (functions runner, tenant traffic) and
+  # app="pgbouncer-gateway" (gateway, from PR 4).
+  - name: eurobase-pgbouncer
+    interval: 1m
+    rules:
+      - alert: PgBouncerDown
+        expr: up{app=~"pgbouncer|pgbouncer-gateway"} == 0 or pgbouncer_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: pgbouncer
+        annotations:
+          summary: "PgBouncer {{ $labels.app }} pod {{ $labels.pod }} is down or its admin console is unreachable"
+          description: "Check: kubectl -n eurobase get pods -l app={{ $labels.app }}; kubectl -n eurobase logs {{ $labels.pod }} -c pgbouncer"
+
+      - alert: PgBouncerClientsWaiting
+        expr: max by (app, database) (pgbouncer_clients_waiting) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: pgbouncer
+        annotations:
+          summary: "Clients queueing for a server connection on {{ $labels.app }} / {{ $labels.database }}"
+          description: |
+            Sustained waits mean a pool is too small or a tenant holds its
+            connections (long transactions). Queued clients fail after
+            query_wait_timeout (runner: "database is busy"). Check max wait:
+            pgbouncer_maxwait_seconds.
+
+      - alert: PgBouncerLongWait
+        expr: max by (app, database) (pgbouncer_maxwait_seconds) > 5
+        for: 1m
+        labels:
+          severity: warning
+          service: pgbouncer
+        annotations:
+          summary: "A client has waited > 5 s for a server connection on {{ $labels.app }} / {{ $labels.database }}"
+
+      - alert: PgBouncerClientSlotsHigh
+        expr: max by (app, pod) (pgbouncer_client_connections / pgbouncer_max_client_conn) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: pgbouncer
+        annotations:
+          summary: "{{ $labels.app }} pod {{ $labels.pod }} uses > 80% of max_client_conn"
+          description: |
+            On the runner's pooler this can mean tenant code is opening raw
+            sockets to 6432 (it can't log in, but occupies slots) — find the
+            source function in the runner logs; on the gateway's pooler it
+            means gateway client pools are oversized.

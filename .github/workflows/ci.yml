@@ -402,9 +402,13 @@ jobs:
           # pooler must be rolled (with the current config) before a
           # runner pod can start using it.
           # Pinned to the content tag: unchanged inputs = no pooler restart.
-          sed "s|eurobase-app/pgbouncer:latest|eurobase-app/pgbouncer:${{ steps.pgb.outputs.tag }}|" \
-            deploy/k8s/pgbouncer.yaml | kubectl apply -f -
+          # Two poolers (#651): the runner's and the gateway's.
+          for f in pgbouncer pgbouncer-gateway; do
+            sed "s|eurobase-app/pgbouncer:latest|eurobase-app/pgbouncer:${{ steps.pgb.outputs.tag }}|" \
+              deploy/k8s/$f.yaml | kubectl apply -f -
+          done
           kubectl rollout status deployment/pgbouncer -n eurobase --timeout=180s
+          kubectl rollout status deployment/pgbouncer-gateway -n eurobase --timeout=180s
           kubectl apply -f deploy/k8s/gateway.yaml
           kubectl apply -f deploy/k8s/worker.yaml
           kubectl apply -f deploy/k8s/console.yaml
@@ -480,6 +484,7 @@ jobs:
           kubectl rollout status deployment/functions -n eurobase --timeout=120s
           kubectl rollout status deployment/mcp-server -n eurobase --timeout=120s
           kubectl rollout status deployment/pgbouncer -n eurobase --timeout=120s
+          kubectl rollout status deployment/pgbouncer-gateway -n eurobase --timeout=120s
 
       # ----------------------------------------------------------------------
       # Discord #deploys notifications. Configure the channel webhook URL as

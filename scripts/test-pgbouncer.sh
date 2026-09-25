@@ -10,11 +10,13 @@ REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 NET=eb-pgb-test
 PG=eb-pgb-pg
 PGB=eb-pgb-bouncer
+PGB_R=eb-pgb-runner
+PGB_G=eb-pgb-gateway
 PG_PORT="${PGB_TEST_PG_PORT:-5466}"
 PGB_PORT="${PGB_TEST_PORT:-6466}"
 SECRET="pgbouncer-test-secret-0123456789abcdef"
 
-cleanup() { docker rm -f "$PGB" "$PG" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$PGB" "$PGB_R" "$PGB_G" "$PG" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 [ -n "${PGB_KEEP:-}" ] && trap - EXIT
 cleanup
@@ -40,8 +42,24 @@ docker run -d --name "$PGB" --network "$NET" -p "$PGB_PORT:6432" \
   -e PGB_TENANT_POOL_SIZE=1 -e PGB_QUERY_WAIT_TIMEOUT=2 \
   eurobase-pgbouncer:test \
   sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
+# The two production modes (#651): runner pooler (tenants only, lists
+# tenants as the runner role) and gateway pooler (platform roles only).
+docker run -d --name "$PGB_R" --network "$NET" -p 6467:6432 -p 9128:9127 \
+  -e DATABASE_URL_FUNCTION_RUNNER="postgres://eurobase_function_runner:localdev@$PG:5432/eurobase?sslmode=disable" \
+  -e PGB_UPSTREAM_URL_VAR=DATABASE_URL_FUNCTION_RUNNER -e PGB_PLATFORM_URL_VARS= -e PGB_INCLUDE_TENANTS=1 \
+  -e FUNC_PASSWORD_SECRET="$SECRET" -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s \
+  eurobase-pgbouncer:test \
+  sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
+docker run -d --name "$PGB_G" --network "$NET" -p 6468:6432 -p 9129:9127 \
+  -e DATABASE_URL="postgres://eurobase_gateway:localdev@$PG:5432/eurobase?sslmode=disable" \
+  -e PGB_PLATFORM_URL_VARS=DATABASE_URL -e PGB_INCLUDE_TENANTS=0 \
+  -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s \
+  eurobase-pgbouncer:test \
+  sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
 sleep 3
-docker logs "$PGB" 2>&1 | grep -iE "error|fatal|warning" && { echo "pgbouncer reported errors"; exit 1; } || true
+for c in "$PGB" "$PGB_R" "$PGB_G"; do
+  docker logs "$c" 2>&1 | grep -iE "error|fatal|warning" && { echo "$c reported errors"; exit 1; } || true
+done
 
 cd "$REPO_ROOT"
 PGB_TEST_POOLED_GATEWAY="postgres://eurobase_gateway:localdev@localhost:$PGB_PORT/eurobase?sslmode=disable" \
@@ -49,6 +67,13 @@ PGB_TEST_POOLED_BASE="postgres://x:x@localhost:$PGB_PORT/eurobase_tenant?sslmode
 PGB_TEST_DEV_URL="postgres://eurobase_developer:localdev@localhost:$PG_PORT/eurobase?sslmode=disable" \
 PGB_TEST_SECRET="$SECRET" \
   go test ./internal/pgbouncerconf/ -run TestPgBouncerEndToEnd -count=1 -v
+
+# After the e2e test provisioned a tenant: the prod-mode split (#651).
+sleep 3 # runner pooler's sidecar picks the new tenant up
+PGB_TEST_RUNNER_POOLER="postgres://localhost:6467" PGB_TEST_GATEWAY_POOLER="postgres://localhost:6468" \
+PGB_TEST_RUNNER_METRICS="http://localhost:9128/metrics" PGB_TEST_GATEWAY_METRICS="http://localhost:9129/metrics" \
+PGB_TEST_SECRET="$SECRET" \
+  go test ./internal/pgbouncerconf/ -run TestPoolerSplit -count=1 -v
 
 # The runner's driver (postgres.js) through the pooler, as the runner uses it.
 if command -v deno >/dev/null; then
