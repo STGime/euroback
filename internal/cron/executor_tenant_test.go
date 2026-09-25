@@ -72,7 +72,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	e := (&Executor{}).WithTenantLogins(base, secret)
 
 	var who, path string
-	if err := e.runInTenantTx(ctx, schemaA, func(tx pgx.Tx) error {
+	if err := e.runInTenantTx(ctx, schemaA, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, "SELECT session_user, current_setting('search_path')").Scan(&who, &path)
 	}); err != nil {
 		t.Fatalf("runInTenantTx: %v", err)
@@ -85,7 +85,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	}
 
 	// The tenant role has no access to another tenant's schema.
-	err = e.runInTenantTx(ctx, schemaA, func(tx pgx.Tx) error {
+	err = e.runInTenantTx(ctx, schemaA, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, "SELECT count(*) FROM "+pgx.Identifier{schemaB, "todos"}.Sanitize())
 		return err
 	})
@@ -93,8 +93,17 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 		t.Errorf("cross-tenant read: err = %v, want permission denied", err)
 	}
 
+	// The server refuses a second statement on this path.
+	err = e.runInTenantTx(ctx, schemaA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := execExtended(ctx, tx, "SELECT 1; SELECT 2")
+		return err
+	})
+	if err == nil {
+		t.Error("execExtended ran two statements, want an error")
+	}
+
 	// Not configured => refuse rather than fall back to a shared role.
-	if err := (&Executor{}).runInTenantTx(ctx, schemaA, func(pgx.Tx) error { return nil }); err == nil {
+	if err := (&Executor{}).runInTenantTx(ctx, schemaA, func(context.Context, pgx.Tx) error { return nil }); err == nil {
 		t.Error("runInTenantTx without tenant logins: want error")
 	}
 }

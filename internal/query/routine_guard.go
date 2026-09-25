@@ -47,8 +47,11 @@ func ValidateNoRoutineOrSessionObjects(sql string) error {
 				return routineErr(w.name)
 			}
 			if w.kw == "temp" || w.kw == "temporary" {
-				switch kw(i - 1) {
-				case "create", "global", "local", "into":
+				prev := kw(i - 1)
+				// CREATE [GLOBAL|LOCAL] TEMP …, and SELECT … INTO TEMP t.
+				// INSERT/MERGE INTO a table named temp stays allowed.
+				if (kw(0) == "create" && (prev == "create" || prev == "global" || prev == "local")) ||
+					((kw(0) == "select" || kw(0) == "with") && prev == "into") {
 					return routineErr("temporary objects")
 				}
 			}

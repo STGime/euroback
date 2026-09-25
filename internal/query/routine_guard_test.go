@@ -11,6 +11,9 @@ func TestValidateNoRoutineOrSessionObjects(t *testing.T) {
 		"CREATE INDEX ON events (created_at)",
 		"select aufraeumen_fristen();",
 		"SELECT 'set_config' AS label",
+		"INSERT INTO temp (v) VALUES (1)",
+		"MERGE INTO temp t USING src s ON t.id = s.id WHEN MATCHED THEN DELETE",
+		"SELECT local, temp FROM readings",
 	}
 	for _, s := range allow {
 		if err := ValidateNoRoutineOrSessionObjects(s); err != nil {
