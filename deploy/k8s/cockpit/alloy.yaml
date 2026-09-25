@@ -45,12 +45,23 @@ data:
         regex         = "true"
       }
 
-      // Allow overriding the scrape port via annotation (defaults to 9100).
+      // Pod discovery yields one target per container port (plus a
+      // port-less one per container); keep only the port named "metrics".
+      // Otherwise the app / pgbouncer ports and init containers are scraped
+      // too, blocked by NetworkPolicy, and report up=0 forever (#651).
       rule {
-        source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_port"]
+        source_labels = ["__meta_kubernetes_pod_container_port_name"]
+        action        = "keep"
+        regex         = "metrics"
+      }
+
+      // Scrape <pod IP>:<prometheus.io/port annotation>.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_ip", "__meta_kubernetes_pod_annotation_prometheus_io_port"]
         action        = "replace"
-        target_label  = "__meta_kubernetes_pod_container_port_number"
-        regex         = "(.+)"
+        target_label  = "__address__"
+        regex         = "(.+);(.+)"
+        replacement   = "$1:$2"
       }
 
       // Surface pod/container/app labels for dashboards.

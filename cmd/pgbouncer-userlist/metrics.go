@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/pgbouncerconf"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -85,13 +86,15 @@ func collectMetrics(ctx context.Context, c *config) string {
 	metric("pgbouncer_servers_idle", "Idle server connections.", func(a *agg) float64 { return a.svIdle + a.svUsed })
 	metric("pgbouncer_maxwait_seconds", "Longest current client wait.", func(a *agg) float64 { return a.maxwait })
 
-	fmt.Fprintf(&b, "# HELP pgbouncer_client_connections Client connections (used_clients).\n# TYPE pgbouncer_client_connections gauge\npgbouncer_client_connections %g\n", num(lists["used_clients"]))
-	fmt.Fprintf(&b, "# HELP pgbouncer_max_client_conn Configured max_client_conn.\n# TYPE pgbouncer_max_client_conn gauge\npgbouncer_max_client_conn %d\n", maxClientConn)
+	// used_clients includes this scrape's own admin-console connection.
+	clients := num(lists["used_clients"]) - 1
+	if clients < 0 {
+		clients = 0
+	}
+	fmt.Fprintf(&b, "# HELP pgbouncer_client_connections Client connections (used_clients, excluding the scrape).\n# TYPE pgbouncer_client_connections gauge\npgbouncer_client_connections %g\n", clients)
+	fmt.Fprintf(&b, "# HELP pgbouncer_max_client_conn Configured max_client_conn.\n# TYPE pgbouncer_max_client_conn gauge\npgbouncer_max_client_conn %d\n", pgbouncerconf.MaxClientConn)
 	return b.String()
 }
-
-// maxClientConn mirrors the rendered max_client_conn (pgbouncerconf).
-const maxClientConn = 500
 
 func scrape(ctx context.Context, c *config) ([]map[string]string, map[string]string, error) {
 	pw, err := statsPassword(c.dir)

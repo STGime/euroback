@@ -87,3 +87,22 @@ func TestRenderINI_GatewayPooler(t *testing.T) {
 		t.Error("stats_users rendered without a StatsUser")
 	}
 }
+
+// The runner's pooler serves no platform role: no platform alias, so a
+// tenant role can't open an extra, unbudgeted pool on it.
+func TestRenderINI_RunnerPoolerNoPlatformAlias(t *testing.T) {
+	s := Settings{ServerTLS: "require", AuthFile: "/a", MaxDBConnections: 1, TenantMaxDBConnections: 15,
+		TenantPoolSize: 2, PlatformPoolSizes: map[string]int{}, IncludeTenants: true, StatsUser: "pgb_stats"}
+	if err := s.UpstreamFromURL("postgres://u:p@db.example:14319/eurobase"); err != nil {
+		t.Fatal(err)
+	}
+	ini := RenderINI(s)
+	if strings.Contains(ini, "\neurobase = ") {
+		t.Errorf("runner pooler rendered the platform alias:\n%s", ini)
+	}
+	for _, want := range []string{"eurobase_tenant = host=db.example", "max_client_conn = 500", "auth_file = /a"} {
+		if !strings.Contains(ini, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}

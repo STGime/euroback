@@ -205,28 +205,40 @@ groups:
           summary: "PgBouncer {{ $labels.app }} pod {{ $labels.pod }} is down or its admin console is unreachable"
           description: "Check: kubectl -n eurobase get pods -l app={{ $labels.app }}; kubectl -n eurobase logs {{ $labels.pod }} -c pgbouncer"
 
-      - alert: PgBouncerClientsWaiting
-        expr: max by (app, database) (pgbouncer_clients_waiting) > 0
+      # Gateway pooler: any sustained queue affects every tenant's API calls.
+      - alert: PgBouncerGatewayClientsWaiting
+        expr: max by (app, database) (pgbouncer_clients_waiting{app="pgbouncer-gateway"}) > 0
         for: 2m
         labels:
           severity: warning
           service: pgbouncer
         annotations:
-          summary: "Clients queueing for a server connection on {{ $labels.app }} / {{ $labels.database }}"
-          description: |
-            Sustained waits mean a pool is too small or a tenant holds its
-            connections (long transactions). Queued clients fail after
-            query_wait_timeout (runner: "database is busy"). Check max wait:
-            pgbouncer_maxwait_seconds.
+          summary: "Gateway clients queueing for a server connection ({{ $labels.database }})"
+          description: "The gateway's pool is too small or held by long transactions. Check pgbouncer_maxwait_seconds."
 
-      - alert: PgBouncerLongWait
-        expr: max by (app, database) (pgbouncer_maxwait_seconds) > 5
+      - alert: PgBouncerGatewayLongWait
+        expr: max by (app, database) (pgbouncer_maxwait_seconds{app="pgbouncer-gateway"}) > 5
         for: 1m
         labels:
           severity: warning
           service: pgbouncer
         annotations:
-          summary: "A client has waited > 5 s for a server connection on {{ $labels.app }} / {{ $labels.database }}"
+          summary: "A gateway client has waited > 5 s for a server connection"
+
+      # Runner pooler: one busy tenant filling its own 2-connection pool
+      # shows up here too, so only sustained queueing is worth a look.
+      - alert: PgBouncerRunnerClientsWaiting
+        expr: max by (app, database) (pgbouncer_clients_waiting{app="pgbouncer"}) > 0
+        for: 15m
+        labels:
+          severity: info
+          service: pgbouncer
+        annotations:
+          summary: "Function (tenant) clients have been queueing for 15+ minutes"
+          description: |
+            Usually one tenant holding its pool with long transactions (its
+            functions get "database is busy"). If many tenants are affected,
+            raise PGB_TENANT_MAX_DB_CONNECTIONS within the budget.
 
       - alert: PgBouncerClientSlotsHigh
         expr: max by (app, pod) (pgbouncer_client_connections / pgbouncer_max_client_conn) > 0.8
