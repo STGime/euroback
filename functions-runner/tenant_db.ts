@@ -1,10 +1,10 @@
-// Per-tenant database connections for ctx.db.sql (stage B, phase 1a).
+// Per-tenant database connections for ctx.db.sql (stage B).
 //
 // When FUNC_PASSWORD_SECRET is set, customer SQL runs on a connection
 // that *logs in as* the tenant's `<schema>_func` role (password derived
 // the same way as internal/tenantlogin.FuncPassword), so the session
-// identity itself is the tenant. Without the secret the runner keeps the
-// legacy shared-connection role switch.
+// identity itself is the tenant. There is no shared-connection fallback
+// (phase 1b): the runner's own login is a member of no tenant role.
 //
 // Budget (shared cluster, max_connections=100): one connection per
 // tenant, a soft global cap, idle close, LRU eviction of *idle* entries
@@ -42,13 +42,8 @@ export interface Lease {
   release: () => void;
 }
 
-/** How long a failed login keeps a tenant on the fallback path. */
-export const AUTH_FAILURE_COOLDOWN_MS = 60_000;
-
-/** LRU cache of per-tenant clients with a soft global cap. */
 export class TenantDBPool {
   private entries = new Map<string, Entry>();
-  private authFailedAt = new Map<string, number>();
 
   constructor(
     private readonly baseUrl: string,
@@ -62,18 +57,8 @@ export class TenantDBPool {
     return this.entries.size;
   }
 
-  /** True while a recent login failure keeps this tenant on the fallback path. */
-  authCoolingDown(schema: string): boolean {
-    const at = this.authFailedAt.get(schema);
-    if (at === undefined) return false;
-    if (this.now() - at < AUTH_FAILURE_COOLDOWN_MS) return true;
-    this.authFailedAt.delete(schema);
-    return false;
-  }
-
-  /** Records a login failure and drops the tenant's client. */
-  markAuthFailed(schema: string): void {
-    this.authFailedAt.set(schema, this.now());
+  /** Drops the tenant's client (e.g. after a failed login) so the next call reconnects. */
+  invalidate(schema: string): void {
     this.drop(schema);
   }
 

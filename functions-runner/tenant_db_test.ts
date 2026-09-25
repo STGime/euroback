@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { AUTH_FAILURE_COOLDOWN_MS, funcPassword, isAuthError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
+import { funcPassword, isAuthError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
 
 Deno.test("funcPassword matches the Go vector (internal/tenantlogin)", async () => {
   assertEquals(
@@ -55,14 +55,17 @@ Deno.test("LRU evicts only idle entries; busy entries survive over the cap", asy
   d.release();
 });
 
-Deno.test("auth failure cools a tenant down, then expires", () => {
-  let t = 1000;
+Deno.test("invalidate drops the client so the next acquire reconnects", async () => {
   const f = fakeFactory();
-  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5, () => t);
-  pool.markAuthFailed("tenant_a");
-  assert(pool.authCoolingDown("tenant_a"));
-  t += AUTH_FAILURE_COOLDOWN_MS + 1;
-  assert(!pool.authCoolingDown("tenant_a"));
+  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5);
+  const a = await pool.acquire("tenant_a", "tenant_a_func");
+  a.release();
+  pool.invalidate("tenant_a");
+  await new Promise((r) => setTimeout(r, 0));
+  assertEquals(f.ended, ["tenant_a_func"]);
+  const b = await pool.acquire("tenant_a", "tenant_a_func");
+  assertEquals(f.created, ["tenant_a_func", "tenant_a_func"]);
+  b.release();
 });
 
 Deno.test("isAuthError", () => {
