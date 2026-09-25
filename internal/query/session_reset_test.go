@@ -120,3 +120,20 @@ func TestExecCustomerStatement_SingleStatement(t *testing.T) {
 		t.Error("execCustomerStatement ran two statements, want an error")
 	}
 }
+
+// String-literal parsing is pinned before every customer statement, even
+// if earlier customer code in the same transaction changed it.
+func TestExecuteSQLTransaction_PinsStringParsing(t *testing.T) {
+	pool, schema, _ := setupTestDB(t)
+	e := NewQueryEngine(pool)
+	res, err := e.ExecuteSQLTransaction(context.Background(), schema, []string{
+		"DO $$BEGIN PERFORM set_config('standard_conforming_strings', 'off', true); END$$",
+		"SELECT current_setting('standard_conforming_strings') AS v",
+	}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res[len(res)-1].Rows[0]["v"]; got != "on" {
+		t.Errorf("standard_conforming_strings = %v for the next customer statement, want on", got)
+	}
+}

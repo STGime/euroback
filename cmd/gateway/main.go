@@ -88,7 +88,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool, err := db.NewPool(ctx, databaseURL)
+	pool, err := db.NewPool(ctx, databaseURL, db.WithSessionReset())
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
@@ -108,7 +108,7 @@ func main() {
 	developerDatabaseURL := os.Getenv("DATABASE_URL_DEVELOPER")
 	var developerPool *pgxpool.Pool
 	if developerDatabaseURL != "" {
-		developerPool, err = db.NewPool(ctx, developerDatabaseURL)
+		developerPool, err = db.NewPool(ctx, developerDatabaseURL, db.WithSessionReset())
 		if err != nil {
 			slog.Error("failed to connect with DATABASE_URL_DEVELOPER", "error", err)
 			os.Exit(1)

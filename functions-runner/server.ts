@@ -312,6 +312,9 @@ async function executeFunction(
         started = true;
         await tx.unsafe(timeoutSQL);
         await tx.unsafe(setPathSQL);
+        // Server tokenizes string literals the way sql_guard.ts does,
+        // whatever earlier customer code changed (transaction-local).
+        await tx.unsafe("SET LOCAL standard_conforming_strings = on");
         // Mirror the gateway's RLS context so auth_uid() /
         // is_service_role() behave the same in functions as in gateway
         // REST — see rlsContextStatements in role.ts. Closes #188.
