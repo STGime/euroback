@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -351,6 +353,17 @@ type testRequest struct {
 	RunAs      *string `json:"run_as,omitempty"`
 }
 
+// Dry runs open a real `<schema>_func` connection, which counts against
+// the role's CONNECTION LIMIT (tenantlogin.FuncConnLimit reserves one
+// slot for this) and the cluster's max_connections. Per gateway pod: at
+// most dryRunGlobal at once, one per project.
+const dryRunGlobal = 2
+
+var (
+	dryRunSlots   = make(chan struct{}, dryRunGlobal)
+	dryRunProject sync.Map // projectID -> struct{}
+)
+
 // handleTest dry-runs a sql / rpc action as the scheduled job would run
 // it (tenant login, run_as) and rolls back (#645).
 func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
@@ -360,6 +373,18 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 			return
 		}
 		projectID := chi.URLParam(r, "id")
+		if _, busy := dryRunProject.LoadOrStore(projectID, struct{}{}); busy {
+			jsonError(w, "a test run for this project is already in progress", http.StatusTooManyRequests)
+			return
+		}
+		defer dryRunProject.Delete(projectID)
+		select {
+		case dryRunSlots <- struct{}{}:
+			defer func() { <-dryRunSlots }()
+		default:
+			jsonError(w, "too many test runs right now; try again in a moment", http.StatusTooManyRequests)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleBodyBytes)
 		var req testRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -377,9 +402,25 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 		}
 		res, err := dry.DryRun(r.Context(), schema, req.ActionType, strings.TrimSpace(req.Action), runAs)
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			// Validation errors and database errors (permission denied,
+			// syntax, statement timeout, …) are the caller's to see;
+			// anything else (network, driver) may name internal hosts.
+			var pgErr *pgconn.PgError
+			if isDryRunValidationErr(err) || errors.As(err, &pgErr) {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			slog.Error("cron dry run failed", "error", err, "project_id", projectID)
+			jsonError(w, "the test run could not be completed; try again", http.StatusServiceUnavailable)
 			return
 		}
 		jsonResponse(w, res, http.StatusOK)
 	}
+}
+
+// isDryRunValidationErr reports errors DryRun returns before touching the
+// database (validation, unsupported action type, run_as, no connection).
+func isDryRunValidationErr(err error) bool {
+	var v *dryRunInputError
+	return errors.As(err, &v) || errors.Is(err, errTenantConnect)
 }

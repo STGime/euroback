@@ -36,8 +36,9 @@ const MinSecretLen = 32
 // The runner holds at most one connection per tenant per pod, so this
 // must cover the functions HPA maxReplicas (4, deploy/k8s/functions.yaml)
 // plus one surging pod during a rollout, plus one cron job connection
-// (worker), plus one spare.
-const FuncConnLimit = 7
+// (worker), plus one console dry run (gateway, one per project per pod —
+// internal/cron/handler.go), plus one spare.
+const FuncConnLimit = 8
 
 // scramIterations matches PostgreSQL's default scram_iterations.
 const scramIterations = 4096

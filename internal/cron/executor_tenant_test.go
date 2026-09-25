@@ -142,7 +142,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
 	}
-	if res.RowsAffected != 1 || !res.DryRun {
+	if res.RowsAffected == nil || *res.RowsAffected != 1 || !res.DryRun {
 		t.Errorf("DryRun = %+v, want 1 row affected, dry_run", res)
 	}
 	var still int
@@ -154,7 +154,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	if still != 1 {
 		t.Errorf("after DryRun the table has %d rows, want 1 (rolled back)", still)
 	}
-	if res, err := e.DryRun(ctx, schemaA, "sql", "DELETE FROM svc_only", RunAsNone); err != nil || res.RowsAffected != 0 {
+	if res, err := e.DryRun(ctx, schemaA, "sql", "DELETE FROM svc_only", RunAsNone); err != nil || res.RowsAffected == nil || *res.RowsAffected != 0 {
 		t.Errorf("DryRun as none = %+v, %v; want 0 rows", res, err)
 	}
 	if _, err := e.DryRun(ctx, schemaA, "sql", "GRANT SELECT ON svc_only TO PUBLIC", RunAsService); err == nil {

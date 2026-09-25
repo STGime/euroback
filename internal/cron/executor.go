@@ -336,7 +336,7 @@ func (e *Executor) runInTenantTx(ctx context.Context, schemaName, runAs string, 
 		// The driver error names the role and the internal host; keep it
 		// in the logs, not in cron_job_runs (visible to the tenant).
 		slog.Error("cron: connect as tenant role", "schema", schemaName, "error", err)
-		return errors.New("could not connect as the project's database role; it may still be provisioning — the job will retry at its next run")
+		return errTenantConnect
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -445,42 +445,60 @@ func partMatches(part string, value int) bool {
 	return value == n
 }
 
+// dryRunInputError marks a DryRun refusal made before touching the
+// database (safe to show the caller).
+type dryRunInputError struct{ err error }
+
+func (e *dryRunInputError) Error() string { return e.err.Error() }
+func (e *dryRunInputError) Unwrap() error { return e.err }
+
+// errTenantConnect is returned when the tenant login fails; its message is
+// generic (the driver error, which names hosts, is logged instead).
+var errTenantConnect = errors.New("could not connect as the project's database role; it may still be provisioning — the job will retry at its next run")
+
 // errDryRunRollback makes runInTenantTx roll back after a dry run.
 var errDryRunRollback = errors.New("dry run: rolled back")
 
 // DryRunResult reports what a job would have done.
 type DryRunResult struct {
-	RowsAffected int64 `json:"rows_affected"`
+	// RowsAffected is nil for rpc actions (SELECT fn() always "returns" 1).
+	RowsAffected *int64 `json:"rows_affected"`
 	DurationMs   int64 `json:"execution_time_ms"`
 	DryRun       bool  `json:"dry_run"`
 }
 
 // DryRun executes a sql / rpc action exactly like a scheduled run — same
 // validation, tenant login, run_as and timeouts — and always rolls back.
-// Backs the console's Test Run (#645). Side effects outside the database
-// (none are reachable from the tenant role today) would not be undone.
+// Backs the console's Test Run (#645). Not undone: sequence nextval()
+// advances (never transactional in Postgres), and any side effect outside
+// the database (none are reachable from the tenant role today).
 func (e *Executor) DryRun(ctx context.Context, schemaName, actionType, action, runAs string) (*DryRunResult, error) {
 	var sql string
 	switch actionType {
 	case "sql":
 		if err := validateCronSQLAction(action, schemaName); err != nil {
-			return nil, err
+			return nil, &dryRunInputError{err}
 		}
 		sql = action
 	case "rpc":
 		if err := validateCronRPCName(action); err != nil {
-			return nil, err
+			return nil, &dryRunInputError{err}
 		}
 		sql = fmt.Sprintf("SELECT %s()", quoteIdent(action))
 	default:
-		return nil, fmt.Errorf("dry run supports action_type 'sql' or 'rpc'")
+		return nil, &dryRunInputError{fmt.Errorf("dry run supports action_type 'sql' or 'rpc'")}
 	}
 	if err := validateRunAs(&runAs); err != nil {
-		return nil, err
+		return nil, &dryRunInputError{err}
 	}
 	start := time.Now()
 	var rows int64
 	err := e.runInTenantTx(ctx, schemaName, runAs, func(ctx context.Context, tx pgx.Tx) error {
+		// Below the gateway's 30 s request timeout, so a slow statement
+		// reports a clear statement-timeout error.
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '25s'"); err != nil {
+			return err
+		}
 		n, err := execExtended(ctx, tx, sql)
 		if err != nil {
 			return err
@@ -491,5 +509,9 @@ func (e *Executor) DryRun(ctx context.Context, schemaName, actionType, action, r
 	if err != nil && !errors.Is(err, errDryRunRollback) {
 		return nil, err
 	}
-	return &DryRunResult{RowsAffected: rows, DurationMs: time.Since(start).Milliseconds(), DryRun: true}, nil
+	res := &DryRunResult{DurationMs: time.Since(start).Milliseconds(), DryRun: true}
+	if actionType == "sql" {
+		res.RowsAffected = &rows
+	}
+	return res, nil
 }
