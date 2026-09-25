@@ -67,6 +67,13 @@ func TestValidateCronSQLAction_Rejects(t *testing.T) {
 		{"set search_path", "SET search_path TO tenant_22222222_2222_2222_2222_222222222222"},
 		{"create role", "CREATE ROLE x LOGIN"},
 		{"security definer", "CREATE FUNCTION f() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'"},
+		{"do block", "DO $$BEGIN NULL; END$$"},
+		{"create function", "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"},
+		{"create procedure", "CREATE PROCEDURE p() LANGUAGE sql AS 'SELECT 1'"},
+		{"temp table", "CREATE TEMP TABLE t (id int)"},
+		{"select into temp", "SELECT * INTO TEMPORARY t FROM events"},
+		{"pg_temp reference", "SELECT * FROM pg_temp.t"},
+		{"set_config", "SELECT set_config('app.x', '1', false)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,6 +81,14 @@ func TestValidateCronSQLAction_Rejects(t *testing.T) {
 				t.Errorf("validateCronSQLAction(%q) returned nil, want an error", tc.sql)
 			}
 		})
+	}
+}
+
+func TestValidateCronRPCName_RefusesCatalogFunctions(t *testing.T) {
+	for _, n := range []string{"pg_stat_get_activity", "pg_sleep", "PG_RELOAD_CONF"} {
+		if err := validateCronRPCName(n); err == nil {
+			t.Errorf("validateCronRPCName(%q) = nil, want error", n)
+		}
 	}
 }
 

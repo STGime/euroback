@@ -390,6 +390,15 @@ func main() {
 	// ── Start cron executor ──
 	cronSvc := cron.NewCronService(pool)
 	cronExec := cron.NewExecutor(cronSvc, pool)
+	// sql / rpc schedules run as the tenant's own `<schema>_func` login,
+	// same as edge-function SQL. Without FUNC_PASSWORD_SECRET they fail.
+	if cronBase, err := pgx.ParseConfig(databaseURL); err != nil {
+		slog.Error("parse DATABASE_URL for cron tenant logins", "error", err)
+	} else if secret := os.Getenv("FUNC_PASSWORD_SECRET"); len(secret) >= tenantlogin.MinSecretLen {
+		cronExec = cronExec.WithTenantLogins(cronBase, []byte(secret))
+	} else {
+		slog.Warn("FUNC_PASSWORD_SECRET not set — sql/rpc cron schedules will fail")
+	}
 
 	// Wire the function-runner invoker so schedules with action_type
 	// `function` (issue #112) can fire deployed edge functions. Optional

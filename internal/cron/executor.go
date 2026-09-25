@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -34,6 +35,23 @@ type Executor struct {
 	pool     *pgxpool.Pool
 	invoker  *FunctionInvoker
 	location *time.Location // fallback timezone when a job's tz fails to load
+
+	// Customer SQL (sql / rpc actions) runs on a connection that logs in
+	// as the tenant's own `<schema>_func` role — the same identity as
+	// edge-function SQL — never on the shared pool, whose role can reach
+	// every tenant schema. Unset => sql / rpc jobs fail (no fallback).
+	tenantBase   *pgx.ConnConfig
+	tenantSecret []byte
+}
+
+// WithTenantLogins configures the per-tenant logins used for sql / rpc
+// actions: base is the worker's own connection config (host, db, TLS);
+// user and password are replaced per job with `<schema>_func` and
+// tenantlogin.FuncPassword(secret, schema).
+func (e *Executor) WithTenantLogins(base *pgx.ConnConfig, secret []byte) *Executor {
+	e.tenantBase = base
+	e.tenantSecret = secret
+	return e
 }
 
 // NewExecutor creates a new cron job executor.
@@ -296,29 +314,42 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 	return nil
 }
 
-// runInTenantTx wraps a cron action in a transaction with `SET LOCAL
-// search_path` and `SET LOCAL statement_timeout`. Both reset on commit.
-// search_path intentionally does NOT include `public` — qualified
-// references are blocked by validateCronSQLAction (the same checks as the
-// SQL endpoints); this stops accidental
-// resolution of unqualified names (`projects`, `api_keys`) into the
-// platform schema.
+// runInTenantTx runs a cron action as the tenant: a short-lived
+// connection logged in as `<schema>_func` (only that schema's grants;
+// temp objects and session state die with the connection), inside a
+// transaction with `SET LOCAL search_path` and `statement_timeout`.
+// search_path does NOT include `public`; qualified references outside
+// the tenant are also refused by validateCronSQLAction.
 func (e *Executor) runInTenantTx(ctx context.Context, schemaName string, fn func(pgx.Tx) error) error {
-	tx, err := e.pool.Begin(ctx)
+	if e.tenantBase == nil || len(e.tenantSecret) == 0 {
+		return fmt.Errorf("sql/rpc cron actions need per-tenant logins (FUNC_PASSWORD_SECRET) on the worker")
+	}
+	cfg := e.tenantBase.Copy()
+	cfg.User = tenantlogin.FuncRole(schemaName)
+	cfg.Password = tenantlogin.FuncPassword(e.tenantSecret, schemaName)
+	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(cctx, cfg)
+	if err != nil {
+		return fmt.Errorf("connect as tenant: %w", err)
+	}
+	defer conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
+
+	tx, err := conn.Begin(cctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", quoteIdent(schemaName))); err != nil {
+	defer tx.Rollback(cctx) //nolint:errcheck
+	if _, err := tx.Exec(cctx, fmt.Sprintf("SET LOCAL search_path TO %s", quoteIdent(schemaName))); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
+	if _, err := tx.Exec(cctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
 		return fmt.Errorf("set statement_timeout: %w", err)
 	}
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return tx.Commit(cctx)
 }
 
 // quoteIdent quotes an identifier to prevent SQL injection.

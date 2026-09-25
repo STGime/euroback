@@ -33,6 +33,12 @@ var errMultiStatement = errors.New("cron sql action must be a single statement")
 //     platform developer
 //   - no system-catalog references (pg_stat_activity etc.)
 //   - no role / session / privilege statements (SET ROLE, GRANT, …)
+//   - no DO blocks, new functions/procedures, temporary objects or
+//     set_config() (query.ValidateNoRoutineOrSessionObjects, mirroring
+//     the edge-function SQL guard)
+//
+// The actual boundary is the role: the executor runs the statement as
+// the tenant's own `<schema>_func` login (see runInTenantTx).
 //
 // It does NOT validate that the SQL is syntactically valid or that the
 // referenced tables exist — Postgres surfaces those when it runs.
@@ -52,7 +58,10 @@ func validateCronSQLAction(action, schema string) error {
 	if err := query.ValidateNoCatalogRefs(trimmed); err != nil {
 		return err
 	}
-	return query.ValidateNoPrivilegeStatements(trimmed)
+	if err := query.ValidateNoPrivilegeStatements(trimmed); err != nil {
+		return err
+	}
+	return query.ValidateNoRoutineOrSessionObjects(trimmed)
 }
 
 // validateCronRPCName accepts only safe identifiers — letters, digits,
@@ -63,5 +72,7 @@ func validateCronRPCName(name string) error {
 	if !validRPCNameRe.MatchString(strings.TrimSpace(name)) {
 		return errors.New("invalid rpc function name (use letters, digits, underscores)")
 	}
-	return nil
+	// Tenant functions only: refuse system-catalog names (pg_…), which
+	// resolve through the implicit pg_catalog search path.
+	return query.ValidateNoCatalogRefs(name)
 }

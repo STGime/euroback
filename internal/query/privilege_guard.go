@@ -20,6 +20,21 @@ import (
 // still compared (case-folded) against the configuration-parameter names
 // below, because `SET "role"` / `"set_config"(…)` resolve the same way.
 func ValidateNoPrivilegeStatements(sql string) error {
+	stmts, err := splitPrivStatements(sql)
+	if err != nil {
+		return err
+	}
+	for _, st := range stmts {
+		if err := checkPrivilegeStatement(st); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitPrivStatements tokenizes sql (comment/string/dollar-quote aware)
+// into statements of privWords.
+func splitPrivStatements(sql string) ([][]privWord, error) {
 	var stmts [][]privWord
 	cur := []privWord{}
 	for _, t := range scanIdentifiersAndDots(sql) {
@@ -31,7 +46,7 @@ func ValidateNoPrivilegeStatements(sql string) error {
 			cur = append(cur, privWord{})
 		default:
 			if t.unicodeEscaped {
-				return privErr(`U&"…" identifiers`)
+				return nil, privErr(`U&"…" identifiers`)
 			}
 			w := privWord{name: strings.ToLower(t.value)}
 			if !t.quoted {
@@ -40,14 +55,7 @@ func ValidateNoPrivilegeStatements(sql string) error {
 			cur = append(cur, w)
 		}
 	}
-	stmts = append(stmts, cur)
-
-	for _, st := range stmts {
-		if err := checkPrivilegeStatement(st); err != nil {
-			return err
-		}
-	}
-	return nil
+	return append(stmts, cur), nil
 }
 
 // privWord is one token of a statement for the privilege guard.

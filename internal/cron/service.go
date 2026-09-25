@@ -174,6 +174,11 @@ func (s *CronService) Create(ctx context.Context, projectID string, req CreateCr
 			return nil, err
 		}
 	}
+	if req.ActionType == "rpc" {
+		if err := validateCronRPCName(req.Action); err != nil {
+			return nil, err
+		}
+	}
 
 	tz := req.Timezone
 	if tz == "" {
@@ -237,7 +242,8 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 			`SELECT project_id::text, action_type, action FROM cron_jobs WHERE `+whereClause,
 			whereArgs...).Scan(&projectID, &actionType, &action)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("load cron job: %w", err)
+			slog.Error("cron: load job for validation", "error", err)
+			return nil, errors.New("could not validate the cron job; try again")
 		}
 		if err == nil {
 			if req.ActionType != nil {
@@ -246,8 +252,17 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 			if req.Action != nil {
 				action = *req.Action
 			}
-			if actionType == "sql" {
+			switch actionType {
+			case "sql":
 				if err := s.validateSQLActionFor(ctx, projectID, action); err != nil {
+					return nil, err
+				}
+			case "rpc":
+				if err := validateCronRPCName(action); err != nil {
+					return nil, err
+				}
+			case "function":
+				if err := validateFunctionName(action); err != nil {
 					return nil, err
 				}
 			}
@@ -468,7 +483,8 @@ func isUniqueViolation(err error) bool {
 func (s *CronService) validateSQLActionFor(ctx context.Context, projectID, action string) error {
 	var schema string
 	if err := s.pool.QueryRow(ctx, `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schema); err != nil {
-		return fmt.Errorf("resolve project schema: %w", err)
+		slog.Error("cron: resolve project schema", "error", err, "project_id", projectID)
+		return errors.New("could not validate the sql action; try again")
 	}
 	return validateCronSQLAction(action, schema)
 }
