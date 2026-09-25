@@ -325,9 +325,9 @@ async function executeFunction(
       // the customer's SQL — even with an auth-like SQLSTATE — pass
       // through unchanged.
       if (started || !isAuthError(err)) throw err;
-      tp.invalidate(schemaName);
+      lease?.invalidate();
       console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
-      throw new Error("database login for this project is not ready yet; retry in a minute");
+      throw new Error("database login for this project is unavailable; retry shortly");
     } finally {
       lease?.release();
     }

@@ -82,8 +82,11 @@ type Ensurer struct {
 }
 
 // FullPassInterval is how often every tenant is re-applied even if it
-// was ensured before (heals out-of-band changes, e.g. a manual NOLOGIN).
-const FullPassInterval = time.Hour
+// was ensured before. Heals out-of-band changes — including a tenant
+// changing its own role's password from function SQL (Postgres lets a
+// role do that), which only locks that tenant out of its own DB until
+// the next full pass.
+const FullPassInterval = 15 * time.Minute
 
 // NewEnsurer returns nil when the secret is empty (feature off). A
 // non-empty secret shorter than MinSecretLen is an error.

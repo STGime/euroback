@@ -46,6 +46,9 @@ spec:
                     || ' CREATE=' || has_schema_privilege('eurobase_migrator', 'public', 'CREATE');
                 SELECT 'index: ' || indexdef FROM pg_indexes WHERE indexname IN ('ix_retention_holds_lookup', 'ix_retention_holds_expiry') ORDER BY indexname;
                 SELECT 'constraint retention_holds_legal_basis_check: validated=' || convalidated FROM pg_constraint WHERE conname = 'retention_holds_legal_basis_check';
+                SELECT 'runner tenant _func memberships (target 0, see runner-membership-revoke.sql): ' || count(*)
+                  FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid
+                 WHERE am.member = 'eurobase_function_runner'::regrole AND r.rolname ~ '^tenant_[0-9a-f_]+_func$';
                 SELECT 'auth.email() live lookup: ' || (pg_get_functiondef('auth.email()'::regprocedure) LIKE '%FROM users%');
 YAML
 

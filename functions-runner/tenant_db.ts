@@ -40,6 +40,8 @@ interface Entry {
 export interface Lease {
   client: SqlClient;
   release: () => void;
+  /** Drops this lease's client (e.g. after a failed login) if it is still the cached one. */
+  invalidate: () => void;
 }
 
 export class TenantDBPool {
@@ -55,11 +57,6 @@ export class TenantDBPool {
 
   get size(): number {
     return this.entries.size;
-  }
-
-  /** Drops the tenant's client (e.g. after a failed login) so the next call reconnects. */
-  invalidate(schema: string): void {
-    this.drop(schema);
   }
 
   /**
@@ -87,6 +84,9 @@ export class TenantDBPool {
           released = true;
           e.inUse--;
           e.lastUsed = this.now();
+        },
+        invalidate: () => {
+          if (this.entries.get(schema) === e) this.drop(schema);
         },
       };
     } catch (err) {

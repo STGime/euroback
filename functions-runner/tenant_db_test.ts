@@ -55,17 +55,30 @@ Deno.test("LRU evicts only idle entries; busy entries survive over the cap", asy
   d.release();
 });
 
-Deno.test("invalidate drops the client so the next acquire reconnects", async () => {
+Deno.test("lease.invalidate drops its own client so the next acquire reconnects", async () => {
   const f = fakeFactory();
   const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5);
   const a = await pool.acquire("tenant_a", "tenant_a_func");
+  a.invalidate();
   a.release();
-  pool.invalidate("tenant_a");
-  await new Promise((r) => setTimeout(r, 0));
-  assertEquals(f.ended, ["tenant_a_func"]);
   const b = await pool.acquire("tenant_a", "tenant_a_func");
   assertEquals(f.created, ["tenant_a_func", "tenant_a_func"]);
   b.release();
+});
+
+Deno.test("a stale lease.invalidate does not evict a newer client", async () => {
+  const f = fakeFactory();
+  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5);
+  const stale = await pool.acquire("tenant_a", "tenant_a_func");
+  stale.invalidate(); // first failure drops client #1
+  const fresh = await pool.acquire("tenant_a", "tenant_a_func"); // client #2
+  stale.invalidate(); // late second failure on the old lease
+  stale.release();
+  const again = await pool.acquire("tenant_a", "tenant_a_func");
+  assert(again.client === fresh.client);
+  assertEquals(f.created.length, 2);
+  fresh.release();
+  again.release();
 });
 
 Deno.test("isAuthError", () => {
