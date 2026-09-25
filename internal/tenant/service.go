@@ -684,7 +684,10 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 	// the worker's next pass. Best effort: the project is created either
 	// way, and the worker retries.
 	if status == "active" && !skipPlatformSchema && s.funcLogins != nil {
-		if err := s.funcLogins.EnsureOne(ctx, schemaName); err != nil {
+		// Detached from the request: a client that disconnects right after
+		// the create must not leave the project waiting for the worker.
+		// EnsureOne bounds itself (15 s, lock_timeout 3 s).
+		if err := s.funcLogins.EnsureOne(context.WithoutCancel(ctx), schemaName); err != nil {
 			slog.Error("tenant function login not set at provisioning; worker will retry",
 				"error", err, "project_id", projectID, "schema", schemaName)
 		}

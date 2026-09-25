@@ -32,6 +32,11 @@ import (
 // MinSecretLen is the minimum FUNC_PASSWORD_SECRET length (bytes).
 const MinSecretLen = 32
 
+// FuncConnLimit is the per-tenant connection limit on `<schema>_func`.
+// The runner holds at most one connection per tenant per pod; 3 leaves
+// room for a rolling restart (two pods) plus one.
+const FuncConnLimit = 3
+
 // scramIterations matches PostgreSQL's default scram_iterations.
 const scramIterations = 4096
 
@@ -139,9 +144,16 @@ func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
 		return nil // project without a function role (e.g. mid-provisioning)
 	}
 	// The verifier is [A-Za-z0-9+/=:$-] only — safe inside the literal.
-	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'",
-		pgx.Identifier{role}.Sanitize(), verifier)); err != nil {
+	// CONNECTION LIMIT caps what a tenant can do with its own login if it
+	// learns a password (a role may change its own password from function
+	// SQL; it cannot change its connection limit). RESET ALL drops any
+	// role-level defaults the tenant set on itself.
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN CONNECTION LIMIT %d PASSWORD '%s'",
+		pgx.Identifier{role}.Sanitize(), FuncConnLimit, verifier)); err != nil {
 		return fmt.Errorf("set login on %s: %w", role, err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s RESET ALL", pgx.Identifier{role}.Sanitize())); err != nil {
+		return fmt.Errorf("reset role settings on %s: %w", role, err)
 	}
 	var canConnect bool
 	if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", role, e.database).Scan(&canConnect); err != nil {
