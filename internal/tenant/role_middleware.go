@@ -43,6 +43,15 @@ func RoleFromContext(ctx context.Context) string {
 	return v
 }
 
+// HasMinRole reports whether the role on ctx meets min — the same test
+// RequireMinRole applies, for handlers that need a stricter bar on part
+// of a route (e.g. compliance export archives in the storage browser).
+// Fails closed on an unset role.
+func HasMinRole(ctx context.Context, min string) bool {
+	role := RoleFromContext(ctx)
+	return role != "" && roleLevel[role] >= roleLevel[min]
+}
+
 // RequireMinRole returns a middleware that rejects (403) any request
 // whose stashed role doesn't meet the minimum. Must run AFTER
 // projectMembershipMiddleware so the role is on the context.
