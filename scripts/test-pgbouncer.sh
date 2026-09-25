@@ -37,6 +37,7 @@ docker run -d --name "$PGB" --network "$NET" -p "$PGB_PORT:6432" \
   -e DATABASE_URL_FUNCTION_RUNNER="postgres://eurobase_function_runner:localdev@$PG:5432/eurobase?sslmode=disable" \
   -e FUNC_PASSWORD_SECRET="$SECRET" \
   -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s -e PGB_POOL_SIZE_EUROBASE_GATEWAY=1 \
+  -e PGB_TENANT_POOL_SIZE=1 -e PGB_QUERY_WAIT_TIMEOUT=2 \
   eurobase-pgbouncer:test \
   sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
 sleep 3
@@ -44,7 +45,16 @@ docker logs "$PGB" 2>&1 | grep -iE "error|fatal|warning" && { echo "pgbouncer re
 
 cd "$REPO_ROOT"
 PGB_TEST_POOLED_GATEWAY="postgres://eurobase_gateway:localdev@localhost:$PGB_PORT/eurobase?sslmode=disable" \
-PGB_TEST_POOLED_BASE="postgres://x:x@localhost:$PGB_PORT/eurobase?sslmode=disable" \
+PGB_TEST_POOLED_BASE="postgres://x:x@localhost:$PGB_PORT/eurobase_tenant?sslmode=disable" \
 PGB_TEST_DEV_URL="postgres://eurobase_developer:localdev@localhost:$PG_PORT/eurobase?sslmode=disable" \
 PGB_TEST_SECRET="$SECRET" \
   go test ./internal/pgbouncerconf/ -run TestPgBouncerEndToEnd -count=1 -v
+
+# The runner's driver (postgres.js) through the pooler, as the runner uses it.
+if command -v deno >/dev/null; then
+  echo "── postgres.js probe"
+  PGB_PROBE_GATEWAY="postgres://eurobase_gateway:localdev@localhost:$PGB_PORT/eurobase?sslmode=disable" \
+  PGB_PROBE_TENANT_BASE="postgres://x:x@localhost:$PGB_PORT/eurobase_tenant?sslmode=disable" \
+  PGB_TEST_SECRET="$SECRET" \
+    deno run --allow-net --allow-env --allow-read --no-lock scripts/pgbouncer-probe.ts
+fi

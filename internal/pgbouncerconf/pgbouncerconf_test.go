@@ -34,7 +34,8 @@ func TestRenderINI(t *testing.T) {
 	}
 	ini := RenderINI(s)
 	for _, want := range []string{
-		"eurobase = host=db.example port=14319 dbname=eurobase",
+		"eurobase = host=db.example port=14319 dbname=eurobase max_db_connections=20",
+		"eurobase_tenant = host=db.example port=14319 dbname=eurobase max_db_connections=20",
 		"eurobase_gateway = pool_size=10",
 		"pool_mode = transaction",
 		"auth_type = scram-sha-256",
@@ -42,7 +43,6 @@ func TestRenderINI(t *testing.T) {
 		"server_reset_query_always = 1",
 		"max_prepared_statements = 200",
 		"server_tls_sslmode = require",
-		"max_db_connections = 20",
 		"default_pool_size = 2",
 	} {
 		if !strings.Contains(ini, want) {

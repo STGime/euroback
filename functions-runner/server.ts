@@ -10,7 +10,7 @@
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
-import { isLoginError, TenantDBPool } from "./tenant_db.ts";
+import { isConnectionDrop, isLoginError, isPoolerBusyError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -22,6 +22,7 @@ import { newVerifier, type Verifier } from "./hmac.ts";
 import { openSealed, resolveVaultSecret } from "./vault.ts";
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
+import { onWorkerError } from "./worker_errors.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner's own login
 // (`eurobase_function_runner`) has no grants on any tenant schema and,
@@ -35,6 +36,22 @@ import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
 // DATABASE_URL_FUNCTION_RUNNER is in every environment, the fallback
 // can be removed.
 const DB_URL = Deno.env.get("DATABASE_URL_FUNCTION_RUNNER") ?? Deno.env.get("DATABASE_URL") ?? "";
+
+// One tenant's broken connection must never take down the runner for
+// everyone: postgres.js can emit a connection error as an unhandled
+// rejection (e.g. when PgBouncer closes a client after query_wait_timeout)
+// in addition to rejecting the pending query. Log it and keep serving.
+globalThis.addEventListener("unhandledrejection", (e) => {
+  e.preventDefault();
+  const r = e.reason as { code?: string; message?: string } | undefined;
+  if (r?.code) {
+    // Database driver error (postgres.js); the pending query was rejected too.
+    console.warn(`[runner] db connection error (unhandled rejection): ${r.code} ${r.message ?? ""}`);
+  } else {
+    // Anything else is a runner bug: log loudly with a stable prefix to alert on.
+    console.error(`[runner] BUG unhandled rejection: ${r?.message ?? String(e.reason)}`, (e.reason as Error)?.stack ?? "");
+  }
+});
 const PORT = parseInt(Deno.env.get("PORT") ?? "8000");
 const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50");
 const CODE_CACHE_SIZE = parseInt(Deno.env.get("CODE_CACHE_SIZE") ?? "200");
@@ -124,16 +141,22 @@ let sql: any = null;
 // authenticated as the tenant's `<schema>_func` role. Requires
 // FUNC_PASSWORD_SECRET; without it ctx.db.sql fails.
 const FUNC_PASSWORD_SECRET = Deno.env.get("FUNC_PASSWORD_SECRET") ?? "";
-// Per pod; see the connection budget note on the HPA in deploy/k8s/functions.yaml.
-const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "10");
+// Tenant connections go through PgBouncer when set (#641 PR 3), e.g.
+// postgres://pgbouncer.eurobase.svc.cluster.local:6432/eurobase_tenant?sslmode=disable
+// (user/password are filled in per tenant). Unset: straight to Postgres.
+const FUNC_DB_POOLER_URL = Deno.env.get("FUNC_DB_POOLER_URL") ?? "";
+// Per pod. With FUNC_DB_POOLER_URL these are client connections to
+// PgBouncer (cheap; its max_client_conn is 500 per replica) — see the
+// budget note on the HPA in deploy/k8s/functions.yaml.
+const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? (FUNC_DB_POOLER_URL ? "30" : "10"));
 let tenantPool: TenantDBPool | null = null;
 
 async function getTenantPool(): Promise<TenantDBPool | null> {
   if (FUNC_PASSWORD_SECRET.length < 32 || !DB_URL) return null;
   if (tenantPool) return tenantPool;
-  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
   tenantPool = new TenantDBPool(
-    DB_URL,
+    FUNC_DB_POOLER_URL || DB_URL,
     FUNC_PASSWORD_SECRET,
     (url: string) => postgres(url, { max: 1, idle_timeout: 30 }),
     TENANT_CONN_CAP,
@@ -143,7 +166,7 @@ async function getTenantPool(): Promise<TenantDBPool | null> {
 
 async function getDB() {
   if (sql) return sql;
-  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
   sql = postgres(DB_URL, { max: 3 }); // platform lookups only
   return sql;
 }
@@ -303,37 +326,52 @@ async function executeFunction(
     if (!tp) {
       throw new Error("database access is not configured on this runner (FUNC_PASSWORD_SECRET)");
     }
-    let started = false;
-    let lease;
-    try {
-      lease = await tp.acquire(schemaName, funcRole);
-      // deno-lint-ignore no-explicit-any
-      return await lease.client.begin(async (tx: any) => {
-        started = true;
-        await tx.unsafe(timeoutSQL);
-        await tx.unsafe(setPathSQL);
-        // Server tokenizes string literals the way sql_guard.ts does,
-        // whatever earlier customer code changed (transaction-local).
-        await tx.unsafe("SET LOCAL standard_conforming_strings = on");
-        // Mirror the gateway's RLS context so auth_uid() /
-        // is_service_role() behave the same in functions as in gateway
-        // REST — see rlsContextStatements in role.ts. Closes #188.
-        for (const stmt of rlsContextStatements(userId)) {
-          await tx.unsafe(stmt.sql, stmt.params);
+    // One retry when the connection drops before the transaction started
+    // (pooler restart, idle-close race): no SQL has run yet, so it's safe.
+    for (let attempt = 1; ; attempt++) {
+      let started = false;
+      let lease;
+      try {
+        lease = await tp.acquire(schemaName, funcRole);
+        // deno-lint-ignore no-explicit-any
+        return await lease.client.begin(async (tx: any) => {
+          started = true;
+          await tx.unsafe(timeoutSQL);
+          await tx.unsafe(setPathSQL);
+          // Server tokenizes string literals the way sql_guard.ts does,
+          // whatever earlier customer code changed (transaction-local).
+          await tx.unsafe("SET LOCAL standard_conforming_strings = on");
+          // Mirror the gateway's RLS context so auth_uid() /
+          // is_service_role() behave the same in functions as in gateway
+          // REST — see rlsContextStatements in role.ts. Closes #188.
+          for (const stmt of rlsContextStatements(userId)) {
+            await tx.unsafe(stmt.sql, stmt.params);
+          }
+          return await tx.unsafe(query, params);
+        });
+      } catch (err) {
+        // Errors raised once the transaction started (customer SQL, even
+        // with an auth-like SQLSTATE) pass through unchanged.
+        if (started) throw err;
+        if (isConnectionDrop(err) && attempt === 1) {
+          lease?.invalidate();
+          console.warn(`[tenant-db] connection for ${funcRole} dropped before the transaction; retrying once`);
+          continue;
         }
-        return await tx.unsafe(query, params);
-      });
-    } catch (err) {
-      // A failed login (not applied yet for a brand-new project) gets a
-      // retryable message and a fresh client next time. Errors raised by
-      // the customer's SQL — even with an auth-like SQLSTATE — pass
-      // through unchanged.
-      if (started || !isLoginError(err)) throw err;
-      lease?.invalidate();
-      console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
-      throw new Error("database login for this project is unavailable; retry shortly");
-    } finally {
-      lease?.release();
+        if (isPoolerBusyError(err)) {
+          lease?.invalidate();
+          console.warn(`[tenant-db] pooler busy for ${funcRole}`);
+          throw new Error("the database is busy for this project; retry shortly");
+        }
+        // A failed login (not applied yet for a brand-new project) gets a
+        // retryable message and a fresh client next time.
+        if (!isLoginError(err)) throw err;
+        lease?.invalidate();
+        console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
+        throw new Error("database login for this project is unavailable; retry shortly");
+      } finally {
+        lease?.release();
+      }
     }
   }
 
@@ -490,9 +528,9 @@ async function runUserHandlerInWorker(opts: {
       respondError(504, "Function timed out");
     }, timeoutMs);
 
-    worker.addEventListener("error", (e: ErrorEvent) => {
-      console.error(`[fn:${projectId}] Worker error:`, e.message);
-      respondError(500, e.message || "worker error");
+    onWorkerError(worker, (message) => {
+      console.error(`[fn:${projectId}] Worker error:`, message);
+      respondError(500, message || "worker error");
     });
 
     worker.addEventListener("message", (event: MessageEvent) => {

@@ -320,16 +320,26 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:${{ github.sha }}
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:latest
 
+      # The pooler image is tagged by the content of its inputs, so a deploy
+      # that doesn't touch them leaves the tag — and the running pooler,
+      # which carries live tenant traffic — unchanged (no restart).
       - name: Build and push pgbouncer
+        id: pgb
         if: steps.fresh.outputs.stale != 'true'
         run: |
-          docker build \
-            -f deploy/docker/Dockerfile.pgbouncer \
-            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
-            -t ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:latest \
-            .
-          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }}
-          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:latest
+          # ISO week in the hash: the image (alpine + PgBouncer security
+          # fixes) is rebuilt at least weekly, even if no input changed.
+          TAG=pgb-$( { git ls-files -s deploy/docker/Dockerfile.pgbouncer cmd/pgbouncer-userlist \
+                         internal/pgbouncerconf internal/tenantlogin go.mod go.sum; date -u +%G-W%V; } \
+                   | sha256sum | cut -c1-16)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          IMG=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer
+          if docker manifest inspect "$IMG:$TAG" >/dev/null 2>&1; then
+            echo "pgbouncer image $TAG already in the registry — not rebuilding"
+          else
+            docker build -f deploy/docker/Dockerfile.pgbouncer -t "$IMG:$TAG" .
+            docker push "$IMG:$TAG"
+          fi
 
       - name: Build and push migrations image
         if: steps.fresh.outputs.stale != 'true'
@@ -387,16 +397,22 @@ jobs:
           # the `kubectl set image` step below — set image wins on
           # the container image; everything else is sourced from
           # the manifest.
+          # PgBouncer (#641) before its clients: the functions runner's
+          # tenant connections use its `eurobase_tenant` alias, so the
+          # pooler must be rolled (with the current config) before a
+          # runner pod can start using it.
+          # Pinned to the content tag: unchanged inputs = no pooler restart.
+          sed "s|eurobase-app/pgbouncer:latest|eurobase-app/pgbouncer:${{ steps.pgb.outputs.tag }}|" \
+            deploy/k8s/pgbouncer.yaml | kubectl apply -f -
+          kubectl rollout status deployment/pgbouncer -n eurobase --timeout=180s
           kubectl apply -f deploy/k8s/gateway.yaml
           kubectl apply -f deploy/k8s/worker.yaml
           kubectl apply -f deploy/k8s/console.yaml
-          kubectl apply -f deploy/k8s/functions.yaml
           # NetworkPolicy must apply BEFORE the pod rollout so the new
           # net-allowed worker permissions never have a window of
           # reaching cluster-internal IPs.
           kubectl apply -f deploy/k8s/functions-networkpolicy.yaml
-          # PgBouncer (#641): deployed, not yet used by any client.
-          kubectl apply -f deploy/k8s/pgbouncer.yaml
+          kubectl apply -f deploy/k8s/functions.yaml
           kubectl apply -f deploy/k8s/mcp-server.yaml
           # Health monitor → Discord #alerts. Reads DISCORD_ALERTS_WEBHOOK
           # from eurobase-secrets (optional key); no-ops if it's unset.
@@ -447,11 +463,6 @@ jobs:
             -n eurobase
           kubectl set image deployment/mcp-server \
             mcp-server=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/mcp-server:${{ github.sha }} \
-            -n eurobase
-          kubectl set image deployment/pgbouncer \
-            render=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
-            pgbouncer=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
-            userlist=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/pgbouncer:${{ github.sha }} \
             -n eurobase
 
       - name: Verify rollout

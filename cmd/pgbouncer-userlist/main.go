@@ -16,7 +16,9 @@
 //	FUNC_PASSWORD_SECRET          derives tenant function-role verifiers
 //	PGB_DIR                       output directory (default /run/pgbouncer)
 //	PGB_SERVER_TLS                server_tls_sslmode (default require)
-//	PGB_MAX_DB_CONNECTIONS        per-instance cap on server connections (default 20)
+//	PGB_MAX_DB_CONNECTIONS        per-instance server connections, platform alias (default 10)
+//	PGB_TENANT_MAX_DB_CONNECTIONS per-instance server connections, tenant alias <db>_tenant (default 15)
+//	PGB_QUERY_WAIT_TIMEOUT        seconds a client queues for a server connection (default 15)
 //	PGB_TENANT_POOL_SIZE          per-tenant pool (default 2)
 //	PGB_SYNC_INTERVAL             userlist refresh (default 10s)
 package main
@@ -115,11 +117,13 @@ func loadConfig() (*config, error) {
 		c.platform = append(c.platform, p)
 	}
 	s := pgbouncerconf.Settings{
-		ServerTLS:         envOr("PGB_SERVER_TLS", "require"),
-		AuthFile:          filepath.Join(c.dir, "userlist.txt"),
-		MaxDBConnections:  envInt("PGB_MAX_DB_CONNECTIONS", 20),
-		TenantPoolSize:    envInt("PGB_TENANT_POOL_SIZE", 2),
-		PlatformPoolSizes: map[string]int{},
+		ServerTLS:              envOr("PGB_SERVER_TLS", "require"),
+		AuthFile:               filepath.Join(c.dir, "userlist.txt"),
+		MaxDBConnections:       envInt("PGB_MAX_DB_CONNECTIONS", 10),
+		TenantMaxDBConnections: envInt("PGB_TENANT_MAX_DB_CONNECTIONS", 15),
+		QueryWaitTimeout:       envInt("PGB_QUERY_WAIT_TIMEOUT", 15),
+		TenantPoolSize:         envInt("PGB_TENANT_POOL_SIZE", 2),
+		PlatformPoolSizes:      map[string]int{},
 	}
 	if err := s.UpstreamFromURL(c.gateway); err != nil {
 		return nil, err
