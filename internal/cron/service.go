@@ -512,10 +512,19 @@ func isUniqueViolation(err error) bool {
 // tenant schema, so a bad SQL action is refused when it is saved rather
 // than only when it first runs.
 func (s *CronService) validateSQLActionFor(ctx context.Context, projectID, action string) error {
-	var schema string
-	if err := s.pool.QueryRow(ctx, `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schema); err != nil {
-		slog.Error("cron: resolve project schema", "error", err, "project_id", projectID)
+	schema, err := s.projectSchema(ctx, projectID)
+	if err != nil {
 		return errors.New("could not validate the sql action; try again")
 	}
 	return validateCronSQLAction(action, schema)
+}
+
+// projectSchema returns the project's tenant schema name.
+func (s *CronService) projectSchema(ctx context.Context, projectID string) (string, error) {
+	var schema string
+	if err := s.pool.QueryRow(ctx, `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schema); err != nil {
+		slog.Error("cron: resolve project schema", "error", err, "project_id", projectID)
+		return "", err
+	}
+	return schema, nil
 }

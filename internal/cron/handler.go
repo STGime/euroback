@@ -5,9 +5,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -20,11 +23,13 @@ const (
 )
 
 // Routes returns a chi.Router for cron job CRUD operations.
-// Mounted at /platform/projects/{id}/cron
-func Routes(svc *CronService) chi.Router {
+// Mounted at /platform/projects/{id}/cron. dry may be nil (no per-tenant
+// logins configured): POST /test then returns 503.
+func Routes(svc *CronService, dry *Executor) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", handleList(svc))
 	r.Post("/", handleCreate(svc))
+	r.Post("/test", handleTest(svc, dry))
 	r.Patch("/{jobId}", handleUpdate(svc))
 	r.Delete("/{jobId}", handleDelete(svc))
 	r.Get("/{jobId}/runs", handleListRuns(svc))
@@ -339,4 +344,83 @@ func jsonError(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// testRequest is the body of POST /cron/test.
+type testRequest struct {
+	ActionType string  `json:"action_type"`
+	Action     string  `json:"action"`
+	RunAs      *string `json:"run_as,omitempty"`
+}
+
+// Dry runs open a real `<schema>_func` connection, which counts against
+// the role's CONNECTION LIMIT (tenantlogin.FuncConnLimit reserves one
+// slot for this) and the cluster's max_connections. Per gateway pod: at
+// most dryRunGlobal at once, one per project.
+const dryRunGlobal = 2
+
+var (
+	dryRunSlots   = make(chan struct{}, dryRunGlobal)
+	dryRunProject sync.Map // projectID -> struct{}
+)
+
+// handleTest dry-runs a sql / rpc action as the scheduled job would run
+// it (tenant login, run_as) and rolls back (#645).
+func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if dry == nil {
+			jsonError(w, "test runs are not available on this server", http.StatusServiceUnavailable)
+			return
+		}
+		projectID := chi.URLParam(r, "id")
+		if _, busy := dryRunProject.LoadOrStore(projectID, struct{}{}); busy {
+			jsonError(w, "a test run for this project is already in progress", http.StatusTooManyRequests)
+			return
+		}
+		defer dryRunProject.Delete(projectID)
+		select {
+		case dryRunSlots <- struct{}{}:
+			defer func() { <-dryRunSlots }()
+		default:
+			jsonError(w, "too many test runs right now; try again in a moment", http.StatusTooManyRequests)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleBodyBytes)
+		var req testRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		runAs := RunAsService
+		if req.RunAs != nil {
+			runAs = *req.RunAs
+		}
+		schema, err := svc.projectSchema(r.Context(), projectID)
+		if err != nil {
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		res, err := dry.DryRun(r.Context(), schema, req.ActionType, strings.TrimSpace(req.Action), runAs)
+		if err != nil {
+			// Validation errors and database errors (permission denied,
+			// syntax, statement timeout, …) are the caller's to see;
+			// anything else (network, driver) may name internal hosts.
+			var pgErr *pgconn.PgError
+			if isDryRunValidationErr(err) || errors.As(err, &pgErr) {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			slog.Error("cron dry run failed", "error", err, "project_id", projectID)
+			jsonError(w, "the test run could not be completed; try again", http.StatusServiceUnavailable)
+			return
+		}
+		jsonResponse(w, res, http.StatusOK)
+	}
+}
+
+// isDryRunValidationErr reports errors DryRun returns before touching the
+// database (validation, unsupported action type, run_as, no connection).
+func isDryRunValidationErr(err error) bool {
+	var v *dryRunInputError
+	return errors.As(err, &v) || errors.Is(err, errTenantConnect)
 }

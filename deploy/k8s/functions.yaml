@@ -105,8 +105,8 @@ spec:
   # each pod holds up to RUNNER_TENANT_CONN_CAP (10) per-tenant
   # connections + 3 shared; a rollout at max scale runs 5 pods (default
   # 25% surge) => 5 x 13 = 65, + ~25 gateway/worker = ~90. And
-  # tenantlogin.FuncConnLimit (7) must cover maxReplicas + 1 surging pod
-  # + 1 cron job connection from the worker.
+  # tenantlogin.FuncConnLimit (8) must cover maxReplicas + 1 surging pod
+  # + 1 cron job connection (worker) + 1 console dry run (gateway).
   # Raise these together (or add a pooler).
   maxReplicas: 4
   metrics:

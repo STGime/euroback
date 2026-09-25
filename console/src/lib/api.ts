@@ -1691,6 +1691,14 @@ export class EurobaseAPI {
 		});
 	}
 
+	/** Dry run (#645): runs like the scheduled job (project role, run_as) and rolls back. */
+	async testCronJob(projectId: string, data: { action_type: 'sql' | 'rpc'; action: string; run_as: 'service' | 'none' }): Promise<{ rows_affected: number; execution_time_ms: number; dry_run: boolean }> {
+		return this.fetch(`/platform/projects/${projectId}/cron/test`, {
+			method: 'POST',
+			body: JSON.stringify(data)
+		});
+	}
+
 	async deleteCronJob(projectId: string, jobId: string): Promise<void> {
 		return this.fetch(`/platform/projects/${projectId}/cron/${jobId}`, { method: 'DELETE' });
 	}

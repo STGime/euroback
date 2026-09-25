@@ -920,7 +920,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("developer")).Mount("/migrations", query.HandleTenantMigrations(migrationExec, pool))
 			r.With(tenant.RequireMinRole("developer")).Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
-			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc))
+			// Test Run (#645): dry-run as the tenant login, like the worker.
+			var cronDry *cron.Executor
+			if secret := os.Getenv("FUNC_PASSWORD_SECRET"); len(secret) >= tenantlogin.MinSecretLen {
+				cronDry = cron.NewExecutor(nil, nil).WithTenantLogins(pool.Config().ConnConfig, []byte(secret))
+			}
+			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc, cronDry))
 			r.With(tenant.RequireMinRole("viewer")).Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.With(tenant.RequireMinRole("admin")).Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
 			r.With(tenant.RequireMinRole("viewer")).Get("/connect", tenant.HandleConnect(pool))
