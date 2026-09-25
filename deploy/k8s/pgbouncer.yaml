@@ -30,9 +30,11 @@ spec:
     matchLabels:
       app: pgbouncer
   strategy:
+    # No surge pod: its max_db_connections would come on top of the
+    # budget. With 2 replicas one always stays up (PDB minAvailable 1).
     rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      maxUnavailable: 1
+      maxSurge: 0
   template:
     metadata:
       labels:
@@ -52,8 +54,6 @@ spec:
           env: &pgbEnv
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL } }
-            - name: DATABASE_URL_DEVELOPER
-              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_DEVELOPER } }
             - name: DATABASE_URL_FUNCTION_RUNNER
               valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_FUNCTION_RUNNER } }
             - name: FUNC_PASSWORD_SECRET

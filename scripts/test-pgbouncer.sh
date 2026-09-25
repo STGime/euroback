@@ -33,7 +33,6 @@ docker build -q -f "$REPO_ROOT/deploy/docker/Dockerfile.pgbouncer" -t eurobase-p
 # sidecar); here one container so the sidecar can SIGHUP pgbouncer.
 docker run -d --name "$PGB" --network "$NET" -p "$PGB_PORT:6432" \
   -e DATABASE_URL="postgres://eurobase_gateway:localdev@$PG:5432/eurobase?sslmode=disable" \
-  -e DATABASE_URL_DEVELOPER="postgres://eurobase_developer:localdev@$PG:5432/eurobase?sslmode=disable" \
   -e DATABASE_URL_FUNCTION_RUNNER="postgres://eurobase_function_runner:localdev@$PG:5432/eurobase?sslmode=disable" \
   -e FUNC_PASSWORD_SECRET="$SECRET" \
   -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s -e PGB_POOL_SIZE_EUROBASE_GATEWAY=1 \

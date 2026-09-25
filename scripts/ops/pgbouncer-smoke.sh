@@ -61,4 +61,9 @@ spec:
   volumes: [{ name: smoke, configMap: { name: $POD } }]
 YAML
 for _ in $(seq 1 60); do p=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null); [ "$p" = Succeeded ] || [ "$p" = Failed ] && break; sleep 2; done
-kubectl -n "$NS" logs "$POD" 2>&1 | grep -E "^(OK|FAIL)"
+OUT=$(kubectl -n "$NS" logs "$POD" 2>&1 | grep -E "^(OK|FAIL)" || true)
+echo "$OUT"
+if [ -z "$OUT" ] || echo "$OUT" | grep -q "^FAIL"; then
+  echo "pgbouncer smoke test FAILED (pod phase: ${p:-unknown})" >&2
+  exit 1
+fi

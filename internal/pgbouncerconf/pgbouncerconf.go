@@ -93,7 +93,9 @@ unix_socket_dir =
 auth_type = scram-sha-256
 auth_file = %s
 pool_mode = transaction
-max_client_conn = 2000
+; the functions pod (user code with network access) can open sockets
+; here; cap them well below file-descriptor limits
+max_client_conn = 500
 default_pool_size = %d
 max_db_connections = %d
 ; clients queue for a server connection instead of failing

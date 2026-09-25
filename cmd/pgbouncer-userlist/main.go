@@ -10,7 +10,7 @@
 // Environment:
 //
 //	DATABASE_URL                  gateway role — upstream host/db, lists tenant schemas
-//	DATABASE_URL_DEVELOPER        developer role (optional)
+//	DATABASE_URL_DEVELOPER        developer role (optional; not set until PR 4)
 //	DATABASE_URL_FUNCTION_RUNNER  runner role (optional)
 //	FUNC_PASSWORD_SECRET          derives tenant function-role verifiers
 //	PGB_DIR                       output directory (default /run/pgbouncer)
@@ -95,6 +95,8 @@ func loadConfig() (*config, error) {
 	if len(c.secret) < tenantlogin.MinSecretLen {
 		return nil, fmt.Errorf("FUNC_PASSWORD_SECRET must be at least %d bytes", tenantlogin.MinSecretLen)
 	}
+	// DATABASE_URL_DEVELOPER (migrator-equivalent) is only added when the
+	// developer pool actually routes through the pooler (PR 4).
 	for _, key := range []string{"DATABASE_URL", "DATABASE_URL_DEVELOPER", "DATABASE_URL_FUNCTION_RUNNER"} {
 		v := os.Getenv(key)
 		if v == "" {
@@ -156,15 +158,22 @@ func syncUserlist(ctx context.Context, c *config) (bool, error) {
 func runSync(ctx context.Context, c *config) {
 	t := time.NewTicker(c.interval)
 	defer t.Stop()
+	// The file is written before the reload, so a failed SIGHUP must be
+	// retried on the next pass even though the file then looks unchanged.
+	pendingReload := false
 	for {
 		changed, err := syncUserlist(ctx, c)
-		switch {
-		case err != nil:
+		if err != nil {
 			slog.Error("pgbouncer userlist sync failed", "error", err)
-		case changed:
+		}
+		if changed {
+			pendingReload = true
+		}
+		if pendingReload {
 			if err := reloadPgBouncer(); err != nil {
-				slog.Error("pgbouncer reload failed", "error", err)
+				slog.Error("pgbouncer reload failed; retrying next pass", "error", err)
 			} else {
+				pendingReload = false
 				slog.Info("pgbouncer userlist updated and reloaded")
 			}
 		}
