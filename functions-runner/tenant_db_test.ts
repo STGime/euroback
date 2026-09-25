@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { AUTH_FAILURE_COOLDOWN_MS, funcPassword, isAuthError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
+import { funcPassword, isLoginError, TenantDBPool, tenantDbUrl } from "./tenant_db.ts";
 
 Deno.test("funcPassword matches the Go vector (internal/tenantlogin)", async () => {
   assertEquals(
@@ -55,19 +55,36 @@ Deno.test("LRU evicts only idle entries; busy entries survive over the cap", asy
   d.release();
 });
 
-Deno.test("auth failure cools a tenant down, then expires", () => {
-  let t = 1000;
+Deno.test("lease.invalidate drops its own client so the next acquire reconnects", async () => {
   const f = fakeFactory();
-  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5, () => t);
-  pool.markAuthFailed("tenant_a");
-  assert(pool.authCoolingDown("tenant_a"));
-  t += AUTH_FAILURE_COOLDOWN_MS + 1;
-  assert(!pool.authCoolingDown("tenant_a"));
+  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5);
+  const a = await pool.acquire("tenant_a", "tenant_a_func");
+  a.invalidate();
+  a.release();
+  const b = await pool.acquire("tenant_a", "tenant_a_func");
+  assertEquals(f.created, ["tenant_a_func", "tenant_a_func"]);
+  b.release();
 });
 
-Deno.test("isAuthError", () => {
-  assert(isAuthError({ code: "28P01" }));
-  assert(isAuthError({ code: "28000" }));
-  assert(!isAuthError({ code: "42501" }));
-  assert(!isAuthError(new Error("x")));
+Deno.test("a stale lease.invalidate does not evict a newer client", async () => {
+  const f = fakeFactory();
+  const pool = new TenantDBPool("postgres://r:p@h:5432/db", "s".repeat(32), f.factory, 5);
+  const stale = await pool.acquire("tenant_a", "tenant_a_func");
+  stale.invalidate(); // first failure drops client #1
+  const fresh = await pool.acquire("tenant_a", "tenant_a_func"); // client #2
+  stale.invalidate(); // late second failure on the old lease
+  stale.release();
+  const again = await pool.acquire("tenant_a", "tenant_a_func");
+  assert(again.client === fresh.client);
+  assertEquals(f.created.length, 2);
+  fresh.release();
+  again.release();
+});
+
+Deno.test("isLoginError", () => {
+  assert(isLoginError({ code: "28P01" }));
+  assert(isLoginError({ code: "28000" }));
+  assert(isLoginError({ code: "53300" }));
+  assert(!isLoginError({ code: "42501" }));
+  assert(!isLoginError(new Error("x")));
 });

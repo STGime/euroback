@@ -282,3 +282,34 @@ func TestListProjects(t *testing.T) {
 		t.Error("expected both test projects in the list")
 	}
 }
+
+type recordingFuncLogins struct{ schemas []string }
+
+func (r *recordingFuncLogins) EnsureOne(_ context.Context, schema string) error {
+	r.schemas = append(r.schemas, schema)
+	return nil
+}
+
+// Stage B 1b: the runner has no shared-login fallback, so a new project's
+// function login must be applied at creation, not at the worker's next pass.
+func TestCreateProject_EnsuresFuncLogin(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	rec := &recordingFuncLogins{}
+	svc := &TenantService{pool: pool}
+	svc.SetFuncLoginEnsurer(rec)
+
+	uid := insertTestPlatformUser(t, pool, "funclogin@test.eurobase.local")
+	project, err := svc.CreateProject(ctx, uid, "funclogin@test.eurobase.local", CreateProjectRequest{
+		Name: "Func Login", Slug: "test-func-login", Region: "fr-par", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() returned error: %v", err)
+	}
+	t.Cleanup(func() { cleanupProject(t, pool, project.ID) })
+
+	if len(rec.schemas) != 1 || rec.schemas[0] != project.SchemaName {
+		t.Fatalf("EnsureOne calls = %v, want [%s]", rec.schemas, project.SchemaName)
+	}
+}

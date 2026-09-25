@@ -1,10 +1,10 @@
-// Per-tenant database connections for ctx.db.sql (stage B, phase 1a).
+// Per-tenant database connections for ctx.db.sql (stage B).
 //
 // When FUNC_PASSWORD_SECRET is set, customer SQL runs on a connection
 // that *logs in as* the tenant's `<schema>_func` role (password derived
 // the same way as internal/tenantlogin.FuncPassword), so the session
-// identity itself is the tenant. Without the secret the runner keeps the
-// legacy shared-connection role switch.
+// identity itself is the tenant. There is no shared-connection fallback
+// (phase 1b): the runner's own login is a member of no tenant role.
 //
 // Budget (shared cluster, max_connections=100): one connection per
 // tenant, a soft global cap, idle close, LRU eviction of *idle* entries
@@ -40,15 +40,12 @@ interface Entry {
 export interface Lease {
   client: SqlClient;
   release: () => void;
+  /** Drops this lease's client (e.g. after a failed login) if it is still the cached one. */
+  invalidate: () => void;
 }
 
-/** How long a failed login keeps a tenant on the fallback path. */
-export const AUTH_FAILURE_COOLDOWN_MS = 60_000;
-
-/** LRU cache of per-tenant clients with a soft global cap. */
 export class TenantDBPool {
   private entries = new Map<string, Entry>();
-  private authFailedAt = new Map<string, number>();
 
   constructor(
     private readonly baseUrl: string,
@@ -60,21 +57,6 @@ export class TenantDBPool {
 
   get size(): number {
     return this.entries.size;
-  }
-
-  /** True while a recent login failure keeps this tenant on the fallback path. */
-  authCoolingDown(schema: string): boolean {
-    const at = this.authFailedAt.get(schema);
-    if (at === undefined) return false;
-    if (this.now() - at < AUTH_FAILURE_COOLDOWN_MS) return true;
-    this.authFailedAt.delete(schema);
-    return false;
-  }
-
-  /** Records a login failure and drops the tenant's client. */
-  markAuthFailed(schema: string): void {
-    this.authFailedAt.set(schema, this.now());
-    this.drop(schema);
   }
 
   /**
@@ -102,6 +84,9 @@ export class TenantDBPool {
           released = true;
           e.inUse--;
           e.lastUsed = this.now();
+        },
+        invalidate: () => {
+          if (this.entries.get(schema) === e) this.drop(schema);
         },
       };
     } catch (err) {
@@ -145,9 +130,12 @@ export class TenantDBPool {
   }
 }
 
-/** Postgres auth-failure SQLSTATEs (password / role not yet loginable). */
-export function isAuthError(err: unknown): boolean {
+/**
+ * SQLSTATEs for a failed tenant login: bad password / role not loginable
+ * (28P01, 28000) or the role's CONNECTION LIMIT reached (53300).
+ */
+export function isLoginError(err: unknown): boolean {
   // deno-lint-ignore no-explicit-any
   const code = (err as any)?.code;
-  return code === "28P01" || code === "28000";
+  return code === "28P01" || code === "28000" || code === "53300";
 }

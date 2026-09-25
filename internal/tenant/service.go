@@ -97,6 +97,22 @@ type TenantService struct {
 	// Optional: when nil, org-attach paths that depend on org_members
 	// visibility fall back to leaving projects.org_id NULL.
 	developerPool *pgxpool.Pool
+	// funcLogins gives a new project's `<schema>_func` role its login
+	// right after provisioning, so its edge functions can reach the DB
+	// immediately (stage B phase 1b — the runner has no shared-login
+	// fallback any more). Optional; the worker's periodic pass catches
+	// up within minutes when nil or when this call fails.
+	funcLogins FuncLoginEnsurer
+}
+
+// FuncLoginEnsurer is satisfied by *tenantlogin.Ensurer.
+type FuncLoginEnsurer interface {
+	EnsureOne(ctx context.Context, schema string) error
+}
+
+// SetFuncLoginEnsurer wires the per-tenant function login setup.
+func (s *TenantService) SetFuncLoginEnsurer(e FuncLoginEnsurer) {
+	s.funcLogins = e
 }
 
 // NewTenantService creates a new TenantService backed by the given connection pool.
@@ -662,6 +678,19 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	// Give the new tenant's function role its login now rather than at
+	// the worker's next pass. Best effort: the project is created either
+	// way, and the worker retries.
+	if status == "active" && !skipPlatformSchema && s.funcLogins != nil {
+		// Detached from the request: a client that disconnects right after
+		// the create must not leave the project waiting for the worker.
+		// EnsureOne bounds itself (15 s, lock_timeout 3 s).
+		if err := s.funcLogins.EnsureOne(context.WithoutCancel(ctx), schemaName); err != nil {
+			slog.Error("tenant function login not set at provisioning; worker will retry",
+				"error", err, "project_id", projectID, "schema", schemaName)
+		}
 	}
 
 	// Enqueue async provisioning job (S3 bucket only) if schema provisioning succeeded.

@@ -33,6 +33,7 @@ import (
 	"github.com/eurobase/euroback/internal/sovereignty"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/webhook"
@@ -133,6 +134,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// paths silently no-op — SetDeveloperPool nil-guards that.
 	if developerPool != nil && developerPool != pool {
 		tenantSvc.SetDeveloperPool(developerPool)
+		// Per-tenant function login for new projects (stage B 1b). The
+		// worker validates the secret at startup; here a bad value just
+		// leaves new projects to the worker's periodic pass.
+		ensurer, err := tenantlogin.NewEnsurer(developerPool, pool.Config().ConnConfig.Database, []byte(os.Getenv("FUNC_PASSWORD_SECRET")))
+		if err != nil {
+			slog.Error("tenant function logins misconfigured; new projects wait for the worker", "error", err)
+		} else if ensurer != nil {
+			tenantSvc.SetFuncLoginEnsurer(ensurer)
+		}
 	}
 
 	// Audit service — shared across all route groups that need to log actions.

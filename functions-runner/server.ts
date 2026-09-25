@@ -10,7 +10,7 @@
 
 import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
-import { isAuthError, TenantDBPool } from "./tenant_db.ts";
+import { isLoginError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
 import type {
   ParentToWorker,
@@ -23,11 +23,11 @@ import { openSealed, resolveVaultSecret } from "./vault.ts";
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
 
-// Closes GHSA-7428-mvpp-rhr7 layer 1: the runner now connects as
-// `eurobase_function_runner`, a role with no direct grants on any tenant
-// schema. Each invocation does `SET LOCAL ROLE <schema>_func` inside a
-// transaction so user SQL physically cannot reach other tenants — the
-// `<schema>_func` role is granted only on its own schema.
+// Closes GHSA-7428-mvpp-rhr7 layer 1: the runner's own login
+// (`eurobase_function_runner`) has no grants on any tenant schema and,
+// since stage B phase 1b, no membership in any tenant role. Customer SQL
+// runs on a separate connection that logs in as the tenant's own
+// `<schema>_func` role (see tenant_db.ts).
 //
 // The legacy DATABASE_URL env var is kept as a fallback during the
 // rollout window so the runner doesn't crash on a partial-state deploy
@@ -115,20 +115,17 @@ async function getBootstrapBlobUrl(): Promise<string> {
 // ── Database connection ──
 
 // Use dynamic import for postgres — Deno supports it natively via deno.land/x.
-// The runner role (eurobase_function_runner) has membership in every
-// per-tenant `<schema>_func` role but no direct grants on tenant schemas
-// or `public.*` (beyond a couple of helper functions). Per-invocation
-// code wraps every query in a transaction with `SET LOCAL ROLE` so the
-// SQL runs with the executing tenant's grants only.
+// The shared connection (eurobase_function_runner) is used only for the
+// platform lookups: runner_get_function and vault_get_for_runner.
 // deno-lint-ignore no-explicit-any
 let sql: any = null;
 
-// Per-tenant logins (stage B phase 1a): enabled when FUNC_PASSWORD_SECRET
-// is set. ctx.db.sql then runs on a connection authenticated as the
-// tenant's `<schema>_func` role; the shared connection is used only for
-// the platform lookups (runner_get_function / vault_get_for_runner).
+// Per-tenant logins (stage B): ctx.db.sql runs on a connection
+// authenticated as the tenant's `<schema>_func` role. Requires
+// FUNC_PASSWORD_SECRET; without it ctx.db.sql fails.
 const FUNC_PASSWORD_SECRET = Deno.env.get("FUNC_PASSWORD_SECRET") ?? "";
-const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "20");
+// Per pod; see the connection budget note on the HPA in deploy/k8s/functions.yaml.
+const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? "10");
 let tenantPool: TenantDBPool | null = null;
 
 async function getTenantPool(): Promise<TenantDBPool | null> {
@@ -147,7 +144,7 @@ async function getTenantPool(): Promise<TenantDBPool | null> {
 async function getDB() {
   if (sql) return sql;
   const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.4/mod.js");
-  sql = postgres(DB_URL, { max: 10 });
+  sql = postgres(DB_URL, { max: 3 }); // platform lookups only
   return sql;
 }
 
@@ -282,7 +279,6 @@ async function executeFunction(
   // The per-invocation Web Worker (created below) runs user JS with
   // `permissions: 'none'`. DB / vault calls come back to this parent
   // over postMessage and run here under the per-tenant role.
-  const setRoleSQL = "SET LOCAL ROLE " + quoteIdent(funcRole);
   const setPathSQL = "SET LOCAL search_path TO " + quoteIdent(schemaName);
   const db = await getDB();
   const logCapture = createLogCapture(projectId, LOG_OUTPUT_LIMIT);
@@ -298,51 +294,44 @@ async function executeFunction(
     // per-tenant connection busy.
     const timeoutSQL = `SET LOCAL statement_timeout = ${timeoutMs}`;
 
-    // Preferred: a connection that logs in as the tenant's own role — no
-    // role switch, so the session identity is the boundary.
+    // Customer SQL only ever runs on a connection that logs in as the
+    // tenant's own `<schema>_func` role (stage B phase 1b). There is no
+    // shared-connection fallback: the runner's own login is no longer a
+    // member of any tenant role, and falling back is exactly the path a
+    // tenant could steer into to reach another tenant.
     const tp = await getTenantPool();
-    if (tp && !tp.authCoolingDown(schemaName)) {
-      let started = false;
-      let lease;
-      try {
-        lease = await tp.acquire(schemaName, funcRole);
-        // deno-lint-ignore no-explicit-any
-        return await lease.client.begin(async (tx: any) => {
-          started = true;
-          await tx.unsafe(timeoutSQL);
-          await tx.unsafe(setPathSQL);
-          for (const stmt of rlsContextStatements(userId)) {
-            await tx.unsafe(stmt.sql, stmt.params);
-          }
-          return await tx.unsafe(query, params);
-        });
-      } catch (err) {
-        // Fall back only when the transaction never started, i.e. the
-        // connection/login itself failed (login not applied yet for a
-        // brand-new tenant). Errors raised by the customer's SQL — even
-        // with an auth-like SQLSTATE — are returned to the customer.
-        if (started || !isAuthError(err)) throw err;
-        tp.markAuthFailed(schemaName);
-        console.warn(`[tenant-db] login for ${funcRole} not ready, using shared connection for 60s`);
-      } finally {
-        lease?.release();
-      }
+    if (!tp) {
+      throw new Error("database access is not configured on this runner (FUNC_PASSWORD_SECRET)");
     }
-
-    // Legacy (phase 1b removes it): shared connection + role switch.
-    // deno-lint-ignore no-explicit-any
-    return await db.begin(async (tx: any) => {
-      await tx.unsafe(setRoleSQL);
-      await tx.unsafe(timeoutSQL);
-      await tx.unsafe(setPathSQL);
-      // Mirror the gateway's RLS context so auth_uid() /
-      // is_service_role() behave the same in functions as in gateway
-      // REST — see rlsContextStatements in role.ts. Closes #188.
-      for (const stmt of rlsContextStatements(userId)) {
-        await tx.unsafe(stmt.sql, stmt.params);
-      }
-      return await tx.unsafe(query, params);
-    });
+    let started = false;
+    let lease;
+    try {
+      lease = await tp.acquire(schemaName, funcRole);
+      // deno-lint-ignore no-explicit-any
+      return await lease.client.begin(async (tx: any) => {
+        started = true;
+        await tx.unsafe(timeoutSQL);
+        await tx.unsafe(setPathSQL);
+        // Mirror the gateway's RLS context so auth_uid() /
+        // is_service_role() behave the same in functions as in gateway
+        // REST — see rlsContextStatements in role.ts. Closes #188.
+        for (const stmt of rlsContextStatements(userId)) {
+          await tx.unsafe(stmt.sql, stmt.params);
+        }
+        return await tx.unsafe(query, params);
+      });
+    } catch (err) {
+      // A failed login (not applied yet for a brand-new project) gets a
+      // retryable message and a fresh client next time. Errors raised by
+      // the customer's SQL — even with an auth-like SQLSTATE — pass
+      // through unchanged.
+      if (started || !isLoginError(err)) throw err;
+      lease?.invalidate();
+      console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
+      throw new Error("database login for this project is unavailable; retry shortly");
+    } finally {
+      lease?.release();
+    }
   }
 
   // Materialise the request body up front. The worker can't stream

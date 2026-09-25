@@ -32,6 +32,12 @@ import (
 // MinSecretLen is the minimum FUNC_PASSWORD_SECRET length (bytes).
 const MinSecretLen = 32
 
+// FuncConnLimit is the per-tenant connection limit on `<schema>_func`.
+// The runner holds at most one connection per tenant per pod, so this
+// must cover the functions HPA maxReplicas (4, deploy/k8s/functions.yaml)
+// plus one surging pod during a rollout, plus one spare.
+const FuncConnLimit = 6
+
 // scramIterations matches PostgreSQL's default scram_iterations.
 const scramIterations = 4096
 
@@ -82,8 +88,11 @@ type Ensurer struct {
 }
 
 // FullPassInterval is how often every tenant is re-applied even if it
-// was ensured before (heals out-of-band changes, e.g. a manual NOLOGIN).
-const FullPassInterval = time.Hour
+// was ensured before. Heals out-of-band changes — including a tenant
+// changing its own role's password from function SQL (Postgres lets a
+// role do that), which only locks that tenant out of its own DB until
+// the next full pass.
+const FullPassInterval = 15 * time.Minute
 
 // NewEnsurer returns nil when the secret is empty (feature off). A
 // non-empty secret shorter than MinSecretLen is an error.
@@ -136,9 +145,22 @@ func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
 		return nil // project without a function role (e.g. mid-provisioning)
 	}
 	// The verifier is [A-Za-z0-9+/=:$-] only — safe inside the literal.
-	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'",
-		pgx.Identifier{role}.Sanitize(), verifier)); err != nil {
+	// CONNECTION LIMIT caps what a tenant can do with its own login if it
+	// learns a password (a role may change its own password from function
+	// SQL; it cannot change its connection limit). RESET ALL drops any
+	// role-level defaults the tenant set on itself.
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN CONNECTION LIMIT %d PASSWORD '%s'",
+		pgx.Identifier{role}.Sanitize(), FuncConnLimit, verifier)); err != nil {
 		return fmt.Errorf("set login on %s: %w", role, err)
+	}
+	// Both scopes: role-wide and per-database defaults (a role may set
+	// either on itself).
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s RESET ALL", pgx.Identifier{role}.Sanitize())); err != nil {
+		return fmt.Errorf("reset role settings on %s: %w", role, err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s IN DATABASE %s RESET ALL",
+		pgx.Identifier{role}.Sanitize(), pgx.Identifier{e.database}.Sanitize())); err != nil {
+		return fmt.Errorf("reset per-database role settings on %s: %w", role, err)
 	}
 	var canConnect bool
 	if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", role, e.database).Scan(&canConnect); err != nil {
