@@ -81,6 +81,10 @@ const maxSchemaDumpBytes = 64 << 20
 // pgDumpTimeout bounds one schema dump.
 var pgDumpTimeout = 5 * time.Minute
 
+// pgDumpLockWait bounds pg_dump's wait for each table lock (a schema
+// change in progress holds ACCESS EXCLUSIVE).
+var pgDumpLockWait = 30 * time.Second
+
 // exportSchemaDump writes schema/schema.sql: `pg_dump --schema-only` of
 // the tenant schema, run by the platform as the export source's login
 // (tenants get no catalog access). It imports tx's snapshot, so the DDL
@@ -118,7 +122,7 @@ func exportSchemaDump(ctx context.Context, tx pgx.Tx, src ExportSource, zw *zip.
 		"--schema-only", "--no-owner", "--no-privileges", "--no-security-labels",
 		"--no-tablespaces", "--no-publications", "--no-subscriptions",
 		"--strict-names", "--schema=" + `"` + schemaName + `"`,
-		"--snapshot=" + snapshot, "--lock-wait-timeout=30s",
+		"--snapshot=" + snapshot, fmt.Sprintf("--lock-wait-timeout=%dms", pgDumpLockWait.Milliseconds()),
 	}
 	if src.Role != "" {
 		args = append(args, "--role="+src.Role)
@@ -141,7 +145,7 @@ func exportSchemaDump(ctx context.Context, tx pgx.Tx, src ExportSource, zw *zip.
 		// --lock-wait-timeout is applied as statement_timeout on the LOCK
 		// TABLE (pg_dump runs everything else with statement_timeout 0).
 		if e := stderr.String(); strings.Contains(e, "due to statement timeout") || strings.Contains(e, "due to lock timeout") {
-			return fail("a schema change held a table lock for more than 30 s; request the export again")
+			return fail(fmt.Sprintf("a schema change held a table lock for more than %s; request the export again", pgDumpLockWait))
 		}
 		return fail("pg_dump failed (" + err.Error() + ")")
 	}

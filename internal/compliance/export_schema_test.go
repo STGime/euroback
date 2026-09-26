@@ -308,6 +308,30 @@ func TestTenantExport_SchemaSection(t *testing.T) {
 		}
 	})
 
+	t.Run("a table locked by a schema change: reported as such", func(t *testing.T) {
+		old := pgDumpLockWait
+		pgDumpLockWait = 200 * time.Millisecond
+		defer func() { pgDumpLockWait = old }()
+		lock, err := dev.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Rollback(ctx) //nolint:errcheck
+		if _, err := lock.Exec(ctx, `SET LOCAL ROLE eurobase_migrator; LOCK TABLE `+s+`.users IN ACCESS EXCLUSIVE MODE`); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		var se SectionExport
+		_ = withExportSnapshot(ctx, ExportSource{Pool: dev}, func(tx pgx.Tx) error {
+			se = exportSchemaDump(ctx, tx, ExportSource{Pool: dev}, zw, schema)
+			return nil
+		})
+		if se.Status != TableFailed || !strings.Contains(se.Error, "held a table lock") {
+			t.Errorf("section = %+v, want the lock reason", se)
+		}
+	})
+
 	t.Run("pg_dump unavailable: reported, export incomplete", func(t *testing.T) {
 		res, entries, meta := runTenantExport(t, gw, ExportSource{Pool: dev, PgDump: "/nonexistent/pg_dump"}, schema, projectID)
 		if res.Complete {
