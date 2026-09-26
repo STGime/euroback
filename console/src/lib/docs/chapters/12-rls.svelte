@@ -176,10 +176,10 @@
 
 					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
 						<p class="text-xs font-semibold text-gray-700">"A nightly job must clean up across all users" &rarr; a scheduled job with <em>Run as service role</em></p>
-						<p class="mt-1 text-[11px] text-gray-500">Example: a retention job that deletes bookings older than two years, whoever made them. Create it under <a href="/docs/cron" class="text-eurobase-600 hover:underline cursor-pointer">Scheduled Jobs</a> with <strong>Run as service role</strong> switched on (the default for new jobs), and give the service role a DELETE policy:</p>
+						<p class="mt-1 text-[11px] text-gray-500">Example: a retention job that deletes bookings older than two years, whoever made them. Create it under <a href="/docs/cron" class="text-eurobase-600 hover:underline cursor-pointer">Scheduled Jobs</a> with <strong>Run as service role</strong> switched on (the default for new jobs), and let the service role read <em>and</em> delete the rows. A <code>DELETE &hellip; WHERE</code> also needs a SELECT policy that admits the service role: with only a DELETE policy, the job succeeds and silently deletes nothing.</p>
 						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-1">
-							<div class="text-gray-500">-- once, in the SQL editor or a migration</div>
-							<div>CREATE POLICY "service housekeeping" ON bookings FOR DELETE USING (is_service_role());</div>
+							<div class="text-gray-500">-- once, in the SQL editor or a migration (or use the "own or service" policy above)</div>
+							<div>CREATE POLICY "service housekeeping" ON bookings FOR ALL USING (is_service_role());</div>
 							<div class="mt-1.5 text-gray-500">-- the job's SQL, e.g. daily at 03:00</div>
 							<div>DELETE FROM bookings WHERE ends_at &lt; now() - interval '2 years';</div>
 						</div>
