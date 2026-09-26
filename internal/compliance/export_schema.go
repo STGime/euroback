@@ -138,7 +138,9 @@ func exportSchemaDump(ctx context.Context, tx pgx.Tx, src ExportSource, zw *zip.
 			return fail(fmt.Sprintf("the schema dump is larger than %d MiB", maxSchemaDumpBytes>>20))
 		}
 		slog.Warn("export: pg_dump failed", "error", err, "stderr", stderr.String())
-		if strings.Contains(stderr.String(), "lock timeout") {
+		// --lock-wait-timeout is applied as statement_timeout on the LOCK
+		// TABLE (pg_dump runs everything else with statement_timeout 0).
+		if e := stderr.String(); strings.Contains(e, "due to statement timeout") || strings.Contains(e, "due to lock timeout") {
 			return fail("a schema change held a table lock for more than 30 s; request the export again")
 		}
 		return fail("pg_dump failed (" + err.Error() + ")")
