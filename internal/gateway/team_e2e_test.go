@@ -183,6 +183,27 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := as(other, "GET", "/v1/storage/e2e/sdk.txt"); r.code != http.StatusNotFound {
 			return fmt.Errorf("another end user must not see the file (RLS; runtime pool): %w", r)
 		}
+		// Another end user can't list it, overwrite it, or get an upload
+		// URL for it; the row keeps its owner.
+		if r := as(other, "GET", "/v1/storage/"); r.code != 200 || strings.Contains(r.body, "e2e/sdk.txt") {
+			return fmt.Errorf("another end user's listing must not include the file: %w", r)
+		}
+		if r := env.upload(env.publicKey, other, "http://api.eurobase.test/v1/storage/upload", "e2e/sdk.txt"); r.code != http.StatusForbidden {
+			return fmt.Errorf("another end user's upload to the key must be refused: %w", r)
+		}
+		sreq := httptest.NewRequest("POST", "http://api.eurobase.test/v1/storage/signed-url", strings.NewReader(`{"key":"e2e/sdk.txt","operation":"upload","content_type":"text/plain"}`))
+		sreq.Header.Set("apikey", env.publicKey)
+		sreq.Header.Set("Authorization", "Bearer "+other)
+		sreq.Header.Set("Content-Type", "application/json")
+		srec := httptest.NewRecorder()
+		env.router.ServeHTTP(srec, sreq)
+		if srec.Code != http.StatusForbidden {
+			return fmt.Errorf("another end user's signed upload URL for the key must be refused: %d %s", srec.Code, srec.Body.String())
+		}
+		if n := env.dedScalar(t, "SELECT count(*)::text FROM %s s JOIN "+pgx.Identifier{env.schema, "users"}.Sanitize()+
+			" u ON u.id = s.uploaded_by WHERE s.key = 'e2e/sdk.txt' AND u.email = 'enduser@team.test'", "storage_objects"); n != "1" {
+			return fmt.Errorf("the file changed owner (count %s)", n)
+		}
 		if r := asUser("GET", "/v1/storage/e2e/sdk.txt"); r.code >= 400 {
 			return fmt.Errorf("owner download: %w", r)
 		}

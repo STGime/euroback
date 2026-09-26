@@ -342,6 +342,94 @@ func (h *StorageHandler) objectReadable(r *http.Request, key string) (bool, erro
 	return h.assertObjectVisible(r, key)
 }
 
+// serviceCaller: console traffic (PlatformStorageContext marks it
+// service-role). SDK storage is always scoped to the end user by RLS,
+// like assertObjectVisible.
+func serviceCaller(r *http.Request) bool {
+	return query.KeyTypeFromContext(r.Context()) == "secret"
+}
+
+// keyOwnedByOther reports whether key is tracked in storage_objects but
+// not visible to the caller under RLS — i.e. another end user's (or a
+// console upload's) object. Uploading there would replace their content
+// and, through the tracking upsert, take the row over. Service-role
+// (console) callers may overwrite anything.
+func (h *StorageHandler) keyOwnedByOther(r *http.Request, key string) (bool, error) {
+	if serviceCaller(r) || h.engine == nil {
+		return false, nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" || h.pool == nil {
+		return false, nil
+	}
+	q := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`,
+		strings.ReplaceAll(schema, `"`, `""`))
+	var exists bool
+	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, key).Scan(&exists)
+	}); err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	visible, err := h.assertObjectVisible(r, key)
+	if err != nil {
+		return false, err
+	}
+	return !visible, nil
+}
+
+// visibleToCaller drops listed objects the caller can't read: for SDK
+// callers, keys without a storage_objects row visible to them under RLS
+// (the same rule as download). Console (service-role) listings are
+// unfiltered. A filtered page can be shorter than the limit; the cursor
+// is S3's, so paging still covers every key.
+func (h *StorageHandler) visibleToCaller(r *http.Request, objects []ObjectInfo) ([]ObjectInfo, error) {
+	if serviceCaller(r) || h.engine == nil || len(objects) == 0 {
+		return objects, nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" {
+		return objects, nil
+	}
+	if _, err := h.tenantPool(r.Context()); err != nil {
+		return nil, err
+	}
+	keys := make([]string, len(objects))
+	for i, o := range objects {
+		keys[i] = o.Key
+	}
+	visible := make(map[string]bool, len(keys))
+	err := h.engine.WithTenantTx(r.Context(), schema, func(tx pgx.Tx) error {
+		q := fmt.Sprintf(`SELECT key FROM "%s".storage_objects WHERE key = ANY($1)`,
+			strings.ReplaceAll(schema, `"`, `""`))
+		rows, err := tx.Query(r.Context(), q, keys)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var k string
+			if err := rows.Scan(&k); err != nil {
+				return err
+			}
+			visible[k] = true
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := objects[:0:0]
+	for _, o := range objects {
+		if visible[o.Key] {
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
 // visibleObjects drops export archives from a listing for callers who
 // may not read them (mayReadExports).
 func visibleObjects(r *http.Request, objects []ObjectInfo) []ObjectInfo {
@@ -564,6 +652,14 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if taken, err := h.keyOwnedByOther(r, key); err != nil {
+		writeTenantPoolError(w, err)
+		return
+	} else if taken {
+		http.Error(w, `{"error":"an object with this key belongs to another user"}`, http.StatusForbidden)
+		return
+	}
+
 	retention := h.retentionFor(r, key)
 	if err := h.s3.UploadObjectWithRetention(r.Context(), bucket, key, file, contentType, size, retention); err != nil {
 		slog.Error("storage upload failed", "error", err, "bucket", bucket, "key", key)
@@ -600,7 +696,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			 ON CONFLICT (key) DO UPDATE
 			   SET content_type = EXCLUDED.content_type,
 			       size_bytes   = EXCLUDED.size_bytes,
-			       uploaded_by  = COALESCE(EXCLUDED.uploaded_by, storage_objects.uploaded_by)`,
+			       uploaded_by  = COALESCE(storage_objects.uploaded_by, EXCLUDED.uploaded_by)`,
 			escSchema,
 		)
 		uploader := uploaderForInsert(r)
@@ -880,8 +976,18 @@ func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	objects, err := h.visibleToCaller(r, visibleObjects(r, result.Objects))
+	if err != nil {
+		if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+			writeTenantPoolError(w, err)
+			return
+		}
+		slog.Error("storage list: visibility filter failed", "error", err, "bucket", bucket)
+		http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
+		return
+	}
 	resp := listResponse{
-		Objects:    visibleObjects(r, result.Objects),
+		Objects:    objects,
 		NextCursor: result.NextToken,
 		HasMore:    result.IsTruncated,
 	}
@@ -951,12 +1057,21 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Ownership check for download signed URLs. Upload URLs are for files
-	// the caller is about to create — no existing row to check; the upload
-	// tracking INSERT still records uploaded_by so subsequent downloads are
+	// Ownership check for download signed URLs. Upload URLs may not target
+	// a key another user owns (keyOwnedByOther); for a new key the upload
+	// tracking INSERT records uploaded_by so subsequent downloads are
 	// gated correctly. A signed URL handed to a different user after it's
 	// generated is a trust-the-URL scenario (unguessable token); that's
 	// acceptable per the design of signed URLs.
+	if req.Operation == "upload" {
+		if taken, err := h.keyOwnedByOther(r, req.Key); err != nil {
+			writeTenantPoolError(w, err)
+			return
+		} else if taken {
+			http.Error(w, `{"error":"an object with this key belongs to another user"}`, http.StatusForbidden)
+			return
+		}
+	}
 	if req.Operation == "download" {
 		visible, err := h.objectReadable(r, req.Key)
 		if err != nil {
