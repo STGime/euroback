@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
+	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/go-chi/chi/v5"
@@ -52,8 +54,11 @@ func TestTeamEndToEnd(t *testing.T) {
 		sharedDev:   os.Getenv("TEAM_TEST_SHARED_DEVELOPER"),
 		dedOwner:    os.Getenv("TEAM_TEST_DED_OWNER"),
 		dedAdmin:    os.Getenv("TEAM_TEST_DED_ADMIN"),
+		s3Endpoint:  os.Getenv("TEAM_TEST_S3_ENDPOINT"),
+		s3Key:       os.Getenv("TEAM_TEST_S3_KEY"),
+		s3Secret:    os.Getenv("TEAM_TEST_S3_SECRET"),
 	}
-	if cfg.sharedAdmin == "" || cfg.dedOwner == "" {
+	if cfg.sharedAdmin == "" || cfg.dedOwner == "" || cfg.s3Endpoint == "" {
 		t.Skip("run via scripts/test-team.sh")
 	}
 	// One instance-wide secret, as in prod: the runtime roles are
@@ -133,6 +138,79 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if r := sdk("POST", "/v1/auth/signin", creds); r.code != 200 || !strings.Contains(r.body, "access_token") {
 			return r
+		}
+		return nil
+	})
+
+	// SDK storage as a signed-in end user with the PUBLIC key, as an app
+	// does: RLS applies (the secret key would be service role), so this
+	// also proves the runtime — not owner — pool: another end user must
+	// not see the file.
+	check(t, env, "sdk_storage_upload_list_delete", func() error {
+		signin := func(email string) (string, error) {
+			if r := sdk("POST", "/v1/auth/signup", `{"email":"`+email+`","password":"Correct-horse-9"}`); r.code >= 300 && !strings.Contains(r.body, "already registered") {
+				return "", r
+			}
+			r := sdk("POST", "/v1/auth/signin", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+			var tok struct {
+				AccessToken string `json:"access_token"`
+			}
+			if r.code != 200 || json.Unmarshal([]byte(r.body), &tok) != nil || tok.AccessToken == "" {
+				return "", fmt.Errorf("signin %s: %w", email, r)
+			}
+			return tok.AccessToken, nil
+		}
+		owner, err := signin("enduser@team.test")
+		if err != nil {
+			return err
+		}
+		other, err := signin("other@team.test")
+		if err != nil {
+			return err
+		}
+		as := func(token, method, path string) *httpResult {
+			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, nil)
+			req.Header.Set("apikey", env.publicKey)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		asUser := func(method, path string) *httpResult { return as(owner, method, path) }
+		if r := env.upload(env.publicKey, owner, "http://api.eurobase.test/v1/storage/upload", "e2e/sdk.txt"); r.code >= 300 {
+			return r
+		}
+		if r := as(other, "GET", "/v1/storage/e2e/sdk.txt"); r.code != http.StatusNotFound {
+			return fmt.Errorf("another end user must not see the file (RLS; runtime pool): %w", r)
+		}
+		if r := asUser("GET", "/v1/storage/e2e/sdk.txt"); r.code >= 400 {
+			return fmt.Errorf("owner download: %w", r)
+		}
+		if n := env.dedCount(t, "storage_objects", "key = 'e2e/sdk.txt'"); n != 1 {
+			return fmt.Errorf("storage metadata not on the dedicated DB (count %d)", n)
+		}
+		if n := env.dedScalar(t, "SELECT count(*)::text FROM %s s JOIN "+pgx.Identifier{env.schema, "users"}.Sanitize()+
+			" u ON u.id = s.uploaded_by WHERE s.key = 'e2e/sdk.txt'", "storage_objects"); n != "1" {
+			return fmt.Errorf("uploaded_by doesn't point at the dedicated users table (count %s)", n)
+		}
+		if r := asUser("GET", "/v1/storage/"); r.code != 200 || !strings.Contains(r.body, "e2e/sdk.txt") {
+			return fmt.Errorf("list: %w", r)
+		}
+		if r := asUser("DELETE", "/v1/storage/e2e/sdk.txt"); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "storage_objects", "key = 'e2e/sdk.txt'"); n != 0 {
+			return fmt.Errorf("storage metadata not deleted on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	check(t, env, "console_storage_upload", func() error {
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "e2e/console.txt"); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "storage_objects", "key = 'e2e/console.txt'"); n != 1 {
+			return fmt.Errorf("storage metadata not on the dedicated DB (count %d)", n)
 		}
 		return nil
 	})
@@ -264,6 +342,22 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		env.router.ServeHTTP(srec, sreq)
 		if srec.Code != http.StatusServiceUnavailable {
 			return fmt.Errorf("SDK DDL while provisioning: want 503, got %d %s", srec.Code, srec.Body.String())
+		}
+		// End-user auth for it: refused, never the shared users table.
+		areq := httptest.NewRequest("POST", "http://api.eurobase.test/v1/auth/signup", strings.NewReader(`{"email":"x@team.test","password":"Correct-horse-9"}`))
+		areq.Header.Set("apikey", sec)
+		areq.Header.Set("Content-Type", "application/json")
+		arec := httptest.NewRecorder()
+		env.router.ServeHTTP(arec, areq)
+		if arec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("end-user signup while provisioning: want 503, got %d %s", arec.Code, arec.Body.String())
+		}
+		lreq := httptest.NewRequest("GET", "http://api.eurobase.test/v1/storage/", nil)
+		lreq.Header.Set("apikey", sec)
+		lrec := httptest.NewRecorder()
+		env.router.ServeHTTP(lrec, lreq)
+		if lrec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("SDK storage while provisioning: want 503, got %d %s", lrec.Code, lrec.Body.String())
 		}
 		// Saving an OAuth client secret needs the dedicated vault: refused,
 		// not written to the shared one.
@@ -425,7 +519,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return nil
 		}
 		var fp string
-		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{env.schema, "todos"}.Sanitize(), pgx.Identifier{env.schema, "vault_secrets"}.Sanitize())
+		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{env.schema, "todos"}.Sanitize(), pgx.Identifier{env.schema, "vault_secrets"}.Sanitize(), pgx.Identifier{env.schema, "storage_objects"}.Sanitize())
 		if err := env.shared.QueryRow(ctx, q, env.schema).Scan(&fp); err != nil {
 			return err
 		}
@@ -513,20 +607,24 @@ func (r *httpResult) neverReachedHandler() bool {
 const decoyTitle = "decoy-on-shared"
 
 // sharedFingerprintSQL summarises the stale shared copy: its tables and
-// the todos rows and the vault secret names (%[1]s / %[2]s = the quoted
-// todos / vault_secrets tables).
+// the todos rows, the vault secret names and the storage object keys
+// (%[1]s / %[2]s / %[3]s = the quoted todos / vault_secrets /
+// storage_objects tables).
 const sharedFingerprintSQL = `
 SELECT (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class
          WHERE relnamespace = to_regnamespace($1) AND relkind = 'r')
     || ' | ' ||
        (SELECT coalesce(string_agg(title, ',' ORDER BY title), '') FROM ` + "%[1]s" + `)
     || ' | ' ||
-       (SELECT coalesce(string_agg(name, ',' ORDER BY name), '') FROM ` + "%[2]s" + `)`
+       (SELECT coalesce(string_agg(name, ',' ORDER BY name), '') FROM ` + "%[2]s" + `)
+    || ' | ' ||
+       (SELECT coalesce(string_agg(key, ',' ORDER BY key), '') FROM ` + "%[3]s" + `)`
 
 type teamTestConfig struct {
 	sharedAdmin, sharedGW, sharedDev string
 	dedOwner, dedAdmin               string // URLs; the database is replaced per scenario
 	runtimePW, readonlyPW            string
+	s3Endpoint, s3Key, s3Secret      string
 }
 
 type teamEnv struct {
@@ -541,6 +639,7 @@ type teamEnv struct {
 	schema            string
 	dedDB             string
 	secretKey         string
+	publicKey         string
 	scenario          string
 	upgraded          bool
 	sharedFingerprint string
@@ -570,6 +669,28 @@ func (e *teamEnv) dedScalar(t *testing.T, format, table string) string {
 		t.Fatalf("dedScalar: %v", err)
 	}
 	return v
+}
+
+// upload posts a small multipart file: with apiKey (+ end-user JWT) as the
+// SDK, else as the console owner (platform JWT).
+func (e *teamEnv) upload(apiKey, endUserJWT, url, key string) *httpResult {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("key", key)
+	fw, _ := mw.CreateFormFile("file", "e2e.txt")
+	_, _ = fw.Write([]byte("hello team"))
+	_ = mw.Close()
+	req := httptest.NewRequest("POST", url, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if apiKey != "" {
+		req.Header.Set("apikey", apiKey)
+		req.Header.Set("Authorization", "Bearer "+endUserJWT)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+e.platformJWT)
+	}
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return &httpResult{req: "POST " + url, code: rec.Code, body: rec.Body.String()}
 }
 
 // addAPIKeys creates an API key pair for a project and returns the secret key.
@@ -679,7 +800,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		mustExecT(t, admin, `SELECT provision_tenant($1, 'team e2e', 'pro')`, projectID)
 		mustExecT(t, admin, fmt.Sprintf(`INSERT INTO %s (title) VALUES ($1)`, pgx.Identifier{schema, "todos"}.Sanitize()), decoyTitle)
 		mustExecT(t, admin, `UPDATE projects SET plan = 'team' WHERE id = $1`, projectID)
-		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{schema, "todos"}.Sanitize(), pgx.Identifier{schema, "vault_secrets"}.Sanitize())
+		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{schema, "todos"}.Sanitize(), pgx.Identifier{schema, "vault_secrets"}.Sanitize(), pgx.Identifier{schema, "storage_objects"}.Sanitize())
 		if err := admin.QueryRow(ctx, q, schema).Scan(&sharedFP); err != nil {
 			t.Fatal(err)
 		}
@@ -786,12 +907,30 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, nil, nil, nil,
+	s3Client, err := storage.NewS3Client(cfg.s3Endpoint, "fr-par", cfg.s3Key, cfg.s3Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Garage (the harness's S3) doesn't implement PutBucketAcl, which
+	// CreateBucket issues after creating the bucket (501 NotImplemented);
+	// its buckets are private anyway. Accept only that, and check the
+	// bucket exists. Garage has no object lock or public ACLs either —
+	// Legal-Team WORM checks can't run against it.
+	if err := s3Client.CreateBucket(ctx, "eurobase-"+slug); err != nil {
+		var apiErr interface{ ErrorCode() string }
+		if !strings.Contains(err.Error(), "PutBucketAcl") || !errors.As(err, &apiErr) || apiErr.ErrorCode() != "NotImplemented" {
+			t.Fatalf("create bucket: %v", err)
+		}
+	}
+	if ok, err := s3Client.BucketExists(ctx, "eurobase-"+slug); err != nil || !ok {
+		t.Fatalf("bucket eurobase-%s missing after create: %v", slug, err)
+	}
+	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, s3Client, nil, nil,
 		subdomain, nil, nil, nil, vaultSvc, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
-		secretKey: sec, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
+		secretKey: sec, publicKey: pub, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
 		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
 	}
 }

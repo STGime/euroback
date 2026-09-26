@@ -103,9 +103,10 @@ spec:
             # RUNTIME_PASSWORD_SECRET is empty — that guard prevents
             # the runtime-NULL owner-connection RLS bypass class.
             # PoolCache.Get returns ErrRuntimeCredMissing on rows
-            # without runtime creds, and the router SDK branch falls
-            # back to the shared pool (loud 42P01) rather than
-            # owner-connect. Free/Pro projects have no
+            # without runtime creds, and the SDK routes answer 503
+            # (sdkTenantPoolMw, #680) — never owner-connect, never the
+            # shared pool. Unset, Team projects' SDK traffic is refused
+            # (503), not served from shared. Free/Pro projects have no
             # project_databases row → the resolver returns nil →
             # shared pool → zero behaviour change.
             - name: TEAM_TIER_ROUTING
