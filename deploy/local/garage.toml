@@ -1,0 +1,16 @@
+# Local-dev S3 (docker-compose.yml): Garage, single node. Not used in any
+# deployed environment — prod storage is Scaleway Object Storage.
+# rpc_secret is a fixed local-only value (the RPC port isn't published).
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[s3_api]
+# Must match the client region (storage.NewS3Client defaults to fr-par).
+s3_region = "fr-par"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"

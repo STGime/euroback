@@ -31,20 +31,22 @@ services:
       timeout: 5s
       retries: 10
 
-  minio:
-    image: minio/minio
+  # S3 for local dev: Garage (Deuxfleurs, EU). MinIO no longer publishes
+  # community images to Docker Hub. scripts/setup-local.sh creates the
+  # layout and the dev key (see its output for the credentials).
+  garage:
+    image: dxflrs/garage:v1.1.0@sha256:fdb8272fcbe643eef830ee17874d5d4ed623a86501f1acbac8012583113b1c26
     ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
+      - "9000:3900"
+    volumes:
+      - ./deploy/local/garage.toml:/etc/garage.toml:ro
+      - eurobase_garage:/var/lib/garage
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "/garage", "status"]
       interval: 5s
       timeout: 5s
       retries: 10
 
 volumes:
   eurobase_pgdata:
+  eurobase_garage:
