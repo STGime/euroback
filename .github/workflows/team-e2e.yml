@@ -43,6 +43,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        # internal/sovereignty/data is a submodule; the gateway package
+        # embeds its YAMLs and won't build without them.
+        with:
+          submodules: recursive
 
       - uses: actions/setup-go@v5
         with:
