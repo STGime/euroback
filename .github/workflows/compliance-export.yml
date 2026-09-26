@@ -4,6 +4,9 @@ name: Compliance export
 # a PostgreSQL 16 built by scripts/db/apply-migrations.sh with the
 # production roles, and checks the worker image ships a pg_dump that can
 # dump a PG16 server (the schema section of every tenant export needs it).
+# Also runs the Team-tier upgrade worker's production-role test (#673):
+# same database shape, and the same class of bug (a platform job on a pool
+# whose role lacks the grants it needs).
 #
 # Path-filtered: don't make this a *required* check without dropping the
 # filter, or unrelated PRs will wait on it forever.
@@ -15,6 +18,8 @@ on:
       - internal/workers/export*.go
       - internal/dbprovider/owner_pool.go
       - internal/storage/s3.go
+      - internal/workers/upgrade_project*.go
+      - cmd/worker/main.go
       - migrations/**
       - deploy/docker/Dockerfile.worker
       - .github/workflows/compliance-export.yml
@@ -64,10 +69,11 @@ jobs:
           EXPORT_TEST_DEV_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
           EXPORT_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           TEAM_EXPORT_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
+          UPGRADE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
         run: |
           pg_dump --version
           go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection'
-          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource'
+          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker'
 
   worker-image:
     runs-on: ubuntu-latest
