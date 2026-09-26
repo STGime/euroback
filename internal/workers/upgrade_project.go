@@ -71,7 +71,19 @@ type UpgradeProjectWorker struct {
 	// Nil-safe: if unset the worker fails the upgrade cleanly with
 	// "provisioner not configured" (cmd/worker/main.go wires it).
 	Provisioner *ProvisionTeamDatabaseWorker
+
+	// AllowStubbedCopy lets an upgrade run while the data copy is still
+	// a stub. Tests only: cmd/worker never sets it. Cutting over without
+	// the copy would route the project's live traffic (TEAM_TIER_ROUTING
+	// is on in prod) to a dedicated database with none of its tables,
+	// users or rows, so until the copy lands every upgrade fails before
+	// maintenance mode or provisioning (#675 review).
+	AllowStubbedCopy bool
 }
+
+// ErrUpgradeCopyNotImplemented fails an upgrade before it touches the
+// project while the copying step is a stub.
+var ErrUpgradeCopyNotImplemented = errors.New("Team-tier upgrades are not available yet: the data copy to the dedicated database is not implemented")
 
 // upgradeMaintenanceDrain is the wait after maintenance_mode=true and
 // before running the final incremental copy at cutover. Gives
@@ -102,6 +114,12 @@ func (w *UpgradeProjectWorker) Work(ctx context.Context, job *river.Job[jobs.Upg
 	default:
 		logger.Warn("upgrade already in terminal state — skipping", "state", row.state)
 		return river.JobCancel(fmt.Errorf("upgrade %s in terminal state %q", upgradeID, row.state))
+	}
+
+	// Nothing may run before the copy is real: fail while the project is
+	// untouched (no maintenance, no dedicated instance to pay for).
+	if !w.AllowStubbedCopy && (row.state == "requested" || row.state == "provisioning" || row.state == "copying") {
+		return w.fail(ctx, logger, upgradeID, "data copy", ErrUpgradeCopyNotImplemented)
 	}
 
 	// Enter maintenance + advance to provisioning on first entry.

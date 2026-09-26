@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -59,13 +60,16 @@ func TestUpgradeWorker_ProductionRoles(t *testing.T) {
 		})
 		return projectID, upgradeID
 	}
-	run := func(pool *pgxpool.Pool, upgradeID string) error {
-		w := &UpgradeProjectWorker{Pool: pool} // no Provisioner: the provisioning step fails cleanly
+	// runWith runs Work; allowStub lets it past the copy guard (no
+	// Provisioner: the provisioning step then fails cleanly).
+	runWith := func(pool *pgxpool.Pool, upgradeID string, allowStub bool) error {
+		w := &UpgradeProjectWorker{Pool: pool, AllowStubbedCopy: allowStub}
 		return w.Work(ctx, &river.Job[jobs.UpgradeProjectArgs]{
 			JobRow: &rivertype.JobRow{Attempt: 1},
 			Args:   jobs.UpgradeProjectArgs{UpgradeID: upgradeID},
 		})
 	}
+	run := func(pool *pgxpool.Pool, upgradeID string) error { return runWith(pool, upgradeID, true) }
 	read := func(t *testing.T, projectID, upgradeID string) (state, errText, plan string, maintenance bool) {
 		t.Helper()
 		var e *string
@@ -97,6 +101,20 @@ func TestUpgradeWorker_ProductionRoles(t *testing.T) {
 		}
 		if state, _, _, _ := read(t, projectID, upgradeID); state != "requested" {
 			t.Errorf("state = %q, want it stuck in requested", state)
+		}
+	})
+
+	t.Run("the production worker refuses upgrades while the copy is a stub", func(t *testing.T) {
+		for _, state := range []string{"requested", "provisioning", "copying"} {
+			projectID, upgradeID := newUpgrade(t, state)
+			err := runWith(developer, upgradeID, false)
+			if !errors.Is(err, ErrUpgradeCopyNotImplemented) {
+				t.Errorf("%s: err = %v, want ErrUpgradeCopyNotImplemented", state, err)
+			}
+			st, errText, plan, maintenance := read(t, projectID, upgradeID)
+			if st != "failed" || !strings.Contains(errText, "not implemented") || plan != "pro" || maintenance {
+				t.Errorf("%s: state=%q error=%q plan=%q maintenance=%v; want failed, pro, maintenance off", state, st, errText, plan, maintenance)
+			}
 		}
 	})
 
