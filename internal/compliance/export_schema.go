@@ -138,6 +138,9 @@ func exportSchemaDump(ctx context.Context, tx pgx.Tx, src ExportSource, zw *zip.
 			return fail(fmt.Sprintf("the schema dump is larger than %d MiB", maxSchemaDumpBytes>>20))
 		}
 		slog.Warn("export: pg_dump failed", "error", err, "stderr", stderr.String())
+		if strings.Contains(stderr.String(), "lock timeout") {
+			return fail("a schema change held a table lock for more than 30 s; request the export again")
+		}
 		return fail("pg_dump failed (" + err.Error() + ")")
 	}
 	f, err := zw.Create(schemaDumpFile)
@@ -411,7 +414,10 @@ type TenantExportOptions struct {
 type StorageManifest struct {
 	Objects   []StorageManifestEntry `json:"objects"`
 	Truncated bool                   `json:"truncated,omitempty"`
-	Note      string                 `json:"note"`
+	// TrackingUnavailable: storage_objects couldn't be read, so no entry
+	// has a content type and tracked says nothing.
+	TrackingUnavailable bool   `json:"tracking_unavailable,omitempty"`
+	Note                string `json:"note"`
 }
 
 // StorageManifestEntry is one stored object. ETag is the storage
@@ -433,25 +439,32 @@ var maxManifestObjects = 100000
 
 // readObjectContentTypes maps tracked object keys to their content type,
 // from the tenant's storage_objects table, inside the export snapshot.
-// Best effort: without it the manifest just lacks content types.
+// Rows are read in byte order (COLLATE "C"), the order S3 lists keys in,
+// so past the cap the rows kept are the ones for the objects the manifest
+// lists. nil when the table can't be read: the manifest then says tracking
+// is unavailable rather than calling every object untracked.
 func readObjectContentTypes(ctx context.Context, tx pgx.Tx, schemaName string) map[string]string {
-	out := map[string]string{}
 	sp, err := tx.Begin(ctx)
 	if err != nil {
-		return out
+		return nil
 	}
 	defer sp.Rollback(ctx) //nolint:errcheck
-	rows, err := sp.Query(ctx, fmt.Sprintf(`SELECT key, coalesce(content_type, '') FROM %s.storage_objects LIMIT %d`,
+	rows, err := sp.Query(ctx, fmt.Sprintf(`SELECT key, coalesce(content_type, '') FROM %s.storage_objects ORDER BY key COLLATE "C" LIMIT %d`,
 		quoteIdent(schemaName), maxManifestObjects+1))
 	if err != nil {
-		return out
+		return nil
 	}
 	defer rows.Close()
+	out := map[string]string{}
 	for rows.Next() {
 		var k, ct string
-		if rows.Scan(&k, &ct) == nil {
-			out[k] = ct
+		if err := rows.Scan(&k, &ct); err != nil {
+			return nil
 		}
+		out[k] = ct
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return out
 }
@@ -463,8 +476,9 @@ func exportStorageManifest(ctx context.Context, zw *zip.Writer, opts TenantExpor
 		return se
 	}
 	m := StorageManifest{
-		Objects: []StorageManifestEntry{},
-		Note:    "Object contents are not included in this archive; download them through the storage API.",
+		Objects:             []StorageManifestEntry{},
+		TrackingUnavailable: contentTypes == nil,
+		Note:                "Object contents are not included in this archive; download them through the storage API.",
 	}
 	token := ""
 	for {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -70,19 +71,9 @@ func TestRedactSecrets(t *testing.T) {
 	}
 	want := []string{"hooks[0].token", "oauth_providers.google.client_secret", "smtp.api_key", "smtp.password"}
 	got := append([]string(nil), redacted...)
-	sortStrings(got)
+	sort.Strings(got)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("redacted = %v, want %v", got, want)
-	}
-}
-
-func sortStrings(s []string) {
-	for i := range s {
-		for j := i + 1; j < len(s); j++ {
-			if s[j] < s[i] {
-				s[i], s[j] = s[j], s[i]
-			}
-		}
 	}
 }
 
@@ -168,6 +159,15 @@ func TestStorageManifest(t *testing.T) {
 		defer func() { maxManifestObjects = old }()
 		if se, _ := run(TenantExportOptions{Objects: fakeLister{objects: objs, pageSize: 2}, Bucket: "b"}); se.Status != TableExported {
 			t.Errorf("section = %+v", se)
+		}
+	})
+	t.Run("unreadable tracking table is stated, not reported as untracked", func(t *testing.T) {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		se := exportStorageManifest(ctx, zw, TenantExportOptions{Objects: fakeLister{objects: objs}, Bucket: "b"}, pid, nil)
+		_ = zw.Close()
+		if m := read(t, &buf); se.Status != TableExported || !m.TrackingUnavailable {
+			t.Errorf("section = %+v, tracking_unavailable = %v", se, m.TrackingUnavailable)
 		}
 	})
 	t.Run("listing error and missing storage are failures", func(t *testing.T) {
@@ -289,6 +289,22 @@ func TestTenantExport_SchemaSection(t *testing.T) {
 		dump := string(unzip(t, buf.Bytes())[schemaDumpFile])
 		if !strings.Contains(dump, "CREATE TABLE "+schema+".lanes") || strings.Contains(dump, "after_snapshot") {
 			t.Errorf("dump not taken from the export snapshot (after_snapshot present = %v)", strings.Contains(dump, "after_snapshot"))
+		}
+	})
+
+	t.Run("past the cap, tracking rows are read in S3 (byte) order", func(t *testing.T) {
+		migratorExec(t, dev, `INSERT INTO `+s+`.storage_objects (key, content_type) VALUES ('b', 'x/b'), ('Z', 'x/Z'), ('a', 'x/a')`)
+		old := maxManifestObjects
+		maxManifestObjects = 1
+		defer func() { maxManifestObjects = old }()
+		var got map[string]string
+		err := withExportSnapshot(ctx, ExportSource{Pool: dev}, func(tx pgx.Tx) error {
+			got = readObjectContentTypes(ctx, tx, schema)
+			return nil
+		})
+		// S3 lists "Z" < "a" < "b" (bytes); a heap-order read kept "b".
+		if want := map[string]string{"Z": "x/Z", "a": "x/a"}; err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("content types = %v, err = %v; want %v", got, err, want)
 		}
 	})
 
