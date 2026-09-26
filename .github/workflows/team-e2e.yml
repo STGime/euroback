@@ -46,7 +46,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
 
       - name: Ensure psql client
         run: command -v psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
