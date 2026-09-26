@@ -197,7 +197,7 @@ func BootstrapDedicated(
 	// as the runtime password, distinct HMAC domain tag → the two
 	// passwords never collide.
 	if _, err := conn.Exec(ctx,
-		fmt.Sprintf(`ALTER ROLE eurobase_readonly WITH LOGIN PASSWORD '%s'`, readonlyPassword),
+		fmt.Sprintf(`ALTER ROLE eurobase_readonly WITH LOGIN CONNECTION LIMIT %d PASSWORD '%s'`, ReadonlyConnLimit, readonlyPassword),
 	); err != nil {
 		return nil, "", fmt.Errorf("bootstrap: set eurobase_readonly password: %w", err)
 	}

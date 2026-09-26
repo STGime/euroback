@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
@@ -155,7 +156,7 @@ func (w *UpgradeProjectWorker) Work(ctx context.Context, job *river.Job[jobs.Upg
 			Slug:      row.projectSlug,
 			Provider:  "scaleway",
 			Region:    "fr-par",
-			Size:      "small",
+			Size:      string(dbprovider.DefaultTeamSize),
 		}, job.Attempt, idemKey)
 		if err != nil {
 			return w.fail(ctx, logger, upgradeID, "provision dedicated instance", err)

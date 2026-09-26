@@ -83,6 +83,25 @@ export const db = drizzle(client);</code></pre>
 					<pre class="rounded-md bg-gray-900 p-3 text-xs text-gray-100 overflow-x-auto"><code>psql "$DATABASE_URL"</code></pre>
 				</div>
 
+				<h3 class="text-base font-semibold text-gray-900 pt-2">Connection limits</h3>
+				<p class="text-sm text-gray-700">
+					Your instance allows <strong>100 connections</strong> (Scaleway's default), of which about
+					<strong>95</strong> are usable — a few are reserved for Scaleway's own maintenance. They are shared by
+					your own clients and by Eurobase itself: the SDK, the console and background jobs use up to about
+					<strong>40</strong> during a deploy or an export, fewer otherwise. The <strong>read-only</strong> role
+					is capped at <strong>10</strong> connections.
+				</p>
+				<p class="text-sm text-gray-700">
+					Leave that headroom free — if your app opens every remaining connection, your own SDK and console
+					traffic start failing. Size your client's pool accordingly (a total of about 40–50 across all your processes):
+				</p>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
+					<li><strong>Prisma</strong>: add <code class="rounded bg-gray-100 px-1 text-[11px]">?connection_limit=10</code> to the URL (per process).</li>
+					<li><strong>node-postgres / Payload</strong>: <code class="rounded bg-gray-100 px-1 text-[11px]">pool: {'{'} connectionString, max: 10 {'}'}</code>.</li>
+					<li><strong>postgres.js / Drizzle</strong>: <code class="rounded bg-gray-100 px-1 text-[11px]">postgres(url, {'{'} max: 10 {'}'})</code>.</li>
+					<li><strong>Serverless</strong> (many short-lived instances): keep the per-instance pool at 1–2, or put a pooler in front.</li>
+				</ul>
+
 				<h3 class="text-base font-semibold text-gray-900 pt-2">Free / Pro alternatives</h3>
 				<p class="text-sm text-gray-700">
 					If you don't need direct connection, all Free/Pro projects can still work with tools that speak

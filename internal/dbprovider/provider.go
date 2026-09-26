@@ -170,6 +170,22 @@ const (
 	SizeLarge  Size = "large"
 )
 
+// DefaultTeamSize is the instance size every Team / Legal-Team project gets
+// — at project creation and on a Pro→Team upgrade alike (#682). Small =
+// Scaleway db-dev-s: right-sized for the €149 / €89 Team price points (see
+// provision_team_db.go); no HA on that tier — a customer who needs it gets
+// an online resize to db-gp-s first.
+const DefaultTeamSize = SizeSmall
+
+// Connection budget on a dedicated instance (#682). Scaleway's PostgreSQL
+// max_connections default is 100 on every engine version and node type
+// (not hot-configurable); we keep it — db-dev-s has 2 GB RAM.
+const (
+	// ReadonlyConnLimit caps eurobase_readonly (the read-only URL on the
+	// console Connection page: BI tools, dashboards).
+	ReadonlyConnLimit = 10
+)
+
 // RestoreSource identifies which snapshot to restore.
 //
 // The PITRTarget field was removed in migration 000111's PR after

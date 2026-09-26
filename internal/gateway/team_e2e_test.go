@@ -600,6 +600,19 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// #682: the read-only login (console Connection page) is capped.
+	check(t, env, "readonly_connection_limit", func() error {
+		var limit int
+		if err := env.ded.QueryRow(context.Background(),
+			`SELECT rolconnlimit FROM pg_roles WHERE rolname = 'eurobase_readonly'`).Scan(&limit); err != nil {
+			return err
+		}
+		if limit != dbprovider.ReadonlyConnLimit {
+			return fmt.Errorf("eurobase_readonly CONNECTION LIMIT = %d, want %d", limit, dbprovider.ReadonlyConnLimit)
+		}
+		return nil
+	})
+
 	// Background token cleanup (#681): expired tokens on the dedicated DB
 	// are deleted, fresh ones kept; the shared cluster's stale copy of an
 	// upgraded project is left alone.

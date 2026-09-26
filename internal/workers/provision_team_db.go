@@ -207,15 +207,15 @@ func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.Prov
 
 	size := dbprovider.Size(args.Size)
 	if size == "" {
-		// SizeSmall = Scaleway db-dev-s (2 vCPU / 4 GB RAM) with a
+		// SizeSmall = Scaleway db-dev-s (2 vCPU / 2 GB RAM) with a
 		// 50 GB `sbs_5k` volume (see dbprovider/scaleway.go —
 		// SizeSmall's volume is 50 GB, NOT 10 GB, to stay ≥ Team's
 		// plan_limits.db_size_mb=100 GB… wait, 50 < 100 — see below).
 		//
 		// Right-sized for the €149/mo Team price point + the SMB
 		// buyer profile (<5k signed-up users, <10 GB active DB, <100
-		// req/s). Previous default (SizeMedium = db-gp-s, 4 vCPU /
-		// 16 GB RAM, 50 GB) was ~€115-136/mo of Scaleway spend on a
+		// req/s). Previous default (SizeMedium = db-gp-s, 8 vCPU /
+		// 32 GB RAM, 50 GB) was ~€115-136/mo of Scaleway spend on a
 		// €149/mo tier — near-zero gross margin once support + backup
 		// storage + fixed platform costs land. Compute downsize is
 		// the ~€60/mo win; storage delta 50→10 GB was only ~€4/mo
@@ -234,7 +234,7 @@ func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.Prov
 		// an online compute upgrade to db-gp-s first, THEN enables
 		// HA. Marketing surfaces (DPA Annex 2, /security) must not
 		// promise HA as a starter-shape capability.
-		size = dbprovider.SizeSmall
+		size = dbprovider.DefaultTeamSize
 	}
 
 	// Idempotency-Key comes from the caller so River retries share it
