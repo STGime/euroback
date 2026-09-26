@@ -425,10 +425,16 @@ func main() {
 	// constructed above) so upgrade + create-time-Team share every
 	// bit of the provisioning path — cipher unwrap, Scaleway
 	// idempotency, runtime + readonly credential bootstrap.
-	river.AddWorker(riverWorkers, &workers.UpgradeProjectWorker{
-		Pool:        pool,
+	// Developer pool: project_upgrades is revoked from eurobase_gateway
+	// (000117) and the writes SET ROLE eurobase_migrator (#673).
+	upgradeWorker := &workers.UpgradeProjectWorker{
+		Pool:        developerPool,
 		Provisioner: provisionTeamDBWorker,
-	})
+	}
+	if err := upgradeWorker.Preflight(ctx); err != nil {
+		slog.Error("Team-tier upgrades will fail: the upgrade worker's pool lacks the privileges it needs", "error", err)
+	}
+	river.AddWorker(riverWorkers, upgradeWorker)
 
 	// #354 audit webhook deliverer. Vault is used to resolve the
 	// tenant's HMAC signing secret (secret_ref → vault key name).

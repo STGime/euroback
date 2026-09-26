@@ -54,9 +54,12 @@ import (
 type UpgradeProjectWorker struct {
 	river.WorkerDefaults[jobs.UpgradeProjectArgs]
 
-	// Pool is the platform pool. All writes on project_upgrades /
-	// projects run through it with SET LOCAL ROLE eurobase_migrator
-	// inside each tx.
+	// Pool must be the DEVELOPER pool (eurobase_developer). It reads
+	// project_upgrades, which migration 000117 revokes from
+	// eurobase_gateway, and every write runs SET LOCAL ROLE
+	// eurobase_migrator, which only the developer role may assume. On
+	// the gateway pool every upgrade failed at its first query and
+	// couldn't even record the failure (#673).
 	Pool *pgxpool.Pool
 
 	// Provisioner is the ProvisionTeamDatabaseWorker constructed at
@@ -73,7 +76,7 @@ type UpgradeProjectWorker struct {
 // upgradeMaintenanceDrain is the wait after maintenance_mode=true and
 // before running the final incremental copy at cutover. Gives
 // in-flight SDK requests a grace window to complete.
-const upgradeMaintenanceDrain = 5 * time.Second
+var upgradeMaintenanceDrain = 5 * time.Second
 
 func (w *UpgradeProjectWorker) Work(ctx context.Context, job *river.Job[jobs.UpgradeProjectArgs]) error {
 	if w.Pool == nil {
@@ -348,6 +351,28 @@ func (w *UpgradeProjectWorker) fail(ctx context.Context, logger *slog.Logger, up
 	}
 
 	return fmt.Errorf("%s: %w", step, cause)
+}
+
+// Preflight checks that Pool can do what Work needs: read project_upgrades
+// and assume eurobase_migrator. cmd/worker runs it at startup so wiring
+// the wrong pool shows up in the first log lines, not at the first
+// upgrade (#673). Nothing is written.
+func (w *UpgradeProjectWorker) Preflight(ctx context.Context) error {
+	if w.Pool == nil {
+		return errors.New("upgrade_project worker: pool not configured")
+	}
+	tx, err := w.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("upgrade_project preflight: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM public.project_upgrades LIMIT 0`); err != nil {
+		return fmt.Errorf("upgrade_project preflight: read project_upgrades: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL ROLE eurobase_migrator`); err != nil {
+		return fmt.Errorf("upgrade_project preflight: set migrator role: %w", err)
+	}
+	return nil
 }
 
 func (w *UpgradeProjectWorker) execWithMigratorRole(ctx context.Context, sql string, args ...any) error {
