@@ -391,30 +391,37 @@ jobs:
           # docs/runbooks/cost-tier.md.
           kubectl apply -f deploy/k8s/redis.yaml
           kubectl apply -f deploy/k8s/ingress.yaml
-          # All Deployment manifests get applied so changes to
-          # replicas, resource requests, probes, etc. propagate via
-          # the normal deploy. Image tag changes still go through
-          # the `kubectl set image` step below — set image wins on
-          # the container image; everything else is sourced from
-          # the manifest.
-          # PgBouncer (#641) before its clients: the functions runner's
-          # tenant connections use its `eurobase_tenant` alias, so the
-          # pooler must be rolled (with the current config) before a
-          # runner pod can start using it.
+          # All Deployment manifests get applied so changes to replicas,
+          # resources, probes, env, etc. propagate via the normal deploy.
+          #
+          # Images: the manifests say `:latest`, which is THIS build (pushed
+          # above). Client-side apply patches the live object to match, so
+          # applying `:latest` here would start the new code BEFORE the
+          # migrations below. apply_pinned rewrites each image to the one
+          # currently running, so this step changes config only; the new sha
+          # arrives via `kubectl set image` in "Deploy to Kapsule", after
+          # migrations. (First-ever create: no live object, `:latest` it is.)
+          apply_pinned() { # <manifest> <deployment> <container>
+            live=$(kubectl -n eurobase get deployment "$2" -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$3\")].image}" 2>/dev/null || true)
+            if [ -n "$live" ]; then
+              sed -E "s#${REGISTRY}/${REGISTRY_NS}/[a-z-]+:latest#${live}#g" "$1" | kubectl apply -f -
+            else
+              kubectl apply -f "$1"
+            fi
+          }
           # #653: RBAC + the published-userlist Secret, and the worker's
-          # SA/env. The worker's IMAGE is not changed by this apply (the live
-          # Deployment is pinned by `set image`), so publishing and the
-          # pooler roll happen in "Deploy to Kapsule", after migrations.
+          # SA/env (image pinned; the new worker starts in "Deploy to
+          # Kapsule", where it publishes before the poolers roll).
           kubectl apply -f deploy/k8s/pgbouncer-userlist-rbac.yaml
-          kubectl apply -f deploy/k8s/worker.yaml
-          kubectl apply -f deploy/k8s/gateway.yaml
-          kubectl apply -f deploy/k8s/console.yaml
+          apply_pinned deploy/k8s/worker.yaml worker worker
+          apply_pinned deploy/k8s/gateway.yaml gateway gateway
+          apply_pinned deploy/k8s/console.yaml console console
           # NetworkPolicy must apply BEFORE the pod rollout so the new
           # net-allowed worker permissions never have a window of
           # reaching cluster-internal IPs.
           kubectl apply -f deploy/k8s/functions-networkpolicy.yaml
-          kubectl apply -f deploy/k8s/functions.yaml
-          kubectl apply -f deploy/k8s/mcp-server.yaml
+          apply_pinned deploy/k8s/functions.yaml functions deno-runner
+          apply_pinned deploy/k8s/mcp-server.yaml mcp-server mcp-server
           # Health monitor → Discord #alerts. Reads DISCORD_ALERTS_WEBHOOK
           # from eurobase-secrets (optional key); no-ops if it's unset.
           kubectl apply -f deploy/k8s/health-monitor-cronjob.yaml

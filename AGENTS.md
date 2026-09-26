@@ -77,6 +77,7 @@
 - Service key for server-side access only — never expose in client code
 
 ## Build & Deploy
+- **New code never starts before migrations.** CI's "Apply K8s manifests" step applies Deployment manifests with their image **pinned to the image currently running** (`apply_pinned` in `.github/workflows/ci.yml`): the manifests say `:latest` (= this build, pushed earlier in the job), and client-side `kubectl apply` would otherwise roll every Deployment onto it before "Run database migrations". New images arrive only via `kubectl set image` in "Deploy to Kapsule", after migrations. Any new Deployment manifest must be applied through `apply_pinned` too.
 - Backend builds and deploys via GitHub Actions (push to main triggers CI/CD)
 - Do not run deploy scripts manually — just commit and push
 
