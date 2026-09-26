@@ -71,7 +71,11 @@ func TestPoolerSplit(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		for _, want := range []string{"pgbouncer_up 1", "pgbouncer_clients_waiting{database=", "pgbouncer_client_connections ", "pgbouncer_max_client_conn 500"} {
+		wants := []string{"pgbouncer_up 1", "pgbouncer_clients_waiting{database=", "pgbouncer_client_connections ", "pgbouncer_max_client_conn 500"}
+		if name == "runner" {
+			wants = append(wants, "pgbouncer_userlist_published_age_seconds ") // #653
+		}
+		for _, want := range wants {
 			if !strings.Contains(string(body), want) {
 				t.Errorf("%s metrics missing %q:\n%s", name, want, body)
 			}

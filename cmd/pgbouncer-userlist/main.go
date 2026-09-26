@@ -306,10 +306,16 @@ func runSync(ctx context.Context, c *config) {
 	// The file is written before the reload, so a failed SIGHUP must be
 	// retried on the next pass even though the file then looks unchanged.
 	pendingReload := false
+	failing := false // log sync failures on state change, not every pass
 	for {
 		changed, err := syncUserlist(ctx, c)
-		if err != nil {
-			slog.Error("pgbouncer userlist sync failed", "error", err)
+		switch {
+		case err != nil && !failing:
+			failing = true
+			slog.Error("pgbouncer userlist sync failing (logged once until it recovers)", "error", err)
+		case err == nil && failing:
+			failing = false
+			slog.Info("pgbouncer userlist sync recovered")
 		}
 		if changed {
 			pendingReload = true

@@ -304,7 +304,12 @@ func main() {
 	if name := os.Getenv("PGB_USERLIST_SECRET"); name != "" {
 		secret := []byte(os.Getenv("FUNC_PASSWORD_SECRET"))
 		kc, kerr := k8sapi.InCluster()
-		upstream, uerr := pgbouncerconf.UpstreamOf(databaseURL)
+		// The runner pooler connects where the runner's own login does.
+		upURL := os.Getenv("DATABASE_URL_FUNCTION_RUNNER")
+		if upURL == "" {
+			upURL = databaseURL
+		}
+		upstream, uerr := pgbouncerconf.UpstreamOf(upURL)
 		switch {
 		case len(secret) < tenantlogin.MinSecretLen:
 			slog.Error("pgbouncer userlist publisher: FUNC_PASSWORD_SECRET missing or too short")
@@ -315,20 +320,26 @@ func main() {
 		default:
 			pub := &pgbouncerconf.Publisher{Store: pgbouncerconf.SecretStore{Client: kc, Name: name}, Secret: secret, Upstream: upstream}
 			go func() {
+				// Log state changes, not every 5 s failure.
+				failing := false
 				publish := func() {
 					pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 					defer cancel()
+					var wrote bool
 					conn, err := pool.Acquire(pctx)
-					if err != nil {
-						slog.Error("pgbouncer userlist publish: acquire", "error", err)
-						return
+					if err == nil {
+						wrote, err = pub.Publish(pctx, conn.Conn())
+						conn.Release()
 					}
-					defer conn.Release()
-					wrote, err := pub.Publish(pctx, conn.Conn())
 					switch {
-					case err != nil:
-						slog.Error("pgbouncer userlist publish failed", "error", err)
-					case wrote:
+					case err != nil && !failing:
+						failing = true
+						slog.Error("pgbouncer userlist publish failing (logged once until it recovers)", "error", err)
+					case err == nil && failing:
+						failing = false
+						slog.Info("pgbouncer userlist publish recovered", "secret", name)
+					}
+					if wrote {
 						slog.Info("pgbouncer tenant userlist published", "secret", name)
 					}
 				}

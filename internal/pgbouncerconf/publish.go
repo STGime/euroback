@@ -25,8 +25,9 @@ import (
 // compromised, usable until FUNC_PASSWORD_SECRET is rotated. Idle and
 // future tenants are not exposed, and no key derives the others.
 const (
-	KeyUserlist = "userlist" // tenant `"<schema>_func" "<verifier>"` lines
-	KeyUpstream = "upstream" // "host:port/database" (no credentials)
+	KeyUserlist    = "userlist"     // tenant `"<schema>_func" "<verifier>"` lines
+	KeyUpstream    = "upstream"     // "host:port/database" (no credentials)
+	KeyPublishedAt = "published_at" // RFC 3339; the pooler exports its age
 )
 
 // Store is where the published userlist lives: a Kubernetes Secret in
@@ -50,12 +51,16 @@ func (s SecretStore) Put(ctx context.Context, data map[string][]byte) error {
 	return s.Client.PatchSecretData(ctx, s.Name, data)
 }
 
+// Note: the RBAC lets the worker get/patch the Secret but not create it
+// (create can't be scoped to one name). If it is deleted, re-apply
+// deploy/k8s/pgbouncer-userlist-rbac.yaml; the worker republishes within 5 s.
+
 // DirStore keeps one file per key in a directory (tests).
 type DirStore string
 
 func (d DirStore) Get(context.Context) (map[string][]byte, error) {
 	out := map[string][]byte{}
-	for _, k := range []string{KeyUserlist, KeyUpstream} {
+	for _, k := range []string{KeyUserlist, KeyUpstream, KeyPublishedAt} {
 		b, err := os.ReadFile(filepath.Join(string(d), k))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -121,14 +126,20 @@ type Publisher struct {
 	lastWrite time.Time
 }
 
-// Publish lists tenant schemas and writes the userlist on the first call
-// (even with zero tenants — the pooler's init waits for a first publish),
-// when it changed, and every Refresh. Returns whether it wrote.
+// Publish lists tenant schemas and publishes them (PublishSchemas).
 func (p *Publisher) Publish(ctx context.Context, conn *pgx.Conn) (bool, error) {
 	schemas, err := TenantSchemas(ctx, conn)
 	if err != nil {
 		return false, err
 	}
+	return p.PublishSchemas(ctx, schemas)
+}
+
+// PublishSchemas writes the userlist on the first call (even with zero
+// tenants — the pooler's init waits for a first publish), when it
+// changed, and every Refresh. A failed write is retried on the next call.
+// Returns whether it wrote.
+func (p *Publisher) PublishSchemas(ctx context.Context, schemas []string) (bool, error) {
 	body, err := RenderTenantUserlist(p.Secret, schemas)
 	if err != nil {
 		return false, err
@@ -140,7 +151,11 @@ func (p *Publisher) Publish(ctx context.Context, conn *pgx.Conn) (bool, error) {
 	if !p.lastWrite.IsZero() && body == p.last && time.Since(p.lastWrite) < refresh {
 		return false, nil
 	}
-	if err := p.Store.Put(ctx, map[string][]byte{KeyUserlist: []byte(body), KeyUpstream: []byte(p.Upstream)}); err != nil {
+	if err := p.Store.Put(ctx, map[string][]byte{
+		KeyUserlist:    []byte(body),
+		KeyUpstream:    []byte(p.Upstream),
+		KeyPublishedAt: []byte(time.Now().UTC().Format(time.RFC3339)),
+	}); err != nil {
 		return false, err
 	}
 	p.last, p.lastWrite = body, time.Now()

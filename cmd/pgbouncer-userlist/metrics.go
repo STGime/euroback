@@ -91,6 +91,15 @@ func collectMetrics(ctx context.Context, c *config) string {
 	if clients < 0 {
 		clients = 0
 	}
+	// Published userlist age (#653): a stale list means new tenants can't
+	// log in through the pooler (worker publisher down / misconfigured).
+	if c.store != nil {
+		if data, err := c.store.Get(ctx); err == nil {
+			if t, err := time.Parse(time.RFC3339, string(data[pgbouncerconf.KeyPublishedAt])); err == nil {
+				fmt.Fprintf(&b, "# HELP pgbouncer_userlist_published_age_seconds Seconds since the worker last published the tenant userlist.\n# TYPE pgbouncer_userlist_published_age_seconds gauge\npgbouncer_userlist_published_age_seconds %g\n", time.Since(t).Seconds())
+			}
+		}
+	}
 	fmt.Fprintf(&b, "# HELP pgbouncer_client_connections Client connections (used_clients, excluding the scrape).\n# TYPE pgbouncer_client_connections gauge\npgbouncer_client_connections %g\n", clients)
 	fmt.Fprintf(&b, "# HELP pgbouncer_max_client_conn Configured max_client_conn.\n# TYPE pgbouncer_max_client_conn gauge\npgbouncer_max_client_conn %d\n", pgbouncerconf.MaxClientConn)
 	return b.String()

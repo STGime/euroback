@@ -253,3 +253,16 @@ groups:
             sockets to 6432 (it can't log in, but occupies slots) — find the
             source function in the runner logs; on the gateway's pooler it
             means gateway client pools are oversized.
+
+      # The worker republishes the runner pooler's tenant userlist at least
+      # every 5 min (#653); older means its publisher is down or
+      # misconfigured and new projects can't use ctx.db.sql.
+      - alert: PgBouncerUserlistStale
+        expr: max by (pod) (pgbouncer_userlist_published_age_seconds{app="pgbouncer"}) > 900
+        for: 5m
+        labels:
+          severity: warning
+          service: pgbouncer
+        annotations:
+          summary: "Runner pooler's tenant userlist not republished for 15+ minutes"
+          description: "Check the worker logs for 'pgbouncer userlist publish'; kubectl -n eurobase get secret pgbouncer-tenant-userlist."
