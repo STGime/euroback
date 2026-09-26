@@ -65,7 +65,7 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 		failExport("resolve_project", err)
 		return err
 	}
-	if err := refuseDuringUpgrade(ctx, w.DBPool, args.ProjectID); err != nil {
+	if err := refuseDuringUpgrade(ctx, upgradeStatePool(w.Data, w.DBPool), args.ProjectID); err != nil {
 		failExport("upgrade_in_progress", err)
 		return err
 	}
@@ -174,7 +174,7 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 		failExport("resolve_project", err)
 		return err
 	}
-	if err := refuseDuringUpgrade(ctx, w.DBPool, args.ProjectID); err != nil {
+	if err := refuseDuringUpgrade(ctx, upgradeStatePool(w.Data, w.DBPool), args.ProjectID); err != nil {
 		failExport("upgrade_in_progress", err)
 		return err
 	}
@@ -267,6 +267,17 @@ func refuseDuringUpgrade(ctx context.Context, pool *pgxpool.Pool, projectID stri
 		return ErrUpgradeInProgress
 	}
 	return nil
+}
+
+// upgradeStatePool is the pool refuseDuringUpgrade reads project_upgrades
+// with: the developer pool (data.Pool). Migration 000117 revokes the table
+// from eurobase_gateway — the worker's DBPool — so reading it there fails
+// every export with 42501. Without a developer pool (dev) it's fallback.
+func upgradeStatePool(data compliance.ExportSource, fallback *pgxpool.Pool) *pgxpool.Pool {
+	if data.Pool != nil {
+		return data.Pool
+	}
+	return fallback
 }
 
 // resolveExportSource picks where a project's tenant tables are read from

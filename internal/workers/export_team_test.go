@@ -114,9 +114,11 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// As in cmd/worker: the repo is on the worker's eurobase_gateway pool.
+	workerRepo := dbprovider.NewRepo(poolAsRole(t, adminURL, "eurobase_gateway"))
 	resolver := func(c *dbprovider.Cipher) DedicatedResolver {
 		return func(ctx context.Context, pid string) (*pgxpool.Pool, error) {
-			p, err := dbprovider.OpenOwnerPool(ctx, repo, c, pid)
+			p, err := dbprovider.OpenOwnerPool(ctx, workerRepo, c, pid)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, nil
 			}
@@ -206,6 +208,10 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 	t.Run("upgrade before cutover: refused; live: allowed", func(t *testing.T) {
 		// The dedicated row is already active here, as it is once the
 		// upgrade's provisioning step finishes — before the data copy.
+		// The check runs with the production roles: the worker's DBPool is
+		// eurobase_gateway, which may not read project_upgrades (000117).
+		gateway, developer := poolAsRole(t, adminURL, "eurobase_gateway"), poolAsRole(t, adminURL, "eurobase_developer")
+		checkPool := upgradeStatePool(compliance.ExportSource{Pool: developer}, gateway)
 		t.Cleanup(func() {
 			_, _ = platform.Exec(context.Background(), `DELETE FROM project_upgrades WHERE project_id = $1`, projectID)
 		})
@@ -216,13 +222,13 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 		}
 		for _, state := range []string{"requested", "provisioning", "copying", "cutting_over"} {
 			mustExec(t, platform, `UPDATE project_upgrades SET state = $2 WHERE id = $1`, upgradeID, state)
-			if err := refuseDuringUpgrade(ctx, platform, projectID); !errors.Is(err, ErrUpgradeInProgress) {
+			if err := refuseDuringUpgrade(ctx, checkPool, projectID); !errors.Is(err, ErrUpgradeInProgress) {
 				t.Errorf("state %s: err = %v, want ErrUpgradeInProgress", state, err)
 			}
 		}
 		for _, state := range []string{"live", "confirmed", "failed"} {
 			mustExec(t, platform, `UPDATE project_upgrades SET state = $2 WHERE id = $1`, upgradeID, state)
-			if err := refuseDuringUpgrade(ctx, platform, projectID); err != nil {
+			if err := refuseDuringUpgrade(ctx, checkPool, projectID); err != nil {
 				t.Errorf("state %s: err = %v, want nil", state, err)
 			}
 		}
@@ -235,6 +241,23 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 			t.Errorf("src = %+v, err = %v; want the shared source", src, err)
 		}
 	})
+}
+
+// poolAsRole connects with adminURL's login and runs as role, so queries
+// get that role's privileges.
+func poolAsRole(t *testing.T, adminURL, role string) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["role"] = role
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	return p
 }
 
 func mustExec(t *testing.T, p *pgxpool.Pool, q string, args ...any) {
