@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -208,6 +210,33 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Through the real router: a Team project whose dedicated database is
+	// still provisioning (no host yet — its pool can't be opened) gets
+	// 503 on tenant-data routes, never the shared cluster, while its
+	// platform-table settings stay editable.
+	check(t, env, "console_fails_closed_while_provisioning", func() error {
+		stuck := env.addProvisioningTeamProject(t)
+		for _, path := range []string{"/data/todos", "/users"} {
+			r := env.consoleFor(stuck, "GET", path, "")
+			if r.code != http.StatusServiceUnavailable {
+				return fmt.Errorf("want 503: %w", r)
+			}
+		}
+		body, err := json.Marshal(map[string]any{"auth_config": tenant.DefaultAuthConfig()})
+		if err != nil {
+			return err
+		}
+		req := httptest.NewRequest("PATCH", "http://api.eurobase.test/v1/tenants/"+stuck, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+env.platformJWT)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code >= 300 {
+			return fmt.Errorf("settings locked out: PATCH /v1/tenants/{id}: %d %s", rec.Code, rec.Body.String())
+		}
+		return nil
+	})
+
 	// ded_only exists only on the dedicated DB, so a listing read from the
 	// stale shared copy can't pass.
 	check(t, env, "console_schema_introspection", func() error {
@@ -217,6 +246,40 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if !strings.Contains(r.body, "ded_only") {
 			return fmt.Errorf("schema listing lacks the dedicated-only table: %w", r)
+		}
+		return nil
+	})
+
+	// Console Table Editor schema editing (/schema/tables): the DDL itself
+	// is routed, but its prechecks and listings read the shared cluster
+	// (#679). ded_only exists only on the dedicated DB.
+	check(t, env, "console_ddl_create_table", func() error {
+		if r := console("POST", "/schema/tables", `{"name":"console_made","columns":[{"name":"id","type":"uuid","primary_key":true,"default":"gen_random_uuid()"},{"name":"note","type":"text"}]}`); r.code >= 300 {
+			return r
+		}
+		if !env.dedTableExists(t, "console_made") {
+			return errors.New("table not created on the dedicated DB")
+		}
+		return nil
+	})
+
+	check(t, env, "console_ddl_add_column", func() error {
+		if r := console("POST", "/schema/tables/ded_only/columns", `{"name":"note","type":"text","nullable":true}`); r.code >= 300 {
+			return r
+		}
+		if env.dedScalar(t, "SELECT count(*)::text FROM pg_attribute WHERE attrelid = '%s'::regclass AND attname = 'note'", "ded_only") != "1" {
+			return errors.New("column not added on the dedicated DB")
+		}
+		return nil
+	})
+
+	check(t, env, "console_ddl_list_indexes", func() error {
+		r := console("GET", "/schema/tables/ded_only/indexes", "")
+		if r.code != 200 {
+			return r
+		}
+		if !strings.Contains(r.body, "ded_only_marker_idx") {
+			return fmt.Errorf("index listing lacks the dedicated-only index: %w", r)
 		}
 		return nil
 	})
@@ -268,6 +331,8 @@ type knownGap struct {
 
 var teamKnownGaps = map[string]knownGap{
 	"console_schema_introspection": {"#679", []string{"lacks the dedicated-only table"}},
+	"console_ddl_add_column":       {"#679", []string{"does not exist in schema"}},
+	"console_ddl_list_indexes":     {"#679", []string{"lacks the dedicated-only index"}},
 	"sdk_ddl_create_table":         {"#679", []string{"SQLSTATE 3F000", "table not created on the dedicated DB"}},
 	// SDK DDL above creates its table in the stale shared copy.
 	"upgraded/shared_cluster_untouched": {"#679", []string{"stale shared copy changed"}},
@@ -394,6 +459,35 @@ func (e *teamEnv) dedScalar(t *testing.T, format, table string) string {
 	return v
 }
 
+// consoleFor issues a console request as the owner for another project.
+func (e *teamEnv) consoleFor(projectID, method, path, body string) *httpResult {
+	req := httptest.NewRequest(method, "http://api.eurobase.test/platform/projects/"+projectID+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e.platformJWT)
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return &httpResult{req: "console " + method + " " + path, code: rec.Code, body: rec.Body.String()}
+}
+
+// addProvisioningTeamProject creates a Team project owned by the same user
+// whose project_databases row is still provisioning (no host), as between
+// project creation and the provision worker's MarkActive.
+func (e *teamEnv) addProvisioningTeamProject(t *testing.T) string {
+	t.Helper()
+	id := "7e4a0000-0000-4000-a000-" + randHexT(t, 6)
+	slug := "stuck-" + randHexT(t, 4)
+	mustExecT(t, e.shared, `INSERT INTO projects (id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
+		VALUES ($1, $2, 'stuck', $3, $4, $5, 'fr-par', 'team', 'active')`,
+		id, e.ownerUser, slug, "tenant_"+strings.ReplaceAll(id, "-", "_"), "b-"+slug)
+	mustExecT(t, e.shared, `INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING`, id, e.ownerUser)
+	if _, err := dbprovider.NewRepo(e.shared).InsertProvisioning(context.Background(), id, &dbprovider.Instance{
+		ProviderID: "e2e-" + slug, DBName: "rdb", Username: "eurobase_owner", State: dbprovider.StateProvisioning, Region: "fr-par",
+	}, "scaleway", []byte("x"), []byte("x"), 1); err != nil {
+		t.Fatalf("InsertProvisioning: %v", err)
+	}
+	return id
+}
+
 func (e *teamEnv) dedTableExists(t *testing.T, table string) bool {
 	t.Helper()
 	var ok bool
@@ -502,6 +596,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	}
 	// Exists only here, so reads from the stale shared copy are detectable.
 	mustExecT(t, dedAdmin, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+	mustExecT(t, dedAdmin, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
 
 	// project_databases row with sealed credentials (owner, runtime, readonly).
 	key := make([]byte, 32)

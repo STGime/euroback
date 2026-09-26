@@ -2,13 +2,16 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestVaultService_tenantPool pins the two-branch contract:
+// TestVaultService_tenantPool pins the contract (plus: a project with a
+// dedicated database but no pool on the request is refused, #678):
 //
 //   * ctx has NO stashed tenant pool → fall back to s.pool
 //     (Free/Pro path — the middleware doesn't stash for projects
@@ -34,7 +37,7 @@ func TestVaultService_tenantPool(t *testing.T) {
 	s := &VaultService{pool: shared}
 
 	t.Run("no tenant pool stashed → shared pool", func(t *testing.T) {
-		got := s.tenantPool(context.Background())
+		got, _ := s.tenantPool(context.Background())
 		if got != shared {
 			t.Fatalf("expected shared pool, got %p (shared=%p)", got, shared)
 		}
@@ -42,9 +45,25 @@ func TestVaultService_tenantPool(t *testing.T) {
 
 	t.Run("tenant pool stashed → tenant pool", func(t *testing.T) {
 		ctx := query.ContextWithTenantPool(context.Background(), dedicated)
-		got := s.tenantPool(ctx)
+		got, _ := s.tenantPool(ctx)
 		if got != dedicated {
 			t.Fatalf("expected dedicated pool, got %p (dedicated=%p, shared=%p)", got, dedicated, shared)
+		}
+	})
+
+	t.Run("dedicated project without a pool → refused, never shared (#678)", func(t *testing.T) {
+		ctx := auth.ContextWithProject(context.Background(), &auth.ProjectContext{ProjectID: "p", HasDedicatedDB: true})
+		got, err := s.tenantPool(ctx)
+		if !errors.Is(err, ErrDedicatedPoolUnavailable) || got != nil {
+			t.Fatalf("got pool %p, err %v; want nil, ErrDedicatedPoolUnavailable", got, err)
+		}
+	})
+
+	t.Run("dedicated project with its pool → that pool", func(t *testing.T) {
+		ctx := auth.ContextWithProject(context.Background(), &auth.ProjectContext{ProjectID: "p", HasDedicatedDB: true})
+		ctx = query.ContextWithTenantPool(ctx, dedicated)
+		if got, err := s.tenantPool(ctx); err != nil || got != dedicated {
+			t.Fatalf("got %p, %v; want dedicated", got, err)
 		}
 	})
 
@@ -53,7 +72,7 @@ func TestVaultService_tenantPool(t *testing.T) {
 		// so this ctx is equivalent to Background(). Belt +
 		// suspenders in case someone bypasses the helper.
 		ctx := query.ContextWithTenantPool(context.Background(), nil)
-		got := s.tenantPool(ctx)
+		got, _ := s.tenantPool(ctx)
 		if got != shared {
 			t.Fatalf("expected shared pool on nil stash, got %p", got)
 		}

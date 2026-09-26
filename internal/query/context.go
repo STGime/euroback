@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -128,3 +129,8 @@ func DeveloperRoleFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(developerRoleKey{}).(bool)
 	return v
 }
+
+// ErrDedicatedPoolUnavailable: the project keeps its tenant data on a
+// dedicated database and no pool for it is on the request. Callers refuse
+// (503) — never fall back to the shared cluster (#678).
+var ErrDedicatedPoolUnavailable = errors.New("the project's dedicated database is not available")

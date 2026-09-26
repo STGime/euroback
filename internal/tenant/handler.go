@@ -14,6 +14,7 @@ import (
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/plans"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -451,6 +452,11 @@ func HandleUpdateProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		rotated, err := svc.UpdateAuthConfig(r.Context(), projectID, claims.Subject, *body.AuthConfig)
 		if err != nil {
 			slog.Error("update auth config failed", "error", err, "project_id", projectID)
+			if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+				// OAuth secrets go to the dedicated DB's vault (#678).
+				http.Error(w, `{"error":"the project's dedicated database is not available right now; OAuth secrets can't be saved"}`, http.StatusServiceUnavailable)
+				return
+			}
 			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "not owned") {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 				return

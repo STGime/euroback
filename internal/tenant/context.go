@@ -57,6 +57,20 @@ type TenantPoolResolver func(ctx context.Context, projectID string) *pgxpool.Poo
 // on the developer pool. Pass nil in dev configurations to skip SSO
 // enforcement (safe default; matches pre-fix behaviour).
 func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
+	return platformTenantContext(pool, developerPool, resolver, true)
+}
+
+// PlatformTenantContextForSettings is PlatformTenantContext for project
+// settings (PATCH /v1/tenants/{id}), which live in platform tables: an
+// unavailable dedicated database doesn't lock the owner out of them. The
+// request then carries no tenant pool, and the one step that needs the
+// dedicated DB (the OAuth-secret vault write) refuses on its own
+// (query.ErrDedicatedPoolUnavailable) — it never falls back to shared.
+func PlatformTenantContextForSettings(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
+	return platformTenantContext(pool, developerPool, resolver, false)
+}
+
+func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver, failClosed bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := auth.ClaimsFromContext(r.Context())
@@ -194,13 +208,17 @@ func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 				if resolver != nil {
 					tp = resolver(ctx, projectID)
 				}
-				if tp == nil {
+				if tp == nil && !failClosed {
+					slog.Warn("platform tenant context: dedicated database unavailable — continuing without it (settings route)",
+						"project_id", projectID, "project_database_id", *pdID)
+				} else if tp == nil {
 					slog.Error("platform tenant context: dedicated database unavailable — refusing (no shared fallback)",
 						"project_id", projectID, "project_database_id", *pdID, "resolver_configured", resolver != nil)
 					http.Error(w, `{"error":"the project's dedicated database is not available right now"}`, http.StatusServiceUnavailable)
 					return
+				} else {
+					ctx = query.ContextWithTenantPool(ctx, tp)
 				}
-				ctx = query.ContextWithTenantPool(ctx, tp)
 			}
 			// Stash the resolved role so RequireRole (called by
 			// handlers that live outside the membership-middleware
