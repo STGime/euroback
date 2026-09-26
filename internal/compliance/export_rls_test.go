@@ -293,7 +293,8 @@ func migratorExec(t *testing.T, dev *pgxpool.Pool, stmts ...string) {
 func runTenantExport(t *testing.T, platform *pgxpool.Pool, src ExportSource, schema, projectID string) (*ExportResult, map[string][]byte, ExportMetadata) {
 	t.Helper()
 	var buf bytes.Buffer
-	res, err := WriteTenantExport(context.Background(), platform, src, &buf, schema, projectID, "exp-rls", "json")
+	res, err := WriteTenantExport(context.Background(), platform, src, &buf, schema, projectID, "exp-rls", "json",
+		TenantExportOptions{Objects: fakeLister{}, Bucket: "b"})
 	if err != nil {
 		t.Fatalf("WriteTenantExport: %v", err)
 	}

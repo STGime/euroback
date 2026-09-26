@@ -76,12 +76,19 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 	}
 	defer closeSrc()
 
+	// The storage manifest lists the project's bucket (#656). Never a
+	// typed nil in the interface: that would look configured.
+	opts := compliance.TenantExportOptions{Bucket: s3Bucket}
+	if w.S3 != nil {
+		opts.Objects = w.S3
+	}
+
 	logger.Info("streaming tenant export zip to temp file")
 	var result *compliance.ExportResult
 	tmpFile, size, totalRows, err := streamExportToTempFile(
 		ctx, args.ExportID,
 		func(out io.Writer) (int, error) {
-			res, err := compliance.WriteTenantExport(ctx, w.DBPool, src, out, schemaName, args.ProjectID, args.ExportID, args.Format)
+			res, err := compliance.WriteTenantExport(ctx, w.DBPool, src, out, schemaName, args.ProjectID, args.ExportID, args.Format, opts)
 			if err != nil {
 				return 0, err
 			}

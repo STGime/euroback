@@ -1,0 +1,79 @@
+name: Compliance export
+
+# Runs the DB-backed compliance export suites (#654 / #656 / #663) against
+# a PostgreSQL 16 built by scripts/db/apply-migrations.sh with the
+# production roles, and checks the worker image ships a pg_dump that can
+# dump a PG16 server (the schema section of every tenant export needs it).
+#
+# Path-filtered: don't make this a *required* check without dropping the
+# filter, or unrelated PRs will wait on it forever.
+
+on:
+  pull_request:
+    paths:
+      - internal/compliance/**
+      - internal/workers/export*.go
+      - internal/dbprovider/owner_pool.go
+      - internal/storage/s3.go
+      - migrations/**
+      - deploy/docker/Dockerfile.worker
+      - .github/workflows/compliance-export.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-db-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Not a service container: the Team-tier test connects to its
+      # "dedicated" database with sslmode=require, so the server needs TLS
+      # (the image's snakeoil certificate is enough).
+      - name: Start PostgreSQL 16 with TLS
+        run: |
+          docker run -d --name pg -p 5432:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=export-ci-ephemeral -e POSTGRES_DB=eurobase \
+            postgres:16 \
+            -c ssl=on \
+            -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem \
+            -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+          for i in $(seq 1 30); do
+            docker exec pg pg_isready -U postgres -d eurobase && break
+            sleep 2
+          done
+
+      - name: PostgreSQL 16 client tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-client-16
+          echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
+
+      - name: Apply migrations
+        run: scripts/db/apply-migrations.sh "postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable"
+
+      - name: Export suites
+        env:
+          EXPORT_TEST_DEV_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
+          EXPORT_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
+          TEAM_EXPORT_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
+        run: |
+          pg_dump --version
+          go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection'
+          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource'
+
+  worker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the worker image
+        run: docker build -f deploy/docker/Dockerfile.worker -t worker:ci .
+      - name: pg_dump in the image dumps PG16
+        run: docker run --rm --entrypoint pg_dump worker:ci --version | tee /dev/stderr | grep -Eq 'PostgreSQL\) 1[6-9]\.'
