@@ -51,6 +51,18 @@ type ExportService struct {
 	S3          *storage.S3Client
 	AuditSvc    *audit.Service
 	riverClient *river.Client[pgx.Tx]
+	// tenantPool returns the pool holding a project's tenant schema when
+	// it isn't the shared cluster (a Team-tier dedicated database, #663);
+	// nil = the shared cluster.
+	tenantPool func(ctx context.Context, projectID string) *pgxpool.Pool
+}
+
+// WithTenantPoolResolver routes tenant-schema reads (UserExistsInTenant) to
+// a Team-tier project's dedicated database. The resolver returns nil for
+// projects on the shared cluster.
+func (s *ExportService) WithTenantPoolResolver(r func(ctx context.Context, projectID string) *pgxpool.Pool) *ExportService {
+	s.tenantPool = r
+	return s
 }
 
 // NewExportService creates a new ExportService with an insert-only River client.
@@ -127,9 +139,16 @@ func (s *ExportService) UserExistsInTenant(ctx context.Context, projectID, userI
 		return false, fmt.Errorf("resolve project schema: %w", err)
 	}
 
+	// A Team-tier project's users table is on its dedicated database (#663).
+	tenant := s.Pool
+	if s.tenantPool != nil {
+		if p := s.tenantPool(ctx, projectID); p != nil {
+			tenant = p
+		}
+	}
 	var exists bool
 	q := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.users WHERE id = $1)`, quoteIdent(schemaName))
-	if err := edb.RunAsService(ctx, s.Pool, func(ctx context.Context, tx pgx.Tx) error {
+	if err := edb.RunAsService(ctx, tenant, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, userID).Scan(&exists)
 	}); err != nil {
 		return false, fmt.Errorf("check user existence: %w", err)
@@ -463,6 +482,21 @@ func withExportSnapshot(ctx context.Context, src ExportSource, fn func(pgx.Tx) e
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// requireSchema fails when schemaName doesn't exist on the export source.
+// Listing a missing schema returns no tables, which would otherwise look
+// like a complete, empty export — the failure mode of reading the wrong
+// database (a Team-tier project's shared-cluster slot has no schema, #663).
+func requireSchema(ctx context.Context, tx pgx.Tx, schemaName string) error {
+	var ok bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, schemaName).Scan(&ok); err != nil {
+		return fmt.Errorf("check tenant schema: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("tenant schema %q not found on the export source database", schemaName)
+	}
+	return nil
 }
 
 // maxRowsPerTable caps each table in an export. A larger table is
@@ -849,6 +883,9 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 	var tables []string
 	var exported []TableExport
 	err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
+		if err := requireSchema(ctx, tx, schemaName); err != nil {
+			return err
+		}
 		var err error
 		if tables, err = ListTenantTables(ctx, tx, schemaName); err != nil {
 			return err
@@ -946,6 +983,9 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, 
 	var refs []TableRef
 	var exported []TableExport
 	err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
+		if err := requireSchema(ctx, tx, schemaName); err != nil {
+			return err
+		}
 		// User profile.
 		te := exportTable(ctx, tx, zw, "users", "_user_profile",
 			fmt.Sprintf(`SELECT * FROM %s.users WHERE id = $1`, quoteIdent(schemaName)),

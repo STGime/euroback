@@ -994,6 +994,21 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// Listing + status are also admin-only since the URLs they
 			// hand back are presigned and give the holder the file.
 			exportSvc := compliance.NewExportService(pool, s3Client, auditSvc)
+			// Team-tier: the user check before a per-user export reads the
+			// dedicated database's users table, as its owner (#663). The
+			// export itself runs in the worker, which resolves the same way.
+			if poolCache != nil {
+				exportSvc.WithTenantPoolResolver(func(ctx context.Context, projectID string) *pgxpool.Pool {
+					p, err := poolCache.GetOwner(ctx, projectID)
+					if err != nil {
+						if !errors.Is(err, pgx.ErrNoRows) {
+							slog.Warn("export: dedicated pool unavailable", "project_id", projectID, "error", err)
+						}
+						return nil
+					}
+					return p
+				})
+			}
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/export", compliance.HandleRequestTenantExport(exportSvc))
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/user-export", compliance.HandleRequestUserExport(exportSvc))
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/exports", compliance.HandleListExports(exportSvc))
