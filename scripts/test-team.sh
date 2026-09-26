@@ -15,7 +15,10 @@ SH_PORT="${TEAM_SHARED_PORT:-5470}"
 DED_PORT="${TEAM_DED_PORT:-5471}"
 S3_PORT="${TEAM_S3_PORT:-5472}"
 
-cleanup() { docker rm -f "$SH" "$DED" "$S3" >/dev/null 2>&1 || true; rm -rf "${CERTS:-}" "${GARAGE_CONF:-}"; }
+cleanup() {
+  docker rm -f "$SH" "$DED" "$S3" >/dev/null 2>&1 || true
+  for f in "${CERTS:-}" "${GARAGE_CONF:-}"; do [ -z "$f" ] || rm -rf "$f"; done
+}
 [ -n "${TEAM_KEEP:-}" ] || trap cleanup EXIT
 cleanup
 
@@ -63,7 +66,7 @@ garage() { docker exec -e RUST_LOG=warn "$S3" /garage "$@"; }
 ok=
 for _ in $(seq 1 30); do garage status >/dev/null 2>&1 && ok=1 && break; sleep 1; done
 [ -n "$ok" ] || { echo "$S3: garage not ready after 30s" >&2; docker logs "$S3" | tail -20 >&2; exit 1; }
-NODE="$(garage node id -q | cut -d@ -f1)"
+NODE="$(garage node id -q | cut -d@ -f1)" && [ -n "$NODE" ] || { echo "$S3: can't read the garage node id" >&2; docker logs "$S3" | tail -20 >&2; exit 1; }
 garage layout assign -z dc1 -c 1G "$NODE" >/dev/null
 garage layout apply --version 1 >/dev/null
 garage key import --yes -n team-e2e "$GARAGE_KEY_ID" "$GARAGE_SECRET" >/dev/null

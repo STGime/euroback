@@ -912,10 +912,18 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatal(err)
 	}
 	// Garage (the harness's S3) doesn't implement PutBucketAcl, which
-	// CreateBucket issues after creating the bucket; its buckets are
-	// private anyway.
-	if err := s3Client.CreateBucket(ctx, "eurobase-"+slug); err != nil && !strings.Contains(err.Error(), "PutBucketAcl") {
-		t.Fatalf("create bucket: %v", err)
+	// CreateBucket issues after creating the bucket (501 NotImplemented);
+	// its buckets are private anyway. Accept only that, and check the
+	// bucket exists. Garage has no object lock or public ACLs either —
+	// Legal-Team WORM checks can't run against it.
+	if err := s3Client.CreateBucket(ctx, "eurobase-"+slug); err != nil {
+		var apiErr interface{ ErrorCode() string }
+		if !strings.Contains(err.Error(), "PutBucketAcl") || !errors.As(err, &apiErr) || apiErr.ErrorCode() != "NotImplemented" {
+			t.Fatalf("create bucket: %v", err)
+		}
+	}
+	if ok, err := s3Client.BucketExists(ctx, "eurobase-"+slug); err != nil || !ok {
+		t.Fatalf("bucket eurobase-%s missing after create: %v", slug, err)
 	}
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, s3Client, nil, nil,
 		subdomain, nil, nil, nil, vaultSvc, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
