@@ -12,7 +12,8 @@ metadata:
 spec:
   # Single replica during beta. The HPA below has minReplicas=1 to
   # match. See docs/runbooks/cost-tier.md.
-  replicas: 1
+  # No `replicas:` here: the HPA below owns the replica count. A fixed
+  # value in the manifest reset it to 1 on every deploy.
   selector:
     matchLabels:
       app: functions
