@@ -20,6 +20,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/vault"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -210,6 +211,26 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	check(t, env, "console_vault_set", func() error {
+		if r := console("POST", "/vault", `{"name":"E2E_CONSOLE_SECRET","value":"v1"}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "vault_secrets", "name = 'E2E_CONSOLE_SECRET'"); n != 1 {
+			return fmt.Errorf("secret not in the dedicated DB's vault (count %d)", n)
+		}
+		return nil
+	})
+
+	check(t, env, "sdk_vault_set", func() error {
+		if r := sdk("POST", "/v1/vault", `{"name":"E2E_SDK_SECRET","value":"v1"}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "vault_secrets", "name = 'E2E_SDK_SECRET'"); n != 1 {
+			return fmt.Errorf("secret not in the dedicated DB's vault (count %d)", n)
+		}
+		return nil
+	})
+
 	// Through the real router: a Team project whose dedicated database is
 	// still provisioning (no host yet — its pool can't be opened) gets
 	// 503 on tenant-data routes, never the shared cluster, while its
@@ -233,6 +254,24 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		env.router.ServeHTTP(rec, req)
 		if rec.Code >= 300 {
 			return fmt.Errorf("settings locked out: PATCH /v1/tenants/{id}: %d %s", rec.Code, rec.Body.String())
+		}
+		// Saving an OAuth client secret needs the dedicated vault: refused,
+		// not written to the shared one.
+		cfg := tenant.DefaultAuthConfig()
+		cfg.OAuthProviders = map[string]tenant.OAuthProviderConfig{
+			"github": {Enabled: true, ClientID: "e2e-client", ClientSecret: "e2e-secret"},
+		}
+		body, err = json.Marshal(map[string]any{"auth_config": cfg})
+		if err != nil {
+			return err
+		}
+		req = httptest.NewRequest("PATCH", "http://api.eurobase.test/v1/tenants/"+stuck, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+env.platformJWT)
+		rec = httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("OAuth secret save while provisioning: want 503, got %d %s", rec.Code, rec.Body.String())
 		}
 		return nil
 	})
@@ -308,7 +347,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return nil
 		}
 		var fp string
-		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{env.schema, "todos"}.Sanitize())
+		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{env.schema, "todos"}.Sanitize(), pgx.Identifier{env.schema, "vault_secrets"}.Sanitize())
 		if err := env.shared.QueryRow(ctx, q, env.schema).Scan(&fp); err != nil {
 			return err
 		}
@@ -334,8 +373,6 @@ var teamKnownGaps = map[string]knownGap{
 	"console_ddl_add_column":       {"#679", []string{"does not exist in schema"}},
 	"console_ddl_list_indexes":     {"#679", []string{"lacks the dedicated-only index"}},
 	"sdk_ddl_create_table":         {"#679", []string{"SQLSTATE 3F000", "table not created on the dedicated DB"}},
-	// SDK DDL above creates its table in the stale shared copy.
-	"upgraded/shared_cluster_untouched": {"#679", []string{"stale shared copy changed"}},
 }
 
 func check(t *testing.T, env *teamEnv, name string, fn func() error) {
@@ -403,12 +440,17 @@ func (r *httpResult) neverReachedHandler() bool {
 const decoyTitle = "decoy-on-shared"
 
 // sharedFingerprintSQL summarises the stale shared copy: its tables and
-// the todos rows (%s = the quoted todos table).
+// the todos rows and the vault secret names (%[1]s / %[2]s = the quoted
+// todos / vault_secrets tables). SDK DDL's table is excluded while #679 is
+// open, so any other write to the stale copy fails the check.
 const sharedFingerprintSQL = `
 SELECT (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class
-         WHERE relnamespace = to_regnamespace($1) AND relkind = 'r')
+         WHERE relnamespace = to_regnamespace($1) AND relkind = 'r'
+           AND relname <> 'sdk_made') -- known gap #679 (sdk_ddl_create_table)
     || ' | ' ||
-       (SELECT coalesce(string_agg(title, ',' ORDER BY title), '') FROM ` + "%s" + `)`
+       (SELECT coalesce(string_agg(title, ',' ORDER BY title), '') FROM ` + "%[1]s" + `)
+    || ' | ' ||
+       (SELECT coalesce(string_agg(name, ',' ORDER BY name), '') FROM ` + "%[2]s" + `)`
 
 type teamTestConfig struct {
 	sharedAdmin, sharedGW, sharedDev string
@@ -544,7 +586,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		mustExecT(t, admin, `SELECT provision_tenant($1, 'team e2e', 'pro')`, projectID)
 		mustExecT(t, admin, fmt.Sprintf(`INSERT INTO %s (title) VALUES ($1)`, pgx.Identifier{schema, "todos"}.Sanitize()), decoyTitle)
 		mustExecT(t, admin, `UPDATE projects SET plan = 'team' WHERE id = $1`, projectID)
-		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{schema, "todos"}.Sanitize())
+		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{schema, "todos"}.Sanitize(), pgx.Identifier{schema, "vault_secrets"}.Sanitize())
 		if err := admin.QueryRow(ctx, q, schema).Scan(&sharedFP); err != nil {
 			t.Fatal(err)
 		}
@@ -643,8 +685,12 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatal(err)
 	}
 	subdomain := auth.NewSubdomainMiddleware(gw, "eurobase.test")
+	vaultSvc, err := vault.NewVaultService(gw, keyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, nil, nil, nil,
-		subdomain, nil, nil, nil, nil, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
+		subdomain, nil, nil, nil, vaultSvc, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
