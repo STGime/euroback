@@ -173,23 +173,38 @@ func (h *StorageHandler) WithPoolResolver(r PoolResolver) *StorageHandler {
 // context helpers so this works for both the SDK path (ProjectContext
 // set by APIKeyMiddleware) and console (set by
 // PlatformStorageContext).
-func (h *StorageHandler) tenantPool(ctx context.Context) *pgxpool.Pool {
-	if h.resolver == nil {
-		return h.pool
+//
+// A project with a dedicated database whose pool can't be resolved is
+// refused (query.ErrDedicatedPoolUnavailable) — never served from the
+// shared cluster, which has no storage_objects for a project created as
+// Team and a stale copy for one upgraded from Pro (#680).
+func (h *StorageHandler) tenantPool(ctx context.Context) (*pgxpool.Pool, error) {
+	pc, _ := auth.ProjectFromContext(ctx)
+	dedicated := pc != nil && pc.HasDedicatedDB
+	if h.resolver != nil {
+		projectID := query.ProjectIDFromContext(ctx)
+		if pc != nil && pc.ProjectID != "" {
+			projectID = pc.ProjectID
+		}
+		if projectID != "" {
+			if p := h.resolver(ctx, projectID); p != nil {
+				return p, nil
+			}
+		}
 	}
-	var projectID string
-	if pc, ok := auth.ProjectFromContext(ctx); ok && pc != nil {
-		projectID = pc.ProjectID
-	} else {
-		projectID = query.ProjectIDFromContext(ctx)
+	if dedicated {
+		return nil, query.ErrDedicatedPoolUnavailable
 	}
-	if projectID == "" {
-		return h.pool
+	return h.pool, nil
+}
+
+// runAsService runs fn as the service role on the project's pool.
+func (h *StorageHandler) runAsService(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
+	p, err := h.tenantPool(ctx)
+	if err != nil {
+		return err
 	}
-	if p := h.resolver(ctx, projectID); p != nil {
-		return p
-	}
-	return h.pool
+	return edb.RunAsService(ctx, p, fn)
 }
 
 // WithRetentionResolver attaches a retention resolver so upload paths
@@ -577,7 +592,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			escSchema,
 		)
 		uploader := uploaderForInsert(r)
-		insertErr := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
+		insertErr := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, q, key, contentType, size, uploader)
 			return err
 		})
@@ -589,7 +604,7 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		if insertErr != nil && isForeignKeyViolation(insertErr) && uploader != nil {
 			slog.Warn("storage upload: uploaded_by FK failed, retrying with NULL",
 				"schema", schema, "key", key, "attempted_user", uploader)
-			insertErr = edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
+			insertErr = h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 				_, err := tx.Exec(ctx, q, key, contentType, size, nil)
 				return err
 			})
@@ -791,7 +806,7 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
 		q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1`, escSchema)
-		if err := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
+		if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, q, key)
 			return err
 		}); err != nil {
@@ -1070,7 +1085,7 @@ func (h *StorageHandler) lookupUploadedAt(r *http.Request, key string) time.Time
 	esc := strings.ReplaceAll(schema, `"`, `""`)
 	q := fmt.Sprintf(`SELECT created_at FROM "%s".storage_objects WHERE key = $1`, esc)
 	var t time.Time
-	if err := edb.RunAsService(r.Context(), h.tenantPool(r.Context()), func(ctx context.Context, tx pgx.Tx) error {
+	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, key).Scan(&t)
 	}); err != nil {
 		// No row / RLS filter / query error — leave zero so the

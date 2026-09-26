@@ -10,10 +10,12 @@ set -euo pipefail
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 SH=eb-team-shared
 DED=eb-team-dedicated
+S3=eb-team-s3
 SH_PORT="${TEAM_SHARED_PORT:-5470}"
 DED_PORT="${TEAM_DED_PORT:-5471}"
+S3_PORT="${TEAM_S3_PORT:-5472}"
 
-cleanup() { docker rm -f "$SH" "$DED" >/dev/null 2>&1 || true; [ -z "${CERTS:-}" ] || rm -rf "$CERTS"; }
+cleanup() { docker rm -f "$SH" "$DED" "$S3" >/dev/null 2>&1 || true; [ -z "${CERTS:-}" ] || rm -rf "$CERTS"; }
 [ -n "${TEAM_KEEP:-}" ] || trap cleanup EXIT
 cleanup
 
@@ -30,10 +32,14 @@ docker run -d --name "$DED" -p "$DED_PORT:5432" -e POSTGRES_PASSWORD=postgres -e
     install -o postgres -g postgres -m 600 /certs/server.key /tmp/server.key
     install -o postgres -g postgres -m 644 /certs/server.crt /tmp/server.crt
     exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key' >/dev/null
+# S3 for the storage checks: MinIO, as in docker-compose.yml (local dev).
+docker run -d --name "$S3" -p "$S3_PORT:9000" -e MINIO_ROOT_USER=teame2e -e MINIO_ROOT_PASSWORD=teame2e-secret \
+  minio/minio server /data >/dev/null
 for c in "$SH" "$DED"; do
   for _ in $(seq 1 30); do docker exec "$c" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 done
 
+for _ in $(seq 1 30); do curl -sf "http://localhost:$S3_PORT/minio/health/ready" >/dev/null && break; sleep 1; done
 MIGLOG="$(mktemp)"
 if ! "$REPO_ROOT/scripts/db/apply-migrations.sh" "postgres://postgres:postgres@localhost:$SH_PORT/eurobase?sslmode=disable" >"$MIGLOG" 2>&1; then
   cat "$MIGLOG"; exit 1
@@ -64,4 +70,5 @@ TEAM_TEST_SHARED_GATEWAY="postgres://eurobase_gateway:localdev@localhost:$SH_POR
 TEAM_TEST_SHARED_DEVELOPER="postgres://eurobase_developer:localdev@localhost:$SH_PORT/eurobase?sslmode=disable" \
 TEAM_TEST_DED_OWNER="postgres://eurobase_owner:ownerpw@localhost:$DED_PORT/eb_fresh" \
 TEAM_TEST_DED_ADMIN="postgres://postgres:postgres@localhost:$DED_PORT/eb_fresh?sslmode=disable" \
+TEAM_TEST_S3_ENDPOINT="http://localhost:$S3_PORT" TEAM_TEST_S3_KEY=teame2e TEAM_TEST_S3_SECRET=teame2e-secret \
   go test ./internal/gateway/ -run TestTeamEndToEnd -count=1 -v "$@"

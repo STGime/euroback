@@ -366,32 +366,37 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// fallback.
 	sdkTenantPoolMw := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !enableSDKRouting || poolCache == nil {
-				next.ServeHTTP(w, r)
-				return
-			}
 			pc, ok := auth.ProjectFromContext(r.Context())
 			if !ok || pc == nil || !pc.HasDedicatedDB {
 				next.ServeHTTP(w, r)
 				return
 			}
-			p, err := poolCache.Get(r.Context(), pc.ProjectID)
+			// Team-tier: the runtime pool, or refuse — never the shared
+			// cluster (#680). It has no schema for a project created as
+			// Team and a stale copy for one upgraded from Pro, so a
+			// fallback would sign end users up into, and write storage
+			// metadata to, the wrong database. Routing off / no cipher
+			// refuses too. Never the owner pool: SDK traffic must stay
+			// subject to RLS.
+			var (
+				p   *pgxpool.Pool
+				err = errors.New("Team-tier SDK routing disabled (TEAM_TIER_ROUTING, VAULT_ENCRYPTION_KEY)")
+			)
+			if enableSDKRouting && poolCache != nil {
+				p, err = poolCache.Get(r.Context(), pc.ProjectID)
+			}
 			if err != nil {
-				switch {
-				case errors.Is(err, pgx.ErrNoRows):
-					// Stale ctx (row deleted between apiKeyMw and this
-					// middleware). Fall through to shared.
-				case errors.Is(err, dbprovider.ErrRuntimeCredMissing):
-					slog.Error("SDK vault/auth routing refused: runtime credential missing — falling back to shared pool (loud failure) rather than owner-connect (silent RLS bypass)",
+				if errors.Is(err, dbprovider.ErrRuntimeCredMissing) {
+					slog.Error("SDK request refused: runtime credential missing on project_databases row (never owner-connect: RLS bypass)",
 						"project_id", pc.ProjectID)
-				default:
-					slog.Warn("sdk tenant pool: dedicated pool unavailable, falling back to shared",
+				} else {
+					slog.Error("SDK request refused: dedicated database unavailable (no shared fallback)",
 						"project_id", pc.ProjectID, "error", err)
 				}
-				next.ServeHTTP(w, r)
+				http.Error(w, `{"error":"the project's dedicated database is not available right now"}`, http.StatusServiceUnavailable)
 				return
 			}
-			ctx := query.ContextWithTenantPool(r.Context(), p)
+			ctx := query.WithDedicatedDB(query.ContextWithTenantPool(r.Context(), p))
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -1474,9 +1479,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// to SDK uploads too (not just console uploads), plus a
 				// hold checker so post-upload retention_holds refuse
 				// SDK deletes with 409 object_locked.
+				// #680: storage_objects metadata goes to the runtime pool
+				// sdkTenantPoolMw put on the request (503 if a Team
+				// project has none), as the engine's resolver does.
+				r.Use(sdkTenantPoolMw)
 				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(poolResolver)).
 					WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
-					WithHoldChecker(compliance.NewHoldService(pool))
+					WithHoldChecker(compliance.NewHoldService(pool)).
+					WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) })
 				r.Mount("/", storageHandler.Routes())
 			})
 		} else {
