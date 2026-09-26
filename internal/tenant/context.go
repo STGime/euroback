@@ -244,7 +244,7 @@ func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 // contents are project-scoped and belong to the org that owns the
 // project, so a password session can't reach them for an
 // sso_required org.
-func PlatformStorageContext(pool, developerPool *pgxpool.Pool) func(http.Handler) http.Handler {
+func PlatformStorageContext(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := auth.ClaimsFromContext(r.Context())
@@ -358,6 +358,22 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool) func(http.Handler
 			// no-op because storage handlers don't do DDL — the
 			// service-role marker above is what grants access.
 			ctx = query.WithDeveloperRole(ctx)
+			// Team-tier (#680): the dedicated owner pool, or 503 — never
+			// the shared cluster (stale copy for an upgraded project).
+			if pdID != nil {
+				ctx = query.WithDedicatedDB(ctx)
+				var tp *pgxpool.Pool
+				if resolver != nil {
+					tp = resolver(ctx, projectID)
+				}
+				if tp == nil {
+					slog.Error("platform storage context: dedicated database unavailable — refusing (no shared fallback)",
+						"project_id", projectID, "project_database_id", *pdID)
+					http.Error(w, `{"error":"the project's dedicated database is not available right now"}`, http.StatusServiceUnavailable)
+					return
+				}
+				ctx = query.ContextWithTenantPool(ctx, tp)
+			}
 			// Also stash the schema + project_id in the query context
 			// so h.tenantPool(ctx) inside StorageHandler.WithPoolResolver
 			// picks the dedicated pool via ProjectContext (which it

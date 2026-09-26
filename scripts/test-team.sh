@@ -34,12 +34,16 @@ docker run -d --name "$DED" -p "$DED_PORT:5432" -e POSTGRES_PASSWORD=postgres -e
     exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key' >/dev/null
 # S3 for the storage checks: MinIO, as in docker-compose.yml (local dev).
 docker run -d --name "$S3" -p "$S3_PORT:9000" -e MINIO_ROOT_USER=teame2e -e MINIO_ROOT_PASSWORD=teame2e-secret \
-  minio/minio server /data >/dev/null
+  minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data >/dev/null
 for c in "$SH" "$DED"; do
-  for _ in $(seq 1 30); do docker exec "$c" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
+  ok=
+  for _ in $(seq 1 30); do docker exec "$c" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && ok=1 && break; sleep 1; done
+  [ -n "$ok" ] || { echo "$c: postgres not ready after 30s" >&2; docker logs "$c" | tail -20 >&2; exit 1; }
 done
 
-for _ in $(seq 1 30); do curl -sf "http://localhost:$S3_PORT/minio/health/ready" >/dev/null && break; sleep 1; done
+ok=
+for _ in $(seq 1 30); do curl -sf "http://localhost:$S3_PORT/minio/health/ready" >/dev/null && ok=1 && break; sleep 1; done
+[ -n "$ok" ] || { echo "$S3: minio not ready after 30s" >&2; docker logs "$S3" | tail -20 >&2; exit 1; }
 MIGLOG="$(mktemp)"
 if ! "$REPO_ROOT/scripts/db/apply-migrations.sh" "postgres://postgres:postgres@localhost:$SH_PORT/eurobase?sslmode=disable" >"$MIGLOG" 2>&1; then
   cat "$MIGLOG"; exit 1

@@ -241,6 +241,10 @@ func (h *StorageHandler) assertObjectVisible(r *http.Request, key string) (bool,
 	if schema == "" {
 		return true, nil
 	}
+	// Never answer from the shared cluster for a Team project (#680).
+	if _, err := h.tenantPool(r.Context()); err != nil {
+		return false, err
+	}
 	var exists bool
 	err := h.engine.WithTenantTx(r.Context(), schema, func(tx pgx.Tx) error {
 		q := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`,
@@ -552,6 +556,14 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		"user", userID,
 	)
 
+	// Resolve the metadata pool before touching S3: a Team project whose
+	// dedicated database is unavailable must not get an object written
+	// (or overwritten) that can't be recorded (#680).
+	if _, err := h.tenantPool(r.Context()); err != nil {
+		writeTenantPoolError(w, err)
+		return
+	}
+
 	retention := h.retentionFor(r, key)
 	if err := h.s3.UploadObjectWithRetention(r.Context(), bucket, key, file, contentType, size, retention); err != nil {
 		slog.Error("storage upload failed", "error", err, "bucket", bucket, "key", key)
@@ -666,6 +678,10 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	// doesn't exist or the caller may not read it — either way, 404.
 	visible, err := h.objectReadable(r, key)
 	if err != nil {
+		if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+			writeTenantPoolError(w, err)
+			return
+		}
 		slog.Error("storage download: ownership check failed", "error", err, "key", key)
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
@@ -735,6 +751,10 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	// end-user from deleting another's file by guessing the key.
 	visible, err := h.assertObjectVisible(r, key)
 	if err != nil {
+		if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+			writeTenantPoolError(w, err)
+			return
+		}
 		slog.Error("storage delete: ownership check failed", "error", err, "key", key)
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
@@ -940,6 +960,10 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	if req.Operation == "download" {
 		visible, err := h.objectReadable(r, req.Key)
 		if err != nil {
+			if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+				writeTenantPoolError(w, err)
+				return
+			}
 			slog.Error("storage signed-url: ownership check failed", "error", err, "key", req.Key)
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
@@ -1138,4 +1162,14 @@ func (h *StorageHandler) retentionFor(r *http.Request, key string) Retention {
 		return Retention{}
 	}
 	return ret
+}
+
+// writeTenantPoolError answers 503 when the project's dedicated database
+// isn't available on this request, 500 otherwise.
+func writeTenantPoolError(w http.ResponseWriter, err error) {
+	if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+		http.Error(w, `{"error":"the project's dedicated database is not available right now"}`, http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 }

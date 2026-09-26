@@ -142,26 +142,49 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
-	// SDK storage runs as a signed-in end user (API key + end-user JWT),
-	// so storage_objects.uploaded_by points at the dedicated users table.
+	// SDK storage as a signed-in end user with the PUBLIC key, as an app
+	// does: RLS applies (the secret key would be service role), so this
+	// also proves the runtime — not owner — pool: another end user must
+	// not see the file.
 	check(t, env, "sdk_storage_upload_list_delete", func() error {
-		r := sdk("POST", "/v1/auth/signin", `{"email":"enduser@team.test","password":"Correct-horse-9"}`)
-		var tok struct {
-			AccessToken string `json:"access_token"`
+		signin := func(email string) (string, error) {
+			if r := sdk("POST", "/v1/auth/signup", `{"email":"`+email+`","password":"Correct-horse-9"}`); r.code >= 300 && !strings.Contains(r.body, "already registered") {
+				return "", r
+			}
+			r := sdk("POST", "/v1/auth/signin", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+			var tok struct {
+				AccessToken string `json:"access_token"`
+			}
+			if r.code != 200 || json.Unmarshal([]byte(r.body), &tok) != nil || tok.AccessToken == "" {
+				return "", fmt.Errorf("signin %s: %w", email, r)
+			}
+			return tok.AccessToken, nil
 		}
-		if r.code != 200 || json.Unmarshal([]byte(r.body), &tok) != nil || tok.AccessToken == "" {
-			return fmt.Errorf("signin: %w", r)
+		owner, err := signin("enduser@team.test")
+		if err != nil {
+			return err
 		}
-		asUser := func(method, path string) *httpResult {
+		other, err := signin("other@team.test")
+		if err != nil {
+			return err
+		}
+		as := func(token, method, path string) *httpResult {
 			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, nil)
-			req.Header.Set("apikey", env.secretKey)
-			req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+			req.Header.Set("apikey", env.publicKey)
+			req.Header.Set("Authorization", "Bearer "+token)
 			rec := httptest.NewRecorder()
 			env.router.ServeHTTP(rec, req)
 			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
 		}
-		if r := env.upload(env.secretKey, tok.AccessToken, "http://api.eurobase.test/v1/storage/upload", "e2e/sdk.txt"); r.code >= 300 {
+		asUser := func(method, path string) *httpResult { return as(owner, method, path) }
+		if r := env.upload(env.publicKey, owner, "http://api.eurobase.test/v1/storage/upload", "e2e/sdk.txt"); r.code >= 300 {
 			return r
+		}
+		if r := as(other, "GET", "/v1/storage/e2e/sdk.txt"); r.code != http.StatusNotFound {
+			return fmt.Errorf("another end user must not see the file (RLS; runtime pool): %w", r)
+		}
+		if r := asUser("GET", "/v1/storage/e2e/sdk.txt"); r.code >= 400 {
+			return fmt.Errorf("owner download: %w", r)
 		}
 		if n := env.dedCount(t, "storage_objects", "key = 'e2e/sdk.txt'"); n != 1 {
 			return fmt.Errorf("storage metadata not on the dedicated DB (count %d)", n)
@@ -616,6 +639,7 @@ type teamEnv struct {
 	schema            string
 	dedDB             string
 	secretKey         string
+	publicKey         string
 	scenario          string
 	upgraded          bool
 	sharedFingerprint string
@@ -895,7 +919,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
-		secretKey: sec, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
+		secretKey: sec, publicKey: pub, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
 		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
 	}
 }

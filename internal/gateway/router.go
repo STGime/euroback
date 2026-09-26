@@ -352,18 +352,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// bypass RLS on every owned tenant table. Same rationale as
 	// the loud warning in the SDK's poolResolver above.
 	//
-	// Gated on enableSDKRouting for the same reason the query
-	// engine's SDK dispatch is: pre-flag, SDK stays on shared for
-	// everything, matching the pre-Team-tier behaviour. Fires no-
-	// op when the flag is off.
-	//
-	// Handles the same three error paths as the query engine's
-	// resolver: ErrNoRows (Free/Pro) → transparent shared fallback;
-	// ErrRuntimeCredMissing (runtime cred not yet populated —
-	// pre-bootstrap window) → refuse to route, let the request
-	// 42P01 loudly on shared, DO NOT owner-connect (SDK RLS-
-	// bypass hazard); transient (network/500) → warn + shared
-	// fallback.
+	// Fails closed (#680): a project with a dedicated DB gets its
+	// runtime pool or 503 — also when TEAM_TIER_ROUTING is off or
+	// there is no cipher, and never the owner pool. Projects without
+	// one (Free/Pro) pass through unchanged. Mounted on /v1/db,
+	// /v1/auth, /v1/vault, /v1/storage and the OAuth callbacks, after
+	// MaintenanceModeMiddleware so a project in maintenance gets the
+	// maintenance response.
 	sdkTenantPoolMw := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			pc, ok := auth.ProjectFromContext(r.Context())
@@ -1215,15 +1210,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// can see.
 			if s3Client != nil {
 				r.Route("/storage", func(r chi.Router) {
-					r.Use(tenant.PlatformStorageContext(pool, developerPool))
+					r.Use(tenant.PlatformStorageContext(pool, developerPool, tenantPoolResolver))
 					// Console storage: route metadata reads/writes to
 					// the dedicated instance for Team-tier. The inner
 					// QueryEngine gets the same resolver so ownership
 					// checks (assertObjectVisible) also route.
-					storageHandler := storage.NewStorageHandler(s3Client, developerPool, query.NewQueryEngine(developerPool).WithPoolResolver(poolResolver)).
+					storageHandler := storage.NewStorageHandler(s3Client, developerPool, query.NewQueryEngine(developerPool).WithPoolResolver(query.TenantPoolFromContext)).
 						WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
 						WithHoldChecker(compliance.NewHoldService(pool)).
-						WithPoolResolver(storage.PoolResolver(enduserPoolResolver))
+						WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) })
 					r.With(tenant.RequireMinRole("developer")).Post("/upload", storageHandler.UploadFile)
 					r.With(tenant.RequireMinRole("developer")).Post("/signed-url", storageHandler.GenerateSignedURL)
 					r.With(tenant.RequireMinRole("viewer")).Get("/", storageHandler.ListFiles)
@@ -1370,8 +1365,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// middleware's LEFT JOIN of project_databases (added in
 		// subdomain_middleware.go same-PR); otherwise pc.HasDedicatedDB
 		// stays false and the middleware no-ops.
-		r.With(sdkTenantPoolMw, MaintenanceModeMiddleware).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
-		r.With(sdkTenantPoolMw, MaintenanceModeMiddleware).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
+		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
+		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 
 		// Auth endpoints (only need API key, no end-user JWT).
 		// sdkTenantPoolMw stashes the runtime pool for Team-tier
@@ -1382,8 +1377,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// OAuth login is broken for Team-tier end users.
 		r.Route("/auth", func(r chi.Router) {
 			r.Use(apiKeyMw.Handler)
+			r.Use(MaintenanceModeMiddleware) // before the pool: maintenance answers first
 			r.Use(sdkTenantPoolMw)
-			r.Use(MaintenanceModeMiddleware)
 			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc, limiter))
 			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc, limiter))
 			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc, limiter))
@@ -1418,6 +1413,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.Use(MaintenanceModeMiddleware)
 				r.Use(endUserMw.Handler)
 				r.Use(tenant.TenantContextFromProject())
+				// #680: a Team project gets its runtime pool or 503 — also
+				// with routing off, where the engine's resolver would
+				// otherwise fall back to the shared cluster.
+				r.Use(sdkTenantPoolMw)
 			}
 
 			// Rate limiting.
@@ -1483,7 +1482,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// sdkTenantPoolMw put on the request (503 if a Team
 				// project has none), as the engine's resolver does.
 				r.Use(sdkTenantPoolMw)
-				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(poolResolver)).
+				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(query.TenantPoolFromContext)).
 					WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
 					WithHoldChecker(compliance.NewHoldService(pool)).
 					WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) })
@@ -1501,8 +1500,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		if vaultSvc != nil && vaultSvc.Configured() {
 			r.Route("/vault", func(r chi.Router) {
 				r.Use(apiKeyMw.Handler)
+				r.Use(MaintenanceModeMiddleware) // before the pool: maintenance answers first
 				r.Use(sdkTenantPoolMw)
-				r.Use(MaintenanceModeMiddleware)
 				r.Get("/", vault.HandleSDKList(vaultSvc))
 				r.Get("/{name}", vault.HandleSDKGet(vaultSvc))
 				r.Post("/", vault.HandleSDKSet(vaultSvc, pool))
