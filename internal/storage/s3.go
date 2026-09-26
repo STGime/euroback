@@ -122,7 +122,16 @@ func (s *S3Client) CreateBucketWithObjectLock(ctx context.Context, bucketName st
 		ACL:    types.BucketCannedACLPrivate,
 	})
 	if err != nil {
-		return fmt.Errorf("set bucket acl to private %s: %w", bucketName, err)
+		// A server without bucket ACLs (Garage, the local-dev / test S3)
+		// answers NotImplemented: nothing there can make the bucket
+		// public, and new buckets are private by default. Scaleway
+		// implements ACLs, so any error there still fails.
+		var apiErr interface{ ErrorCode() string } // smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotImplemented" {
+			slog.Warn("s3 server doesn't implement bucket ACLs; bucket left at its private default", "bucket", bucketName)
+		} else {
+			return fmt.Errorf("set bucket acl to private %s: %w", bucketName, err)
+		}
 	}
 
 	slog.Info("s3 bucket created", "bucket", bucketName, "object_lock", enableObjectLock)
