@@ -332,6 +332,23 @@ func TestTenantExport_SchemaSection(t *testing.T) {
 		}
 	})
 
+	t.Run("the export snapshot refuses views instead of evaluating them", func(t *testing.T) {
+		migratorExec(t, dev,
+			`CREATE FUNCTION `+s+`.probe() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'probe ran as %', current_user; END $$`,
+			`CREATE VIEW `+s+`.probe_v AS SELECT `+s+`.probe() AS x`)
+		t.Cleanup(func() {
+			migratorExec(t, dev, `DROP VIEW IF EXISTS `+s+`.probe_v`, `DROP FUNCTION IF EXISTS `+s+`.probe()`)
+		})
+		var readErr error
+		_ = withExportSnapshot(ctx, ExportSource{Pool: dev}, func(tx pgx.Tx) error {
+			_, readErr = tx.Exec(ctx, `SELECT * FROM `+s+`.probe_v`)
+			return nil
+		})
+		if readErr == nil || !strings.Contains(readErr.Error(), "is restricted") || strings.Contains(readErr.Error(), "probe ran") {
+			t.Errorf("reading a view in the export snapshot: %v; want it refused before the view runs", readErr)
+		}
+	})
+
 	t.Run("pg_dump unavailable: reported, export incomplete", func(t *testing.T) {
 		res, entries, meta := runTenantExport(t, gw, ExportSource{Pool: dev, PgDump: "/nonexistent/pg_dump"}, schema, projectID)
 		if res.Complete {

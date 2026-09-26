@@ -479,6 +479,12 @@ func withExportSnapshot(ctx context.Context, src ExportSource, fn func(pgx.Tx) e
 	if _, err := tx.Exec(ctx, "SET LOCAL row_security = off"); err != nil {
 		return fmt.Errorf("export: row_security: %w", err)
 	}
+	// Read tables and sequences only: a view or foreign table under a name
+	// the export reads is refused, never evaluated with the export login's
+	// privileges (as pg_dump does since 16.4). Needs PostgreSQL >= 16.4.
+	if _, err := tx.Exec(ctx, "SET LOCAL restrict_nonsystem_relation_kind = 'view, foreign-table'"); err != nil {
+		return fmt.Errorf("export: restrict_nonsystem_relation_kind: %w", err)
+	}
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '5min'"); err != nil {
 		return fmt.Errorf("export: statement_timeout: %w", err)
 	}
