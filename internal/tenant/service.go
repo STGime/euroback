@@ -724,7 +724,7 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 			Slug:      slug,
 			Provider:  "scaleway",
 			Region:    "fr-par",
-			Size:      "medium",
+			Size:      string(dbprovider.DefaultTeamSize), // same as upgrades (#682)
 		}, nil)
 		if err != nil {
 			slog.Error("failed to enqueue team-database provision job",

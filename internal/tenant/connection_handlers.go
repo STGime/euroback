@@ -513,7 +513,7 @@ func (s *ConnectionService) HandleRetryProvisioning() http.HandlerFunc {
 			Slug:      slug,
 			Provider:  "scaleway",
 			Region:    "fr-par",
-			Size:      "medium",
+			Size:      string(dbprovider.DefaultTeamSize), // same as create / upgrade (#682)
 		}, nil); err != nil {
 			slog.Error("retry provision: enqueue failed", "error", err, "project_id", projectID)
 			http.Error(w, `{"error":"failed to enqueue provisioning job"}`, http.StatusInternalServerError)

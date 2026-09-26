@@ -120,9 +120,9 @@ const (
 // type. Node names below are Scaleway's SMB catalogue — check the
 // dashboard for the current list before adding new sizes.
 var scalewayNodeType = map[Size]string{
-	SizeSmall:  "db-dev-s",  // 2 vCPU / 4 GB RAM — good for dev / staging
-	SizeMedium: "db-gp-s",   // 4 vCPU / 16 GB RAM — production default
-	SizeLarge:  "db-gp-m",   // 8 vCPU / 32 GB RAM — high-traffic Team projects
+	SizeSmall:  "db-dev-s",  // 2 vCPU / 2 GB RAM (Scaleway API, 2026-09-26) — Team default (DefaultTeamSize)
+	SizeMedium: "db-gp-s",   // 8 vCPU / 32 GB RAM (Scaleway API, 2026-09-26) — HA-capable
+	SizeLarge:  "db-gp-m",   // larger gp tier — high-traffic Team projects (check specs before use)
 }
 
 // scalewayVolumeSizeGB is the initial storage size mapped from the
