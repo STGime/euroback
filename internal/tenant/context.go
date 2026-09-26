@@ -57,6 +57,20 @@ type TenantPoolResolver func(ctx context.Context, projectID string) *pgxpool.Poo
 // on the developer pool. Pass nil in dev configurations to skip SSO
 // enforcement (safe default; matches pre-fix behaviour).
 func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
+	return platformTenantContext(pool, developerPool, resolver, true)
+}
+
+// PlatformTenantContextForSettings is PlatformTenantContext for project
+// settings (PATCH /v1/tenants/{id}), which live in platform tables: an
+// unavailable dedicated database doesn't lock the owner out of them. The
+// request then carries no tenant pool, and the one step that needs the
+// dedicated DB (the OAuth-secret vault write) refuses on its own
+// (query.ErrDedicatedPoolUnavailable) — it never falls back to shared.
+func PlatformTenantContextForSettings(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver) func(http.Handler) http.Handler {
+	return platformTenantContext(pool, developerPool, resolver, false)
+}
+
+func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoolResolver, failClosed bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := auth.ClaimsFromContext(r.Context())
@@ -183,8 +197,26 @@ func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// still picks its own pool via `pc.HasDedicatedDB` +
 			// DeveloperRoleFromContext — this is a parallel, not
 			// replacement, signal.
-			if pdID != nil && resolver != nil {
-				if tp := resolver(ctx, projectID); tp != nil {
+			//
+			// Fail closed (#678): a project with a live dedicated database
+			// is served from it or not at all. The shared cluster has no
+			// schema for a project created as Team, and only a stale copy
+			// for one upgraded from Pro — falling back there silently
+			// reads and writes the wrong database.
+			if pdID != nil {
+				var tp *pgxpool.Pool
+				if resolver != nil {
+					tp = resolver(ctx, projectID)
+				}
+				if tp == nil && !failClosed {
+					slog.Warn("platform tenant context: dedicated database unavailable — continuing without it (settings route)",
+						"project_id", projectID, "project_database_id", *pdID)
+				} else if tp == nil {
+					slog.Error("platform tenant context: dedicated database unavailable — refusing (no shared fallback)",
+						"project_id", projectID, "project_database_id", *pdID, "resolver_configured", resolver != nil)
+					http.Error(w, `{"error":"the project's dedicated database is not available right now"}`, http.StatusServiceUnavailable)
+					return
+				} else {
 					ctx = query.ContextWithTenantPool(ctx, tp)
 				}
 			}

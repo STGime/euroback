@@ -3,12 +3,14 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -58,6 +60,9 @@ func handlePlatformRekey(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc
 
 		rekeyed, err := svc.RekeySchema(r.Context(), schemaName)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			slog.Error("vault rekey failed", "error", err, "project_id", projectID)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -120,6 +125,9 @@ func handlePlatformList(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc 
 
 		secrets, err := svc.List(r.Context(), schemaName)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			slog.Error("list vault secrets failed", "error", err)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -140,6 +148,9 @@ func handlePlatformGet(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc {
 		name := chi.URLParam(r, "name")
 		secret, err := svc.Get(r.Context(), schemaName, name)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -177,12 +188,18 @@ func handlePlatformSet(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check plan limit.
 		if err := checkVaultLimit(r.Context(), svc, pool, projectID, schemaName); err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			jsonError(w, err.Error(), http.StatusForbidden)
 			return
 		}
 
 		secret, err := svc.Set(r.Context(), schemaName, req.Name, req.Value, req.Description)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			slog.Error("set vault secret failed", "error", err, "project_id", projectID)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -215,6 +232,9 @@ func handlePlatformUpdate(svc *VaultService, pool *pgxpool.Pool) http.HandlerFun
 
 		secret, err := svc.Update(r.Context(), schemaName, name, req.Value, req.Description)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			slog.Error("update vault secret failed", "error", err, "project_id", projectID)
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
@@ -235,6 +255,9 @@ func handlePlatformDelete(svc *VaultService, pool *pgxpool.Pool) http.HandlerFun
 
 		name := chi.URLParam(r, "name")
 		if err := svc.Delete(r.Context(), schemaName, name); err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -262,6 +285,9 @@ func HandleSDKList(svc *VaultService) http.HandlerFunc {
 
 		secrets, err := svc.List(r.Context(), pc.SchemaName)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			slog.Error("sdk list vault secrets failed", "error", err)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -287,6 +313,9 @@ func HandleSDKGet(svc *VaultService) http.HandlerFunc {
 		name := chi.URLParam(r, "name")
 		secret, err := svc.Get(r.Context(), pc.SchemaName, name)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -328,12 +357,18 @@ func HandleSDKSet(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check plan limit.
 		if err := checkVaultLimit(r.Context(), svc, pool, pc.ProjectID, pc.SchemaName); err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			jsonError(w, err.Error(), http.StatusForbidden)
 			return
 		}
 
 		secret, err := svc.Set(r.Context(), pc.SchemaName, req.Name, req.Value, req.Description)
 		if err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			slog.Error("sdk set vault secret failed", "error", err)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -358,6 +393,9 @@ func HandleSDKDelete(svc *VaultService) http.HandlerFunc {
 
 		name := chi.URLParam(r, "name")
 		if err := svc.Delete(r.Context(), pc.SchemaName, name); err != nil {
+			if writeDedicatedUnavailable(w, err) {
+				return
+			}
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -395,6 +433,16 @@ func jsonResponse(w http.ResponseWriter, data any, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// writeDedicatedUnavailable answers 503 when the project's vault lives on
+// a dedicated database that isn't available on this request (#678).
+func writeDedicatedUnavailable(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+		return false
+	}
+	jsonError(w, "the project's dedicated database is not available right now", http.StatusServiceUnavailable)
+	return true
 }
 
 func jsonError(w http.ResponseWriter, msg string, status int) {

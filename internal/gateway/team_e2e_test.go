@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +20,8 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/vault"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -153,6 +157,125 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	check(t, env, "console_table_editor_read_update", func() error {
+		r := console("GET", "/data/todos", "")
+		if r.code != 200 || !strings.Contains(r.body, "from-console") || strings.Contains(r.body, decoyTitle) {
+			return fmt.Errorf("select read the wrong rows: %w", r)
+		}
+		id := env.dedScalar(t, "SELECT id::text FROM %s WHERE title = 'from-console'", "todos")
+		if r := console("PATCH", "/data/todos/"+id, `{"title":"console-updated"}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "todos", "title = 'console-updated'"); n != 1 {
+			return fmt.Errorf("update not on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	// MCP runSQLTransaction uses this route too.
+	check(t, env, "console_sql_transaction", func() error {
+		if r := console("POST", "/data/sql/transaction", `{"statements":["INSERT INTO todos (title) VALUES ('from-tx-1')","INSERT INTO todos (title) VALUES ('from-tx-2')"]}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "todos", "title LIKE 'from-tx-%'"); n != 2 {
+			return fmt.Errorf("rows not on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	// The console runs as the dedicated instance's owner (console traffic
+	// is service-role by design); the point is that it is *that* instance.
+	check(t, env, "console_sql_on_dedicated", func() error {
+		r := console("POST", "/data/sql", `{"sql":"SELECT current_database() AS db"}`)
+		if r.code != 200 || !strings.Contains(r.body, `"db":"`+env.dedDB+`"`) {
+			return fmt.Errorf("not on the dedicated DB: %w", r)
+		}
+		return nil
+	})
+
+	// A Team project whose dedicated pool can't be opened is refused —
+	// never served from the shared cluster.
+	check(t, env, "console_fails_closed_without_dedicated_pool", func() error {
+		reached := false
+		mw := tenant.PlatformTenantContext(env.gw, env.dev, func(context.Context, string) *pgxpool.Pool { return nil })
+		h := mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+		cr := chi.NewRouter()
+		cr.Handle("/p/{id}/data", h)
+		req := httptest.NewRequest("GET", "/p/"+env.projectID+"/data", nil)
+		req = req.WithContext(auth.ContextWithClaims(req.Context(), &auth.Claims{Subject: env.ownerUser, Email: env.ownerEmail}))
+		rec := httptest.NewRecorder()
+		cr.ServeHTTP(rec, req)
+		if reached || rec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("handler reached=%v, status %d %s (want 503, not reached)", reached, rec.Code, rec.Body.String())
+		}
+		return nil
+	})
+
+	check(t, env, "console_vault_set", func() error {
+		if r := console("POST", "/vault", `{"name":"E2E_CONSOLE_SECRET","value":"v1"}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "vault_secrets", "name = 'E2E_CONSOLE_SECRET'"); n != 1 {
+			return fmt.Errorf("secret not in the dedicated DB's vault (count %d)", n)
+		}
+		return nil
+	})
+
+	check(t, env, "sdk_vault_set", func() error {
+		if r := sdk("POST", "/v1/vault", `{"name":"E2E_SDK_SECRET","value":"v1"}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "vault_secrets", "name = 'E2E_SDK_SECRET'"); n != 1 {
+			return fmt.Errorf("secret not in the dedicated DB's vault (count %d)", n)
+		}
+		return nil
+	})
+
+	// Through the real router: a Team project whose dedicated database is
+	// still provisioning (no host yet — its pool can't be opened) gets
+	// 503 on tenant-data routes, never the shared cluster, while its
+	// platform-table settings stay editable.
+	check(t, env, "console_fails_closed_while_provisioning", func() error {
+		stuck := env.addProvisioningTeamProject(t)
+		for _, path := range []string{"/data/todos", "/users"} {
+			r := env.consoleFor(stuck, "GET", path, "")
+			if r.code != http.StatusServiceUnavailable {
+				return fmt.Errorf("want 503: %w", r)
+			}
+		}
+		body, err := json.Marshal(map[string]any{"auth_config": tenant.DefaultAuthConfig()})
+		if err != nil {
+			return err
+		}
+		req := httptest.NewRequest("PATCH", "http://api.eurobase.test/v1/tenants/"+stuck, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+env.platformJWT)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code >= 300 {
+			return fmt.Errorf("settings locked out: PATCH /v1/tenants/{id}: %d %s", rec.Code, rec.Body.String())
+		}
+		// Saving an OAuth client secret needs the dedicated vault: refused,
+		// not written to the shared one.
+		cfg := tenant.DefaultAuthConfig()
+		cfg.OAuthProviders = map[string]tenant.OAuthProviderConfig{
+			"github": {Enabled: true, ClientID: "e2e-client", ClientSecret: "e2e-secret"},
+		}
+		body, err = json.Marshal(map[string]any{"auth_config": cfg})
+		if err != nil {
+			return err
+		}
+		req = httptest.NewRequest("PATCH", "http://api.eurobase.test/v1/tenants/"+stuck, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+env.platformJWT)
+		rec = httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("OAuth secret save while provisioning: want 503, got %d %s", rec.Code, rec.Body.String())
+		}
+		return nil
+	})
+
 	// ded_only exists only on the dedicated DB, so a listing read from the
 	// stale shared copy can't pass.
 	check(t, env, "console_schema_introspection", func() error {
@@ -162,6 +285,40 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if !strings.Contains(r.body, "ded_only") {
 			return fmt.Errorf("schema listing lacks the dedicated-only table: %w", r)
+		}
+		return nil
+	})
+
+	// Console Table Editor schema editing (/schema/tables): the DDL itself
+	// is routed, but its prechecks and listings read the shared cluster
+	// (#679). ded_only exists only on the dedicated DB.
+	check(t, env, "console_ddl_create_table", func() error {
+		if r := console("POST", "/schema/tables", `{"name":"console_made","columns":[{"name":"id","type":"uuid","primary_key":true,"default":"gen_random_uuid()"},{"name":"note","type":"text"}]}`); r.code >= 300 {
+			return r
+		}
+		if !env.dedTableExists(t, "console_made") {
+			return errors.New("table not created on the dedicated DB")
+		}
+		return nil
+	})
+
+	check(t, env, "console_ddl_add_column", func() error {
+		if r := console("POST", "/schema/tables/ded_only/columns", `{"name":"note","type":"text","nullable":true}`); r.code >= 300 {
+			return r
+		}
+		if env.dedScalar(t, "SELECT count(*)::text FROM pg_attribute WHERE attrelid = '%s'::regclass AND attname = 'note'", "ded_only") != "1" {
+			return errors.New("column not added on the dedicated DB")
+		}
+		return nil
+	})
+
+	check(t, env, "console_ddl_list_indexes", func() error {
+		r := console("GET", "/schema/tables/ded_only/indexes", "")
+		if r.code != 200 {
+			return r
+		}
+		if !strings.Contains(r.body, "ded_only_marker_idx") {
+			return fmt.Errorf("index listing lacks the dedicated-only index: %w", r)
 		}
 		return nil
 	})
@@ -190,7 +347,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return nil
 		}
 		var fp string
-		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{env.schema, "todos"}.Sanitize())
+		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{env.schema, "todos"}.Sanitize(), pgx.Identifier{env.schema, "vault_secrets"}.Sanitize())
 		if err := env.shared.QueryRow(ctx, q, env.schema).Scan(&fp); err != nil {
 			return err
 		}
@@ -212,12 +369,10 @@ type knownGap struct {
 }
 
 var teamKnownGaps = map[string]knownGap{
-	"console_table_editor_insert":  {"#678", []string{"does not exist in schema", "row not on the dedicated DB (count 0)"}},
-	"console_sql_editor":           {"#678", []string{"SQLSTATE 42P01", "row not on the dedicated DB (count 0)"}},
 	"console_schema_introspection": {"#679", []string{"lacks the dedicated-only table"}},
+	"console_ddl_add_column":       {"#679", []string{"does not exist in schema"}},
+	"console_ddl_list_indexes":     {"#679", []string{"lacks the dedicated-only index"}},
 	"sdk_ddl_create_table":         {"#679", []string{"SQLSTATE 3F000", "table not created on the dedicated DB"}},
-	// The misrouted console writes above land in the stale shared copy.
-	"upgraded/shared_cluster_untouched": {"#678/#679", []string{"stale shared copy changed"}},
 }
 
 func check(t *testing.T, env *teamEnv, name string, fn func() error) {
@@ -285,12 +440,17 @@ func (r *httpResult) neverReachedHandler() bool {
 const decoyTitle = "decoy-on-shared"
 
 // sharedFingerprintSQL summarises the stale shared copy: its tables and
-// the todos rows (%s = the quoted todos table).
+// the todos rows and the vault secret names (%[1]s / %[2]s = the quoted
+// todos / vault_secrets tables). SDK DDL's table is excluded while #679 is
+// open, so any other write to the stale copy fails the check.
 const sharedFingerprintSQL = `
 SELECT (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class
-         WHERE relnamespace = to_regnamespace($1) AND relkind = 'r')
+         WHERE relnamespace = to_regnamespace($1) AND relkind = 'r'
+           AND relname <> 'sdk_made') -- known gap #679 (sdk_ddl_create_table)
     || ' | ' ||
-       (SELECT coalesce(string_agg(title, ',' ORDER BY title), '') FROM ` + "%s" + `)`
+       (SELECT coalesce(string_agg(title, ',' ORDER BY title), '') FROM ` + "%[1]s" + `)
+    || ' | ' ||
+       (SELECT coalesce(string_agg(name, ',' ORDER BY name), '') FROM ` + "%[2]s" + `)`
 
 type teamTestConfig struct {
 	sharedAdmin, sharedGW, sharedDev string
@@ -313,6 +473,9 @@ type teamEnv struct {
 	scenario          string
 	upgraded          bool
 	sharedFingerprint string
+	ownerUser         string
+	ownerEmail        string
+	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
 	shared            *pgxpool.Pool
 	ded               *pgxpool.Pool // admin view of the dedicated DB, for assertions
 }
@@ -326,6 +489,45 @@ func (e *teamEnv) dedCount(t *testing.T, table, where string) int {
 		return -1
 	}
 	return n
+}
+
+func (e *teamEnv) dedScalar(t *testing.T, format, table string) string {
+	t.Helper()
+	var v string
+	q := fmt.Sprintf(format, pgx.Identifier{e.schema, table}.Sanitize())
+	if err := e.ded.QueryRow(context.Background(), q).Scan(&v); err != nil {
+		t.Fatalf("dedScalar: %v", err)
+	}
+	return v
+}
+
+// consoleFor issues a console request as the owner for another project.
+func (e *teamEnv) consoleFor(projectID, method, path, body string) *httpResult {
+	req := httptest.NewRequest(method, "http://api.eurobase.test/platform/projects/"+projectID+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e.platformJWT)
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return &httpResult{req: "console " + method + " " + path, code: rec.Code, body: rec.Body.String()}
+}
+
+// addProvisioningTeamProject creates a Team project owned by the same user
+// whose project_databases row is still provisioning (no host), as between
+// project creation and the provision worker's MarkActive.
+func (e *teamEnv) addProvisioningTeamProject(t *testing.T) string {
+	t.Helper()
+	id := "7e4a0000-0000-4000-a000-" + randHexT(t, 6)
+	slug := "stuck-" + randHexT(t, 4)
+	mustExecT(t, e.shared, `INSERT INTO projects (id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
+		VALUES ($1, $2, 'stuck', $3, $4, $5, 'fr-par', 'team', 'active')`,
+		id, e.ownerUser, slug, "tenant_"+strings.ReplaceAll(id, "-", "_"), "b-"+slug)
+	mustExecT(t, e.shared, `INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING`, id, e.ownerUser)
+	if _, err := dbprovider.NewRepo(e.shared).InsertProvisioning(context.Background(), id, &dbprovider.Instance{
+		ProviderID: "e2e-" + slug, DBName: "rdb", Username: "eurobase_owner", State: dbprovider.StateProvisioning, Region: "fr-par",
+	}, "scaleway", []byte("x"), []byte("x"), 1); err != nil {
+		t.Fatalf("InsertProvisioning: %v", err)
+	}
+	return id
 }
 
 func (e *teamEnv) dedTableExists(t *testing.T, table string) bool {
@@ -384,7 +586,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		mustExecT(t, admin, `SELECT provision_tenant($1, 'team e2e', 'pro')`, projectID)
 		mustExecT(t, admin, fmt.Sprintf(`INSERT INTO %s (title) VALUES ($1)`, pgx.Identifier{schema, "todos"}.Sanitize()), decoyTitle)
 		mustExecT(t, admin, `UPDATE projects SET plan = 'team' WHERE id = $1`, projectID)
-		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{schema, "todos"}.Sanitize())
+		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{schema, "todos"}.Sanitize(), pgx.Identifier{schema, "vault_secrets"}.Sanitize())
 		if err := admin.QueryRow(ctx, q, schema).Scan(&sharedFP); err != nil {
 			t.Fatal(err)
 		}
@@ -436,6 +638,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	}
 	// Exists only here, so reads from the stale shared copy are detectable.
 	mustExecT(t, dedAdmin, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+	mustExecT(t, dedAdmin, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
 
 	// project_databases row with sealed credentials (owner, runtime, readonly).
 	key := make([]byte, 32)
@@ -482,12 +685,17 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatal(err)
 	}
 	subdomain := auth.NewSubdomainMiddleware(gw, "eurobase.test")
+	vaultSvc, err := vault.NewVaultService(gw, keyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, nil, nil, nil,
-		subdomain, nil, nil, nil, nil, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
+		subdomain, nil, nil, nil, vaultSvc, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
-		secretKey: sec, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin, ded: dedAdmin,
+		secretKey: sec, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
+		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
 	}
 }
 

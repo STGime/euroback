@@ -324,7 +324,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			p, err := poolCache.GetOwner(ctx, projectID)
 			if err != nil {
 				if !errors.Is(err, pgx.ErrNoRows) {
-					slog.Warn("console: dedicated pool unavailable, falling back to shared",
+					slog.Warn("console: dedicated pool unavailable — PlatformTenantContext refuses the request (no shared fallback)",
 						"project_id", projectID, "error", err)
 				}
 				return nil
@@ -1238,7 +1238,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Route("/data", func(r chi.Router) {
 				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
 
-				queryEngine := query.NewQueryEngine(developerPool)
+				// Team-tier (#678): route to the dedicated owner pool that
+				// PlatformTenantContext put on the request (it refuses
+				// with 503 when a Team project's pool can't be opened,
+				// so a nil here means "not a Team project" — never "fall
+				// back to shared").
+				queryEngine := query.NewQueryEngine(developerPool).WithPoolResolver(query.TenantPoolFromContext)
 				publisher := realtime.NewEventPublisher(nil, hub)
 
 				// Reads → viewer; mutations + SQL exec → developer
@@ -1284,7 +1289,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// so VaultService.tenantPool routes to the dedicated
 		// instance for Team-tier — otherwise Team-tier admins
 		// configuring OAuth get 500 on save.
-		r.With(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
+		// ForSettings: an unavailable dedicated DB doesn't lock the
+		// owner out of platform-table settings; the vault write refuses
+		// on its own (503) rather than touching the shared cluster.
+		r.With(tenant.PlatformTenantContextForSettings(pool, developerPool, tenantPoolResolver)).Patch("/{id}", tenant.HandleUpdateProject(pool, tenantSvc))
 		// PATCH /{id}/org attaches/detaches a project to/from an org.
 		// Kept as a separate route from PATCH /{id} because the shape
 		// + auth check (owner + org membership) is entirely different
