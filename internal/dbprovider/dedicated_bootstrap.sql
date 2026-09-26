@@ -291,6 +291,17 @@ BEGIN
     );
 
     EXECUTE format(
+        'CREATE TABLE %I.storage_shared_prefixes (
+            prefix      TEXT        PRIMARY KEY
+                        CHECK (prefix <> '''' AND right(prefix, 1) = ''/'' AND left(prefix, 1) <> ''/''
+                               AND left(prefix, 8) <> ''exports/''),
+            visibility  TEXT        NOT NULL CHECK (visibility IN (''authenticated'', ''public'')),
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        )',
+        v_schema_name
+    );
+
+    EXECUTE format(
         'CREATE TABLE %I.todos (
             id         UUID        PRIMARY KEY DEFAULT public.uuid_generate_v4(),
             title      TEXT        NOT NULL,
@@ -332,6 +343,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.refresh_tokens ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.email_tokens ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.storage_objects ENABLE ROW LEVEL SECURITY', v_schema_name);
+    EXECUTE format('ALTER TABLE %I.storage_shared_prefixes ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.todos ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.vault_secrets ENABLE ROW LEVEL SECURITY', v_schema_name);
 
@@ -361,10 +373,40 @@ BEGIN
          WITH CHECK (public.is_internal_auth_path())',
         v_schema_name
     );
+    -- #697: reads also cover shared folders (storage_shared_prefixes);
+    -- writes stay owner / service only. Export archives are never shared.
     EXECUTE format(
-        'CREATE POLICY storage_owner_access ON %I.storage_objects
+        'CREATE POLICY storage_read ON %I.storage_objects FOR SELECT
+         USING (public.is_service_role() OR uploaded_by = public.current_end_user_id()
+                OR (left(key, 8) <> ''exports/'' AND EXISTS (
+                      SELECT 1 FROM %I.storage_shared_prefixes s
+                       WHERE starts_with(key, s.prefix)
+                         AND (s.visibility = ''public'' OR public.current_end_user_id() IS NOT NULL))))',
+        v_schema_name, v_schema_name
+    );
+    EXECUTE format(
+        'CREATE POLICY storage_insert ON %I.storage_objects FOR INSERT
+         WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
+        v_schema_name
+    );
+    EXECUTE format(
+        'CREATE POLICY storage_update ON %I.storage_objects FOR UPDATE
          USING (public.is_service_role() OR uploaded_by = public.current_end_user_id())
          WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
+        v_schema_name
+    );
+    EXECUTE format(
+        'CREATE POLICY storage_delete ON %I.storage_objects FOR DELETE
+         USING (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
+        v_schema_name
+    );
+    -- Rules: readable by everyone (the read policy evaluates them as the
+    -- caller), writable by the service role / owner only — end users can't
+    -- create rules through the SDK's table API.
+    EXECUTE format('CREATE POLICY shared_prefixes_read ON %I.storage_shared_prefixes FOR SELECT USING (true)', v_schema_name);
+    EXECUTE format(
+        'CREATE POLICY shared_prefixes_write ON %I.storage_shared_prefixes FOR ALL
+         USING (public.is_service_role()) WITH CHECK (public.is_service_role())',
         v_schema_name
     );
     EXECUTE format('CREATE POLICY public_todos ON %I.todos FOR ALL USING (true)', v_schema_name);

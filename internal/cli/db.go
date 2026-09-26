@@ -15,6 +15,7 @@ var systemTables = map[string]bool{
 	"storage_objects": true,
 	"email_tokens":    true,
 	"vault_secrets":   true,
+	"storage_shared_prefixes": true,
 }
 
 // DbCmd returns the parent "db" command.

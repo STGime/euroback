@@ -1241,6 +1241,7 @@ type RLSAuditEntry struct {
 var auditPlatformTables = map[string]bool{
 	"users": true, "refresh_tokens": true, "storage_objects": true,
 	"email_tokens": true, "user_identities": true, "vault_secrets": true,
+	"storage_shared_prefixes": true,
 }
 
 // AuditRLS returns an RLS-posture snapshot for every user-facing table in the

@@ -217,6 +217,7 @@ func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 var platformTables = map[string]bool{
 	"users": true, "refresh_tokens": true, "email_tokens": true,
 	"storage_objects": true, "user_identities": true, "todos": true,
+	"storage_shared_prefixes": true,
 }
 
 // backfillUnloggedTables discovers tables in the tenant schema that have no

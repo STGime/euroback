@@ -300,6 +300,102 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// #697 shared folders: developer-uploaded files become readable by end
+	// users (never writable) once their folder is shared.
+	check(t, env, "storage_shared_folders", func() error {
+		ctx := context.Background()
+		_ = ctx
+		call := func(method, path, apiKey, bearer, body string) *httpResult {
+			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, strings.NewReader(body))
+			if apiKey != "" {
+				req.Header.Set("apikey", apiKey)
+			}
+			if bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+bearer)
+			}
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		sharing := "/platform/projects/" + env.projectID + "/storage-sharing"
+		setShare := func(prefix, vis string) *httpResult {
+			return call("PUT", sharing+"/", "", env.platformJWT, `{"prefix":"`+prefix+`","visibility":"`+vis+`"}`)
+		}
+		r := call("POST", "/v1/auth/signin", env.publicKey, "", `{"email":"enduser@team.test","password":"Correct-horse-9"}`)
+		var tok struct {
+			AccessToken string `json:"access_token"`
+		}
+		if r.code != 200 || json.Unmarshal([]byte(r.body), &tok) != nil || tok.AccessToken == "" {
+			return fmt.Errorf("signin: %w", r)
+		}
+		user := tok.AccessToken
+		// Developer upload (console → no owner).
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "themes/hero.txt"); r.code >= 300 {
+			return fmt.Errorf("console upload: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code != http.StatusNotFound {
+			return fmt.Errorf("unshared developer file must be invisible to end users: %w", r)
+		}
+		if r := setShare("exports/", "public"); r.code != http.StatusBadRequest {
+			return fmt.Errorf("sharing exports/ must be refused: %w", r)
+		}
+		// End users can't create rules through the SDK table API.
+		call("POST", "/v1/db/storage_shared_prefixes", env.publicKey, user, `{"prefix":"themes/","visibility":"public"}`)
+		if n := env.dedCount(t, "storage_shared_prefixes", "true"); n != 0 {
+			return fmt.Errorf("an end user created a sharing rule via the SDK (count %d)", n)
+		}
+		// authenticated
+		if r := setShare("themes", "authenticated"); r.code != 200 || !strings.Contains(r.body, `"themes/"`) {
+			return fmt.Errorf("set authenticated: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code != 200 || r.body != "hello team" {
+			return fmt.Errorf("signed-in user must read an authenticated-shared file: %w", r)
+		}
+		if r := call("GET", "/v1/storage/?prefix=themes/", env.publicKey, user, ""); r.code != 200 || !strings.Contains(r.body, "themes/hero.txt") {
+			return fmt.Errorf("signed-in user's listing must include it: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, "", ""); r.code != http.StatusNotFound {
+			return fmt.Errorf("anonymous caller must not read an authenticated-shared file: %w", r)
+		}
+		// Never writable by end users.
+		if r := env.upload(env.publicKey, user, "http://api.eurobase.test/v1/storage/upload", "themes/hero.txt"); r.code != http.StatusForbidden {
+			return fmt.Errorf("end user overwrite of a shared file must be refused: %w", r)
+		}
+		if r := call("DELETE", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code < 400 {
+			return fmt.Errorf("end user delete of a shared file must be refused: %w", r)
+		}
+		// public
+		if r := setShare("themes/", "public"); r.code != 200 {
+			return fmt.Errorf("set public: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt?apikey="+env.publicKey, "", "", ""); r.code != 200 || r.body != "hello team" {
+			return fmt.Errorf("anonymous caller must read a public-shared file (apikey in the URL): %w", r)
+		}
+		if r := call("GET", "/v1/storage/?prefix=themes/", env.publicKey, "", ""); r.code != 200 || !strings.Contains(r.body, "themes/hero.txt") {
+			return fmt.Errorf("anonymous listing of a public folder: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/hero.txt","operation":"download"}`); r.code != 200 {
+			return fmt.Errorf("anonymous signed download URL for a public file: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/new.txt","operation":"upload","content_type":"text/plain"}`); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("anonymous upload URL must be refused: %w", r)
+		}
+		// Rules listing, then unshare → private again.
+		if r := call("GET", sharing+"/", "", env.platformJWT, ""); r.code != 200 || !strings.Contains(r.body, `"public"`) {
+			return fmt.Errorf("list rules: %w", r)
+		}
+		if r := call("DELETE", sharing+"/?prefix=themes/", "", env.platformJWT, ""); r.code != http.StatusNoContent {
+			return fmt.Errorf("remove rule: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code != http.StatusNotFound {
+			return fmt.Errorf("after unsharing the file must be private again: %w", r)
+		}
+		return nil
+	})
+
 	check(t, env, "console_storage_upload", func() error {
 		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "e2e/console.txt"); r.code >= 300 {
 			return r

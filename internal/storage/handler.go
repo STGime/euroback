@@ -351,6 +351,44 @@ const maxListPages = 5
 // overwrites their object within this window).
 const maxUploadURLExpiry = time.Hour
 
+// readAllowed: a signed-in end user or console caller, or — for reads only
+// (#697) — an SDK request authenticated by its API key alone; RLS then
+// limits it to objects under 'public' shared folders.
+func readAllowed(r *http.Request) bool {
+	if _, ok := isAuthenticated(r); ok {
+		return true
+	}
+	pc, ok := auth.ProjectFromContext(r.Context())
+	return ok && pc != nil && pc.ProjectID != ""
+}
+
+// objectOwned reports whether the caller may write key: service-role
+// (console) callers always; an end user only for a tracked object they
+// uploaded. Read visibility isn't enough — objects in shared folders are
+// readable by everyone they're shared with (#697).
+func (h *StorageHandler) objectOwned(r *http.Request, key string) (bool, error) {
+	if serviceCaller(r) || h.engine == nil {
+		return true, nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" || h.pool == nil {
+		return true, nil
+	}
+	eu, ok := auth.EndUserClaimsFromContext(r.Context())
+	if !ok || eu == nil || eu.UserID == "" {
+		return false, nil
+	}
+	var owned bool
+	q := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1 AND uploaded_by::text = $2)`,
+		strings.ReplaceAll(schema, `"`, `""`))
+	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, key, eu.UserID).Scan(&owned)
+	}); err != nil {
+		return false, err
+	}
+	return owned, nil
+}
+
 // serviceCaller: console traffic (PlatformStorageContext marks it
 // service-role). SDK storage is always scoped to the end user by RLS,
 // like assertObjectVisible.
@@ -413,7 +451,9 @@ func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType stri
 			return false, false, err
 		}
 	}
-	ok, err = h.assertObjectVisible(r, key)
+	// Ownership, not read visibility: a file in a shared folder is readable
+	// by other end users (#697) but must stay theirs to write.
+	ok, err = h.objectOwned(r, key)
 	return ok, created, err
 }
 
@@ -824,7 +864,9 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 // Streams the file back to the client with the proper Content-Type and
 // Content-Length headers.
 func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
-	_, ok := isAuthenticated(r)
+	// Reads admit public-key-only SDK callers too (#697): RLS decides what
+	// they see — only objects under a 'public' shared folder.
+	ok := readAllowed(r)
 	if !ok {
 		slog.Warn("storage download called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -921,7 +963,9 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 
 	// Ownership check: same RLS-based filter as DownloadFile. Stops one
 	// end-user from deleting another's file by guessing the key.
-	visible, err := h.assertObjectVisible(r, key)
+	// Ownership, not read visibility (#697): shared files aren't the
+	// reader's to delete.
+	visible, err := h.objectOwned(r, key)
 	if err != nil {
 		if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
 			writeTenantPoolError(w, err)
@@ -1021,7 +1065,9 @@ type listResponse struct {
 
 // ListFiles handles GET /v1/storage?prefix=...&limit=...&cursor=...
 func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
-	_, ok := isAuthenticated(r)
+	// Reads admit public-key-only SDK callers too (#697): RLS decides what
+	// they see — only objects under a 'public' shared folder.
+	ok := readAllowed(r)
 	if !ok {
 		slog.Warn("storage list called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -1117,7 +1163,9 @@ type signedURLResponse struct {
 
 // GenerateSignedURL handles POST /v1/storage/signed-url.
 func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Request) {
-	_, ok := isAuthenticated(r)
+	// Reads admit public-key-only SDK callers too (#697): RLS decides what
+	// they see — only objects under a 'public' shared folder.
+	ok := readAllowed(r)
 	if !ok {
 		slog.Warn("storage signed-url called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -1147,6 +1195,10 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	}
 	if req.Operation != "upload" && req.Operation != "download" {
 		http.Error(w, `{"error":"operation must be upload or download"}`, http.StatusBadRequest)
+		return
+	}
+	if _, signedIn := isAuthenticated(r); req.Operation == "upload" && !signedIn {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	if req.Operation == "upload" && isExportKey(r, req.Key) {
