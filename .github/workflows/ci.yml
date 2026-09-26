@@ -402,12 +402,15 @@ jobs:
           # arrives via `kubectl set image` in "Deploy to Kapsule", after
           # migrations. (First-ever create: no live object, `:latest` it is.)
           apply_pinned() { # <manifest> <deployment> <container>
-            live=$(kubectl -n eurobase get deployment "$2" -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$3\")].image}" 2>/dev/null || true)
-            if [ -n "$live" ]; then
-              sed -E "s#${REGISTRY}/${REGISTRY_NS}/[a-z-]+:latest#${live}#g" "$1" | kubectl apply -f -
-            else
-              kubectl apply -f "$1"
+            if [ -z "$(kubectl -n eurobase get deployment "$2" --ignore-not-found -o name)" ]; then
+              kubectl apply -f "$1" # first-ever create
+              return
             fi
+            live=$(kubectl -n eurobase get deployment "$2" -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$3\")].image}")
+            # Exists but no image read (API hiccup, renamed container):
+            # stop rather than silently applying :latest before migrations.
+            [ -n "$live" ] || { echo "apply_pinned: no image for container $3 in deployment/$2"; exit 1; }
+            sed -E "s#${REGISTRY}/${REGISTRY_NS}/[a-z-]+:latest#${live}#g" "$1" | kubectl apply -f -
           }
           # #653: RBAC + the published-userlist Secret, and the worker's
           # SA/env (image pinned; the new worker starts in "Deploy to
