@@ -187,3 +187,69 @@ groups:
             Any sustained non-zero webhook-failure rate for 30 min likely
             means an outright bug in the state machine (Mollie API change,
             missing metadata, DB drift). Page immediately.
+
+  # ── PgBouncer (#641 / #651) ──────────────────────────────────────────────
+  # Metrics from the pgbouncer-userlist sidecar (:9127) on both poolers:
+  # app="pgbouncer" (functions runner, tenant traffic) and
+  # app="pgbouncer-gateway" (gateway, from PR 4).
+  - name: eurobase-pgbouncer
+    interval: 1m
+    rules:
+      - alert: PgBouncerDown
+        expr: up{app=~"pgbouncer|pgbouncer-gateway"} == 0 or pgbouncer_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: pgbouncer
+        annotations:
+          summary: "PgBouncer {{ $labels.app }} pod {{ $labels.pod }} is down or its admin console is unreachable"
+          description: "Check: kubectl -n eurobase get pods -l app={{ $labels.app }}; kubectl -n eurobase logs {{ $labels.pod }} -c pgbouncer"
+
+      # Gateway pooler: any sustained queue affects every tenant's API calls.
+      - alert: PgBouncerGatewayClientsWaiting
+        expr: max by (app, database) (pgbouncer_clients_waiting{app="pgbouncer-gateway"}) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: pgbouncer
+        annotations:
+          summary: "Gateway clients queueing for a server connection ({{ $labels.database }})"
+          description: "The gateway's pool is too small or held by long transactions. Check pgbouncer_maxwait_seconds."
+
+      - alert: PgBouncerGatewayLongWait
+        expr: max by (app, database) (pgbouncer_maxwait_seconds{app="pgbouncer-gateway"}) > 5
+        for: 1m
+        labels:
+          severity: warning
+          service: pgbouncer
+        annotations:
+          summary: "A gateway client has waited > 5 s for a server connection"
+
+      # Runner pooler: one busy tenant filling its own 2-connection pool
+      # shows up here too, so only sustained queueing is worth a look.
+      - alert: PgBouncerRunnerClientsWaiting
+        expr: max by (app, database) (pgbouncer_clients_waiting{app="pgbouncer"}) > 0
+        for: 15m
+        labels:
+          severity: info
+          service: pgbouncer
+        annotations:
+          summary: "Function (tenant) clients have been queueing for 15+ minutes"
+          description: |
+            Usually one tenant holding its pool with long transactions (its
+            functions get "database is busy"). If many tenants are affected,
+            raise PGB_TENANT_MAX_DB_CONNECTIONS within the budget.
+
+      - alert: PgBouncerClientSlotsHigh
+        expr: max by (app, pod) (pgbouncer_client_connections / pgbouncer_max_client_conn) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: pgbouncer
+        annotations:
+          summary: "{{ $labels.app }} pod {{ $labels.pod }} uses > 80% of max_client_conn"
+          description: |
+            On the runner's pooler this can mean tenant code is opening raw
+            sockets to 6432 (it can't log in, but occupies slots) — find the
+            source function in the runner logs; on the gateway's pooler it
+            means gateway client pools are oversized.

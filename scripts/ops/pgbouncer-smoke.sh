@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Read-only smoke test of the in-cluster PgBouncer (#641, PR 2): from a
-# one-off pod, connect through pgbouncer:6432 as the gateway role, the
-# function-runner role and one tenant's `<schema>_func` role (derived
-# password — the pooler passes SCRAM through), and run SELECTs only.
+# Read-only smoke test of the in-cluster PgBouncers (#641, #651): from a
+# one-off pod, connect as the gateway role through pgbouncer-gateway, as one
+# tenant's `<schema>_func` role through the runner's pooler (derived
+# password — SCRAM pass-through), and check the runner's pooler refuses the
+# gateway role. SELECTs only.
 # Secrets are read from eurobase-secrets inside the pod, never printed.
 #
 # Usage: ./scripts/ops/pgbouncer-smoke.sh
@@ -17,31 +18,34 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"; kubectl -n "$NS" delete pod "$POD" --igno
 cat > "$TMP/smoke.ts" <<'EOF'
 import { funcPassword } from "/app/tenant_db.ts";
 const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
-function pooled(raw: string, user?: string, pw?: string): string {
+function pooled(raw: string, host: string, user?: string, pw?: string): string {
   const u = new URL(raw);
-  u.hostname = "pgbouncer.eurobase.svc.cluster.local"; u.port = "6432";
-  // Tenants use the tenant alias (its own server-connection cap), like the runner.
-  if (user) u.pathname = u.pathname.replace(/\/?$/, "") + "_tenant";
+  u.hostname = host + ".eurobase.svc.cluster.local"; u.port = "6432";
   u.searchParams.set("sslmode", "disable"); // in-cluster hop; pooler → RDB uses TLS
-  if (user) { u.username = encodeURIComponent(user); u.password = encodeURIComponent(pw!); }
+  // Tenants use the tenant alias (its own server-connection cap), like the runner.
+  if (user) { u.pathname = u.pathname.replace(/\/?$/, "") + "_tenant"; u.username = encodeURIComponent(user); u.password = encodeURIComponent(pw!); }
   return u.toString();
 }
-async function check(label: string, url: string, q: string) {
+async function check(label: string, url: string, q: string, expectFail = false) {
   const sql = postgres(url, { max: 1 });
-  try { const [r] = await sql.unsafe(q); console.log(`OK   ${label}: ${JSON.stringify(r)}`); }
-  catch (e) { console.log(`FAIL ${label}: ${(e as any).code ?? ""} ${(e as Error).message}`); }
-  finally { await sql.end({ timeout: 5 }); }
+  try {
+    const [r] = await sql.unsafe(q);
+    console.log(expectFail ? `FAIL ${label}: unexpectedly accepted` : `OK   ${label}: ${JSON.stringify(r)}`);
+  } catch (e) {
+    console.log(expectFail ? `OK   ${label}: refused (${(e as Error).message})` : `FAIL ${label}: ${(e as any).code ?? ""} ${(e as Error).message}`);
+  } finally { await sql.end({ timeout: 5 }); }
 }
 const gw = Deno.env.get("DATABASE_URL")!;
 const runner = Deno.env.get("DATABASE_URL_FUNCTION_RUNNER")!;
-await check("gateway", pooled(gw), "SELECT current_user, now()");
-await check("function runner", pooled(runner), "SELECT current_user");
-const g = postgres(pooled(gw), { max: 1 });
+await check("gateway via pgbouncer-gateway", pooled(gw, "pgbouncer-gateway"), "SELECT current_user, now()");
+// The runner's pooler holds no platform passwords (#651).
+await check("gateway via runner pooler", pooled(gw, "pgbouncer"), "SELECT 1", true);
+const g = postgres(pooled(gw, "pgbouncer-gateway"), { max: 1 });
 const [t] = await g`SELECT n.nspname AS s FROM pg_namespace n JOIN pg_roles r ON r.rolname = n.nspname || '_func' AND r.rolcanlogin WHERE n.nspname ~ '^tenant_[0-9a-f_]+$' ORDER BY 1 LIMIT 1`;
 await g.end({ timeout: 5 });
 if (t) {
   const pw = await funcPassword(Deno.env.get("FUNC_PASSWORD_SECRET")!, t.s);
-  await check(`tenant ${t.s.slice(0, 15)}…`, pooled(runner, t.s + "_func", pw), "SELECT session_user");
+  await check(`tenant ${t.s.slice(0, 15)}… via runner pooler`, pooled(runner, "pgbouncer", t.s + "_func", pw), "SELECT session_user");
 }
 EOF
 kubectl -n "$NS" create configmap "$POD" --from-file=smoke.ts="$TMP/smoke.ts" >/dev/null

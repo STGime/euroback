@@ -55,6 +55,12 @@ type Settings struct {
 	Replicas int
 	// PlatformPoolSizes sets a per-user pool for the platform roles.
 	PlatformPoolSizes map[string]int
+	// IncludeTenants renders the tenant alias (the runner's pooler). The
+	// gateway's pooler (#651) serves platform roles only.
+	IncludeTenants bool
+	// StatsUser, if set, may run SHOW commands on the admin console (the
+	// sidecar's /metrics); it is in the userlist with a per-pod password.
+	StatsUser string
 }
 
 // UpstreamFromURL fills Host/Port/Database from a postgres:// URL.
@@ -77,6 +83,10 @@ func (s *Settings) UpstreamFromURL(databaseURL string) error {
 	return nil
 }
 
+// MaxClientConn is the rendered max_client_conn (also reported by the
+// sidecar's /metrics as the denominator for client-slot alerts).
+const MaxClientConn = 500
+
 // TenantDatabase is the alias tenant `<schema>_func` clients connect to.
 // It maps to the same Postgres database with its own server-connection
 // cap (Settings.TenantMaxDBConnections).
@@ -93,8 +103,16 @@ func RenderINI(s Settings) string {
 	if wait <= 0 {
 		wait = 15
 	}
-	fmt.Fprintf(&b, "[databases]\n%s = host=%s port=%d dbname=%s max_db_connections=%d\n", s.Database, s.Host, s.Port, s.Database, s.MaxDBConnections)
-	fmt.Fprintf(&b, "%s = host=%s port=%d dbname=%s max_db_connections=%d\n\n", s.TenantDatabase(), s.Host, s.Port, s.Database, tenantMax)
+	b.WriteString("[databases]\n")
+	// The platform alias only when this pooler serves platform roles —
+	// otherwise tenant roles could open an extra, unbudgeted pool on it.
+	if len(s.PlatformPoolSizes) > 0 {
+		fmt.Fprintf(&b, "%s = host=%s port=%d dbname=%s max_db_connections=%d\n", s.Database, s.Host, s.Port, s.Database, s.MaxDBConnections)
+	}
+	if s.IncludeTenants {
+		fmt.Fprintf(&b, "%s = host=%s port=%d dbname=%s max_db_connections=%d\n", s.TenantDatabase(), s.Host, s.Port, s.Database, tenantMax)
+	}
+	b.WriteString("\n")
 
 	users := make([]string, 0, len(s.PlatformPoolSizes))
 	for u := range s.PlatformPoolSizes {
@@ -118,7 +136,7 @@ auth_file = %s
 pool_mode = transaction
 ; the functions pod (user code with network access) can open sockets
 ; here; cap them well below file-descriptor limits
-max_client_conn = 500
+max_client_conn = %d
 default_pool_size = %d
 ; per-database caps are set on the [databases] entries above
 ; unauthenticated clients can't hold slots for long
@@ -140,7 +158,10 @@ ignore_startup_parameters = extra_float_digits
 log_connections = 0
 log_disconnections = 0
 stats_period = 60
-`, s.AuthFile, s.TenantPoolSize, wait, s.ServerTLS)
+`, s.AuthFile, MaxClientConn, s.TenantPoolSize, wait, s.ServerTLS)
+	if s.StatsUser != "" {
+		fmt.Fprintf(&b, "stats_users = %s\n", s.StatsUser)
+	}
 	return b.String()
 }
 
@@ -180,7 +201,8 @@ func TenantSchemas(ctx context.Context, conn *pgx.Conn) ([]string, error) {
 }
 
 // RenderUserlist returns the auth_file contents: platform users with
-// plaintext passwords, tenant function roles with derived SCRAM verifiers.
+// plaintext passwords (the stats user is passed the same way), tenant
+// function roles with derived SCRAM verifiers.
 func RenderUserlist(platform []PlatformUser, secret []byte, schemas []string) (string, error) {
 	seen := map[string]bool{}
 	var b strings.Builder

@@ -28,7 +28,8 @@ func TestRenderUserlist(t *testing.T) {
 
 func TestRenderINI(t *testing.T) {
 	s := Settings{ServerTLS: "require", AuthFile: "/run/pgbouncer/userlist.txt", MaxDBConnections: 20,
-		TenantPoolSize: 2, PlatformPoolSizes: map[string]int{"eurobase_gateway": 10}}
+		TenantPoolSize: 2, PlatformPoolSizes: map[string]int{"eurobase_gateway": 10}, IncludeTenants: true,
+		StatsUser: "pgb_stats"}
 	if err := s.UpstreamFromURL("postgres://u:p@db.example:14319/eurobase?sslmode=require"); err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +45,7 @@ func TestRenderINI(t *testing.T) {
 		"max_prepared_statements = 200",
 		"server_tls_sslmode = require",
 		"default_pool_size = 2",
+		"stats_users = pgb_stats",
 	} {
 		if !strings.Contains(ini, want) {
 			t.Errorf("pgbouncer.ini missing %q", want)
@@ -67,5 +69,40 @@ func TestCheckTenantBudget(t *testing.T) {
 	}
 	if err := CheckTenantBudget(Settings{Replicas: 4, TenantPoolSize: 2}); err == nil {
 		t.Error("4×2+2 > FuncConnLimit: want error")
+	}
+}
+
+// The gateway's pooler (#651) serves platform roles only: no tenant alias.
+func TestRenderINI_GatewayPooler(t *testing.T) {
+	s := Settings{ServerTLS: "require", AuthFile: "/run/pgbouncer/userlist.txt", MaxDBConnections: 10,
+		TenantPoolSize: 2, PlatformPoolSizes: map[string]int{"eurobase_gateway": 10}}
+	if err := s.UpstreamFromURL("postgres://u:p@db.example:14319/eurobase"); err != nil {
+		t.Fatal(err)
+	}
+	ini := RenderINI(s)
+	if strings.Contains(ini, "eurobase_tenant") {
+		t.Error("gateway pooler must not render the tenant alias")
+	}
+	if strings.Contains(ini, "stats_users") {
+		t.Error("stats_users rendered without a StatsUser")
+	}
+}
+
+// The runner's pooler serves no platform role: no platform alias, so a
+// tenant role can't open an extra, unbudgeted pool on it.
+func TestRenderINI_RunnerPoolerNoPlatformAlias(t *testing.T) {
+	s := Settings{ServerTLS: "require", AuthFile: "/a", MaxDBConnections: 1, TenantMaxDBConnections: 15,
+		TenantPoolSize: 2, PlatformPoolSizes: map[string]int{}, IncludeTenants: true, StatsUser: "pgb_stats"}
+	if err := s.UpstreamFromURL("postgres://u:p@db.example:14319/eurobase"); err != nil {
+		t.Fatal(err)
+	}
+	ini := RenderINI(s)
+	if strings.Contains(ini, "\neurobase = ") {
+		t.Errorf("runner pooler rendered the platform alias:\n%s", ini)
+	}
+	for _, want := range []string{"eurobase_tenant = host=db.example", "max_client_conn = 500", "auth_file = /a"} {
+		if !strings.Contains(ini, want) {
+			t.Errorf("missing %q", want)
+		}
 	}
 }

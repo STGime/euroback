@@ -1,58 +1,41 @@
-# PgBouncer for the functions runner's tenant connections (#641 PR 2/3;
-# runner-only since #651 — the gateway has pgbouncer-gateway.yaml).
+# PgBouncer for the gateway (#651) — separate from the runner's pooler
+# (pgbouncer.yaml) so client capacity reachable from tenant function code
+# is never the gateway's: only gateway pods may connect, and the functions
+# egress policy only allows `app: pgbouncer`.
 #
-# Transaction pooling; authenticates every client itself against a
-# generated userlist (platform roles + one derived SCRAM verifier per
-# tenant `<schema>_func` role — SCRAM passes through to Postgres, so the
-# pooler never holds a tenant's plaintext password). Config and userlist
-# are rendered by `pgbouncer-userlist` (cmd/pgbouncer-userlist):
-#   - init container `render`: pgbouncer.ini + userlist.txt
-#   - sidecar `userlist`: re-renders every 10 s, SIGHUPs pgbouncer on
-#     change (new projects become poolable within seconds)
+# Platform roles only (PGB_INCLUDE_TENANTS=0): the gateway role now; the
+# developer role in PR 4 (PGB_INCLUDE_DEVELOPER=1). No tenant roles, no
+# FUNC_PASSWORD_SECRET. Unused until PR 4 routes the gateway's pools here;
+# pools open lazily, so it holds no server connections until then.
 #
-# PR 3: the functions runner's tenant connections (ctx.db.sql) go through
-# it, via the tenant alias `eurobase_tenant`. PR 4 (gateway) needs a
-# separate pooler deployment first (AGENTS.md).
-# Never route through it: golang-migrate, tenant `_ddl` apply
-# connections, the worker (River LISTEN) — see AGENTS.md § Connection
-# pooling prerequisites.
-#
-# Budget per replica: platform alias 10, tenant alias 15 server connections
-# (× 2 replicas); pools open lazily, so an idle pooler holds none.
+# Budget (PR 4): PGB_MAX_DB_CONNECTIONS per replica × 2 comes on top of the
+# budget — shrink the gateway's direct pools as they move (AGENTS.md).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pgbouncer
+  name: pgbouncer-gateway
   namespace: eurobase
   labels:
-    app: pgbouncer
+    app: pgbouncer-gateway
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: pgbouncer
+      app: pgbouncer-gateway
   strategy:
-    # No surge pod: its max_db_connections would come on top of the
-    # budget. With 2 replicas one always stays up (PDB minAvailable 1).
     rollingUpdate:
       maxUnavailable: 1
       maxSurge: 0
   template:
     metadata:
       labels:
-        app: pgbouncer
+        app: pgbouncer-gateway
       annotations:
-        # userlist sidecar exposes pool stats (#651) for Alloy → Cockpit.
         prometheus.io/scrape: "true"
         prometheus.io/port: "9127"
         prometheus.io/path: "/metrics"
     spec:
-      # The userlist sidecar SIGHUPs the pgbouncer process on change.
       shareProcessNamespace: true
-      # preStop waits for in-flight transactions: tenant statement_timeout
-      # is the invocation budget (60 s on Pro), + preStop sleep + margin.
-      # Only rolls when the pooler's own inputs change (content-tagged
-      # image in CI).
       terminationGracePeriodSeconds: 90
       securityContext:
         runAsNonRoot: true
@@ -64,35 +47,22 @@ spec:
           image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
           command: ["pgbouncer-userlist", "init"]
           env: &pgbEnv
-            # The runner's pooler (#651): tenant roles only, NO platform
-            # passwords — user code can reach this process. The runner
-            # role's URL is used only for the upstream host and the
-            # read-only tenant listing.
-            - name: DATABASE_URL_FUNCTION_RUNNER
-              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_FUNCTION_RUNNER } }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL } }
             - name: PGB_UPSTREAM_URL_VAR
-              value: DATABASE_URL_FUNCTION_RUNNER
+              value: DATABASE_URL
             - name: PGB_PLATFORM_URL_VARS
-              value: ""
+              value: DATABASE_URL
             - name: PGB_INCLUDE_TENANTS
-              value: "1"
-            - name: FUNC_PASSWORD_SECRET
-              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: FUNC_PASSWORD_SECRET } }
+              value: "0"
             - name: PGB_DIR
               value: /run/pgbouncer
             - name: PGB_SERVER_TLS
               value: require
-            # Server connections per replica. The platform alias serves no
-            # role here (only the stats user reaches the admin console).
             - name: PGB_MAX_DB_CONNECTIONS
-              value: "1"
-            - name: PGB_TENANT_MAX_DB_CONNECTIONS
-              value: "15"
-            - name: PGB_TENANT_POOL_SIZE
-              value: "2"
-            # Keep equal to spec.replicas (tenant connection budget check).
-            - name: PGB_REPLICAS
-              value: "2"
+              value: "10"
+            - name: PGB_POOL_SIZE_EUROBASE_GATEWAY
+              value: "10"
           volumeMounts:
             - { name: run, mountPath: /run/pgbouncer }
           securityContext: &restricted
@@ -106,10 +76,6 @@ spec:
         - name: pgbouncer
           image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
           command: ["pgbouncer", "/run/pgbouncer/pgbouncer.ini"]
-          # Graceful stop: wait for the endpoint removal to propagate, then
-          # SIGINT = "safe shutdown" (finish in-flight transactions, then
-          # exit). Kubernetes' SIGTERM would be "super safe" (wait for
-          # clients to disconnect), which pooled clients never do.
           lifecycle:
             preStop:
               exec:
@@ -148,47 +114,44 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: pgbouncer
+  name: pgbouncer-gateway
   namespace: eurobase
   labels:
-    app: pgbouncer
+    app: pgbouncer-gateway
 spec:
   selector:
-    app: pgbouncer
+    app: pgbouncer-gateway
   ports:
     - { name: pgbouncer, port: 6432, targetPort: 6432 }
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: pgbouncer
+  name: pgbouncer-gateway
   namespace: eurobase
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: pgbouncer
+      app: pgbouncer-gateway
 ---
-# The runner's pooler: only the functions runner and the ops smoke test may
-# connect (the gateway has its own pooler, pgbouncer-gateway.yaml); Alloy
-# scrapes the sidecar's metrics.
+# Only the gateway (and the ops smoke test) may connect; Alloy scrapes metrics.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: pgbouncer-ingress
+  name: pgbouncer-gateway-ingress
   namespace: eurobase
 spec:
   podSelector:
     matchLabels:
-      app: pgbouncer
+      app: pgbouncer-gateway
   policyTypes:
     - Ingress
   ingress:
     - from:
         - podSelector:
             matchLabels:
-              app: functions
-        # scripts/ops/pgbouncer-smoke.sh (one-off verification pod)
+              app: gateway
         - podSelector:
             matchLabels:
               app: pgbouncer-smoke

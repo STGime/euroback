@@ -9,7 +9,10 @@
 //
 // Environment:
 //
-//	DATABASE_URL                  gateway role — upstream host/db, lists tenant schemas
+//	PGB_UPSTREAM_URL_VAR          env var holding the URL for upstream host/db + tenant listing (default DATABASE_URL)
+//	PGB_PLATFORM_URL_VARS         platform roles served, as env var names (default DATABASE_URL,DATABASE_URL_FUNCTION_RUNNER; "" for none)
+//	PGB_INCLUDE_TENANTS           1 (default): tenant alias + tenant roles; 0: platform roles only
+//	PGB_METRICS_ADDR              /metrics listen address (default :9127)
 //	DATABASE_URL_DEVELOPER        developer role, only with PGB_INCLUDE_DEVELOPER=1 (PR 4)
 //	PGB_REPLICAS                  PgBouncer replicas (tenant connection budget check)
 //	DATABASE_URL_FUNCTION_RUNNER  runner role (optional)
@@ -25,6 +28,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -78,30 +83,49 @@ func fail(what string, err error) {
 
 type config struct {
 	dir      string
-	gateway  string
+	upstream string // DB URL: upstream host/db and tenant listing (read-only catalog query)
 	platform []pgbouncerconf.PlatformUser
 	secret   []byte
+	tenants  bool
 	settings pgbouncerconf.Settings
 	interval time.Duration
+	metrics  string
 }
+
+// statsUser may run SHOW commands on PgBouncer's admin console; its
+// password is random per pod (statsPasswordFile), used only by /metrics.
+const statsUser = "pgb_stats"
 
 func loadConfig() (*config, error) {
 	c := &config{
 		dir:      envOr("PGB_DIR", "/run/pgbouncer"),
-		gateway:  os.Getenv("DATABASE_URL"),
+		upstream: os.Getenv(envOr("PGB_UPSTREAM_URL_VAR", "DATABASE_URL")),
 		secret:   []byte(os.Getenv("FUNC_PASSWORD_SECRET")),
+		tenants:  envOr("PGB_INCLUDE_TENANTS", "1") == "1",
 		interval: 10 * time.Second,
+		metrics:  envOr("PGB_METRICS_ADDR", ":9127"),
 	}
-	if c.gateway == "" {
-		return nil, errors.New("DATABASE_URL is required")
+	if c.upstream == "" {
+		return nil, errors.New("upstream database URL is required (PGB_UPSTREAM_URL_VAR, default DATABASE_URL)")
 	}
-	if len(c.secret) < tenantlogin.MinSecretLen {
+	if c.tenants && len(c.secret) < tenantlogin.MinSecretLen {
 		return nil, fmt.Errorf("FUNC_PASSWORD_SECRET must be at least %d bytes", tenantlogin.MinSecretLen)
 	}
-	// DATABASE_URL_DEVELOPER (migrator-equivalent) is only added with an
-	// explicit PGB_INCLUDE_DEVELOPER=1, set when the developer pool routes
-	// through the pooler (PR 4) — so a future envFrom can't slip it in.
-	keys := []string{"DATABASE_URL", "DATABASE_URL_FUNCTION_RUNNER"}
+	// Platform roles this pooler serves, by env var name. The runner's
+	// pooler serves none (#651: the process user code can reach holds no
+	// platform password); the gateway's serves the gateway role.
+	// DATABASE_URL_DEVELOPER (migrator-equivalent) additionally needs an
+	// explicit PGB_INCLUDE_DEVELOPER=1 (PR 4), so an envFrom can't slip it in.
+	platformVars, set := os.LookupEnv("PGB_PLATFORM_URL_VARS")
+	if !set {
+		platformVars = "DATABASE_URL,DATABASE_URL_FUNCTION_RUNNER"
+	}
+	var keys []string
+	for _, k := range strings.Split(platformVars, ",") {
+		if k = strings.TrimSpace(k); k != "" && k != "DATABASE_URL_DEVELOPER" {
+			keys = append(keys, k)
+		}
+	}
 	if os.Getenv("PGB_INCLUDE_DEVELOPER") == "1" {
 		keys = append(keys, "DATABASE_URL_DEVELOPER")
 	}
@@ -124,16 +148,20 @@ func loadConfig() (*config, error) {
 		QueryWaitTimeout:       envInt("PGB_QUERY_WAIT_TIMEOUT", 15),
 		TenantPoolSize:         envInt("PGB_TENANT_POOL_SIZE", 2),
 		PlatformPoolSizes:      map[string]int{},
+		IncludeTenants:         c.tenants,
+		StatsUser:              statsUser,
 	}
-	if err := s.UpstreamFromURL(c.gateway); err != nil {
+	if err := s.UpstreamFromURL(c.upstream); err != nil {
 		return nil, err
 	}
 	for _, p := range c.platform {
 		s.PlatformPoolSizes[p.User] = envInt("PGB_POOL_SIZE_"+strings.ToUpper(p.User), 10)
 	}
 	s.Replicas = envInt("PGB_REPLICAS", 1)
-	if err := pgbouncerconf.CheckTenantBudget(s); err != nil {
-		return nil, err
+	if c.tenants {
+		if err := pgbouncerconf.CheckTenantBudget(s); err != nil {
+			return nil, err
+		}
 	}
 	c.settings = s
 	if d, err := time.ParseDuration(envOr("PGB_SYNC_INTERVAL", "10s")); err == nil && d > 0 {
@@ -144,18 +172,26 @@ func loadConfig() (*config, error) {
 
 // syncUserlist renders the userlist and writes it if it changed.
 func syncUserlist(ctx context.Context, c *config) (bool, error) {
-	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	conn, err := pgx.Connect(cctx, c.gateway)
-	if err != nil {
-		return false, fmt.Errorf("connect: %w", err)
+	var schemas []string
+	if c.tenants {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		conn, err := pgx.Connect(cctx, c.upstream)
+		if err != nil {
+			return false, fmt.Errorf("connect: %w", err)
+		}
+		defer conn.Close(context.Background()) //nolint:errcheck
+		if schemas, err = pgbouncerconf.TenantSchemas(cctx, conn); err != nil {
+			return false, err
+		}
 	}
-	defer conn.Close(context.Background()) //nolint:errcheck
-	schemas, err := pgbouncerconf.TenantSchemas(cctx, conn)
+	statsPw, err := statsPassword(c.dir)
 	if err != nil {
 		return false, err
 	}
-	body, err := pgbouncerconf.RenderUserlist(c.platform, c.secret, schemas)
+	platform := append(append([]pgbouncerconf.PlatformUser{}, c.platform...),
+		pgbouncerconf.PlatformUser{User: statsUser, Password: statsPw})
+	body, err := pgbouncerconf.RenderUserlist(platform, c.secret, schemas)
 	if err != nil {
 		return false, err
 	}
@@ -166,7 +202,23 @@ func syncUserlist(ctx context.Context, c *config) (bool, error) {
 	return true, writeFile(path, body)
 }
 
+// statsPassword returns the pod's random stats-user password, creating it
+// on first use (in the in-memory emptyDir, 0600).
+func statsPassword(dir string) (string, error) {
+	path := filepath.Join(dir, "stats_password")
+	if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+		return string(b), nil
+	}
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	pw := hex.EncodeToString(buf)
+	return pw, writeFile(path, pw)
+}
+
 func runSync(ctx context.Context, c *config) {
+	go serveMetrics(ctx, c)
 	t := time.NewTicker(c.interval)
 	defer t.Stop()
 	// The file is written before the reload, so a failed SIGHUP must be
