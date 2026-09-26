@@ -153,7 +153,7 @@ const SecurityDefinerDocsURL = "https://console.eurobase.app/docs/rls#security-d
 // rather than a bare "not allowed" (#661).
 const SecurityDefinerRejection = "SECURITY DEFINER is not allowed: a definer function runs with the privileges of the role that owns it, not the caller's, and here that is a platform role, so it would bypass your project's isolation and row-level security. " +
 	"Use SECURITY INVOKER (the default) and let RLS decide; policies can admit trusted callers with is_service_role(). " +
-	"For work that must reach every user's rows, run it as the service role: a cron job with \"Run as service role\", an edge function, or the service key on your server. " +
+	"For work that must reach every user's rows, run it as the service role: a cron job with \"Run as service role\", an edge function called without a user session, or the service key on your server. " +
 	"See " + SecurityDefinerDocsURL
 
 func privErr(what string) error {
