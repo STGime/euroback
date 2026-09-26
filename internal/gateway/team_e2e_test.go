@@ -210,6 +210,14 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := env.upload(env.publicKey, owner, "http://api.eurobase.test/v1/storage/upload", "e2e/sdk.txt"); r.code >= 300 {
 			return fmt.Errorf("owner re-upload of their own key: %w", r)
 		}
+		// A console (service-role) overwrite is allowed but keeps the owner.
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "e2e/sdk.txt"); r.code >= 300 {
+			return fmt.Errorf("console overwrite: %w", r)
+		}
+		if n := env.dedScalar(t, "SELECT count(*)::text FROM %s s JOIN "+pgx.Identifier{env.schema, "users"}.Sanitize()+
+			" u ON u.id = s.uploaded_by WHERE s.key = 'e2e/sdk.txt' AND u.email = 'enduser@team.test'", "storage_objects"); n != "1" {
+			return fmt.Errorf("a console overwrite changed the owner (count %s)", n)
+		}
 		// Signed-URL upload: the key is claimed when the URL is issued, so
 		// the file is tracked and listed for its uploader only.
 		signed := func(token, key string) *httpResult {
@@ -231,8 +239,13 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		put, _ := http.NewRequest("PUT", su.URL, strings.NewReader("signed"))
 		put.Header.Set("Content-Type", "text/plain")
-		if resp, err := http.DefaultClient.Do(put); err != nil || resp.StatusCode >= 300 {
-			return fmt.Errorf("PUT to signed URL: %v %v", err, resp)
+		resp, err := http.DefaultClient.Do(put)
+		if err != nil {
+			return fmt.Errorf("PUT to signed URL: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return fmt.Errorf("PUT to signed URL: %s", resp.Status)
 		}
 		if r := asUser("GET", "/v1/storage/"); !strings.Contains(r.body, "e2e/signed.txt") {
 			return fmt.Errorf("the uploader's listing must include their signed-URL upload: %w", r)
@@ -247,6 +260,26 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if r := env.upload(env.publicKey, other, "http://api.eurobase.test/v1/storage/upload", "e2e/untracked.txt"); r.code != http.StatusForbidden {
 			return fmt.Errorf("claiming an untracked existing object must be refused: %w", r)
+		}
+		// Filtered listing refills from later S3 pages: with limit=1 the
+		// other user's only file sorts after three keys they can't see.
+		if r := env.upload(env.publicKey, other, "http://api.eurobase.test/v1/storage/upload", "e2e/zz-other.txt"); r.code >= 300 {
+			return r
+		}
+		if r := as(other, "GET", "/v1/storage/?limit=1"); r.code != 200 || !strings.Contains(r.body, "e2e/zz-other.txt") {
+			return fmt.Errorf("limit=1 listing must reach the caller's file past others' keys: %w", r)
+		}
+		// A still-valid JWT of a deleted end user: 401, not 500.
+		gone, err := signin("gone@team.test")
+		if err != nil {
+			return err
+		}
+		if _, err := env.ded.Exec(context.Background(), fmt.Sprintf(`DELETE FROM %s WHERE email = 'gone@team.test'`,
+			pgx.Identifier{env.schema, "users"}.Sanitize())); err != nil {
+			return err
+		}
+		if r := env.upload(env.publicKey, gone, "http://api.eurobase.test/v1/storage/upload", "e2e/gone.txt"); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("upload by a deleted end user: want 401: %w", r)
 		}
 		if n := env.dedCount(t, "storage_objects", "key = 'e2e/sdk.txt'"); n != 1 {
 			return fmt.Errorf("storage metadata not on the dedicated DB (count %d)", n)

@@ -346,7 +346,9 @@ func (h *StorageHandler) objectReadable(r *http.Request, key string) (bool, erro
 const maxListPages = 5
 
 // maxUploadURLExpiry caps upload signed URLs: the key claim is checked
-// when the URL is issued, so a long-lived URL would outlast it.
+// when the URL is issued, so a long-lived URL would outlast it (e.g. the
+// owner deletes the key, another user claims it, and the old URL
+// overwrites their object within this window).
 const maxUploadURLExpiry = time.Hour
 
 // serviceCaller: console traffic (PlatformStorageContext marks it
@@ -367,43 +369,86 @@ func serviceCaller(r *http.Request) bool {
 //     issued to someone else for the same key loses, and a signed-URL
 //     upload — which never passes through the gateway — is tracked and
 //     listed for its uploader.
-func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType string) (bool, error) {
+//
+// created reports whether this request inserted the claim, so a caller
+// whose S3 write then fails can release it (releaseClaim).
+func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType string) (ok, created bool, err error) {
 	if serviceCaller(r) || h.engine == nil {
-		return true, nil
+		return true, false, nil
 	}
 	schema := h.schemaForRequest(r)
 	if schema == "" || h.pool == nil {
-		return true, nil
+		return true, false, nil
 	}
 	esc := strings.ReplaceAll(schema, `"`, `""`)
 	var exists bool
 	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`, esc), key).Scan(&exists)
 	}); err != nil {
-		return false, err
+		return false, false, err
 	}
 	if !exists {
 		if h.s3 != nil {
 			inS3, err := h.s3.ObjectExists(r.Context(), bucket, key)
 			if err != nil {
-				return false, err
+				return false, false, err
 			}
 			if inS3 {
-				return false, nil
+				return false, false, nil
 			}
 		}
 		uploader := uploaderForInsert(r)
 		if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, fmt.Sprintf(
+			tag, err := tx.Exec(ctx, fmt.Sprintf(
 				`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
 				 VALUES ($1, $2, 0, $3) ON CONFLICT (key) DO NOTHING`, esc),
 				key, contentType, uploader)
+			created = err == nil && tag.RowsAffected() == 1
 			return err
 		}); err != nil {
-			return false, err
+			if isForeignKeyViolation(err) {
+				// The JWT is valid but its end user no longer exists.
+				return false, false, errClaimNoUser
+			}
+			return false, false, err
 		}
 	}
-	return h.assertObjectVisible(r, key)
+	ok, err = h.assertObjectVisible(r, key)
+	return ok, created, err
+}
+
+// errClaimNoUser: the caller's end user no longer exists (tenant users FK).
+var errClaimNoUser = errors.New("end user no longer exists")
+
+// releaseClaim removes a claim this request created when its S3 write
+// failed, so the key isn't left owned-but-empty. Only a fresh claim
+// (size 0) of this owner is removed; background context — the request
+// may be cancelled.
+func (h *StorageHandler) releaseClaim(r *http.Request, key string) {
+	schema := h.schemaForRequest(r)
+	uploader := uploaderForInsert(r)
+	if schema == "" || uploader == nil {
+		return
+	}
+	ctx := context.WithoutCancel(r.Context())
+	q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1 AND size_bytes = 0 AND uploaded_by = $2`,
+		strings.ReplaceAll(schema, `"`, `""`))
+	if err := h.runAsService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, key, uploader)
+		return err
+	}); err != nil {
+		slog.Warn("storage: failed to release key claim", "error", err, "key", key)
+	}
+}
+
+// writeClaimError maps a claimKey error: 401 for a deleted end user,
+// 503 for an unavailable dedicated database, else 500.
+func writeClaimError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errClaimNoUser) {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	writeTenantPoolError(w, err)
 }
 
 // visibleToCaller drops listed objects the caller can't read: for SDK
@@ -678,9 +723,10 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ok, err := h.claimKey(r, bucket, key, contentType); err != nil {
+	ok, claimed, err := h.claimKey(r, bucket, key, contentType)
+	if err != nil {
 		slog.Error("storage upload: key claim failed", "error", err, "key", key)
-		writeTenantPoolError(w, err)
+		writeClaimError(w, err)
 		return
 	} else if !ok {
 		http.Error(w, `{"error":"an object with this key belongs to another user"}`, http.StatusForbidden)
@@ -689,6 +735,9 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 
 	retention := h.retentionFor(r, key)
 	if err := h.s3.UploadObjectWithRetention(r.Context(), bucket, key, file, contentType, size, retention); err != nil {
+		if claimed {
+			h.releaseClaim(r, key)
+		}
 		slog.Error("storage upload failed", "error", err, "bucket", bucket, "key", key)
 		http.Error(w, `{"error":"failed to upload file"}`, http.StatusInternalServerError)
 		return
@@ -1089,6 +1138,9 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Same normalization as UploadFile and the read path — a claim under
+	// a decomposed (NFD) key would never match later NFC lookups.
+	req.Key = NormalizeStorageKey(req.Key)
 	if err := ValidateStorageKey(req.Key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
@@ -1103,7 +1155,7 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Ownership check for download signed URLs. Upload URLs may not target
-	// a key another user owns (keyOwnedByOther); for a new key the upload
+	// a key another user owns (claimKey); for a new key the upload
 	// tracking INSERT records uploaded_by so subsequent downloads are
 	// gated correctly. A signed URL handed to a different user after it's
 	// generated is a trust-the-URL scenario (unguessable token); that's
@@ -1113,9 +1165,9 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
-		if ok, err := h.claimKey(r, bucket, req.Key, ct); err != nil {
+		if ok, _, err := h.claimKey(r, bucket, req.Key, ct); err != nil {
 			slog.Error("storage signed-url: key claim failed", "error", err, "key", req.Key)
-			writeTenantPoolError(w, err)
+			writeClaimError(w, err)
 			return
 		} else if !ok {
 			http.Error(w, `{"error":"an object with this key belongs to another user"}`, http.StatusForbidden)
