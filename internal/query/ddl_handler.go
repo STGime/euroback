@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -77,6 +78,7 @@ type AlterColumnRequest struct {
 // Mounted at /platform/projects/{id}/schema/tables
 func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
+	r.Use(requireTenantPool)
 
 	r.Post("/", handleCreateTable(pool))
 	r.Delete("/{table}", handleDropTable(pool))
@@ -118,6 +120,9 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 // data leak" class of bug.
 func HandleRLSAudit(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseWithoutTenantPool(w, r) {
+			return
+		}
 		projectID := chi.URLParam(r, "id")
 
 		var schemaName string
@@ -162,6 +167,9 @@ func HandleRLSAudit(pool *pgxpool.Pool) http.HandlerFunc {
 // via CLI migrations, psql, or any path that bypasses the DDL handlers.
 func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseWithoutTenantPool(w, r) {
+			return
+		}
 		projectID := chi.URLParam(r, "id")
 
 		// Resolve tenant schema for backfill.
@@ -195,6 +203,11 @@ func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			changes = append(changes, c)
 		}
+		if err := rows.Err(); err != nil {
+			slog.Error("list schema changes failed", "error", err)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 
 		jsonResponse(w, changes, http.StatusOK)
 	}
@@ -209,37 +222,55 @@ var platformTables = map[string]bool{
 // backfillUnloggedTables discovers tables in the tenant schema that have no
 // corresponding "create_table" entry in schema_changes and inserts one.
 func backfillUnloggedTables(ctx context.Context, pool *pgxpool.Pool, projectID, schemaName string) {
-	rows, err := pool.Query(ctx,
+	// Tables live on the project's database (dedicated for Team, #679);
+	// schema_changes lives on the platform DB — two queries, no join.
+	tp, err := tenantDDLPool(ctx, pool)
+	if err != nil {
+		slog.Debug("backfill schema changes: tenant pool unavailable", "error", err)
+		return
+	}
+	rows, err := tp.Query(ctx,
 		`SELECT t.table_name
 		 FROM information_schema.tables t
 		 WHERE t.table_schema = $1
-		   AND t.table_type = 'BASE TABLE'
-		   AND NOT EXISTS (
-		       SELECT 1 FROM schema_changes sc
-		       WHERE sc.project_id = $2
-		         AND sc.table_name = t.table_name
-		         AND sc.action = 'create_table'
-		   )`, schemaName, projectID)
+		   AND t.table_type = 'BASE TABLE'`, schemaName)
 	if err != nil {
 		slog.Debug("backfill schema changes: query failed", "error", err)
 		return
 	}
-	defer rows.Close()
-
+	var tables []string
 	for rows.Next() {
 		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
-			continue
+		if err := rows.Scan(&tableName); err == nil && !platformTables[tableName] {
+			tables = append(tables, tableName)
 		}
-		if platformTables[tableName] {
-			continue
-		}
-		// Insert a backfilled create_table entry.
-		_, _ = pool.Exec(ctx,
-			`INSERT INTO schema_changes (project_id, action, table_name, detail)
-			 VALUES ($1, 'create_table', $2, '{"source":"backfill"}'::jsonb)`,
-			projectID, tableName)
-		slog.Info("backfilled schema change", "project_id", projectID, "table", tableName)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		slog.Debug("backfill schema changes: query failed", "error", err)
+		return
+	}
+	if len(tables) == 0 {
+		return
+	}
+
+	// Insert a backfilled create_table entry for each table without one.
+	tag, err := pool.Exec(ctx,
+		`INSERT INTO schema_changes (project_id, action, table_name, detail)
+		 SELECT $1::uuid, 'create_table', t, '{"source":"backfill"}'::jsonb
+		   FROM unnest($2::text[]) AS t
+		  WHERE NOT EXISTS (
+		        SELECT 1 FROM schema_changes sc
+		         WHERE sc.project_id = $1::uuid
+		           AND sc.table_name = t
+		           AND sc.action = 'create_table')`,
+		projectID, tables)
+	if err != nil {
+		slog.Debug("backfill schema changes: insert failed", "error", err)
+		return
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		slog.Info("backfilled schema changes", "project_id", projectID, "tables", n)
 	}
 }
 
@@ -714,7 +745,12 @@ func handleListIndexes(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		indexes, err := GetTableIndexes(r.Context(), pool, schemaName, tableName)
+		tp, err := tenantDDLPool(r.Context(), pool)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		indexes, err := GetTableIndexes(r.Context(), tp, schemaName, tableName)
 		if err != nil {
 			slog.Error("list indexes failed", "error", err)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
@@ -945,6 +981,7 @@ func handleListTriggerFunctions(pool *pgxpool.Pool) http.HandlerFunc {
 // Mounted at /platform/projects/{id}/schema/functions
 func HandleFunctions(pool *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
+	r.Use(requireTenantPool)
 	r.Get("/", handleListFunctions(pool))
 	r.Get("/triggers", handleListTriggerFunctions(pool))
 	r.Post("/", handleCreateFunction(pool))
@@ -1085,14 +1122,8 @@ func handleAlterColumn(pool *pgxpool.Pool) http.HandlerFunc {
 		currentCol := columnName
 		changes := map[string]any{}
 
-		// Apply changes in sequence within a transaction.
-		tx, err := pool.Begin(r.Context())
-		if err != nil {
-			slog.Error("begin transaction failed", "error", err)
-			jsonError(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		defer tx.Rollback(r.Context()) //nolint:errcheck
+		// Apply changes in sequence; each runs in its own DDL transaction
+		// on the project's database.
 
 		if req.NewType != nil {
 			if err := AlterColumnType(r.Context(), pool, schemaName, tableName, currentCol, *req.NewType); err != nil {
@@ -1131,12 +1162,6 @@ func handleAlterColumn(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			changes["new_name"] = *req.NewName
 			currentCol = *req.NewName
-		}
-
-		if err := tx.Commit(r.Context()); err != nil {
-			slog.Error("commit failed", "error", err)
-			jsonError(w, "internal server error", http.StatusInternalServerError)
-			return
 		}
 
 		logSchemaChange(pool, r, projectID, "alter_column", tableName, &columnName, changes)
@@ -1307,4 +1332,26 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 		logSchemaChange(pool, r, projectID, "drop_policy", tableName, nil, map[string]any{"policy": policyName})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// requireTenantPool answers 503 for a Team project whose dedicated pool is
+// not on the request, before any handler runs (#679). The routes'
+// middlewares already refuse in that case; this makes every DDL handler
+// return 503 rather than whatever status it maps the underlying
+// ErrDedicatedPoolUnavailable to, should a new route skip them.
+func requireTenantPool(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuseWithoutTenantPool(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func refuseWithoutTenantPool(w http.ResponseWriter, r *http.Request) bool {
+	if _, err := tenantDDLPool(r.Context(), nil); errors.Is(err, ErrDedicatedPoolUnavailable) {
+		jsonError(w, err.Error(), http.StatusServiceUnavailable)
+		return true
+	}
+	return false
 }

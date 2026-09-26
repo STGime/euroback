@@ -204,6 +204,7 @@ func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// for one upgraded from Pro — falling back there silently
 			// reads and writes the wrong database.
 			if pdID != nil {
+				ctx = query.WithDedicatedDB(ctx)
 				var tp *pgxpool.Pool
 				if resolver != nil {
 					tp = resolver(ctx, projectID)

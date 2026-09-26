@@ -134,3 +134,36 @@ func DeveloperRoleFromContext(ctx context.Context) bool {
 // dedicated database and no pool for it is on the request. Callers refuse
 // (503) — never fall back to the shared cluster (#678).
 var ErrDedicatedPoolUnavailable = errors.New("the project's dedicated database is not available")
+
+// tenantDDLPool picks the pool for tenant-schema DDL, validation and
+// catalog listings: the dedicated pool on the request if there is one;
+// ErrDedicatedPoolUnavailable if the project has a dedicated database but
+// the request carries no pool for it (never the shared cluster, #679);
+// otherwise shared — the caller's pool.
+func tenantDDLPool(ctx context.Context, shared *pgxpool.Pool) (*pgxpool.Pool, error) {
+	if p := TenantPoolFromContext(ctx); p != nil {
+		return p, nil
+	}
+	if HasDedicatedDBFromContext(ctx) {
+		return nil, ErrDedicatedPoolUnavailable
+	}
+	return shared, nil
+}
+
+type dedicatedDBKey struct{}
+
+// WithDedicatedDB marks the request's project as keeping its tenant data on
+// a dedicated database (a live project_databases row). Set by the
+// middlewares that resolve the project (PlatformTenantContext, the SDK DDL
+// adapter); tenantDDLPool then refuses rather than use the shared pool when
+// no dedicated pool is on the request. (query can't read
+// auth.ProjectContext — auth imports query.)
+func WithDedicatedDB(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dedicatedDBKey{}, true)
+}
+
+// HasDedicatedDBFromContext reports whether WithDedicatedDB was applied.
+func HasDedicatedDBFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(dedicatedDBKey{}).(bool)
+	return v
+}

@@ -889,9 +889,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			//   Settings/API keys/vault/invites → admin
 			//   Delete project / change roles → owner
 			r.With(tenant.RequireMinRole("viewer")).Get("/logs", HandleLogs(pool))
-			r.With(tenant.RequireMinRole("viewer")).Get("/schema", query.HandleSchemaIntrospection(pool))
-			r.With(tenant.RequireMinRole("viewer")).Get("/schema/changes", query.HandleSchemaChanges(pool))
-			r.With(tenant.RequireMinRole("viewer")).Get("/schema/rls-audit", query.HandleRLSAudit(pool))
+			// PlatformTenantContext (#679): the catalog reads go to a Team
+			// project's dedicated DB (or 503); projects / schema_changes
+			// lookups stay on the platform DB via `pool`.
+			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema", query.HandleSchemaIntrospection(pool))
+			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/changes", query.HandleSchemaChanges(pool))
+			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/rls-audit", query.HandleRLSAudit(pool))
 			// DDL on tenant schemas.
 			//
 			// Free/Pro: the developer pool + SET LOCAL ROLE
@@ -1441,7 +1444,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// from the platform path (and vice versa). See issues #40/#41/#42.
 			r.Route("/schema/tables", func(r chi.Router) {
 				r.Use(requireSecretKeyForDDL)
-				r.Use(sdkDDLAdapter)
+				r.Use(sdkDDLAdapter(ownerPoolFor, enableSDKRouting))
 				r.Mount("/", query.HandleDDL(developerPool))
 			})
 
@@ -1704,19 +1707,40 @@ func requireSecretKeyForDDL(next http.Handler) http.Handler {
 // SDK path (/v1/db/schema/...) where the project is resolved by the API
 // key middleware and the dev-role flag is set here. Both paths therefore
 // produce uniformly migrator-owned tables.
-func sdkDDLAdapter(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pc, ok := auth.ProjectFromContext(r.Context())
-		if !ok || pc.ProjectID == "" {
-			http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
-			return
-		}
-		if rctx := chi.RouteContext(r.Context()); rctx != nil {
-			rctx.URLParams.Add("id", pc.ProjectID)
-		}
-		ctx := query.WithDeveloperRole(r.Context())
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+//
+// Team-tier (#679): DDL for a project with a dedicated database runs there,
+// on the owner pool (the dedicated-instance counterpart of the shared
+// cluster's eurobase_migrator, as for console DDL) — or is refused with 503
+// (routing off, no cipher, pool unavailable). Never the shared cluster.
+func sdkDDLAdapter(ownerPoolFor func(context.Context, string) *pgxpool.Pool, routingEnabled bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pc, ok := auth.ProjectFromContext(r.Context())
+			if !ok || pc.ProjectID == "" {
+				http.Error(w, `{"error":"missing project context"}`, http.StatusUnauthorized)
+				return
+			}
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				rctx.URLParams.Add("id", pc.ProjectID)
+			}
+			ctx := query.WithDeveloperRole(r.Context())
+			if pc.HasDedicatedDB {
+				ctx = query.WithDedicatedDB(ctx)
+				var p *pgxpool.Pool
+				if routingEnabled && ownerPoolFor != nil {
+					p = ownerPoolFor(ctx, pc.ProjectID)
+				}
+				if p == nil {
+					slog.Error("SDK DDL refused: dedicated database unavailable (no shared fallback)",
+						"project_id", pc.ProjectID, "routing_enabled", routingEnabled)
+					http.Error(w, `{"error":"the project's dedicated database is not available right now"}`, http.StatusServiceUnavailable)
+					return
+				}
+				ctx = query.ContextWithTenantPool(ctx, p)
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 // buildRealtimeAuthorize returns a realtime.Authorize closure that

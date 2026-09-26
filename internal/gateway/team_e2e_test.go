@@ -255,6 +255,16 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if rec.Code >= 300 {
 			return fmt.Errorf("settings locked out: PATCH /v1/tenants/{id}: %d %s", rec.Code, rec.Body.String())
 		}
+		// SDK DDL for it: refused, never the shared cluster.
+		sec := env.addAPIKeys(t, stuck)
+		sreq := httptest.NewRequest("POST", "http://api.eurobase.test/v1/db/schema/tables", strings.NewReader(`{"name":"never","columns":[{"name":"id","type":"text"}]}`))
+		sreq.Header.Set("apikey", sec)
+		sreq.Header.Set("Content-Type", "application/json")
+		srec := httptest.NewRecorder()
+		env.router.ServeHTTP(srec, sreq)
+		if srec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("SDK DDL while provisioning: want 503, got %d %s", srec.Code, srec.Body.String())
+		}
 		// Saving an OAuth client secret needs the dedicated vault: refused,
 		// not written to the shared one.
 		cfg := tenant.DefaultAuthConfig()
@@ -323,6 +333,74 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	check(t, env, "console_ddl_alter_and_drop_column", func() error {
+		if r := console("PATCH", "/schema/tables/ded_only/columns/note", `{"new_name":"note2"}`); r.code >= 300 {
+			return r
+		}
+		if r := console("DELETE", "/schema/tables/ded_only/columns/note2", ""); r.code >= 300 {
+			return r
+		}
+		if env.dedScalar(t, "SELECT count(*)::text FROM pg_attribute WHERE attrelid = '%s'::regclass AND attname IN ('note', 'note2') AND NOT attisdropped", "ded_only") != "0" {
+			return errors.New("column not renamed/dropped on the dedicated DB")
+		}
+		return nil
+	})
+
+	check(t, env, "console_ddl_list_functions_and_policies", func() error {
+		r := console("GET", "/schema/functions", "")
+		if r.code != 200 || !strings.Contains(r.body, "ded_only_fn") {
+			return fmt.Errorf("function listing lacks the dedicated-only function: %w", r)
+		}
+		if strings.Contains(r.body, "auth_uid") {
+			return fmt.Errorf("function listing shows platform helpers: %w", r)
+		}
+		r = console("GET", "/schema/tables/ded_only/policies", "")
+		if r.code != 200 || !strings.Contains(r.body, "ded_only_policy") {
+			return fmt.Errorf("policy listing lacks the dedicated-only policy: %w", r)
+		}
+		return nil
+	})
+
+	check(t, env, "console_function_reserved_names", func() error {
+		r := console("POST", "/schema/functions", `{"name":"auth_uid","body":"SELECT NULL::uuid","returns":"uuid","language":"sql"}`)
+		if r.code < 400 || !strings.Contains(r.body, "reserved") {
+			return fmt.Errorf("overwriting the RLS helper auth_uid must be refused: %w", r)
+		}
+		return nil
+	})
+
+	check(t, env, "console_rls_audit", func() error {
+		r := console("GET", "/schema/rls-audit", "")
+		if r.code != 200 || !strings.Contains(r.body, "ded_only") {
+			return fmt.Errorf("RLS audit lacks the dedicated-only table: %w", r)
+		}
+		return nil
+	})
+
+	check(t, env, "console_schema_changes_backfill", func() error {
+		// Earlier checks log DDL on ded_only themselves; only the backfill
+		// writes a create_table entry for it (it was created outside the
+		// DDL handlers), and only if it listed the dedicated DB's tables.
+		r := console("GET", "/schema/changes", "")
+		if r.code != 200 {
+			return r
+		}
+		var changes []struct {
+			Action    string          `json:"action"`
+			TableName string          `json:"table_name"`
+			Detail    json.RawMessage `json:"detail"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &changes); err != nil {
+			return fmt.Errorf("decode: %v: %w", err, r)
+		}
+		for _, c := range changes {
+			if c.Action == "create_table" && c.TableName == "ded_only" && strings.Contains(string(c.Detail), "backfill") {
+				return nil
+			}
+		}
+		return fmt.Errorf("no backfilled create_table entry for the dedicated-only table: %w", r)
+	})
+
 	check(t, env, "sdk_ddl_create_table", func() error {
 		if r := sdk("POST", "/v1/db/schema/tables", `{"name":"sdk_made","columns":[{"name":"id","type":"uuid","primary_key":true,"default":"gen_random_uuid()"},{"name":"note","type":"text"}]}`); r.code >= 300 {
 			return r
@@ -368,12 +446,7 @@ type knownGap struct {
 	sigs  []string
 }
 
-var teamKnownGaps = map[string]knownGap{
-	"console_schema_introspection": {"#679", []string{"lacks the dedicated-only table"}},
-	"console_ddl_add_column":       {"#679", []string{"does not exist in schema"}},
-	"console_ddl_list_indexes":     {"#679", []string{"lacks the dedicated-only index"}},
-	"sdk_ddl_create_table":         {"#679", []string{"SQLSTATE 3F000", "table not created on the dedicated DB"}},
-}
+var teamKnownGaps = map[string]knownGap{}
 
 func check(t *testing.T, env *teamEnv, name string, fn func() error) {
 	t.Helper()
@@ -441,12 +514,10 @@ const decoyTitle = "decoy-on-shared"
 
 // sharedFingerprintSQL summarises the stale shared copy: its tables and
 // the todos rows and the vault secret names (%[1]s / %[2]s = the quoted
-// todos / vault_secrets tables). SDK DDL's table is excluded while #679 is
-// open, so any other write to the stale copy fails the check.
+// todos / vault_secrets tables).
 const sharedFingerprintSQL = `
 SELECT (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class
-         WHERE relnamespace = to_regnamespace($1) AND relkind = 'r'
-           AND relname <> 'sdk_made') -- known gap #679 (sdk_ddl_create_table)
+         WHERE relnamespace = to_regnamespace($1) AND relkind = 'r')
     || ' | ' ||
        (SELECT coalesce(string_agg(title, ',' ORDER BY title), '') FROM ` + "%[1]s" + `)
     || ' | ' ||
@@ -499,6 +570,28 @@ func (e *teamEnv) dedScalar(t *testing.T, format, table string) string {
 		t.Fatalf("dedScalar: %v", err)
 	}
 	return v
+}
+
+// addAPIKeys creates an API key pair for a project and returns the secret key.
+func (e *teamEnv) addAPIKeys(t *testing.T, projectID string) string {
+	t.Helper()
+	ctx := context.Background()
+	pub, sec, pubHash, secHash, err := tenant.GenerateAPIKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := e.shared.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := tenant.StoreAPIKeys(ctx, tx, projectID, pubHash, pub[:14], secHash, sec[:14]); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return sec
 }
 
 // consoleFor issues a console request as the owner for another project.
@@ -637,8 +730,12 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatalf("LockdownReadonlyGrants: %v", err)
 	}
 	// Exists only here, so reads from the stale shared copy are detectable.
-	mustExecT(t, dedAdmin, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
-	mustExecT(t, dedAdmin, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+	// Created as the owner, like any customer table there.
+	ownerPool := mustPool(ownerDSN)
+	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()))
 
 	// project_databases row with sealed credentials (owner, runtime, readonly).
 	key := make([]byte, 32)
