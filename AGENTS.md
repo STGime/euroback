@@ -107,6 +107,14 @@ This ensures the compliance DPA report automatically includes the processor when
 ## Storage object ownership
 - SDK storage (`/v1/storage`, API key + end-user JWT) is scoped per end user by the `storage_objects` RLS policy (`is_service_role() OR uploaded_by = current_end_user_id()`): download / delete / download URLs via `assertObjectVisible`, **listings** via `visibleToCaller` (keys with a visible row only; refilled from up to `maxListPages` S3 pages), **uploads and upload URLs** via `claimKey` — a tracked key must be the caller's, an untracked key that already exists in S3 is refused, a new key is claimed (row owned by the caller) *before* anything reaches S3, so signed-URL uploads are tracked too. The tracking upsert never changes an existing owner. Upload URLs expire after at most 1 h. Console storage (key type `secret`) and edge functions are service role and unrestricted.
 
+## SDK releases (`@eurobase/sdk`)
+Every release, in order — npm and GitHub drifted for 0.7.1 (#695):
+1. Bump `sdk/js/package.json` and add the `sdk/js/CHANGELOG.md` section (note any required gateway change); merge.
+2. Tag the merge commit **`sdk-vX.Y.Z`** (the CLI uses `cli-vX.Y.Z`; the older bare `v0.6.0` / `v0.7.0` tags are legacy) and push the tag.
+3. `npm publish` from `sdk/js`.
+4. **GitHub Release** from the tag: title "SDK vX.Y.Z — <headline>", body = "Published to npm as [`@eurobase/sdk@X.Y.Z`](https://www.npmjs.com/package/@eurobase/sdk/v/X.Y.Z)." + the CHANGELOG section; mark Latest.
+5. Update version mentions that advertise the latest SDK (console docs install hints, marketing site `STGime/eurobase`) — "requires ≥ X" notes stay as they are.
+
 ## Sovereignty
 - All infrastructure runs in EU (France) on Scaleway
 - No US cloud services permitted (AWS, GCP, Azure, Cloudflare, Stripe, Vercel)
