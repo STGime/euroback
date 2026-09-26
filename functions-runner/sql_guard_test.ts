@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
+import { privilegeStatementError, SECURITY_DEFINER_REJECTION, uuidRe } from "./sql_guard.ts";
 
 Deno.test("privilegeStatementError blocks role/session/privilege statements", () => {
   const blocked = [
@@ -79,4 +79,16 @@ Deno.test("privilegeStatementError refuses string-literal settings", () => {
     assert(privilegeStatementError(s) !== null, s);
   }
   assertEquals(privilegeStatementError("SELECT 'standard_conforming_strings' AS doc"), null);
+});
+
+// #661: SECURITY DEFINER is explained, and the text matches the gateway's
+// query.SecurityDefinerRejection (privilege_guard.go) word for word.
+Deno.test("privilegeStatementError explains SECURITY DEFINER", async () => {
+  assertEquals(privilegeStatementError("ALTER FUNCTION f() SECURITY DEFINER"), SECURITY_DEFINER_REJECTION);
+  const goSrc = await Deno.readTextFile(new URL("../internal/query/privilege_guard.go", import.meta.url));
+  const start = goSrc.indexOf("const SecurityDefinerRejection =");
+  const end = goSrc.indexOf("SecurityDefinerDocsURL", start + 1);
+  const literals = [...goSrc.slice(start, end).matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replaceAll('\\"', '"'));
+  const url = /SecurityDefinerDocsURL = "([^"]+)"/.exec(goSrc)![1];
+  assertEquals(literals.join("") + url, SECURITY_DEFINER_REJECTION);
 });
