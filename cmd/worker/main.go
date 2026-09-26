@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -30,6 +31,7 @@ import (
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivermigrate"
@@ -215,15 +217,28 @@ func main() {
 	if developerPool != pool {
 		exportData = compliance.ExportSource{Pool: developerPool}
 	}
+	// A Team-tier project's tenant data lives on its dedicated database,
+	// not the shared cluster (#663): exports read it there as the owner.
+	// Always wired (the repo always exists), so a Team project never falls
+	// back to the shared cluster — without a cipher its export fails.
+	exportDedicated := func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+		p, err := dbprovider.OpenOwnerPool(ctx, providerRepo, cipher, projectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return p, err
+	}
 	river.AddWorker(riverWorkers, &workers.TenantExportWorker{
-		DBPool: pool,
-		S3:     s3Client,
-		Data:   exportData,
+		DBPool:    pool,
+		S3:        s3Client,
+		Data:      exportData,
+		Dedicated: exportDedicated,
 	})
 	river.AddWorker(riverWorkers, &workers.UserExportWorker{
-		DBPool: pool,
-		S3:     s3Client,
-		Data:   exportData,
+		DBPool:    pool,
+		S3:        s3Client,
+		Data:      exportData,
+		Dedicated: exportDedicated,
 	})
 	river.AddWorker(riverWorkers, &workers.SendDripEmailWorker{
 		DBPool:     pool,

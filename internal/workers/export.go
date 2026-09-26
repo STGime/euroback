@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,9 +23,12 @@ type TenantExportWorker struct {
 	S3       *storage.S3Client
 	AuditSvc *audit.Service
 	// Data is where tenant tables are read from (compliance.ExportSource,
-	// #654): the developer pool as eurobase_migrator in production. Unset
+	// #654): the developer pool, as eurobase_developer, in production. Unset
 	// = DBPool, where RLS-limited tables are reported as not exported.
 	Data compliance.ExportSource
+	// Dedicated opens the owner pool of a Team-tier project's dedicated
+	// database, where its tenant data lives (#663). Unset = shared only.
+	Dedicated DedicatedResolver
 }
 
 func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.TenantExportArgs]) error {
@@ -61,13 +65,23 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 		failExport("resolve_project", err)
 		return err
 	}
+	if err := refuseDuringUpgrade(ctx, upgradeStatePool(w.Data, w.DBPool), args.ProjectID); err != nil {
+		failExport("upgrade_in_progress", err)
+		return err
+	}
+	src, closeSrc, err := resolveExportSource(ctx, w.Data, w.DBPool, w.Dedicated, args.ProjectID)
+	if err != nil {
+		failExport("resolve_database", err)
+		return err
+	}
+	defer closeSrc()
 
 	logger.Info("streaming tenant export zip to temp file")
 	var result *compliance.ExportResult
 	tmpFile, size, totalRows, err := streamExportToTempFile(
 		ctx, args.ExportID,
 		func(out io.Writer) (int, error) {
-			res, err := compliance.WriteTenantExport(ctx, w.DBPool, exportSource(w.Data, w.DBPool), out, schemaName, args.ProjectID, args.ExportID, args.Format)
+			res, err := compliance.WriteTenantExport(ctx, w.DBPool, src, out, schemaName, args.ProjectID, args.ExportID, args.Format)
 			if err != nil {
 				return 0, err
 			}
@@ -126,8 +140,9 @@ type UserExportWorker struct {
 	DBPool   *pgxpool.Pool
 	S3       *storage.S3Client
 	AuditSvc *audit.Service
-	// Data: see TenantExportWorker.Data.
-	Data compliance.ExportSource
+	// Data / Dedicated: see TenantExportWorker.
+	Data      compliance.ExportSource
+	Dedicated DedicatedResolver
 }
 
 func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExportArgs]) error {
@@ -159,13 +174,23 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 		failExport("resolve_project", err)
 		return err
 	}
+	if err := refuseDuringUpgrade(ctx, upgradeStatePool(w.Data, w.DBPool), args.ProjectID); err != nil {
+		failExport("upgrade_in_progress", err)
+		return err
+	}
+	src, closeSrc, err := resolveExportSource(ctx, w.Data, w.DBPool, w.Dedicated, args.ProjectID)
+	if err != nil {
+		failExport("resolve_database", err)
+		return err
+	}
+	defer closeSrc()
 
 	logger.Info("streaming user export zip to temp file")
 	var result *compliance.ExportResult
 	tmpFile, size, totalRows, err := streamExportToTempFile(
 		ctx, args.ExportID,
 		func(out io.Writer) (int, error) {
-			res, err := compliance.WriteUserExport(ctx, w.DBPool, exportSource(w.Data, w.DBPool), out, schemaName, args.ProjectID, args.UserID, args.ExportID, args.Format)
+			res, err := compliance.WriteUserExport(ctx, w.DBPool, src, out, schemaName, args.ProjectID, args.UserID, args.ExportID, args.Format)
 			if err != nil {
 				return 0, err
 			}
@@ -214,13 +239,71 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 	return nil
 }
 
-// exportSource returns the configured tenant-data source, or the
-// worker's own pool when none is set (dev without a developer pool).
-func exportSource(data compliance.ExportSource, fallback *pgxpool.Pool) compliance.ExportSource {
-	if data.Pool != nil {
-		return data
+// DedicatedResolver opens an owner pool on a project's live dedicated
+// database (dbprovider.OpenOwnerPool). It returns (nil, nil) for a
+// project without one — its data is on the shared cluster.
+type DedicatedResolver func(ctx context.Context, projectID string) (*pgxpool.Pool, error)
+
+// ErrUpgradeInProgress fails an export while the project is being upgraded
+// to a Team tier: project_databases turns active at the end of provisioning,
+// before the data copy and cutover, so the dedicated database would be read
+// (and reported complete) while it is still empty or partly copied.
+var ErrUpgradeInProgress = errors.New("the project is being upgraded to a dedicated database; retry the export once the upgrade is live")
+
+// refuseDuringUpgrade returns ErrUpgradeInProgress while projectID has an
+// upgrade before cutover (requested → cutting_over, the states the upgrade
+// worker resumes). From 'live' on, live traffic uses the dedicated database,
+// so that is what the export reads.
+func refuseDuringUpgrade(ctx context.Context, pool *pgxpool.Pool, projectID string) error {
+	var inFlight bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM public.project_upgrades
+		  WHERE project_id = $1 AND state IN ('requested', 'provisioning', 'copying', 'cutting_over'))`,
+		projectID,
+	).Scan(&inFlight); err != nil {
+		return fmt.Errorf("check for an upgrade in progress: %w", err)
 	}
-	return compliance.ExportSource{Pool: fallback}
+	if inFlight {
+		return ErrUpgradeInProgress
+	}
+	return nil
+}
+
+// upgradeStatePool is the pool refuseDuringUpgrade reads project_upgrades
+// with: the developer pool (data.Pool). Migration 000117 revokes the table
+// from eurobase_gateway — the worker's DBPool — so reading it there fails
+// every export with 42501. Without a developer pool (dev) it's fallback.
+func upgradeStatePool(data compliance.ExportSource, fallback *pgxpool.Pool) *pgxpool.Pool {
+	if data.Pool != nil {
+		return data.Pool
+	}
+	return fallback
+}
+
+// resolveExportSource picks where a project's tenant tables are read from
+// (#663). A Team-tier project with a live dedicated database is read there,
+// as its owner: that's where live traffic reads and writes its data, while
+// the shared cluster has no schema for it (or a stale pre-upgrade copy).
+// Every other project is read from the shared cluster through data (the
+// developer pool, #654), or through fallback without one (dev). An error —
+// dedicated database not active yet, credential unavailable — fails the
+// export rather than reading the wrong database. The returned func closes
+// what was opened.
+func resolveExportSource(ctx context.Context, data compliance.ExportSource, fallback *pgxpool.Pool, dedicated DedicatedResolver, projectID string) (compliance.ExportSource, func(), error) {
+	noop := func() {}
+	if dedicated != nil {
+		p, err := dedicated(ctx, projectID)
+		if err != nil {
+			return compliance.ExportSource{}, noop, fmt.Errorf("open the project's dedicated database: %w", err)
+		}
+		if p != nil {
+			return compliance.ExportSource{Pool: p}, p.Close, nil
+		}
+	}
+	if data.Pool != nil {
+		return data, noop, nil
+	}
+	return compliance.ExportSource{Pool: fallback}, noop, nil
 }
 
 // streamExportToTempFile drives one of the compliance.Write*Export
