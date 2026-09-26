@@ -153,6 +153,10 @@ func isSimpleLiteral(s string) bool {
 
 // CreateTable creates a new table in the tenant's schema with RLS enabled.
 func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string, columns []ColumnDefinition) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -281,6 +285,10 @@ func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName 
 
 // DropTable drops a table from the tenant's schema.
 func DropTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -306,6 +314,10 @@ func DropTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName st
 
 // AddColumn adds a column to an existing table.
 func AddColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string, col ColumnDefinition) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -344,6 +356,10 @@ func AddColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName st
 
 // DropColumn removes a column from a table.
 func DropColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, columnName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -371,6 +387,10 @@ func DropColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, 
 
 // RenameTable renames a table and its RLS policy.
 func RenameTable(ctx context.Context, pool *pgxpool.Pool, schemaName, oldName, newName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(oldName, "table"); err != nil {
 		return err
 	}
@@ -429,6 +449,10 @@ func RenameTable(ctx context.Context, pool *pgxpool.Pool, schemaName, oldName, n
 
 // RenameColumn renames a column in a table.
 func RenameColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, oldCol, newCol string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -461,6 +485,10 @@ func RenameColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName
 
 // AlterColumnType changes the data type of a column.
 func AlterColumnType(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, col, newType string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -491,6 +519,10 @@ func AlterColumnType(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 
 // AlterColumnNullable sets or drops the NOT NULL constraint on a column.
 func AlterColumnNullable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, col string, nullable bool) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -526,6 +558,10 @@ var validOnDelete = map[string]bool{
 
 // AddForeignKey adds a foreign key constraint to a column.
 func AddForeignKey(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string, fk ForeignKeyDefinition) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -581,6 +617,10 @@ func AddForeignKey(ctx context.Context, pool *pgxpool.Pool, schemaName, tableNam
 
 // DropConstraint drops a named constraint from a table (works for FK and UNIQUE).
 func DropConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, constraintName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -600,6 +640,10 @@ func DropConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, tableNa
 
 // AddUniqueConstraint adds a UNIQUE constraint to a column.
 func AddUniqueConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, column string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -626,6 +670,10 @@ func AddUniqueConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, ta
 
 // CreateIndex creates an index on a column. If unique is true, creates a UNIQUE index.
 func CreateIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, column string, unique bool) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -656,6 +704,10 @@ func CreateIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName,
 
 // DropIndex drops an index from the schema.
 func DropIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, indexName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	sql := fmt.Sprintf("DROP INDEX %s.%s", quoteIdent(schemaName), quoteIdent(indexName))
 	return runDDL(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
@@ -711,6 +763,10 @@ var allowedTriggerLevels = map[string]bool{"ROW": true, "STATEMENT": true}
 //
 // Decoded into the structured DBTrigger fields below.
 func GetTableTriggers(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]DBTrigger, error) {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return nil, perr
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT t.tgname,
 		        ns_p.nspname AS function_schema,
@@ -758,6 +814,10 @@ func GetTableTriggers(ctx context.Context, pool *pgxpool.Pool, schemaName, table
 // UI can attach to a table. Same exclusions as ListFunctions (extension
 // dependency, language whitelist) so the picker is honest.
 func ListTriggerFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]DBFunction, error) {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return nil, perr
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT p.proname,
 		        l.lanname,
@@ -789,6 +849,9 @@ func ListTriggerFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName st
 		}
 		funcs = append(funcs, f)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return funcs, nil
 }
 
@@ -813,6 +876,10 @@ type CreateTriggerRequest struct {
 // schema only. Use ListTriggerFunctions to populate a picker so the
 // caller doesn't typo a name.
 func CreateTrigger(ctx context.Context, pool *pgxpool.Pool, schemaName string, req CreateTriggerRequest) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(req.Name, "trigger"); err != nil {
 		return err
 	}
@@ -895,6 +962,10 @@ func CreateTrigger(ctx context.Context, pool *pgxpool.Pool, schemaName string, r
 // DropTrigger removes a trigger from a table. Both identifiers are
 // validated before the SQL is issued.
 func DropTrigger(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, triggerName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -932,11 +1003,14 @@ type DBFunction struct {
 //   - Non-user languages (C, internal): catches extension functions
 //     that might predate a pg_depend entry, plus the few built-in
 //     casts that show up in `information_schema.routines`.
-//   - Platform-provisioned helpers (auth_uid, is_service_role,
-//     current_end_user_id, …): these are created by provision_tenant()
-//     and owned by eurobase_migrator. User-authored functions land
-//     owned by eurobase_gateway because the gateway runs CREATE FUNCTION
-//     on the user's behalf via the SDK / DDL handler.
+//   - Platform-provisioned helpers (auth_uid, auth_role, auth_email),
+//     excluded by name. Ownership can't tell them apart: on the shared
+//     cluster console/MCP/SDK DDL runs as eurobase_migrator (#40–#42), the
+//     same owner as the helpers; on a dedicated database both are owned by
+//     eurobase_owner. (The previous owner filter joined pg_authid, which is
+//     superuser-only: the query failed for every runtime role, the error
+//     surfaced only in the unchecked rows.Err(), and the list was always
+//     silently empty.)
 //   - Trigger functions (RETURNS trigger): invoked by the trigger
 //     system, never by eb.db.rpc(). Showing them here is misleading —
 //     they belong with the table they're attached to, not in the
@@ -946,6 +1020,10 @@ type DBFunction struct {
 // allows the user to author, so the list and create surfaces stay
 // symmetric.
 func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]DBFunction, error) {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return nil, perr
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT p.proname,
 		        l.lanname,
@@ -953,10 +1031,9 @@ func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) (
 		   FROM pg_proc p
 		   JOIN pg_namespace n ON n.oid = p.pronamespace
 		   JOIN pg_language  l ON l.oid = p.prolang
-		   JOIN pg_authid    a ON a.oid = p.proowner
 		  WHERE n.nspname = $1
 		    AND l.lanname IN ('sql', 'plpgsql')
-		    AND a.rolname <> 'eurobase_migrator'
+		    AND p.proname NOT IN ('auth_uid', 'auth_role', 'auth_email')
 		    AND pg_get_function_result(p.oid) <> 'trigger'
 		    AND NOT EXISTS (
 		          SELECT 1
@@ -978,6 +1055,9 @@ func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) (
 			return nil, fmt.Errorf("scan function: %w", err)
 		}
 		funcs = append(funcs, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return funcs, nil
 }
@@ -1011,6 +1091,10 @@ var allowedReturnTypes = map[string]bool{
 
 // CreateFunction creates or replaces a zero-argument function in the schema.
 func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, req CreateFunctionRequest) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(req.Name, "function"); err != nil {
 		return err
 	}
@@ -1062,6 +1146,10 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 
 // DropFunction drops a zero-argument function from the schema.
 func DropFunction(ctx context.Context, pool *pgxpool.Pool, schemaName, funcName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(funcName, "function"); err != nil {
 		return err
 	}
@@ -1077,6 +1165,10 @@ func DropFunction(ctx context.Context, pool *pgxpool.Pool, schemaName, funcName 
 
 // AlterColumnDefault sets or drops the default value of a column.
 func AlterColumnDefault(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, col string, defaultVal *string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	if err := validateIdentifier(tableName, "table"); err != nil {
 		return err
 	}
@@ -1139,6 +1231,10 @@ var auditPlatformTables = map[string]bool{
 // tenant schema. Use it to surface tables where RLS is disabled or has no
 // policies — the "silent multi-tenant data leak" class of bug.
 func AuditRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]RLSAuditEntry, error) {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return nil, perr
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT c.relname, c.relrowsecurity, COALESCE(p.policy_count, 0)
 		 FROM pg_class c
@@ -1177,6 +1273,9 @@ func AuditRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]RLS
 		}
 		out = append(out, e)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -1203,6 +1302,10 @@ func detectOwnerColumn(columns []ColumnDefinition) string {
 
 // ListPolicies returns all RLS policies for a table.
 func ListPolicies(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]RLSPolicy, error) {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return nil, perr
+	}
 	rows, err := pool.Query(ctx,
 		`SELECT polname, polcmd, polpermissive,
 		        pg_get_expr(polqual, polrelid) AS qual,
@@ -1243,11 +1346,18 @@ func ListPolicies(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName
 		}
 		policies = append(policies, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return policies, nil
 }
 
 // ApplyPolicyPreset drops all existing policies and applies a preset.
 func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, preset, userIDColumn string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	qt := qualifiedTable(schemaName, tableName)
 
 	// Drop all existing policies first.
@@ -1351,6 +1461,10 @@ func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tabl
 
 // CreateCustomPolicy creates a single custom RLS policy.
 func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, policyName, command, usingExpr, withCheckExpr string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	qt := qualifiedTable(schemaName, tableName)
 
 	if !validIdentRe.MatchString(policyName) {
@@ -1389,6 +1503,10 @@ func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tab
 
 // DropPolicy drops an RLS policy by name.
 func DropPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, policyName string) error {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return perr
+	}
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", quoteIdent(policyName), qt)
 	return runDDL(ctx, pool, func(tx pgx.Tx) error {

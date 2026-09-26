@@ -185,8 +185,16 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Catalog reads go to the project's dedicated database (Team,
+		// #679); the projects lookup above stays on the platform DB.
+		tp, err := tenantDDLPool(r.Context(), pool)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+
 		// Get all tables in the schema.
-		tables, err := GetSchemaTables(r.Context(), pool, schemaName)
+		tables, err := GetSchemaTables(r.Context(), tp, schemaName)
 		if err != nil {
 			slog.Error("failed to list schema tables", "error", err, "schema", schemaName)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
@@ -205,25 +213,25 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 
 		result := make([]TableSchema, 0, len(tables))
 		for _, t := range tables {
-			cols, err := GetTableColumns(r.Context(), pool, schemaName, t)
+			cols, err := GetTableColumns(r.Context(), tp, schemaName, t)
 			if err != nil {
 				slog.Error("failed to get table columns", "error", err, "schema", schemaName, "table", t)
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			cols, err = GetTableConstraints(r.Context(), pool, schemaName, t, cols)
+			cols, err = GetTableConstraints(r.Context(), tp, schemaName, t, cols)
 			if err != nil {
 				slog.Error("failed to get table constraints", "error", err, "schema", schemaName, "table", t)
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			indexes, err := GetTableIndexes(r.Context(), pool, schemaName, t)
+			indexes, err := GetTableIndexes(r.Context(), tp, schemaName, t)
 			if err != nil {
 				slog.Error("failed to get table indexes", "error", err, "schema", schemaName, "table", t)
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			triggers, err := GetTableTriggers(r.Context(), pool, schemaName, t)
+			triggers, err := GetTableTriggers(r.Context(), tp, schemaName, t)
 			if err != nil {
 				slog.Error("failed to get table triggers", "error", err, "schema", schemaName, "table", t)
 				jsonError(w, "internal server error", http.StatusInternalServerError)
@@ -231,7 +239,7 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// Check RLS status.
 			var rlsEnabled bool
-			_ = pool.QueryRow(r.Context(),
+			_ = tp.QueryRow(r.Context(),
 				`SELECT relrowsecurity FROM pg_class
 				 WHERE relname = $1 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)`,
 				t, schemaName,
