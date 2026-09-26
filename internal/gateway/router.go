@@ -1238,7 +1238,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Route("/data", func(r chi.Router) {
 				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
 
-				queryEngine := query.NewQueryEngine(developerPool)
+				// Team-tier (#678): route to the dedicated owner pool that
+				// PlatformTenantContext put on the request (it refuses
+				// with 503 when a Team project's pool can't be opened,
+				// so a nil here means "not a Team project" — never "fall
+				// back to shared").
+				queryEngine := query.NewQueryEngine(developerPool).WithPoolResolver(query.TenantPoolFromContext)
 				publisher := realtime.NewEventPublisher(nil, hub)
 
 				// Reads → viewer; mutations + SQL exec → developer

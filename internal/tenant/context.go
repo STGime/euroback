@@ -183,10 +183,24 @@ func PlatformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// still picks its own pool via `pc.HasDedicatedDB` +
 			// DeveloperRoleFromContext — this is a parallel, not
 			// replacement, signal.
-			if pdID != nil && resolver != nil {
-				if tp := resolver(ctx, projectID); tp != nil {
-					ctx = query.ContextWithTenantPool(ctx, tp)
+			//
+			// Fail closed (#678): a project with a live dedicated database
+			// is served from it or not at all. The shared cluster has no
+			// schema for a project created as Team, and only a stale copy
+			// for one upgraded from Pro — falling back there silently
+			// reads and writes the wrong database.
+			if pdID != nil {
+				var tp *pgxpool.Pool
+				if resolver != nil {
+					tp = resolver(ctx, projectID)
 				}
+				if tp == nil {
+					slog.Error("platform tenant context: dedicated database unavailable — refusing (no shared fallback)",
+						"project_id", projectID, "project_database_id", *pdID, "resolver_configured", resolver != nil)
+					http.Error(w, `{"error":"the project's dedicated database is not available right now"}`, http.StatusServiceUnavailable)
+					return
+				}
+				ctx = query.ContextWithTenantPool(ctx, tp)
 			}
 			// Stash the resolved role so RequireRole (called by
 			// handlers that live outside the membership-middleware

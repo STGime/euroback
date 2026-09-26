@@ -18,6 +18,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -153,6 +154,60 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	check(t, env, "console_table_editor_read_update", func() error {
+		r := console("GET", "/data/todos", "")
+		if r.code != 200 || !strings.Contains(r.body, "from-console") || strings.Contains(r.body, decoyTitle) {
+			return fmt.Errorf("select read the wrong rows: %w", r)
+		}
+		id := env.dedScalar(t, "SELECT id::text FROM %s WHERE title = 'from-console'", "todos")
+		if r := console("PATCH", "/data/todos/"+id, `{"title":"console-updated"}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "todos", "title = 'console-updated'"); n != 1 {
+			return fmt.Errorf("update not on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	// MCP runSQLTransaction uses this route too.
+	check(t, env, "console_sql_transaction", func() error {
+		if r := console("POST", "/data/sql/transaction", `{"statements":["INSERT INTO todos (title) VALUES ('from-tx-1')","INSERT INTO todos (title) VALUES ('from-tx-2')"]}`); r.code >= 300 {
+			return r
+		}
+		if n := env.dedCount(t, "todos", "title LIKE 'from-tx-%'"); n != 2 {
+			return fmt.Errorf("rows not on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	// The console runs as the dedicated instance's owner (console traffic
+	// is service-role by design); the point is that it is *that* instance.
+	check(t, env, "console_sql_on_dedicated", func() error {
+		r := console("POST", "/data/sql", `{"sql":"SELECT current_database() AS db"}`)
+		if r.code != 200 || !strings.Contains(r.body, `"db":"`+env.dedDB+`"`) {
+			return fmt.Errorf("not on the dedicated DB: %w", r)
+		}
+		return nil
+	})
+
+	// A Team project whose dedicated pool can't be opened is refused —
+	// never served from the shared cluster.
+	check(t, env, "console_fails_closed_without_dedicated_pool", func() error {
+		reached := false
+		mw := tenant.PlatformTenantContext(env.gw, env.dev, func(context.Context, string) *pgxpool.Pool { return nil })
+		h := mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+		cr := chi.NewRouter()
+		cr.Handle("/p/{id}/data", h)
+		req := httptest.NewRequest("GET", "/p/"+env.projectID+"/data", nil)
+		req = req.WithContext(auth.ContextWithClaims(req.Context(), &auth.Claims{Subject: env.ownerUser, Email: env.ownerEmail}))
+		rec := httptest.NewRecorder()
+		cr.ServeHTTP(rec, req)
+		if reached || rec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("handler reached=%v, status %d %s (want 503, not reached)", reached, rec.Code, rec.Body.String())
+		}
+		return nil
+	})
+
 	// ded_only exists only on the dedicated DB, so a listing read from the
 	// stale shared copy can't pass.
 	check(t, env, "console_schema_introspection", func() error {
@@ -212,12 +267,10 @@ type knownGap struct {
 }
 
 var teamKnownGaps = map[string]knownGap{
-	"console_table_editor_insert":  {"#678", []string{"does not exist in schema", "row not on the dedicated DB (count 0)"}},
-	"console_sql_editor":           {"#678", []string{"SQLSTATE 42P01", "row not on the dedicated DB (count 0)"}},
 	"console_schema_introspection": {"#679", []string{"lacks the dedicated-only table"}},
 	"sdk_ddl_create_table":         {"#679", []string{"SQLSTATE 3F000", "table not created on the dedicated DB"}},
-	// The misrouted console writes above land in the stale shared copy.
-	"upgraded/shared_cluster_untouched": {"#678/#679", []string{"stale shared copy changed"}},
+	// SDK DDL above creates its table in the stale shared copy.
+	"upgraded/shared_cluster_untouched": {"#679", []string{"stale shared copy changed"}},
 }
 
 func check(t *testing.T, env *teamEnv, name string, fn func() error) {
@@ -313,6 +366,9 @@ type teamEnv struct {
 	scenario          string
 	upgraded          bool
 	sharedFingerprint string
+	ownerUser         string
+	ownerEmail        string
+	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
 	shared            *pgxpool.Pool
 	ded               *pgxpool.Pool // admin view of the dedicated DB, for assertions
 }
@@ -326,6 +382,16 @@ func (e *teamEnv) dedCount(t *testing.T, table, where string) int {
 		return -1
 	}
 	return n
+}
+
+func (e *teamEnv) dedScalar(t *testing.T, format, table string) string {
+	t.Helper()
+	var v string
+	q := fmt.Sprintf(format, pgx.Identifier{e.schema, table}.Sanitize())
+	if err := e.ded.QueryRow(context.Background(), q).Scan(&v); err != nil {
+		t.Fatalf("dedScalar: %v", err)
+	}
+	return v
 }
 
 func (e *teamEnv) dedTableExists(t *testing.T, table string) bool {
@@ -487,7 +553,8 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
-		secretKey: sec, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin, ded: dedAdmin,
+		secretKey: sec, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
+		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
 	}
 }
 
