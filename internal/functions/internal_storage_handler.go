@@ -61,6 +61,20 @@ func (h *InternalStorageHandler) Routes() chi.Router {
 	return r
 }
 
+// refuseExportArchive answers 403 and returns true when key is in the
+// project's compliance export namespace (#655). Edge functions never need
+// the archives: they can't write or delete them (the export lifecycle
+// owns them), and can't sign download URLs for them either — a function
+// that signs whatever key a request names would otherwise hand the
+// project's full data dump to any end user.
+func refuseExportArchive(w http.ResponseWriter, projectID, key string) bool {
+	if !storage.IsExportArchiveKey(projectID, key) {
+		return false
+	}
+	http.Error(w, storage.ErrExportsReadOnlyJSON, http.StatusForbidden)
+	return true
+}
+
 // projectMeta resolves project_id → (slug, schema_name). Both are
 // derived server-side and never trusted from a header.
 func (h *InternalStorageHandler) projectMeta(ctx context.Context, projectID string) (slug, schema string, err error) {
@@ -128,6 +142,9 @@ func (h *InternalStorageHandler) upload(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := storage.ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+	if refuseExportArchive(w, projectID, key) {
 		return
 	}
 
@@ -204,6 +221,9 @@ func (h *InternalStorageHandler) signedURL(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"missing project"}`, http.StatusBadRequest)
 		return
 	}
+	if refuseExportArchive(w, projectID, req.Key) {
+		return
+	}
 	slug, _, err := h.projectMeta(r.Context(), projectID)
 	if err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
@@ -264,6 +284,9 @@ func (h *InternalStorageHandler) delete(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := storage.ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+	if refuseExportArchive(w, projectID, key) {
 		return
 	}
 	slug, schema, err := h.projectMeta(r.Context(), projectID)

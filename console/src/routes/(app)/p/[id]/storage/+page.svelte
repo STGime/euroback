@@ -62,6 +62,13 @@
 	// etc. sees a `string`. Same class as #11 (repo-wide sweep), fixed
 	// locally so this file's new call doesn't add to the baseline.
 	let projectId = $derived($page.params.id!);
+	// Compliance export archives (#655) live under exports/<project-id>/.
+	// They're read-only here (the gateway refuses writes and deletes) and
+	// expire on their own; the list only shows them to project admins.
+	let exportPrefix = $derived(`exports/${projectId}/`);
+	function isExportArchive(key: string): boolean {
+		return key.startsWith(exportPrefix);
+	}
 	let projectSlug = $derived(projectCtx.project?.slug ?? projectId);
 
 	// Breadcrumb segments
@@ -322,8 +329,16 @@
 		try {
 			// List all objects under the old prefix
 			const res = await api.listFiles(projectId, { prefix: oldPrefix, limit: 1000 });
-			// Copy each object to new key, then delete old
+			// Copy each object to new key, then delete old. Compliance
+			// export archives stay where they are: they're read-only
+			// (copying them out would take a full data dump out of the
+			// admin-only namespace, and the delete would be refused).
+			let keptExports = 0;
 			for (const obj of res.objects) {
+				if (isExportArchive(obj.key)) {
+					keptExports++;
+					continue;
+				}
 				const newKey = obj.key.replace(oldPrefix, newPrefix);
 				// Download and re-upload (S3 doesn't have a rename)
 				const blob = await api.downloadFile(projectId, obj.key);
@@ -333,6 +348,9 @@
 			}
 			showRenameFolderModal = false;
 			await loadFiles();
+			if (keptExports > 0) {
+				showToast(`${keptExports} compliance export ${keptExports === 1 ? 'archive was' : 'archives were'} left in place (read-only).`);
+			}
 		} catch (err_) {
 			alert(err_ instanceof Error ? err_.message : 'Failed to rename folder');
 		}
@@ -356,6 +374,7 @@
 			// Delete all objects under the folder prefix
 			const res = await api.listFiles(projectId, { prefix: folderKey, limit: 1000 });
 			for (const obj of res.objects) {
+				if (isExportArchive(obj.key)) continue; // read-only, expire on their own
 				await api.deleteFile(projectId, obj.key);
 			}
 			showDeleteFolderConfirm = null;
@@ -596,6 +615,9 @@
 												</svg>
 											{/if}
 											<span class="font-medium text-gray-900 truncate">{file.displayName}</span>
+											{#if isExportArchive(file.key)}
+												<span class="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600" title="Created by Compliance → Data Export. Read-only; deleted automatically when the export expires.">compliance export</span>
+											{/if}
 										</div>
 									</td>
 									<td class="px-4 py-3 text-gray-500 hidden sm:table-cell">{formatBytes(file.size)}</td>
@@ -643,6 +665,7 @@
 														</svg>
 														Generate Signed URL
 													</button>
+													{#if !isExportArchive(file.key)}
 													<div class="border-t border-gray-100 my-1"></div>
 													<button
 														onclick={(e) => { e.stopPropagation(); handleDelete(file); openDropdown = null; }}
@@ -653,6 +676,7 @@
 														</svg>
 														Delete
 													</button>
+													{/if}
 												</div>
 											{/if}
 										</div>
@@ -796,6 +820,7 @@
 							</svg>
 							Copy Link
 						</button>
+						{#if !isExportArchive(selectedFile.key)}
 						<button
 							onclick={() => handleDelete(selectedFile!)}
 							class="flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 bg-white px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
@@ -805,6 +830,7 @@
 							</svg>
 							Delete
 						</button>
+						{/if}
 					</div>
 
 					<!-- Signed URL generator -->

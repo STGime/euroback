@@ -81,7 +81,7 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 	}
 	defer cleanupTempFile(tmpFile)
 
-	s3Key := fmt.Sprintf("exports/%s/%s.zip", args.ProjectID, args.ExportID)
+	s3Key := storage.ExportArchivePrefix(args.ProjectID) + args.ExportID + ".zip"
 	logger.Info("uploading export to s3", "key", s3Key, "size", size, "rows", totalRows)
 
 	if err := w.S3.UploadObject(ctx, s3Bucket, s3Key, tmpFile, "application/zip", size); err != nil {
@@ -179,7 +179,7 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 	}
 	defer cleanupTempFile(tmpFile)
 
-	s3Key := fmt.Sprintf("exports/%s/users/%s/%s.zip", args.ProjectID, args.UserID, args.ExportID)
+	s3Key := storage.ExportArchivePrefix(args.ProjectID) + "users/" + args.UserID + "/" + args.ExportID + ".zip"
 	logger.Info("uploading user export to s3", "key", s3Key, "size", size, "rows", totalRows)
 
 	if err := w.S3.UploadObject(ctx, s3Bucket, s3Key, tmpFile, "application/zip", size); err != nil {

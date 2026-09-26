@@ -202,8 +202,15 @@ func main() {
 		// — normal insert path runs. This only skips the rename
 		// (and the coupled insert) for the NFD subset.
 		skipRenameForWORM := p.plan == "legal_team"
-		inserted, skipped, errCount, renamed, renameErr, wormSkipped := 0, 0, 0, 0, 0, 0
+		inserted, skipped, errCount, renamed, renameErr, wormSkipped, exportsSkipped := 0, 0, 0, 0, 0, 0, 0
 		for _, obj := range allObjects {
+			// Compliance export archives have no storage_objects row by
+			// design — export_requests is their record (#655). Neither
+			// track nor rename them.
+			if storage.IsExportArchiveKey(p.id, obj.Key) {
+				exportsSkipped++
+				continue
+			}
 			nfcKey := storage.NormalizeStorageKey(obj.Key)
 
 			if nfcKey != obj.Key {
@@ -277,8 +284,8 @@ func main() {
 			}
 		}
 
-		fmt.Printf("  inserted=%d already-tracked=%d renamed=%d rename-errors=%d insert-errors=%d worm-skipped=%d\n",
-			inserted, skipped, renamed, renameErr, errCount, wormSkipped)
+		fmt.Printf("  inserted=%d already-tracked=%d renamed=%d rename-errors=%d insert-errors=%d worm-skipped=%d export-archives-skipped=%d\n",
+			inserted, skipped, renamed, renameErr, errCount, wormSkipped, exportsSkipped)
 		if wormSkipped > 0 {
 			fmt.Printf("  ⚠ %d non-NFC keys skipped on this WORM (legal_team) bucket. These files stay broken until the retention-preserving rename lands; see issue tracker.\n", wormSkipped)
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/query"
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -234,6 +235,110 @@ func (h *StorageHandler) assertObjectVisible(r *http.Request, key string) (bool,
 	return exists, err
 }
 
+// ---------- Compliance export archives (#655) ----------
+//
+// The export worker writes archives straight to the project's bucket under
+// exports/<project-id>/ (internal/workers/export.go). They have no
+// storage_objects row — export_requests is their record — so the generic
+// ownership check above 404'd every console download and Copy Link.
+// The namespace is platform-managed:
+//   - download / download URL: console callers with the admin role (the
+//     compliance export API's own bar — an archive is a full data dump,
+//     storage download alone only needs viewer), and only for a completed,
+//     unexpired export of this project;
+//   - upload / upload URL / delete: refused for every caller, so an archive
+//     can't be replaced or removed behind the export's back (the worker and
+//     the expiry cleanup write S3 directly, not through this handler);
+//   - listing: shown only to callers who may download them.
+
+// ErrExportsReadOnlyJSON is the error body for writes into the export
+// namespace (shared with the edge-functions storage handler).
+const ErrExportsReadOnlyJSON = `{"error":"exports/ for this project holds compliance export archives and is read-only; they expire automatically"}`
+
+// ExportArchivePrefix is the namespace holding projectID's compliance
+// export archives. The export worker builds its keys from it; every
+// storage entry point (this handler, the edge-functions storage handler,
+// cmd/backfill-storage) treats it as platform-managed.
+func ExportArchivePrefix(projectID string) string {
+	return "exports/" + projectID + "/"
+}
+
+// IsExportArchiveKey reports whether key is in projectID's export namespace.
+func IsExportArchiveKey(projectID, key string) bool {
+	return projectID != "" && strings.HasPrefix(key, ExportArchivePrefix(projectID))
+}
+
+// exportKeyPrefix is this request's project export namespace ("" without
+// a project).
+func exportKeyPrefix(r *http.Request) string {
+	pc, ok := auth.ProjectFromContext(r.Context())
+	if !ok || pc == nil || pc.ProjectID == "" {
+		return ""
+	}
+	return ExportArchivePrefix(pc.ProjectID)
+}
+
+// isExportKey reports whether key is in this request's project export
+// namespace.
+func isExportKey(r *http.Request, key string) bool {
+	pc, ok := auth.ProjectFromContext(r.Context())
+	return ok && pc != nil && IsExportArchiveKey(pc.ProjectID, key)
+}
+
+// mayReadExports reports whether the caller may see export archives at
+// all: a console (platform) caller with at least the admin role. SDK
+// callers — API keys and end-user JWTs — never may.
+func mayReadExports(r *http.Request) bool {
+	if pc, ok := auth.ClaimsFromContext(r.Context()); !ok || pc == nil {
+		return false
+	}
+	return tenant.HasMinRole(r.Context(), "admin")
+}
+
+// exportArchiveReadable reports whether the caller may download key, an
+// export archive: mayReadExports, and key is the archive of a completed,
+// unexpired export of this project.
+func (h *StorageHandler) exportArchiveReadable(r *http.Request, key string) (bool, error) {
+	if !mayReadExports(r) || h.pool == nil {
+		return false, nil
+	}
+	pc, _ := auth.ProjectFromContext(r.Context())
+	var ok bool
+	err := h.pool.QueryRow(r.Context(),
+		`SELECT EXISTS (SELECT 1 FROM public.export_requests
+		                 WHERE project_id = $1 AND s3_key = $2
+		                   AND status = 'completed' AND expires_at > now())`,
+		pc.ProjectID, key,
+	).Scan(&ok)
+	return ok, err
+}
+
+// objectReadable is the read check for download and download URLs:
+// export archives by exportArchiveReadable, everything else by
+// assertObjectVisible.
+func (h *StorageHandler) objectReadable(r *http.Request, key string) (bool, error) {
+	if isExportKey(r, key) {
+		return h.exportArchiveReadable(r, key)
+	}
+	return h.assertObjectVisible(r, key)
+}
+
+// visibleObjects drops export archives from a listing for callers who
+// may not read them (mayReadExports).
+func visibleObjects(r *http.Request, objects []ObjectInfo) []ObjectInfo {
+	p := exportKeyPrefix(r)
+	if p == "" || mayReadExports(r) {
+		return objects
+	}
+	out := make([]ObjectInfo, 0, len(objects))
+	for _, o := range objects {
+		if !strings.HasPrefix(o.Key, p) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 // isAuthenticated checks whether the request has valid auth claims —
 // either platform claims (console/platform access) or end-user claims
 // (SDK access with end-user JWT). Returns the user ID and true if authenticated.
@@ -411,6 +516,10 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
+	if isExportKey(r, key) {
+		http.Error(w, ErrExportsReadOnlyJSON, http.StatusForbidden)
+		return
+	}
 
 	// Determine content type.
 	contentType := header.Header.Get("Content-Type")
@@ -537,9 +646,10 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Ownership check: RLS filters storage_objects so an end-user only
-	// sees their own rows. If this returns false, either the object
-	// doesn't exist or it belongs to someone else — either way, 404.
-	visible, err := h.assertObjectVisible(r, key)
+	// sees their own rows; export archives are checked against
+	// export_requests (#655). If this returns false, either the object
+	// doesn't exist or the caller may not read it — either way, 404.
+	visible, err := h.objectReadable(r, key)
 	if err != nil {
 		slog.Error("storage download: ownership check failed", "error", err, "key", key)
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
@@ -599,6 +709,10 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	key := extractWildcardKey(r)
 	if err := ValidateStorageKey(key); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+	if isExportKey(r, key) {
+		http.Error(w, ErrExportsReadOnlyJSON, http.StatusForbidden)
 		return
 	}
 
@@ -732,7 +846,7 @@ func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := listResponse{
-		Objects:    result.Objects,
+		Objects:    visibleObjects(r, result.Objects),
 		NextCursor: result.NextToken,
 		HasMore:    result.IsTruncated,
 	}
@@ -797,6 +911,10 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"operation must be upload or download"}`, http.StatusBadRequest)
 		return
 	}
+	if req.Operation == "upload" && isExportKey(r, req.Key) {
+		http.Error(w, ErrExportsReadOnlyJSON, http.StatusForbidden)
+		return
+	}
 
 	// Ownership check for download signed URLs. Upload URLs are for files
 	// the caller is about to create — no existing row to check; the upload
@@ -805,7 +923,7 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	// generated is a trust-the-URL scenario (unguessable token); that's
 	// acceptable per the design of signed URLs.
 	if req.Operation == "download" {
-		visible, err := h.assertObjectVisible(r, req.Key)
+		visible, err := h.objectReadable(r, req.Key)
 		if err != nil {
 			slog.Error("storage signed-url: ownership check failed", "error", err, "key", req.Key)
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
