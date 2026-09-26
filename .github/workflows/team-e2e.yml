@@ -1,0 +1,55 @@
+name: Team e2e
+
+# Team-tier end-to-end harness (#683): drives the real gateway router for a
+# Team project routed to a separate "dedicated" Postgres and checks each
+# feature lands there (never on the shared cluster). Known routing gaps are
+# listed in internal/gateway/team_e2e_test.go (teamKnownGaps) and SKIP while
+# they still fail; fixing one without removing it from the list FAILS this
+# job, so the list stays accurate (epic #684).
+#
+# Path-filtered: don't make this a *required* check without dropping the
+# filter, or unrelated PRs will wait on it forever.
+
+on:
+  pull_request:
+    paths:
+      - internal/**
+      - cmd/gateway/**
+      - migrations/**
+      - scripts/db/**
+      - scripts/test-team.sh
+      - go.mod
+      - go.sum
+      - .github/workflows/team-e2e.yml
+  push:
+    branches: [main]
+    paths:
+      - internal/**
+      - cmd/gateway/**
+      - migrations/**
+      - scripts/db/**
+      - scripts/test-team.sh
+      - go.mod
+      - go.sum
+      - .github/workflows/team-e2e.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  team-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Ensure psql client
+        run: command -v psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
+
+      - name: Team e2e harness
+        run: scripts/test-team.sh
