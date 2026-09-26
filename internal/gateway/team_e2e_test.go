@@ -911,7 +911,10 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s3Client.CreateBucket(ctx, "eurobase-"+slug); err != nil {
+	// Garage (the harness's S3) doesn't implement PutBucketAcl, which
+	// CreateBucket issues after creating the bucket; its buckets are
+	// private anyway.
+	if err := s3Client.CreateBucket(ctx, "eurobase-"+slug); err != nil && !strings.Contains(err.Error(), "PutBucketAcl") {
 		t.Fatalf("create bucket: %v", err)
 	}
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, s3Client, nil, nil,
