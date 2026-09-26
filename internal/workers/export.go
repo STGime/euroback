@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,7 +23,7 @@ type TenantExportWorker struct {
 	S3       *storage.S3Client
 	AuditSvc *audit.Service
 	// Data is where tenant tables are read from (compliance.ExportSource,
-	// #654): the developer pool as eurobase_migrator in production. Unset
+	// #654): the developer pool, as eurobase_developer, in production. Unset
 	// = DBPool, where RLS-limited tables are reported as not exported.
 	Data compliance.ExportSource
 	// Dedicated opens the owner pool of a Team-tier project's dedicated
@@ -62,6 +63,10 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 	schemaName, s3Bucket, err := resolveProject(ctx, w.DBPool, args.ProjectID)
 	if err != nil {
 		failExport("resolve_project", err)
+		return err
+	}
+	if err := refuseDuringUpgrade(ctx, w.DBPool, args.ProjectID); err != nil {
+		failExport("upgrade_in_progress", err)
 		return err
 	}
 	src, closeSrc, err := resolveExportSource(ctx, w.Data, w.DBPool, w.Dedicated, args.ProjectID)
@@ -169,6 +174,10 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 		failExport("resolve_project", err)
 		return err
 	}
+	if err := refuseDuringUpgrade(ctx, w.DBPool, args.ProjectID); err != nil {
+		failExport("upgrade_in_progress", err)
+		return err
+	}
 	src, closeSrc, err := resolveExportSource(ctx, w.Data, w.DBPool, w.Dedicated, args.ProjectID)
 	if err != nil {
 		failExport("resolve_database", err)
@@ -234,6 +243,31 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 // database (dbprovider.OpenOwnerPool). It returns (nil, nil) for a
 // project without one — its data is on the shared cluster.
 type DedicatedResolver func(ctx context.Context, projectID string) (*pgxpool.Pool, error)
+
+// ErrUpgradeInProgress fails an export while the project is being upgraded
+// to a Team tier: project_databases turns active at the end of provisioning,
+// before the data copy and cutover, so the dedicated database would be read
+// (and reported complete) while it is still empty or partly copied.
+var ErrUpgradeInProgress = errors.New("the project is being upgraded to a dedicated database; retry the export once the upgrade is live")
+
+// refuseDuringUpgrade returns ErrUpgradeInProgress while projectID has an
+// upgrade before cutover (requested → cutting_over, the states the upgrade
+// worker resumes). From 'live' on, live traffic uses the dedicated database,
+// so that is what the export reads.
+func refuseDuringUpgrade(ctx context.Context, pool *pgxpool.Pool, projectID string) error {
+	var inFlight bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM public.project_upgrades
+		  WHERE project_id = $1 AND state IN ('requested', 'provisioning', 'copying', 'cutting_over'))`,
+		projectID,
+	).Scan(&inFlight); err != nil {
+		return fmt.Errorf("check for an upgrade in progress: %w", err)
+	}
+	if inFlight {
+		return ErrUpgradeInProgress
+	}
+	return nil
+}
 
 // resolveExportSource picks where a project's tenant tables are read from
 // (#663). A Team-tier project with a live dedicated database is read there,

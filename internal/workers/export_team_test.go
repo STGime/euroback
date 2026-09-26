@@ -203,6 +203,31 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 		}
 	})
 
+	t.Run("upgrade before cutover: refused; live: allowed", func(t *testing.T) {
+		// The dedicated row is already active here, as it is once the
+		// upgrade's provisioning step finishes — before the data copy.
+		t.Cleanup(func() {
+			_, _ = platform.Exec(context.Background(), `DELETE FROM project_upgrades WHERE project_id = $1`, projectID)
+		})
+		var upgradeID string
+		if err := platform.QueryRow(ctx, `INSERT INTO project_upgrades (project_id, from_plan, to_plan, state)
+			VALUES ($1, 'pro', 'team', 'requested') RETURNING id`, projectID).Scan(&upgradeID); err != nil {
+			t.Fatal(err)
+		}
+		for _, state := range []string{"requested", "provisioning", "copying", "cutting_over"} {
+			mustExec(t, platform, `UPDATE project_upgrades SET state = $2 WHERE id = $1`, upgradeID, state)
+			if err := refuseDuringUpgrade(ctx, platform, projectID); !errors.Is(err, ErrUpgradeInProgress) {
+				t.Errorf("state %s: err = %v, want ErrUpgradeInProgress", state, err)
+			}
+		}
+		for _, state := range []string{"live", "confirmed", "failed"} {
+			mustExec(t, platform, `UPDATE project_upgrades SET state = $2 WHERE id = $1`, upgradeID, state)
+			if err := refuseDuringUpgrade(ctx, platform, projectID); err != nil {
+				t.Errorf("state %s: err = %v, want nil", state, err)
+			}
+		}
+	})
+
 	t.Run("project without a dedicated database reads the shared cluster", func(t *testing.T) {
 		src, closeSrc, err := resolveExportSource(ctx, shared, platform, resolver(cipher), "7d0f1c2e-0000-4000-8000-00000000f7ee")
 		defer closeSrc()
