@@ -32,10 +32,10 @@ import (
 // Free/Pro / any request without the stashed pool: falls back to
 // the shared `pool` argument, exactly the pre-PR-D behaviour.
 func runDDL(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
-	routed := false
-	if p := TenantPoolFromContext(ctx); p != nil {
-		pool = p
-		routed = true
+	routed := TenantPoolFromContext(ctx) != nil
+	pool, err := tenantDDLPool(ctx, pool)
+	if err != nil {
+		return err
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -51,6 +51,12 @@ func runDDL(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) e
 	}
 	return tx.Commit(ctx)
 }
+
+// platformHelperFunctions are the per-tenant RLS helpers provision_tenant
+// / dedicated_bootstrap.sql create in the tenant schema. Hidden from the
+// function listing and refused by CreateFunction / DropFunction —
+// CREATE OR REPLACE would silently rewrite RLS.
+var platformHelperFunctions = map[string]bool{"auth_uid": true, "auth_role": true, "auth_email": true}
 
 // validIdentRe matches safe SQL identifiers (letters, digits, underscores).
 var validIdentRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -239,8 +245,12 @@ func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName 
 		// the ddl role, so ALTER OWNER succeeds. Wrapped in a savepoint so
 		// a missing ddl role (pre-000063 / local dev) degrades to a
 		// migrator-owned table instead of aborting the whole create.
+		// Not on a Team project's dedicated database: it has no
+		// <schema>_ddl role; its tables stay owned by eurobase_owner.
 		ownSQL := fmt.Sprintf("ALTER TABLE %s OWNER TO %s", qt, quoteIdent(schemaName+"_ddl"))
-		if _, err := tx.Exec(ctx, "SAVEPOINT own_ddl"); err == nil {
+		if TenantPoolFromContext(ctx) != nil {
+			// dedicated: skip
+		} else if _, err := tx.Exec(ctx, "SAVEPOINT own_ddl"); err == nil {
 			if _, err := tx.Exec(ctx, ownSQL); err != nil {
 				slog.Warn("ownership convergence skipped (tenant ddl role unavailable)",
 					"schema", schemaName, "table", tableName, "error", err)
@@ -1033,7 +1043,7 @@ func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) (
 		   JOIN pg_language  l ON l.oid = p.prolang
 		  WHERE n.nspname = $1
 		    AND l.lanname IN ('sql', 'plpgsql')
-		    AND p.proname NOT IN ('auth_uid', 'auth_role', 'auth_email')
+		    AND p.proname NOT IN ('auth_uid', 'auth_role', 'auth_email') -- platformHelperFunctions
 		    AND pg_get_function_result(p.oid) <> 'trigger'
 		    AND NOT EXISTS (
 		          SELECT 1
@@ -1095,6 +1105,9 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 	if perr != nil {
 		return perr
 	}
+	if platformHelperFunctions[req.Name] {
+		return fmt.Errorf("function name %q is reserved by the platform", req.Name)
+	}
 	if err := validateIdentifier(req.Name, "function"); err != nil {
 		return err
 	}
@@ -1149,6 +1162,9 @@ func DropFunction(ctx context.Context, pool *pgxpool.Pool, schemaName, funcName 
 	pool, perr := tenantDDLPool(ctx, pool)
 	if perr != nil {
 		return perr
+	}
+	if platformHelperFunctions[funcName] {
+		return fmt.Errorf("function name %q is reserved by the platform", funcName)
 	}
 	if err := validateIdentifier(funcName, "function"); err != nil {
 		return err

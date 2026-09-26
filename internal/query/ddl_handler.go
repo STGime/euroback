@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -77,6 +78,7 @@ type AlterColumnRequest struct {
 // Mounted at /platform/projects/{id}/schema/tables
 func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
+	r.Use(requireTenantPool)
 
 	r.Post("/", handleCreateTable(pool))
 	r.Delete("/{table}", handleDropTable(pool))
@@ -118,6 +120,9 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 // data leak" class of bug.
 func HandleRLSAudit(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseWithoutTenantPool(w, r) {
+			return
+		}
 		projectID := chi.URLParam(r, "id")
 
 		var schemaName string
@@ -162,6 +167,9 @@ func HandleRLSAudit(pool *pgxpool.Pool) http.HandlerFunc {
 // via CLI migrations, psql, or any path that bypasses the DDL handlers.
 func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseWithoutTenantPool(w, r) {
+			return
+		}
 		projectID := chi.URLParam(r, "id")
 
 		// Resolve tenant schema for backfill.
@@ -194,6 +202,11 @@ func HandleSchemaChanges(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			changes = append(changes, c)
+		}
+		if err := rows.Err(); err != nil {
+			slog.Error("list schema changes failed", "error", err)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
 		}
 
 		jsonResponse(w, changes, http.StatusOK)
@@ -233,6 +246,10 @@ func backfillUnloggedTables(ctx context.Context, pool *pgxpool.Pool, projectID, 
 		}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		slog.Debug("backfill schema changes: query failed", "error", err)
+		return
+	}
 	if len(tables) == 0 {
 		return
 	}
@@ -964,6 +981,7 @@ func handleListTriggerFunctions(pool *pgxpool.Pool) http.HandlerFunc {
 // Mounted at /platform/projects/{id}/schema/functions
 func HandleFunctions(pool *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
+	r.Use(requireTenantPool)
 	r.Get("/", handleListFunctions(pool))
 	r.Get("/triggers", handleListTriggerFunctions(pool))
 	r.Post("/", handleCreateFunction(pool))
@@ -1314,4 +1332,26 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 		logSchemaChange(pool, r, projectID, "drop_policy", tableName, nil, map[string]any{"policy": policyName})
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// requireTenantPool answers 503 for a Team project whose dedicated pool is
+// not on the request, before any handler runs (#679). The routes'
+// middlewares already refuse in that case; this makes every DDL handler
+// return 503 rather than whatever status it maps the underlying
+// ErrDedicatedPoolUnavailable to, should a new route skip them.
+func requireTenantPool(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuseWithoutTenantPool(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func refuseWithoutTenantPool(w http.ResponseWriter, r *http.Request) bool {
+	if _, err := tenantDDLPool(r.Context(), nil); errors.Is(err, ErrDedicatedPoolUnavailable) {
+		jsonError(w, err.Error(), http.StatusServiceUnavailable)
+		return true
+	}
+	return false
 }

@@ -255,6 +255,16 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if rec.Code >= 300 {
 			return fmt.Errorf("settings locked out: PATCH /v1/tenants/{id}: %d %s", rec.Code, rec.Body.String())
 		}
+		// SDK DDL for it: refused, never the shared cluster.
+		sec := env.addAPIKeys(t, stuck)
+		sreq := httptest.NewRequest("POST", "http://api.eurobase.test/v1/db/schema/tables", strings.NewReader(`{"name":"never","columns":[{"name":"id","type":"text"}]}`))
+		sreq.Header.Set("apikey", sec)
+		sreq.Header.Set("Content-Type", "application/json")
+		srec := httptest.NewRecorder()
+		env.router.ServeHTTP(srec, sreq)
+		if srec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("SDK DDL while provisioning: want 503, got %d %s", srec.Code, srec.Body.String())
+		}
 		// Saving an OAuth client secret needs the dedicated vault: refused,
 		// not written to the shared one.
 		cfg := tenant.DefaultAuthConfig()
@@ -351,6 +361,14 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	check(t, env, "console_function_reserved_names", func() error {
+		r := console("POST", "/schema/functions", `{"name":"auth_uid","body":"SELECT NULL::uuid","returns":"uuid","language":"sql"}`)
+		if r.code < 400 || !strings.Contains(r.body, "reserved") {
+			return fmt.Errorf("overwriting the RLS helper auth_uid must be refused: %w", r)
+		}
+		return nil
+	})
+
 	check(t, env, "console_rls_audit", func() error {
 		r := console("GET", "/schema/rls-audit", "")
 		if r.code != 200 || !strings.Contains(r.body, "ded_only") {
@@ -360,11 +378,27 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 	})
 
 	check(t, env, "console_schema_changes_backfill", func() error {
+		// Earlier checks log DDL on ded_only themselves; only the backfill
+		// writes a create_table entry for it (it was created outside the
+		// DDL handlers), and only if it listed the dedicated DB's tables.
 		r := console("GET", "/schema/changes", "")
-		if r.code != 200 || !strings.Contains(r.body, "ded_only") {
-			return fmt.Errorf("schema history lacks the dedicated-only table: %w", r)
+		if r.code != 200 {
+			return r
 		}
-		return nil
+		var changes []struct {
+			Action    string          `json:"action"`
+			TableName string          `json:"table_name"`
+			Detail    json.RawMessage `json:"detail"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &changes); err != nil {
+			return fmt.Errorf("decode: %v: %w", err, r)
+		}
+		for _, c := range changes {
+			if c.Action == "create_table" && c.TableName == "ded_only" && strings.Contains(string(c.Detail), "backfill") {
+				return nil
+			}
+		}
+		return fmt.Errorf("no backfilled create_table entry for the dedicated-only table: %w", r)
 	})
 
 	check(t, env, "sdk_ddl_create_table", func() error {
@@ -536,6 +570,28 @@ func (e *teamEnv) dedScalar(t *testing.T, format, table string) string {
 		t.Fatalf("dedScalar: %v", err)
 	}
 	return v
+}
+
+// addAPIKeys creates an API key pair for a project and returns the secret key.
+func (e *teamEnv) addAPIKeys(t *testing.T, projectID string) string {
+	t.Helper()
+	ctx := context.Background()
+	pub, sec, pubHash, secHash, err := tenant.GenerateAPIKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := e.shared.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if err := tenant.StoreAPIKeys(ctx, tx, projectID, pubHash, pub[:14], secHash, sec[:14]); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return sec
 }
 
 // consoleFor issues a console request as the owner for another project.
