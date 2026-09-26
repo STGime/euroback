@@ -402,11 +402,17 @@ jobs:
           # arrives via `kubectl set image` in "Deploy to Kapsule", after
           # migrations. (First-ever create: no live object, `:latest` it is.)
           apply_pinned() { # <manifest> <deployment> <container>
-            if [ -z "$(kubectl -n eurobase get deployment "$2" --ignore-not-found -o name)" ]; then
+            # Explicit failure handling (not just `bash -e`, which doesn't
+            # apply inside `[ $(…) ]` or `||` lists): an API error must
+            # never look like "not found" and apply :latest unpinned.
+            exists=$(kubectl -n eurobase get deployment "$2" --ignore-not-found -o name) \
+              || { echo "apply_pinned: cannot read deployment/$2"; exit 1; }
+            if [ -z "$exists" ]; then
               kubectl apply -f "$1" # first-ever create
               return
             fi
-            live=$(kubectl -n eurobase get deployment "$2" -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$3\")].image}")
+            live=$(kubectl -n eurobase get deployment "$2" -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$3\")].image}") \
+              || { echo "apply_pinned: cannot read deployment/$2"; exit 1; }
             # Exists but no image read (API hiccup, renamed container):
             # stop rather than silently applying :latest before migrations.
             [ -n "$live" ] || { echo "apply_pinned: no image for container $3 in deployment/$2"; exit 1; }
