@@ -12,7 +12,7 @@ Select the **Eurobase Local** environment before running.
 ## Prerequisites
 
 ```bash
-# 1. Start local services (Postgres, Redis, MinIO)
+# 1. Start local services (Postgres, Redis, Garage S3)
 make setup
 
 # 2. Apply new migrations

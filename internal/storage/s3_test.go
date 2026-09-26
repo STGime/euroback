@@ -11,7 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// setupTestS3 creates an S3Client pointing to the local MinIO instance.
+// setupTestS3 creates an S3Client pointing to the local local S3 (Garage) instance.
 func setupTestS3(t *testing.T) *S3Client {
 	t.Helper()
 
@@ -25,27 +25,27 @@ func setupTestS3(t *testing.T) *S3Client {
 	}
 	accessKey := os.Getenv("S3_ACCESS_KEY")
 	if accessKey == "" {
-		accessKey = "minioadmin"
+		accessKey = "GK0000000000000000000000de" // scripts/setup-local.sh dev key (Garage)
 	}
 	secretKey := os.Getenv("S3_SECRET_KEY")
 	if secretKey == "" {
-		secretKey = "minioadmin"
+		secretKey = "00000000000000000000000000000000000000000000000000000000000000de"
 	}
 	region := os.Getenv("S3_REGION")
 	if region == "" {
-		region = "us-east-1"
+		region = "fr-par"
 	}
 
 	client, err := NewS3Client(endpoint, region, accessKey, secretKey)
 	if err != nil {
-		t.Skipf("cannot create S3 client (MinIO not running?): %v", err)
+		t.Skipf("cannot create S3 client (local S3 (Garage) not running?): %v", err)
 	}
 
 	// Verify connectivity by listing buckets.
 	ctx := context.Background()
 	_, err = client.client.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
-		t.Skipf("cannot connect to MinIO: %v", err)
+		t.Skipf("cannot connect to local S3 (Garage): %v", err)
 	}
 
 	return client

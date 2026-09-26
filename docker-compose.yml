@@ -37,7 +37,7 @@ services:
   garage:
     image: dxflrs/garage:v1.1.0@sha256:fdb8272fcbe643eef830ee17874d5d4ed623a86501f1acbac8012583113b1c26
     ports:
-      - "9000:3900"
+      - "127.0.0.1:9000:3900"  # dev key is public: localhost only
     volumes:
       - ./deploy/local/garage.toml:/etc/garage.toml:ro
       - eurobase_garage:/var/lib/garage

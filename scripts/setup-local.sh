@@ -53,7 +53,10 @@ echo "==> Configuring Garage (local S3)..."
 GARAGE_KEY_ID=GK0000000000000000000000de
 GARAGE_SECRET=00000000000000000000000000000000000000000000000000000000000000de
 garage() { docker compose exec -T -e RUST_LOG=warn garage /garage "$@"; }
-if ! garage layout show 2>/dev/null | grep -q "Current cluster layout version: [1-9]"; then
+for _ in $(seq 1 30); do garage status >/dev/null 2>&1 && break; sleep 1; done
+garage status >/dev/null || { echo "Garage is not answering (docker compose logs garage)" >&2; exit 1; }
+LAYOUT="$(garage layout show 2>/dev/null || true)"
+if ! printf '%s' "$LAYOUT" | grep -q "Current cluster layout version: [1-9]"; then
     NODE="$(garage node id -q | cut -d@ -f1)"
     garage layout assign -z dc1 -c 1G "$NODE" >/dev/null
     garage layout apply --version 1 >/dev/null
@@ -68,8 +71,11 @@ echo "Connection info:"
 echo "  PostgreSQL: postgres://eurobase_api:localdev@localhost:5433/eurobase?sslmode=disable"
 echo "  Redis:      redis://localhost:6380"
 echo "  S3 (Garage): http://localhost:9000  region fr-par"
-echo "               SCW_S3_ENDPOINT=http://localhost:9000 SCW_ACCESS_KEY=$GARAGE_KEY_ID"
-echo "               SCW_SECRET_KEY=$GARAGE_SECRET"
+echo "    gateway: SCW_S3_ENDPOINT=http://localhost:9000 SCW_S3_REGION=fr-par"
+echo "             SCW_ACCESS_KEY=$GARAGE_KEY_ID SCW_SECRET_KEY=$GARAGE_SECRET"
+echo "    worker:  S3_ENDPOINT=http://localhost:9000 S3_REGION=fr-par"
+echo "             S3_ACCESS_KEY=$GARAGE_KEY_ID S3_SECRET_KEY=$GARAGE_SECRET"
+echo "    (an .env.local from the MinIO days has minioadmin keys / us-east-1 — update it)"
 echo ""
 echo "Start the services:"
 echo "  1. Gateway:  source .env.local && go run ./cmd/gateway"

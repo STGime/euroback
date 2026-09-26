@@ -36,7 +36,7 @@ See [console.eurobase.app/docs](https://console.eurobase.app/docs) for the SDK r
 ```bash
 git clone https://github.com/STGime/euroback.git
 cd euroback
-./scripts/setup-local.sh   # spins up Postgres + Redis + MinIO via docker-compose, applies migrations
+./scripts/setup-local.sh   # spins up Postgres + Redis + Garage (S3) via docker-compose, applies migrations
 ```
 Detailed local-dev walkthrough is in the `docs/` directory. A proper `eb dev up` command that packages the whole local stack into one CLI is planned; watch the [public issue tracker](https://github.com/STGime/euroback/issues) for progress.
 
