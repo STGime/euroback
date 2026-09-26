@@ -93,7 +93,10 @@ func (h *InternalStorageHandler) projectMeta(ctx context.Context, projectID stri
 
 // recordUpload mirrors what storage.UploadFile does after a successful
 // S3 PUT — write to <schema>.storage_objects so usage tracking and
-// download visibility checks see the file.
+// download visibility checks see the file. Unlike SDK uploads (which
+// never change an existing owner), a function sets uploaded_by
+// outright: function code is the project developer's and runs as
+// service role, so it may assign or reassign ownership deliberately.
 func (h *InternalStorageHandler) recordUpload(ctx context.Context, schema, key, contentType, userID string, size int64) {
 	if schema == "" || h.pool == nil {
 		return
