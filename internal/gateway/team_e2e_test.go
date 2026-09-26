@@ -600,6 +600,56 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Background token cleanup (#681): expired tokens on the dedicated DB
+	// are deleted, fresh ones kept; the shared cluster's stale copy of an
+	// upgraded project is left alone.
+	check(t, env, "token_cleanup_on_dedicated", func() error {
+		ctx := context.Background()
+		rt := pgx.Identifier{env.schema, "refresh_tokens"}.Sanitize()
+		users := pgx.Identifier{env.schema, "users"}.Sanitize()
+		for _, q := range []string{
+			`INSERT INTO ` + rt + ` (user_id, token_hash, expires_at)
+			   SELECT id, 'e2e-expired', now() - interval '30 days' FROM ` + users + ` WHERE email = 'enduser@team.test'`,
+			`INSERT INTO ` + rt + ` (user_id, token_hash, expires_at)
+			   SELECT id, 'e2e-fresh', now() + interval '1 day' FROM ` + users + ` WHERE email = 'enduser@team.test'`,
+		} {
+			if _, err := env.ded.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		if env.upgraded {
+			// A stale-copy user + expired token on the shared cluster.
+			if _, err := env.shared.Exec(ctx, `WITH u AS (INSERT INTO `+users+` (email) VALUES ('stale@team.test') RETURNING id)
+				INSERT INTO `+rt+` (user_id, token_hash, expires_at) SELECT id, 'e2e-stale', now() - interval '30 days' FROM u`); err != nil {
+				return err
+			}
+		}
+		repo := dbprovider.NewRepo(env.shared)
+		cleanupExpiredTokens(ctx, env.gw, func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+			p, err := dbprovider.OpenOwnerPool(ctx, repo, env.cipher, projectID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil
+			}
+			return p, err
+		})
+		if n := env.dedCount(t, "refresh_tokens", "token_hash = 'e2e-expired'"); n != 0 {
+			return fmt.Errorf("expired token not deleted on the dedicated DB (count %d)", n)
+		}
+		if n := env.dedCount(t, "refresh_tokens", "token_hash = 'e2e-fresh'"); n != 1 {
+			return fmt.Errorf("fresh token deleted on the dedicated DB (count %d)", n)
+		}
+		if env.upgraded {
+			var n int
+			if err := env.shared.QueryRow(ctx, `SELECT count(*) FROM `+rt+` WHERE token_hash = 'e2e-stale'`).Scan(&n); err != nil {
+				return err
+			}
+			if n != 1 {
+				return fmt.Errorf("cleanup touched the shared cluster's stale copy (count %d)", n)
+			}
+		}
+		return nil
+	})
+
 	// Runs last: nothing above may have touched the shared cluster.
 	check(t, env, "shared_cluster_untouched", func() error {
 		ctx := context.Background()
@@ -740,6 +790,7 @@ type teamEnv struct {
 	sharedFingerprint string
 	ownerUser         string
 	s3                *storage.S3Client
+	cipher            *dbprovider.Cipher
 	bucket            string
 	ownerEmail        string
 	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
@@ -1027,7 +1078,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
-		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
+		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, cipher: cipher, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
 		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
 	}
 }
