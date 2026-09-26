@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 	"github.com/eurobase/euroback/internal/clientip"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/functions"
@@ -357,7 +359,24 @@ func main() {
 	slog.Info("request logging pipeline started")
 
 	// ── Start token cleanup job (expired refresh/email tokens across all tenants) ──
-	gateway.StartTokenCleanup(ctx, pool)
+	// Team projects' tokens live on their dedicated database (#681): the
+	// job opens a short-lived owner pool there — never the shared cluster.
+	var tokenCipher *dbprovider.Cipher
+	if vk := os.Getenv("VAULT_ENCRYPTION_KEY"); vk != "" {
+		if c, err := dbprovider.NewCipher(vk, 1); err != nil {
+			slog.Error("token cleanup: VAULT_ENCRYPTION_KEY invalid — Team projects' tokens won't be cleaned", "error", err)
+		} else {
+			tokenCipher = c
+		}
+	}
+	tokenRepo := dbprovider.NewRepo(pool)
+	gateway.StartTokenCleanup(ctx, pool, func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+		p, err := dbprovider.OpenOwnerPool(ctx, tokenRepo, tokenCipher, projectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return p, err
+	})
 	slog.Info("token cleanup job started")
 
 	// ── Start usage alerts job (daily scan, 80/90/100% thresholds) ──
