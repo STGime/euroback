@@ -306,6 +306,23 @@ func (s *S3Client) UploadObjectWithRetention(ctx context.Context, bucketName, ke
 	return nil
 }
 
+// ObjectExists reports whether key exists in the bucket (HeadObject).
+func (s *S3Client) ObjectExists(ctx context.Context, bucketName, key string) (bool, error) {
+	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	if err == nil {
+		return true, nil
+	}
+	var notFound *types.NotFound
+	var noKey *types.NoSuchKey
+	if errors.As(err, &notFound) || errors.As(err, &noKey) {
+		return false, nil
+	}
+	return false, fmt.Errorf("head object %s/%s: %w", bucketName, key, err)
+}
+
 // DownloadObject retrieves an object and returns a reader, the content type,
 // and the content length. The caller is responsible for closing the reader.
 func (s *S3Client) DownloadObject(ctx context.Context, bucketName, key string) (io.ReadCloser, string, int64, error) {

@@ -207,6 +207,47 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := asUser("GET", "/v1/storage/e2e/sdk.txt"); r.code >= 400 {
 			return fmt.Errorf("owner download: %w", r)
 		}
+		if r := env.upload(env.publicKey, owner, "http://api.eurobase.test/v1/storage/upload", "e2e/sdk.txt"); r.code >= 300 {
+			return fmt.Errorf("owner re-upload of their own key: %w", r)
+		}
+		// Signed-URL upload: the key is claimed when the URL is issued, so
+		// the file is tracked and listed for its uploader only.
+		signed := func(token, key string) *httpResult {
+			req := httptest.NewRequest("POST", "http://api.eurobase.test/v1/storage/signed-url",
+				strings.NewReader(`{"key":"`+key+`","operation":"upload","content_type":"text/plain"}`))
+			req.Header.Set("apikey", env.publicKey)
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: "POST signed-url " + key, code: rec.Code, body: rec.Body.String()}
+		}
+		sr := signed(owner, "e2e/signed.txt")
+		var su struct {
+			URL string `json:"url"`
+		}
+		if sr.code != 200 || json.Unmarshal([]byte(sr.body), &su) != nil || su.URL == "" {
+			return fmt.Errorf("signed upload URL: %w", sr)
+		}
+		put, _ := http.NewRequest("PUT", su.URL, strings.NewReader("signed"))
+		put.Header.Set("Content-Type", "text/plain")
+		if resp, err := http.DefaultClient.Do(put); err != nil || resp.StatusCode >= 300 {
+			return fmt.Errorf("PUT to signed URL: %v %v", err, resp)
+		}
+		if r := asUser("GET", "/v1/storage/"); !strings.Contains(r.body, "e2e/signed.txt") {
+			return fmt.Errorf("the uploader's listing must include their signed-URL upload: %w", r)
+		}
+		if r := as(other, "GET", "/v1/storage/"); strings.Contains(r.body, "e2e/signed.txt") {
+			return fmt.Errorf("another end user's listing must not include it: %w", r)
+		}
+		// An object in S3 without a tracking row has no owner to check:
+		// end users can't claim it.
+		if err := env.s3.UploadObject(context.Background(), env.bucket, "e2e/untracked.txt", strings.NewReader("x"), "text/plain", 1); err != nil {
+			return err
+		}
+		if r := env.upload(env.publicKey, other, "http://api.eurobase.test/v1/storage/upload", "e2e/untracked.txt"); r.code != http.StatusForbidden {
+			return fmt.Errorf("claiming an untracked existing object must be refused: %w", r)
+		}
 		if n := env.dedCount(t, "storage_objects", "key = 'e2e/sdk.txt'"); n != 1 {
 			return fmt.Errorf("storage metadata not on the dedicated DB (count %d)", n)
 		}
@@ -665,6 +706,8 @@ type teamEnv struct {
 	upgraded          bool
 	sharedFingerprint string
 	ownerUser         string
+	s3                *storage.S3Client
+	bucket            string
 	ownerEmail        string
 	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
 	shared            *pgxpool.Pool
@@ -951,7 +994,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
-		secretKey: sec, publicKey: pub, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
+		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
 		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
 	}
 }

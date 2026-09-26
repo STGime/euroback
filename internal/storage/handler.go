@@ -342,6 +342,13 @@ func (h *StorageHandler) objectReadable(r *http.Request, key string) (bool, erro
 	return h.assertObjectVisible(r, key)
 }
 
+// maxListPages bounds the S3 pages one filtered SDK listing reads.
+const maxListPages = 5
+
+// maxUploadURLExpiry caps upload signed URLs: the key claim is checked
+// when the URL is issued, so a long-lived URL would outlast it.
+const maxUploadURLExpiry = time.Hour
+
 // serviceCaller: console traffic (PlatformStorageContext marks it
 // service-role). SDK storage is always scoped to the end user by RLS,
 // like assertObjectVisible.
@@ -349,35 +356,54 @@ func serviceCaller(r *http.Request) bool {
 	return query.KeyTypeFromContext(r.Context()) == "secret"
 }
 
-// keyOwnedByOther reports whether key is tracked in storage_objects but
-// not visible to the caller under RLS — i.e. another end user's (or a
-// console upload's) object. Uploading there would replace their content
-// and, through the tracking upsert, take the row over. Service-role
-// (console) callers may overwrite anything.
-func (h *StorageHandler) keyOwnedByOther(r *http.Request, key string) (bool, error) {
+// claimKey decides whether the caller may write key, and for an end user
+// records the claim before anything reaches S3. Service-role (console)
+// callers may write anything. For an end user:
+//   - a tracked key must be visible to them under RLS (their own);
+//   - an untracked key that already exists in S3 (pre-tracking upload,
+//     lost tracking row) is refused — it has no owner we could check;
+//   - a new key gets a storage_objects row owned by the caller now
+//     (ON CONFLICT DO NOTHING), so a concurrent upload or an upload URL
+//     issued to someone else for the same key loses, and a signed-URL
+//     upload — which never passes through the gateway — is tracked and
+//     listed for its uploader.
+func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType string) (bool, error) {
 	if serviceCaller(r) || h.engine == nil {
-		return false, nil
+		return true, nil
 	}
 	schema := h.schemaForRequest(r)
 	if schema == "" || h.pool == nil {
-		return false, nil
+		return true, nil
 	}
-	q := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`,
-		strings.ReplaceAll(schema, `"`, `""`))
+	esc := strings.ReplaceAll(schema, `"`, `""`)
 	var exists bool
 	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, q, key).Scan(&exists)
+		return tx.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`, esc), key).Scan(&exists)
 	}); err != nil {
 		return false, err
 	}
 	if !exists {
-		return false, nil
+		if h.s3 != nil {
+			inS3, err := h.s3.ObjectExists(r.Context(), bucket, key)
+			if err != nil {
+				return false, err
+			}
+			if inS3 {
+				return false, nil
+			}
+		}
+		uploader := uploaderForInsert(r)
+		if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, fmt.Sprintf(
+				`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
+				 VALUES ($1, $2, 0, $3) ON CONFLICT (key) DO NOTHING`, esc),
+				key, contentType, uploader)
+			return err
+		}); err != nil {
+			return false, err
+		}
 	}
-	visible, err := h.assertObjectVisible(r, key)
-	if err != nil {
-		return false, err
-	}
-	return !visible, nil
+	return h.assertObjectVisible(r, key)
 }
 
 // visibleToCaller drops listed objects the caller can't read: for SDK
@@ -652,10 +678,11 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if taken, err := h.keyOwnedByOther(r, key); err != nil {
+	if ok, err := h.claimKey(r, bucket, key, contentType); err != nil {
+		slog.Error("storage upload: key claim failed", "error", err, "key", key)
 		writeTenantPoolError(w, err)
 		return
-	} else if taken {
+	} else if !ok {
 		http.Error(w, `{"error":"an object with this key belongs to another user"}`, http.StatusForbidden)
 		return
 	}
@@ -969,27 +996,45 @@ func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := h.s3.ListObjects(r.Context(), bucket, prefix, limit, cursor)
-	if err != nil {
-		slog.Error("storage list failed", "error", err, "bucket", bucket, "prefix", prefix)
-		http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
-		return
-	}
-
-	objects, err := h.visibleToCaller(r, visibleObjects(r, result.Objects))
-	if err != nil {
-		if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
-			writeTenantPoolError(w, err)
+	// SDK listings are filtered to the caller's objects (visibleToCaller);
+	// keep reading S3 pages until the page is full or the budget runs out
+	// so a user with few files in a busy bucket doesn't get a run of empty
+	// pages. The cursor stays S3's, so has_more/next_cursor remain exact.
+	var (
+		objects   []ObjectInfo
+		nextToken = cursor
+		truncated bool
+	)
+	for pages := 0; pages < maxListPages; pages++ {
+		result, err := h.s3.ListObjects(r.Context(), bucket, prefix, limit-len(objects), nextToken)
+		if err != nil {
+			slog.Error("storage list failed", "error", err, "bucket", bucket, "prefix", prefix)
+			http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
 			return
 		}
-		slog.Error("storage list: visibility filter failed", "error", err, "bucket", bucket)
-		http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
-		return
+		page, err := h.visibleToCaller(r, visibleObjects(r, result.Objects))
+		if err != nil {
+			if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
+				writeTenantPoolError(w, err)
+				return
+			}
+			slog.Error("storage list: visibility filter failed", "error", err, "bucket", bucket)
+			http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
+			return
+		}
+		objects = append(objects, page...)
+		nextToken, truncated = result.NextToken, result.IsTruncated
+		if !truncated || len(objects) >= limit || serviceCaller(r) {
+			break
+		}
+	}
+	if objects == nil {
+		objects = []ObjectInfo{}
 	}
 	resp := listResponse{
 		Objects:    objects,
-		NextCursor: result.NextToken,
-		HasMore:    result.IsTruncated,
+		NextCursor: nextToken,
+		HasMore:    truncated,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1064,10 +1109,15 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	// generated is a trust-the-URL scenario (unguessable token); that's
 	// acceptable per the design of signed URLs.
 	if req.Operation == "upload" {
-		if taken, err := h.keyOwnedByOther(r, req.Key); err != nil {
+		ct := req.ContentType
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		if ok, err := h.claimKey(r, bucket, req.Key, ct); err != nil {
+			slog.Error("storage signed-url: key claim failed", "error", err, "key", req.Key)
 			writeTenantPoolError(w, err)
 			return
-		} else if taken {
+		} else if !ok {
 			http.Error(w, `{"error":"an object with this key belongs to another user"}`, http.StatusForbidden)
 			return
 		}
@@ -1104,6 +1154,9 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			expiry = time.Duration(req.ExpiresIn) * time.Second
 		} else {
 			expiry = 15 * time.Minute // default for upload
+		}
+		if expiry > maxUploadURLExpiry {
+			expiry = maxUploadURLExpiry
 		}
 		retention := h.retentionFor(r, req.Key)
 		p, perr := h.s3.GeneratePresignedUploadURLWithRetention(r.Context(), bucket, req.Key, req.ContentType, expiry, retention)
