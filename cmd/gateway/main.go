@@ -363,7 +363,9 @@ func main() {
 	// job opens a short-lived owner pool there — never the shared cluster.
 	var tokenCipher *dbprovider.Cipher
 	if vk := os.Getenv("VAULT_ENCRYPTION_KEY"); vk != "" {
-		if c, err := dbprovider.NewCipher(vk, 1); err == nil {
+		if c, err := dbprovider.NewCipher(vk, 1); err != nil {
+			slog.Error("token cleanup: VAULT_ENCRYPTION_KEY invalid — Team projects' tokens won't be cleaned", "error", err)
+		} else {
 			tokenCipher = c
 		}
 	}

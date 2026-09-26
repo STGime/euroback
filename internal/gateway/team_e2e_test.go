@@ -624,6 +624,23 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 				return err
 			}
 		}
+		// Skip path first: the dedicated database can't be opened — the
+		// project is skipped, nothing is deleted anywhere.
+		cleanupExpiredTokens(ctx, env.gw, func(context.Context, string) (*pgxpool.Pool, error) {
+			return nil, errors.New("simulated: dedicated database unavailable")
+		})
+		if n := env.dedCount(t, "refresh_tokens", "token_hash = 'e2e-expired'"); n != 1 {
+			return fmt.Errorf("skip path: dedicated token touched (count %d)", n)
+		}
+		if env.upgraded {
+			var n int
+			if err := env.shared.QueryRow(ctx, `SELECT count(*) FROM `+rt+` WHERE token_hash = 'e2e-stale'`).Scan(&n); err != nil {
+				return err
+			}
+			if n != 1 {
+				return fmt.Errorf("skip path: cleanup fell back to the shared cluster's stale copy (count %d)", n)
+			}
+		}
 		repo := dbprovider.NewRepo(env.shared)
 		cleanupExpiredTokens(ctx, env.gw, func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
 			p, err := dbprovider.OpenOwnerPool(ctx, repo, env.cipher, projectID)

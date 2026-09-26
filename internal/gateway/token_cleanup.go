@@ -14,6 +14,9 @@ import (
 // tokenCleanupInterval controls how often the cleanup job runs.
 const tokenCleanupInterval = 1 * time.Hour
 
+// tokenCleanupPerProjectTimeout bounds one project's cleanup.
+const tokenCleanupPerProjectTimeout = time.Minute
+
 // tokenCleanupGracePeriod is how long past expires_at a token is kept before
 // deletion. Gives us a buffer for clock skew, debugging, and late refresh
 // attempts that might benefit from a clear "expired" response instead of
@@ -84,6 +87,11 @@ func cleanupExpiredTokens(ctx context.Context, pool *pgxpool.Pool, dedicated Ded
 
 	// Per-tenant cleanup: every active project, with whether it has a live
 	// dedicated database (same live-row rule as PlatformTenantContext).
+	// NOTE for the Pro→Team data copy: the row turns active before the
+	// copy runs; if deleting expired tokens on the target mid-copy ever
+	// matters (row-count verification), skip projects with an in-flight
+	// project_upgrades row (developer pool — 000117 revokes it from the
+	// gateway), as the export does (refuseDuringUpgrade).
 	rows, err := pool.Query(ctx,
 		`SELECT p.id, p.schema_name,
 		        EXISTS (SELECT 1 FROM public.project_databases pd
@@ -132,7 +140,11 @@ func cleanupExpiredTokens(ctx context.Context, pool *pgxpool.Pool, dedicated Ded
 			}
 			target = p
 		}
-		r, e := cleanupTenantTokens(ctx, target, t.schema, cutoff)
+		// Bounded per project: an unreachable dedicated host or a lock
+		// wait must not stall the rest of the pass.
+		tctx, cancel := context.WithTimeout(ctx, tokenCleanupPerProjectTimeout)
+		r, e := cleanupTenantTokens(tctx, target, t.schema, cutoff)
+		cancel()
 		if t.dedicated {
 			target.Close()
 		}
