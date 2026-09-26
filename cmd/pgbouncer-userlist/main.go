@@ -3,6 +3,10 @@
 //
 //	pgbouncer-userlist init   write pgbouncer.ini + userlist.txt, exit
 //	                          (init container, before PgBouncer starts)
+//	pgbouncer-userlist publish derive tenant verifiers (DATABASE_URL +
+//	                          FUNC_PASSWORD_SECRET) and publish them to
+//	                          PGB_PUBLISH_TO (file:<dir>) every PGB_SYNC_INTERVAL —
+//	                          the worker's job in production (#653); used by tests
 //	pgbouncer-userlist sync   re-render the userlist every PGB_SYNC_INTERVAL
 //	                          and SIGHUP PgBouncer when it changes (sidecar;
 //	                          the pod shares its process namespace)
@@ -13,6 +17,8 @@
 //	PGB_PLATFORM_URL_VARS         platform roles served, as env var names (default DATABASE_URL,DATABASE_URL_FUNCTION_RUNNER; "" for none)
 //	PGB_INCLUDE_TENANTS           1 (default): tenant alias + tenant roles; 0: platform roles only
 //	PGB_METRICS_ADDR              /metrics listen address (default :9127)
+//	PGB_TENANT_SOURCE             derive (default: compute verifiers here from FUNC_PASSWORD_SECRET) |
+//	                              k8s-secret:<name> | file:<dir> (read what the worker publishes — #653)
 //	DATABASE_URL_DEVELOPER        developer role, only with PGB_INCLUDE_DEVELOPER=1 (PR 4)
 //	PGB_REPLICAS                  PgBouncer replicas (tenant connection budget check)
 //	DATABASE_URL_FUNCTION_RUNNER  runner role (optional)
@@ -41,6 +47,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eurobase/euroback/internal/k8sapi"
 	"github.com/eurobase/euroback/internal/pgbouncerconf"
 	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/jackc/pgx/v5"
@@ -55,6 +62,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	if mode == "publish" {
+		runPublish(ctx)
+		return
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		slog.Error("pgbouncer-userlist: config", "error", err)
@@ -62,6 +73,11 @@ func main() {
 	}
 	switch mode {
 	case "init":
+		if cfg.store != nil {
+			if err := awaitPublished(ctx, cfg); err != nil {
+				fail("published userlist", err)
+			}
+		}
 		if err := writeFile(filepath.Join(cfg.dir, "pgbouncer.ini"), pgbouncerconf.RenderINI(cfg.settings)); err != nil {
 			fail("write pgbouncer.ini", err)
 		}
@@ -72,7 +88,7 @@ func main() {
 	case "sync":
 		runSync(ctx, cfg)
 	default:
-		fail("usage", fmt.Errorf("unknown mode %q (init|sync)", mode))
+		fail("usage", fmt.Errorf("unknown mode %q (init|sync|publish)", mode))
 	}
 }
 
@@ -87,6 +103,10 @@ type config struct {
 	platform []pgbouncerconf.PlatformUser
 	secret   []byte
 	tenants  bool
+	// store, if set, is where the worker publishes the tenant userlist
+	// (PGB_TENANT_SOURCE=k8s-secret:<name> | file:<dir>); the pooler then
+	// holds no FUNC_PASSWORD_SECRET and no database URL (#653).
+	store    pgbouncerconf.Store
 	settings pgbouncerconf.Settings
 	interval time.Duration
 	metrics  string
@@ -105,11 +125,28 @@ func loadConfig() (*config, error) {
 		interval: 10 * time.Second,
 		metrics:  envOr("PGB_METRICS_ADDR", ":9127"),
 	}
-	if c.upstream == "" {
-		return nil, errors.New("upstream database URL is required (PGB_UPSTREAM_URL_VAR, default DATABASE_URL)")
+	switch src := envOr("PGB_TENANT_SOURCE", "derive"); {
+	case src == "derive":
+	case strings.HasPrefix(src, "k8s-secret:"):
+		kc, err := k8sapi.InCluster()
+		if err != nil {
+			return nil, err
+		}
+		c.store = pgbouncerconf.SecretStore{Client: kc, Name: strings.TrimPrefix(src, "k8s-secret:")}
+	case strings.HasPrefix(src, "file:"):
+		c.store = pgbouncerconf.DirStore(strings.TrimPrefix(src, "file:"))
+	default:
+		return nil, fmt.Errorf("PGB_TENANT_SOURCE %q: want derive | k8s-secret:<name> | file:<dir>", src)
 	}
-	if c.tenants && len(c.secret) < tenantlogin.MinSecretLen {
-		return nil, fmt.Errorf("FUNC_PASSWORD_SECRET must be at least %d bytes", tenantlogin.MinSecretLen)
+	if c.store != nil {
+		c.tenants = true // published tenants; nothing derived here
+	} else {
+		if c.upstream == "" {
+			return nil, errors.New("upstream database URL is required (PGB_UPSTREAM_URL_VAR, default DATABASE_URL)")
+		}
+		if c.tenants && len(c.secret) < tenantlogin.MinSecretLen {
+			return nil, fmt.Errorf("FUNC_PASSWORD_SECRET must be at least %d bytes", tenantlogin.MinSecretLen)
+		}
 	}
 	// Platform roles this pooler serves, by env var name. The runner's
 	// pooler serves none (#651: the process user code can reach holds no
@@ -151,8 +188,10 @@ func loadConfig() (*config, error) {
 		IncludeTenants:         c.tenants,
 		StatsUser:              statsUser,
 	}
-	if err := s.UpstreamFromURL(c.upstream); err != nil {
-		return nil, err
+	if c.store == nil {
+		if err := s.UpstreamFromURL(c.upstream); err != nil {
+			return nil, err
+		}
 	}
 	for _, p := range c.platform {
 		s.PlatformPoolSizes[p.User] = envInt("PGB_POOL_SIZE_"+strings.ToUpper(p.User), 10)
@@ -172,34 +211,77 @@ func loadConfig() (*config, error) {
 
 // syncUserlist renders the userlist and writes it if it changed.
 func syncUserlist(ctx context.Context, c *config) (bool, error) {
-	var schemas []string
-	if c.tenants {
-		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		conn, err := pgx.Connect(cctx, c.upstream)
-		if err != nil {
-			return false, fmt.Errorf("connect: %w", err)
-		}
-		defer conn.Close(context.Background()) //nolint:errcheck
-		if schemas, err = pgbouncerconf.TenantSchemas(cctx, conn); err != nil {
-			return false, err
-		}
-	}
 	statsPw, err := statsPassword(c.dir)
 	if err != nil {
 		return false, err
 	}
 	platform := append(append([]pgbouncerconf.PlatformUser{}, c.platform...),
 		pgbouncerconf.PlatformUser{User: statsUser, Password: statsPw})
-	body, err := pgbouncerconf.RenderUserlist(platform, c.secret, schemas)
-	if err != nil {
-		return false, err
+
+	var body string
+	switch {
+	case c.store != nil:
+		data, err := c.store.Get(ctx)
+		if err != nil {
+			return false, fmt.Errorf("read published userlist: %w", err)
+		}
+		// The publisher always writes the upstream key with the list, so
+		// its absence means "never published" (keep the current file); an
+		// empty list with it present is a real "no tenants".
+		if len(data[pgbouncerconf.KeyUpstream]) == 0 {
+			return false, errors.New("tenant userlist not published yet; keeping the current one")
+		}
+		body = pgbouncerconf.RenderUserlistWithTenants(platform, string(data[pgbouncerconf.KeyUserlist]))
+	default:
+		var schemas []string
+		if c.tenants {
+			cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			conn, err := pgx.Connect(cctx, c.upstream)
+			if err != nil {
+				return false, fmt.Errorf("connect: %w", err)
+			}
+			defer conn.Close(context.Background()) //nolint:errcheck
+			if schemas, err = pgbouncerconf.TenantSchemas(cctx, conn); err != nil {
+				return false, err
+			}
+		}
+		if body, err = pgbouncerconf.RenderUserlist(platform, c.secret, schemas); err != nil {
+			return false, err
+		}
 	}
 	path := filepath.Join(c.dir, "userlist.txt")
 	if old, err := os.ReadFile(path); err == nil && string(old) == body {
 		return false, nil
 	}
 	return true, writeFile(path, body)
+}
+
+// awaitPublished waits (up to 2 min) until the worker has published (the
+// upstream key is always written with the list — an empty list is a real
+// "no tenants") and takes the upstream address from it. The init container
+// fails if nothing was ever published, so a rollout can't replace a working
+// pooler with one that knows no tenants (maxUnavailable 1 keeps an old pod).
+func awaitPublished(ctx context.Context, c *config) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		data, err := c.store.Get(ctx)
+		if err == nil && len(data[pgbouncerconf.KeyUpstream]) > 0 {
+			return c.settings.ParseUpstream(string(data[pgbouncerconf.KeyUpstream]))
+		}
+		if time.Now().After(deadline) {
+			if err == nil {
+				err = errors.New("tenant userlist never published")
+			}
+			return err
+		}
+		slog.Info("waiting for the worker to publish the tenant userlist", "error", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
 }
 
 // statsPassword returns the pod's random stats-user password, creating it
@@ -224,10 +306,16 @@ func runSync(ctx context.Context, c *config) {
 	// The file is written before the reload, so a failed SIGHUP must be
 	// retried on the next pass even though the file then looks unchanged.
 	pendingReload := false
+	failing := false // log sync failures on state change, not every pass
 	for {
 		changed, err := syncUserlist(ctx, c)
-		if err != nil {
-			slog.Error("pgbouncer userlist sync failed", "error", err)
+		switch {
+		case err != nil && !failing:
+			failing = true
+			slog.Error("pgbouncer userlist sync failing (logged once until it recovers)", "error", err)
+		case err == nil && failing:
+			failing = false
+			slog.Info("pgbouncer userlist sync recovered")
 		}
 		if changed {
 			pendingReload = true
@@ -304,4 +392,44 @@ func envInt(k string, def int) int {
 		return v
 	}
 	return def
+}
+
+// runPublish is the worker's publisher (cmd/worker) as a standalone loop,
+// for tests and local setups.
+func runPublish(ctx context.Context) {
+	dbURL, secret := os.Getenv("DATABASE_URL"), []byte(os.Getenv("FUNC_PASSWORD_SECRET"))
+	to := strings.TrimPrefix(os.Getenv("PGB_PUBLISH_TO"), "file:")
+	if dbURL == "" || len(secret) < tenantlogin.MinSecretLen || to == "" {
+		fail("publish", errors.New("need DATABASE_URL, FUNC_PASSWORD_SECRET and PGB_PUBLISH_TO=file:<dir>"))
+	}
+	upstream, err := pgbouncerconf.UpstreamOf(dbURL)
+	if err != nil {
+		fail("publish", err)
+	}
+	interval := 10 * time.Second
+	if d, err := time.ParseDuration(envOr("PGB_SYNC_INTERVAL", "10s")); err == nil && d > 0 {
+		interval = d
+	}
+	pub := &pgbouncerconf.Publisher{Store: pgbouncerconf.DirStore(to), Secret: secret, Upstream: upstream}
+	for {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		conn, err := pgx.Connect(cctx, dbURL)
+		if err == nil {
+			var wrote bool
+			wrote, err = pub.Publish(cctx, conn)
+			conn.Close(context.Background()) //nolint:errcheck
+			if wrote {
+				slog.Info("tenant userlist published", "to", to)
+			}
+		}
+		cancel()
+		if err != nil {
+			slog.Error("publish failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+	}
 }

@@ -401,16 +401,13 @@ jobs:
           # tenant connections use its `eurobase_tenant` alias, so the
           # pooler must be rolled (with the current config) before a
           # runner pod can start using it.
-          # Pinned to the content tag: unchanged inputs = no pooler restart.
-          # Two poolers (#651): the runner's and the gateway's.
-          for f in pgbouncer pgbouncer-gateway; do
-            sed "s|eurobase-app/pgbouncer:latest|eurobase-app/pgbouncer:${{ steps.pgb.outputs.tag }}|" \
-              deploy/k8s/$f.yaml | kubectl apply -f -
-          done
-          kubectl rollout status deployment/pgbouncer -n eurobase --timeout=180s
-          kubectl rollout status deployment/pgbouncer-gateway -n eurobase --timeout=180s
-          kubectl apply -f deploy/k8s/gateway.yaml
+          # #653: RBAC + the published-userlist Secret, and the worker's
+          # SA/env. The worker's IMAGE is not changed by this apply (the live
+          # Deployment is pinned by `set image`), so publishing and the
+          # pooler roll happen in "Deploy to Kapsule", after migrations.
+          kubectl apply -f deploy/k8s/pgbouncer-userlist-rbac.yaml
           kubectl apply -f deploy/k8s/worker.yaml
+          kubectl apply -f deploy/k8s/gateway.yaml
           kubectl apply -f deploy/k8s/console.yaml
           # NetworkPolicy must apply BEFORE the pod rollout so the new
           # net-allowed worker permissions never have a window of
@@ -453,11 +450,32 @@ jobs:
       - name: Deploy to Kapsule
         if: steps.fresh.outputs.stale != 'true'
         run: |
-          kubectl set image deployment/gateway \
-            gateway=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:${{ github.sha }} \
-            -n eurobase
+          # 1. Worker first (after migrations): it publishes the runner
+          #    pooler's tenant userlist (#653). Wait for its first publish so
+          #    new pooler pods never start without tenants (their init
+          #    container also refuses to).
           kubectl set image deployment/worker \
             worker=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:${{ github.sha }} \
+            migrate=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/worker:${{ github.sha }} \
+            -n eurobase
+          kubectl rollout status deployment/worker -n eurobase --timeout=180s
+          for i in $(seq 1 36); do
+            [ -n "$(kubectl -n eurobase get secret pgbouncer-tenant-userlist -o jsonpath='{.data.upstream}')" ] && break
+            sleep 5
+          done
+          [ -n "$(kubectl -n eurobase get secret pgbouncer-tenant-userlist -o jsonpath='{.data.upstream}')" ] \
+            || { echo "worker never published the pgbouncer tenant userlist"; kubectl -n eurobase logs deployment/worker -c worker --tail=50; exit 1; }
+          # 2. Poolers (content tag: unchanged inputs = no restart), healthy
+          #    before the clients roll.
+          for f in pgbouncer pgbouncer-gateway; do
+            sed "s|eurobase-app/pgbouncer:latest|eurobase-app/pgbouncer:${{ steps.pgb.outputs.tag }}|" \
+              deploy/k8s/$f.yaml | kubectl apply -f -
+          done
+          kubectl rollout status deployment/pgbouncer -n eurobase --timeout=180s
+          kubectl rollout status deployment/pgbouncer-gateway -n eurobase --timeout=180s
+          # 3. Everything else.
+          kubectl set image deployment/gateway \
+            gateway=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/gateway:${{ github.sha }} \
             -n eurobase
           kubectl set image deployment/console \
             console=${{ env.REGISTRY }}/${{ env.REGISTRY_NS }}/console:${{ github.sha }} \

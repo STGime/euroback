@@ -223,6 +223,13 @@ func RenderUserlist(platform []PlatformUser, secret []byte, schemas []string) (s
 	return b.String(), nil
 }
 
+// RenderUserlistWithTenants returns the auth_file from platform users and
+// already-rendered tenant lines (the published userlist, #653).
+func RenderUserlistWithTenants(platform []PlatformUser, tenantLines string) string {
+	body, _ := RenderUserlist(platform, nil, nil)
+	return body + tenantLines
+}
+
 // quote renders a userlist field: double-quoted, inner quotes doubled.
 func quote(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`

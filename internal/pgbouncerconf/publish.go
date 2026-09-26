@@ -1,0 +1,163 @@
+package pgbouncerconf
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/eurobase/euroback/internal/k8sapi"
+	"github.com/eurobase/euroback/internal/tenantlogin"
+	"github.com/jackc/pgx/v5"
+)
+
+// Published tenant userlist (#653). The worker — which holds
+// FUNC_PASSWORD_SECRET anyway — derives each tenant's SCRAM verifier and
+// publishes the userlist lines plus the upstream address; the runner's
+// pooler only reads them. So the pooler pod, which tenant code can reach,
+// holds no master secret and no database password. What a compromised
+// pooler still gets: the verifiers (no login from them alone; offline
+// brute force of a 64-hex HMAC is impractical) and — inherent to SCRAM
+// pass-through — the ClientKey of every tenant that connects while it is
+// compromised, usable until FUNC_PASSWORD_SECRET is rotated. Idle and
+// future tenants are not exposed, and no key derives the others.
+const (
+	KeyUserlist    = "userlist"     // tenant `"<schema>_func" "<verifier>"` lines
+	KeyUpstream    = "upstream"     // "host:port/database" (no credentials)
+	KeyPublishedAt = "published_at" // RFC 3339; the pooler exports its age
+)
+
+// Store is where the published userlist lives: a Kubernetes Secret in
+// production, a directory in tests.
+type Store interface {
+	Get(ctx context.Context) (map[string][]byte, error)
+	Put(ctx context.Context, data map[string][]byte) error
+}
+
+// SecretStore is a Kubernetes Secret (read: pooler SA; patch: worker SA).
+type SecretStore struct {
+	Client *k8sapi.Client
+	Name   string
+}
+
+func (s SecretStore) Get(ctx context.Context) (map[string][]byte, error) {
+	return s.Client.GetSecretData(ctx, s.Name)
+}
+
+func (s SecretStore) Put(ctx context.Context, data map[string][]byte) error {
+	return s.Client.PatchSecretData(ctx, s.Name, data)
+}
+
+// Note: the RBAC lets the worker get/patch the Secret but not create it
+// (create can't be scoped to one name). If it is deleted, re-apply
+// deploy/k8s/pgbouncer-userlist-rbac.yaml; the worker republishes within 5 s.
+
+// DirStore keeps one file per key in a directory (tests).
+type DirStore string
+
+func (d DirStore) Get(context.Context) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	for _, k := range []string{KeyUserlist, KeyUpstream, KeyPublishedAt} {
+		b, err := os.ReadFile(filepath.Join(string(d), k))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out[k] = b
+	}
+	return out, nil
+}
+
+func (d DirStore) Put(_ context.Context, data map[string][]byte) error {
+	for k, v := range data {
+		tmp := filepath.Join(string(d), "."+k+".tmp")
+		if err := os.WriteFile(tmp, v, 0o644); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, filepath.Join(string(d), k)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RenderTenantUserlist returns the tenant lines of the userlist.
+func RenderTenantUserlist(secret []byte, schemas []string) (string, error) {
+	var b strings.Builder
+	for _, s := range schemas {
+		v, err := tenantlogin.ScramVerifier(secret, s)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "%s %s\n", quote(tenantlogin.FuncRole(s)), quote(v))
+	}
+	return b.String(), nil
+}
+
+// UpstreamOf returns "host:port/database" for a postgres:// URL.
+func UpstreamOf(databaseURL string) (string, error) {
+	var s Settings
+	if err := s.UpstreamFromURL(databaseURL); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s:%d/%s", s.Host, s.Port, s.Database), nil
+}
+
+// ParseUpstream fills Host/Port/Database from "host:port/database".
+func (s *Settings) ParseUpstream(upstream string) error {
+	return s.UpstreamFromURL("postgres://" + strings.TrimSpace(upstream))
+}
+
+// Publisher keeps the published userlist current (worker side).
+type Publisher struct {
+	Store    Store
+	Secret   []byte
+	Upstream string
+	// Refresh re-writes even an unchanged list this often (default 5 min),
+	// so a wiped / re-created Secret heals without a worker restart.
+	Refresh time.Duration
+
+	last      string
+	lastWrite time.Time
+}
+
+// Publish lists tenant schemas and publishes them (PublishSchemas).
+func (p *Publisher) Publish(ctx context.Context, conn *pgx.Conn) (bool, error) {
+	schemas, err := TenantSchemas(ctx, conn)
+	if err != nil {
+		return false, err
+	}
+	return p.PublishSchemas(ctx, schemas)
+}
+
+// PublishSchemas writes the userlist on the first call (even with zero
+// tenants — the pooler's init waits for a first publish), when it
+// changed, and every Refresh. A failed write is retried on the next call.
+// Returns whether it wrote.
+func (p *Publisher) PublishSchemas(ctx context.Context, schemas []string) (bool, error) {
+	body, err := RenderTenantUserlist(p.Secret, schemas)
+	if err != nil {
+		return false, err
+	}
+	refresh := p.Refresh
+	if refresh <= 0 {
+		refresh = 5 * time.Minute
+	}
+	if !p.lastWrite.IsZero() && body == p.last && time.Since(p.lastWrite) < refresh {
+		return false, nil
+	}
+	if err := p.Store.Put(ctx, map[string][]byte{
+		KeyUserlist:    []byte(body),
+		KeyUpstream:    []byte(p.Upstream),
+		KeyPublishedAt: []byte(time.Now().UTC().Format(time.RFC3339)),
+	}); err != nil {
+		return false, err
+	}
+	p.last, p.lastWrite = body, time.Now()
+	return true, nil
+}

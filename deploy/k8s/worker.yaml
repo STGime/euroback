@@ -21,6 +21,9 @@ spec:
         app: worker
         component: jobs
     spec:
+      # Patches the runner pooler's published tenant userlist (#653;
+      # RBAC in pgbouncer-userlist-rbac.yaml: this one Secret only).
+      serviceAccountName: worker
       initContainers:
         # Run River schema migrations before the worker starts.
         # Uses the same image — the river CLI is baked into the worker binary
@@ -45,6 +48,9 @@ spec:
             - secretRef:
                 name: eurobase-secrets
           env:
+            # #653: publish the runner pooler's tenant userlist here.
+            - name: PGB_USERLIST_SECRET
+              value: pgbouncer-tenant-userlist
             - name: ENVIRONMENT
               valueFrom:
                 configMapKeyRef:

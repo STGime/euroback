@@ -1,0 +1,84 @@
+# Published tenant userlist for the runner's PgBouncer (#653).
+#
+# The worker (holds FUNC_PASSWORD_SECRET anyway) derives each tenant's SCRAM
+# verifier and patches them into the Secret below; the runner's pooler only
+# reads it. The pooler pod — reachable from tenant function code — thus
+# holds no master secret and no database password.
+#
+# The Secret is declared WITHOUT data on purpose: `kubectl apply` then never
+# overwrites what the worker published (data is owned by the worker's PATCH).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pgbouncer-tenant-userlist
+  namespace: eurobase
+  labels:
+    app: pgbouncer
+type: Opaque
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: worker
+  namespace: eurobase
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pgbouncer-runner
+  namespace: eurobase
+# Mounted only into the containers that read the Secret (projected volume
+# in pgbouncer.yaml), never into the pgbouncer container.
+automountServiceAccountToken: false
+---
+# Worker: read + patch this one Secret only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pgbouncer-userlist-publisher
+  namespace: eurobase
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["pgbouncer-tenant-userlist"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pgbouncer-userlist-publisher
+  namespace: eurobase
+subjects:
+  - kind: ServiceAccount
+    name: worker
+    namespace: eurobase
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pgbouncer-userlist-publisher
+---
+# Runner pooler: read this one Secret only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pgbouncer-userlist-reader
+  namespace: eurobase
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["pgbouncer-tenant-userlist"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pgbouncer-userlist-reader
+  namespace: eurobase
+subjects:
+  - kind: ServiceAccount
+    name: pgbouncer-runner
+    namespace: eurobase
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pgbouncer-userlist-reader

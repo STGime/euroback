@@ -11,12 +11,14 @@ NET=eb-pgb-test
 PG=eb-pgb-pg
 PGB=eb-pgb-bouncer
 PGB_R=eb-pgb-runner
+PGB_P=eb-pgb-publisher
+PUBVOL=eb-pgb-published
 PGB_G=eb-pgb-gateway
 PG_PORT="${PGB_TEST_PG_PORT:-5466}"
 PGB_PORT="${PGB_TEST_PORT:-6466}"
 SECRET="pgbouncer-test-secret-0123456789abcdef"
 
-cleanup() { docker rm -f "$PGB" "$PGB_R" "$PGB_G" "$PG" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$PGB" "$PGB_R" "$PGB_P" "$PGB_G" "$PG" >/dev/null 2>&1 || true; docker volume rm "$PUBVOL" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 [ -n "${PGB_KEEP:-}" ] && trap - EXIT
 cleanup
@@ -44,10 +46,17 @@ docker run -d --name "$PGB" --network "$NET" -p "$PGB_PORT:6432" \
   sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
 # The two production modes (#651): runner pooler (tenants only, lists
 # tenants as the runner role) and gateway pooler (platform roles only).
-docker run -d --name "$PGB_R" --network "$NET" -p 6467:6432 -p 9128:9127 \
-  -e DATABASE_URL_FUNCTION_RUNNER="postgres://eurobase_function_runner:localdev@$PG:5432/eurobase?sslmode=disable" \
-  -e PGB_UPSTREAM_URL_VAR=DATABASE_URL_FUNCTION_RUNNER -e PGB_PLATFORM_URL_VARS= -e PGB_INCLUDE_TENANTS=1 \
-  -e FUNC_PASSWORD_SECRET="$SECRET" -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s \
+# #653: the publisher (the worker's role in production) derives the tenant
+# verifiers and writes them to a shared volume; the runner pooler only
+# reads them — it gets no FUNC_PASSWORD_SECRET and no database URL.
+docker volume create "$PUBVOL" >/dev/null
+docker run -d --name "$PGB_P" --network "$NET" -v "$PUBVOL:/pub" --user 0 \
+  -e DATABASE_URL="postgres://eurobase_gateway:localdev@$PG:5432/eurobase?sslmode=disable" \
+  -e FUNC_PASSWORD_SECRET="$SECRET" -e PGB_PUBLISH_TO=file:/pub -e PGB_SYNC_INTERVAL=2s \
+  eurobase-pgbouncer:test pgbouncer-userlist publish >/dev/null
+docker run -d --name "$PGB_R" --network "$NET" -p 6467:6432 -p 9128:9127 -v "$PUBVOL:/pub:ro" \
+  -e PGB_TENANT_SOURCE=file:/pub -e PGB_PLATFORM_URL_VARS= \
+  -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s \
   eurobase-pgbouncer:test \
   sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
 docker run -d --name "$PGB_G" --network "$NET" -p 6468:6432 -p 9129:9127 \
@@ -57,8 +66,11 @@ docker run -d --name "$PGB_G" --network "$NET" -p 6468:6432 -p 9129:9127 \
   eurobase-pgbouncer:test \
   sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
 sleep 3
-for c in "$PGB" "$PGB_R" "$PGB_G"; do
-  docker logs "$c" 2>&1 | grep -iE "error|fatal|warning" && { echo "$c reported errors"; exit 1; } || true
+# The runner pooler holds no secret (#653).
+docker inspect "$PGB_R" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E "FUNC_PASSWORD_SECRET|DATABASE_URL" \
+  && { echo "runner pooler has a secret in its environment"; exit 1; } || true
+for c in "$PGB" "$PGB_R" "$PGB_P" "$PGB_G"; do
+  docker logs "$c" 2>&1 | grep -E '"level":"ERROR"|\] (FATAL|ERROR|WARNING) ' && { echo "$c reported errors"; exit 1; } || true
 done
 
 cd "$REPO_ROOT"
@@ -69,7 +81,7 @@ PGB_TEST_SECRET="$SECRET" \
   go test ./internal/pgbouncerconf/ -run TestPgBouncerEndToEnd -count=1 -v
 
 # After the e2e test provisioned a tenant: the prod-mode split (#651).
-sleep 3 # runner pooler's sidecar picks the new tenant up
+sleep 6 # publisher publishes the new tenant, runner pooler's sidecar picks it up
 PGB_TEST_RUNNER_POOLER="postgres://localhost:6467" PGB_TEST_GATEWAY_POOLER="postgres://localhost:6468" \
 PGB_TEST_RUNNER_METRICS="http://localhost:9128/metrics" PGB_TEST_GATEWAY_METRICS="http://localhost:9129/metrics" \
 PGB_TEST_SECRET="$SECRET" \

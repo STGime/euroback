@@ -21,6 +21,8 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/k8sapi"
+	"github.com/eurobase/euroback/internal/pgbouncerconf"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenantlogin"
@@ -292,6 +294,68 @@ func main() {
 				}
 			}
 		}()
+	}
+
+	// Publish the runner pooler's tenant userlist (#653): SCRAM verifiers
+	// derived here, so the pooler pod — reachable from tenant code — needs
+	// neither FUNC_PASSWORD_SECRET nor a database URL. Every 5 s (a new
+	// project's tenant becomes poolable within ~15 s incl. the pooler's
+	// 10 s sync); writes on change and every 5 min.
+	if name := os.Getenv("PGB_USERLIST_SECRET"); name != "" {
+		secret := []byte(os.Getenv("FUNC_PASSWORD_SECRET"))
+		kc, kerr := k8sapi.InCluster()
+		// The runner pooler connects where the runner's own login does.
+		upURL := os.Getenv("DATABASE_URL_FUNCTION_RUNNER")
+		if upURL == "" {
+			upURL = databaseURL
+		}
+		upstream, uerr := pgbouncerconf.UpstreamOf(upURL)
+		switch {
+		case len(secret) < tenantlogin.MinSecretLen:
+			slog.Error("pgbouncer userlist publisher: FUNC_PASSWORD_SECRET missing or too short")
+		case kerr != nil:
+			slog.Error("pgbouncer userlist publisher: no in-cluster API access", "error", kerr)
+		case uerr != nil:
+			slog.Error("pgbouncer userlist publisher: upstream", "error", uerr)
+		default:
+			pub := &pgbouncerconf.Publisher{Store: pgbouncerconf.SecretStore{Client: kc, Name: name}, Secret: secret, Upstream: upstream}
+			go func() {
+				// Log state changes, not every 5 s failure.
+				failing := false
+				publish := func() {
+					pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					defer cancel()
+					var wrote bool
+					conn, err := pool.Acquire(pctx)
+					if err == nil {
+						wrote, err = pub.Publish(pctx, conn.Conn())
+						conn.Release()
+					}
+					switch {
+					case err != nil && !failing:
+						failing = true
+						slog.Error("pgbouncer userlist publish failing (logged once until it recovers)", "error", err)
+					case err == nil && failing:
+						failing = false
+						slog.Info("pgbouncer userlist publish recovered", "secret", name)
+					}
+					if wrote {
+						slog.Info("pgbouncer tenant userlist published", "secret", name)
+					}
+				}
+				publish()
+				t := time.NewTicker(5 * time.Second)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						publish()
+					}
+				}
+			}()
+		}
 	}
 
 	// Shared plans.LimitsService — resolves plan_limits from the
