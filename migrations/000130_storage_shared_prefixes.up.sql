@@ -6,9 +6,11 @@
 --   readable by everyone (the storage read policy evaluates it as the
 --   caller), writable by the service role / owner only.
 -- * storage_owner_access (FOR ALL) is split: storage_read (FOR SELECT) also
---   admits rows under a matching shared prefix; storage_insert / _update /
---   _delete stay owner / service only — a shared file is readable, never
---   writable, by other end users.
+--   admits developer files (uploaded_by IS NULL) under a matching shared
+--   prefix; storage_insert / _update / _delete stay owner / service only,
+--   and end users can't create or move a file into a shared folder — a
+--   shared folder is readable, never writable, by end users (otherwise
+--   anyone could plant content served to everyone, or squat a key).
 -- * Export archives (exports/…) are never shared (CHECK + policy).
 -- * provision_tenant (copy of 000127) does the same for new tenants;
 --   internal/dbprovider/dedicated_bootstrap.sql for Team instances.
@@ -199,12 +201,14 @@ BEGIN
          WITH CHECK (public.is_internal_auth_path())',
         v_schema_name
     );
-    -- #697: reads also cover shared folders (storage_shared_prefixes);
-    -- writes stay owner / service only. Export archives are never shared.
+    -- #697: reads also cover developer files (no owner) in shared folders
+    -- (storage_shared_prefixes); writes stay owner / service only, and end
+    -- users can't create or move files into a shared folder. Export
+    -- archives are never shared.
     EXECUTE format(
         'CREATE POLICY storage_read ON %I.storage_objects FOR SELECT
          USING (public.is_service_role() OR uploaded_by = public.current_end_user_id()
-                OR (left(key, 8) <> ''exports/'' AND EXISTS (
+                OR (uploaded_by IS NULL AND left(key, 8) <> ''exports/'' AND EXISTS (
                       SELECT 1 FROM %I.storage_shared_prefixes s
                        WHERE starts_with(key, s.prefix)
                          AND (s.visibility = ''public'' OR public.current_end_user_id() IS NOT NULL))))',
@@ -212,14 +216,18 @@ BEGIN
     );
     EXECUTE format(
         'CREATE POLICY storage_insert ON %I.storage_objects FOR INSERT
-         WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
-        v_schema_name
+         WITH CHECK (public.is_service_role()
+                     OR (uploaded_by = public.current_end_user_id() AND NOT EXISTS (
+                           SELECT 1 FROM %I.storage_shared_prefixes s WHERE starts_with(key, s.prefix))))',
+        v_schema_name, v_schema_name
     );
     EXECUTE format(
         'CREATE POLICY storage_update ON %I.storage_objects FOR UPDATE
          USING (public.is_service_role() OR uploaded_by = public.current_end_user_id())
-         WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
-        v_schema_name
+         WITH CHECK (public.is_service_role()
+                     OR (uploaded_by = public.current_end_user_id() AND NOT EXISTS (
+                           SELECT 1 FROM %I.storage_shared_prefixes s WHERE starts_with(key, s.prefix))))',
+        v_schema_name, v_schema_name
     );
     EXECUTE format(
         'CREATE POLICY storage_delete ON %I.storage_objects FOR DELETE
@@ -310,6 +318,18 @@ BEGIN
           JOIN pg_namespace n ON n.nspname = p.schema_name
          WHERE p.schema_name IS NOT NULL
     LOOP
+        -- A tenant's own table under this name would break the feature
+        -- (none in prod, 2026-09-26): fail with the schema named.
+        IF to_regclass(format('%I.storage_shared_prefixes', rec.schema_name)) IS NOT NULL THEN
+            RAISE EXCEPTION '000130: % already has a table named storage_shared_prefixes', rec.schema_name;
+        END IF;
+        -- Replace every platform storage policy, including a very old
+        -- permissive one, and any stale ones under the new names.
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_storage ON %I.storage_objects', rec.schema_name);
+        EXECUTE format('DROP POLICY IF EXISTS storage_read ON %I.storage_objects', rec.schema_name);
+        EXECUTE format('DROP POLICY IF EXISTS storage_insert ON %I.storage_objects', rec.schema_name);
+        EXECUTE format('DROP POLICY IF EXISTS storage_update ON %I.storage_objects', rec.schema_name);
+        EXECUTE format('DROP POLICY IF EXISTS storage_delete ON %I.storage_objects', rec.schema_name);
         EXECUTE format(
             'CREATE TABLE %I.storage_shared_prefixes (
                 prefix      TEXT        PRIMARY KEY
@@ -322,12 +342,14 @@ BEGIN
         );
         EXECUTE format('ALTER TABLE %I.storage_shared_prefixes ENABLE ROW LEVEL SECURITY', rec.schema_name);
         EXECUTE format('DROP POLICY IF EXISTS storage_owner_access ON %I.storage_objects', rec.schema_name);
-        -- #697: reads also cover shared folders (storage_shared_prefixes);
-        -- writes stay owner / service only. Export archives are never shared.
+        -- #697: reads also cover developer files (no owner) in shared folders
+        -- (storage_shared_prefixes); writes stay owner / service only, and end
+        -- users can't create or move files into a shared folder. Export
+        -- archives are never shared.
         EXECUTE format(
             'CREATE POLICY storage_read ON %I.storage_objects FOR SELECT
              USING (public.is_service_role() OR uploaded_by = public.current_end_user_id()
-                    OR (left(key, 8) <> ''exports/'' AND EXISTS (
+                    OR (uploaded_by IS NULL AND left(key, 8) <> ''exports/'' AND EXISTS (
                           SELECT 1 FROM %I.storage_shared_prefixes s
                            WHERE starts_with(key, s.prefix)
                              AND (s.visibility = ''public'' OR public.current_end_user_id() IS NOT NULL))))',
@@ -335,14 +357,18 @@ BEGIN
         );
         EXECUTE format(
             'CREATE POLICY storage_insert ON %I.storage_objects FOR INSERT
-             WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
-            rec.schema_name
+             WITH CHECK (public.is_service_role()
+                         OR (uploaded_by = public.current_end_user_id() AND NOT EXISTS (
+                               SELECT 1 FROM %I.storage_shared_prefixes s WHERE starts_with(key, s.prefix))))',
+            rec.schema_name, rec.schema_name
         );
         EXECUTE format(
             'CREATE POLICY storage_update ON %I.storage_objects FOR UPDATE
              USING (public.is_service_role() OR uploaded_by = public.current_end_user_id())
-             WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
-            rec.schema_name
+             WITH CHECK (public.is_service_role()
+                         OR (uploaded_by = public.current_end_user_id() AND NOT EXISTS (
+                               SELECT 1 FROM %I.storage_shared_prefixes s WHERE starts_with(key, s.prefix))))',
+            rec.schema_name, rec.schema_name
         );
         EXECUTE format(
             'CREATE POLICY storage_delete ON %I.storage_objects FOR DELETE
@@ -364,5 +390,15 @@ BEGIN
             EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.storage_shared_prefixes TO %I',
                            rec.schema_name, rec.schema_name || '_func');
         END IF;
+    END LOOP;
+
+    -- Any other policy on storage_objects would OR more access into the
+    -- new split policies: report it (not fatal — it's the tenant's own).
+    FOR rec IN
+        SELECT schemaname, policyname FROM pg_policies
+         WHERE tablename = 'storage_objects' AND schemaname LIKE 'tenant\_%'
+           AND policyname NOT IN ('storage_read', 'storage_insert', 'storage_update', 'storage_delete')
+    LOOP
+        RAISE WARNING '000130: unexpected policy % on %.storage_objects', rec.policyname, rec.schemaname;
     END LOOP;
 END $$;

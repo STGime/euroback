@@ -373,12 +373,14 @@ BEGIN
          WITH CHECK (public.is_internal_auth_path())',
         v_schema_name
     );
-    -- #697: reads also cover shared folders (storage_shared_prefixes);
-    -- writes stay owner / service only. Export archives are never shared.
+    -- #697: reads also cover developer files (no owner) in shared folders
+    -- (storage_shared_prefixes); writes stay owner / service only, and end
+    -- users can't create or move files into a shared folder. Export
+    -- archives are never shared.
     EXECUTE format(
         'CREATE POLICY storage_read ON %I.storage_objects FOR SELECT
          USING (public.is_service_role() OR uploaded_by = public.current_end_user_id()
-                OR (left(key, 8) <> ''exports/'' AND EXISTS (
+                OR (uploaded_by IS NULL AND left(key, 8) <> ''exports/'' AND EXISTS (
                       SELECT 1 FROM %I.storage_shared_prefixes s
                        WHERE starts_with(key, s.prefix)
                          AND (s.visibility = ''public'' OR public.current_end_user_id() IS NOT NULL))))',
@@ -386,14 +388,18 @@ BEGIN
     );
     EXECUTE format(
         'CREATE POLICY storage_insert ON %I.storage_objects FOR INSERT
-         WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
-        v_schema_name
+         WITH CHECK (public.is_service_role()
+                     OR (uploaded_by = public.current_end_user_id() AND NOT EXISTS (
+                           SELECT 1 FROM %I.storage_shared_prefixes s WHERE starts_with(key, s.prefix))))',
+        v_schema_name, v_schema_name
     );
     EXECUTE format(
         'CREATE POLICY storage_update ON %I.storage_objects FOR UPDATE
          USING (public.is_service_role() OR uploaded_by = public.current_end_user_id())
-         WITH CHECK (public.is_service_role() OR uploaded_by = public.current_end_user_id())',
-        v_schema_name
+         WITH CHECK (public.is_service_role()
+                     OR (uploaded_by = public.current_end_user_id() AND NOT EXISTS (
+                           SELECT 1 FROM %I.storage_shared_prefixes s WHERE starts_with(key, s.prefix))))',
+        v_schema_name, v_schema_name
     );
     EXECUTE format(
         'CREATE POLICY storage_delete ON %I.storage_objects FOR DELETE

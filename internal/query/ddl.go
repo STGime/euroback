@@ -63,7 +63,8 @@ var validIdentRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // reservedTableNames are system tables that cannot be dropped or altered.
 var reservedTableNames = map[string]bool{
-	"storage_objects": true,
+	"storage_objects":         true,
+	"storage_shared_prefixes": true, // #697: the sharing API and storage policies depend on it
 }
 
 // ForeignKeyDefinition describes a foreign key to add.

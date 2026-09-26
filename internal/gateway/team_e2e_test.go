@@ -72,6 +72,9 @@ func TestTeamEndToEnd(t *testing.T) {
 	}{
 		{"fresh", "eb_fresh", false},
 		{"upgraded", "eb_upgraded", true},
+		// Free / Pro: the same checks on the shared cluster (no dedicated
+		// database) — every change for Team must keep these working.
+		{"free", "eurobase", false},
 	} {
 		t.Run(sc.name, func(t *testing.T) {
 			runTeamChecks(t, setupTeamProject(t, cfg, sc.name, sc.db, sc.upgraded))
@@ -367,9 +370,37 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := call("DELETE", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code < 400 {
 			return fmt.Errorf("end user delete of a shared file must be refused: %w", r)
 		}
+		// Shared folders hold developer files only: an end user can't plant
+		// a new file there (it would be served to everyone) — upload or
+		// upload URL — nor squat a name before the developer uploads it.
+		if r := env.upload(env.publicKey, user, "http://api.eurobase.test/v1/storage/upload", "themes/planted.html"); r.code != http.StatusForbidden {
+			return fmt.Errorf("end user upload of a new file into a shared folder must be refused: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, user, `{"key":"themes/planted2.html","operation":"upload","content_type":"text/html"}`); r.code != http.StatusForbidden {
+			return fmt.Errorf("end user upload URL into a shared folder must be refused: %w", r)
+		}
+		// …nor through the table API (the storage_insert policy refuses it).
+		call("POST", "/v1/db/storage_objects", env.publicKey, user, `{"key":"themes/planted3.html","content_type":"text/html"}`)
+		if n := env.dedCount(t, "storage_objects", "key LIKE 'themes/planted%'"); n != 0 {
+			return fmt.Errorf("a planted file was recorded (count %d)", n)
+		}
+		// Who uploaded what isn't readable through the SDK table API.
+		if r := call("GET", "/v1/db/storage_objects", env.publicKey, user, ""); strings.Contains(r.body, "uploaded_by") && r.code == 200 {
+			return fmt.Errorf("uploaded_by must not be exposed via /v1/db: %w", r)
+		}
 		// public
 		if r := setShare("themes/", "public"); r.code != 200 {
 			return fmt.Errorf("set public: %w", r)
+		}
+		// Anonymous listing shows only public files, and the cursor never
+		// reveals a hidden key (an S3 continuation token would).
+		anonList := call("GET", "/v1/storage/?limit=1", env.publicKey, "", "")
+		if anonList.code != 200 || strings.Contains(anonList.body, "e2e/") || !strings.Contains(anonList.body, "themes/hero.txt") {
+			return fmt.Errorf("anonymous listing must show only public files: %w", anonList)
+		}
+		// Anonymous download URLs are capped at 1 h.
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/hero.txt","operation":"download","expires_in":604800}`); r.code != 200 || !strings.Contains(r.body, "X-Amz-Expires=3600") {
+			return fmt.Errorf("anonymous download URL must be capped at 1 h: %w", r)
 		}
 		if r := call("GET", "/v1/storage/themes/hero.txt?apikey="+env.publicKey, "", "", ""); r.code != 200 || r.body != "hello team" {
 			return fmt.Errorf("anonymous caller must read a public-shared file (apikey in the URL): %w", r)
@@ -733,8 +764,11 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 				return err
 			}
 		}
-		// Skip path first: the dedicated database can't be opened — the
-		// project is skipped, nothing is deleted anywhere.
+		// Skip path first (Team): the dedicated database can't be opened —
+		// the project is skipped, nothing is deleted anywhere.
+		if env.scenario == "free" {
+			goto realRun
+		}
 		cleanupExpiredTokens(ctx, env.gw, func(context.Context, string) (*pgxpool.Pool, error) {
 			return nil, errors.New("simulated: dedicated database unavailable")
 		})
@@ -750,6 +784,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 				return fmt.Errorf("skip path: cleanup fell back to the shared cluster's stale copy (count %d)", n)
 			}
 		}
+	realRun:
 		repo := dbprovider.NewRepo(env.shared)
 		cleanupExpiredTokens(ctx, env.gw, func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
 			p, err := dbprovider.OpenOwnerPool(ctx, repo, env.cipher, projectID)
@@ -811,6 +846,14 @@ type knownGap struct {
 	sigs  []string
 }
 
+// teamOnlyChecks don't apply to a Free / Pro project (shared cluster).
+var teamOnlyChecks = map[string]bool{
+	"console_fails_closed_without_dedicated_pool": true,
+	"console_fails_closed_while_provisioning":     true,
+	"readonly_connection_limit":                   true,
+	"shared_cluster_untouched":                    true,
+}
+
 var teamKnownGaps = map[string]knownGap{}
 
 func check(t *testing.T, env *teamEnv, name string, fn func() error) {
@@ -821,6 +864,9 @@ func check(t *testing.T, env *teamEnv, name string, fn func() error) {
 		if errors.As(err, &hr) && hr.neverReachedHandler() {
 			// A harness auth problem must not hide behind a known gap.
 			t.Fatalf("request never reached the handler: %v", err)
+		}
+		if env.scenario == "free" && teamOnlyChecks[name] {
+			t.Skip("Team only (dedicated database)")
 		}
 		gap, known := teamKnownGaps[name]
 		if !known {
@@ -1056,7 +1102,11 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		return p
 	}
 	admin, gw, dev := mustPool(cfg.sharedAdmin), mustPool(cfg.sharedGW), mustPool(cfg.sharedDev)
-	dedAdmin := mustPool(withDB(t, cfg.dedAdmin, dedDB).String())
+	free := scenario == "free"
+	dedAdmin := admin // free: the tenant data lives on the shared cluster
+	if !free {
+		dedAdmin = mustPool(withDB(t, cfg.dedAdmin, dedDB).String())
+	}
 
 	ownerUser := "7e4a0000-0000-4000-9000-" + randHexT(t, 6)
 	ownerEmail := "owner-" + ownerUser + "@team.test"
@@ -1066,7 +1116,11 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	mustExecT(t, admin, `INSERT INTO platform_users (id, email) VALUES ($1, $2)`, ownerUser, ownerEmail)
 
 	var sharedFP string
-	if upgraded {
+	if free {
+		mustExecT(t, admin, `INSERT INTO projects (id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
+			VALUES ($1, $2, 'team e2e', $3, $4, $5, 'fr-par', 'free', 'active')`, projectID, ownerUser, slug, schema, "b-"+slug)
+		mustExecT(t, admin, `SELECT provision_tenant($1, 'team e2e', 'free')`, projectID)
+	} else if upgraded {
 		// As a Pro project: provision_tenant builds the shared schema (the
 		// copy an upgrade leaves behind), then a decoy row goes in.
 		mustExecT(t, admin, `INSERT INTO projects (id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
@@ -1101,38 +1155,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatal(err)
 	}
 
-	// The dedicated instance, bootstrapped as ProvisionTeamDatabaseWorker
-	// does: owner DSN via BuildOwnerDSN (sslmode=require), display name =
-	// project ID, then the provider's SetPrivilege (stand-in: CONNECT
-	// granted by the instance superuser — the database is not the owner's
-	// and PUBLIC has no CONNECT, as on Scaleway), then the readonly lockdown.
-	ou := withDB(t, cfg.dedOwner, dedDB)
-	ownerPW, _ := ou.User.Password()
-	port, _ := strconv.Atoi(ou.Port())
-	ownerDSN := dbprovider.BuildOwnerDSN(ou.User.Username(), ownerPW, ou.Hostname(), port, dedDB)
-	creds, gotSchema, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, projectID, projectID, cfg.runtimePW, cfg.readonlyPW, nil)
-	if err != nil {
-		t.Fatalf("BootstrapDedicated: %v", err)
-	}
-	if gotSchema != schema {
-		t.Fatalf("bootstrap schema %q, projects.schema_name %q", gotSchema, schema)
-	}
-	for _, role := range []string{creds.Runtime.Username, creds.Readonly.Username} {
-		mustExecT(t, dedAdmin, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
-			pgx.Identifier{dedDB}.Sanitize(), pgx.Identifier{role}.Sanitize()))
-	}
-	if err := dbprovider.LockdownReadonlyGrants(ctx, ownerDSN, schema, nil); err != nil {
-		t.Fatalf("LockdownReadonlyGrants: %v", err)
-	}
-	// Exists only here, so reads from the stale shared copy are detectable.
-	// Created as the owner, like any customer table there.
-	ownerPool := mustPool(ownerDSN)
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()))
-
-	// project_databases row with sealed credentials (owner, runtime, readonly).
+	// Connection cipher (= VAULT_ENCRYPTION_KEY) for the vault and project_databases.
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
@@ -1142,29 +1165,84 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	seal := func(s string) ([]byte, []byte, int16) {
-		ct, nonce, ver, err := cipher.Seal(s)
+	if free {
+		// Marker objects only the tenant's own DB has, created as
+		// eurobase_migrator like console-made tables on the shared cluster.
+		tx, err := admin.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ct, nonce, ver
-	}
-	repo := dbprovider.NewRepo(admin)
-	ct, nonce, ver := seal(ownerPW)
-	rec, err := repo.InsertProvisioning(ctx, projectID, &dbprovider.Instance{
-		ProviderID: "e2e-" + slug, Host: ou.Hostname(), Port: port, DBName: dedDB,
-		Username: ou.User.Username(), State: dbprovider.StateActive, Region: "fr-par",
-	}, "scaleway", ct, nonce, ver)
-	if err != nil {
-		t.Fatalf("InsertProvisioning: %v", err)
-	}
-	ct, nonce, ver = seal(creds.Runtime.Password)
-	if _, err := repo.SetRuntimeCredentials(ctx, rec.ID, creds.Runtime.Username, ct, nonce, ver); err != nil {
-		t.Fatalf("SetRuntimeCredentials: %v", err)
-	}
-	ct, nonce, ver = seal(creds.Readonly.Password)
-	if _, err := repo.SetReadonlyCredentials(ctx, rec.ID, creds.Readonly.Username, ct, nonce, ver); err != nil {
-		t.Fatalf("SetReadonlyCredentials: %v", err)
+		for _, q := range []string{
+			`SET LOCAL ROLE eurobase_migrator`,
+			fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
+			fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
+			fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
+			fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()),
+		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				t.Fatalf("%v\n%s", err, q)
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		// The dedicated instance, bootstrapped as ProvisionTeamDatabaseWorker
+		// does: owner DSN via BuildOwnerDSN (sslmode=require), display name =
+		// project ID, then the provider's SetPrivilege (stand-in: CONNECT
+		// granted by the instance superuser — the database is not the owner's
+		// and PUBLIC has no CONNECT, as on Scaleway), then the readonly lockdown.
+		ou := withDB(t, cfg.dedOwner, dedDB)
+		ownerPW, _ := ou.User.Password()
+		port, _ := strconv.Atoi(ou.Port())
+		ownerDSN := dbprovider.BuildOwnerDSN(ou.User.Username(), ownerPW, ou.Hostname(), port, dedDB)
+		creds, gotSchema, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, projectID, projectID, cfg.runtimePW, cfg.readonlyPW, nil)
+		if err != nil {
+			t.Fatalf("BootstrapDedicated: %v", err)
+		}
+		if gotSchema != schema {
+			t.Fatalf("bootstrap schema %q, projects.schema_name %q", gotSchema, schema)
+		}
+		for _, role := range []string{creds.Runtime.Username, creds.Readonly.Username} {
+			mustExecT(t, dedAdmin, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
+				pgx.Identifier{dedDB}.Sanitize(), pgx.Identifier{role}.Sanitize()))
+		}
+		if err := dbprovider.LockdownReadonlyGrants(ctx, ownerDSN, schema, nil); err != nil {
+			t.Fatalf("LockdownReadonlyGrants: %v", err)
+		}
+		// Exists only here, so reads from the stale shared copy are detectable.
+		// Created as the owner, like any customer table there.
+		ownerPool := mustPool(ownerDSN)
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()))
+
+		// project_databases row with sealed credentials (owner, runtime, readonly).
+		seal := func(s string) ([]byte, []byte, int16) {
+			ct, nonce, ver, err := cipher.Seal(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ct, nonce, ver
+		}
+		repo := dbprovider.NewRepo(admin)
+		ct, nonce, ver := seal(ownerPW)
+		rec, err := repo.InsertProvisioning(ctx, projectID, &dbprovider.Instance{
+			ProviderID: "e2e-" + slug, Host: ou.Hostname(), Port: port, DBName: dedDB,
+			Username: ou.User.Username(), State: dbprovider.StateActive, Region: "fr-par",
+		}, "scaleway", ct, nonce, ver)
+		if err != nil {
+			t.Fatalf("InsertProvisioning: %v", err)
+		}
+		ct, nonce, ver = seal(creds.Runtime.Password)
+		if _, err := repo.SetRuntimeCredentials(ctx, rec.ID, creds.Runtime.Username, ct, nonce, ver); err != nil {
+			t.Fatalf("SetRuntimeCredentials: %v", err)
+		}
+		ct, nonce, ver = seal(creds.Readonly.Password)
+		if _, err := repo.SetReadonlyCredentials(ctx, rec.ID, creds.Readonly.Username, ct, nonce, ver); err != nil {
+			t.Fatalf("SetReadonlyCredentials: %v", err)
+		}
 	}
 
 	// The real router with Team routing on and platform auth wired as in

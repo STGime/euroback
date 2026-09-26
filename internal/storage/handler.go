@@ -73,6 +73,11 @@ func recordDownload(r *http.Request, key string) {
 			projectID = pc.ProjectID
 		}
 	} else if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil {
+		if pc.KeyType != "secret" {
+			// Anonymous read of a public shared file (#697): no data
+			// subject, no personal data — don't log every asset fetch.
+			return
+		}
 		projectID, role = pc.ProjectID, audit.EffectiveRole(pc.KeyType, "")
 	}
 	rec.Record(audit.AccessEvent{
@@ -342,8 +347,8 @@ func (h *StorageHandler) objectReadable(r *http.Request, key string) (bool, erro
 	return h.assertObjectVisible(r, key)
 }
 
-// maxListPages bounds the S3 pages one filtered SDK listing reads.
-const maxListPages = 5
+// maxDownloadURLExpiry caps SDK download URLs (#697).
+const maxDownloadURLExpiry = time.Hour
 
 // maxUploadURLExpiry caps upload signed URLs: the key claim is checked
 // when the URL is issued, so a long-lived URL would outlast it (e.g. the
@@ -419,11 +424,21 @@ func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType stri
 		return true, false, nil
 	}
 	esc := strings.ReplaceAll(schema, `"`, `""`)
-	var exists bool
+	// Shared folders (#697) hold developer files only: an end user can't
+	// create or overwrite anything under one (it would be served to
+	// everyone it's shared with). The storage_insert / _update policies
+	// enforce the same.
+	var exists, shared bool
 	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`, esc), key).Scan(&exists)
+		return tx.QueryRow(ctx, fmt.Sprintf(
+			`SELECT EXISTS(SELECT 1 FROM "%[1]s".storage_objects WHERE key = $1),
+			        EXISTS(SELECT 1 FROM "%[1]s".storage_shared_prefixes WHERE starts_with($1, prefix))`, esc),
+			key).Scan(&exists, &shared)
 	}); err != nil {
 		return false, false, err
+	}
+	if shared {
+		return false, false, nil
 	}
 	if !exists {
 		if h.s3 != nil {
@@ -491,54 +506,51 @@ func writeClaimError(w http.ResponseWriter, err error) {
 	writeTenantPoolError(w, err)
 }
 
-// visibleToCaller drops listed objects the caller can't read: for SDK
-// callers, keys without a storage_objects row visible to them under RLS
-// (the same rule as download). Console (service-role) listings are
-// unfiltered. A filtered page can be shorter than the limit; the cursor
-// is S3's, so paging still covers every key.
-func (h *StorageHandler) visibleToCaller(r *http.Request, objects []ObjectInfo) ([]ObjectInfo, error) {
-	if serviceCaller(r) || h.engine == nil || len(objects) == 0 {
-		return objects, nil
+// listReadable lists the objects the caller may read (their own, plus
+// developer files in folders shared with them — the storage_read RLS
+// policy decides), ordered by key (byte order, like S3), after cursor.
+func (h *StorageHandler) listReadable(r *http.Request, prefix, cursor string, limit int) ([]ObjectInfo, string, bool, error) {
+	if _, err := h.tenantPool(r.Context()); err != nil {
+		return nil, "", false, err
 	}
 	schema := h.schemaForRequest(r)
-	if schema == "" {
-		return objects, nil
-	}
-	if _, err := h.tenantPool(r.Context()); err != nil {
-		return nil, err
-	}
-	keys := make([]string, len(objects))
-	for i, o := range objects {
-		keys[i] = o.Key
-	}
-	visible := make(map[string]bool, len(keys))
+	out := make([]ObjectInfo, 0, limit)
+	more := false
 	err := h.engine.WithTenantTx(r.Context(), schema, func(tx pgx.Tx) error {
-		q := fmt.Sprintf(`SELECT key FROM "%s".storage_objects WHERE key = ANY($1)`,
+		q := fmt.Sprintf(`SELECT key, COALESCE(content_type, ''), COALESCE(size_bytes, 0), created_at
+		                    FROM "%s".storage_objects
+		                   WHERE starts_with(key, $1) AND key COLLATE "C" > $2 COLLATE "C"
+		                   ORDER BY key COLLATE "C" LIMIT $3`,
 			strings.ReplaceAll(schema, `"`, `""`))
-		rows, err := tx.Query(r.Context(), q, keys)
+		rows, err := tx.Query(r.Context(), q, prefix, cursor, limit+1)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var k string
-			if err := rows.Scan(&k); err != nil {
+			var o ObjectInfo
+			var created *time.Time
+			if err := rows.Scan(&o.Key, &o.ContentType, &o.Size, &created); err != nil {
 				return err
 			}
-			visible[k] = true
+			if created != nil {
+				o.LastModified = *created
+			}
+			out = append(out, o)
 		}
 		return rows.Err()
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", false, err
 	}
-	out := objects[:0:0]
-	for _, o := range objects {
-		if visible[o.Key] {
-			out = append(out, o)
-		}
+	if len(out) > limit {
+		out, more = out[:limit], true
 	}
-	return out, nil
+	next := ""
+	if more {
+		next = out[len(out)-1].Key
+	}
+	return visibleObjects(r, out), next, more, nil
 }
 
 // visibleObjects drops export archives from a listing for callers who
@@ -1091,45 +1103,37 @@ func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// SDK listings are filtered to the caller's objects (visibleToCaller);
-	// keep reading S3 pages until the page is full or the budget runs out
-	// so a user with few files in a busy bucket doesn't get a run of empty
-	// pages. The cursor stays S3's, so has_more/next_cursor remain exact.
-	var (
-		objects   []ObjectInfo
-		nextToken = cursor
-		truncated bool
-	)
-	for pages := 0; pages < maxListPages; pages++ {
-		result, err := h.s3.ListObjects(r.Context(), bucket, prefix, limit-len(objects), nextToken)
+	var resp listResponse
+	if serviceCaller(r) || h.engine == nil || h.schemaForRequest(r) == "" {
+		// Console: the bucket's S3 listing (export archives hidden from
+		// callers who may not read them).
+		result, err := h.s3.ListObjects(r.Context(), bucket, prefix, limit, cursor)
 		if err != nil {
 			slog.Error("storage list failed", "error", err, "bucket", bucket, "prefix", prefix)
 			http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
 			return
 		}
-		page, err := h.visibleToCaller(r, visibleObjects(r, result.Objects))
+		resp = listResponse{Objects: visibleObjects(r, result.Objects), NextCursor: result.NextToken, HasMore: result.IsTruncated}
+	} else {
+		// SDK callers see exactly what they may read (#693, #697): listed
+		// from storage_objects under RLS, keyset-paginated by key. The
+		// cursor is the last key returned — never an S3 continuation
+		// token, which encodes the last key S3 scanned, possibly one the
+		// caller can't see.
+		objects, next, more, err := h.listReadable(r, prefix, cursor, limit)
 		if err != nil {
 			if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
 				writeTenantPoolError(w, err)
 				return
 			}
-			slog.Error("storage list: visibility filter failed", "error", err, "bucket", bucket)
+			slog.Error("storage list failed", "error", err, "prefix", prefix)
 			http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
 			return
 		}
-		objects = append(objects, page...)
-		nextToken, truncated = result.NextToken, result.IsTruncated
-		if !truncated || len(objects) >= limit || serviceCaller(r) {
-			break
-		}
+		resp = listResponse{Objects: objects, NextCursor: next, HasMore: more}
 	}
-	if objects == nil {
-		objects = []ObjectInfo{}
-	}
-	resp := listResponse{
-		Objects:    objects,
-		NextCursor: nextToken,
-		HasMore:    truncated,
+	if resp.Objects == nil {
+		resp.Objects = []ObjectInfo{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1275,6 +1279,12 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			expiry = time.Duration(req.ExpiresIn) * time.Second
 		} else {
 			expiry = 1 * time.Hour // default for download
+		}
+		// An SDK caller's URL outlives any later unsharing / ownership
+		// change for its lifetime: cap it (#697). Console callers keep
+		// their choice.
+		if !serviceCaller(r) && expiry > maxDownloadURLExpiry {
+			expiry = maxDownloadURLExpiry
 		}
 		url, err = h.s3.GeneratePresignedDownloadURL(r.Context(), bucket, req.Key, expiry)
 	}

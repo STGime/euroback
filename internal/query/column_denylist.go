@@ -52,6 +52,9 @@ var sensitiveColumns = map[string]map[string]bool{
 	"refresh_tokens": {"token_hash": true},
 	"email_tokens":   {"token_hash": true},
 	"vault_secrets":  {"secret": true, "nonce": true},
+	// #697: shared-folder rows are readable by others under RLS; who
+	// uploaded what (end-user ids) and custom metadata aren't theirs.
+	"storage_objects": {"uploaded_by": true, "metadata": true},
 }
 
 // SensitiveSystemColumns reports the credential columns of a per-tenant
@@ -112,10 +115,11 @@ var sqlPathDeniedColumns = map[string]bool{
 // (documented): `SELECT id, email FROM users` via raw /sql under the
 // public key is now refused — use the REST path for that.
 var sqlPathDeniedTables = map[string]bool{
-	"users":          true,
-	"refresh_tokens": true,
-	"email_tokens":   true,
-	"vault_secrets":  true,
+	"users":           true,
+	"refresh_tokens":  true,
+	"email_tokens":    true,
+	"vault_secrets":   true,
+	"storage_objects": true, // #697: uploaded_by / metadata of shared rows (use /v1/storage)
 }
 
 // serviceKeyExempt reports whether the caller may see sensitive
