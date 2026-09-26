@@ -451,6 +451,10 @@ type ExportSource struct {
 	// Role, if set, is assumed with SET LOCAL ROLE for the read
 	// transaction.
 	Role string
+	// PgDump is the pg_dump binary for the schema section of tenant
+	// exports (#656); empty = "pg_dump" from PATH. It connects with
+	// Pool's settings and must be at least the server's major version.
+	PgDump string
 }
 
 // querier is satisfied by *pgxpool.Pool and pgx.Tx.
@@ -718,13 +722,15 @@ func ListTenantTables(ctx context.Context, q querier, schemaName string) ([]stri
 
 // ExportMetadata is the _metadata.json file in the export zip.
 type ExportMetadata struct {
-	ExportID   string    `json:"export_id"`
-	ProjectID  string    `json:"project_id"`
-	UserID     *string   `json:"user_id,omitempty"`
-	Format     string    `json:"format"`
-	ExportedAt time.Time `json:"exported_at"`
-	TableCount int       `json:"table_count"`
-	TotalRows  int       `json:"total_rows"`
+	// FormatVersion is ExportFormatVersion (absent in version 1).
+	FormatVersion int       `json:"format_version"`
+	ExportID      string    `json:"export_id"`
+	ProjectID     string    `json:"project_id"`
+	UserID        *string   `json:"user_id,omitempty"`
+	Format        string    `json:"format"`
+	ExportedAt    time.Time `json:"exported_at"`
+	TableCount    int       `json:"table_count"`
+	TotalRows     int       `json:"total_rows"`
 	// Complete is true only when every table was exported in full and
 	// every section could be read. Warnings says what is missing (#654).
 	Complete bool     `json:"complete"`
@@ -733,6 +739,9 @@ type ExportMetadata struct {
 	// count and status (exported | truncated | failed).
 	Tables           []TableExport `json:"tables"`
 	RowLimitPerTable int           `json:"row_limit_per_table"`
+	// Sections lists the schema/ section's files of a tenant export
+	// (#656): schema dump, sequence values, auth and storage manifests.
+	Sections []SectionExport `json:"sections,omitempty"`
 	// AuditLogUnavailable: the audit-log section could not be read.
 	AuditLogUnavailable bool `json:"audit_log_unavailable,omitempty"`
 	// RetentionHoldCount is the number of active
@@ -876,16 +885,25 @@ func collectRetentionHolds(ctx context.Context, pool *pgxpool.Pool, projectID st
 // empty tables an empty one — and an entry in _metadata.json's tables
 // list; anything not exported in full makes the result incomplete, with
 // a warning saying why (#654).
-func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, w io.Writer, schemaName, projectID, exportID, format string) (*ExportResult, error) {
+func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, w io.Writer, schemaName, projectID, exportID, format string, opts TenantExportOptions) (*ExportResult, error) {
 	zw := zip.NewWriter(w)
 	res := &ExportResult{}
 
 	var tables []string
 	var exported []TableExport
+	var sections []SectionExport
+	var contentTypes map[string]string
 	err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
 		if err := requireSchema(ctx, tx, schemaName); err != nil {
 			return err
 		}
+		// Schema section (#656), from the same snapshot as the rows. The
+		// dump goes first: it shares the snapshot from the top-level
+		// transaction, which the per-table savepoints below are not.
+		sections = append(sections,
+			exportSchemaDump(ctx, tx, src, zw, schemaName),
+			exportSequences(ctx, tx, zw, schemaName))
+		contentTypes = readObjectContentTypes(ctx, tx, schemaName)
 		var err error
 		if tables, err = ListTenantTables(ctx, tx, schemaName); err != nil {
 			return err
@@ -907,6 +925,10 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 		return nil, err
 	}
 	res.Warnings = tableWarnings(exported)
+	sections = append(sections,
+		exportAuthManifest(ctx, pool, zw, projectID),
+		exportStorageManifest(ctx, zw, opts, projectID, contentTypes))
+	res.Warnings = append(res.Warnings, sectionWarnings(sections)...)
 
 	// Audit log for this project. The 10k cap is a soft bound — a
 	// streaming archive could in principle take more, but at 10k
@@ -942,6 +964,7 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 	}
 	res.Complete = len(res.Warnings) == 0
 	meta := ExportMetadata{
+		FormatVersion:       ExportFormatVersion,
 		ExportID:            exportID,
 		ProjectID:           projectID,
 		Format:              format,
@@ -952,6 +975,7 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 		Warnings:            res.Warnings,
 		Tables:              exported,
 		RowLimitPerTable:    maxRowsPerTable,
+		Sections:            sections,
 		AuditLogUnavailable: auditUnavailable,
 	}
 	if herr != nil {
@@ -1057,6 +1081,7 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, 
 	}
 	res.Complete = len(res.Warnings) == 0
 	meta := ExportMetadata{
+		FormatVersion:       ExportFormatVersion,
 		ExportID:            exportID,
 		ProjectID:           projectID,
 		UserID:              &userID,
@@ -1290,14 +1315,14 @@ func writeJSONToZip(zw *zip.Writer, name string, data interface{}) error {
 // Behaviour by type:
 //   - nil               → empty string (CSV null)
 //   - map / slice / any composite → json.Marshal so jsonb /
-//                         text[] / row arrays round-trip
+//     text[] / row arrays round-trip
 //   - time.Time          → RFC3339Nano (matches what pgx emits and
-//                         what most spreadsheet apps recognise)
+//     what most spreadsheet apps recognise)
 //   - []byte             → string conversion (Postgres bytea
-//                         literal; if it happens to be UTF-8 text,
-//                         the cell is human-readable, otherwise
-//                         the recipient gets the raw bytes the
-//                         pg driver returned)
+//     literal; if it happens to be UTF-8 text,
+//     the cell is human-readable, otherwise
+//     the recipient gets the raw bytes the
+//     pg driver returned)
 //   - everything else    → fmt.Sprint, same as before
 func formatCSVCell(v any) string {
 	switch v := v.(type) {

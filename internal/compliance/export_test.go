@@ -127,7 +127,7 @@ func TestWriteTenantExport_StreamsZipStructure(t *testing.T) {
 	for _, format := range []string{"json", "csv"} {
 		t.Run("format="+format, func(t *testing.T) {
 			var buf bytes.Buffer
-			res, err := WriteTenantExport(ctx, pool, ExportSource{Pool: pool}, &buf, schema, projectID, "exp-"+format, format)
+			res, err := WriteTenantExport(ctx, pool, ExportSource{Pool: pool}, &buf, schema, projectID, "exp-"+format, format, TenantExportOptions{})
 			if err != nil {
 				t.Fatalf("WriteTenantExport: %v", err)
 			}
@@ -292,7 +292,7 @@ func TestWriteTenantExport_AcceptsArbitraryWriter(t *testing.T) {
 	defer cleanup()
 
 	cw := &countingWriter{}
-	res, err := WriteTenantExport(ctx, pool, ExportSource{Pool: pool}, cw, schema, projectID, "exp-cw", "json")
+	res, err := WriteTenantExport(ctx, pool, ExportSource{Pool: pool}, cw, schema, projectID, "exp-cw", "json", TenantExportOptions{})
 	if err != nil {
 		t.Fatalf("WriteTenantExport into counting writer: %v", err)
 	}

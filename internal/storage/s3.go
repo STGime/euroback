@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -23,6 +24,8 @@ type ObjectInfo struct {
 	ContentType  string    `json:"content_type"`
 	Size         int64     `json:"size"`
 	LastModified time.Time `json:"last_modified"`
+	// ETag as listed by the storage service, without quotes.
+	ETag string `json:"etag,omitempty"`
 }
 
 // ListResult is the response for a paginated object listing.
@@ -486,6 +489,9 @@ func (s *S3Client) ListObjects(ctx context.Context, bucketName, prefix string, l
 		}
 		if obj.LastModified != nil {
 			info.LastModified = *obj.LastModified
+		}
+		if obj.ETag != nil {
+			info.ETag = strings.Trim(*obj.ETag, `"`)
 		}
 		objects = append(objects, info)
 	}

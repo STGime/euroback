@@ -18,6 +18,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/dbprovider"
+	"github.com/eurobase/euroback/internal/storage"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -134,7 +135,8 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 		}
 		defer closeSrc()
 		var buf bytes.Buffer
-		res, err := compliance.WriteTenantExport(ctx, platform, src, &buf, schema, projectID, "exp-team", "json")
+		res, err := compliance.WriteTenantExport(ctx, platform, src, &buf, schema, projectID, "exp-team", "json",
+			compliance.TenantExportOptions{Objects: emptyBucket{}, Bucket: "b-team"})
 		if err != nil {
 			t.Fatalf("WriteTenantExport: %v", err)
 		}
@@ -144,6 +146,10 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 		}
 		if n := rowsIn(t, entries, "tables/users.json"); n != 1 {
 			t.Errorf("users: %d rows, want 1", n)
+		}
+		// The schema dump connects like the owner pool (sslmode=require).
+		if dump := string(entries["schema/schema.sql"]); !strings.Contains(dump, `CREATE POLICY "none" ON `+schema+".bookings USING (false)") {
+			t.Errorf("schema.sql from the dedicated database lacks the bookings policy:\n%s", dump)
 		}
 		if !res.Complete {
 			t.Errorf("export incomplete: %q", res.Warnings)
@@ -181,7 +187,7 @@ func TestTeamTierExport_ReadsDedicatedDatabase(t *testing.T) {
 
 	t.Run("reading the shared cluster for a Team project fails instead of exporting nothing", func(t *testing.T) {
 		var buf bytes.Buffer
-		_, err := compliance.WriteTenantExport(ctx, platform, shared, &buf, schema, projectID, "exp-team-wrong", "json")
+		_, err := compliance.WriteTenantExport(ctx, platform, shared, &buf, schema, projectID, "exp-team-wrong", "json", compliance.TenantExportOptions{})
 		if err == nil || !strings.Contains(err.Error(), "not found") {
 			t.Errorf("export from the shared cluster: err = %v, want tenant schema not found", err)
 		}
@@ -258,6 +264,12 @@ func poolAsRole(t *testing.T, adminURL, role string) *pgxpool.Pool {
 	}
 	t.Cleanup(p.Close)
 	return p
+}
+
+type emptyBucket struct{}
+
+func (emptyBucket) ListObjects(context.Context, string, string, int, string) (*storage.ListResult, error) {
+	return &storage.ListResult{}, nil
 }
 
 func mustExec(t *testing.T, p *pgxpool.Pool, q string, args ...any) {

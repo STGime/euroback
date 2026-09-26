@@ -9,6 +9,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o worker ./cmd/worker/
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+# pg_dump writes the schema section of compliance exports (#656). It must
+# be at least the server's major version (PostgreSQL 16 on Scaleway).
+RUN apk add --no-cache ca-certificates postgresql16-client \
+ && pg_dump --version | grep -Eq 'PostgreSQL\) 1[6-9]\.'
 COPY --from=builder /app/worker /usr/local/bin/worker
 ENTRYPOINT ["worker"]
