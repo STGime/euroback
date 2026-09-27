@@ -21,6 +21,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/tenantlogin"
@@ -1259,6 +1260,64 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Connection page (#698): a read-only request gets the SELECT-only
+	// login or nothing — never the owner credential, even while the
+	// read-only slot is still empty.
+	check(t, env, "console_connection_roles", func() error {
+		ctx := context.Background()
+		type connResp struct {
+			URL, Username, Role, Code string
+		}
+		get := func(role string) (*httpResult, connResp, error) {
+			r := console("GET", "/connection?role="+role, "")
+			var c connResp
+			if r.code == http.StatusOK || r.code == http.StatusConflict {
+				if err := json.Unmarshal([]byte(r.body), &c); err != nil {
+					return r, c, fmt.Errorf("%s: %w (%s)", r.req, err, r.body)
+				}
+			}
+			return r, c, nil
+		}
+		r, c, err := get("readonly")
+		if err != nil {
+			return err
+		}
+		if r.code != http.StatusOK || c.Role != "readonly" || c.Username != "eurobase_readonly" {
+			return fmt.Errorf("readonly: %d role %q user %q (%s)", r.code, c.Role, c.Username, r.body)
+		}
+		// Bootstrap not finished: empty the read-only slot.
+		var roUser string
+		var roCT, roNonce []byte
+		var roVer int16
+		if err := env.shared.QueryRow(ctx, `SELECT readonly_username, readonly_password_ciphertext, readonly_password_nonce, readonly_password_key_version
+			FROM project_databases WHERE project_id = $1 AND deleted_at IS NULL`, env.projectID).Scan(&roUser, &roCT, &roNonce, &roVer); err != nil {
+			return err
+		}
+		if _, err := env.shared.Exec(ctx, `UPDATE project_databases SET readonly_username = NULL, readonly_password_ciphertext = NULL,
+			readonly_password_nonce = NULL, readonly_password_key_version = NULL WHERE project_id = $1 AND deleted_at IS NULL`, env.projectID); err != nil {
+			return err
+		}
+		defer env.shared.Exec(ctx, `UPDATE project_databases SET readonly_username = $2, readonly_password_ciphertext = $3,
+			readonly_password_nonce = $4, readonly_password_key_version = $5 WHERE project_id = $1 AND deleted_at IS NULL`,
+			env.projectID, roUser, roCT, roNonce, roVer) //nolint:errcheck
+		r, c, err = get("readonly")
+		if err != nil {
+			return err
+		}
+		if r.code != http.StatusConflict || c.Code != "readonly_pending" || c.URL != "" || c.Username != "" || strings.Contains(r.body, "postgres://") {
+			return fmt.Errorf("readonly while pending: %d %s — want 409 readonly_pending without a credential", r.code, r.body)
+		}
+		// Read/write is still available, and says what it is.
+		r, c, err = get("readwrite")
+		if err != nil {
+			return err
+		}
+		if r.code != http.StatusOK || c.Role != "readwrite" || c.URL == "" {
+			return fmt.Errorf("readwrite: %d role %q (%s)", r.code, c.Role, r.body)
+		}
+		return nil
+	})
+
 	// Runs last: nothing above may have touched the shared cluster.
 	check(t, env, "shared_cluster_untouched", func() error {
 		ctx := context.Background()
@@ -1301,6 +1360,7 @@ var teamOnlyChecks = map[string]bool{
 	"readonly_connection_limit":                   true,
 	"shared_cluster_untouched":                    true,
 	"credential_reseal":                           true,
+	"console_connection_roles":                    true,
 }
 
 var teamKnownGaps = map[string]knownGap{}
@@ -1777,7 +1837,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatalf("bucket eurobase-%s missing after create: %v", slug, err)
 	}
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, s3Client, nil, nil,
-		subdomain, nil, nil, nil, vaultSvc, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
+		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,

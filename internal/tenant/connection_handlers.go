@@ -94,19 +94,16 @@ func (s *ConnectionService) WithRiverClient(c *river.Client[pgx.Tx]) *Connection
 }
 
 // ConnectionResponse is the JSON body returned by GET /connection
-// and POST /connection/rotate. `role` is the *effective* role the
-// URL grants (never a promise the caller can't verify), so a caller
-// that asked for "readonly" while the _ro role is still being
-// provisioned sees `role: "readwrite"` + `readonly_pending: true`
-// and knows to treat the URL as a bearer write credential.
+// and POST /connection/rotate. `role` is the role the URL grants —
+// always the role that was asked for: a read-only request is never
+// answered with another role's credential (#698).
 type ConnectionResponse struct {
-	URL             string `json:"url"`
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	Database        string `json:"database"`
-	Username        string `json:"username"`
-	Role            string `json:"role"`
-	ReadonlyPending bool   `json:"readonly_pending,omitempty"`
+	URL      string `json:"url"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Database string `json:"database"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
 }
 
 // HandleGetConnection — GET /platform/projects/{id}/connection[?role=readwrite].
@@ -156,33 +153,36 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 
 		// Read-only role: the dedicated bootstrap provisions a real
 		// `eurobase_readonly` LOGIN with SELECT-only grants (see
-		// dbprovider/dedicated_bootstrap.sql and 000101). When the
-		// caller asks for `?role=readonly` AND the readonly slot is
-		// populated on this project's row, we hand out that DSN.
-		//
-		// The fallback path (readonly slot NULL — pre-000101 rows
-		// still in the migration window before the backfill sweeper
-		// runs) keeps the old behaviour: return the owner URL and
-		// set `readonly_pending: true` so the console hides the
-		// URL/Copy affordance rather than misleading a user into
-		// pasting owner creds into an analyst tool.
+		// dbprovider/dedicated_bootstrap.sql and 000101), capped by
+		// CONNECTION LIMIT (#682). A read-only request gets that
+		// credential or nothing: while the slot is still NULL (bootstrap
+		// not finished) the answer is 409 `readonly_pending` without a
+		// credential — never the owner login, which can write and is
+		// uncapped (#698). The console shows "provisioning" for it;
+		// callers who need a URL now ask for role=readwrite explicitly.
 		var (
-			username        string
-			password        string
-			effectiveRole   string
-			readonlyPending bool
-			openErr         error
+			username      string
+			password      string
+			effectiveRole string
+			openErr       error
 		)
-		if roUser, roCT, roNonce, roVer, ok := rec.ReadonlyCredential(); ok && requestedRole == "readonly" {
+		switch requestedRole {
+		case "readonly":
+			roUser, roCT, roNonce, roVer, ok := rec.ReadonlyCredential()
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", "no-store")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":"the read-only role is still being provisioned; try again in a few minutes, or request role=readwrite","code":"readonly_pending"}`))
+				return
+			}
 			username = roUser
 			password, openErr = s.cipher.Open(roCT, roNonce, roVer)
 			effectiveRole = "readonly"
-			readonlyPending = false
-		} else {
+		default:
 			username = rec.Username
 			password, openErr = s.cipher.Open(rec.PasswordCiphertext, rec.PasswordNonce, rec.PasswordKeyVersion)
 			effectiveRole = "readwrite"
-			readonlyPending = requestedRole == "readonly"
 		}
 		if openErr != nil {
 			slog.Error("connection cipher open failed", "error", openErr, "project_id", projectID, "role", effectiveRole)
@@ -193,10 +193,9 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 		connURL := buildPostgresURL(username, password, rec.Host, rec.Port, rec.DatabaseName)
 
 		writeConnectionAudit(r, projectID, audit.ActionConnectionURLViewed, map[string]any{
-			"requested_role":   requestedRole,
-			"effective_role":   effectiveRole,
-			"readonly_pending": readonlyPending,
-			"host":             rec.Host,
+			"requested_role": requestedRole,
+			"effective_role": effectiveRole,
+			"host":           rec.Host,
 		})
 
 		w.Header().Set("Content-Type", "application/json")
@@ -206,9 +205,8 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 			Host:            rec.Host,
 			Port:            rec.Port,
 			Database:        rec.DatabaseName,
-			Username:        username,
-			Role:            effectiveRole,
-			ReadonlyPending: readonlyPending,
+			Username: username,
+			Role:     effectiveRole,
 		})
 	}
 }
