@@ -186,7 +186,7 @@ func main() {
 	var cipher *dbprovider.Cipher
 	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
 		var cErr error
-		cipher, cErr = dbprovider.NewCipher(vaultKey, 1)
+		cipher, cErr = dbprovider.NewCipher(vaultKey, dbprovider.CipherVersionLegacy)
 		if cErr != nil {
 			slog.Error("failed to construct dbprovider cipher", "error", cErr)
 			if isProdEnv() {

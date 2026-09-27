@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 
@@ -77,4 +78,58 @@ func TestVaultService_tenantPool(t *testing.T) {
 			t.Fatalf("expected shared pool on nil stash, got %p", got)
 		}
 	})
+}
+
+// A Team project's vault is on a database the customer owns: a legacy
+// key_version 0 row there (never written by the platform) would make the
+// gateway decrypt raw-master-key ciphertext for them — refused. Shared
+// rows may still be legacy until rekeyed.
+func TestVaultService_legacyRowRefusedOnDedicated(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	s, err := NewVaultService(&pgxpool.Pool{}, base64.StdEncoding.EncodeToString(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const schema = "tenant_abc"
+	legacyCT, legacyNonce, err := encryptWith(key, "raw-key-sealed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1CT, v1Nonce, v1, err := s.seal(context.Background(), schema, "per-tenant")
+	if err != nil || v1 == legacyKeyVersion {
+		t.Fatalf("seal: v%d %v", v1, err)
+	}
+	shared := context.Background()
+	dedicatedCtxs := map[string]context.Context{
+		"pool on request":       query.ContextWithTenantPool(context.Background(), &pgxpool.Pool{}),
+		"project has dedicated": auth.ContextWithProject(context.Background(), &auth.ProjectContext{ProjectID: "p", HasDedicatedDB: true}),
+	}
+
+	if got, err := s.openVaultRow(shared, schema, legacyCT, legacyNonce, legacyKeyVersion); err != nil || got != "raw-key-sealed" {
+		t.Fatalf("shared legacy row: %q, %v", got, err)
+	}
+	for name, ctx := range dedicatedCtxs {
+		if _, err := s.openVaultRow(ctx, schema, legacyCT, legacyNonce, legacyKeyVersion); !errors.Is(err, ErrLegacyOnDedicated) {
+			t.Fatalf("%s: legacy row err %v, want ErrLegacyOnDedicated", name, err)
+		}
+		if got, err := s.openVaultRow(ctx, schema, v1CT, v1Nonce, v1); err != nil || got != "per-tenant" {
+			t.Fatalf("%s: per-tenant row: %q, %v", name, got, err)
+		}
+	}
+}
+
+// A malformed row (e.g. planted on a dedicated database) is an error, not
+// a GCM panic.
+func TestVaultService_malformedNonceIsError(t *testing.T) {
+	s, err := NewVaultService(&pgxpool.Pool{}, base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := query.ContextWithTenantPool(context.Background(), &pgxpool.Pool{})
+	if _, err := s.openVaultRow(ctx, "tenant_abc", []byte("x"), []byte("x"), 1); err == nil {
+		t.Fatal("malformed nonce opened")
+	}
 }

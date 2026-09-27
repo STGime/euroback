@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -157,6 +158,35 @@ func (s *VaultService) open(ctx context.Context, schemaName string, ciphertext, 
 	return decryptWith(key, ciphertext, nonce)
 }
 
+// openVaultRow opens a vault_secrets row read through the request's tenant
+// pool. A Team project's vault lives on its dedicated database, which the
+// customer owns (owner URL): they could plant a legacy key_version 0 row,
+// which is sealed with the raw master key — opening it would make the
+// platform decrypt arbitrary raw-key ciphertext for them. Rows there are
+// always per-tenant sealed (the vault writes CurrentVersion), so version 0
+// is refused. Shared-cluster rows are platform-written and may still be
+// legacy until rekeyed.
+func (s *VaultService) openVaultRow(ctx context.Context, schemaName string, ciphertext, nonce []byte, version int16) (string, error) {
+	if version == legacyKeyVersion && s.dedicated(ctx) {
+		return "", ErrLegacyOnDedicated
+	}
+	return s.open(ctx, schemaName, ciphertext, nonce, version)
+}
+
+// ErrLegacyOnDedicated: a legacy (key_version 0) vault row on a Team
+// project's dedicated database — never written by the platform there.
+var ErrLegacyOnDedicated = errors.New("legacy (key_version 0) vault row refused on a dedicated database")
+
+// dedicated reports whether this request's vault is a Team project's
+// dedicated database.
+func (s *VaultService) dedicated(ctx context.Context) bool {
+	if query.TenantPoolFromContext(ctx) != nil {
+		return true
+	}
+	pc, ok := auth.ProjectFromContext(ctx)
+	return ok && pc != nil && pc.HasDedicatedDB
+}
+
 // SealForTenant is the exported seal — same KDF / AEAD scheme as the
 // vault_secrets row pipeline, exposed so other packages that need to
 // store a per-tenant sealed blob (#206: edge_functions.env_vars) can do
@@ -205,6 +235,11 @@ func decryptWith(key, ciphertext, nonce []byte) (string, error) {
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", err
+	}
+	// GCM panics on a wrong nonce length — and on a Team project's
+	// dedicated database the row comes from a database the customer owns.
+	if len(nonce) != gcm.NonceSize() {
+		return "", fmt.Errorf("decryption failed (malformed nonce)")
 	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
@@ -260,7 +295,7 @@ func (s *VaultService) Get(ctx context.Context, schemaName, name string) (*Secre
 		return nil, fmt.Errorf("get vault secret: %w", err)
 	}
 
-	value, err := s.open(ctx, schemaName, encrypted, nonce, keyVersion)
+	value, err := s.openVaultRow(ctx, schemaName, encrypted, nonce, keyVersion)
 	if err != nil {
 		slog.Error("vault decryption failed", "name", name, "key_version", keyVersion, "error", err)
 		return nil, fmt.Errorf("decrypt vault secret: %w", err)
@@ -441,7 +476,7 @@ func (s *VaultService) RekeySchema(ctx context.Context, schemaName string) (int,
 		}
 
 		for _, rw := range pending {
-			plaintext, err := s.open(ctx, schemaName, rw.ciphertext, rw.nonce, rw.version)
+			plaintext, err := s.openVaultRow(ctx, schemaName, rw.ciphertext, rw.nonce, rw.version)
 			if err != nil {
 				return fmt.Errorf("decrypt secret %s (v%d) during rekey: %w", rw.id, rw.version, err)
 			}

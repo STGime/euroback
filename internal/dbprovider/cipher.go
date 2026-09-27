@@ -3,28 +3,55 @@ package dbprovider
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 )
 
-// Cipher seals and opens the DB password stored inline on
-// project_databases (ciphertext + nonce + key_version columns).
+// Cipher seals and opens the DB passwords stored inline on
+// project_databases (owner, runtime and readonly: ciphertext + nonce +
+// key_version columns).
 //
-// Uses AES-256-GCM with a 32-byte master key sourced from
-// VAULT_ENCRYPTION_KEY — the same secret the vault package uses. No
-// new secret is introduced; we simply seal a different class of
-// value against it. Rotation is handled via the key_version column:
-// when a new master key is rolled, existing rows keep opening with
-// their recorded version until re-sealed.
+// The master key is VAULT_ENCRYPTION_KEY (32 bytes, base64). Versions:
+//
+//   - 1 (legacy, open only): AES-256-GCM under the raw master key, no
+//     associated data. The raw key also opens legacy key_version 0 vault
+//     rows, so anyone who can make the platform decrypt such a row
+//     (e.g. one planted in a Team customer's own database) could have
+//     opened these ciphertexts too.
+//   - 2 (current): AES-256-GCM under a key HKDF-derived from the master
+//     key for this purpose only (domain-separated from the vault's
+//     per-tenant keys), with associated data binding the ciphertext to
+//     this use. Nothing else seals with that key.
+//
+// Rollout in two steps, so no running (or rolled-back) component ever
+// meets a version it can't open: first every component learns to open
+// version 2 while new seals stay version 1 (callers pass
+// CipherVersionLegacy); once that is deployed, callers switch to
+// CipherVersion and existing rows are re-sealed.
 type Cipher struct {
-	key     []byte
+	raw     []byte // version 1 (legacy)
+	derived []byte // version 2
 	version int16
 }
 
-// NewCipher builds a Cipher from a base64-encoded 32-byte master
-// key. Mirrors vault.NewVaultService's key-validation shape so ops
-// don't have two different failure modes to remember.
+const (
+	// CipherVersionLegacy is the raw-master-key version (open only).
+	CipherVersionLegacy int16 = 1
+	// CipherVersion is the domain-separated version (see the rollout note).
+	CipherVersion int16 = 2
+
+	cipherHKDFSalt = "eurobase/project_databases"
+	cipherHKDFInfo = "eurobase-dbprovider-v2"
+	cipherAAD      = "eurobase/project_databases/password/v2"
+)
+
+// NewCipher builds a Cipher from a base64-encoded 32-byte master key;
+// version is the version new seals use (CipherVersion in production).
+// Mirrors vault.NewVaultService's key-validation shape so ops don't have
+// two different failure modes to remember.
 func NewCipher(base64Key string, version int16) (*Cipher, error) {
 	key, err := base64.StdEncoding.DecodeString(base64Key)
 	if err != nil {
@@ -33,57 +60,69 @@ func NewCipher(base64Key string, version int16) (*Cipher, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("dbprovider: VAULT_ENCRYPTION_KEY must be 32 bytes (got %d)", len(key))
 	}
-	if version < 1 {
-		return nil, fmt.Errorf("dbprovider: key version must be >= 1 (got %d)", version)
+	if version != CipherVersionLegacy && version != CipherVersion {
+		return nil, fmt.Errorf("dbprovider: unsupported key version %d (want %d)", version, CipherVersion)
 	}
-	return &Cipher{key: key, version: version}, nil
+	derived, err := hkdf.Key(sha256.New, key, []byte(cipherHKDFSalt), cipherHKDFInfo, 32)
+	if err != nil {
+		return nil, fmt.Errorf("dbprovider: derive key: %w", err)
+	}
+	return &Cipher{raw: key, derived: derived, version: version}, nil
 }
 
-// Version returns the current write-version — always the value
-// passed to NewCipher. Recorded on every Seal so a later Open can
-// look up the correct key even after rotation.
+// Version returns the version new seals use — the value passed to
+// NewCipher, recorded on every Seal so a later Open picks the right key.
 func (c *Cipher) Version() int16 { return c.version }
 
-// Seal encrypts plaintext under the current key. Returns
+func (c *Cipher) aead(version int16) (cipher.AEAD, []byte, error) {
+	var key, aad []byte
+	switch version {
+	case CipherVersionLegacy:
+		key = c.raw
+	case CipherVersion:
+		key, aad = c.derived, []byte(cipherAAD)
+	default:
+		// A stray version is data corruption or a botched rotation —
+		// fail loud.
+		return nil, nil, fmt.Errorf("dbprovider: unknown key version %d (current %d)", version, c.version)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dbprovider: aes cipher: %w", err)
+	}
+	a, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dbprovider: gcm: %w", err)
+	}
+	return a, aad, nil
+}
+
+// Seal encrypts plaintext under the current version. Returns
 // (ciphertext, nonce, version); persist all three alongside the row.
 func (c *Cipher) Seal(plaintext string) (ciphertext, nonce []byte, version int16, err error) {
-	block, err := aes.NewCipher(c.key)
+	a, aad, err := c.aead(c.version)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("dbprovider: aes cipher: %w", err)
+		return nil, nil, 0, err
 	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, nil, 0, fmt.Errorf("dbprovider: gcm: %w", err)
-	}
-	nonce = make([]byte, aead.NonceSize())
+	nonce = make([]byte, a.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, nil, 0, fmt.Errorf("dbprovider: nonce: %w", err)
 	}
-	ciphertext = aead.Seal(nil, nonce, []byte(plaintext), nil)
-	return ciphertext, nonce, c.version, nil
+	return a.Seal(nil, nonce, []byte(plaintext), aad), nonce, c.version, nil
 }
 
-// Open decrypts a row's ciphertext. Takes the version explicitly so
-// that rotation-mid-read is a no-op — the cipher looks up the right
-// key for the version. Today we only carry v1, so any non-1 version
-// returns an error.
+// Open decrypts a row's ciphertext with the key of the version it was
+// sealed with (legacy version 1 or the current one).
 func (c *Cipher) Open(ciphertext, nonce []byte, version int16) (string, error) {
-	if version != c.version {
-		// Once we support rotation, this becomes a key-lookup call.
-		// For M1 we only support one live version — a stray v0/v2
-		// row is either data corruption or a botched rotation, both
-		// worth failing loud.
-		return "", fmt.Errorf("dbprovider: unknown key version %d (current %d)", version, c.version)
-	}
-	block, err := aes.NewCipher(c.key)
+	a, aad, err := c.aead(version)
 	if err != nil {
-		return "", fmt.Errorf("dbprovider: aes cipher: %w", err)
+		return "", err
 	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("dbprovider: gcm: %w", err)
+	// GCM panics on a wrong nonce length; a malformed row is an error.
+	if len(nonce) != a.NonceSize() {
+		return "", fmt.Errorf("dbprovider: open: nonce is %d bytes, want %d", len(nonce), a.NonceSize())
 	}
-	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := a.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return "", fmt.Errorf("dbprovider: open: %w", err)
 	}

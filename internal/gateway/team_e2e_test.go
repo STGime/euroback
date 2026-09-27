@@ -1600,7 +1600,9 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatal(err)
 	}
 	keyB64 := base64.StdEncoding.EncodeToString(key)
-	cipher, err := dbprovider.NewCipher(keyB64, 1)
+	// Sealed with the domain-separated version while the gateway's own
+	// cipher still writes the legacy one: every reader must open both.
+	cipher, err := dbprovider.NewCipher(keyB64, dbprovider.CipherVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
