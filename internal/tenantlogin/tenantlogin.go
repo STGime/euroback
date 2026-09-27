@@ -84,6 +84,15 @@ type Ensurer struct {
 	database  string
 	secret    []byte
 
+	// PrepareDedicated, if set, runs on a Team project's owner pool before
+	// its login is applied — the worker sets dbprovider.EnsureFuncRole so
+	// instances bootstrapped before #676 get the function role.
+	PrepareDedicated func(ctx context.Context, ownerPool *pgxpool.Pool, schema string) error
+	// GrantDedicatedConnect, if set, grants the function role CONNECT
+	// through the provider (SetPrivilege) when EnsureDedicated reports
+	// ErrNoConnect; the login is then re-verified.
+	GrantDedicatedConnect func(ctx context.Context, projectID, role string) error
+
 	mu       sync.Mutex
 	ensured  map[string]bool // schemas done since the last full pass
 	lastFull time.Time
@@ -115,18 +124,31 @@ func NewEnsurer(adminPool *pgxpool.Pool, database string, secret []byte) (*Ensur
 // credentials and verifies CONNECT (a GRANT by a non-owner can silently
 // no-op, so the check is authoritative).
 func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
+	return ensureOn(ctx, e.adminPool, e.database, e.secret, schema, true)
+}
+
+// EnsureDedicated does the same on a Team project's dedicated instance
+// (#676), through ownerPool (connected as the instance's owner, which
+// created the role via ensure_tenant_func_role). CONNECT there comes from
+// the provider's SetPrivilege (a GRANT by the owner is a no-op on
+// Scaleway's rdb database); if it's missing the error says so.
+func EnsureDedicated(ctx context.Context, ownerPool *pgxpool.Pool, database string, secret []byte, schema string) error {
+	return ensureOn(ctx, ownerPool, database, secret, schema, false)
+}
+
+func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret []byte, schema string, asMigrator bool) error {
 	if !schemaRe.MatchString(schema) {
 		return fmt.Errorf("invalid tenant schema %q", schema)
 	}
 	role := FuncRole(schema)
-	verifier, err := ScramVerifier(e.secret, schema)
+	verifier, err := ScramVerifier(secret, schema)
 	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	tx, err := e.adminPool.Begin(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
@@ -136,8 +158,10 @@ func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
 	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'"); err != nil {
 		return fmt.Errorf("set lock_timeout: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
-		return fmt.Errorf("set migrator role: %w", err)
+	if asMigrator {
+		if _, err := tx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
+			return fmt.Errorf("set migrator role: %w", err)
+		}
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", role).Scan(&exists); err != nil {
@@ -161,26 +185,117 @@ func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
 		return fmt.Errorf("reset role settings on %s: %w", role, err)
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s IN DATABASE %s RESET ALL",
-		pgx.Identifier{role}.Sanitize(), pgx.Identifier{e.database}.Sanitize())); err != nil {
+		pgx.Identifier{role}.Sanitize(), pgx.Identifier{database}.Sanitize())); err != nil {
 		return fmt.Errorf("reset per-database role settings on %s: %w", role, err)
 	}
 	var canConnect bool
-	if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", role, e.database).Scan(&canConnect); err != nil {
+	if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", role, database).Scan(&canConnect); err != nil {
 		return fmt.Errorf("check connect: %w", err)
 	}
 	if !canConnect {
 		if _, err := tx.Exec(ctx, fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s",
-			pgx.Identifier{e.database}.Sanitize(), pgx.Identifier{role}.Sanitize())); err != nil {
+			pgx.Identifier{database}.Sanitize(), pgx.Identifier{role}.Sanitize())); err != nil {
 			return fmt.Errorf("grant connect to %s: %w", role, err)
 		}
-		if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", role, e.database).Scan(&canConnect); err != nil {
+		if err := tx.QueryRow(ctx, "SELECT has_database_privilege($1, $2, 'CONNECT')", role, database).Scan(&canConnect); err != nil {
 			return fmt.Errorf("verify connect: %w", err)
 		}
 		if !canConnect {
-			return fmt.Errorf("role %s has no CONNECT on %s and eurobase_migrator could not grant it", role, e.database)
+			if !asMigrator {
+				// Commit the login anyway; CONNECT needs the provider API.
+				if err := tx.Commit(ctx); err != nil {
+					return err
+				}
+				return fmt.Errorf("role %s on %s: %w", role, database, ErrNoConnect)
+			}
+			return fmt.Errorf("role %s has no CONNECT on %s and eurobase_migrator could not grant it", role, database)
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// ErrNoConnect: the function role on a dedicated instance has its login
+// but no CONNECT, which only the provider's SetPrivilege can grant there.
+var ErrNoConnect = errors.New("no CONNECT on the database: grant it via the provider's SetPrivilege (readwrite)")
+
+// DedicatedOpener opens a short-lived owner pool to a Team project's
+// dedicated instance and returns its database name; (nil, "", nil) when the
+// project has none active. The caller closes the pool.
+type DedicatedOpener func(ctx context.Context, projectID string) (*pgxpool.Pool, string, error)
+
+// EnsureTeam applies EnsureDedicated to every Team project with an active
+// dedicated instance (#676): the function role there gets LOGIN, the
+// connection limit and its derived password. Same cadence as EnsureAll.
+func (e *Ensurer) EnsureTeam(ctx context.Context, open DedicatedOpener) (int, error) {
+	if open == nil {
+		return 0, nil
+	}
+	rows, err := e.adminPool.Query(ctx,
+		`SELECT p.id::text, p.schema_name
+		   FROM public.projects p
+		   JOIN public.project_databases pd ON pd.project_id = p.id
+		  WHERE pd.state = 'active' AND pd.deleted_at IS NULL
+		    AND p.status = 'active' AND p.schema_name IS NOT NULL
+		  ORDER BY 1`)
+	if err != nil {
+		return 0, fmt.Errorf("list Team projects: %w", err)
+	}
+	type target struct{ id, schema string }
+	var targets []target
+	for rows.Next() {
+		var t target
+		if err := rows.Scan(&t.id, &t.schema); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		targets = append(targets, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	var firstErr error
+	done := 0
+	for _, t := range targets {
+		key := "team:" + t.schema
+		e.mu.Lock()
+		skip := e.ensured[key]
+		e.mu.Unlock()
+		if skip {
+			continue
+		}
+		pool, database, err := open(ctx, t.id)
+		if err == nil && pool == nil {
+			continue
+		}
+		if err == nil {
+			if e.PrepareDedicated != nil {
+				err = e.PrepareDedicated(ctx, pool, t.schema)
+			}
+			if err == nil {
+				err = EnsureDedicated(ctx, pool, database, e.secret, t.schema)
+			}
+			if errors.Is(err, ErrNoConnect) && e.GrantDedicatedConnect != nil {
+				if err = e.GrantDedicatedConnect(ctx, t.id, FuncRole(t.schema)); err == nil {
+					err = EnsureDedicated(ctx, pool, database, e.secret, t.schema)
+				}
+			}
+			pool.Close()
+		}
+		if err != nil {
+			slog.Error("tenantlogin: ensure dedicated function role login failed", "project_id", t.id, "schema", t.schema, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		e.mu.Lock()
+		e.ensured[key] = true
+		e.mu.Unlock()
+		done++
+	}
+	return done, firstErr
 }
 
 // EnsureAll applies EnsureOne to shared-cluster tenant schemas: only new

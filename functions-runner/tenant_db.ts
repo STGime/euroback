@@ -10,6 +10,8 @@
 // tenant, a soft global cap, idle close, LRU eviction of *idle* entries
 // only — a connection with a transaction in flight is never closed.
 
+import { type DedicatedTarget, dedicatedDbUrl, targetKey } from "./tenant_route.ts";
+
 const enc = new TextEncoder();
 
 /** HMAC-SHA256(secret, "funcpw:" + schema), hex. Must match Go FuncPassword. */
@@ -63,13 +65,19 @@ export class TenantDBPool {
    * Leases the tenant's client. Concurrent first calls share one client;
    * the caller must release() when its transaction has finished.
    */
-  async acquire(schema: string, role: string): Promise<Lease> {
-    let entry = this.entries.get(schema);
+  async acquire(schema: string, role: string, target?: DedicatedTarget): Promise<Lease> {
+    // A Team project's client connects to its dedicated instance (#676);
+    // the key includes the target so a shared-cluster client is never
+    // reused for it (or the other way round after an upgrade).
+    const key = target ? `${schema}@${targetKey(target)}` : schema;
+    let entry = this.entries.get(key);
     if (!entry) {
       this.evictIdleOverCap();
-      const client = funcPassword(this.secret, schema).then((pw) => this.factory(tenantDbUrl(this.baseUrl, role, pw)));
+      const client = funcPassword(this.secret, schema).then((pw) =>
+        this.factory(target ? dedicatedDbUrl(target, role, pw) : tenantDbUrl(this.baseUrl, role, pw))
+      );
       entry = { client, lastUsed: this.now(), inUse: 0 };
-      this.entries.set(schema, entry);
+      this.entries.set(key, entry);
     }
     entry.inUse++;
     entry.lastUsed = this.now();
@@ -86,12 +94,12 @@ export class TenantDBPool {
           e.lastUsed = this.now();
         },
         invalidate: () => {
-          if (this.entries.get(schema) === e) this.drop(schema);
+          if (this.entries.get(key) === e) this.drop(key);
         },
       };
     } catch (err) {
       e.inUse--;
-      if (this.entries.get(schema) === e) this.entries.delete(schema);
+      if (this.entries.get(key) === e) this.entries.delete(key);
       throw err;
     }
   }

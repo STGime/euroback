@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 //go:embed dedicated_bootstrap.sql
@@ -219,6 +220,13 @@ func BootstrapDedicated(
 		"project_id", projectID,
 		"schema", schemaName)
 
+	// Step 4 (#676): the edge-functions role + vault helper. Idempotent,
+	// and run on every bootstrap — provision_tenant exits early on a
+	// retry, this doesn't.
+	if err := EnsureFuncRole(ctx, conn, schemaName); err != nil {
+		return nil, "", fmt.Errorf("bootstrap: %w", err)
+	}
+
 	return &BootstrapCredentials{
 		Runtime: RuntimeCredential{
 			Username: "eurobase_gateway",
@@ -313,4 +321,24 @@ func isHexChars(s string) bool {
 		}
 	}
 	return true
+}
+
+//go:embed dedicated_func_role.sql
+var dedicatedFuncRoleSQL string
+
+// EnsureFuncRole (re)defines public.ensure_tenant_func_role and applies it
+// to schema on a dedicated instance, as its owner (#676): the tenant's
+// <schema>_func role (NOLOGIN — tenantlogin sets the login) and the
+// <schema>.runner_vault_get helper. Idempotent; the worker's tenant-login
+// pass calls it too, so instances bootstrapped before #676 catch up.
+func EnsureFuncRole(ctx context.Context, conn interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, schema string) error {
+	if _, err := conn.Exec(ctx, dedicatedFuncRoleSQL); err != nil {
+		return fmt.Errorf("apply dedicated_func_role.sql: %w", err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT public.ensure_tenant_func_role($1)`, schema); err != nil {
+		return fmt.Errorf("ensure_tenant_func_role: %w", err)
+	}
+	return nil
 }

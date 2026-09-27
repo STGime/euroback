@@ -135,3 +135,27 @@ Deno.test("vault.get errors when ciphertext was tampered (auth tag mismatch)", a
   const got = await resolveVaultSecret(stubDB([{ encrypted, nonce, key_version: 0 }]), PROJECT_ID, SCHEMA, "K");
   if (!("error" in got)) throw new Error(`expected error result, got ${JSON.stringify(got)}`);
 });
+
+Deno.test("vault.get uses the dedicated lookup when given, not the shared query (#676)", async () => {
+  Deno.env.set("VAULT_ENCRYPTION_KEY", KEY_B64);
+  const { encrypted, nonce } = await encryptForGateway("dedicated_value", KEY_RAW);
+  const asked: string[] = [];
+  const got = await resolveVaultSecret(
+    stubDB([]), // shared would say "not found"
+    PROJECT_ID,
+    SCHEMA,
+    "TEAM_KEY",
+    (name) => {
+      asked.push(name);
+      return Promise.resolve([{ encrypted, nonce, key_version: 0 }]);
+    },
+  );
+  assertEquals(got, { value: "dedicated_value" });
+  assertEquals(asked, ["TEAM_KEY"]);
+});
+
+Deno.test("vault.get errors (no leak) when the dedicated lookup throws", async () => {
+  Deno.env.set("VAULT_ENCRYPTION_KEY", KEY_B64);
+  const got = await resolveVaultSecret(stubDB([]), PROJECT_ID, SCHEMA, "K", () => Promise.reject(new Error("host 10.0.0.5 down")));
+  assertEquals(got, { error: "vault unavailable: secret lookup failed" });
+});

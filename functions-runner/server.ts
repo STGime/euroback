@@ -20,6 +20,7 @@ import type {
 } from "./bridge.ts";
 import { newVerifier, type Verifier } from "./hmac.ts";
 import { openSealed, resolveVaultSecret } from "./vault.ts";
+import { RouteCache, type TenantDbRow, TenantDbNotReady, type TenantRoute } from "./tenant_route.ts";
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
 import { onWorkerError } from "./worker_errors.ts";
@@ -150,6 +151,9 @@ const FUNC_DB_POOLER_URL = Deno.env.get("FUNC_DB_POOLER_URL") ?? "";
 // budget note on the HPA in deploy/k8s/functions.yaml.
 const TENANT_CONN_CAP = parseInt(Deno.env.get("RUNNER_TENANT_CONN_CAP") ?? (FUNC_DB_POOLER_URL ? "30" : "10"));
 let tenantPool: TenantDBPool | null = null;
+// Where each project's tenant data lives (#676): shared cluster, or a Team
+// project's dedicated instance. Cached briefly per project.
+const tenantRoutes = new RouteCache();
 
 async function getTenantPool(): Promise<TenantDBPool | null> {
   if (FUNC_PASSWORD_SECRET.length < 32 || !DB_URL) return null;
@@ -304,6 +308,52 @@ async function executeFunction(
   // over postMessage and run here under the per-tenant role.
   const setPathSQL = "SET LOCAL search_path TO " + quoteIdent(schemaName);
   const db = await getDB();
+
+  // Where this project's tenant data lives (#676) — resolved on first use.
+  // A Team project runs on its dedicated instance; a failed lookup or a
+  // not-yet-active instance fails the call (retryable) — never the shared
+  // cluster.
+  let routePromise: Promise<TenantRoute> | null = null;
+  function tenantRoute(): Promise<TenantRoute> {
+    routePromise ??= tenantRoutes.get(projectId, async (pid) => {
+      try {
+        return await db`SELECT host, port, database_name, state FROM public.runner_get_tenant_db(${pid}::uuid)` as unknown as TenantDbRow[];
+      } catch (err) {
+        console.error(`[tenant-db] route lookup for ${pid} failed`, err instanceof Error ? err.message : err);
+        throw new Error("database routing is unavailable for this project; retry shortly");
+      }
+    });
+    routePromise.catch(() => {
+      routePromise = null; // don't pin a failed lookup for the invocation
+    });
+    return routePromise;
+  }
+  async function dedicatedTarget() {
+    const r = await tenantRoute();
+    if (r.kind === "not_ready") throw new TenantDbNotReady(r.state);
+    return r.kind === "dedicated" ? r.target : undefined;
+  }
+  // deno-lint-ignore no-explicit-any
+  async function vaultLookup(): Promise<((name: string) => Promise<any>) | undefined> {
+    const target = await dedicatedTarget();
+    if (!target) return undefined; // shared cluster: public.vault_get_for_runner
+    const tp = await getTenantPool();
+    if (!tp) throw new Error("database access is not configured on this runner (FUNC_PASSWORD_SECRET)");
+    return async (name: string) => {
+      const lease = await tp.acquire(schemaName, funcRole, target);
+      try {
+        return await lease.client.unsafe(
+          `SELECT encrypted, nonce, key_version FROM ${quoteIdent(schemaName)}.runner_vault_get($1)`,
+          [name],
+        );
+      } catch (err) {
+        if (isLoginError(err)) lease.invalidate();
+        throw err;
+      } finally {
+        lease.release();
+      }
+    };
+  }
   const logCapture = createLogCapture(projectId, LOG_OUTPUT_LIMIT);
 
   // deno-lint-ignore no-explicit-any
@@ -332,7 +382,7 @@ async function executeFunction(
       let started = false;
       let lease;
       try {
-        lease = await tp.acquire(schemaName, funcRole);
+        lease = await tp.acquire(schemaName, funcRole, await dedicatedTarget());
         // deno-lint-ignore no-explicit-any
         return await lease.client.begin(async (tx: any) => {
           started = true;
@@ -429,6 +479,7 @@ async function executeFunction(
     user: userId ? { id: userId, email: userEmail } : null,
     timeoutMs,
     runDBSql,
+    vaultLookup,
     db,
     logCapture,
   });
@@ -449,6 +500,8 @@ async function runUserHandlerInWorker(opts: {
   timeoutMs: number;
   runDBSql: (query: string, params: unknown[]) => Promise<unknown>;
   // deno-lint-ignore no-explicit-any
+  vaultLookup: () => Promise<((name: string) => Promise<any>) | undefined>;
+  // deno-lint-ignore no-explicit-any
   db: any;
   // deno-lint-ignore no-explicit-any
   logCapture: ReturnType<typeof createLogCapture>;
@@ -464,6 +517,7 @@ async function runUserHandlerInWorker(opts: {
     user,
     timeoutMs,
     runDBSql,
+    vaultLookup,
     db,
     logCapture,
   } = opts;
@@ -588,7 +642,12 @@ async function runUserHandlerInWorker(opts: {
           // lookup/decrypt failure) → error, which the worker's RPC
           // layer surfaces to user code as a thrown Error so "secret
           // missing" and "vault broken" are distinguishable.
-          resolveVaultSecret(db, projectId, schemaName, msg.name)
+          // A Team project's vault is on its dedicated instance (#676):
+          // read it there through <schema>.runner_vault_get as the
+          // project's own function role.
+          vaultLookup()
+            .then((lookup) => resolveVaultSecret(db, projectId, schemaName, msg.name, lookup))
+            .catch((err) => ({ error: `vault unavailable: ${err instanceof Error ? err.message : String(err)}` }))
             .then((result) => {
               if (settled) return;
               if ("error" in result) {
