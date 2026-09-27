@@ -2,6 +2,8 @@ package dbprovider
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -12,7 +14,7 @@ import (
 const testKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" // 32 zero bytes
 
 func TestCipher_RoundTrip(t *testing.T) {
-	c, err := NewCipher(testKey, 1)
+	c, err := NewCipher(testKey, CipherVersion)
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
@@ -21,8 +23,8 @@ func TestCipher_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	if ver != 1 {
-		t.Errorf("version: got %d, want 1", ver)
+	if ver != CipherVersion {
+		t.Errorf("version: got %d, want %d", ver, CipherVersion)
 	}
 	if len(nonce) != 12 {
 		t.Errorf("nonce length: got %d, want 12 (GCM standard)", len(nonce))
@@ -52,9 +54,9 @@ func TestCipher_UniqueNoncePerSeal(t *testing.T) {
 }
 
 func TestCipher_RejectsWrongVersion(t *testing.T) {
-	c, _ := NewCipher(testKey, 1)
+	c, _ := NewCipher(testKey, CipherVersion)
 	ct, nonce, _, _ := c.Seal("x")
-	_, err := c.Open(ct, nonce, 2)
+	_, err := c.Open(ct, nonce, 3)
 	if err == nil || !strings.Contains(err.Error(), "unknown key version") {
 		t.Errorf("wrong-version Open should fail with 'unknown key version', got %v", err)
 	}
@@ -66,7 +68,7 @@ func TestCipher_RejectsMalformedKey(t *testing.T) {
 		"wrong length":   base64.StdEncoding.EncodeToString([]byte("short")),
 	}
 	for name, key := range cases {
-		if _, err := NewCipher(key, 1); err == nil {
+		if _, err := NewCipher(key, CipherVersion); err == nil {
 			t.Errorf("%s: NewCipher should have errored", name)
 		}
 	}
@@ -75,5 +77,42 @@ func TestCipher_RejectsMalformedKey(t *testing.T) {
 func TestCipher_RejectsZeroVersion(t *testing.T) {
 	if _, err := NewCipher(testKey, 0); err == nil {
 		t.Error("NewCipher(v=0) should have errored")
+	}
+}
+
+// Version 2 is not the raw master key: a raw-key AES-GCM open (what the
+// vault does for a legacy key_version 0 row) can't read it.
+func TestCipher_V2NotOpenableWithRawKey(t *testing.T) {
+	c, _ := NewCipher(testKey, CipherVersion)
+	ct, nonce, _, _ := c.Seal("owner-password")
+	raw, _ := base64.StdEncoding.DecodeString(testKey)
+	block, _ := aes.NewCipher(raw)
+	gcm, _ := cipher.NewGCM(block)
+	if _, err := gcm.Open(nil, nonce, ct, nil); err == nil {
+		t.Fatal("a version 2 ciphertext opens with the raw master key")
+	}
+	// Nor with the right key but without the associated data.
+	block, _ = aes.NewCipher(c.derived)
+	gcm, _ = cipher.NewGCM(block)
+	if _, err := gcm.Open(nil, nonce, ct, nil); err == nil {
+		t.Fatal("a version 2 ciphertext opens without its associated data")
+	}
+}
+
+// Rows sealed before version 2 keep opening until ResealLegacy moves them.
+func TestCipher_OpensLegacyV1(t *testing.T) {
+	legacy, _ := NewCipher(testKey, CipherVersionLegacy)
+	ct, nonce, ver, _ := legacy.Seal("old-password")
+	if ver != CipherVersionLegacy {
+		t.Fatalf("legacy seal version %d", ver)
+	}
+	c, _ := NewCipher(testKey, CipherVersion)
+	got, err := c.Open(ct, nonce, ver)
+	if err != nil || got != "old-password" {
+		t.Fatalf("open legacy: %q, %v", got, err)
+	}
+	// Version labels are not interchangeable.
+	if _, err := c.Open(ct, nonce, CipherVersion); err == nil {
+		t.Fatal("a legacy ciphertext opens as version 2")
 	}
 }
