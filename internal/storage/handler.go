@@ -521,13 +521,18 @@ func (h *StorageHandler) listReadable(r *http.Request, prefix, cursor string, li
 		// Range predicates on the byte-order key (index
 		// idx_storage_objects_key_c): [prefix, prefix + U+10FFFF), after
 		// the cursor — same order as S3.
+		// Two texts so the upper bound is always an index condition, also
+		// under a cached generic plan.
+		bound := ""
+		if prefix != "" {
+			bound = `AND key COLLATE "C" < ($1 || chr(1114111)) COLLATE "C"`
+		}
 		q := fmt.Sprintf(`SELECT key, COALESCE(content_type, ''), COALESCE(size_bytes, 0), created_at
 		                    FROM "%s".storage_objects
-		                   WHERE key COLLATE "C" >= $1 COLLATE "C"
-		                     AND ($1 = '' OR key COLLATE "C" < ($1 || chr(1114111)) COLLATE "C")
+		                   WHERE key COLLATE "C" >= $1 COLLATE "C" %s
 		                     AND key COLLATE "C" > $2 COLLATE "C"
 		                   ORDER BY key COLLATE "C" LIMIT $3`,
-			strings.ReplaceAll(schema, `"`, `""`))
+			strings.ReplaceAll(schema, `"`, `""`), bound)
 		rows, err := tx.Query(r.Context(), q, prefix, cursor, limit+1)
 		if err != nil {
 			return err
@@ -851,6 +856,12 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		// row counts as a developer file and could become shared (#697).
 		if insertErr != nil && isForeignKeyViolation(insertErr) && uploader != nil {
 			slog.Warn("storage upload: end user no longer exists", "schema", schema, "key", key)
+			if claimed {
+				if err := h.s3.DeleteObject(context.WithoutCancel(r.Context()), bucket, key); err != nil {
+					slog.Warn("storage upload: failed to remove the untracked object", "error", err, "key", key)
+				}
+				h.releaseClaim(r, key)
+			}
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}

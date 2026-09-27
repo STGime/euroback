@@ -25,6 +25,7 @@ import (
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -374,6 +375,11 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		// (not superuser — RLS applies): no insert under a shared folder,
 		// no moving an own row into one.
 		uid := env.dedScalar(t, "SELECT id::text FROM %s WHERE email = 'enduser@team.test'", "users")
+		// Refused means refused by RLS (42501), not any error.
+		rlsRefused := func(err error) bool {
+			var pgErr *pgconn.PgError
+			return errors.As(err, &pgErr) && pgErr.Code == "42501"
+		}
 		asEndUser := func(stmts ...string) error {
 			tx, err := env.rt.Begin(ctx)
 			if err != nil {
@@ -391,12 +397,12 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return nil
 		}
 		so := pgx.Identifier{env.schema, "storage_objects"}.Sanitize()
-		if err := asEndUser(`INSERT INTO ` + so + ` (key, uploaded_by) VALUES ('themes/rls-plant.txt', $1::uuid)`); err == nil {
-			return errors.New("RLS: an end user inserted a row under a shared folder")
+		if err := asEndUser(`INSERT INTO ` + so + ` (key, uploaded_by) VALUES ('themes/rls-plant.txt', $1::uuid)`); !rlsRefused(err) {
+			return fmt.Errorf("RLS must refuse an end user's row under a shared folder: %v", err)
 		}
 		if err := asEndUser(`INSERT INTO `+so+` (key, uploaded_by) VALUES ('mine/rls.txt', $1::uuid)`,
-			`UPDATE `+so+` SET key = 'themes/rls-moved.txt' WHERE key = 'mine/rls.txt' AND uploaded_by = $1::uuid`); err == nil {
-			return errors.New("RLS: an end user moved their own row into a shared folder")
+			`UPDATE `+so+` SET key = 'themes/rls-moved.txt' WHERE key = 'mine/rls.txt' AND uploaded_by = $1::uuid`); !rlsRefused(err) {
+			return fmt.Errorf("RLS must refuse moving an own row into a shared folder: %v", err)
 		}
 		if err := asEndUser(`INSERT INTO ` + so + ` (key, uploaded_by) VALUES ('mine/rls-ok.txt', $1::uuid)`); err != nil {
 			return fmt.Errorf("RLS: an end user's own insert outside shared folders must work: %v", err)
@@ -404,6 +410,11 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		// The data API is read-only on platform-managed tables for SDK callers.
 		if r := call("PATCH", "/v1/db/storage_objects/00000000-0000-0000-0000-000000000000", env.publicKey, user, `{"size_bytes":0}`); r.code < 400 || !strings.Contains(r.body, "read-only") {
 			return fmt.Errorf("data API writes to storage_objects must be refused: %w", r)
+		}
+		// …while the secret key (the developer's server) may still write it.
+		heroID := env.dedScalar(t, "SELECT id::text FROM %s WHERE key = 'themes/hero.txt'", "storage_objects")
+		if r := call("PATCH", "/v1/db/storage_objects/"+heroID, env.secretKey, "", `{"content_type":"text/plain"}`); r.code != 200 {
+			return fmt.Errorf("secret-key write to storage_objects must still work: %w", r)
 		}
 		if r := call("GET", "/v1/db/storage_objects?select=uploaded_by", env.publicKey, user, ""); r.code < 400 {
 			return fmt.Errorf("selecting uploaded_by via the data API must be refused: %w", r)
@@ -450,7 +461,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if page.NextCursor != "" && page.NextCursor != "themes/hero.txt" {
 			return fmt.Errorf("anonymous listing cursor %q must be empty or the last visible key", page.NextCursor)
 		}
-		if r := call("GET", "/v1/storage/?cursor="+url.QueryEscape(page.NextCursor), env.publicKey, "", ""); strings.Contains(r.body, "themesz-private") {
+		if r := call("GET", "/v1/storage/?cursor="+url.QueryEscape(page.NextCursor), env.publicKey, "", ""); r.code != 200 || strings.Contains(r.body, "themesz-private") {
 			return fmt.Errorf("anonymous listing leaked a private key: %w", r)
 		}
 		// Anonymous download URLs are capped at 1 h.
