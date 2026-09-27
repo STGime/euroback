@@ -105,6 +105,48 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return &httpResult{req: "console " + method + " " + path, code: rec.Code, body: rec.Body.String()}
 	}
 
+	// Credential cipher step 2: the worker re-seals legacy (raw master
+	// key) Team credentials with the domain-separated version.
+	check(t, env, "credential_reseal", func() error {
+		ctx := context.Background()
+		versions := func() (string, error) {
+			var v string
+			err := env.shared.QueryRow(ctx, `SELECT password_key_version || '/' || runtime_password_key_version || '/' || readonly_password_key_version
+				FROM project_databases WHERE project_id = $1 AND deleted_at IS NULL`, env.projectID).Scan(&v)
+			return v, err
+		}
+		if v, err := versions(); err != nil || v != "1/1/1" {
+			return fmt.Errorf("before: key versions %q (%v), want 1/1/1", v, err)
+		}
+		current, err := dbprovider.NewCipher(env.keyB64, dbprovider.CipherVersion)
+		if err != nil {
+			return err
+		}
+		repo := dbprovider.NewRepo(env.shared)
+		// Rows of the other scenarios (own keys, placeholder credentials)
+		// fail to open and are skipped — reported, never a panic or an abort.
+		if _, _, err := repo.ResealLegacy(ctx, current); err != nil {
+			return fmt.Errorf("ResealLegacy: %w", err)
+		}
+		want := fmt.Sprintf("%d/%d/%d", dbprovider.CipherVersion, dbprovider.CipherVersion, dbprovider.CipherVersion)
+		if v, err := versions(); err != nil || v != want {
+			return fmt.Errorf("after: key versions %q (%v), want %s", v, err, want)
+		}
+		// Idempotent, and the re-sealed owner credential still opens.
+		if _, _, err := repo.ResealLegacy(ctx, current); err != nil {
+			return fmt.Errorf("second pass: %w", err)
+		}
+		if v, err := versions(); err != nil || v != want {
+			return fmt.Errorf("after a second pass: key versions %q (%v), want %s", v, err, want)
+		}
+		p, err := dbprovider.OpenOwnerPool(ctx, repo, current, env.projectID)
+		if err != nil {
+			return fmt.Errorf("open owner pool with the re-sealed credential: %w", err)
+		}
+		defer p.Close()
+		return p.Ping(ctx)
+	})
+
 	check(t, env, "sdk_rest_insert_and_select", func() error {
 		if r := sdk("POST", "/v1/db/todos", `{"title":"from-sdk"}`); r.code >= 300 {
 			return r
@@ -1257,6 +1299,7 @@ var teamOnlyChecks = map[string]bool{
 	"console_fails_closed_while_provisioning":     true,
 	"readonly_connection_limit":                   true,
 	"shared_cluster_untouched":                    true,
+	"credential_reseal":                           true,
 }
 
 var teamKnownGaps = map[string]knownGap{}
@@ -1368,6 +1411,7 @@ type teamEnv struct {
 	ownerUser         string
 	s3                *storage.S3Client
 	cipher            *dbprovider.Cipher
+	keyB64            string
 	bucket            string
 	ownerEmail        string
 	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
@@ -1600,9 +1644,10 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatal(err)
 	}
 	keyB64 := base64.StdEncoding.EncodeToString(key)
-	// Sealed with the domain-separated version while the gateway's own
-	// cipher still writes the legacy one: every reader must open both.
-	cipher, err := dbprovider.NewCipher(keyB64, dbprovider.CipherVersion)
+	// Credentials start sealed with the legacy version, as rows written
+	// before the domain-separated cipher are; credential_reseal moves them
+	// (and every later check then runs on re-sealed rows).
+	cipher, err := dbprovider.NewCipher(keyB64, dbprovider.CipherVersionLegacy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1735,7 +1780,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
-		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, cipher: cipher, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
+		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, cipher: cipher, keyB64: keyB64, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
 		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, rt: rt, ded: dedAdmin,
 	}
 }

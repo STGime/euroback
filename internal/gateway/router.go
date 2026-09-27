@@ -203,7 +203,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// than mounted-but-broken).
 	var connCipher *dbprovider.Cipher
 	if vk := os.Getenv("VAULT_ENCRYPTION_KEY"); vk != "" {
-		if c, err := dbprovider.NewCipher(vk, dbprovider.CipherVersionLegacy); err != nil {
+		if c, err := dbprovider.NewCipher(vk, dbprovider.CipherVersion); err != nil {
 			slog.Warn("dbprovider cipher init failed — /connection routes disabled", "error", err)
 		} else {
 			connCipher = c

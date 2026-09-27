@@ -186,7 +186,7 @@ func main() {
 	var cipher *dbprovider.Cipher
 	if vaultKey := os.Getenv("VAULT_ENCRYPTION_KEY"); vaultKey != "" {
 		var cErr error
-		cipher, cErr = dbprovider.NewCipher(vaultKey, dbprovider.CipherVersionLegacy)
+		cipher, cErr = dbprovider.NewCipher(vaultKey, dbprovider.CipherVersion)
 		if cErr != nil {
 			slog.Error("failed to construct dbprovider cipher", "error", cErr)
 			if isProdEnv() {
@@ -200,6 +200,37 @@ func main() {
 		slog.Warn("VAULT_ENCRYPTION_KEY not set — Team-tier provisioning will fail at seal time (dev mode)")
 	}
 	providerRepo := dbprovider.NewRepo(pool)
+
+	// Credential cipher step 2 (dbprovider/cipher.go): move Team
+	// credentials sealed with the raw master key to the domain-separated
+	// version. Hourly too, so rows sealed by pods still on the old image
+	// during a rollout are picked up. Idempotent; a no-op once done.
+	if cipher != nil {
+		go func() {
+			reseal := func() {
+				n, failed, err := providerRepo.ResealLegacy(ctx, cipher)
+				switch {
+				case err != nil:
+					slog.Error("credential reseal failed", "error", err)
+				case failed > 0:
+					slog.Error("credential reseal: some rows failed", "resealed", n, "failed", failed)
+				case n > 0:
+					slog.Info("credential reseal: moved Team credentials to the current cipher version", "rows", n)
+				}
+			}
+			reseal()
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					reseal()
+				}
+			}
+		}()
+	}
 
 	// ── Register River workers ──
 	riverWorkers := river.NewWorkers()
