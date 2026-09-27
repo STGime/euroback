@@ -464,6 +464,33 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := call("GET", "/v1/storage/?cursor="+url.QueryEscape(page.NextCursor), env.publicKey, "", ""); r.code != 200 || strings.Contains(r.body, "themesz-private") {
 			return fmt.Errorf("anonymous listing leaked a private key: %w", r)
 		}
+		// Serving headers (#697 follow-up): a file stored without a type is
+		// served with a passive one from its extension, cacheable for
+		// anonymous public reads; HEAD works; an uploaded HTML file is never
+		// served as a document on the project's origin.
+		raw := func(method, path string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, nil)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return rec
+		}
+		pub := "?apikey=" + env.publicKey
+		if rec := raw("GET", "/v1/storage/themes/hero.txt"+pub); rec.Code != 200 ||
+			!strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") ||
+			rec.Header().Get("Cache-Control") != "public, max-age=300" {
+			return fmt.Errorf("public GET headers: %d %q %q", rec.Code, rec.Header().Get("Content-Type"), rec.Header().Get("Cache-Control"))
+		}
+		if rec := raw("HEAD", "/v1/storage/themes/hero.txt"+pub); rec.Code != 200 || rec.Body.Len() != 0 ||
+			rec.Header().Get("Content-Length") == "" {
+			return fmt.Errorf("public HEAD: %d len=%q body=%d", rec.Code, rec.Header().Get("Content-Length"), rec.Body.Len())
+		}
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "themes/page.html"); r.code >= 300 {
+			return fmt.Errorf("console upload html: %w", r)
+		}
+		if rec := raw("GET", "/v1/storage/themes/page.html"+pub); rec.Code != 200 ||
+			strings.Contains(rec.Header().Get("Content-Type"), "html") {
+			return fmt.Errorf("an uploaded HTML file must not be served as HTML: %d %q %q", rec.Code, rec.Header().Get("Content-Type"), rec.Header().Get("Content-Disposition"))
+		}
 		// Anonymous download URLs are capped at 1 h.
 		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/hero.txt","operation":"download","expires_in":604800}`); r.code != 200 || !strings.Contains(r.body, "X-Amz-Expires=3600") {
 			return fmt.Errorf("anonymous download URL must be capped at 1 h: %w", r)

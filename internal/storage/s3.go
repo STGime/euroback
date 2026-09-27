@@ -306,6 +306,33 @@ func (s *S3Client) UploadObjectWithRetention(ctx context.Context, bucketName, ke
 	return nil
 }
 
+// HeadObjectInfo returns an object's stored content type and size without
+// downloading it (HeadObject). Missing → an "object not found" error, like
+// DownloadObject.
+func (s *S3Client) HeadObjectInfo(ctx context.Context, bucketName, key string) (string, int64, error) {
+	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var notFound *types.NotFound
+		var noKey *types.NoSuchKey
+		if errors.As(err, &notFound) || errors.As(err, &noKey) {
+			return "", 0, fmt.Errorf("object not found: %s/%s", bucketName, key)
+		}
+		return "", 0, fmt.Errorf("head object %s/%s: %w", bucketName, key, err)
+	}
+	ct := ""
+	if out.ContentType != nil {
+		ct = *out.ContentType
+	}
+	var size int64
+	if out.ContentLength != nil {
+		size = *out.ContentLength
+	}
+	return ct, size, nil
+}
+
 // ObjectExists reports whether key exists in the bucket (HeadObject).
 func (s *S3Client) ObjectExists(ctx context.Context, bucketName, key string) (bool, error) {
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{

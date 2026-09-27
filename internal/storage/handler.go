@@ -689,6 +689,7 @@ func (h *StorageHandler) Routes() chi.Router {
 
 	// Wildcard routes for object keys that may contain slashes.
 	r.Get("/*", h.DownloadFile)
+	r.Head("/*", h.DownloadFile)
 	r.Delete("/*", h.DeleteFile)
 
 	return r
@@ -937,6 +938,24 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HEAD (media players and CDNs probe with it): headers from the S3
+	// object's metadata, no body, not access-logged.
+	if r.Method == http.MethodHead {
+		contentType, size, err := h.s3.HeadObjectInfo(r.Context(), bucket, key)
+		if err != nil {
+			if strings.Contains(err.Error(), "object not found") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			slog.Error("storage head failed", "error", err, "bucket", bucket, "key", key)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h.setDownloadHeaders(w, r, key, contentType, size)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	body, contentType, size, err := h.s3.DownloadObject(r.Context(), bucket, key)
 	if err != nil {
 		if strings.Contains(err.Error(), "object not found") {
@@ -952,17 +971,55 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	// GDPR access log: a personal-data object is being downloaded.
 	recordDownload(r, key)
 
-	if contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	}
-	if size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	}
-
+	h.setDownloadHeaders(w, r, key, contentType, size)
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, body); err != nil {
 		slog.Error("storage download: error streaming response", "error", err, "bucket", bucket, "key", key)
 	}
+}
+
+// setDownloadHeaders sets Content-Type (resolveContentType: a passive type
+// filled in when none was stored), Content-Length, Cache-Control and — for
+// types a browser could execute — Content-Disposition: attachment, so an
+// uploaded HTML / SVG file never renders on the project's origin.
+func (h *StorageHandler) setDownloadHeaders(w http.ResponseWriter, r *http.Request, key, s3Type string, size int64) {
+	recorded := ""
+	if genericContentType(s3Type) {
+		recorded = h.recordedContentType(r, key)
+	}
+	ct := resolveContentType(key, s3Type, recorded)
+	w.Header().Set("Content-Type", ct)
+	if activeContentType(ct) {
+		w.Header().Set("Content-Disposition", "attachment")
+	}
+	if size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	// Anonymous reads only ever reach public shared folders: cacheable for
+	// a few minutes (unsharing takes effect within that). Everything else
+	// is per-user.
+	if _, signedIn := isAuthenticated(r); !signedIn && !serviceCaller(r) {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	} else {
+		w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
+	}
+}
+
+// recordedContentType is the content type stored with the object's tracking
+// row at upload ("" if none / unavailable).
+func (h *StorageHandler) recordedContentType(r *http.Request, key string) string {
+	schema := h.schemaForRequest(r)
+	if schema == "" || h.pool == nil {
+		return ""
+	}
+	var ct *string
+	q := fmt.Sprintf(`SELECT content_type FROM "%s".storage_objects WHERE key = $1`, strings.ReplaceAll(schema, `"`, `""`))
+	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, key).Scan(&ct)
+	}); err != nil || ct == nil {
+		return ""
+	}
+	return *ct
 }
 
 // ---------- Delete ----------
