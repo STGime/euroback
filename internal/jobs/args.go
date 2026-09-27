@@ -178,14 +178,14 @@ func (BackfillRuntimeCredentialArgs) InsertOpts() river.InsertOpts {
 
 // ReconcileBackupScheduleArgs is enqueued by StartBackupScheduleSweeper
 // (one job per project_databases row still needing a Scaleway
-// set-backup-schedule call). The worker looks up the project's plan
+// backup-schedule UpdateInstance call). The worker looks up the project's plan
 // to resolve retention days, calls Provider.SetBackupSchedule, and
 // on success stamps project_databases.backup_schedule_applied_at.
 //
 // UniqueOpts.ByArgs collapses double-enqueues from overlapping
 // sweep ticks — matches the DeprovisionTeamDatabaseArgs pattern in
 // #455. MaxAttempts=5 covers Scaleway warmup rejections (a fresh
-// instance may 5xx set-backup-schedule for a few minutes before
+// instance may 5xx the backup-schedule update for a few minutes before
 // the backup subsystem accepts writes; River's exponential backoff
 // drains through the warmup window).
 type ReconcileBackupScheduleArgs struct {
