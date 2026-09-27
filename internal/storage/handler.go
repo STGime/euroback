@@ -244,7 +244,8 @@ func (h *StorageHandler) assertObjectVisible(r *http.Request, key string) (bool,
 	}
 	schema := h.schemaForRequest(r)
 	if schema == "" {
-		return true, nil
+		// Fail closed for SDK callers (reachable with just a public key).
+		return serviceCaller(r), nil
 	}
 	// Never answer from the shared cluster for a Team project (#680).
 	if _, err := h.tenantPool(r.Context()); err != nil {
@@ -377,7 +378,7 @@ func (h *StorageHandler) objectOwned(r *http.Request, key string) (bool, error) 
 	}
 	schema := h.schemaForRequest(r)
 	if schema == "" || h.pool == nil {
-		return true, nil
+		return false, nil // fail closed (service callers returned above)
 	}
 	eu, ok := auth.EndUserClaimsFromContext(r.Context())
 	if !ok || eu == nil || eu.UserID == "" {
@@ -421,7 +422,7 @@ func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType stri
 	}
 	schema := h.schemaForRequest(r)
 	if schema == "" || h.pool == nil {
-		return true, false, nil
+		return false, false, nil // fail closed (service callers returned above)
 	}
 	esc := strings.ReplaceAll(schema, `"`, `""`)
 	// Shared folders (#697) hold developer files only: an end user can't
@@ -517,9 +518,14 @@ func (h *StorageHandler) listReadable(r *http.Request, prefix, cursor string, li
 	out := make([]ObjectInfo, 0, limit)
 	more := false
 	err := h.engine.WithTenantTx(r.Context(), schema, func(tx pgx.Tx) error {
+		// Range predicates on the byte-order key (index
+		// idx_storage_objects_key_c): [prefix, prefix + U+10FFFF), after
+		// the cursor — same order as S3.
 		q := fmt.Sprintf(`SELECT key, COALESCE(content_type, ''), COALESCE(size_bytes, 0), created_at
 		                    FROM "%s".storage_objects
-		                   WHERE starts_with(key, $1) AND key COLLATE "C" > $2 COLLATE "C"
+		                   WHERE key COLLATE "C" >= $1 COLLATE "C"
+		                     AND ($1 = '' OR key COLLATE "C" < ($1 || chr(1114111)) COLLATE "C")
+		                     AND key COLLATE "C" > $2 COLLATE "C"
 		                   ORDER BY key COLLATE "C" LIMIT $3`,
 			strings.ReplaceAll(schema, `"`, `""`))
 		rows, err := tx.Query(r.Context(), q, prefix, cursor, limit+1)
@@ -819,31 +825,34 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		// (uploader != NULL) still win via `EXCLUDED.uploaded_by
 		// IS NOT NULL`.
 		q := fmt.Sprintf(
-			`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
+			`INSERT INTO "%[1]s".storage_objects (key, content_type, size_bytes, uploaded_by)
 			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (key) DO UPDATE
 			   SET content_type = EXCLUDED.content_type,
 			       size_bytes   = EXCLUDED.size_bytes,
-			       uploaded_by  = COALESCE(storage_objects.uploaded_by, EXCLUDED.uploaded_by)`,
+			       -- A console upload into a shared folder makes the file a
+			       -- developer file again (#697): an end user who claimed the
+			       -- name first doesn't keep it. Otherwise the owner never
+			       -- changes.
+			       uploaded_by  = CASE WHEN $5 AND EXISTS (
+			                             SELECT 1 FROM "%[1]s".storage_shared_prefixes s
+			                              WHERE starts_with(EXCLUDED.key, s.prefix))
+			                           THEN NULL
+			                           ELSE COALESCE(storage_objects.uploaded_by, EXCLUDED.uploaded_by) END`,
 			escSchema,
 		)
 		uploader := uploaderForInsert(r)
 		insertErr := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, q, key, contentType, size, uploader)
+			_, err := tx.Exec(ctx, q, key, contentType, size, uploader, serviceCaller(r))
 			return err
 		})
-		// Belt: if we tried to attribute to a specific end-user
-		// but the FK check refused (23503 foreign_key_violation),
-		// retry once with NULL. Covers a race where the end-user
-		// was deleted between JWT issue and upload — the file
-		// still needs a tracking row so downstream operations work.
+		// The end user was deleted between the key claim and now (the
+		// uploaded_by FK refused). No retry without an owner: an ownerless
+		// row counts as a developer file and could become shared (#697).
 		if insertErr != nil && isForeignKeyViolation(insertErr) && uploader != nil {
-			slog.Warn("storage upload: uploaded_by FK failed, retrying with NULL",
-				"schema", schema, "key", key, "attempted_user", uploader)
-			insertErr = h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, q, key, contentType, size, nil)
-				return err
-			})
+			slog.Warn("storage upload: end user no longer exists", "schema", schema, "key", key)
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
 		}
 		if insertErr != nil {
 			// Fatal (was "non-fatal" pre-fix, which is exactly how
@@ -1104,7 +1113,13 @@ func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var resp listResponse
-	if serviceCaller(r) || h.engine == nil || h.schemaForRequest(r) == "" {
+	if !serviceCaller(r) && h.engine != nil && h.schemaForRequest(r) == "" {
+		// Fail closed: an SDK caller without a resolved tenant schema must
+		// never get the raw bucket listing.
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if serviceCaller(r) || h.engine == nil {
 		// Console: the bucket's S3 listing (export archives hidden from
 		// callers who may not read them).
 		result, err := h.s3.ListObjects(r.Context(), bucket, prefix, limit, cursor)

@@ -370,6 +370,44 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := call("DELETE", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code < 400 {
 			return fmt.Errorf("end user delete of a shared file must be refused: %w", r)
 		}
+		// The policies themselves, as the end user on the runtime role
+		// (not superuser — RLS applies): no insert under a shared folder,
+		// no moving an own row into one.
+		uid := env.dedScalar(t, "SELECT id::text FROM %s WHERE email = 'enduser@team.test'", "users")
+		asEndUser := func(stmts ...string) error {
+			tx, err := env.rt.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.end_user_id', $1, true), set_config('app.end_user_role', 'authenticated', true)`, uid); err != nil {
+				return err
+			}
+			for _, q := range stmts {
+				if _, err := tx.Exec(ctx, q, uid); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		so := pgx.Identifier{env.schema, "storage_objects"}.Sanitize()
+		if err := asEndUser(`INSERT INTO ` + so + ` (key, uploaded_by) VALUES ('themes/rls-plant.txt', $1::uuid)`); err == nil {
+			return errors.New("RLS: an end user inserted a row under a shared folder")
+		}
+		if err := asEndUser(`INSERT INTO `+so+` (key, uploaded_by) VALUES ('mine/rls.txt', $1::uuid)`,
+			`UPDATE `+so+` SET key = 'themes/rls-moved.txt' WHERE key = 'mine/rls.txt' AND uploaded_by = $1::uuid`); err == nil {
+			return errors.New("RLS: an end user moved their own row into a shared folder")
+		}
+		if err := asEndUser(`INSERT INTO ` + so + ` (key, uploaded_by) VALUES ('mine/rls-ok.txt', $1::uuid)`); err != nil {
+			return fmt.Errorf("RLS: an end user's own insert outside shared folders must work: %v", err)
+		}
+		// The data API is read-only on platform-managed tables for SDK callers.
+		if r := call("PATCH", "/v1/db/storage_objects/00000000-0000-0000-0000-000000000000", env.publicKey, user, `{"size_bytes":0}`); r.code < 400 || !strings.Contains(r.body, "read-only") {
+			return fmt.Errorf("data API writes to storage_objects must be refused: %w", r)
+		}
+		if r := call("GET", "/v1/db/storage_objects?select=uploaded_by", env.publicKey, user, ""); r.code < 400 {
+			return fmt.Errorf("selecting uploaded_by via the data API must be refused: %w", r)
+		}
 		// Shared folders hold developer files only: an end user can't plant
 		// a new file there (it would be served to everyone) — upload or
 		// upload URL — nor squat a name before the developer uploads it.
@@ -393,10 +431,27 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return fmt.Errorf("set public: %w", r)
 		}
 		// Anonymous listing shows only public files, and the cursor never
-		// reveals a hidden key (an S3 continuation token would).
+		// reveals a hidden key (an S3 continuation token would): a private
+		// file that sorts right after the public one must not leak.
+		if r := env.upload(env.publicKey, user, "http://api.eurobase.test/v1/storage/upload", "themesz-private/a.txt"); r.code >= 300 {
+			return fmt.Errorf("private upload: %w", r)
+		}
 		anonList := call("GET", "/v1/storage/?limit=1", env.publicKey, "", "")
-		if anonList.code != 200 || strings.Contains(anonList.body, "e2e/") || !strings.Contains(anonList.body, "themes/hero.txt") {
+		var page struct {
+			Objects []struct {
+				Key string `json:"key"`
+			} `json:"objects"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if anonList.code != 200 || json.Unmarshal([]byte(anonList.body), &page) != nil ||
+			len(page.Objects) != 1 || page.Objects[0].Key != "themes/hero.txt" {
 			return fmt.Errorf("anonymous listing must show only public files: %w", anonList)
+		}
+		if page.NextCursor != "" && page.NextCursor != "themes/hero.txt" {
+			return fmt.Errorf("anonymous listing cursor %q must be empty or the last visible key", page.NextCursor)
+		}
+		if r := call("GET", "/v1/storage/?cursor="+url.QueryEscape(page.NextCursor), env.publicKey, "", ""); strings.Contains(r.body, "themesz-private") {
+			return fmt.Errorf("anonymous listing leaked a private key: %w", r)
 		}
 		// Anonymous download URLs are capped at 1 h.
 		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/hero.txt","operation":"download","expires_in":604800}`); r.code != 200 || !strings.Contains(r.body, "X-Amz-Expires=3600") {
@@ -859,14 +914,14 @@ var teamKnownGaps = map[string]knownGap{}
 func check(t *testing.T, env *teamEnv, name string, fn func() error) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
+		if env.scenario == "free" && teamOnlyChecks[name] {
+			t.Skip("Team only (dedicated database)")
+		}
 		err := fn()
 		var hr *httpResult
 		if errors.As(err, &hr) && hr.neverReachedHandler() {
 			// A harness auth problem must not hide behind a known gap.
 			t.Fatalf("request never reached the handler: %v", err)
-		}
-		if env.scenario == "free" && teamOnlyChecks[name] {
-			t.Skip("Team only (dedicated database)")
 		}
 		gap, known := teamKnownGaps[name]
 		if !known {
@@ -966,6 +1021,7 @@ type teamEnv struct {
 	bucket            string
 	ownerEmail        string
 	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
+	rt                *pgxpool.Pool // the tenant DB's runtime role (RLS applies)
 	shared            *pgxpool.Pool
 	ded               *pgxpool.Pool // admin view of the dedicated DB, for assertions
 }
@@ -1245,6 +1301,18 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		}
 	}
 
+	// The tenant DB's runtime role, for RLS-level checks: the gateway role
+	// on the shared cluster, or eurobase_gateway on the dedicated instance.
+	rt := gw
+	if !free {
+		ru := withDB(t, cfg.dedOwner, dedDB)
+		ru.User = url.UserPassword("eurobase_gateway", cfg.runtimePW)
+		q := ru.Query()
+		q.Set("sslmode", "require")
+		ru.RawQuery = q.Encode()
+		rt = mustPool(ru.String())
+	}
+
 	// The real router with Team routing on and platform auth wired as in
 	// cmd/gateway.
 	t.Setenv("VAULT_ENCRYPTION_KEY", keyB64)
@@ -1283,7 +1351,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
 		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, cipher: cipher, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
-		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
+		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, rt: rt, ded: dedAdmin,
 	}
 }
 

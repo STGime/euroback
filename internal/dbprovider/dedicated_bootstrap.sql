@@ -344,6 +344,8 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.email_tokens ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.storage_objects ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.storage_shared_prefixes ENABLE ROW LEVEL SECURITY', v_schema_name);
+    -- Byte-order key index for SDK listings (keyset pagination, #697).
+    EXECUTE format('CREATE INDEX idx_storage_objects_key_c ON %I.storage_objects (key COLLATE "C")', v_schema_name);
     EXECUTE format('ALTER TABLE %I.todos ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.vault_secrets ENABLE ROW LEVEL SECURITY', v_schema_name);
 

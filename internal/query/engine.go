@@ -482,6 +482,9 @@ func nestRelationColumns(rows []map[string]interface{}, relations []ResolvedRela
 
 // InsertRow builds and executes a parameterized INSERT ... RETURNING * query.
 func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName string, data map[string]interface{}) (map[string]interface{}, error) {
+	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
+		return nil, err
+	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return nil, err
@@ -539,6 +542,9 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 
 // UpdateRow builds and executes a parameterized UPDATE ... WHERE id = $1 RETURNING *.
 func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowID string, data map[string]interface{}) (map[string]interface{}, error) {
+	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
+		return nil, err
+	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("no data provided for update")
 	}
@@ -591,6 +597,9 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 
 // DeleteRow builds and executes a parameterized DELETE WHERE id = $1.
 func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowID string) error {
+	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
+		return err
+	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return err
@@ -614,6 +623,9 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 // DeleteRows deletes multiple rows by ID using ANY($1).
 // Returns the number of rows affected.
 func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) (int64, error) {
+	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
+		return 0, err
+	}
 	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return 0, err
 	}

@@ -157,6 +157,31 @@ func checkDeniedColumns(ctx context.Context, tableName string, cols []string) er
 	return nil
 }
 
+// platformManagedTables are written only by their own API: the typed
+// data API may read them (under RLS) but a non-service caller may not
+// insert, update or delete rows (#697). Rewriting a storage_objects row
+// (its key or size) would re-point it at another S3 object — gaining
+// read / overwrite / delete on an untracked or developer file — or dodge
+// the storage quota; rules in storage_shared_prefixes are the
+// developer's.
+var platformManagedTables = map[string]bool{
+	"storage_objects":         true,
+	"storage_shared_prefixes": true,
+}
+
+// checkPlatformManagedWrite refuses a non-service write to a
+// platform-managed table through the data API.
+func checkPlatformManagedWrite(ctx context.Context, tableName string) error {
+	if serviceKeyExempt(ctx) || !platformManagedTables[tableName] {
+		return nil
+	}
+	return fmt.Errorf("%w: table %q is managed by the storage API (/v1/storage) and is read-only via the data API", ErrPlatformManagedTable, tableName)
+}
+
+// ErrPlatformManagedTable: a non-service write to a platform-managed table
+// through the data API (403).
+var ErrPlatformManagedTable = errors.New("platform-managed table")
+
 // checkDeniedRelation rejects embedding a protected table when the
 // requested columns would expose a sensitive one — including the
 // wildcard `table(*)`, which pulls every column via row_to_json and so
