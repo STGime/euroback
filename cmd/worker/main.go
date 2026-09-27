@@ -292,27 +292,34 @@ func main() {
 		go func() {
 			// Team projects (#676): the function role on each dedicated
 			// instance, through a short-lived owner pool (never PoolCache).
-			openDedicated := func(ctx context.Context, projectID string) (*pgxpool.Pool, string, error) {
+			openDedicated := func(ctx context.Context, projectID string) (*pgxpool.Pool, tenantlogin.DedicatedDB, error) {
 				rec, err := providerRepo.GetLiveByProject(ctx, projectID)
 				if err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
-						return nil, "", nil
+						return nil, tenantlogin.DedicatedDB{}, nil
 					}
-					return nil, "", err
+					return nil, tenantlogin.DedicatedDB{}, err
 				}
-				p, err := dbprovider.OpenOwnerPool(ctx, providerRepo, cipher, projectID)
+				p, err := dbprovider.OpenOwnerPoolFor(ctx, rec, cipher)
 				if err != nil {
-					return nil, "", err
+					return nil, tenantlogin.DedicatedDB{}, err
 				}
-				return p, rec.DatabaseName, nil
+				return p, tenantlogin.DedicatedDB{ID: rec.ID, Database: rec.DatabaseName}, nil
 			}
+			// Instances bootstrapped before #676 have no function role yet.
+			// Only created when missing: never re-grant what a Team customer
+			// revoked on their own database.
 			ensurer.PrepareDedicated = func(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+				ready, err := dbprovider.FuncRoleReady(ctx, pool, schema)
+				if err != nil || ready {
+					return err
+				}
 				return dbprovider.EnsureFuncRole(ctx, pool, schema)
 			}
 			// CONNECT for the function role comes from the provider (a SQL
-			// GRANT by the owner is a no-op on Scaleway's rdb database) —
-			// needed for instances provisioned before #676.
-			ensurer.GrantDedicatedConnect = func(ctx context.Context, projectID, role string) error {
+			// GRANT by the owner is a no-op on Scaleway's rdb database);
+			// the lockdown then strips whatever else its readwrite grants.
+			ensurer.GrantDedicatedConnect = func(ctx context.Context, projectID, schema string, pool *pgxpool.Pool) error {
 				rec, err := providerRepo.GetLiveByProject(ctx, projectID)
 				if err != nil {
 					return err
@@ -325,7 +332,10 @@ func main() {
 				if !ok {
 					return fmt.Errorf("provider %s can't grant CONNECT", rec.Provider)
 				}
-				return granter.SetPrivilege(ctx, rec.ProviderInstanceID, rec.DatabaseName, role, "readwrite")
+				if err := granter.SetPrivilege(ctx, rec.ProviderInstanceID, rec.DatabaseName, tenantlogin.FuncRole(schema), "readwrite"); err != nil {
+					return err
+				}
+				return dbprovider.EnsureFuncRole(ctx, pool, schema)
 			}
 			run := func() {
 				n, err := ensurer.EnsureAll(ctx)

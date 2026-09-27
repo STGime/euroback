@@ -19,7 +19,7 @@ import type {
   WorkerToParent,
 } from "./bridge.ts";
 import { newVerifier, type Verifier } from "./hmac.ts";
-import { openSealed, resolveVaultSecret } from "./vault.ts";
+import { openSealed, requirePerTenantSealed, resolveVaultSecret } from "./vault.ts";
 import { RouteCache, type TenantDbRow, TenantDbNotReady, type TenantRoute } from "./tenant_route.ts";
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
@@ -309,24 +309,20 @@ async function executeFunction(
   const setPathSQL = "SET LOCAL search_path TO " + quoteIdent(schemaName);
   const db = await getDB();
 
-  // Where this project's tenant data lives (#676) — resolved on first use.
-  // A Team project runs on its dedicated instance; a failed lookup or a
-  // not-yet-active instance fails the call (retryable) — never the shared
-  // cluster.
-  let routePromise: Promise<TenantRoute> | null = null;
+  // Where this project's tenant data lives (#676), per call (RouteCache
+  // keeps it for a few seconds). A Team project runs on its dedicated
+  // instance; a failed lookup or an instance that isn't serving (not yet
+  // active, being upgraded / restored / in maintenance) fails the call
+  // (retryable) — never the shared cluster.
   function tenantRoute(): Promise<TenantRoute> {
-    routePromise ??= tenantRoutes.get(projectId, async (pid) => {
+    return tenantRoutes.get(projectId, async (pid) => {
       try {
-        return await db`SELECT host, port, database_name, state FROM public.runner_get_tenant_db(${pid}::uuid)` as unknown as TenantDbRow[];
+        return await db`SELECT id::text AS id, host, port, database_name, state FROM public.runner_get_tenant_db(${pid}::uuid)` as unknown as TenantDbRow[];
       } catch (err) {
         console.error(`[tenant-db] route lookup for ${pid} failed`, err instanceof Error ? err.message : err);
         throw new Error("database routing is unavailable for this project; retry shortly");
       }
     });
-    routePromise.catch(() => {
-      routePromise = null; // don't pin a failed lookup for the invocation
-    });
-    return routePromise;
   }
   async function dedicatedTarget() {
     const r = await tenantRoute();
@@ -342,10 +338,11 @@ async function executeFunction(
     return async (name: string) => {
       const lease = await tp.acquire(schemaName, funcRole, target);
       try {
-        return await lease.client.unsafe(
+        const rows = await lease.client.unsafe(
           `SELECT encrypted, nonce, key_version FROM ${quoteIdent(schemaName)}.runner_vault_get($1)`,
           [name],
         );
+        return requirePerTenantSealed(rows);
       } catch (err) {
         if (isLoginError(err)) lease.invalidate();
         throw err;
@@ -376,13 +373,15 @@ async function executeFunction(
     if (!tp) {
       throw new Error("database access is not configured on this runner (FUNC_PASSWORD_SECRET)");
     }
+    // Throws the retryable not-ready / routing error itself.
+    const target = await dedicatedTarget();
     // One retry when the connection drops before the transaction started
     // (pooler restart, idle-close race): no SQL has run yet, so it's safe.
     for (let attempt = 1; ; attempt++) {
       let started = false;
       let lease;
       try {
-        lease = await tp.acquire(schemaName, funcRole, await dedicatedTarget());
+        lease = await tp.acquire(schemaName, funcRole, target);
         // deno-lint-ignore no-explicit-any
         return await lease.client.begin(async (tx: any) => {
           started = true;
@@ -415,10 +414,20 @@ async function executeFunction(
         }
         // A failed login (not applied yet for a brand-new project) gets a
         // retryable message and a fresh client next time.
-        if (!isLoginError(err)) throw err;
-        lease?.invalidate();
-        console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
-        throw new Error("database login for this project is unavailable; retry shortly");
+        if (isLoginError(err)) {
+          lease?.invalidate();
+          console.warn(`[tenant-db] login for ${funcRole} failed (${(err as { code?: string }).code})`);
+          throw new Error("database login for this project is unavailable; retry shortly");
+        }
+        // Dedicated instance unreachable / refusing before any SQL ran
+        // (DNS, TLS, CONNECT not granted yet): same retryable shape, the
+        // driver's error goes to our log only.
+        if (target) {
+          lease?.invalidate();
+          console.warn(`[tenant-db] dedicated database for ${funcRole} unavailable`, err instanceof Error ? err.message : err);
+          throw new Error("the project's database is unavailable; retry shortly");
+        }
+        throw err;
       } finally {
         lease?.release();
       }

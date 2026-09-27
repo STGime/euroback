@@ -9,6 +9,8 @@
 // after a Pro→Team upgrade.
 
 export interface DedicatedTarget {
+  /** project_databases.id — part of the password derivation. */
+  id: string;
   host: string;
   port: number;
   database: string;
@@ -20,6 +22,7 @@ export type TenantRoute =
   | { kind: "not_ready"; state: string };
 
 export interface TenantDbRow {
+  id?: string | null;
   host: string | null;
   port: number | null;
   database_name: string | null;
@@ -30,10 +33,13 @@ export interface TenantDbRow {
 export function routeFromRows(rows: TenantDbRow[] | undefined | null): TenantRoute {
   const row = rows?.[0];
   if (!row) return { kind: "shared" };
-  if (row.state !== "active" || !row.host || !row.port || !row.database_name) {
+  if (row.state !== "active" || !row.id || !row.host || !row.port || !row.database_name) {
     return { kind: "not_ready", state: row.state };
   }
-  return { kind: "dedicated", target: { host: row.host, port: Number(row.port), database: row.database_name } };
+  return {
+    kind: "dedicated",
+    target: { id: row.id, host: row.host, port: Number(row.port), database: row.database_name },
+  };
 }
 
 /**
@@ -53,7 +59,16 @@ export function dedicatedDbUrl(t: DedicatedTarget, role: string, password: strin
 
 /** Stable cache key for a target (a project moved to another instance gets a new client). */
 export function targetKey(t: DedicatedTarget): string {
-  return `${t.host}:${t.port}/${t.database}`;
+  return `${t.id}@${t.host}:${t.port}/${t.database}`;
+}
+
+/**
+ * Password derivation subject on a dedicated instance: per instance, so a
+ * leaked Team password opens nothing else. Must match Go
+ * tenantlogin.DedicatedSubject.
+ */
+export function dedicatedSubject(t: DedicatedTarget, schema: string): string {
+  return `ded:${t.id}:${schema}`;
 }
 
 /** Thrown for a Team project whose dedicated database isn't active yet. */
@@ -67,7 +82,10 @@ export class TenantDbNotReady extends Error {
 /** Short-lived per-project cache of routes, so each invocation doesn't re-query. */
 export class RouteCache {
   private entries = new Map<string, { route: TenantRoute; at: number }>();
-  constructor(private readonly ttlMs = 30_000, private readonly now: () => number = Date.now) {}
+  // Short: after a restore cutover or a move, a cached route still points
+  // at the old instance until it expires (in-flight moves themselves are
+  // reported as not ready by runner_get_tenant_db).
+  constructor(private readonly ttlMs = 5_000, private readonly now: () => number = Date.now) {}
 
   async get(projectId: string, lookup: (projectId: string) => Promise<TenantDbRow[]>): Promise<TenantRoute> {
     const hit = this.entries.get(projectId);

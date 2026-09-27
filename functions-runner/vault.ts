@@ -134,6 +134,19 @@ export async function openSealed(
 // { error } for platform-side failures (no key configured, lookup failed,
 // wrong key / decryption failed). Not-found stays a plain null value —
 // that one is the developer's to handle.
+/**
+ * Vault rows from a Team project's dedicated database (#676) must be
+ * sealed with the per-tenant key (key_version >= 1). The customer owns
+ * that database and could plant a key_version 0 row, which would be opened
+ * with the raw master key — refuse it (the lookup then fails).
+ */
+export function requirePerTenantSealed<T extends { key_version: number | null }>(rows: T[]): T[] {
+  if (rows.some((r) => !(Number(r.key_version) >= 1))) {
+    throw new Error("refused a legacy (key_version < 1) vault row on a dedicated database");
+  }
+  return rows;
+}
+
 export async function resolveVaultSecret(
   // deno-lint-ignore no-explicit-any
   db: any,

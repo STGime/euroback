@@ -36,7 +36,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 //go:embed dedicated_bootstrap.sql
@@ -328,17 +327,42 @@ var dedicatedFuncRoleSQL string
 
 // EnsureFuncRole (re)defines public.ensure_tenant_func_role and applies it
 // to schema on a dedicated instance, as its owner (#676): the tenant's
-// <schema>_func role (NOLOGIN — tenantlogin sets the login) and the
-// <schema>.runner_vault_get helper. Idempotent; the worker's tenant-login
-// pass calls it too, so instances bootstrapped before #676 catch up.
-func EnsureFuncRole(ctx context.Context, conn interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+// <schema>_func role (NOLOGIN — tenantlogin sets the login) with exactly
+// the shared cluster's privileges, and the <schema>.runner_vault_get
+// helper. Idempotent. Run it again after the provider's SetPrivilege on
+// the role, which may grant more (the lockdown strips it).
+func EnsureFuncRole(ctx context.Context, db interface {
+	Begin(context.Context) (pgx.Tx, error)
 }, schema string) error {
-	if _, err := conn.Exec(ctx, dedicatedFuncRoleSQL); err != nil {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ensure function role: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	// Don't queue behind the customer's own locks (it's their database);
+	// the worker's next pass retries.
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`); err != nil {
+		return fmt.Errorf("ensure function role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, dedicatedFuncRoleSQL); err != nil {
 		return fmt.Errorf("apply dedicated_func_role.sql: %w", err)
 	}
-	if _, err := conn.Exec(ctx, `SELECT public.ensure_tenant_func_role($1)`, schema); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT public.ensure_tenant_func_role($1)`, schema); err != nil {
 		return fmt.Errorf("ensure_tenant_func_role: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
+}
+
+// FuncRoleReady reports whether schema's function role and vault helper
+// already exist on a dedicated instance. The worker's periodic pass only
+// runs EnsureFuncRole when they don't, so it never re-grants privileges a
+// Team customer revoked on their own database.
+func FuncRoleReady(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, schema string) (bool, error) {
+	var ok bool
+	err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)
+		AND to_regprocedure(quote_ident($2) || '.runner_vault_get(text)') IS NOT NULL`,
+		schema+"_func", schema).Scan(&ok)
+	return ok, err
 }

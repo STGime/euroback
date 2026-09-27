@@ -60,6 +60,16 @@ func FuncPassword(secret []byte, schema string) string {
 	return hex.EncodeToString(hmacSHA256(secret, "funcpw:"+schema))
 }
 
+// DedicatedSubject is the derivation subject for a tenant's function role
+// on a Team project's dedicated instance (#676): FuncPassword(secret,
+// DedicatedSubject(id, schema)). Distinct per instance (project_databases.id),
+// so a leaked Team password opens neither the shared cluster's role of the
+// same schema (the stale copy after an upgrade) nor another instance of the
+// project. Must match functions-runner/tenant_route.ts dedicatedSubject().
+func DedicatedSubject(databaseID, schema string) string {
+	return "ded:" + databaseID + ":" + schema
+}
+
 // ScramVerifier returns the SCRAM-SHA-256 verifier PostgreSQL stores for
 // FuncPassword(secret, schema) (RFC 5802 / 7677). The salt is derived
 // from the secret, so the result is deterministic.
@@ -85,13 +95,14 @@ type Ensurer struct {
 	secret    []byte
 
 	// PrepareDedicated, if set, runs on a Team project's owner pool before
-	// its login is applied — the worker sets dbprovider.EnsureFuncRole so
-	// instances bootstrapped before #676 get the function role.
+	// its login is applied — the worker creates the function role there
+	// when it's missing (instances bootstrapped before #676).
 	PrepareDedicated func(ctx context.Context, ownerPool *pgxpool.Pool, schema string) error
 	// GrantDedicatedConnect, if set, grants the function role CONNECT
 	// through the provider (SetPrivilege) when EnsureDedicated reports
-	// ErrNoConnect; the login is then re-verified.
-	GrantDedicatedConnect func(ctx context.Context, projectID, role string) error
+	// ErrNoConnect — and then re-applies the lockdown on ownerPool
+	// (dbprovider.EnsureFuncRole); the login is re-verified after.
+	GrantDedicatedConnect func(ctx context.Context, projectID, schema string, ownerPool *pgxpool.Pool) error
 
 	mu       sync.Mutex
 	ensured  map[string]bool // schemas done since the last full pass
@@ -124,24 +135,28 @@ func NewEnsurer(adminPool *pgxpool.Pool, database string, secret []byte) (*Ensur
 // credentials and verifies CONNECT (a GRANT by a non-owner can silently
 // no-op, so the check is authoritative).
 func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
-	return ensureOn(ctx, e.adminPool, e.database, e.secret, schema, true)
+	return ensureOn(ctx, e.adminPool, e.database, e.secret, schema, schema, true)
 }
 
 // EnsureDedicated does the same on a Team project's dedicated instance
-// (#676), through ownerPool (connected as the instance's owner, which
+// (project_databases row databaseID)
+// (#676), with the per-instance password (DedicatedSubject), through ownerPool (connected as the instance's owner, which
 // created the role via ensure_tenant_func_role). CONNECT there comes from
 // the provider's SetPrivilege (a GRANT by the owner is a no-op on
 // Scaleway's rdb database); if it's missing the error says so.
-func EnsureDedicated(ctx context.Context, ownerPool *pgxpool.Pool, database string, secret []byte, schema string) error {
-	return ensureOn(ctx, ownerPool, database, secret, schema, false)
+func EnsureDedicated(ctx context.Context, ownerPool *pgxpool.Pool, database string, secret []byte, schema, databaseID string) error {
+	if databaseID == "" {
+		return errors.New("dedicated function login: no database id")
+	}
+	return ensureOn(ctx, ownerPool, database, secret, schema, DedicatedSubject(databaseID, schema), false)
 }
 
-func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret []byte, schema string, asMigrator bool) error {
+func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret []byte, schema, subject string, asMigrator bool) error {
 	if !schemaRe.MatchString(schema) {
 		return fmt.Errorf("invalid tenant schema %q", schema)
 	}
 	role := FuncRole(schema)
-	verifier, err := ScramVerifier(secret, schema)
+	verifier, err := ScramVerifier(secret, subject)
 	if err != nil {
 		return err
 	}
@@ -218,14 +233,26 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 // but no CONNECT, which only the provider's SetPrivilege can grant there.
 var ErrNoConnect = errors.New("no CONNECT on the database: grant it via the provider's SetPrivilege (readwrite)")
 
+// DedicatedDB identifies the dedicated instance an opener connected to.
+type DedicatedDB struct {
+	ID       string // project_databases.id (the password subject)
+	Database string
+}
+
 // DedicatedOpener opens a short-lived owner pool to a Team project's
-// dedicated instance and returns its database name; (nil, "", nil) when the
-// project has none active. The caller closes the pool.
-type DedicatedOpener func(ctx context.Context, projectID string) (*pgxpool.Pool, string, error)
+// dedicated instance; (nil, _, nil) when the project has none active. The
+// caller closes the pool.
+type DedicatedOpener func(ctx context.Context, projectID string) (*pgxpool.Pool, DedicatedDB, error)
+
+// dedicatedTimeout bounds one Team project in EnsureTeam, so an
+// unreachable instance or a customer holding locks can't stall the pass
+// (which also carries the shared-cluster logins).
+const dedicatedTimeout = 30 * time.Second
 
 // EnsureTeam applies EnsureDedicated to every Team project with an active
 // dedicated instance (#676): the function role there gets LOGIN, the
-// connection limit and its derived password. Same cadence as EnsureAll.
+// connection limit and its per-instance password. Same cadence as
+// EnsureAll; each instance once per full pass.
 func (e *Ensurer) EnsureTeam(ctx context.Context, open DedicatedOpener) (int, error) {
 	if open == nil {
 		return 0, nil
@@ -258,31 +285,7 @@ func (e *Ensurer) EnsureTeam(ctx context.Context, open DedicatedOpener) (int, er
 	var firstErr error
 	done := 0
 	for _, t := range targets {
-		key := "team:" + t.schema
-		e.mu.Lock()
-		skip := e.ensured[key]
-		e.mu.Unlock()
-		if skip {
-			continue
-		}
-		pool, database, err := open(ctx, t.id)
-		if err == nil && pool == nil {
-			continue
-		}
-		if err == nil {
-			if e.PrepareDedicated != nil {
-				err = e.PrepareDedicated(ctx, pool, t.schema)
-			}
-			if err == nil {
-				err = EnsureDedicated(ctx, pool, database, e.secret, t.schema)
-			}
-			if errors.Is(err, ErrNoConnect) && e.GrantDedicatedConnect != nil {
-				if err = e.GrantDedicatedConnect(ctx, t.id, FuncRole(t.schema)); err == nil {
-					err = EnsureDedicated(ctx, pool, database, e.secret, t.schema)
-				}
-			}
-			pool.Close()
-		}
+		key, err := e.ensureTeamOne(ctx, open, t.id, t.schema)
 		if err != nil {
 			slog.Error("tenantlogin: ensure dedicated function role login failed", "project_id", t.id, "schema", t.schema, "error", err)
 			if firstErr == nil {
@@ -290,12 +293,50 @@ func (e *Ensurer) EnsureTeam(ctx context.Context, open DedicatedOpener) (int, er
 			}
 			continue
 		}
-		e.mu.Lock()
-		e.ensured[key] = true
-		e.mu.Unlock()
-		done++
+		if key != "" {
+			done++
+		}
 	}
 	return done, firstErr
+}
+
+// ensureTeamOne handles one project; it returns the cache key it ensured
+// ("" when skipped).
+func (e *Ensurer) ensureTeamOne(ctx context.Context, open DedicatedOpener, projectID, schema string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, dedicatedTimeout)
+	defer cancel()
+	pool, db, err := open(ctx, projectID)
+	if err != nil || pool == nil {
+		return "", err
+	}
+	defer pool.Close()
+	// Per instance: a restore or move to a new instance is picked up at
+	// once, not at the next full pass.
+	key := "team:" + db.ID
+	e.mu.Lock()
+	skip := e.ensured[key]
+	e.mu.Unlock()
+	if skip {
+		return "", nil
+	}
+	if e.PrepareDedicated != nil {
+		if err := e.PrepareDedicated(ctx, pool, schema); err != nil {
+			return "", err
+		}
+	}
+	err = EnsureDedicated(ctx, pool, db.Database, e.secret, schema, db.ID)
+	if errors.Is(err, ErrNoConnect) && e.GrantDedicatedConnect != nil {
+		if err = e.GrantDedicatedConnect(ctx, projectID, schema, pool); err == nil {
+			err = EnsureDedicated(ctx, pool, db.Database, e.secret, schema, db.ID)
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	e.mu.Lock()
+	e.ensured[key] = true
+	e.mu.Unlock()
+	return key, nil
 }
 
 // EnsureAll applies EnsureOne to shared-cluster tenant schemas: only new

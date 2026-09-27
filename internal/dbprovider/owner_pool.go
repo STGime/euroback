@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,6 +43,12 @@ func OpenOwnerPool(ctx context.Context, repo *Repo, cipher *Cipher, projectID st
 		}
 		return nil, fmt.Errorf("dedicated database lookup: %w", err)
 	}
+	return OpenOwnerPoolFor(ctx, rec, cipher)
+}
+
+// OpenOwnerPoolFor is OpenOwnerPool for a row the caller already holds
+// (so everything it does refers to that one row).
+func OpenOwnerPoolFor(ctx context.Context, rec *Record, cipher *Cipher) (*pgxpool.Pool, error) {
 	if rec.State != StateActive || rec.Host == "" || rec.Port == 0 {
 		return nil, fmt.Errorf("%w (state %s)", ErrDedicatedNotReady, rec.State)
 	}
@@ -57,6 +64,9 @@ func OpenOwnerPool(ctx context.Context, repo *Repo, cipher *Cipher, projectID st
 		return nil, fmt.Errorf("dedicated database dsn: %w", err)
 	}
 	cfg.MaxConns = 1
+	// Background callers loop over projects: an unreachable instance must
+	// not stall them for the OS TCP timeout.
+	cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open dedicated database: %w", err)

@@ -10,11 +10,15 @@
 // tenant, a soft global cap, idle close, LRU eviction of *idle* entries
 // only — a connection with a transaction in flight is never closed.
 
-import { type DedicatedTarget, dedicatedDbUrl, targetKey } from "./tenant_route.ts";
+import { type DedicatedTarget, dedicatedDbUrl, dedicatedSubject, targetKey } from "./tenant_route.ts";
 
 const enc = new TextEncoder();
 
-/** HMAC-SHA256(secret, "funcpw:" + schema), hex. Must match Go FuncPassword. */
+/**
+ * HMAC-SHA256(secret, "funcpw:" + subject), hex. Must match Go FuncPassword.
+ * The subject is the schema on the shared cluster, dedicatedSubject() on a
+ * Team project's instance.
+ */
 export async function funcPassword(secret: string, schema: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode("funcpw:" + schema)));
@@ -73,7 +77,7 @@ export class TenantDBPool {
     let entry = this.entries.get(key);
     if (!entry) {
       this.evictIdleOverCap();
-      const client = funcPassword(this.secret, schema).then((pw) =>
+      const client = funcPassword(this.secret, target ? dedicatedSubject(target, schema) : schema).then((pw) =>
         this.factory(target ? dedicatedDbUrl(target, role, pw) : tenantDbUrl(this.baseUrl, role, pw))
       );
       entry = { client, lastUsed: this.now(), inUse: 0 };

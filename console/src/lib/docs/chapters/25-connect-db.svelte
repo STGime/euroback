@@ -87,13 +87,13 @@ export const db = drizzle(client);</code></pre>
 				<p class="text-sm text-gray-700">
 					Your instance allows <strong>100 connections</strong> (Scaleway's default), of which about
 					<strong>95</strong> are usable — a few are reserved for Scaleway's own maintenance. They are shared by
-					your own clients and by Eurobase itself: the SDK, the console and background jobs use up to about
-					<strong>40</strong> during a deploy or an export, fewer otherwise. The <strong>read-only</strong> role
+					your own clients and by Eurobase itself: the SDK, the console, edge functions and background jobs use up to about
+					<strong>50</strong> during a deploy or an export, fewer otherwise. The <strong>read-only</strong> role
 					is capped at <strong>10</strong> connections.
 				</p>
 				<p class="text-sm text-gray-700">
 					Leave that headroom free — if your app opens every remaining connection, your own SDK and console
-					traffic start failing. Size your client's pool accordingly (a total of about 40–50 across all your processes):
+					traffic start failing. Size your client's pool accordingly (a total of about 40 across all your processes):
 				</p>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li><strong>Prisma</strong>: add <code class="rounded bg-gray-100 px-1 text-[11px]">?connection_limit=10</code> to the URL (per process).</li>

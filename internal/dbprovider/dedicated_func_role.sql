@@ -20,7 +20,9 @@
 -- (the shared cluster's public.vault_get_for_runner equivalent):
 -- SECURITY DEFINER as the owner (vault_secrets' RLS admits only the
 -- auth path), EXECUTE for the func role only. Returns the sealed secret;
--- the runner decrypts it as before.
+-- the runner decrypts it as before — and refuses key_version < 1 here:
+-- the customer owns this database and could plant a legacy row, and
+-- version 0 is sealed with the raw master key, not a per-tenant one.
 --
 -- Idempotent; called by BootstrapDedicated on every bootstrap (also on
 -- retries, where provision_tenant exits early).
@@ -54,11 +56,25 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.auth_uid(), %I.auth_role(), %I.auth_email() TO %I',
                    p_schema, p_schema, p_schema, v_role);
 
+    -- Lockdown: exactly the shared cluster's privileges. The provider's
+    -- SetPrivilege (readwrite, which grants CONNECT) may add more — as
+    -- Scaleway's readonly does for eurobase_readonly (LockdownReadonlyGrants)
+    -- — so strip anything beyond DML + sequence USAGE/SELECT. Callers run
+    -- this again after SetPrivilege. (Grants made by the provider's
+    -- superuser are recorded with the owner as grantor, so the owner can
+    -- revoke them.)
+    EXECUTE format('REVOKE TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA %I FROM %I', p_schema, v_role);
+    EXECUTE format('REVOKE UPDATE ON ALL SEQUENCES IN SCHEMA %I FROM %I', p_schema, v_role);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %I REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLES FROM %I', p_schema, v_role);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_owner IN SCHEMA %I REVOKE UPDATE ON SEQUENCES FROM %I', p_schema, v_role);
+    EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', p_schema, v_role);
+    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', v_role);
+
     EXECUTE format(
         'CREATE OR REPLACE FUNCTION %I.runner_vault_get(p_name text)
          RETURNS TABLE(encrypted bytea, nonce bytea, key_version smallint)
          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $_$
-           SELECT secret, nonce, COALESCE(key_version, 0::smallint) FROM %I.vault_secrets WHERE name = p_name
+           SELECT secret, nonce, key_version FROM %I.vault_secrets WHERE name = p_name
          $_$', p_schema, p_schema);
     -- SECURITY DEFINER convention: no PUBLIC EXECUTE; the func role only.
     EXECUTE format('REVOKE ALL ON FUNCTION %I.runner_vault_get(text) FROM PUBLIC', p_schema);
