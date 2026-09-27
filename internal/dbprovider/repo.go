@@ -722,8 +722,8 @@ func Wrap(err error) error {
 	return err
 }
 
-// ResealLegacy re-seals every project_databases password (owner, runtime,
-// readonly) not at cipher.Version() — step 2 of the credential cipher
+// ResealLegacy re-seals every live project_databases password (owner,
+// runtime, readonly) not at cipher.Version() — step 2 of the credential cipher
 // rollout (cipher.go). One transaction per row with FOR UPDATE, so a
 // concurrent credential write (rotation, backfill) is never lost; a row
 // that can't be opened is skipped and reported. Idempotent: rows already
@@ -734,12 +734,16 @@ func (r *Repo) ResealLegacy(ctx context.Context, cipher *Cipher) (int, int, erro
 		return 0, 0, errors.New("dbprovider.Repo.ResealLegacy: no cipher")
 	}
 	target := cipher.Version()
-	rows, err := r.pool.Query(ctx, `
+	// Live rows only: a soft-deleted instance's credential is never
+	// opened again, and a broken one would log every hour forever.
+	const q = `
 		SELECT id::text FROM public.project_databases
-		 WHERE password_key_version <> $1
-		    OR runtime_password_key_version <> $1
-		    OR readonly_password_key_version <> $1
-		 ORDER BY id`, target)
+		 WHERE deleted_at IS NULL
+		   AND (password_key_version <> $1
+		        OR runtime_password_key_version <> $1
+		        OR readonly_password_key_version <> $1)
+		 ORDER BY id`
+	rows, err := r.pool.Query(ctx, q, target)
 	if err != nil {
 		return 0, 0, fmt.Errorf("dbprovider.Repo.ResealLegacy: list: %w", err)
 	}
@@ -781,11 +785,12 @@ func (r *Repo) resealRow(ctx context.Context, cipher *Cipher, id string) error {
 		keyVersion *int16
 	}
 	slots := []*slot{{col: "password"}, {col: "runtime_password"}, {col: "readonly_password"}}
-	if err := tx.QueryRow(ctx, `
+	const q = `
 		SELECT password_ciphertext, password_nonce, password_key_version,
 		       runtime_password_ciphertext, runtime_password_nonce, runtime_password_key_version,
 		       readonly_password_ciphertext, readonly_password_nonce, readonly_password_key_version
-		  FROM public.project_databases WHERE id = $1 FOR UPDATE`, id).Scan(
+		  FROM public.project_databases WHERE id = $1 FOR UPDATE`
+	if err := tx.QueryRow(ctx, q, id).Scan(
 		&slots[0].ct, &slots[0].nonce, &slots[0].keyVersion,
 		&slots[1].ct, &slots[1].nonce, &slots[1].keyVersion,
 		&slots[2].ct, &slots[2].nonce, &slots[2].keyVersion,

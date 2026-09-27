@@ -122,7 +122,8 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if err != nil {
 			return err
 		}
-		repo := dbprovider.NewRepo(env.shared)
+		// As the worker runs it: on its pool (eurobase_gateway).
+		repo := dbprovider.NewRepo(env.gw)
 		// Rows of the other scenarios (own keys, placeholder credentials)
 		// fail to open and are skipped — reported, never a panic or an abort.
 		if _, _, err := repo.ResealLegacy(ctx, current); err != nil {
