@@ -294,11 +294,11 @@ Supports `File`, `Blob`, `ArrayBuffer`, `Uint8Array`, and Node.js `Buffer` for u
 
 ### Who sees which files
 
-- Each signed-in user **owns** the files they upload: only they can list, download, replace or delete them. Use keys that include the user's id (e.g. `avatars/<user-id>.png`) — the first user to upload a key owns it.
+- Each signed-in user **owns** the files they upload: only they can list, download, replace or delete them. Use keys that include the user's id (e.g. `avatars/<user-id>.png`) — the first user to upload a key owns it (until you upload to the same key from the console, which makes it yours).
 - Files **you** upload (console, your server with the secret key, edge functions) are private by default. To let your app's users read them, share their folder in the console (**Storage → folder → Sharing**):
   - **Signed-in users** — every signed-in user can download and list them; display them with `createSignedUrl(key, 'download')`.
   - **Public** — anyone with your public key can read them; use `getPublicUrl()` for `<img src>`, audio, CSS…
-- Your users can never upload, replace or delete files in a shared folder. The `exports/` folder can't be shared.
+- Only your files are shared. Your users can't add or replace files in a shared folder (they can still delete their own earlier files there) — so don't share a folder your users upload into. The `exports/` folder can't be shared.
 - Signed URLs expire after at most 1 hour (upload and download) when requested with the public key.
 
 ```ts

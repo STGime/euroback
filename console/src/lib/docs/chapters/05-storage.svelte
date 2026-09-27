@@ -61,7 +61,7 @@ await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Who sees which files</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li>Each signed-in user <strong>owns</strong> the files they upload: only they can list, download, replace or delete them. Use keys that include the user's id (e.g. <code class="rounded bg-gray-100 px-1 text-xs">avatars/&lt;user-id&gt;.png</code>) &mdash; the first user to upload a key owns it.</li>
+					<li>Each signed-in user <strong>owns</strong> the files they upload: only they can list, download, replace or delete them. Use keys that include the user's id (e.g. <code class="rounded bg-gray-100 px-1 text-xs">avatars/&lt;user-id&gt;.png</code>) &mdash; the first user to upload a key owns it (until you upload to the same key from the console, which makes it yours).</li>
 					<li>Files <strong>you</strong> upload (console, your server with the secret key, edge functions) are private by default.</li>
 					<li>Signed URLs requested from your app expire after at most 1 hour.</li>
 				</ul>
@@ -76,8 +76,8 @@ await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 					<li><strong>Public</strong> &mdash; anyone with your project's public key can read them, no sign-in needed. Use <code class="rounded bg-gray-100 px-1 text-xs">getPublicUrl(key)</code> (SDK 0.8.0+) for <code class="rounded bg-gray-100 px-1 text-xs">&lt;img src&gt;</code>. Don't put anything private in a public folder.</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Sharing covers only the files <em>you</em> upload: your users can never upload, replace or delete files in a shared folder,
-					and their own uploads stay private. Subfolders are shared too. The <code class="rounded bg-gray-100 px-1 text-xs">exports/</code> folder (compliance archives) can't be shared.
+					Sharing covers only the files <em>you</em> upload: your users can't add or replace files in a shared folder (so don't share a folder they upload into),
+					and their own files stay private. Subfolders are shared too. The <code class="rounded bg-gray-100 px-1 text-xs">exports/</code> folder (compliance archives) can't be shared.
 				</p>
 				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 					<pre>// A file in a folder shared as "Public"

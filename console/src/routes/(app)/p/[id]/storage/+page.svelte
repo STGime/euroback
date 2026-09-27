@@ -89,22 +89,50 @@
 		}
 	}
 
-	/** The rule that applies to prefix: its own, else the nearest parent's. */
-	function sharingFor(prefix: string): { rule: SharedFolder; inherited: boolean } | null {
+	const shareRank = { authenticated: 1, public: 2 } as const;
+
+	/**
+	 * The effective sharing of prefix. Access is granted if ANY matching rule
+	 * allows it (the storage RLS policy ORs them), so the widest matching rule
+	 * wins (public over signed-in users; the nearest breaks a tie).
+	 * inherited: that rule belongs to a parent folder.
+	 */
+	function sharingFor(prefix: string, opts: { parentsOnly?: boolean } = {}): { rule: SharedFolder; inherited: boolean } | null {
 		let best: SharedFolder | null = null;
 		for (const r of sharedFolders) {
-			if (prefix.startsWith(r.prefix) && (!best || r.prefix.length > best.prefix.length)) best = r;
+			if (!prefix.startsWith(r.prefix)) continue;
+			if (opts.parentsOnly && r.prefix === prefix) continue;
+			if (
+				!best ||
+				shareRank[r.visibility] > shareRank[best.visibility] ||
+				(shareRank[r.visibility] === shareRank[best.visibility] && r.prefix.length > best.prefix.length)
+			) {
+				best = r;
+			}
 		}
 		return best ? { rule: best, inherited: best.prefix !== prefix } : null;
+	}
+
+	function isExportsKey(key: string): boolean {
+		return key === 'exports/' || key.startsWith('exports/');
 	}
 
 	function sharingLabel(v: SharedFolderVisibility): string {
 		return v === 'public' ? 'Public' : 'Signed-in users';
 	}
 
+	/** Options narrower than an inherited (parent) share can't take effect. */
+	function shareOptionDisabled(choice: 'owner' | SharedFolderVisibility): boolean {
+		if (!shareModal) return false;
+		const parent = sharingFor(shareModal.prefix, { parentsOnly: true });
+		if (!parent) return false;
+		const rank = choice === 'owner' ? 0 : shareRank[choice];
+		return rank < shareRank[parent.rule.visibility];
+	}
+
 	function openShare(prefix: string, name: string) {
-		const own = sharedFolders.find((r) => r.prefix === prefix);
-		shareChoice = own ? own.visibility : 'owner';
+		const eff = sharingFor(prefix);
+		shareChoice = eff ? eff.rule.visibility : 'owner';
 		shareError = '';
 		shareModal = { prefix, name };
 	}
@@ -114,14 +142,24 @@
 		shareSaving = true;
 		shareError = '';
 		try {
-			const own = sharedFolders.find((r) => r.prefix === shareModal!.prefix);
-			if (shareChoice === 'owner') {
-				if (own) await api.removeSharedFolder(projectId, shareModal.prefix);
-			} else {
-				await api.setSharedFolder(projectId, shareModal.prefix, shareChoice);
+			const prefix = shareModal.prefix;
+			const own = sharedFolders.find((r) => r.prefix === prefix);
+			const parent = sharingFor(prefix, { parentsOnly: true });
+			// A rule that doesn't widen the parent's sharing is redundant.
+			const needsOwnRule =
+				shareChoice !== 'owner' && (!parent || shareRank[shareChoice] > shareRank[parent.rule.visibility]);
+			if (needsOwnRule) {
+				if (own?.visibility !== shareChoice) await api.setSharedFolder(projectId, prefix, shareChoice as SharedFolderVisibility);
+			} else if (own) {
+				await api.removeSharedFolder(projectId, prefix);
 			}
 			await loadSharedFolders();
-			showToast(shareChoice === 'owner' ? 'Folder is private again' : `Folder shared with ${sharingLabel(shareChoice).toLowerCase()}`);
+			const eff = sharingFor(prefix);
+			showToast(
+				eff
+					? `Readable by ${sharingLabel(eff.rule.visibility).toLowerCase()}${eff.inherited ? ` (via ${eff.rule.prefix})` : ''}`
+					: 'Folder is private (owner only)'
+			);
 			shareModal = null;
 		} catch (err_) {
 			shareError = err_ instanceof Error ? err_.message : 'Failed to update sharing';
@@ -518,14 +556,14 @@
 			</div>
 
 			<!-- Sharing for the folder being viewed (#697) -->
-			{#if currentPrefix && !isExportArchive(currentPrefix)}
+			{#if currentPrefix && !isExportsKey(currentPrefix)}
 				{@const sh = sharingFor(currentPrefix)}
 				<button
 					onclick={() => openShare(currentPrefix, breadcrumbs[breadcrumbs.length - 1]?.label ?? currentPrefix)}
 					class="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium shadow-sm transition-colors cursor-pointer {sh ? (sh.rule.visibility === 'public' ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100') : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}"
 					title="Who can read the files in this folder"
 				>
-					Sharing: {sh ? sharingLabel(sh.rule.visibility) : 'Owner only'}
+					Sharing: {sh ? sharingLabel(sh.rule.visibility) + (sh.inherited ? ' (inherited)' : '') : 'Owner only'}
 				</button>
 			{/if}
 
@@ -646,6 +684,7 @@
 									<td class="px-4 py-3 text-gray-500 hidden lg:table-cell">{formatRelativeTime(folder.last_modified)}</td>
 									<td class="px-4 py-3 text-right">
 										<div class="flex items-center justify-end gap-1">
+											{#if !isExportsKey(folder.key)}
 											<button
 												type="button"
 												class="cursor-pointer rounded p-1 text-gray-300 hover:bg-eurobase-50 hover:text-eurobase-600 transition-colors"
@@ -657,6 +696,7 @@
 													<path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z" />
 												</svg>
 											</button>
+											{/if}
 											<button
 												type="button"
 												class="cursor-pointer rounded p-1 text-gray-300 hover:bg-blue-50 hover:text-blue-500 transition-colors"
@@ -995,7 +1035,7 @@
 
 <!-- Sharing Modal (#697) -->
 {#if shareModal}
-	{@const inherited = sharingFor(shareModal.prefix)?.inherited ? sharingFor(shareModal.prefix)!.rule : null}
+	{@const inherited = sharingFor(shareModal.prefix, { parentsOnly: true })?.rule ?? null}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div class="fixed inset-0 z-50 flex items-center justify-center">
@@ -1004,32 +1044,37 @@
 			<h2 class="text-lg font-semibold text-gray-900">Sharing: {shareModal.name}</h2>
 			<p class="mt-1 text-sm text-gray-500">
 				Who can <strong>read</strong> the files you upload to <code class="rounded bg-gray-100 px-1 text-xs">{shareModal.prefix}</code>
-				(and its subfolders) through the SDK. Your app's users can never upload, replace or delete files in a shared folder.
+				(and its subfolders) through the SDK. Your app's users can't add or replace files in a shared folder.
 			</p>
 			{#if inherited}
 				<p class="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
-					Already shared via <code>{inherited.prefix}</code> ({sharingLabel(inherited.visibility).toLowerCase()}). A setting here can widen it, not narrow it.
+					Already shared via <code>{inherited.prefix}</code> ({sharingLabel(inherited.visibility).toLowerCase()}). A setting here can only widen that, not narrow it.
 				</p>
 			{/if}
 			<fieldset class="mt-4 space-y-2">
 				<legend class="sr-only">Visibility</legend>
 				<label class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 {shareChoice === 'owner' ? 'border-eurobase-500 bg-eurobase-50' : 'border-gray-200'}">
-					<input type="radio" name="share" value="owner" bind:group={shareChoice} class="mt-1" />
+					<input type="radio" name="share" value="owner" bind:group={shareChoice} disabled={shareOptionDisabled('owner')} class="mt-1" />
 					<span><span class="block text-sm font-medium text-gray-900">Owner only</span>
 						<span class="block text-xs text-gray-500">Default. Each end user sees only files they uploaded themselves.</span></span>
 				</label>
 				<label class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 {shareChoice === 'authenticated' ? 'border-eurobase-500 bg-eurobase-50' : 'border-gray-200'}">
-					<input type="radio" name="share" value="authenticated" bind:group={shareChoice} class="mt-1" />
+					<input type="radio" name="share" value="authenticated" bind:group={shareChoice} disabled={shareOptionDisabled('authenticated')} class="mt-1" />
 					<span><span class="block text-sm font-medium text-gray-900">Signed-in users</span>
 						<span class="block text-xs text-gray-500">Every signed-in user of your app can read your files here — e.g. premium content, shared templates. Use signed URLs to display them.</span></span>
 				</label>
 				<label class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 {shareChoice === 'public' ? 'border-amber-500 bg-amber-50' : 'border-gray-200'}">
-					<input type="radio" name="share" value="public" bind:group={shareChoice} class="mt-1" />
+					<input type="radio" name="share" value="public" bind:group={shareChoice} disabled={shareOptionDisabled('public')} class="mt-1" />
 					<span><span class="block text-sm font-medium text-gray-900">Public</span>
 						<span class="block text-xs text-gray-500">Anyone with your project's public key can read and list your files here — e.g. app assets, images for <code>&lt;img src&gt;</code>. Don't put anything private in a public folder.</span></span>
 				</label>
 			</fieldset>
 			<p class="mt-3 text-xs text-gray-500">Only files you (or your server / edge functions) upload are shared; files your users upload stay private to them.</p>
+			{#if shareChoice !== 'owner'}
+				<p class="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+					Your app's users can't add or replace files in a shared folder — don't share a folder they upload into (e.g. <code>avatars/</code>).
+				</p>
+			{/if}
 			{#if shareError}
 				<p class="mt-3 text-sm text-red-600">{shareError}</p>
 			{/if}
