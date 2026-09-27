@@ -219,6 +219,13 @@ func BootstrapDedicated(
 		"project_id", projectID,
 		"schema", schemaName)
 
+	// Step 4 (#676): the edge-functions role + vault helper. Idempotent,
+	// and run on every bootstrap — provision_tenant exits early on a
+	// retry, this doesn't.
+	if err := EnsureFuncRole(ctx, conn, schemaName); err != nil {
+		return nil, "", fmt.Errorf("bootstrap: %w", err)
+	}
+
 	return &BootstrapCredentials{
 		Runtime: RuntimeCredential{
 			Username: "eurobase_gateway",
@@ -313,4 +320,49 @@ func isHexChars(s string) bool {
 		}
 	}
 	return true
+}
+
+//go:embed dedicated_func_role.sql
+var dedicatedFuncRoleSQL string
+
+// EnsureFuncRole (re)defines public.ensure_tenant_func_role and applies it
+// to schema on a dedicated instance, as its owner (#676): the tenant's
+// <schema>_func role (NOLOGIN — tenantlogin sets the login) with exactly
+// the shared cluster's privileges, and the <schema>.runner_vault_get
+// helper. Idempotent. Run it again after the provider's SetPrivilege on
+// the role, which may grant more (the lockdown strips it).
+func EnsureFuncRole(ctx context.Context, db interface {
+	Begin(context.Context) (pgx.Tx, error)
+}, schema string) error {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ensure function role: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	// Don't queue behind the customer's own locks (it's their database);
+	// the worker's next pass retries.
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`); err != nil {
+		return fmt.Errorf("ensure function role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, dedicatedFuncRoleSQL); err != nil {
+		return fmt.Errorf("apply dedicated_func_role.sql: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT public.ensure_tenant_func_role($1)`, schema); err != nil {
+		return fmt.Errorf("ensure_tenant_func_role: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// FuncRoleReady reports whether schema's function role and vault helper
+// already exist on a dedicated instance. The worker's periodic pass only
+// runs EnsureFuncRole when they don't, so it never re-grants privileges a
+// Team customer revoked on their own database.
+func FuncRoleReady(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, schema string) (bool, error) {
+	var ok bool
+	err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)
+		AND to_regprocedure(quote_ident($2) || '.runner_vault_get(text)') IS NOT NULL`,
+		schema+"_func", schema).Scan(&ok)
+	return ok, err
 }

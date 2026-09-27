@@ -16,6 +16,18 @@ func TestFuncPasswordVector(t *testing.T) {
 	}
 }
 
+// Pinned in functions-runner/tenant_route_test.ts too (#676).
+func TestDedicatedFuncPasswordVector(t *testing.T) {
+	const want = "c6434a60fd4e27d7e05724754c2268a21c5577312cc743855b31a116822948bb"
+	subject := DedicatedSubject("11111111-2222-3333-4444-555555555555", "tenant_abc")
+	if got := FuncPassword([]byte("0123456789abcdef0123456789abcdef"), subject); got != want {
+		t.Fatalf("got %s want %s", got, want)
+	}
+	if FuncPassword([]byte("0123456789abcdef0123456789abcdef"), subject) == FuncPassword([]byte("0123456789abcdef0123456789abcdef"), "tenant_abc") {
+		t.Fatal("dedicated password equals the shared-cluster one")
+	}
+}
+
 func TestNewEnsurerSecretRules(t *testing.T) {
 	if e, err := NewEnsurer(nil, "eurobase", nil); e != nil || err != nil {
 		t.Fatalf("empty secret must disable without error, got %v %v", e, err)

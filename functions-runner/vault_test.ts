@@ -9,7 +9,7 @@
 // are hermetic.
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { resolveVaultSecret } from "./vault.ts";
+import { requirePerTenantSealed, resolveVaultSecret } from "./vault.ts";
 
 const KEY_RAW = new Uint8Array(32);
 for (let i = 0; i < 32; i++) KEY_RAW[i] = i;
@@ -134,4 +134,52 @@ Deno.test("vault.get errors when ciphertext was tampered (auth tag mismatch)", a
   encrypted[0] ^= 0xff; // flip a bit in the ciphertext
   const got = await resolveVaultSecret(stubDB([{ encrypted, nonce, key_version: 0 }]), PROJECT_ID, SCHEMA, "K");
   if (!("error" in got)) throw new Error(`expected error result, got ${JSON.stringify(got)}`);
+});
+
+Deno.test("vault.get uses the dedicated lookup when given, not the shared query (#676)", async () => {
+  Deno.env.set("VAULT_ENCRYPTION_KEY", KEY_B64);
+  const { encrypted, nonce } = await encryptForGateway("dedicated_value", KEY_RAW);
+  const asked: string[] = [];
+  // (key_version 0 through a bare lookup: resolveVaultSecret itself is
+  // version-agnostic; server.ts wraps the dedicated lookup in
+  // requirePerTenantSealed — tested below.)
+  const got = await resolveVaultSecret(
+    stubDB([]), // shared would say "not found"
+    PROJECT_ID,
+    SCHEMA,
+    "TEAM_KEY",
+    (name) => {
+      asked.push(name);
+      return Promise.resolve([{ encrypted, nonce, key_version: 0 }]);
+    },
+  );
+  assertEquals(got, { value: "dedicated_value" });
+  assertEquals(asked, ["TEAM_KEY"]);
+});
+
+Deno.test("vault.get errors (no leak) when the dedicated lookup throws", async () => {
+  Deno.env.set("VAULT_ENCRYPTION_KEY", KEY_B64);
+  const got = await resolveVaultSecret(stubDB([]), PROJECT_ID, SCHEMA, "K", () => Promise.reject(new Error("host 10.0.0.5 down")));
+  assertEquals(got, { error: "vault unavailable: secret lookup failed" });
+});
+
+Deno.test("dedicated vault rows must be per-tenant sealed (key_version >= 1) (#676)", async () => {
+  const b = new Uint8Array(1);
+  assertEquals(requirePerTenantSealed([{ encrypted: b, nonce: b, key_version: 1 }]).length, 1);
+  assertEquals(requirePerTenantSealed([]).length, 0);
+  for (const kv of [0, null]) {
+    let threw = false;
+    try {
+      requirePerTenantSealed([{ encrypted: b, nonce: b, key_version: kv }]);
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true, `key_version ${kv} accepted`);
+  }
+  // Through resolveVaultSecret: a planted legacy row is an error, not a decryption.
+  Deno.env.set("VAULT_ENCRYPTION_KEY", KEY_B64);
+  const { encrypted, nonce } = await encryptForGateway("planted", KEY_RAW);
+  const got = await resolveVaultSecret(stubDB([]), PROJECT_ID, SCHEMA, "K", () =>
+    Promise.resolve(requirePerTenantSealed([{ encrypted, nonce, key_version: 0 }])));
+  assertEquals(got, { error: "vault unavailable: secret lookup failed" });
 });

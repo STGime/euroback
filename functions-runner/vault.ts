@@ -134,12 +134,29 @@ export async function openSealed(
 // { error } for platform-side failures (no key configured, lookup failed,
 // wrong key / decryption failed). Not-found stays a plain null value —
 // that one is the developer's to handle.
+/**
+ * Vault rows from a Team project's dedicated database (#676) must be
+ * sealed with the per-tenant key (key_version >= 1). The customer owns
+ * that database and could plant a key_version 0 row, which would be opened
+ * with the raw master key — refuse it (the lookup then fails).
+ */
+export function requirePerTenantSealed<T extends { key_version: number | null }>(rows: T[]): T[] {
+  if (rows.some((r) => !(Number(r.key_version) >= 1))) {
+    throw new Error("refused a legacy (key_version < 1) vault row on a dedicated database");
+  }
+  return rows;
+}
+
 export async function resolveVaultSecret(
   // deno-lint-ignore no-explicit-any
   db: any,
   projectId: string,
   schemaName: string,
   name: string,
+  // A Team project's vault lives on its dedicated instance (#676): the
+  // caller passes a lookup that reads it there. Default: the shared
+  // cluster's public.vault_get_for_runner.
+  lookup?: (name: string) => Promise<Array<{ encrypted: Uint8Array; nonce: Uint8Array; key_version: number | null }>>,
 ): Promise<VaultResult> {
   if (!projectId || !name) return { value: null };
 
@@ -156,7 +173,9 @@ export async function resolveVaultSecret(
   // (vault_secrets.name has a unique constraint).
   let rows: Array<{ encrypted: Uint8Array; nonce: Uint8Array; key_version: number | null }>;
   try {
-    rows = await db`SELECT encrypted, nonce, key_version FROM public.vault_get_for_runner(${projectId}::uuid, ${name})`;
+    rows = lookup
+      ? await lookup(name)
+      : await db`SELECT encrypted, nonce, key_version FROM public.vault_get_for_runner(${projectId}::uuid, ${name})`;
   } catch (err) {
     console.error("[vault] DB read failed", err instanceof Error ? err.message : err);
     return { error: "vault unavailable: secret lookup failed" };

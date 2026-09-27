@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -289,13 +290,65 @@ func main() {
 		slog.Warn("FUNC_PASSWORD_SECRET not set — functions runner keeps the shared-connection role switch")
 	} else {
 		go func() {
+			// Team projects (#676): the function role on each dedicated
+			// instance, through a short-lived owner pool (never PoolCache).
+			openDedicated := func(ctx context.Context, projectID string) (*pgxpool.Pool, tenantlogin.DedicatedDB, error) {
+				rec, err := providerRepo.GetLiveByProject(ctx, projectID)
+				if err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						return nil, tenantlogin.DedicatedDB{}, nil
+					}
+					return nil, tenantlogin.DedicatedDB{}, err
+				}
+				p, err := dbprovider.OpenOwnerPoolFor(ctx, rec, cipher)
+				if err != nil {
+					return nil, tenantlogin.DedicatedDB{}, err
+				}
+				return p, tenantlogin.DedicatedDB{ID: rec.ID, Database: rec.DatabaseName}, nil
+			}
+			// Instances bootstrapped before #676 have no function role yet.
+			// Only created when missing: never re-grant what a Team customer
+			// revoked on their own database.
+			ensurer.PrepareDedicated = func(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+				ready, err := dbprovider.FuncRoleReady(ctx, pool, schema)
+				if err != nil || ready {
+					return err
+				}
+				return dbprovider.EnsureFuncRole(ctx, pool, schema)
+			}
+			// CONNECT for the function role comes from the provider (a SQL
+			// GRANT by the owner is a no-op on Scaleway's rdb database);
+			// the lockdown then strips whatever else its readwrite grants.
+			ensurer.GrantDedicatedConnect = func(ctx context.Context, projectID, schema string, pool *pgxpool.Pool) error {
+				rec, err := providerRepo.GetLiveByProject(ctx, projectID)
+				if err != nil {
+					return err
+				}
+				provider, err := providerRegistry.Get(rec.Provider)
+				if err != nil {
+					return err
+				}
+				granter, ok := provider.(dbprovider.PrivilegeGranter)
+				if !ok {
+					return fmt.Errorf("provider %s can't grant CONNECT", rec.Provider)
+				}
+				if err := granter.SetPrivilege(ctx, rec.ProviderInstanceID, rec.DatabaseName, tenantlogin.FuncRole(schema), "readwrite"); err != nil {
+					return err
+				}
+				return dbprovider.EnsureFuncRole(ctx, pool, schema)
+			}
 			run := func() {
 				n, err := ensurer.EnsureAll(ctx)
 				if err != nil {
 					slog.Error("tenant function logins: some roles failed", "ensured", n, "error", err)
-					return
+				} else {
+					slog.Info("tenant function logins ensured", "roles", n)
 				}
-				slog.Info("tenant function logins ensured", "roles", n)
+				if n, err := ensurer.EnsureTeam(ctx, openDedicated); err != nil {
+					slog.Error("tenant function logins (Team): some roles failed", "ensured", n, "error", err)
+				} else if n > 0 {
+					slog.Info("tenant function logins ensured (Team)", "roles", n)
+				}
 			}
 			run()
 			ticker := time.NewTicker(5 * time.Minute)
@@ -385,6 +438,7 @@ func main() {
 		Cipher:                cipher,
 		Repo:                  providerRepo,
 		RuntimePasswordSecret: runtimePwSecret,
+		FuncPasswordSecret:    funcPasswordSecretForTeam(),
 		Limits:                limitsService,
 	}
 	river.AddWorker(riverWorkers, provisionTeamDBWorker)
@@ -706,4 +760,15 @@ func parseLogLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// funcPasswordSecretForTeam returns FUNC_PASSWORD_SECRET for the Team
+// provisioning worker (#676), or nil if unset / too short (the worker's
+// tenantlogin pass reports that case).
+func funcPasswordSecretForTeam() []byte {
+	s := os.Getenv("FUNC_PASSWORD_SECRET")
+	if len(s) < tenantlogin.MinSecretLen {
+		return nil
+	}
+	return []byte(s)
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -944,6 +945,277 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Edge functions (#676): the runner asks runner_get_tenant_db where the
+	// project's data lives, then logs in there as <schema>_func with the
+	// derived password (the worker's tenantlogin pass sets it: EnsureAll on
+	// the shared cluster, EnsureTeam — per-instance password — on dedicated
+	// instances).
+	check(t, env, "function_login_routed", func() error {
+		ctx := context.Background()
+		secret := []byte(randHexT(t, 32))
+		rows, err := env.runnerRoute(ctx, env.projectID)
+		if err != nil {
+			return err
+		}
+		ensurer, err := tenantlogin.NewEnsurer(env.dev, "eurobase", secret)
+		if err != nil {
+			return err
+		}
+		// As cmd/worker wires it.
+		ensurer.PrepareDedicated = func(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+			ready, err := dbprovider.FuncRoleReady(ctx, pool, schema)
+			if err != nil || ready {
+				return err
+			}
+			return dbprovider.EnsureFuncRole(ctx, pool, schema)
+		}
+		role := tenantlogin.FuncRole(env.schema)
+		var loginURL url.URL
+		password := tenantlogin.FuncPassword(secret, env.schema)
+		if env.scenario == "free" {
+			if len(rows) != 0 {
+				return fmt.Errorf("runner_get_tenant_db routed a Free project away from the shared cluster: %+v", rows)
+			}
+			if _, err := ensurer.EnsureAll(ctx); err != nil {
+				return fmt.Errorf("EnsureAll: %w", err)
+			}
+			u, err := url.Parse(env.shared.Config().ConnString())
+			if err != nil {
+				return err
+			}
+			loginURL = *u
+		} else {
+			if len(rows) != 1 || rows[0].state != "active" || rows[0].db != env.dedDB || rows[0].id == "" {
+				return fmt.Errorf("runner_get_tenant_db = %+v, want the active dedicated database %s", rows, env.dedDB)
+			}
+			repo := dbprovider.NewRepo(env.shared)
+			open := func(ctx context.Context, projectID string) (*pgxpool.Pool, tenantlogin.DedicatedDB, error) {
+				if projectID != env.projectID {
+					return nil, tenantlogin.DedicatedDB{}, nil // other scenarios' projects (their own cipher)
+				}
+				rec, err := repo.GetLiveByProject(ctx, projectID)
+				if err != nil {
+					return nil, tenantlogin.DedicatedDB{}, err
+				}
+				p, err := dbprovider.OpenOwnerPoolFor(ctx, rec, env.cipher)
+				return p, tenantlogin.DedicatedDB{ID: rec.ID, Database: rec.DatabaseName}, err
+			}
+			if env.upgraded {
+				// An instance bootstrapped before #676: no function role, no
+				// vault helper. The worker's pass (PrepareDedicated) adds them.
+				for _, q := range []string{
+					`DROP FUNCTION ` + pgx.Identifier{env.schema}.Sanitize() + `.runner_vault_get(text)`,
+					`DROP FUNCTION public.ensure_tenant_func_role(text)`,
+					`DROP OWNED BY ` + pgx.Identifier{role}.Sanitize(),
+					`DROP ROLE ` + pgx.Identifier{role}.Sanitize(),
+				} {
+					if _, err := env.ded.Exec(ctx, q); err != nil {
+						return fmt.Errorf("%s: %w", q, err)
+					}
+				}
+			}
+			// The first pass sets LOGIN but can't grant CONNECT (the owner
+			// doesn't own the database, as on Scaleway): it says so.
+			if _, err := ensurer.EnsureTeam(ctx, open); !errors.Is(err, tenantlogin.ErrNoConnect) {
+				return fmt.Errorf("EnsureTeam without CONNECT: err = %v, want ErrNoConnect", err)
+			}
+			// With the provider hook the pass completes by itself. Stand-in
+			// for Scaleway's SetPrivilege readwrite, run by the instance
+			// superuser: CONNECT plus more than the shared cluster grants —
+			// the lockdown (EnsureFuncRole) must strip the extras.
+			ensurer.GrantDedicatedConnect = func(ctx context.Context, projectID, schema string, pool *pgxpool.Pool) error {
+				if projectID != env.projectID || schema != env.schema {
+					return fmt.Errorf("grant for %s/%s, want %s/%s", projectID, schema, env.projectID, env.schema)
+				}
+				r, s := pgx.Identifier{role}.Sanitize(), pgx.Identifier{env.schema}.Sanitize()
+				for _, q := range []string{
+					`GRANT CONNECT ON DATABASE ` + pgx.Identifier{env.dedDB}.Sanitize() + ` TO ` + r,
+					`GRANT ALL ON ALL TABLES IN SCHEMA ` + s + ` TO ` + r,
+					`GRANT ALL ON ALL SEQUENCES IN SCHEMA ` + s + ` TO ` + r,
+					`GRANT CREATE ON SCHEMA ` + s + ` TO ` + r,
+				} {
+					if _, err := env.ded.Exec(ctx, q); err != nil {
+						return fmt.Errorf("%s: %w", q, err)
+					}
+				}
+				return dbprovider.EnsureFuncRole(ctx, pool, schema)
+			}
+			if n, err := ensurer.EnsureTeam(ctx, open); err != nil || n != 1 {
+				return fmt.Errorf("EnsureTeam: ensured %d, err %v", n, err)
+			}
+			loginURL = url.URL{Scheme: "postgres", Host: fmt.Sprintf("%s:%d", rows[0].host, rows[0].port), Path: "/" + rows[0].db}
+			loginURL.RawQuery = "sslmode=require"
+			password = tenantlogin.FuncPassword(secret, tenantlogin.DedicatedSubject(rows[0].id, env.schema))
+			// The shared-cluster password doesn't open the dedicated role.
+			bad := loginURL
+			bad.User = url.UserPassword(role, tenantlogin.FuncPassword(secret, env.schema))
+			if c, err := pgx.Connect(ctx, bad.String()); err == nil {
+				c.Close(ctx)
+				return fmt.Errorf("the shared-cluster password logs in on the dedicated instance")
+			}
+		}
+		loginURL.User = url.UserPassword(role, password)
+		conn, err := pgx.Connect(ctx, loginURL.String())
+		if err != nil {
+			return fmt.Errorf("login as %s: %w", role, err)
+		}
+		defer conn.Close(ctx)
+
+		var limit int
+		if err := conn.QueryRow(ctx, `SELECT rolconnlimit FROM pg_roles WHERE rolname = current_user`).Scan(&limit); err != nil {
+			return err
+		}
+		if limit != tenantlogin.FuncConnLimit {
+			return fmt.Errorf("%s CONNECTION LIMIT = %d, want %d", role, limit, tenantlogin.FuncConnLimit)
+		}
+		// Data the function sees: the project's own tables, including one
+		// created after provisioning (default privileges), and on Team the
+		// marker that only the dedicated database has.
+		for _, tbl := range []string{"todos", "ded_only"} {
+			if _, err := conn.Exec(ctx, `SELECT count(*) FROM `+pgx.Identifier{env.schema, tbl}.Sanitize()); err != nil {
+				return fmt.Errorf("function role reading %s: %w", tbl, err)
+			}
+		}
+		// Exactly the shared cluster's privileges: DML, no TRUNCATE (which
+		// skips RLS) / REFERENCES / TRIGGER, no setval, no CREATE.
+		var extra string
+		if err := conn.QueryRow(ctx, `
+			SELECT coalesce(string_agg(x, ', '), '') FROM (
+			  SELECT c.relname || ':' || p AS x
+			    FROM pg_class c, unnest(ARRAY['TRUNCATE','REFERENCES','TRIGGER']) p
+			   WHERE c.relnamespace = $1::regnamespace
+			     AND CASE WHEN c.relkind = 'r' THEN has_table_privilege(c.oid, p) ELSE false END
+			  UNION ALL
+			  SELECT c.relname || ':UPDATE' FROM pg_class c
+			   WHERE c.relnamespace = $1::regnamespace
+			     AND CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(c.oid, 'UPDATE') ELSE false END
+			  UNION ALL
+			  SELECT 'schema:CREATE' WHERE has_schema_privilege($1, 'CREATE')) q`, env.schema).Scan(&extra); err != nil {
+			return err
+		}
+		if extra != "" {
+			return fmt.Errorf("function role has privileges beyond the shared cluster's: %s", extra)
+		}
+		if env.scenario == "free" {
+			return nil // shared vault: public.vault_get_for_runner (runner's own login)
+		}
+		// ctx.vault on Team: <schema>.runner_vault_get returns the sealed
+		// row (per-tenant key) from the dedicated vault; the table itself
+		// stays RLS-hidden.
+		var enc, want []byte
+		var kv *int16
+		if err := conn.QueryRow(ctx, `SELECT encrypted, key_version FROM `+pgx.Identifier{env.schema}.Sanitize()+`.runner_vault_get($1)`,
+			"E2E_CONSOLE_SECRET").Scan(&enc, &kv); err != nil {
+			return fmt.Errorf("runner_vault_get: %w", err)
+		}
+		if err := env.ded.QueryRow(ctx, `SELECT secret FROM `+pgx.Identifier{env.schema, "vault_secrets"}.Sanitize()+` WHERE name = 'E2E_CONSOLE_SECRET'`).Scan(&want); err != nil {
+			return err
+		}
+		if !bytes.Equal(enc, want) {
+			return fmt.Errorf("runner_vault_get returned a different secret than the dedicated vault holds")
+		}
+		if kv == nil || *kv < 1 {
+			return fmt.Errorf("dedicated vault secret has key_version %v; the runner only accepts per-tenant sealed (>= 1)", kv)
+		}
+		var direct int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM `+pgx.Identifier{env.schema, "vault_secrets"}.Sanitize()).Scan(&direct); err != nil {
+			return err
+		}
+		if direct != 0 {
+			return fmt.Errorf("function role reads vault_secrets directly (%d rows)", direct)
+		}
+		return nil
+	})
+
+	// runner_get_tenant_db while data is moving: the runner gets "not
+	// ready" (no host), never a route — and only its own login may call it.
+	check(t, env, "function_route_not_ready", func() error {
+		ctx := context.Background()
+		want := func(projectID, state string) error {
+			rows, err := env.runnerRoute(ctx, projectID)
+			if err != nil {
+				return err
+			}
+			if len(rows) != 1 || rows[0].state != state || rows[0].host != "" {
+				return fmt.Errorf("runner_get_tenant_db(%s) = %+v, want state %q without a host", projectID, rows, state)
+			}
+			return nil
+		}
+		// An upgrade in flight — for any project, before its dedicated row
+		// exists too (Free/Pro).
+		var upID string
+		if err := env.shared.QueryRow(ctx, `INSERT INTO project_upgrades (project_id, from_plan, to_plan, state)
+			VALUES ($1, 'pro', 'team', 'copying') RETURNING id`, env.projectID).Scan(&upID); err != nil {
+			return err
+		}
+		err := want(env.projectID, "upgrading")
+		if _, derr := env.shared.Exec(ctx, `DELETE FROM project_upgrades WHERE id = $1`, upID); derr != nil && err == nil {
+			err = derr
+		}
+		if err != nil {
+			return err
+		}
+		if env.scenario == "free" {
+			// Maintenance on a shared-cluster project doesn't change its route.
+			if _, err := env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = true WHERE id = $1`, env.projectID); err != nil {
+				return err
+			}
+			rows, err := env.runnerRoute(ctx, env.projectID)
+			_, _ = env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = false WHERE id = $1`, env.projectID)
+			if err != nil || len(rows) != 0 {
+				return fmt.Errorf("free project in maintenance: rows %+v err %v, want none (shared)", rows, err)
+			}
+		} else {
+			if err := want(env.addProvisioningTeamProject(t), "provisioning"); err != nil {
+				return err
+			}
+			if _, err := env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = true WHERE id = $1`, env.projectID); err != nil {
+				return err
+			}
+			err := want(env.projectID, "maintenance")
+			if _, uerr := env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = false WHERE id = $1`, env.projectID); uerr != nil && err == nil {
+				err = uerr
+			}
+			if err != nil {
+				return err
+			}
+			var rID string
+			if err := env.shared.QueryRow(ctx, `INSERT INTO restore_operations (project_id, kind, source_ref, state, old_instance_id)
+				SELECT $1, 'snapshot', 'e2e', 'cutover', id FROM project_databases
+				 WHERE project_id = $1 AND deleted_at IS NULL LIMIT 1 RETURNING id`, env.projectID).Scan(&rID); err != nil {
+				return err
+			}
+			err = want(env.projectID, "restoring")
+			if _, derr := env.shared.Exec(ctx, `DELETE FROM restore_operations WHERE id = $1`, rID); derr != nil && err == nil {
+				err = derr
+			}
+			if err != nil {
+				return err
+			}
+		}
+		// Only the runner's login may ask.
+		for _, r := range []string{"eurobase_gateway", tenantlogin.FuncRole(env.schema)} {
+			tx, err := env.shared.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `SET LOCAL ROLE `+pgx.Identifier{r}.Sanitize())
+			if err == nil {
+				_, err = tx.Exec(ctx, `SELECT * FROM public.runner_get_tenant_db($1::uuid)`, env.projectID)
+			}
+			_ = tx.Rollback(ctx)
+			var pgErr *pgconn.PgError
+			if env.scenario != "free" && r != "eurobase_gateway" {
+				// A Team project has no <schema>_func on the shared cluster.
+				continue
+			}
+			if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+				return fmt.Errorf("runner_get_tenant_db as %s: err %v, want 42501", r, err)
+			}
+		}
+		return nil
+	})
+
 	// Runs last: nothing above may have touched the shared cluster.
 	check(t, env, "shared_cluster_untouched", func() error {
 		ctx := context.Background()
@@ -1182,6 +1454,39 @@ func (e *teamEnv) consoleFor(projectID, method, path, body string) *httpResult {
 // addProvisioningTeamProject creates a Team project owned by the same user
 // whose project_databases row is still provisioning (no host), as between
 // project creation and the provision worker's MarkActive.
+type runnerRouteRow struct {
+	id, host, db, state string
+	port                int
+}
+
+// runnerRoute calls runner_get_tenant_db as the runner's own role
+// (eurobase_function_runner), as functions-runner/server.ts does.
+func (e *teamEnv) runnerRoute(ctx context.Context, projectID string) ([]runnerRouteRow, error) {
+	tx, err := e.shared.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SET LOCAL ROLE eurobase_function_runner`); err != nil {
+		return nil, err
+	}
+	r, err := tx.Query(ctx, `SELECT coalesce(id::text, ''), coalesce(host, ''), coalesce(port, 0), coalesce(database_name, ''), state
+		FROM public.runner_get_tenant_db($1::uuid)`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("runner_get_tenant_db as eurobase_function_runner: %w", err)
+	}
+	defer r.Close()
+	var out []runnerRouteRow
+	for r.Next() {
+		var row runnerRouteRow
+		if err := r.Scan(&row.id, &row.host, &row.port, &row.db, &row.state); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, r.Err()
+}
+
 func (e *teamEnv) addProvisioningTeamProject(t *testing.T) string {
 	t.Helper()
 	id := "7e4a0000-0000-4000-a000-" + randHexT(t, 6)

@@ -108,3 +108,26 @@ Deno.test("isConnectionDrop", () => {
   assert(!isConnectionDrop({ code: "08P01" }));
   assert(!isConnectionDrop({ code: "42P01" }));
 });
+
+Deno.test("a dedicated target gets its own client, never the shared-cluster one (#676)", async () => {
+  const urls: string[] = [];
+  const factory = (url: string) => {
+    urls.push(url);
+    return { url, end: () => Promise.resolve() };
+  };
+  const pool = new TenantDBPool("postgres://r:p@shared:5432/eurobase", "s".repeat(32), factory, 5);
+  const t1 = { id: "db-1", host: "ded1", port: 5432, database: "rdb" };
+  const shared = await pool.acquire("tenant_a", "tenant_a_func");
+  const ded = await pool.acquire("tenant_a", "tenant_a_func", t1);
+  const ded2 = await pool.acquire("tenant_a", "tenant_a_func", { id: "db-2", host: "ded2", port: 5432, database: "rdb" });
+  assert(shared.client !== ded.client);
+  assert(ded.client !== ded2.client);
+  assertEquals(urls.map((u) => new URL(u).hostname), ["shared", "ded1", "ded2"]);
+  // A different password per instance (and not the shared cluster's).
+  assertEquals(new Set(urls.map((u) => new URL(u).password)).size, 3);
+  assertEquals(new URL(urls[1]).searchParams.get("sslmode"), "require");
+  // invalidate drops only the dedicated entry.
+  ded.invalidate();
+  assertEquals(pool.size, 2);
+  for (const l of [shared, ded, ded2]) l.release();
+});

@@ -10,6 +10,8 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/eurobase/euroback/internal/plans"
+	"github.com/eurobase/euroback/internal/tenantlogin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 )
 
@@ -18,16 +20,16 @@ import (
 // (M2) after the shared-cluster tenant schema is set up.
 //
 // Flow:
-//   1. Look up the provider from the registry (fail-fast if unknown).
-//   2. Provider.Provision — returns as soon as the provider assigns
-//      an ID; the instance is still spinning up.
-//   3. Seal the returned password with the platform cipher.
-//   4. Insert project_databases row with state='provisioning'.
-//   5. Poll Provider.Describe until StateActive or timeout.
-//   6. Flip state='active' with the current host/port.
-//   7. On terminal failure at any step: mark state='failed' and
-//      return the error so River's retry logic can decide whether
-//      to try again.
+//  1. Look up the provider from the registry (fail-fast if unknown).
+//  2. Provider.Provision — returns as soon as the provider assigns
+//     an ID; the instance is still spinning up.
+//  3. Seal the returned password with the platform cipher.
+//  4. Insert project_databases row with state='provisioning'.
+//  5. Poll Provider.Describe until StateActive or timeout.
+//  6. Flip state='active' with the current host/port.
+//  7. On terminal failure at any step: mark state='failed' and
+//     return the error so River's retry logic can decide whether
+//     to try again.
 type ProvisionTeamDatabaseWorker struct {
 	river.WorkerDefaults[jobs.ProvisionTeamDatabaseArgs]
 	Registry *dbprovider.Registry
@@ -42,6 +44,10 @@ type ProvisionTeamDatabaseWorker struct {
 	// and SDK routing falls back to shared (safe posture until the
 	// secret is configured).
 	RuntimePasswordSecret []byte
+	// FuncPasswordSecret (FUNC_PASSWORD_SECRET) derives the edge-functions
+	// role's password on the dedicated instance (#676). Empty: the role
+	// stays NOLOGIN until the worker's tenantlogin pass sets it.
+	FuncPasswordSecret []byte
 	// Limits resolves plan_limits for the project (used to derive
 	// backup retention days for the SetBackupSchedule call). Nil-
 	// safe — the schedule step is skipped with a warning if unset,
@@ -473,6 +479,33 @@ func (w *ProvisionTeamDatabaseWorker) bootstrapRuntime(
 			}
 			logger.Info("provider-side DB privilege granted",
 				"user", g.user, "permission", g.perm, "database", rec.DatabaseName)
+		}
+		// Edge functions (#676): make <schema>_func loginable (Scaleway's
+		// SetPrivilege may need a login role), grant it CONNECT the same
+		// way, then strip whatever else readwrite granted (EnsureFuncRole's
+		// lockdown). Not fatal: the database is usable without functions,
+		// and the worker's tenantlogin pass retries all of it.
+		funcRole := tenantlogin.FuncRole(schemaName)
+		ownerPool, err := pgxpool.New(ctx, ownerDSN)
+		if err != nil {
+			logger.Error("edge functions: owner pool for the function role failed", "error", err)
+		} else {
+			if len(w.FuncPasswordSecret) > 0 {
+				if err := tenantlogin.EnsureDedicated(ctx, ownerPool, rec.DatabaseName, w.FuncPasswordSecret, schemaName, rec.ID); err != nil &&
+					!errors.Is(err, tenantlogin.ErrNoConnect) {
+					logger.Error("edge functions: function role login failed", "role", funcRole, "error", err)
+				}
+			}
+			if err := granter.SetPrivilege(ctx, rec.ProviderInstanceID, rec.DatabaseName, funcRole, "readwrite"); err != nil {
+				logger.Error("edge functions: SetPrivilege for the function role failed — functions can't connect until it's granted",
+					"role", funcRole, "error", err)
+			} else {
+				logger.Info("provider-side DB privilege granted", "user", funcRole, "permission", "readwrite", "database", rec.DatabaseName)
+			}
+			if err := dbprovider.EnsureFuncRole(ctx, ownerPool, schemaName); err != nil {
+				logger.Error("edge functions: function role lockdown failed", "role", funcRole, "error", err)
+			}
+			ownerPool.Close()
 		}
 		// Post-grant lockdown: force eurobase_readonly back to
 		// SELECT-only regardless of what the Scaleway `readonly`
