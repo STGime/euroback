@@ -46,15 +46,21 @@ func passiveContentType(ct string) bool {
 	return false
 }
 
-// activeContentType: types a browser may execute or render as a document.
-func activeContentType(ct string) bool {
-	base := strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
-	switch base {
-	case "text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml",
-		"text/javascript", "application/javascript", "application/ecmascript", "text/ecmascript":
-		return true
+// servedInline reports whether ct may be rendered inline: only a cleanly
+// parsed, single, passive media type. Everything else (active types,
+// unknown types, anything that doesn't parse — e.g. "text/plain, text/html",
+// where a browser's parser picks the last) is served as an attachment. An
+// allowlist, not a denylist: +xml, x-javascript, xsl, multipart/… all fall
+// out by default.
+func servedInline(ct string) bool {
+	if strings.Contains(ct, ",") {
+		return false
 	}
-	return false
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return passiveContentType(mt)
 }
 
 // resolveContentType picks the Content-Type to serve: the stored S3 type if

@@ -941,9 +941,10 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	// HEAD (media players and CDNs probe with it): headers from the S3
 	// object's metadata, no body, not access-logged.
 	if r.Method == http.MethodHead {
-		contentType, size, err := h.s3.HeadObjectInfo(r.Context(), bucket, key)
+		meta, err := h.s3.HeadObjectInfo(r.Context(), bucket, key)
 		if err != nil {
 			if strings.Contains(err.Error(), "object not found") {
+				w.Header().Set("Cache-Control", "no-store")
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
@@ -951,14 +952,25 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		h.setDownloadHeaders(w, r, key, contentType, size)
+		h.setDownloadHeaders(w, r, key, meta)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	body, contentType, size, err := h.s3.DownloadObject(r.Context(), bucket, key)
+	// A single byte range (media players need them); anything else →
+	// the whole object.
+	rng := r.Header.Get("Range")
+	if !strings.HasPrefix(rng, "bytes=") || strings.Contains(rng, ",") {
+		rng = ""
+	}
+	body, meta, err := h.s3.DownloadObjectRange(r.Context(), bucket, key, rng)
 	if err != nil {
+		if errors.Is(err, ErrInvalidRange) {
+			http.Error(w, `{"error":"requested range not satisfiable"}`, http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
 		if strings.Contains(err.Error(), "object not found") {
+			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
 		}
@@ -971,33 +983,50 @@ func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	// GDPR access log: a personal-data object is being downloaded.
 	recordDownload(r, key)
 
-	h.setDownloadHeaders(w, r, key, contentType, size)
-	w.WriteHeader(http.StatusOK)
+	h.setDownloadHeaders(w, r, key, meta)
+	status := http.StatusOK
+	if meta.ContentRange != "" {
+		w.Header().Set("Content-Range", meta.ContentRange)
+		status = http.StatusPartialContent
+	}
+	w.WriteHeader(status)
 	if _, err := io.Copy(w, body); err != nil {
 		slog.Error("storage download: error streaming response", "error", err, "bucket", bucket, "key", key)
 	}
 }
 
 // setDownloadHeaders sets Content-Type (resolveContentType: a passive type
-// filled in when none was stored), Content-Length, Cache-Control and — for
-// types a browser could execute — Content-Disposition: attachment, so an
-// uploaded HTML / SVG file never renders on the project's origin.
-func (h *StorageHandler) setDownloadHeaders(w http.ResponseWriter, r *http.Request, key, s3Type string, size int64) {
+// filled in when none was stored), Content-Length, Accept-Ranges, ETag /
+// Last-Modified, Cache-Control, and Content-Disposition: attachment for
+// anything that isn't a cleanly parsed passive type (servedInline) — an
+// uploaded document never renders on the project's origin.
+func (h *StorageHandler) setDownloadHeaders(w http.ResponseWriter, r *http.Request, key string, meta *ObjectMeta) {
 	recorded := ""
-	if genericContentType(s3Type) {
+	if genericContentType(meta.ContentType) {
 		recorded = h.recordedContentType(r, key)
 	}
-	ct := resolveContentType(key, s3Type, recorded)
+	ct := resolveContentType(key, meta.ContentType, recorded)
 	w.Header().Set("Content-Type", ct)
-	if activeContentType(ct) {
+	if !servedInline(ct) {
 		w.Header().Set("Content-Disposition", "attachment")
 	}
-	if size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	if meta.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	if meta.ETag != "" {
+		w.Header().Set("ETag", meta.ETag)
+	}
+	if !meta.LastModified.IsZero() {
+		w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
 	}
 	// Anonymous reads only ever reach public shared folders: cacheable for
 	// a few minutes (unsharing takes effect within that). Everything else
-	// is per-user.
+	// is per-user. On api.eurobase.app the project comes from the apikey
+	// header, so the same URL serves different projects: shared caches
+	// must key on it (Add — CORS already set Vary: Origin).
+	w.Header().Add("Vary", "apikey")
+	w.Header().Add("Vary", "Authorization")
 	if _, signedIn := isAuthenticated(r); !signedIn && !serviceCaller(r) {
 		w.Header().Set("Cache-Control", "public, max-age=300")
 	} else {

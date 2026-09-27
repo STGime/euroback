@@ -19,7 +19,16 @@ func TestResolveContentType(t *testing.T) {
 			t.Errorf("resolveContentType(%q, %q, %q) = %q, want %q", tc.key, tc.s3, tc.recorded, got, tc.want)
 		}
 	}
-	if !activeContentType("text/html; charset=utf-8") || !activeContentType("image/svg+xml") || activeContentType("image/png") {
-		t.Error("activeContentType misclassifies")
+	for ct, inline := range map[string]bool{
+		"image/png": true, "IMAGE/JPEG": true, "audio/mp4": true, "video/mp4": true,
+		"application/pdf": true, "text/plain; charset=utf-8": true,
+		"text/html": false, "text/html; charset=utf-8": false, "TEXT/HTML ": false,
+		"text/html,": false, "text/plain, text/html": false, "image/svg+xml": false,
+		"application/xhtml+xml": false, "application/rss+xml": false, "application/x-javascript": false,
+		"text/xsl": false, "multipart/x-mixed-replace": false, "": false, "garbage": false,
+	} {
+		if got := servedInline(ct); got != inline {
+			t.Errorf("servedInline(%q) = %v, want %v", ct, got, inline)
+		}
 	}
 }
