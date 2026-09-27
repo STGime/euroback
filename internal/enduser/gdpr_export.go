@@ -300,6 +300,7 @@ func exportRefreshTokens(ctx context.Context, tx pgx.Tx, qs, userID string) ([]G
 var gdprPlatformTables = map[string]bool{
 	"users": true, "refresh_tokens": true, "storage_objects": true,
 	"email_tokens": true, "user_identities": true, "vault_secrets": true,
+	"storage_shared_prefixes": true,
 }
 
 // ownerColumns are column names that link a row to an end-user.

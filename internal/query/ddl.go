@@ -63,7 +63,8 @@ var validIdentRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // reservedTableNames are system tables that cannot be dropped or altered.
 var reservedTableNames = map[string]bool{
-	"storage_objects": true,
+	"storage_objects":         true,
+	"storage_shared_prefixes": true, // #697: the sharing API and storage policies depend on it
 }
 
 // ForeignKeyDefinition describes a foreign key to add.
@@ -1241,6 +1242,7 @@ type RLSAuditEntry struct {
 var auditPlatformTables = map[string]bool{
 	"users": true, "refresh_tokens": true, "storage_objects": true,
 	"email_tokens": true, "user_identities": true, "vault_secrets": true,
+	"storage_shared_prefixes": true,
 }
 
 // AuditRLS returns an RLS-posture snapshot for every user-facing table in the

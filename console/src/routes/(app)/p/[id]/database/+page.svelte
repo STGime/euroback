@@ -121,7 +121,7 @@
 		schemaLoading = true;
 		schemaError = null;
 		try {
-			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets']);
+			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
 			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 			if (tables.length > 0 && !selectedTable) {
 				selectTableAndLoad(tables[0].name);

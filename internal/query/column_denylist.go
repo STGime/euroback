@@ -52,6 +52,9 @@ var sensitiveColumns = map[string]map[string]bool{
 	"refresh_tokens": {"token_hash": true},
 	"email_tokens":   {"token_hash": true},
 	"vault_secrets":  {"secret": true, "nonce": true},
+	// #697: shared-folder rows are readable by others under RLS; who
+	// uploaded what (end-user ids) and custom metadata aren't theirs.
+	"storage_objects": {"uploaded_by": true, "metadata": true},
 }
 
 // SensitiveSystemColumns reports the credential columns of a per-tenant
@@ -112,10 +115,11 @@ var sqlPathDeniedColumns = map[string]bool{
 // (documented): `SELECT id, email FROM users` via raw /sql under the
 // public key is now refused — use the REST path for that.
 var sqlPathDeniedTables = map[string]bool{
-	"users":          true,
-	"refresh_tokens": true,
-	"email_tokens":   true,
-	"vault_secrets":  true,
+	"users":           true,
+	"refresh_tokens":  true,
+	"email_tokens":    true,
+	"vault_secrets":   true,
+	"storage_objects": true, // #697: uploaded_by / metadata of shared rows (use /v1/storage)
 }
 
 // serviceKeyExempt reports whether the caller may see sensitive
@@ -152,6 +156,31 @@ func checkDeniedColumns(ctx context.Context, tableName string, cols []string) er
 	}
 	return nil
 }
+
+// platformManagedTables are written only by their own API: the typed
+// data API may read them (under RLS) but a non-service caller may not
+// insert, update or delete rows (#697). Rewriting a storage_objects row
+// (its key or size) would re-point it at another S3 object — gaining
+// read / overwrite / delete on an untracked or developer file — or dodge
+// the storage quota; rules in storage_shared_prefixes are the
+// developer's.
+var platformManagedTables = map[string]bool{
+	"storage_objects":         true,
+	"storage_shared_prefixes": true,
+}
+
+// checkPlatformManagedWrite refuses a non-service write to a
+// platform-managed table through the data API.
+func checkPlatformManagedWrite(ctx context.Context, tableName string) error {
+	if serviceKeyExempt(ctx) || !platformManagedTables[tableName] {
+		return nil
+	}
+	return fmt.Errorf("%w: table %q is managed by the storage API (/v1/storage) and is read-only via the data API", ErrPlatformManagedTable, tableName)
+}
+
+// ErrPlatformManagedTable: a non-service write to a platform-managed table
+// through the data API (403).
+var ErrPlatformManagedTable = errors.New("platform-managed table")
 
 // checkDeniedRelation rejects embedding a protected table when the
 // requested columns would expose a sensitive one — including the

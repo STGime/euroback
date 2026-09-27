@@ -1238,6 +1238,18 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// check in the middleware (ResolveRole, line 64 of
 			// internal/tenant/context.go) still uses the gateway pool —
 			// that's a public.* read.
+			// Shared storage folders (#697): which key prefixes every
+			// signed-in end user ('authenticated') or anyone with the
+			// public key ('public') may read. Rules live in the tenant
+			// schema (dedicated DB for Team) → PlatformTenantContext +
+			// the pool on the request.
+			r.Route("/storage-sharing", func(r chi.Router) {
+				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
+				r.With(tenant.RequireMinRole("viewer")).Mount("/", storage.SharedPrefixRoutes(
+					query.NewQueryEngine(developerPool).WithPoolResolver(query.TenantPoolFromContext),
+					tenant.RequireMinRole("developer")))
+			})
+
 			r.Route("/data", func(r chi.Router) {
 				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
 

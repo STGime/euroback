@@ -69,7 +69,7 @@
 
 	async function loadSchema() {
 		schemaLoading = true;
-		const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets']);
+		const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
 		try {
 			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 		} catch {

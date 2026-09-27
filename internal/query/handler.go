@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -530,6 +531,10 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 // handleQueryError writes the appropriate HTTP error response for a query engine error.
 // Returns true if it handled the error, false if the caller should use a generic 500.
 func handleQueryError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, ErrPlatformManagedTable) {
+		jsonError(w, err.Error(), http.StatusForbidden)
+		return true
+	}
 	if isRLSViolation(err) {
 		policy := extractRLSPolicy(err)
 		body := map[string]string{"error": "row-level security policy denied this operation"}

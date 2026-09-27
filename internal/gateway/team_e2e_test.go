@@ -25,6 +25,7 @@ import (
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -72,6 +73,9 @@ func TestTeamEndToEnd(t *testing.T) {
 	}{
 		{"fresh", "eb_fresh", false},
 		{"upgraded", "eb_upgraded", true},
+		// Free / Pro: the same checks on the shared cluster (no dedicated
+		// database) — every change for Team must keep these working.
+		{"free", "eurobase", false},
 	} {
 		t.Run(sc.name, func(t *testing.T) {
 			runTeamChecks(t, setupTeamProject(t, cfg, sc.name, sc.db, sc.upgraded))
@@ -296,6 +300,195 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if n := env.dedCount(t, "storage_objects", "key = 'e2e/sdk.txt'"); n != 0 {
 			return fmt.Errorf("storage metadata not deleted on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	// #697 shared folders: developer-uploaded files become readable by end
+	// users (never writable) once their folder is shared.
+	check(t, env, "storage_shared_folders", func() error {
+		ctx := context.Background()
+		_ = ctx
+		call := func(method, path, apiKey, bearer, body string) *httpResult {
+			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, strings.NewReader(body))
+			if apiKey != "" {
+				req.Header.Set("apikey", apiKey)
+			}
+			if bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+bearer)
+			}
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		sharing := "/platform/projects/" + env.projectID + "/storage-sharing"
+		setShare := func(prefix, vis string) *httpResult {
+			return call("PUT", sharing+"/", "", env.platformJWT, `{"prefix":"`+prefix+`","visibility":"`+vis+`"}`)
+		}
+		r := call("POST", "/v1/auth/signin", env.publicKey, "", `{"email":"enduser@team.test","password":"Correct-horse-9"}`)
+		var tok struct {
+			AccessToken string `json:"access_token"`
+		}
+		if r.code != 200 || json.Unmarshal([]byte(r.body), &tok) != nil || tok.AccessToken == "" {
+			return fmt.Errorf("signin: %w", r)
+		}
+		user := tok.AccessToken
+		// Developer upload (console → no owner).
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "themes/hero.txt"); r.code >= 300 {
+			return fmt.Errorf("console upload: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code != http.StatusNotFound {
+			return fmt.Errorf("unshared developer file must be invisible to end users: %w", r)
+		}
+		if r := setShare("exports/", "public"); r.code != http.StatusBadRequest {
+			return fmt.Errorf("sharing exports/ must be refused: %w", r)
+		}
+		// End users can't create rules through the SDK table API.
+		call("POST", "/v1/db/storage_shared_prefixes", env.publicKey, user, `{"prefix":"themes/","visibility":"public"}`)
+		if n := env.dedCount(t, "storage_shared_prefixes", "true"); n != 0 {
+			return fmt.Errorf("an end user created a sharing rule via the SDK (count %d)", n)
+		}
+		// authenticated
+		if r := setShare("themes", "authenticated"); r.code != 200 || !strings.Contains(r.body, `"themes/"`) {
+			return fmt.Errorf("set authenticated: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code != 200 || r.body != "hello team" {
+			return fmt.Errorf("signed-in user must read an authenticated-shared file: %w", r)
+		}
+		if r := call("GET", "/v1/storage/?prefix=themes/", env.publicKey, user, ""); r.code != 200 || !strings.Contains(r.body, "themes/hero.txt") {
+			return fmt.Errorf("signed-in user's listing must include it: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, "", ""); r.code != http.StatusNotFound {
+			return fmt.Errorf("anonymous caller must not read an authenticated-shared file: %w", r)
+		}
+		// Never writable by end users.
+		if r := env.upload(env.publicKey, user, "http://api.eurobase.test/v1/storage/upload", "themes/hero.txt"); r.code != http.StatusForbidden {
+			return fmt.Errorf("end user overwrite of a shared file must be refused: %w", r)
+		}
+		if r := call("DELETE", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code < 400 {
+			return fmt.Errorf("end user delete of a shared file must be refused: %w", r)
+		}
+		// The policies themselves, as the end user on the runtime role
+		// (not superuser — RLS applies): no insert under a shared folder,
+		// no moving an own row into one.
+		uid := env.dedScalar(t, "SELECT id::text FROM %s WHERE email = 'enduser@team.test'", "users")
+		// Refused means refused by RLS (42501), not any error.
+		rlsRefused := func(err error) bool {
+			var pgErr *pgconn.PgError
+			return errors.As(err, &pgErr) && pgErr.Code == "42501"
+		}
+		asEndUser := func(stmts ...string) error {
+			tx, err := env.rt.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.end_user_id', $1, true), set_config('app.end_user_role', 'authenticated', true)`, uid); err != nil {
+				return err
+			}
+			for _, q := range stmts {
+				if _, err := tx.Exec(ctx, q, uid); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		so := pgx.Identifier{env.schema, "storage_objects"}.Sanitize()
+		if err := asEndUser(`INSERT INTO ` + so + ` (key, uploaded_by) VALUES ('themes/rls-plant.txt', $1::uuid)`); !rlsRefused(err) {
+			return fmt.Errorf("RLS must refuse an end user's row under a shared folder: %v", err)
+		}
+		if err := asEndUser(`INSERT INTO `+so+` (key, uploaded_by) VALUES ('mine/rls.txt', $1::uuid)`,
+			`UPDATE `+so+` SET key = 'themes/rls-moved.txt' WHERE key = 'mine/rls.txt' AND uploaded_by = $1::uuid`); !rlsRefused(err) {
+			return fmt.Errorf("RLS must refuse moving an own row into a shared folder: %v", err)
+		}
+		if err := asEndUser(`INSERT INTO ` + so + ` (key, uploaded_by) VALUES ('mine/rls-ok.txt', $1::uuid)`); err != nil {
+			return fmt.Errorf("RLS: an end user's own insert outside shared folders must work: %v", err)
+		}
+		// The data API is read-only on platform-managed tables for SDK callers.
+		if r := call("PATCH", "/v1/db/storage_objects/00000000-0000-0000-0000-000000000000", env.publicKey, user, `{"size_bytes":0}`); r.code < 400 || !strings.Contains(r.body, "read-only") {
+			return fmt.Errorf("data API writes to storage_objects must be refused: %w", r)
+		}
+		// …while the secret key (the developer's server) may still write it.
+		heroID := env.dedScalar(t, "SELECT id::text FROM %s WHERE key = 'themes/hero.txt'", "storage_objects")
+		if r := call("PATCH", "/v1/db/storage_objects/"+heroID, env.secretKey, "", `{"content_type":"text/plain"}`); r.code != 200 {
+			return fmt.Errorf("secret-key write to storage_objects must still work: %w", r)
+		}
+		if r := call("GET", "/v1/db/storage_objects?select=uploaded_by", env.publicKey, user, ""); r.code < 400 {
+			return fmt.Errorf("selecting uploaded_by via the data API must be refused: %w", r)
+		}
+		// Shared folders hold developer files only: an end user can't plant
+		// a new file there (it would be served to everyone) — upload or
+		// upload URL — nor squat a name before the developer uploads it.
+		if r := env.upload(env.publicKey, user, "http://api.eurobase.test/v1/storage/upload", "themes/planted.html"); r.code != http.StatusForbidden {
+			return fmt.Errorf("end user upload of a new file into a shared folder must be refused: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, user, `{"key":"themes/planted2.html","operation":"upload","content_type":"text/html"}`); r.code != http.StatusForbidden {
+			return fmt.Errorf("end user upload URL into a shared folder must be refused: %w", r)
+		}
+		// …nor through the table API (the storage_insert policy refuses it).
+		call("POST", "/v1/db/storage_objects", env.publicKey, user, `{"key":"themes/planted3.html","content_type":"text/html"}`)
+		if n := env.dedCount(t, "storage_objects", "key LIKE 'themes/planted%'"); n != 0 {
+			return fmt.Errorf("a planted file was recorded (count %d)", n)
+		}
+		// Who uploaded what isn't readable through the SDK table API.
+		if r := call("GET", "/v1/db/storage_objects", env.publicKey, user, ""); strings.Contains(r.body, "uploaded_by") && r.code == 200 {
+			return fmt.Errorf("uploaded_by must not be exposed via /v1/db: %w", r)
+		}
+		// public
+		if r := setShare("themes/", "public"); r.code != 200 {
+			return fmt.Errorf("set public: %w", r)
+		}
+		// Anonymous listing shows only public files, and the cursor never
+		// reveals a hidden key (an S3 continuation token would): a private
+		// file that sorts right after the public one must not leak.
+		if r := env.upload(env.publicKey, user, "http://api.eurobase.test/v1/storage/upload", "themesz-private/a.txt"); r.code >= 300 {
+			return fmt.Errorf("private upload: %w", r)
+		}
+		anonList := call("GET", "/v1/storage/?limit=1", env.publicKey, "", "")
+		var page struct {
+			Objects []struct {
+				Key string `json:"key"`
+			} `json:"objects"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if anonList.code != 200 || json.Unmarshal([]byte(anonList.body), &page) != nil ||
+			len(page.Objects) != 1 || page.Objects[0].Key != "themes/hero.txt" {
+			return fmt.Errorf("anonymous listing must show only public files: %w", anonList)
+		}
+		if page.NextCursor != "" && page.NextCursor != "themes/hero.txt" {
+			return fmt.Errorf("anonymous listing cursor %q must be empty or the last visible key", page.NextCursor)
+		}
+		if r := call("GET", "/v1/storage/?cursor="+url.QueryEscape(page.NextCursor), env.publicKey, "", ""); r.code != 200 || strings.Contains(r.body, "themesz-private") {
+			return fmt.Errorf("anonymous listing leaked a private key: %w", r)
+		}
+		// Anonymous download URLs are capped at 1 h.
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/hero.txt","operation":"download","expires_in":604800}`); r.code != 200 || !strings.Contains(r.body, "X-Amz-Expires=3600") {
+			return fmt.Errorf("anonymous download URL must be capped at 1 h: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt?apikey="+env.publicKey, "", "", ""); r.code != 200 || r.body != "hello team" {
+			return fmt.Errorf("anonymous caller must read a public-shared file (apikey in the URL): %w", r)
+		}
+		if r := call("GET", "/v1/storage/?prefix=themes/", env.publicKey, "", ""); r.code != 200 || !strings.Contains(r.body, "themes/hero.txt") {
+			return fmt.Errorf("anonymous listing of a public folder: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/hero.txt","operation":"download"}`); r.code != 200 {
+			return fmt.Errorf("anonymous signed download URL for a public file: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/new.txt","operation":"upload","content_type":"text/plain"}`); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("anonymous upload URL must be refused: %w", r)
+		}
+		// Rules listing, then unshare → private again.
+		if r := call("GET", sharing+"/", "", env.platformJWT, ""); r.code != 200 || !strings.Contains(r.body, `"public"`) {
+			return fmt.Errorf("list rules: %w", r)
+		}
+		if r := call("DELETE", sharing+"/?prefix=themes/", "", env.platformJWT, ""); r.code != http.StatusNoContent {
+			return fmt.Errorf("remove rule: %w", r)
+		}
+		if r := call("GET", "/v1/storage/themes/hero.txt", env.publicKey, user, ""); r.code != http.StatusNotFound {
+			return fmt.Errorf("after unsharing the file must be private again: %w", r)
 		}
 		return nil
 	})
@@ -637,8 +830,11 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 				return err
 			}
 		}
-		// Skip path first: the dedicated database can't be opened — the
-		// project is skipped, nothing is deleted anywhere.
+		// Skip path first (Team): the dedicated database can't be opened —
+		// the project is skipped, nothing is deleted anywhere.
+		if env.scenario == "free" {
+			goto realRun
+		}
 		cleanupExpiredTokens(ctx, env.gw, func(context.Context, string) (*pgxpool.Pool, error) {
 			return nil, errors.New("simulated: dedicated database unavailable")
 		})
@@ -654,6 +850,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 				return fmt.Errorf("skip path: cleanup fell back to the shared cluster's stale copy (count %d)", n)
 			}
 		}
+	realRun:
 		repo := dbprovider.NewRepo(env.shared)
 		cleanupExpiredTokens(ctx, env.gw, func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
 			p, err := dbprovider.OpenOwnerPool(ctx, repo, env.cipher, projectID)
@@ -715,11 +912,22 @@ type knownGap struct {
 	sigs  []string
 }
 
+// teamOnlyChecks don't apply to a Free / Pro project (shared cluster).
+var teamOnlyChecks = map[string]bool{
+	"console_fails_closed_without_dedicated_pool": true,
+	"console_fails_closed_while_provisioning":     true,
+	"readonly_connection_limit":                   true,
+	"shared_cluster_untouched":                    true,
+}
+
 var teamKnownGaps = map[string]knownGap{}
 
 func check(t *testing.T, env *teamEnv, name string, fn func() error) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
+		if env.scenario == "free" && teamOnlyChecks[name] {
+			t.Skip("Team only (dedicated database)")
+		}
 		err := fn()
 		var hr *httpResult
 		if errors.As(err, &hr) && hr.neverReachedHandler() {
@@ -824,6 +1032,7 @@ type teamEnv struct {
 	bucket            string
 	ownerEmail        string
 	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
+	rt                *pgxpool.Pool // the tenant DB's runtime role (RLS applies)
 	shared            *pgxpool.Pool
 	ded               *pgxpool.Pool // admin view of the dedicated DB, for assertions
 }
@@ -960,7 +1169,11 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		return p
 	}
 	admin, gw, dev := mustPool(cfg.sharedAdmin), mustPool(cfg.sharedGW), mustPool(cfg.sharedDev)
-	dedAdmin := mustPool(withDB(t, cfg.dedAdmin, dedDB).String())
+	free := scenario == "free"
+	dedAdmin := admin // free: the tenant data lives on the shared cluster
+	if !free {
+		dedAdmin = mustPool(withDB(t, cfg.dedAdmin, dedDB).String())
+	}
 
 	ownerUser := "7e4a0000-0000-4000-9000-" + randHexT(t, 6)
 	ownerEmail := "owner-" + ownerUser + "@team.test"
@@ -970,7 +1183,11 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	mustExecT(t, admin, `INSERT INTO platform_users (id, email) VALUES ($1, $2)`, ownerUser, ownerEmail)
 
 	var sharedFP string
-	if upgraded {
+	if free {
+		mustExecT(t, admin, `INSERT INTO projects (id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
+			VALUES ($1, $2, 'team e2e', $3, $4, $5, 'fr-par', 'free', 'active')`, projectID, ownerUser, slug, schema, "b-"+slug)
+		mustExecT(t, admin, `SELECT provision_tenant($1, 'team e2e', 'free')`, projectID)
+	} else if upgraded {
 		// As a Pro project: provision_tenant builds the shared schema (the
 		// copy an upgrade leaves behind), then a decoy row goes in.
 		mustExecT(t, admin, `INSERT INTO projects (id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status)
@@ -1005,38 +1222,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		t.Fatal(err)
 	}
 
-	// The dedicated instance, bootstrapped as ProvisionTeamDatabaseWorker
-	// does: owner DSN via BuildOwnerDSN (sslmode=require), display name =
-	// project ID, then the provider's SetPrivilege (stand-in: CONNECT
-	// granted by the instance superuser — the database is not the owner's
-	// and PUBLIC has no CONNECT, as on Scaleway), then the readonly lockdown.
-	ou := withDB(t, cfg.dedOwner, dedDB)
-	ownerPW, _ := ou.User.Password()
-	port, _ := strconv.Atoi(ou.Port())
-	ownerDSN := dbprovider.BuildOwnerDSN(ou.User.Username(), ownerPW, ou.Hostname(), port, dedDB)
-	creds, gotSchema, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, projectID, projectID, cfg.runtimePW, cfg.readonlyPW, nil)
-	if err != nil {
-		t.Fatalf("BootstrapDedicated: %v", err)
-	}
-	if gotSchema != schema {
-		t.Fatalf("bootstrap schema %q, projects.schema_name %q", gotSchema, schema)
-	}
-	for _, role := range []string{creds.Runtime.Username, creds.Readonly.Username} {
-		mustExecT(t, dedAdmin, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
-			pgx.Identifier{dedDB}.Sanitize(), pgx.Identifier{role}.Sanitize()))
-	}
-	if err := dbprovider.LockdownReadonlyGrants(ctx, ownerDSN, schema, nil); err != nil {
-		t.Fatalf("LockdownReadonlyGrants: %v", err)
-	}
-	// Exists only here, so reads from the stale shared copy are detectable.
-	// Created as the owner, like any customer table there.
-	ownerPool := mustPool(ownerDSN)
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
-	mustExecT(t, ownerPool, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()))
-
-	// project_databases row with sealed credentials (owner, runtime, readonly).
+	// Connection cipher (= VAULT_ENCRYPTION_KEY) for the vault and project_databases.
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
@@ -1046,29 +1232,96 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	seal := func(s string) ([]byte, []byte, int16) {
-		ct, nonce, ver, err := cipher.Seal(s)
+	if free {
+		// Marker objects only the tenant's own DB has, created as
+		// eurobase_migrator like console-made tables on the shared cluster.
+		tx, err := admin.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ct, nonce, ver
+		for _, q := range []string{
+			`SET LOCAL ROLE eurobase_migrator`,
+			fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
+			fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
+			fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
+			fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()),
+		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				t.Fatalf("%v\n%s", err, q)
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		// The dedicated instance, bootstrapped as ProvisionTeamDatabaseWorker
+		// does: owner DSN via BuildOwnerDSN (sslmode=require), display name =
+		// project ID, then the provider's SetPrivilege (stand-in: CONNECT
+		// granted by the instance superuser — the database is not the owner's
+		// and PUBLIC has no CONNECT, as on Scaleway), then the readonly lockdown.
+		ou := withDB(t, cfg.dedOwner, dedDB)
+		ownerPW, _ := ou.User.Password()
+		port, _ := strconv.Atoi(ou.Port())
+		ownerDSN := dbprovider.BuildOwnerDSN(ou.User.Username(), ownerPW, ou.Hostname(), port, dedDB)
+		creds, gotSchema, err := dbprovider.BootstrapDedicated(ctx, ownerDSN, projectID, projectID, cfg.runtimePW, cfg.readonlyPW, nil)
+		if err != nil {
+			t.Fatalf("BootstrapDedicated: %v", err)
+		}
+		if gotSchema != schema {
+			t.Fatalf("bootstrap schema %q, projects.schema_name %q", gotSchema, schema)
+		}
+		for _, role := range []string{creds.Runtime.Username, creds.Readonly.Username} {
+			mustExecT(t, dedAdmin, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
+				pgx.Identifier{dedDB}.Sanitize(), pgx.Identifier{role}.Sanitize()))
+		}
+		if err := dbprovider.LockdownReadonlyGrants(ctx, ownerDSN, schema, nil); err != nil {
+			t.Fatalf("LockdownReadonlyGrants: %v", err)
+		}
+		// Exists only here, so reads from the stale shared copy are detectable.
+		// Created as the owner, like any customer table there.
+		ownerPool := mustPool(ownerDSN)
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE TABLE %s (id int)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()))
+
+		// project_databases row with sealed credentials (owner, runtime, readonly).
+		seal := func(s string) ([]byte, []byte, int16) {
+			ct, nonce, ver, err := cipher.Seal(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ct, nonce, ver
+		}
+		repo := dbprovider.NewRepo(admin)
+		ct, nonce, ver := seal(ownerPW)
+		rec, err := repo.InsertProvisioning(ctx, projectID, &dbprovider.Instance{
+			ProviderID: "e2e-" + slug, Host: ou.Hostname(), Port: port, DBName: dedDB,
+			Username: ou.User.Username(), State: dbprovider.StateActive, Region: "fr-par",
+		}, "scaleway", ct, nonce, ver)
+		if err != nil {
+			t.Fatalf("InsertProvisioning: %v", err)
+		}
+		ct, nonce, ver = seal(creds.Runtime.Password)
+		if _, err := repo.SetRuntimeCredentials(ctx, rec.ID, creds.Runtime.Username, ct, nonce, ver); err != nil {
+			t.Fatalf("SetRuntimeCredentials: %v", err)
+		}
+		ct, nonce, ver = seal(creds.Readonly.Password)
+		if _, err := repo.SetReadonlyCredentials(ctx, rec.ID, creds.Readonly.Username, ct, nonce, ver); err != nil {
+			t.Fatalf("SetReadonlyCredentials: %v", err)
+		}
 	}
-	repo := dbprovider.NewRepo(admin)
-	ct, nonce, ver := seal(ownerPW)
-	rec, err := repo.InsertProvisioning(ctx, projectID, &dbprovider.Instance{
-		ProviderID: "e2e-" + slug, Host: ou.Hostname(), Port: port, DBName: dedDB,
-		Username: ou.User.Username(), State: dbprovider.StateActive, Region: "fr-par",
-	}, "scaleway", ct, nonce, ver)
-	if err != nil {
-		t.Fatalf("InsertProvisioning: %v", err)
-	}
-	ct, nonce, ver = seal(creds.Runtime.Password)
-	if _, err := repo.SetRuntimeCredentials(ctx, rec.ID, creds.Runtime.Username, ct, nonce, ver); err != nil {
-		t.Fatalf("SetRuntimeCredentials: %v", err)
-	}
-	ct, nonce, ver = seal(creds.Readonly.Password)
-	if _, err := repo.SetReadonlyCredentials(ctx, rec.ID, creds.Readonly.Username, ct, nonce, ver); err != nil {
-		t.Fatalf("SetReadonlyCredentials: %v", err)
+
+	// The tenant DB's runtime role, for RLS-level checks: the gateway role
+	// on the shared cluster, or eurobase_gateway on the dedicated instance.
+	rt := gw
+	if !free {
+		ru := withDB(t, cfg.dedOwner, dedDB)
+		ru.User = url.UserPassword("eurobase_gateway", cfg.runtimePW)
+		q := ru.Query()
+		q.Set("sslmode", "require")
+		ru.RawQuery = q.Encode()
+		rt = mustPool(ru.String())
 	}
 
 	// The real router with Team routing on and platform auth wired as in
@@ -1109,7 +1362,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
 		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, cipher: cipher, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
-		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, ded: dedAdmin,
+		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, rt: rt, ded: dedAdmin,
 	}
 }
 

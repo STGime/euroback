@@ -73,6 +73,11 @@ func recordDownload(r *http.Request, key string) {
 			projectID = pc.ProjectID
 		}
 	} else if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil {
+		if pc.KeyType != "secret" {
+			// Anonymous read of a public shared file (#697): no data
+			// subject, no personal data — don't log every asset fetch.
+			return
+		}
 		projectID, role = pc.ProjectID, audit.EffectiveRole(pc.KeyType, "")
 	}
 	rec.Record(audit.AccessEvent{
@@ -239,7 +244,8 @@ func (h *StorageHandler) assertObjectVisible(r *http.Request, key string) (bool,
 	}
 	schema := h.schemaForRequest(r)
 	if schema == "" {
-		return true, nil
+		// Fail closed for SDK callers (reachable with just a public key).
+		return serviceCaller(r), nil
 	}
 	// Never answer from the shared cluster for a Team project (#680).
 	if _, err := h.tenantPool(r.Context()); err != nil {
@@ -342,14 +348,52 @@ func (h *StorageHandler) objectReadable(r *http.Request, key string) (bool, erro
 	return h.assertObjectVisible(r, key)
 }
 
-// maxListPages bounds the S3 pages one filtered SDK listing reads.
-const maxListPages = 5
+// maxDownloadURLExpiry caps SDK download URLs (#697).
+const maxDownloadURLExpiry = time.Hour
 
 // maxUploadURLExpiry caps upload signed URLs: the key claim is checked
 // when the URL is issued, so a long-lived URL would outlast it (e.g. the
 // owner deletes the key, another user claims it, and the old URL
 // overwrites their object within this window).
 const maxUploadURLExpiry = time.Hour
+
+// readAllowed: a signed-in end user or console caller, or — for reads only
+// (#697) — an SDK request authenticated by its API key alone; RLS then
+// limits it to objects under 'public' shared folders.
+func readAllowed(r *http.Request) bool {
+	if _, ok := isAuthenticated(r); ok {
+		return true
+	}
+	pc, ok := auth.ProjectFromContext(r.Context())
+	return ok && pc != nil && pc.ProjectID != ""
+}
+
+// objectOwned reports whether the caller may write key: service-role
+// (console) callers always; an end user only for a tracked object they
+// uploaded. Read visibility isn't enough — objects in shared folders are
+// readable by everyone they're shared with (#697).
+func (h *StorageHandler) objectOwned(r *http.Request, key string) (bool, error) {
+	if serviceCaller(r) || h.engine == nil {
+		return true, nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" || h.pool == nil {
+		return false, nil // fail closed (service callers returned above)
+	}
+	eu, ok := auth.EndUserClaimsFromContext(r.Context())
+	if !ok || eu == nil || eu.UserID == "" {
+		return false, nil
+	}
+	var owned bool
+	q := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1 AND uploaded_by::text = $2)`,
+		strings.ReplaceAll(schema, `"`, `""`))
+	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, key, eu.UserID).Scan(&owned)
+	}); err != nil {
+		return false, err
+	}
+	return owned, nil
+}
 
 // serviceCaller: console traffic (PlatformStorageContext marks it
 // service-role). SDK storage is always scoped to the end user by RLS,
@@ -378,14 +422,24 @@ func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType stri
 	}
 	schema := h.schemaForRequest(r)
 	if schema == "" || h.pool == nil {
-		return true, false, nil
+		return false, false, nil // fail closed (service callers returned above)
 	}
 	esc := strings.ReplaceAll(schema, `"`, `""`)
-	var exists bool
+	// Shared folders (#697) hold developer files only: an end user can't
+	// create or overwrite anything under one (it would be served to
+	// everyone it's shared with). The storage_insert / _update policies
+	// enforce the same.
+	var exists, shared bool
 	if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".storage_objects WHERE key = $1)`, esc), key).Scan(&exists)
+		return tx.QueryRow(ctx, fmt.Sprintf(
+			`SELECT EXISTS(SELECT 1 FROM "%[1]s".storage_objects WHERE key = $1),
+			        EXISTS(SELECT 1 FROM "%[1]s".storage_shared_prefixes WHERE starts_with($1, prefix))`, esc),
+			key).Scan(&exists, &shared)
 	}); err != nil {
 		return false, false, err
+	}
+	if shared {
+		return false, false, nil
 	}
 	if !exists {
 		if h.s3 != nil {
@@ -413,7 +467,9 @@ func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType stri
 			return false, false, err
 		}
 	}
-	ok, err = h.assertObjectVisible(r, key)
+	// Ownership, not read visibility: a file in a shared folder is readable
+	// by other end users (#697) but must stay theirs to write.
+	ok, err = h.objectOwned(r, key)
 	return ok, created, err
 }
 
@@ -451,54 +507,61 @@ func writeClaimError(w http.ResponseWriter, err error) {
 	writeTenantPoolError(w, err)
 }
 
-// visibleToCaller drops listed objects the caller can't read: for SDK
-// callers, keys without a storage_objects row visible to them under RLS
-// (the same rule as download). Console (service-role) listings are
-// unfiltered. A filtered page can be shorter than the limit; the cursor
-// is S3's, so paging still covers every key.
-func (h *StorageHandler) visibleToCaller(r *http.Request, objects []ObjectInfo) ([]ObjectInfo, error) {
-	if serviceCaller(r) || h.engine == nil || len(objects) == 0 {
-		return objects, nil
+// listReadable lists the objects the caller may read (their own, plus
+// developer files in folders shared with them — the storage_read RLS
+// policy decides), ordered by key (byte order, like S3), after cursor.
+func (h *StorageHandler) listReadable(r *http.Request, prefix, cursor string, limit int) ([]ObjectInfo, string, bool, error) {
+	if _, err := h.tenantPool(r.Context()); err != nil {
+		return nil, "", false, err
 	}
 	schema := h.schemaForRequest(r)
-	if schema == "" {
-		return objects, nil
-	}
-	if _, err := h.tenantPool(r.Context()); err != nil {
-		return nil, err
-	}
-	keys := make([]string, len(objects))
-	for i, o := range objects {
-		keys[i] = o.Key
-	}
-	visible := make(map[string]bool, len(keys))
+	out := make([]ObjectInfo, 0, limit)
+	more := false
 	err := h.engine.WithTenantTx(r.Context(), schema, func(tx pgx.Tx) error {
-		q := fmt.Sprintf(`SELECT key FROM "%s".storage_objects WHERE key = ANY($1)`,
-			strings.ReplaceAll(schema, `"`, `""`))
-		rows, err := tx.Query(r.Context(), q, keys)
+		// Range predicates on the byte-order key (index
+		// idx_storage_objects_key_c): [prefix, prefix + U+10FFFF), after
+		// the cursor — same order as S3.
+		// Two texts so the upper bound is always an index condition, also
+		// under a cached generic plan.
+		bound := ""
+		if prefix != "" {
+			bound = `AND key COLLATE "C" < ($1 || chr(1114111)) COLLATE "C"`
+		}
+		q := fmt.Sprintf(`SELECT key, COALESCE(content_type, ''), COALESCE(size_bytes, 0), created_at
+		                    FROM "%s".storage_objects
+		                   WHERE key COLLATE "C" >= $1 COLLATE "C" %s
+		                     AND key COLLATE "C" > $2 COLLATE "C"
+		                   ORDER BY key COLLATE "C" LIMIT $3`,
+			strings.ReplaceAll(schema, `"`, `""`), bound)
+		rows, err := tx.Query(r.Context(), q, prefix, cursor, limit+1)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var k string
-			if err := rows.Scan(&k); err != nil {
+			var o ObjectInfo
+			var created *time.Time
+			if err := rows.Scan(&o.Key, &o.ContentType, &o.Size, &created); err != nil {
 				return err
 			}
-			visible[k] = true
+			if created != nil {
+				o.LastModified = *created
+			}
+			out = append(out, o)
 		}
 		return rows.Err()
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", false, err
 	}
-	out := objects[:0:0]
-	for _, o := range objects {
-		if visible[o.Key] {
-			out = append(out, o)
-		}
+	if len(out) > limit {
+		out, more = out[:limit], true
 	}
-	return out, nil
+	next := ""
+	if more {
+		next = out[len(out)-1].Key
+	}
+	return visibleObjects(r, out), next, more, nil
 }
 
 // visibleObjects drops export archives from a listing for callers who
@@ -767,31 +830,40 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		// (uploader != NULL) still win via `EXCLUDED.uploaded_by
 		// IS NOT NULL`.
 		q := fmt.Sprintf(
-			`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
+			`INSERT INTO "%[1]s".storage_objects (key, content_type, size_bytes, uploaded_by)
 			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (key) DO UPDATE
 			   SET content_type = EXCLUDED.content_type,
 			       size_bytes   = EXCLUDED.size_bytes,
-			       uploaded_by  = COALESCE(storage_objects.uploaded_by, EXCLUDED.uploaded_by)`,
+			       -- A console upload into a shared folder makes the file a
+			       -- developer file again (#697): an end user who claimed the
+			       -- name first doesn't keep it. Otherwise the owner never
+			       -- changes.
+			       uploaded_by  = CASE WHEN $5 AND EXISTS (
+			                             SELECT 1 FROM "%[1]s".storage_shared_prefixes s
+			                              WHERE starts_with(EXCLUDED.key, s.prefix))
+			                           THEN NULL
+			                           ELSE COALESCE(storage_objects.uploaded_by, EXCLUDED.uploaded_by) END`,
 			escSchema,
 		)
 		uploader := uploaderForInsert(r)
 		insertErr := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, q, key, contentType, size, uploader)
+			_, err := tx.Exec(ctx, q, key, contentType, size, uploader, serviceCaller(r))
 			return err
 		})
-		// Belt: if we tried to attribute to a specific end-user
-		// but the FK check refused (23503 foreign_key_violation),
-		// retry once with NULL. Covers a race where the end-user
-		// was deleted between JWT issue and upload — the file
-		// still needs a tracking row so downstream operations work.
+		// The end user was deleted between the key claim and now (the
+		// uploaded_by FK refused). No retry without an owner: an ownerless
+		// row counts as a developer file and could become shared (#697).
 		if insertErr != nil && isForeignKeyViolation(insertErr) && uploader != nil {
-			slog.Warn("storage upload: uploaded_by FK failed, retrying with NULL",
-				"schema", schema, "key", key, "attempted_user", uploader)
-			insertErr = h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, q, key, contentType, size, nil)
-				return err
-			})
+			slog.Warn("storage upload: end user no longer exists", "schema", schema, "key", key)
+			if claimed {
+				if err := h.s3.DeleteObject(context.WithoutCancel(r.Context()), bucket, key); err != nil {
+					slog.Warn("storage upload: failed to remove the untracked object", "error", err, "key", key)
+				}
+				h.releaseClaim(r, key)
+			}
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
 		}
 		if insertErr != nil {
 			// Fatal (was "non-fatal" pre-fix, which is exactly how
@@ -824,7 +896,9 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 // Streams the file back to the client with the proper Content-Type and
 // Content-Length headers.
 func (h *StorageHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
-	_, ok := isAuthenticated(r)
+	// Reads admit public-key-only SDK callers too (#697): RLS decides what
+	// they see — only objects under a 'public' shared folder.
+	ok := readAllowed(r)
 	if !ok {
 		slog.Warn("storage download called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -921,7 +995,9 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 
 	// Ownership check: same RLS-based filter as DownloadFile. Stops one
 	// end-user from deleting another's file by guessing the key.
-	visible, err := h.assertObjectVisible(r, key)
+	// Ownership, not read visibility (#697): shared files aren't the
+	// reader's to delete.
+	visible, err := h.objectOwned(r, key)
 	if err != nil {
 		if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
 			writeTenantPoolError(w, err)
@@ -1021,7 +1097,9 @@ type listResponse struct {
 
 // ListFiles handles GET /v1/storage?prefix=...&limit=...&cursor=...
 func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
-	_, ok := isAuthenticated(r)
+	// Reads admit public-key-only SDK callers too (#697): RLS decides what
+	// they see — only objects under a 'public' shared folder.
+	ok := readAllowed(r)
 	if !ok {
 		slog.Warn("storage list called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -1045,45 +1123,43 @@ func (h *StorageHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// SDK listings are filtered to the caller's objects (visibleToCaller);
-	// keep reading S3 pages until the page is full or the budget runs out
-	// so a user with few files in a busy bucket doesn't get a run of empty
-	// pages. The cursor stays S3's, so has_more/next_cursor remain exact.
-	var (
-		objects   []ObjectInfo
-		nextToken = cursor
-		truncated bool
-	)
-	for pages := 0; pages < maxListPages; pages++ {
-		result, err := h.s3.ListObjects(r.Context(), bucket, prefix, limit-len(objects), nextToken)
+	var resp listResponse
+	if !serviceCaller(r) && h.engine != nil && h.schemaForRequest(r) == "" {
+		// Fail closed: an SDK caller without a resolved tenant schema must
+		// never get the raw bucket listing.
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if serviceCaller(r) || h.engine == nil {
+		// Console: the bucket's S3 listing (export archives hidden from
+		// callers who may not read them).
+		result, err := h.s3.ListObjects(r.Context(), bucket, prefix, limit, cursor)
 		if err != nil {
 			slog.Error("storage list failed", "error", err, "bucket", bucket, "prefix", prefix)
 			http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
 			return
 		}
-		page, err := h.visibleToCaller(r, visibleObjects(r, result.Objects))
+		resp = listResponse{Objects: visibleObjects(r, result.Objects), NextCursor: result.NextToken, HasMore: result.IsTruncated}
+	} else {
+		// SDK callers see exactly what they may read (#693, #697): listed
+		// from storage_objects under RLS, keyset-paginated by key. The
+		// cursor is the last key returned — never an S3 continuation
+		// token, which encodes the last key S3 scanned, possibly one the
+		// caller can't see.
+		objects, next, more, err := h.listReadable(r, prefix, cursor, limit)
 		if err != nil {
 			if errors.Is(err, query.ErrDedicatedPoolUnavailable) {
 				writeTenantPoolError(w, err)
 				return
 			}
-			slog.Error("storage list: visibility filter failed", "error", err, "bucket", bucket)
+			slog.Error("storage list failed", "error", err, "prefix", prefix)
 			http.Error(w, `{"error":"failed to list files"}`, http.StatusInternalServerError)
 			return
 		}
-		objects = append(objects, page...)
-		nextToken, truncated = result.NextToken, result.IsTruncated
-		if !truncated || len(objects) >= limit || serviceCaller(r) {
-			break
-		}
+		resp = listResponse{Objects: objects, NextCursor: next, HasMore: more}
 	}
-	if objects == nil {
-		objects = []ObjectInfo{}
-	}
-	resp := listResponse{
-		Objects:    objects,
-		NextCursor: nextToken,
-		HasMore:    truncated,
+	if resp.Objects == nil {
+		resp.Objects = []ObjectInfo{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1117,7 +1193,9 @@ type signedURLResponse struct {
 
 // GenerateSignedURL handles POST /v1/storage/signed-url.
 func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Request) {
-	_, ok := isAuthenticated(r)
+	// Reads admit public-key-only SDK callers too (#697): RLS decides what
+	// they see — only objects under a 'public' shared folder.
+	ok := readAllowed(r)
 	if !ok {
 		slog.Warn("storage signed-url called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -1147,6 +1225,10 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 	}
 	if req.Operation != "upload" && req.Operation != "download" {
 		http.Error(w, `{"error":"operation must be upload or download"}`, http.StatusBadRequest)
+		return
+	}
+	if _, signedIn := isAuthenticated(r); req.Operation == "upload" && !signedIn {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	if req.Operation == "upload" && isExportKey(r, req.Key) {
@@ -1223,6 +1305,12 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			expiry = time.Duration(req.ExpiresIn) * time.Second
 		} else {
 			expiry = 1 * time.Hour // default for download
+		}
+		// An SDK caller's URL outlives any later unsharing / ownership
+		// change for its lifetime: cap it (#697). Console callers keep
+		// their choice.
+		if !serviceCaller(r) && expiry > maxDownloadURLExpiry {
+			expiry = maxDownloadURLExpiry
 		}
 		url, err = h.s3.GeneratePresignedDownloadURL(r.Context(), bucket, req.Key, expiry)
 	}
