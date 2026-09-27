@@ -503,16 +503,20 @@ func (s *Scaleway) Restore(ctx context.Context, instanceID string, source Restor
 	return mapScalewayInstance(&out, region, "eurobase_owner", ""), nil
 }
 
-// scalewaySetBackupScheduleRequest is the body Scaleway RDB accepts
-// on POST /rdb/v1/regions/{region}/instances/{id}/set-backup-schedule.
-// Fields verified against Scaleway's public RDB v1 API docs
-// (2026-08). If Scaleway later adds a `disabled: bool` requirement
-// or renames these to `backup_schedule_*`, adjust here — but a
-// simple {frequency, retention} body has been the shape since
-// managed-PG launched.
+// scalewaySetBackupScheduleRequest is the UpdateInstance body that sets
+// the automatic backup schedule: PATCH /rdb/v1/regions/{region}/instances/{id}
+// (Scaleway RDB v1 UpdateInstanceRequest; same fields as `scw rdb instance
+// update backup-schedule-frequency=… backup-schedule-retention=…
+// is-backup-schedule-disabled=…`). There is no separate
+// set-backup-schedule action — the earlier POST to one returned 404 in
+// prod (2026-09-27, first Team instance), so plan retention was never
+// applied and instances kept Scaleway's default (daily, 7 days).
+// is_backup_schedule_disabled is sent explicitly so an instance whose
+// schedule was switched off gets it back.
 type scalewaySetBackupScheduleRequest struct {
-	Frequency int `json:"frequency"` // hours between backups
-	Retention int `json:"retention"` // days to keep each backup
+	Frequency int  `json:"backup_schedule_frequency"` // hours between backups
+	Retention int  `json:"backup_schedule_retention"` // days to keep each backup
+	Disabled  bool `json:"is_backup_schedule_disabled"`
 }
 
 // SetBackupSchedule — see Provider. Configures Scaleway's automatic
@@ -540,10 +544,10 @@ func (s *Scaleway) SetBackupSchedule(ctx context.Context, instanceID string, opt
 		Frequency: opts.FrequencyHours,
 		Retention: opts.RetentionDays,
 	}
-	// The Scaleway RDB action returns the updated instance body; we
-	// don't parse it. A 2xx is all we need.
-	path := fmt.Sprintf("/rdb/v1/regions/%s/instances/%s/set-backup-schedule", s.defaultRegion, instanceID)
-	return s.do(ctx, http.MethodPost, path, req, nil)
+	// UpdateInstance returns the updated instance body; we don't parse
+	// it. A 2xx is all we need.
+	path := fmt.Sprintf("/rdb/v1/regions/%s/instances/%s", s.defaultRegion, instanceID)
+	return s.do(ctx, http.MethodPatch, path, req, nil)
 }
 
 // Delete — see Provider. Idempotent — 404 counts as success.

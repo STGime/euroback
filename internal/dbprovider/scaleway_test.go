@@ -302,13 +302,11 @@ func TestScaleway_SnapshotSendsExpiresAtWhenRetentionSet(t *testing.T) {
 	}
 }
 
-// TestScaleway_SetBackupSchedule_HappyPath — verifies the request
-// hits POST /rdb/v1/regions/{region}/instances/{id}/set-backup-schedule
-// with a body carrying frequency + retention. Regression guard on the
-// wire shape (Scaleway's docs use {frequency, retention} for this
-// action, distinct from the instance's {backup_schedule_frequency,
-// backup_schedule_retention} GET response fields — mixing them up
-// would silently 400).
+// TestScaleway_SetBackupSchedule_HappyPath — the schedule is set through
+// UpdateInstance: PATCH /rdb/v1/regions/{region}/instances/{id} with
+// backup_schedule_frequency / backup_schedule_retention /
+// is_backup_schedule_disabled. Regression guard on the wire shape: the
+// earlier POST .../set-backup-schedule (no such action) 404ed in prod.
 func TestScaleway_SetBackupSchedule_HappyPath(t *testing.T) {
 	var seenPath, seenMethod string
 	var seenBody map[string]any
@@ -318,7 +316,7 @@ func TestScaleway_SetBackupSchedule_HappyPath(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &seenBody)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"rdb-1","status":"ready","backup_schedule_frequency":24,"backup_schedule_retention":30,"endpoints":[]}`))
+		_, _ = w.Write([]byte(`{"id":"rdb-1","status":"ready","backup_schedule":{"frequency":24,"retention":30,"disabled":false},"endpoints":[]}`))
 	})
 	err := p.SetBackupSchedule(context.Background(), "rdb-1", SetBackupScheduleOpts{
 		FrequencyHours: 24,
@@ -327,19 +325,25 @@ func TestScaleway_SetBackupSchedule_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetBackupSchedule: %v", err)
 	}
-	if seenMethod != http.MethodPost {
-		t.Errorf("method: got %s, want POST", seenMethod)
+	if seenMethod != http.MethodPatch {
+		t.Errorf("method: got %s, want PATCH", seenMethod)
 	}
-	wantPath := "/rdb/v1/regions/fr-par/instances/rdb-1/set-backup-schedule"
+	wantPath := "/rdb/v1/regions/fr-par/instances/rdb-1"
 	if seenPath != wantPath {
 		t.Errorf("path: got %q, want %q", seenPath, wantPath)
 	}
 	// JSON numbers unmarshal into float64.
-	if seenBody["frequency"].(float64) != 24 {
-		t.Errorf("frequency in body: got %v, want 24", seenBody["frequency"])
+	if seenBody["backup_schedule_frequency"] != float64(24) {
+		t.Errorf("backup_schedule_frequency in body: got %v, want 24", seenBody["backup_schedule_frequency"])
 	}
-	if seenBody["retention"].(float64) != 30 {
-		t.Errorf("retention in body: got %v, want 30", seenBody["retention"])
+	if seenBody["backup_schedule_retention"] != float64(30) {
+		t.Errorf("backup_schedule_retention in body: got %v, want 30", seenBody["backup_schedule_retention"])
+	}
+	if seenBody["is_backup_schedule_disabled"] != false {
+		t.Errorf("is_backup_schedule_disabled in body: got %v, want false", seenBody["is_backup_schedule_disabled"])
+	}
+	if len(seenBody) != 3 {
+		t.Errorf("body has %d fields, want exactly the 3 schedule fields (an UpdateInstance must not touch anything else): %v", len(seenBody), seenBody)
 	}
 }
 
