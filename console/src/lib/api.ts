@@ -477,6 +477,14 @@ export interface FileInfo {
 	last_modified: string;
 }
 
+export type SharedFolderVisibility = 'authenticated' | 'public';
+
+export interface SharedFolder {
+	prefix: string;
+	visibility: SharedFolderVisibility;
+	created_at: string;
+}
+
 export interface FileListResponse {
 	objects: FileInfo[];
 	next_cursor?: string;
@@ -1619,6 +1627,31 @@ export class EurobaseAPI {
 			method: 'POST',
 			body: JSON.stringify({ key, operation, expires_in: expiresIn })
 		});
+	}
+
+	/** Shared storage folders (#697): which prefixes end users may read. */
+	async listSharedFolders(projectId: string): Promise<SharedFolder[]> {
+		return this.fetch<SharedFolder[]>(`/platform/projects/${projectId}/storage-sharing/`);
+	}
+
+	/** Share a folder with signed-in end users ('authenticated') or everyone with the public key ('public'). */
+	async setSharedFolder(
+		projectId: string,
+		prefix: string,
+		visibility: SharedFolderVisibility
+	): Promise<SharedFolder> {
+		return this.fetch<SharedFolder>(`/platform/projects/${projectId}/storage-sharing/`, {
+			method: 'PUT',
+			body: JSON.stringify({ prefix, visibility })
+		});
+	}
+
+	/** Stop sharing a folder (its developer files become owner-only again). */
+	async removeSharedFolder(projectId: string, prefix: string): Promise<void> {
+		await this.fetch<void>(
+			`/platform/projects/${projectId}/storage-sharing/?prefix=${encodeURIComponent(prefix)}`,
+			{ method: 'DELETE' }
+		);
 	}
 
 	// ---- End-User management methods ----

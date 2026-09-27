@@ -80,9 +80,33 @@ export interface SignedUrlOptions {
 /** Client for interacting with Eurobase object storage. */
 export class StorageClient {
   private http: HttpClient
+  private config: EurobaseConfig
 
   constructor(config: EurobaseConfig, http?: HttpClient) {
+    this.config = config
     this.http = http ?? httpClient(config)
+  }
+
+  /**
+   * A plain URL for a file in a **public** shared folder — usable directly
+   * in `<img src>`, `<audio src>`, CSS, etc. No sign-in or request needed.
+   *
+   * The URL carries your project's **public** key (`?apikey=eb_pk_…`); it
+   * works only for files the developer uploaded into a folder shared as
+   * "Public" (console → Storage → Sharing). Anything else returns 404. For
+   * folders shared with signed-in users only, use `createSignedUrl(key,
+   * 'download')` instead.
+   *
+   * Throws if the client was created with a secret key — a secret key must
+   * never end up in a URL.
+   */
+  getPublicUrl(key: string): string {
+    if (this.config.apiKey.startsWith('eb_sk_')) {
+      throw new Error('getPublicUrl() needs the public key (eb_pk_…); never put the secret key in a URL')
+    }
+    const base = this.config.url.replace(/\/+$/, '')
+    const path = key.split('/').map(encodeURIComponent).join('/')
+    return `${base}/v1/storage/${path}?apikey=${encodeURIComponent(this.config.apiKey)}`
   }
 
   /**
