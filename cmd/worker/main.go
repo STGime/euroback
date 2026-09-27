@@ -666,7 +666,7 @@ func main() {
 	//      is the self-heal path — otherwise a warmup race would
 	//      permanently leave that instance on provider defaults.
 	// Idempotent via ByArgs uniqueness + provider-side idempotency
-	// on set-backup-schedule.
+	// on the backup-schedule update.
 	workers.StartBackupScheduleSweeper(ctx, pool, riverClient)
 
 	// ── Backfill sweeper (M2.5 part 2b) ──

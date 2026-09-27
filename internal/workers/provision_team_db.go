@@ -335,24 +335,6 @@ func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.Prov
 	rec.Port = active.Port
 	logger.Info("team-tier database ready", "host", active.Host, "port", active.Port)
 
-	// Team-tier M3 follow-up (#457) — set the Scaleway backup schedule
-	// so `autobackup_*` retention matches plan_limits.backup_retention_days
-	// instead of Scaleway's undocumented default. Best-effort:
-	//   - Nil Limits (dev/tests without a plans service) → skip; the
-	//     sweeper picks it up once the service is wired in prod.
-	//   - Zero retention (misconfigured plan) → log-loud and skip;
-	//     the sweeper worker will JobCancel the same way if a stale
-	//     row reaches it, so ops sees the config bug immediately.
-	//   - Provider error (e.g. Scaleway warmup 503) → log-warn and
-	//     continue; MarkBackupScheduleApplied is NOT called, so the
-	//     reconcile sweeper enqueues a retry on its next tick. This
-	//     is the specific self-heal the reviewer flagged as
-	//     mandatory on #457.
-	//
-	// On success, MarkBackupScheduleApplied stamps the row so the
-	// sweeper stops seeing it.
-	w.applyBackupSchedule(ctx, provider, rec, logger)
-
 	// Team-tier M2.5 part 2b — bootstrap the fresh instance so it
 	// can safely serve SDK traffic as a non-owner runtime role.
 	// See internal/dbprovider/bootstrap.go for the flow.
@@ -376,6 +358,28 @@ func (w *ProvisionTeamDatabaseWorker) Ensure(ctx context.Context, args jobs.Prov
 			"error", err)
 		return nil, fmt.Errorf("bootstrap dedicated: %w", err)
 	}
+
+	// Team-tier M3 follow-up (#457) — set the Scaleway backup schedule
+	// so `autobackup_*` retention matches plan_limits.backup_retention_days
+	// instead of Scaleway's undocumented default. Best-effort:
+	//   - Nil Limits (dev/tests without a plans service) → skip; the
+	//     sweeper picks it up once the service is wired in prod.
+	//   - Zero retention (misconfigured plan) → log-loud and skip;
+	//     the sweeper worker will JobCancel the same way if a stale
+	//     row reaches it, so ops sees the config bug immediately.
+	//   - Provider error (e.g. Scaleway warmup 503) → log-warn and
+	//     continue; MarkBackupScheduleApplied is NOT called, so the
+	//     reconcile sweeper enqueues a retry on its next tick. This
+	//     is the specific self-heal the reviewer flagged as
+	//     mandatory on #457.
+	//
+	// On success, MarkBackupScheduleApplied stamps the row so the
+	// sweeper stops seeing it.
+	//
+	// After bootstrap and the provider privilege grants: the schedule is
+	// an UpdateInstance, which may briefly put the instance into a
+	// non-ready state that SetPrivilege would be refused in.
+	w.applyBackupSchedule(ctx, provider, rec, logger)
 
 	// Re-fetch the record so the returned value reflects EVERY field
 	// bootstrapRuntime + applyBackupSchedule wrote (runtime creds,
@@ -647,8 +651,8 @@ func isNonRetryable(err error) bool {
 		errors.Is(err, dbprovider.ErrProviderNotRegistered)
 }
 
-// applyBackupSchedule is the inline provision-time call to Scaleway's
-// set-backup-schedule endpoint (#457). All failure paths are
+// applyBackupSchedule is the inline provision-time call that sets
+// Scaleway's backup schedule (UpdateInstance, #457). All failure paths are
 // non-fatal — the reconcile sweeper picks up any row where
 // MarkBackupScheduleApplied didn't fire.
 func (w *ProvisionTeamDatabaseWorker) applyBackupSchedule(
