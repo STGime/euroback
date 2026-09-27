@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
 	"os"
 	"strconv"
@@ -463,6 +464,72 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if r := call("GET", "/v1/storage/?cursor="+url.QueryEscape(page.NextCursor), env.publicKey, "", ""); r.code != 200 || strings.Contains(r.body, "themesz-private") {
 			return fmt.Errorf("anonymous listing leaked a private key: %w", r)
+		}
+		// Serving headers (#697 follow-up): a file stored without a type is
+		// served with a passive one from its extension, cacheable for
+		// anonymous public reads; HEAD works; an uploaded HTML file is never
+		// served as a document on the project's origin.
+		raw := func(method, path string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, nil)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return rec
+		}
+		pub := "?apikey=" + env.publicKey
+		if rec := raw("GET", "/v1/storage/themes/hero.txt"+pub); rec.Code != 200 ||
+			!strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") ||
+			rec.Header().Get("Cache-Control") != "public, max-age=300" {
+			return fmt.Errorf("public GET headers: %d %q %q", rec.Code, rec.Header().Get("Content-Type"), rec.Header().Get("Cache-Control"))
+		}
+		if rec := raw("HEAD", "/v1/storage/themes/hero.txt"+pub); rec.Code != 200 || rec.Body.Len() != 0 ||
+			rec.Header().Get("Content-Length") == "" {
+			return fmt.Errorf("public HEAD: %d len=%q body=%d", rec.Code, rec.Header().Get("Content-Length"), rec.Body.Len())
+		}
+		// An HTML file — stored without a type, or explicitly as text/html
+		// or a type list a browser would read as HTML — is never rendered
+		// inline.
+		for _, tc := range []struct{ key, partType string }{
+			{"themes/page.html", ""},
+			{"themes/explicit.html", "text/html"},
+			{"themes/sneaky.txt", "text/plain, text/html"},
+		} {
+			var buf bytes.Buffer
+			mw := multipart.NewWriter(&buf)
+			_ = mw.WriteField("key", tc.key)
+			hdr := textproto.MIMEHeader{}
+			hdr.Set("Content-Disposition", `form-data; name="file"; filename="x"`)
+			if tc.partType != "" {
+				hdr.Set("Content-Type", tc.partType)
+			}
+			fw, _ := mw.CreatePart(hdr)
+			_, _ = fw.Write([]byte("<script>alert(1)</script>"))
+			_ = mw.Close()
+			req := httptest.NewRequest("POST", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", &buf)
+			req.Header.Set("Content-Type", mw.FormDataContentType())
+			req.Header.Set("Authorization", "Bearer "+env.platformJWT)
+			up := httptest.NewRecorder()
+			env.router.ServeHTTP(up, req)
+			if up.Code >= 300 {
+				return fmt.Errorf("console upload %s: %d %s", tc.key, up.Code, up.Body.String())
+			}
+			rec := raw("GET", "/v1/storage/"+tc.key+pub)
+			if rec.Code != 200 || rec.Header().Get("Content-Disposition") != "attachment" {
+				return fmt.Errorf("%s (%q) must be served as an attachment: %d %q %q", tc.key, tc.partType, rec.Code,
+					rec.Header().Get("Content-Type"), rec.Header().Get("Content-Disposition"))
+			}
+		}
+		// Byte ranges (Safari / iOS media), validators, cache keying.
+		rreq := httptest.NewRequest("GET", "http://api.eurobase.test/v1/storage/themes/hero.txt"+pub, nil)
+		rreq.Header.Set("Range", "bytes=0-4")
+		rrec := httptest.NewRecorder()
+		env.router.ServeHTTP(rrec, rreq)
+		if rrec.Code != http.StatusPartialContent || rrec.Body.String() != "hello" ||
+			!strings.HasPrefix(rrec.Header().Get("Content-Range"), "bytes 0-4/") {
+			return fmt.Errorf("range request: %d %q %q", rrec.Code, rrec.Header().Get("Content-Range"), rrec.Body.String())
+		}
+		if rec := raw("GET", "/v1/storage/themes/hero.txt"+pub); rec.Header().Get("Accept-Ranges") != "bytes" ||
+			rec.Header().Get("ETag") == "" || !strings.Contains(strings.Join(rec.Header().Values("Vary"), ","), "apikey") {
+			return fmt.Errorf("download validators / Vary: %q %q %q", rec.Header().Get("Accept-Ranges"), rec.Header().Get("ETag"), rec.Header().Values("Vary"))
 		}
 		// Anonymous download URLs are capped at 1 h.
 		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "", `{"key":"themes/hero.txt","operation":"download","expires_in":604800}`); r.code != 200 || !strings.Contains(r.body, "X-Amz-Expires=3600") {

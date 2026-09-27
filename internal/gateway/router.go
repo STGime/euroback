@@ -1223,6 +1223,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					r.With(tenant.RequireMinRole("developer")).Post("/signed-url", storageHandler.GenerateSignedURL)
 					r.With(tenant.RequireMinRole("viewer")).Get("/", storageHandler.ListFiles)
 					r.With(tenant.RequireMinRole("viewer")).Get("/*", storageHandler.DownloadFile)
+					r.With(tenant.RequireMinRole("viewer")).Head("/*", storageHandler.DownloadFile)
 					r.With(tenant.RequireMinRole("developer")).Delete("/*", storageHandler.DeleteFile)
 				})
 			}

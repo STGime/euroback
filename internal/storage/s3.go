@@ -306,6 +306,70 @@ func (s *S3Client) UploadObjectWithRetention(ctx context.Context, bucketName, ke
 	return nil
 }
 
+// ObjectMeta is what the gateway passes through when serving an object.
+type ObjectMeta struct {
+	ContentType  string
+	Size         int64 // bytes in this response (the range, for a partial read)
+	ContentRange string
+	ETag         string
+	LastModified time.Time
+}
+
+// ErrInvalidRange: the requested byte range can't be satisfied (416).
+var ErrInvalidRange = errors.New("requested range not satisfiable")
+
+// HeadObjectInfo returns an object's metadata without downloading it
+// (HeadObject). Missing → an "object not found" error, like DownloadObject.
+func (s *S3Client) HeadObjectInfo(ctx context.Context, bucketName, key string) (*ObjectMeta, error) {
+	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var notFound *types.NotFound
+		var noKey *types.NoSuchKey
+		if errors.As(err, &notFound) || errors.As(err, &noKey) {
+			return nil, fmt.Errorf("object not found: %s/%s", bucketName, key)
+		}
+		return nil, fmt.Errorf("head object %s/%s: %w", bucketName, key, err)
+	}
+	return &ObjectMeta{
+		ContentType:  aws.ToString(out.ContentType),
+		Size:         aws.ToInt64(out.ContentLength),
+		ETag:         aws.ToString(out.ETag),
+		LastModified: aws.ToTime(out.LastModified),
+	}, nil
+}
+
+// DownloadObjectRange reads an object, or the single byte range rng (an
+// HTTP Range value such as "bytes=0-1023"; "" = the whole object). Media
+// players (Safari / iOS audio and video) need ranges.
+func (s *S3Client) DownloadObjectRange(ctx context.Context, bucketName, key, rng string) (io.ReadCloser, *ObjectMeta, error) {
+	in := &s3.GetObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key)}
+	if rng != "" {
+		in.Range = aws.String(rng)
+	}
+	out, err := s.client.GetObject(ctx, in)
+	if err != nil {
+		var noSuchKey *types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			return nil, nil, fmt.Errorf("object not found: %s/%s", bucketName, key)
+		}
+		var apiErr interface{ ErrorCode() string }
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidRange" {
+			return nil, nil, ErrInvalidRange
+		}
+		return nil, nil, fmt.Errorf("get object %s/%s: %w", bucketName, key, err)
+	}
+	return out.Body, &ObjectMeta{
+		ContentType:  aws.ToString(out.ContentType),
+		Size:         aws.ToInt64(out.ContentLength),
+		ContentRange: aws.ToString(out.ContentRange),
+		ETag:         aws.ToString(out.ETag),
+		LastModified: aws.ToTime(out.LastModified),
+	}, nil
+}
+
 // ObjectExists reports whether key exists in the bucket (HeadObject).
 func (s *S3Client) ObjectExists(ctx context.Context, bucketName, key string) (bool, error) {
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
