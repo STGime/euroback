@@ -116,3 +116,13 @@ func TestCipher_OpensLegacyV1(t *testing.T) {
 		t.Fatal("a legacy ciphertext opens as version 2")
 	}
 }
+
+// A malformed row (wrong nonce length) is an error, not a panic.
+func TestCipher_MalformedNonceIsError(t *testing.T) {
+	c, _ := NewCipher(testKey, CipherVersion)
+	for _, v := range []int16{CipherVersionLegacy, CipherVersion} {
+		if _, err := c.Open([]byte("x"), []byte("x"), v); err == nil {
+			t.Fatalf("v%d: malformed nonce opened", v)
+		}
+	}
+}

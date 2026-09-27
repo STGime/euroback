@@ -118,6 +118,10 @@ func (c *Cipher) Open(ciphertext, nonce []byte, version int16) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// GCM panics on a wrong nonce length; a malformed row is an error.
+	if len(nonce) != a.NonceSize() {
+		return "", fmt.Errorf("dbprovider: open: nonce is %d bytes, want %d", len(nonce), a.NonceSize())
+	}
 	plaintext, err := a.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return "", fmt.Errorf("dbprovider: open: %w", err)
