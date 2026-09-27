@@ -2,6 +2,21 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.8.0 — unreleased
+
+### Added — `storage.getPublicUrl(key)`
+
+A plain URL for a file in a folder the developer shared as **Public** (console → Storage → Sharing, gateway #697): `${url}/v1/storage/<key>?apikey=<public key>`, usable directly in `<img src>`. Throws if the client uses the secret key — a secret key must never end up in a URL.
+
+### Changed — storage visibility (gateway, all plans)
+
+These come from the gateway (#693, #697) and apply to every SDK version:
+
+- `storage.list()` returns only files the caller may read — their own, plus developer files in folders shared with them — listed from the file index: `etag` is no longer included, `size` of files uploaded through a signed URL may be `0`, `last_modified` is the upload time.
+- Files in shared folders can be downloaded and listed without signing in (public folders) or by any signed-in user; they can never be uploaded over, replaced or deleted by end users.
+- Signed URLs requested with the public key expire after at most 1 hour.
+- With the public key, `storage_objects` can't be written through `eb.db`, and its `uploaded_by` / `metadata` columns can't be read.
+
 ## 0.7.1 — 2026-09-24
 
 ### Fixed — multiple filters on the same column

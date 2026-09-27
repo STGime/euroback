@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy, getContext } from 'svelte';
 	import { page } from '$app/stores';
-	import { api, type FileInfo } from '$lib/api.js';
+	import { api, type FileInfo, type SharedFolder, type SharedFolderVisibility } from '$lib/api.js';
 	import { formatBytes, formatRelativeTime, getFileIcon, inferContentType } from '$lib/utils.js';
 	import FileUploader from '$lib/components/FileUploader.svelte';
 
@@ -70,6 +70,65 @@
 		return key.startsWith(exportPrefix);
 	}
 	let projectSlug = $derived(projectCtx.project?.slug ?? projectId);
+
+	// ---- Shared folders (#697) ----
+	// A folder can be shared so the app's end users may read the developer
+	// files in it: 'authenticated' (signed-in users) or 'public' (anyone
+	// with the project's public key). End users never write there.
+	let sharedFolders = $state<SharedFolder[]>([]);
+	let shareModal = $state<{ prefix: string; name: string } | null>(null);
+	let shareChoice = $state<'owner' | SharedFolderVisibility>('owner');
+	let shareSaving = $state(false);
+	let shareError = $state('');
+
+	async function loadSharedFolders() {
+		try {
+			sharedFolders = await api.listSharedFolders(projectId);
+		} catch {
+			sharedFolders = []; // not fatal: badges just don't show
+		}
+	}
+
+	/** The rule that applies to prefix: its own, else the nearest parent's. */
+	function sharingFor(prefix: string): { rule: SharedFolder; inherited: boolean } | null {
+		let best: SharedFolder | null = null;
+		for (const r of sharedFolders) {
+			if (prefix.startsWith(r.prefix) && (!best || r.prefix.length > best.prefix.length)) best = r;
+		}
+		return best ? { rule: best, inherited: best.prefix !== prefix } : null;
+	}
+
+	function sharingLabel(v: SharedFolderVisibility): string {
+		return v === 'public' ? 'Public' : 'Signed-in users';
+	}
+
+	function openShare(prefix: string, name: string) {
+		const own = sharedFolders.find((r) => r.prefix === prefix);
+		shareChoice = own ? own.visibility : 'owner';
+		shareError = '';
+		shareModal = { prefix, name };
+	}
+
+	async function saveShare() {
+		if (!shareModal) return;
+		shareSaving = true;
+		shareError = '';
+		try {
+			const own = sharedFolders.find((r) => r.prefix === shareModal!.prefix);
+			if (shareChoice === 'owner') {
+				if (own) await api.removeSharedFolder(projectId, shareModal.prefix);
+			} else {
+				await api.setSharedFolder(projectId, shareModal.prefix, shareChoice);
+			}
+			await loadSharedFolders();
+			showToast(shareChoice === 'owner' ? 'Folder is private again' : `Folder shared with ${sharingLabel(shareChoice).toLowerCase()}`);
+			shareModal = null;
+		} catch (err_) {
+			shareError = err_ instanceof Error ? err_.message : 'Failed to update sharing';
+		} finally {
+			shareSaving = false;
+		}
+	}
 
 	// Breadcrumb segments
 	let breadcrumbs = $derived.by(() => {
@@ -146,6 +205,7 @@
 			lastSlug = projectSlug;
 			initialLoadDone = true;
 			loadFiles();
+			loadSharedFolders();
 		}
 	});
 
@@ -457,6 +517,18 @@
 				/>
 			</div>
 
+			<!-- Sharing for the folder being viewed (#697) -->
+			{#if currentPrefix && !isExportArchive(currentPrefix)}
+				{@const sh = sharingFor(currentPrefix)}
+				<button
+					onclick={() => openShare(currentPrefix, breadcrumbs[breadcrumbs.length - 1]?.label ?? currentPrefix)}
+					class="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium shadow-sm transition-colors cursor-pointer {sh ? (sh.rule.visibility === 'public' ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100') : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}"
+					title="Who can read the files in this folder"
+				>
+					Sharing: {sh ? sharingLabel(sh.rule.visibility) : 'Owner only'}
+				</button>
+			{/if}
+
 			<!-- New Folder -->
 			<button
 				onclick={() => { showNewFolderModal = true; newFolderName = ''; }}
@@ -558,6 +630,15 @@
 												<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
 											</svg>
 											<span class="font-medium text-gray-900">{folder.displayName}</span>
+											{#if sharingFor(folder.key)}
+												{@const sh = sharingFor(folder.key)!}
+												<span
+													class="rounded-full px-2 py-0.5 text-[11px] font-medium {sh.rule.visibility === 'public' ? 'bg-amber-50 text-amber-800 ring-1 ring-amber-200' : 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'}"
+													title={sh.inherited ? `Shared via ${sh.rule.prefix}` : 'Shared folder'}
+												>
+													{sharingLabel(sh.rule.visibility)}{sh.inherited ? ' (inherited)' : ''}
+												</span>
+											{/if}
 										</div>
 									</td>
 									<td class="px-4 py-3 text-gray-500 hidden sm:table-cell">--</td>
@@ -565,6 +646,17 @@
 									<td class="px-4 py-3 text-gray-500 hidden lg:table-cell">{formatRelativeTime(folder.last_modified)}</td>
 									<td class="px-4 py-3 text-right">
 										<div class="flex items-center justify-end gap-1">
+											<button
+												type="button"
+												class="cursor-pointer rounded p-1 text-gray-300 hover:bg-eurobase-50 hover:text-eurobase-600 transition-colors"
+												title="Sharing"
+												aria-label="Sharing"
+												onclick={(e) => { e.stopPropagation(); openShare(folder.key, folder.displayName); }}
+											>
+												<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+													<path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z" />
+												</svg>
+											</button>
 											<button
 												type="button"
 												class="cursor-pointer rounded p-1 text-gray-300 hover:bg-blue-50 hover:text-blue-500 transition-colors"
@@ -900,6 +992,68 @@
 		{/if}
 	</div>
 </div>
+
+<!-- Sharing Modal (#697) -->
+{#if shareModal}
+	{@const inherited = sharingFor(shareModal.prefix)?.inherited ? sharingFor(shareModal.prefix)!.rule : null}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="fixed inset-0 z-50 flex items-center justify-center">
+		<div class="absolute inset-0 bg-black/50" onclick={() => { if (!shareSaving) shareModal = null; }}></div>
+		<div class="relative w-full max-w-md rounded-2xl bg-white p-6 shadow-xl mx-4">
+			<h2 class="text-lg font-semibold text-gray-900">Sharing: {shareModal.name}</h2>
+			<p class="mt-1 text-sm text-gray-500">
+				Who can <strong>read</strong> the files you upload to <code class="rounded bg-gray-100 px-1 text-xs">{shareModal.prefix}</code>
+				(and its subfolders) through the SDK. Your app's users can never upload, replace or delete files in a shared folder.
+			</p>
+			{#if inherited}
+				<p class="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
+					Already shared via <code>{inherited.prefix}</code> ({sharingLabel(inherited.visibility).toLowerCase()}). A setting here can widen it, not narrow it.
+				</p>
+			{/if}
+			<fieldset class="mt-4 space-y-2">
+				<legend class="sr-only">Visibility</legend>
+				<label class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 {shareChoice === 'owner' ? 'border-eurobase-500 bg-eurobase-50' : 'border-gray-200'}">
+					<input type="radio" name="share" value="owner" bind:group={shareChoice} class="mt-1" />
+					<span><span class="block text-sm font-medium text-gray-900">Owner only</span>
+						<span class="block text-xs text-gray-500">Default. Each end user sees only files they uploaded themselves.</span></span>
+				</label>
+				<label class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 {shareChoice === 'authenticated' ? 'border-eurobase-500 bg-eurobase-50' : 'border-gray-200'}">
+					<input type="radio" name="share" value="authenticated" bind:group={shareChoice} class="mt-1" />
+					<span><span class="block text-sm font-medium text-gray-900">Signed-in users</span>
+						<span class="block text-xs text-gray-500">Every signed-in user of your app can read your files here — e.g. premium content, shared templates. Use signed URLs to display them.</span></span>
+				</label>
+				<label class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 {shareChoice === 'public' ? 'border-amber-500 bg-amber-50' : 'border-gray-200'}">
+					<input type="radio" name="share" value="public" bind:group={shareChoice} class="mt-1" />
+					<span><span class="block text-sm font-medium text-gray-900">Public</span>
+						<span class="block text-xs text-gray-500">Anyone with your project's public key can read and list your files here — e.g. app assets, images for <code>&lt;img src&gt;</code>. Don't put anything private in a public folder.</span></span>
+				</label>
+			</fieldset>
+			<p class="mt-3 text-xs text-gray-500">Only files you (or your server / edge functions) upload are shared; files your users upload stay private to them.</p>
+			{#if shareError}
+				<p class="mt-3 text-sm text-red-600">{shareError}</p>
+			{/if}
+			<div class="mt-5 flex justify-end gap-3">
+				<button
+					type="button"
+					disabled={shareSaving}
+					onclick={() => { shareModal = null; }}
+					class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors cursor-pointer disabled:opacity-50"
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					disabled={shareSaving}
+					onclick={saveShare}
+					class="rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-semibold text-white hover:bg-eurobase-700 transition-colors cursor-pointer disabled:opacity-50"
+				>
+					{shareSaving ? 'Saving…' : 'Save'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <!-- New Folder Modal -->
 {#if showNewFolderModal}
