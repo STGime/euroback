@@ -112,8 +112,8 @@ func (r *Record) allRuntimeSet() bool {
 // this project's dedicated instance, if bootstrap has populated it.
 // Returned bool is false when the slot is empty (pre-000101 rows or
 // pre-BootstrapDedicated-upgrade instances) — the connection handler
-// falls back to the owner credential + `readonly_pending: true` in
-// that case.
+// then refuses a read-only request (409 `readonly_pending`, no
+// credential; never the owner credential, #698).
 //
 // Same all-or-none safety-net as EffectiveCredential (see
 // allReadonlySet).
@@ -499,8 +499,8 @@ func (r *Repo) ListDeprovisionCandidates(ctx context.Context, olderThan time.Dur
 // empty. This is the M2.5 part 2b / PR-B backfill surface — any
 // project whose bootstrap ran before the readonly role shipped will
 // have runtime_username populated but readonly_username NULL, and
-// filtering on runtime alone would leave them permanently stuck at
-// `readonly_pending: true`. The `OR` covers both migration windows:
+// filtering on runtime alone would leave their read-only connection
+// requests refused (`readonly_pending`) forever. The `OR` covers both migration windows:
 // pre-093 rows (both NULL) and pre-101 rows (readonly NULL only).
 //
 // Bounded LIMIT so a single worker tick doesn't attempt to

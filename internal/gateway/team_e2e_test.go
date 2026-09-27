@@ -1297,9 +1297,13 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			readonly_password_nonce = NULL, readonly_password_key_version = NULL WHERE project_id = $1 AND deleted_at IS NULL`, env.projectID); err != nil {
 			return err
 		}
-		defer env.shared.Exec(ctx, `UPDATE project_databases SET readonly_username = $2, readonly_password_ciphertext = $3,
-			readonly_password_nonce = $4, readonly_password_key_version = $5 WHERE project_id = $1 AND deleted_at IS NULL`,
-			env.projectID, roUser, roCT, roNonce, roVer) //nolint:errcheck
+		defer func() {
+			if _, err := env.shared.Exec(ctx, `UPDATE project_databases SET readonly_username = $2, readonly_password_ciphertext = $3,
+				readonly_password_nonce = $4, readonly_password_key_version = $5 WHERE project_id = $1 AND deleted_at IS NULL`,
+				env.projectID, roUser, roCT, roNonce, roVer); err != nil {
+				t.Errorf("restore read-only slot (later checks would run without it): %v", err)
+			}
+		}()
 		r, c, err = get("readonly")
 		if err != nil {
 			return err

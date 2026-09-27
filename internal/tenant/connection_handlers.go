@@ -173,7 +173,7 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Cache-Control", "no-store")
 				w.WriteHeader(http.StatusConflict)
-				_, _ = w.Write([]byte(`{"error":"the read-only role is still being provisioned; try again in a few minutes, or request role=readwrite","code":"readonly_pending"}`))
+				_, _ = w.Write([]byte(`{"error":"the read-only role is still being provisioned; try again shortly, or request role=readwrite","code":"readonly_pending"}`))
 				return
 			}
 			username = roUser
@@ -201,10 +201,10 @@ func (s *ConnectionService) HandleGetConnection() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(ConnectionResponse{
-			URL:             connURL,
-			Host:            rec.Host,
-			Port:            rec.Port,
-			Database:        rec.DatabaseName,
+			URL:      connURL,
+			Host:     rec.Host,
+			Port:     rec.Port,
+			Database: rec.DatabaseName,
 			Username: username,
 			Role:     effectiveRole,
 		})

@@ -57,6 +57,24 @@
 		}
 	}
 
+	// While the read-only role is still provisioning (409
+	// readonly_pending) the database itself is already active, so the
+	// state poll above has stopped; re-ask for the read-only URL every
+	// 30s until it arrives (or the user switches to Read/Write).
+	let pendingTimer: ReturnType<typeof setInterval> | null = null;
+	function syncPendingPoll() {
+		if (readonlyPending && role === 'readonly') {
+			if (pendingTimer === null) {
+				pendingTimer = setInterval(() => {
+					if (!busy && readonlyPending && role === 'readonly') load('readonly');
+				}, 30000);
+			}
+		} else if (pendingTimer !== null) {
+			clearInterval(pendingTimer);
+			pendingTimer = null;
+		}
+	}
+
 	// Elapsed-time display for the provisioning banner. Derived from
 	// dbState.created_at + a $state ticker that updates every 5s so
 	// the number moves without the whole page re-rendering constantly.
@@ -128,6 +146,7 @@
 			conn = null;
 		} finally {
 			busy = false;
+			syncPendingPoll();
 		}
 	}
 
@@ -187,6 +206,7 @@
 
 	onDestroy(() => {
 		stopPoll();
+		if (pendingTimer !== null) clearInterval(pendingTimer);
 		if (tickTimer !== null) clearInterval(tickTimer);
 	});
 
@@ -207,6 +227,7 @@
 			conn = c;
 			role = 'readwrite';
 			readonlyPending = false;
+			syncPendingPoll();
 			revealed = true; // show freshly rotated URL immediately
 			rotateConfirmOpen = false;
 			typedForRotate = '';
@@ -342,7 +363,7 @@
 						<p class="mt-1 text-xs">
 							This project's dedicated instance is being bootstrapped with a SELECT-only
 							role. That normally completes within a couple of minutes of a fresh
-							provisioning — refresh this page to check. If you need a URL right now,
+							provisioning — this page checks again every 30 seconds. If you need a URL right now,
 							switch to <strong>Read/Write</strong> above; treat that DSN as an owner
 							credential (destructive queries allowed).
 						</p>
