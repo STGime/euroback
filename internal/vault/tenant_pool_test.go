@@ -120,3 +120,16 @@ func TestVaultService_legacyRowRefusedOnDedicated(t *testing.T) {
 		}
 	}
 }
+
+// A malformed row (e.g. planted on a dedicated database) is an error, not
+// a GCM panic.
+func TestVaultService_malformedNonceIsError(t *testing.T) {
+	s, err := NewVaultService(&pgxpool.Pool{}, base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := query.ContextWithTenantPool(context.Background(), &pgxpool.Pool{})
+	if _, err := s.openVaultRow(ctx, "tenant_abc", []byte("x"), []byte("x"), 1); err == nil {
+		t.Fatal("malformed nonce opened")
+	}
+}

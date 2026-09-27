@@ -84,6 +84,12 @@ type UpgradeProjectWorker struct {
 
 // ErrUpgradeCopyNotImplemented fails an upgrade before it touches the
 // project while the copying step is a stub.
+//
+// When implementing the copy: vault_secrets rows must arrive per-tenant
+// sealed (key_version >= 1). The dedicated database is customer-owned, so
+// the gateway and the runner refuse legacy key_version 0 rows read from it
+// (vault.ErrLegacyOnDedicated) and RekeySchema can't fix them there — run
+// RekeySchema on the shared cluster before copying (or re-seal during it).
 var ErrUpgradeCopyNotImplemented = errors.New("Team-tier upgrades are not available yet: the data copy to the dedicated database is not implemented")
 
 // upgradeMaintenanceDrain is the wait after maintenance_mode=true and

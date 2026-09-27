@@ -126,3 +126,14 @@ func TestCipher_MalformedNonceIsError(t *testing.T) {
 		}
 	}
 }
+
+// Rollback safety: a component still writing the legacy version (step 1,
+// or step 2 rolled back) opens version 2 rows the re-seal already wrote.
+func TestCipher_LegacyWriterOpensV2(t *testing.T) {
+	cur, _ := NewCipher(testKey, CipherVersion)
+	ct, nonce, ver, _ := cur.Seal("resealed")
+	legacy, _ := NewCipher(testKey, CipherVersionLegacy)
+	if got, err := legacy.Open(ct, nonce, ver); err != nil || got != "resealed" {
+		t.Fatalf("legacy writer opening v2: %q, %v", got, err)
+	}
+}

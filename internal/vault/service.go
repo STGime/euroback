@@ -236,6 +236,11 @@ func decryptWith(key, ciphertext, nonce []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// GCM panics on a wrong nonce length — and on a Team project's
+	// dedicated database the row comes from a database the customer owns.
+	if len(nonce) != gcm.NonceSize() {
+		return "", fmt.Errorf("decryption failed (malformed nonce)")
+	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return "", fmt.Errorf("decryption failed (wrong key or corrupted data)")
