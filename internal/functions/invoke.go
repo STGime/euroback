@@ -116,6 +116,11 @@ func forwardableQuery(rawQuery string) string {
 // runner is in soft-mode (warn-only) — gateway pods without the secret
 // can keep working until the secret + corresponding env var land in
 // every environment.
+// logSinkKey carries an optional func([]byte) that receives the
+// invocation's decoded log lines (JSON) — set by the console's Test run
+// (#712), never by public traffic.
+type logSinkKey struct{}
+
 func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Signer) http.HandlerFunc {
 	client := &http.Client{Timeout: 65 * time.Second} // slightly above max function timeout
 
@@ -227,6 +232,9 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 		// caller browsers never see internal metadata.
 		logLines := decodeFunctionLogsHeader(resp.Header.Get("X-Function-Logs"))
 		resp.Header.Del("X-Function-Logs")
+		if sink, ok := r.Context().Value(logSinkKey{}).(func([]byte)); ok && sink != nil {
+			sink(logLines) // the console's Test run shows this invocation's lines (#712)
+		}
 
 		// Log the invocation.
 		if resp.StatusCode >= 500 {

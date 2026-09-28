@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { getContext } from 'svelte';
 	import { api, type EdgeFunction, type EdgeFunctionLog, type TableSchema, type FunctionTrigger, type EdgeFunctionVersion, type FunctionMetrics } from '$lib/api.js';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 
@@ -22,6 +23,78 @@
 	let saving = $state(false);
 	let logs: EdgeFunctionLog[] = $state([]);
 	let showLogs = $state(false);
+
+	// Test run (#712): invoke the deployed function from the console.
+	const projectCtx: { project: import('$lib/api.js').Project | null } | undefined = getContext('projectId');
+	let showTest = $state(false);
+	let testMethod = $state('POST');
+	let testQuery = $state('');
+	let testHeaders = $state('');
+	let testBody = $state('{}');
+	let testUserId = $state('');
+	let testRunning = $state(false);
+	let testError: string | null = $state(null);
+	let testResult: import('$lib/api.js').FunctionTestResult | null = $state(null);
+
+	function prettyBody(s: string): string {
+		try {
+			return JSON.stringify(JSON.parse(s), null, 2);
+		} catch {
+			return s;
+		}
+	}
+
+	function parseTestHeaders(): Record<string, string> | null {
+		const out: Record<string, string> = {};
+		for (const line of testHeaders.split('\n')) {
+			const t = line.trim();
+			if (!t) continue;
+			const i = t.indexOf(':');
+			if (i <= 0) return null;
+			out[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+		}
+		return out;
+	}
+
+	async function runTest() {
+		if (!selectedFn) return;
+		const headers = parseTestHeaders();
+		if (headers === null) {
+			testError = 'Headers: one "Name: value" per line.';
+			return;
+		}
+		testRunning = true;
+		testError = null;
+		testResult = null;
+		try {
+			testResult = await api.testEdgeFunction(projectId, selectedFn.name, {
+				method: testMethod,
+				query: testQuery.trim().replace(/^\?/, ''),
+				headers,
+				body: testMethod === 'GET' ? '' : testBody,
+				user_id: testUserId.trim() || undefined
+			});
+		} catch (e: any) {
+			testError = e?.message ?? 'Test run failed';
+		} finally {
+			testRunning = false;
+		}
+	}
+
+	let testCurl = $derived.by(() => {
+		if (!selectedFn) return '';
+		const base = projectCtx?.project?.api_url ?? 'https://<project>.eurobase.app';
+		const q = testQuery.trim().replace(/^\?/, '');
+		const url = `${base}/v1/functions/${selectedFn.name}${q ? '?' + q : ''}`;
+		const parts = [`curl -X ${testMethod} '${url}'`, `  -H 'apikey: <your public key>'`];
+		if (selectedFn.verify_jwt) parts.push(`  -H 'Authorization: Bearer <end-user access token>'`);
+		for (const line of testHeaders.split('\n')) if (line.trim()) parts.push(`  -H '${line.trim().replace(/'/g, "'\\''")}'`);
+		if (testMethod !== 'GET' && testBody) {
+			parts.push(`  -H 'Content-Type: application/json'`);
+			parts.push(`  -d '${testBody.replace(/'/g, "'\\''")}'`);
+		}
+		return parts.join(' \\\n');
+	});
 	// Per-row toggle for the ctx.log.* structured lines row (#492).
 	// Keyed by log.id — flipping doesn't refetch, the lines arrive in
 	// the initial getEdgeFunctionLogs payload.
@@ -543,6 +616,11 @@ module.exports = async (req, ctx) => {
 									aria-pressed={showVersions}
 								>Versions</button>
 								<button
+									onclick={() => { showTest = !showTest; testResult = null; testError = null; }}
+									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showTest ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
+									aria-pressed={showTest}
+								>Test</button>
+								<button
 									onclick={loadLogs}
 									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showLogs ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
 									aria-pressed={showLogs}
@@ -787,6 +865,67 @@ module.exports = async (req, ctx) => {
 						{/if}
 
 						<!-- Logs panel -->
+						{#if showTest}
+							<div class="border-b border-gray-200 px-4 py-3 space-y-3">
+								<div class="flex items-center justify-between">
+									<p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Test run</p>
+									<p class="text-[11px] text-gray-400">Runs the <em>deployed</em> version — Save &amp; Deploy first to test edits.</p>
+								</div>
+								<div class="grid grid-cols-1 gap-3 sm:grid-cols-4">
+									<label class="text-xs text-gray-700">Method
+										<select bind:value={testMethod} class="mt-1 block w-full rounded border-gray-300 px-2 py-1 text-xs">
+											{#each ['POST', 'GET', 'PUT', 'PATCH', 'DELETE'] as m}<option value={m}>{m}</option>{/each}
+										</select>
+									</label>
+									<label class="text-xs text-gray-700 sm:col-span-3">Query string (optional)
+										<input bind:value={testQuery} placeholder="page=2&amp;q=hello" autocomplete="off" class="mt-1 block w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+									</label>
+								</div>
+								<label class="block text-xs text-gray-700">Run as end user (optional)
+									<input bind:value={testUserId} placeholder="user id (uuid) from the Users tab — empty = no user" autocomplete="off" class="mt-1 block w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+									{#if selectedFn.verify_jwt && !testUserId.trim()}
+										<span class="mt-1 block text-[11px] text-amber-700">This function requires a signed-in user (Require JWT) — without one it answers 401, like a public call.</span>
+									{/if}
+								</label>
+								<label class="block text-xs text-gray-700">Headers (optional, one "Name: value" per line)
+									<textarea bind:value={testHeaders} rows="2" spellcheck="false" class="mt-1 block w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"></textarea>
+								</label>
+								{#if testMethod !== 'GET'}
+									<label class="block text-xs text-gray-700">Body
+										<textarea bind:value={testBody} rows="4" spellcheck="false" class="mt-1 block w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs"></textarea>
+									</label>
+								{/if}
+								<div class="flex items-center gap-2">
+									<button onclick={runTest} disabled={testRunning}
+										class="cursor-pointer rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 disabled:opacity-50"
+									>{testRunning ? 'Running…' : 'Run'}</button>
+									{#if testError}<span class="text-xs text-red-600">{testError}</span>{/if}
+								</div>
+								{#if testResult}
+									<div class="space-y-2">
+										<p class="text-xs text-gray-700">
+											<span class="rounded px-1.5 py-0.5 font-mono font-semibold {testResult.status < 300 ? 'bg-green-100 text-green-800' : testResult.status < 500 ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'}">{testResult.status}</span>
+											&middot; {testResult.duration_ms} ms
+											{#if testResult.body_truncated}&middot; <span class="text-amber-700">body truncated at 1 MB</span>{/if}
+										</p>
+										<pre class="max-h-72 overflow-auto rounded bg-gray-900 p-3 text-xs text-green-300">{prettyBody(testResult.body)}</pre>
+										{#if Array.isArray(testResult.logs) && testResult.logs.length > 0}
+											<p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Logs</p>
+											<pre class="max-h-48 overflow-auto rounded bg-gray-50 p-2 text-xs text-gray-800">{testResult.logs.map((l: any) => `${l.level ?? ''} ${l.msg ?? ''}${l.data !== undefined ? ' ' + JSON.stringify(l.data) : ''}`).join('\n')}</pre>
+										{/if}
+										<details class="text-xs text-gray-600">
+											<summary class="cursor-pointer">Response headers</summary>
+											<pre class="mt-1 overflow-auto rounded bg-gray-50 p-2">{Object.entries(testResult.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}</pre>
+										</details>
+									</div>
+								{/if}
+								<details class="text-xs text-gray-600">
+									<summary class="cursor-pointer">Same call with curl</summary>
+									<pre class="mt-1 overflow-auto rounded bg-gray-900 p-3 text-gray-100">{testCurl}</pre>
+								</details>
+							</div>
+						{/if}
+
 						{#if showLogs}
 							<div class="border-t border-gray-200">
 								<div class="flex items-center justify-between px-4 py-2 bg-gray-50">
