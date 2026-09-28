@@ -89,7 +89,7 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
       projectId: z.string().describe('The project UUID'),
       tableName: z.string().describe('Name for the new table'),
       columns: z.string().describe('JSON array of column definitions, e.g. [{"name":"id","type":"uuid","primary_key":true,"default_value":"gen_random_uuid()"},{"name":"title","type":"text"}]'),
-      rlsPreset: z.string().optional().describe('RLS preset: owner_access, public_read_owner_write, authenticated_read_owner_write, full_access, read_only, none'),
+      rlsPreset: z.string().optional().describe('RLS preset: owner_access, public_read_owner_write, authenticated_read_owner_write, read_only, service_only, full_access, none'),
     },
     async ({ projectId, tableName, columns, rlsPreset }) => {
       const body: Record<string, unknown> = {

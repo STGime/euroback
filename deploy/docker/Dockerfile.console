@@ -18,6 +18,9 @@ COPY console/ ./console/
 # to docs/legal/ only — no need to drag the rest of docs/ into
 # the image.
 COPY docs/legal/ ./docs/legal/
+# The Lovable skill (Connect → Lovable tab) — source of truth for the
+# public skill repo, bundled the same way.
+COPY integrations/lovable/ ./integrations/lovable/
 WORKDIR /repo/console
 ENV PUBLIC_API_URL=https://api.eurobase.app
 ARG BUILD_SHA=unknown
