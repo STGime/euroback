@@ -6,10 +6,14 @@
 	let projectId = $derived($page.params.id);
 	let project = $state<Project | null>(null);
 	let conn = $state<ConnectionInfo | null>(null);
-	// `role` is what the user *requested* — the effective role the URL
-	// grants is `conn.role` (backend truth). During the readonly_pending
-	// window they can differ.
+	// `role` is what the user *requested*; `conn.role` is what the URL
+	// grants — the backend never answers a read-only request with
+	// another role's credential (#698).
 	let role = $state<'readonly' | 'readwrite'>('readonly');
+	// Read-only requested while the SELECT-only role is still being
+	// provisioned: the backend answers 409 `readonly_pending` with no
+	// credential at all.
+	let readonlyPending = $state(false);
 
 	let revealed = $state(false);
 	let error = $state<string | null>(null);
@@ -50,6 +54,24 @@
 			if (pollTimer === null) pollTimer = setInterval(refreshState, 5000);
 		} else {
 			stopPoll();
+		}
+	}
+
+	// While the read-only role is still provisioning (409
+	// readonly_pending) the database itself is already active, so the
+	// state poll above has stopped; re-ask for the read-only URL every
+	// 30s until it arrives (or the user switches to Read/Write).
+	let pendingTimer: ReturnType<typeof setInterval> | null = null;
+	function syncPendingPoll() {
+		if (readonlyPending && role === 'readonly') {
+			if (pendingTimer === null) {
+				pendingTimer = setInterval(() => {
+					if (!busy && readonlyPending && role === 'readonly') load('readonly');
+				}, 30000);
+			}
+		} else if (pendingTimer !== null) {
+			clearInterval(pendingTimer);
+			pendingTimer = null;
 		}
 	}
 
@@ -107,6 +129,7 @@
 			project = p;
 			conn = c;
 			role = withRole;
+			readonlyPending = false;
 		} catch (e: any) {
 			// Suppress the top-of-page red banner for the
 			// no-active-DB 409 — the state banner already renders
@@ -115,12 +138,15 @@
 			// substring-matching the message, so a backend reword
 			// can't re-open the double-surface bug.
 			const code = e instanceof APIError ? e.code : undefined;
-			if (code !== 'no_active_dedicated_db') {
+			readonlyPending = code === 'readonly_pending';
+			if (readonlyPending) role = withRole;
+			if (code !== 'no_active_dedicated_db' && code !== 'readonly_pending') {
 				error = e?.message ?? 'Failed to load connection';
 			}
 			conn = null;
 		} finally {
 			busy = false;
+			syncPendingPoll();
 		}
 	}
 
@@ -180,6 +206,7 @@
 
 	onDestroy(() => {
 		stopPoll();
+		if (pendingTimer !== null) clearInterval(pendingTimer);
 		if (tickTimer !== null) clearInterval(tickTimer);
 	});
 
@@ -199,6 +226,8 @@
 			const c = await api.rotateConnection(projectId);
 			conn = c;
 			role = 'readwrite';
+			readonlyPending = false;
+			syncPendingPoll();
 			revealed = true; // show freshly rotated URL immediately
 			rotateConfirmOpen = false;
 			typedForRotate = '';
@@ -320,25 +349,21 @@
 			</button>
 		</div>
 
-		{#if conn}
+		{#if conn || readonlyPending}
 			<div>
-				{#if conn.readonly_pending}
+				{#if readonlyPending || !conn}
 					<!-- The dedicated bootstrap hasn't populated the readonly
 					     credential yet (transient — the backfill sweeper or
 					     a fresh provisioning pass typically fills it in
-					     minutes). The backend would fall back to the owner
-					     DSN with `readonly_pending: true`, but rendering it
-					     here — even next to a banner — would let a user
-					     copy owner creds thinking they're readonly. Hide
-					     the URL/Reveal/Copy affordance entirely; keep the
-					     Read/Write toggle so the user can request the
-					     read/write URL explicitly. -->
+					     minutes). The backend answers 409 `readonly_pending`
+					     with no credential (#698); keep the Read/Write toggle
+					     so the user can request the read/write URL explicitly. -->
 					<div class="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
 						<p class="font-semibold">Read-only role still provisioning</p>
 						<p class="mt-1 text-xs">
 							This project's dedicated instance is being bootstrapped with a SELECT-only
 							role. That normally completes within a couple of minutes of a fresh
-							provisioning — refresh this page to check. If you need a URL right now,
+							provisioning — this page checks again every 30 seconds. If you need a URL right now,
 							switch to <strong>Read/Write</strong> above; treat that DSN as an owner
 							credential (destructive queries allowed).
 						</p>
@@ -377,6 +402,7 @@
 				{/if}
 			</div>
 
+			{#if conn}
 			<dl class="grid grid-cols-2 gap-3 text-sm border-t border-gray-100 pt-4">
 				<div>
 					<dt class="text-xs font-medium text-gray-500">Host</dt>
@@ -395,6 +421,7 @@
 					<dd class="mt-0.5 font-mono text-gray-800">{conn.username}</dd>
 				</div>
 			</dl>
+			{/if}
 		{/if}
 	</div>
 	{/if}

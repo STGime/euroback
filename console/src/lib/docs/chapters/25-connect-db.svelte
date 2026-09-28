@@ -38,6 +38,12 @@
 				<p class="text-sm text-gray-700">
 					Two roles: <strong>read-only</strong> (default — safe for analytics, debugging, most reads) and
 					<strong>read/write</strong> (owner role — for migrations + writes). Both work with any Postgres client.
+					Right after a Team database is created, the read-only role may still be provisioning for a few minutes:
+					the console shows "Read-only role still provisioning", and the API
+					(<code class="rounded bg-gray-100 px-1 text-[11px]">GET …/connection?role=readonly</code>) answers
+					<code class="rounded bg-gray-100 px-1 text-[11px]">409</code> with
+					<code class="rounded bg-gray-100 px-1 text-[11px]">"code": "readonly_pending"</code> and no credential —
+					it never hands out the read/write login instead.
 				</p>
 
 				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">

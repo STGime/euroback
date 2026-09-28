@@ -326,16 +326,10 @@ export interface ConnectionInfo {
 	port: number;
 	database: string;
 	username: string;
-	/** Effective role the URL grants — the truth, not what was
-	 * requested. When `readonly_pending` is true this is always
-	 * "readwrite" even if the caller asked for readonly. */
+	/** The role the URL grants — always the one requested. While the
+	 * read-only role is still being provisioned, a read-only request
+	 * fails with 409 code `readonly_pending` and no credential (#698). */
 	role: 'readonly' | 'readwrite';
-	/** True when the caller asked for `readonly` but the `_ro` role
-	 * hasn't been provisioned yet — the URL is the owner (rw) URL and
-	 * should be treated as a bearer write credential. UI must show a
-	 * "read-only role pending" banner AND the destructive-access
-	 * warning when this is true. */
-	readonly_pending?: boolean;
 }
 
 /**
