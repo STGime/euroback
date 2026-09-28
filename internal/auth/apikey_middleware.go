@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -137,11 +138,20 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 		// UPDATE silently dropped on fast handlers. context.WithoutCancel
 		// preserves the values (request id, audit actor) but detaches
 		// from the cancel signal.
+		// A public key also backfills its plaintext for rows created
+		// before migration 000132 (it's public by design, and this is the
+		// only place that sees it); secret keys never do.
 		bgCtx := context.WithoutCancel(r.Context())
+		var publicKey any
+		if pc.KeyType == "public" && strings.HasPrefix(apiKey, "eb_pk_") {
+			publicKey = apiKey
+		}
 		go func() {
 			_, _ = m.pool.Exec(bgCtx,
-				`UPDATE api_keys SET last_used_at = now() WHERE key_hash = $1`,
-				keyHash,
+				`UPDATE api_keys SET last_used_at = now(),
+				        public_key = CASE WHEN type = 'public' AND public_key IS NULL THEN $2 ELSE public_key END
+				  WHERE key_hash = $1`,
+				keyHash, publicKey,
 			)
 		}()
 

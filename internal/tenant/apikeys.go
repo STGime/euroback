@@ -36,14 +36,16 @@ func GenerateAPIKeyPair() (publicKey, secretKey, publicKeyHash, secretKeyHash st
 }
 
 // StoreAPIKeys inserts two rows into the api_keys table within the given
-// transaction: one for the public key and one for the secret key.
-func StoreAPIKeys(ctx context.Context, tx pgx.Tx, projectID string, publicKeyHash, publicKeyPrefix, secretKeyHash, secretKeyPrefix string) error {
+// transaction: one for the public key and one for the secret key. The public
+// key is also kept in plaintext (it's public: it ships in every browser app),
+// so the console can show it again; the secret key only as a hash.
+func StoreAPIKeys(ctx context.Context, tx pgx.Tx, projectID, publicKey string, publicKeyHash, publicKeyPrefix, secretKeyHash, secretKeyPrefix string) error {
 	slog.Info("storing api keys", "project_id", projectID)
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO api_keys (project_id, key_hash, key_prefix, type)
-		 VALUES ($1, $2, $3, $4)`,
-		projectID, publicKeyHash, publicKeyPrefix, "public",
+		`INSERT INTO api_keys (project_id, key_hash, key_prefix, type, public_key)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		projectID, publicKeyHash, publicKeyPrefix, "public", publicKey,
 	)
 	if err != nil {
 		return fmt.Errorf("insert public api key: %w", err)

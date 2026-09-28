@@ -42,9 +42,10 @@ func keysShowCmd() *cobra.Command {
 			}
 
 			var keys []struct {
-				Type     string `json:"type"`
-				Prefix   string `json:"prefix"`
-				LastUsed string `json:"last_used"`
+				Type      string `json:"type"`
+				Prefix    string `json:"key_prefix"`
+				LastUsed  string `json:"last_used_at"`
+				PublicKey string `json:"public_key,omitempty"`
 			}
 			if err := json.Unmarshal(data, &keys); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
@@ -56,14 +57,20 @@ func keysShowCmd() *cobra.Command {
 				return nil
 			}
 
-			headers := []string{"Type", "Prefix", "Last Used"}
+			headers := []string{"Type", "Key", "Last Used"}
 			var rows [][]string
 			for _, k := range keys {
 				lastUsed := k.LastUsed
 				if lastUsed == "" {
 					lastUsed = "never"
 				}
-				rows = append(rows, []string{k.Type, k.Prefix, lastUsed})
+				// The public key is shown in full (it's public); the secret
+				// key only by prefix — it can't be retrieved again.
+				key := k.PublicKey
+				if key == "" {
+					key = k.Prefix + "…"
+				}
+				rows = append(rows, []string{k.Type, key, lastUsed})
 			}
 			PrintTable(headers, rows)
 			return nil
@@ -102,17 +109,21 @@ func keysRegenerateCmd() *cobra.Command {
 			}
 
 			var keys struct {
-				AnonKey    string `json:"anon_key"`
-				ServiceKey string `json:"service_key"`
+				PublicKey string `json:"public_key"`
+				SecretKey string `json:"secret_key"`
 			}
 			if err := json.Unmarshal(data, &keys); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
 			}
+			if keys.PublicKey == "" || keys.SecretKey == "" {
+				// The old keys are already gone; say so rather than print blanks.
+				return fmt.Errorf("keys were regenerated but the response had no keys — regenerate again from the console")
+			}
 
 			PrintSuccess("API keys regenerated")
-			fmt.Printf("\n  %sAnon key:%s    %s\n", colorBold, colorReset, keys.AnonKey)
-			fmt.Printf("  %sService key:%s %s\n", colorBold, colorReset, keys.ServiceKey)
-			PrintWarning("Save these keys — they will not be shown again.")
+			fmt.Printf("\n  %sPublic key:%s %s\n", colorBold, colorReset, keys.PublicKey)
+			fmt.Printf("  %sSecret key:%s %s\n", colorBold, colorReset, keys.SecretKey)
+			PrintWarning("Save the secret key now — it will not be shown again (the public key stays visible via `eurobase keys show`).")
 			return nil
 		},
 	}
