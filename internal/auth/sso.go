@@ -36,7 +36,10 @@ type OrgsForSSO interface {
 	// FindOrgForSSOMember returns the org_id that this email should
 	// SSO into. MVP: user must already be an org_members row (via
 	// manual invite). Returns tenant.ErrOrgMemberMissing if not.
-	FindOrgForSSOMember(ctx context.Context, email string) (string, error)
+	// preferOrgID (optional) picks that org when the email is an SSO
+	// member of it — e.g. the org whose project sent the user to sign in
+	// (#710) — else the usual choice; it never reveals other orgs.
+	FindOrgForSSOMember(ctx context.Context, email, preferOrgID string) (string, error)
 	// GetOIDCConfigForOrg returns the resolved plaintext OIDC config
 	// (including client_secret) for internal use only.
 	GetOIDCConfigForOrg(ctx context.Context, orgID string) (*OIDCConfigForSSO, error)
@@ -144,6 +147,9 @@ func (h *SSOHandler) HandleSSOInit() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		var body struct {
 			Email string `json:"email"`
+			// Optional: the org to sign in to (the console passes the org
+			// whose project required SSO, #710).
+			OrgID string `json:"org_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
@@ -155,7 +161,7 @@ func (h *SSOHandler) HandleSSOInit() http.HandlerFunc {
 			return
 		}
 
-		orgID, err := h.orgs.FindOrgForSSOMember(r.Context(), email)
+		orgID, err := h.orgs.FindOrgForSSOMember(r.Context(), email, strings.TrimSpace(body.OrgID))
 		if err != nil {
 			// Deliberately opaque error to avoid enumeration:
 			// same 404 for "no such org" as for "email not in any

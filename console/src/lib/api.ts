@@ -626,11 +626,21 @@ export class EurobaseAPI {
 			if (res.status === 403 && typeof window !== 'undefined') {
 				try {
 					const parsed = JSON.parse(body);
-					if (parsed?.code === 'sso_required_for_org') {
+					// Creating a project into an org is refused in place (the
+					// create dialog shows the message), not bounced away.
+					const isCreate = (options?.method ?? 'GET').toUpperCase() === 'POST' &&
+						(path === '/v1/tenants' || path.startsWith('/platform/billing/checkout/new-project'));
+					if (parsed?.code === 'sso_required_for_org' && !isCreate && !window.location.pathname.startsWith('/login')) {
+						// The gateway names the org (#710); older responses only
+						// had it in /platform/orgs/<id> paths.
 						const orgMatch = path.match(/\/platform\/orgs\/([0-9a-f-]{36})/i);
-						const targetOrg = orgMatch ? orgMatch[1] : '';
-						const q = targetOrg ? `?sso_required_for=${targetOrg}` : '';
-						window.location.href = `/login${q}`;
+						const targetOrg: string = parsed.org_id || (orgMatch ? orgMatch[1] : '');
+						const q = new URLSearchParams();
+						if (targetOrg) q.set('sso_required_for', targetOrg);
+						else q.set('sso_required', '1');
+						// Come back to this page after the SSO sign-in.
+						q.set('redirect', window.location.pathname + window.location.search);
+						window.location.href = `/login?${q.toString()}`;
 					}
 				} catch { /* not a JSON error body */ }
 			}
@@ -2594,10 +2604,11 @@ export class EurobaseAPI {
 	 * URL fragment. This endpoint does NOT require an existing
 	 * platform session.
 	 */
-	async initSSO(email: string): Promise<{ authorization_url: string }> {
+	/** orgId (optional): sign in to that org when the email is an SSO member of it (#710). */
+	async initSSO(email: string, orgId?: string): Promise<{ authorization_url: string }> {
 		return this.fetch<{ authorization_url: string }>('/platform/auth/sso/init', {
 			method: 'POST',
-			body: JSON.stringify({ email })
+			body: JSON.stringify(orgId ? { email, org_id: orgId } : { email })
 		});
 	}
 

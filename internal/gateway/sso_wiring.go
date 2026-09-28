@@ -51,8 +51,8 @@ func NewOrgsSSOAdapter(svc *tenant.OrgsService) auth.OrgsForSSO {
 	return &orgsSSOAdapter{svc: svc}
 }
 
-func (a *orgsSSOAdapter) FindOrgForSSOMember(ctx context.Context, email string) (string, error) {
-	return a.svc.FindOrgForSSOMember(ctx, email)
+func (a *orgsSSOAdapter) FindOrgForSSOMember(ctx context.Context, email, preferOrgID string) (string, error) {
+	return a.svc.FindOrgForSSOMember(ctx, email, preferOrgID)
 }
 
 func (a *orgsSSOAdapter) GetOIDCConfigForOrg(ctx context.Context, orgID string) (*auth.OIDCConfigForSSO, error) {

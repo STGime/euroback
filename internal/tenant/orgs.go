@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -594,9 +595,11 @@ func (s *OrgsService) RemoveMember(ctx context.Context, orgID, targetUserID stri
 // If the user is in multiple orgs with SSO configured (rare — MVP
 // UI single-org), returns the first one (arbitrary order — the
 // multi-org UI polish is a deferred follow-up).
-func (s *OrgsService) FindOrgForSSOMember(ctx context.Context, email string) (string, error) {
+func (s *OrgsService) FindOrgForSSOMember(ctx context.Context, email, preferOrgID string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	var orgID string
+	// preferOrgID first when the user is an SSO member of it (#710: the
+	// org whose project required SSO); else the oldest membership.
 	err := s.pool.QueryRow(ctx, `
 		SELECT o.id::text
 		  FROM public.organizations o
@@ -604,9 +607,9 @@ func (s *OrgsService) FindOrgForSSOMember(ctx context.Context, email string) (st
 		  JOIN public.platform_users u ON u.id = om.platform_user_id
 		 WHERE lower(u.email) = $1
 		   AND o.oidc_config IS NOT NULL
-		 ORDER BY om.created_at ASC
+		 ORDER BY (o.id::text = $2) DESC, om.created_at ASC
 		 LIMIT 1
-	`, email).Scan(&orgID)
+	`, email, preferOrgID).Scan(&orgID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return "", ErrOrgMemberMissing
@@ -753,6 +756,30 @@ func isUniqueViolation(err error) bool {
 // a fresh SSO handshake.
 var ErrSSORequiredForOrg = errors.New("this organization requires SSO sign-in")
 
+// SSORequiredError is ErrSSORequiredForOrg naming the org, so the 403
+// can tell the console which org's SSO sign-in to start (#710) — a
+// project route's URL doesn't contain it.
+type SSORequiredError struct{ OrgID string }
+
+func (e *SSORequiredError) Error() string { return ErrSSORequiredForOrg.Error() }
+
+// Is makes errors.Is(err, ErrSSORequiredForOrg) hold.
+func (e *SSORequiredError) Is(target error) bool { return target == ErrSSORequiredForOrg }
+
+// WriteSSORequired answers 403 sso_required_for_org, with the org's id
+// when err carries it (SSORequiredError). The id is only revealed to
+// callers who already passed the membership check.
+func WriteSSORequired(w http.ResponseWriter, err error, msg string) {
+	body := map[string]string{"error": msg, "code": "sso_required_for_org"}
+	var se *SSORequiredError
+	if errors.As(err, &se) && se.OrgID != "" {
+		body["org_id"] = se.OrgID
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 // SetSSORequired flips organizations.sso_required (migration 000121).
 // Caller must be an admin of the org. When set to true, every
 // existing session backed by password login (login_via != 'sso') or
@@ -836,7 +863,7 @@ func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, c
 		return nil
 	}
 	if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, *orgID, *ssoRequired) {
-		return ErrSSORequiredForOrg
+		return &SSORequiredError{OrgID: *orgID}
 	}
 	return nil
 }

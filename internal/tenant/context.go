@@ -124,9 +124,7 @@ func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// the org-membership union in ListProjects.
 			if err := EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
 				if errors.Is(err, ErrSSORequiredForOrg) {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusForbidden)
-					_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+					WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 					return
 				}
 				slog.Error("platform tenant context: sso enforcement",
@@ -285,9 +283,7 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool, resolver TenantPo
 			// PlatformTenantContext for rationale.
 			if err := EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
 				if errors.Is(err, ErrSSORequiredForOrg) {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusForbidden)
-					_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+					WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 					return
 				}
 				slog.Error("platform storage context: sso enforcement",

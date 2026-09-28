@@ -1548,6 +1548,101 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// #710: a password session never gets a project auto-attached to an
+	// SSO-required org (it would be unreachable at once), is refused —
+	// naming the org — when it picks one explicitly, and every 403 for an
+	// SSO org's project names the org so the console can start its SSO.
+	check(t, env, "sso_required_org_projects", func() error {
+		if env.scenario != "free" {
+			return nil // platform org logic, not tenant data: once is enough
+		}
+		ctx := context.Background()
+		var orgID string
+		if err := env.shared.QueryRow(ctx, `INSERT INTO organizations (name, created_by, sso_required)
+			VALUES ('e2e sso org', $1, true) RETURNING id::text`, env.ownerUser).Scan(&orgID); err != nil {
+			return err
+		}
+		if _, err := env.shared.Exec(ctx, `INSERT INTO org_members (org_id, platform_user_id, role, invited_via)
+			VALUES ($1, $2, 'admin', 'manual')`, orgID, env.ownerUser); err != nil {
+			return err
+		}
+		defer env.shared.Exec(ctx, `DELETE FROM organizations WHERE id = $1`, orgID) //nolint:errcheck
+		createAs := func(jwt, body string) *httpResult {
+			req := httptest.NewRequest("POST", "http://api.eurobase.test/v1/tenants", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+jwt)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: "POST /v1/tenants", code: rec.Code, body: rec.Body.String()}
+		}
+		create := func(body string) *httpResult { return createAs(env.platformJWT, body) }
+		// Explicit choice of that org: refused, naming it (first: it
+		// creates nothing, so the Free project limit can't mask it).
+		r := create(`{"name":"e2e sso explicit ` + randHexT(t, 3) + `","plan":"free","org_id":"` + orgID + `"}`)
+		if r.code != http.StatusForbidden || !strings.Contains(r.body, `"code":"sso_required_for_org"`) || !strings.Contains(r.body, `"org_id":"`+orgID+`"`) {
+			return fmt.Errorf("explicit SSO-org create: %d %s, want 403 naming the org", r.code, r.body)
+		}
+		// A session SSO-signed-in to that org still auto-attaches to it
+		// (then the project is removed again: the Free limit is 2).
+		ssoJWT, _, err := env.platformAuth.IssuePlatformJWTForSSO(env.ownerUser, env.ownerEmail, false, orgID)
+		if err != nil {
+			return err
+		}
+		r = createAs(ssoJWT, `{"name":"e2e sso ok `+randHexT(t, 3)+`","plan":"free"}`)
+		if r.code >= 300 {
+			return r
+		}
+		var viaSSO struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &viaSSO); err != nil {
+			return err
+		}
+		var ssoAttached *string
+		if err := env.shared.QueryRow(ctx, `SELECT org_id::text FROM projects WHERE id = $1`, viaSSO.ID).Scan(&ssoAttached); err != nil {
+			return err
+		}
+		if ssoAttached == nil || *ssoAttached != orgID {
+			return fmt.Errorf("SSO session for the org: project attached to %v, want %s", ssoAttached, orgID)
+		}
+		del := httptest.NewRequest("DELETE", "http://api.eurobase.test/v1/tenants/"+viaSSO.ID, nil)
+		del.Header.Set("Authorization", "Bearer "+ssoJWT)
+		delRec := httptest.NewRecorder()
+		env.router.ServeHTTP(delRec, del)
+		if delRec.Code >= 300 {
+			return fmt.Errorf("delete the SSO-attached project: %d %s", delRec.Code, delRec.Body.String())
+		}
+
+		// Auto-attach: skipped for the SSO-required org → personal.
+		r = create(`{"name":"e2e sso auto ` + randHexT(t, 3) + `","plan":"free"}`)
+		if r.code >= 300 {
+			return r
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &created); err != nil {
+			return fmt.Errorf("create response %q: %w", r.body, err)
+		}
+		// The create response doesn't carry org_id: read it back.
+		var attached *string
+		if err := env.shared.QueryRow(ctx, `SELECT org_id::text FROM projects WHERE id = $1`, created.ID).Scan(&attached); err != nil {
+			return err
+		}
+		if attached != nil {
+			return fmt.Errorf("password session: project auto-attached to %s (SSO-required org)", *attached)
+		}
+		// A project in that org: its 403 names the org.
+		if _, err := env.shared.Exec(ctx, `UPDATE projects SET org_id = $1 WHERE id = $2`, orgID, created.ID); err != nil {
+			return err
+		}
+		r = env.consoleFor(created.ID, "GET", "/schema", "")
+		if r.code != http.StatusForbidden || !strings.Contains(r.body, `"org_id":"`+orgID+`"`) {
+			return fmt.Errorf("project in an SSO-required org: %d %s, want 403 naming the org", r.code, r.body)
+		}
+		return nil
+	})
+
 	// Connection page (#698): a read-only request gets the SELECT-only
 	// login or nothing — never the owner credential, even while the
 	// read-only slot is still empty.
@@ -1772,6 +1867,7 @@ type teamEnv struct {
 	funcSecret        []byte // FUNC_PASSWORD_SECRET the runner derives tenant logins from
 	runnerHMAC        []byte // FUNCTIONS_RUNNER_HMAC_SECRET (gateway ↔ runner)
 	runnerOn          bool   // the real Deno runner is up for this scenario
+	platformAuth      *auth.PlatformAuthService
 	bucket            string
 	ownerEmail        string
 	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
@@ -2230,7 +2326,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
 		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, cipher: cipher, keyB64: keyB64, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
 		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, rt: rt, ded: dedAdmin,
-		funcSecret: funcSecret, runnerHMAC: runnerHMAC, runnerOn: runnerOn,
+		funcSecret: funcSecret, runnerHMAC: runnerHMAC, runnerOn: runnerOn, platformAuth: platformSvc,
 	}
 }
 
