@@ -1355,6 +1355,89 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Console Test (#712): invokes a deployed function through the
+	// public invoke path — JWT requirement enforced, "run as" an end
+	// user sets ctx.user, and this invocation's log lines come back.
+	check(t, env, "console_function_test_run", func() error {
+		if !env.runnerOn {
+			t.Skip("no deno (TEAM_TEST_DENO); CI runs this with TEAM_TEST_REQUIRE_RUNNER=1")
+		}
+		ctx := context.Background()
+		if err := env.ensureFuncLogins(ctx); err != nil {
+			return err
+		}
+		code := `export default async function handler(req, ctx) {
+  ctx.log.info("test run", { method: req.method });
+  var q = new URL(req.url).searchParams.get("q");
+  return new Response(JSON.stringify({ user: ctx.user, q: q, body: await req.text() }), { headers: { "Content-Type": "application/json" } });
+}`
+		body, _ := json.Marshal(map[string]any{"name": "e2e-console-test", "code": code, "verify_jwt": true})
+		if r := console("POST", "/functions", string(body)); r.code >= 300 {
+			return r
+		}
+		type result struct {
+			Status int             `json:"status"`
+			Body   string          `json:"body"`
+			Logs   json.RawMessage `json:"logs"`
+		}
+		run := func(payload string) (result, error) {
+			var res result
+			r := console("POST", "/functions/e2e-console-test/test", payload)
+			if r.code != http.StatusOK {
+				return res, r
+			}
+			return res, json.Unmarshal([]byte(r.body), &res)
+		}
+		// verify_jwt: no user → the public path's 401.
+		if res, err := run(`{"method":"POST","body":"{}"}`); err != nil || res.Status != http.StatusUnauthorized {
+			return fmt.Errorf("without a user: %+v %v, want the function's 401", res, err)
+		}
+		// Run as an end user of the project.
+		var uid, email string
+		if err := env.ded.QueryRow(ctx, `SELECT id::text, email FROM `+pgx.Identifier{env.schema, "users"}.Sanitize()+` ORDER BY created_at LIMIT 1`).Scan(&uid, &email); err != nil {
+			return err
+		}
+		res, err := run(`{"method":"POST","query":"q=42","body":"{\"hello\":1}","user_id":"` + uid + `"}`)
+		if err != nil {
+			return err
+		}
+		if res.Status != http.StatusOK || !strings.Contains(res.Body, uid) || !strings.Contains(res.Body, email) || !strings.Contains(res.Body, `"q":"42"`) {
+			return fmt.Errorf("as end user: %+v", res)
+		}
+		if !strings.Contains(string(res.Logs), "test run") {
+			return fmt.Errorf("logs of this invocation missing: %s", res.Logs)
+		}
+		// A phone-only end user (email NULL) can be run as too.
+		var phoneUID string
+		if err := env.ded.QueryRow(ctx, `INSERT INTO `+pgx.Identifier{env.schema, "users"}.Sanitize()+` (phone) VALUES ('+4915100000000') RETURNING id::text`).Scan(&phoneUID); err != nil {
+			return fmt.Errorf("insert phone-only user: %w", err)
+		}
+		if res, err := run(`{"method":"POST","body":"{}","user_id":"` + phoneUID + `"}`); err != nil || res.Status != http.StatusOK || !strings.Contains(res.Body, phoneUID) {
+			return fmt.Errorf("as a phone-only user: %+v %v", res, err)
+		}
+		// Refused up front (400), nothing invoked: unknown user, not a
+		// uuid, an invalid header name.
+		for _, bad := range []string{
+			`{"user_id":"00000000-0000-4000-8000-000000000000"}`,
+			`{"user_id":"not-a-uuid"}`,
+			`{"headers":{"Bad Name":"x"}}`,
+		} {
+			if r := console("POST", "/functions/e2e-console-test/test", bad); r.code != http.StatusBadRequest {
+				return fmt.Errorf("%s: %d %s, want 400", bad, r.code, r.body)
+			}
+		}
+		// No test runs while the project is in maintenance.
+		if _, err := env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = true WHERE id = $1`, env.projectID); err != nil {
+			return err
+		}
+		r := console("POST", "/functions/e2e-console-test/test", `{}`)
+		_, _ = env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = false WHERE id = $1`, env.projectID)
+		if r.code != http.StatusServiceUnavailable {
+			return fmt.Errorf("in maintenance: %d %s, want 503", r.code, r.body)
+		}
+		return nil
+	})
+
 	// ctx.storage for a Team project whose database can't be used (here:
 	// still provisioning) is refused before S3 — never recorded on the
 	// shared cluster, never left untracked.

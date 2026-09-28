@@ -507,10 +507,28 @@ const TOKEN_KEY = 'eurobase_token';
  * the old `{"error":"..."}` shape and the newer two-field
  * envelope.
  */
+// errorBodyField reads a string field from a JSON error body. Parses the
+// JSON (so escaped quotes inside the message survive — a regex stopping at
+// the first `"` cut e.g. esbuild's `Expected ";" but found …` to
+// `Expected \`, #712), with an escape-aware regex fallback for bodies that
+// aren't a single JSON object.
+function errorBodyField(body: string, field: string): string | undefined {
+	try {
+		const v = JSON.parse(body)?.[field];
+		if (typeof v === 'string' && v) return v;
+	} catch { /* not JSON */ }
+	const m = body.match(new RegExp(`"${field}":"((?:[^"\\\\]|\\\\.)*)"`));
+	if (!m || !m[1]) return undefined;
+	try {
+		return JSON.parse(`"${m[1]}"`);
+	} catch {
+		return m[1];
+	}
+}
+
 function parseAPIError(status: number, body: string): string {
-	const match = body.match(/"error":"([^"]+)"/);
-	if (match) {
-		const msg = match[1];
+	const msg = errorBodyField(body, 'error');
+	if (msg) {
 		return msg.charAt(0).toUpperCase() + msg.slice(1);
 	}
 	// Fallback: common status codes
@@ -527,8 +545,7 @@ function parseAPIError(status: number, body: string): string {
 // outcomes (upgrade card vs. red banner) without substring-matching
 // the human-readable message, which the backend can reword any time.
 function parseErrorCode(body: string): string | undefined {
-	const match = body.match(/"code":"([^"]+)"/);
-	return match ? match[1] : undefined;
+	return errorBodyField(body, 'code');
 }
 
 // parseErrorField extracts the "field" name a validation handler
@@ -537,8 +554,7 @@ function parseErrorCode(body: string): string | undefined {
 // input that failed. Same regex shape as parseErrorCode so a body
 // with unusual whitespace / key ordering still works.
 function parseErrorField(body: string): string | undefined {
-	const match = body.match(/"field":"([^"]+)"/);
-	return match ? match[1] : undefined;
+	return errorBodyField(body, 'field');
 }
 
 /**
@@ -2120,6 +2136,17 @@ export class EurobaseAPI {
 		return this.fetch<EdgeFunctionLog[]>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/logs?limit=${limit}`);
 	}
 
+	/**
+	 * Console Test (#712): invoke a deployed function through the public
+	 * invoke path; returns the response and this invocation's log lines.
+	 */
+	async testEdgeFunction(projectId: string, name: string, req: FunctionTestRequest): Promise<FunctionTestResult> {
+		return this.fetch<FunctionTestResult>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/test`, {
+			method: 'POST',
+			body: JSON.stringify(req)
+		});
+	}
+
 	/** List triggers for an edge function. */
 	async listFunctionTriggers(projectId: string, name: string): Promise<FunctionTrigger[]> {
 		return this.fetch<FunctionTrigger[]>(`/platform/projects/${projectId}/functions/${encodeURIComponent(name)}/triggers`);
@@ -3182,6 +3209,24 @@ export interface EdgeFunction {
 	version: number;
 	created_at: string;
 	updated_at: string;
+}
+
+export interface FunctionTestRequest {
+	method: string;
+	query?: string;
+	headers?: Record<string, string>;
+	body?: string;
+	/** Run as this end user of the project (ctx.user); empty = no user. */
+	user_id?: string;
+}
+
+export interface FunctionTestResult {
+	status: number;
+	headers: Record<string, string>;
+	body: string;
+	body_truncated?: boolean;
+	duration_ms: number;
+	logs?: Array<{ level?: string; msg?: string; data?: unknown; ts?: string }> | unknown;
 }
 
 export interface EdgeFunctionLog {

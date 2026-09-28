@@ -1238,6 +1238,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/versions", functions.HandleListVersions(fnSvc))
 				r.With(tenant.RequireMinRole("developer")).Post("/{name}/rollback", functions.HandleRollback(fnSvc))
 				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/metrics", functions.HandleMetrics(fnSvc))
+				// Console Test (#712): invoke through the public invoke path
+				// (runner, HMAC, limits, Team routing); developer+, audited.
+				r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Post("/{name}/test", functions.HandleTestInvoke(pool, fnSvc, fnRunnerURL, fnSigner))
 			})
 
 			// Console end-user management — platform-authenticated.

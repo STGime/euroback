@@ -106,6 +106,11 @@ func forwardableQuery(rawQuery string) string {
 	return q.Encode()
 }
 
+// logSinkKey carries an optional func([]byte) that receives the
+// invocation's decoded log lines (JSON) — set by the console's Test run
+// (#712); unexported, so public traffic can't set it.
+type logSinkKey struct{}
+
 // HandleInvoke proxies a function invocation to the Function Runner service.
 // If no runner is configured, it returns 501 Not Implemented.
 //
@@ -227,6 +232,9 @@ func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Si
 		// caller browsers never see internal metadata.
 		logLines := decodeFunctionLogsHeader(resp.Header.Get("X-Function-Logs"))
 		resp.Header.Del("X-Function-Logs")
+		if sink, ok := r.Context().Value(logSinkKey{}).(func([]byte)); ok && sink != nil {
+			sink(logLines) // the console's Test run shows this invocation's lines (#712)
+		}
 
 		// Log the invocation.
 		if resp.StatusCode >= 500 {
