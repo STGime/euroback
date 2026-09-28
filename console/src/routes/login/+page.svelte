@@ -87,7 +87,15 @@
 
 	// Only same-site paths (no open redirect via ?redirect=).
 	function safeRedirect(u: string | null): string | null {
-		return u && u.startsWith('/') && !u.startsWith('//') && !u.startsWith('/\\') ? u : null;
+		if (!u || !u.startsWith('/') || u.startsWith('//') || u.startsWith('/\\')) return null;
+		// Resolve like the browser would (it strips tabs/newlines, so
+		// "/\t/evil.com" becomes "//evil.com"): same origin only.
+		try {
+			const url = new URL(u, window.location.origin);
+			return url.origin === window.location.origin ? url.pathname + url.search + url.hash : null;
+		} catch {
+			return null;
+		}
 	}
 
 	async function redirectAfterLogin() {
@@ -139,6 +147,11 @@
 			return true;
 		}
 		if (errCode) {
+			// A failed SSO attempt doesn't carry its return path over to a
+			// later, unrelated sign-in in this tab.
+			try {
+				sessionStorage.removeItem(SSO_REDIRECT_KEY);
+			} catch { /* storage unavailable */ }
 			const msg = params.get('sso_error_msg') || errCode;
 			error = `SSO sign-in failed: ${msg}`;
 			history.replaceState({}, '', window.location.pathname + window.location.search);
@@ -234,7 +247,7 @@
 			try {
 				if (back) sessionStorage.setItem(SSO_REDIRECT_KEY, back);
 			} catch { /* storage unavailable */ }
-			const res = await api.initSSO(email.trim());
+			const res = await api.initSSO(email.trim(), ssoRequiredFor || undefined);
 			// Full-page redirect to the IdP — do not use goto() (SvelteKit
 			// client nav) since the URL is on a different origin.
 			window.location.href = res.authorization_url;
@@ -457,7 +470,7 @@
 					<form onsubmit={handleSSOSubmit} class="mt-6 space-y-4">
 						{#if ssoRequired}
 							<div class="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-								The project you opened belongs to an organization that requires single sign-on.
+								The page you opened belongs to an organization that requires single sign-on.
 								Sign in with your organization's SSO to continue — your password sign-in doesn't
 								give access to it.
 							</div>

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/billing/mollie"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -548,6 +549,20 @@ type NewProjectCheckoutRequest struct {
 	//                                    plus audit log entry).
 	OrgIDExplicit bool
 	OrgID         *string
+
+	// The session starting the checkout (#710): an explicit org that
+	// requires SSO is refused unless this session is SSO-signed-in to it
+	// — otherwise the paid project would be unreachable at once.
+	LoginVia string
+	SsoOrgID string
+}
+
+// OrgSSORequiredError: the explicitly chosen org requires SSO and the
+// checkout's session isn't SSO-signed-in to it (#710).
+type OrgSSORequiredError struct{ OrgID string }
+
+func (e *OrgSSORequiredError) Error() string {
+	return "that organization requires SSO sign-in"
 }
 
 // NewProjectCheckoutResult carries the outbound values the handler
@@ -643,17 +658,23 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 			// attaching to personal.
 			return nil, fmt.Errorf("billing: org attach unavailable: developer pool not configured")
 		}
-		var one int
+		var ssoRequired bool
 		err := s.developerPool.QueryRow(ctx,
-			`SELECT 1 FROM public.org_members
-			 WHERE org_id = $1::uuid AND platform_user_id = $2::uuid AND role = 'admin'`,
+			`SELECT o.sso_required FROM public.org_members om
+			   JOIN public.organizations o ON o.id = om.org_id
+			 WHERE om.org_id = $1::uuid AND om.platform_user_id = $2::uuid AND om.role = 'admin'`,
 			*req.OrgID, userID,
-		).Scan(&one)
+		).Scan(&ssoRequired)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrOrgAttachForbidden
 			}
 			return nil, fmt.Errorf("billing: check org admin membership: %w", err)
+		}
+		// Same rule as tenant.SessionSatisfiesSSOFor (no import cycle):
+		// refuse before any payment, not after.
+		if ssoRequired && !(req.LoginVia == auth.LoginViaSSO && req.SsoOrgID == *req.OrgID) {
+			return nil, &OrgSSORequiredError{OrgID: *req.OrgID}
 		}
 	}
 

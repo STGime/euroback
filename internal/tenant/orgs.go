@@ -595,9 +595,11 @@ func (s *OrgsService) RemoveMember(ctx context.Context, orgID, targetUserID stri
 // If the user is in multiple orgs with SSO configured (rare — MVP
 // UI single-org), returns the first one (arbitrary order — the
 // multi-org UI polish is a deferred follow-up).
-func (s *OrgsService) FindOrgForSSOMember(ctx context.Context, email string) (string, error) {
+func (s *OrgsService) FindOrgForSSOMember(ctx context.Context, email, preferOrgID string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	var orgID string
+	// preferOrgID first when the user is an SSO member of it (#710: the
+	// org whose project required SSO); else the oldest membership.
 	err := s.pool.QueryRow(ctx, `
 		SELECT o.id::text
 		  FROM public.organizations o
@@ -605,9 +607,9 @@ func (s *OrgsService) FindOrgForSSOMember(ctx context.Context, email string) (st
 		  JOIN public.platform_users u ON u.id = om.platform_user_id
 		 WHERE lower(u.email) = $1
 		   AND o.oidc_config IS NOT NULL
-		 ORDER BY om.created_at ASC
+		 ORDER BY (o.id::text = $2) DESC, om.created_at ASC
 		 LIMIT 1
-	`, email).Scan(&orgID)
+	`, email, preferOrgID).Scan(&orgID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return "", ErrOrgMemberMissing

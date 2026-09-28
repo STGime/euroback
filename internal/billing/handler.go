@@ -214,6 +214,8 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 			Plan:          strings.ToLower(req.PlanCode),
 			OrgIDExplicit: orgIDExplicit,
 			OrgID:         req.OrgID,
+			LoginVia:      claims.LoginVia,
+			SsoOrgID:      claims.SsoOrgID,
 		})
 		if err != nil {
 			switch {
@@ -231,6 +233,16 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 				writeJSONError(w, http.StatusConflict, "billing_profile_required", "please add your billing details before continuing")
 			case errors.Is(err, ErrOrgAttachForbidden):
 				writeJSONError(w, http.StatusForbidden, "org_attach_forbidden", "you must be an admin of the target organization to attach a project to it")
+			case errors.As(err, new(*OrgSSORequiredError)):
+				var se *OrgSSORequiredError
+				errors.As(err, &se)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":  "that organization requires SSO sign-in; sign in with its SSO to create projects in it",
+					"code":   "sso_required_for_org",
+					"org_id": se.OrgID,
+				})
 			default:
 				reqID := middleware.GetReqID(r.Context())
 				slog.Error("billing: new-project checkout failed",

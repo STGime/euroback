@@ -572,6 +572,23 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			orgID = &s
 		}
 
+		// Attaching to an SSO-required org from a session that can't open
+		// its projects would make this project unreachable at once (#710).
+		// Only checked for orgs the caller belongs to (SetProjectOrg
+		// refuses the rest), so it reveals nothing about other orgs.
+		if orgID != nil && svc.developerPool != nil {
+			var ssoRequired bool
+			err := svc.developerPool.QueryRow(r.Context(),
+				`SELECT o.sso_required FROM public.org_members om
+				   JOIN public.organizations o ON o.id = om.org_id
+				 WHERE om.org_id = $1::uuid AND om.platform_user_id = $2::uuid`,
+				*orgID, claims.Subject).Scan(&ssoRequired)
+			if err == nil && !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, *orgID, ssoRequired) {
+				WriteSSORequired(w, &SSORequiredError{OrgID: *orgID}, "that organization requires SSO sign-in; sign in with its SSO to move projects into it")
+				return
+			}
+		}
+
 		if err := svc.SetProjectOrg(r.Context(), projectID, claims.Subject, orgID); err != nil {
 			if errors.Is(err, ErrProjectNotFound) {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)

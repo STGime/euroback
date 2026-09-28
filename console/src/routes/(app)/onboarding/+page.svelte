@@ -3,7 +3,9 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { api, APIError, type Project, type AuthConfig, type PlanLimits, type OrgWithMembership } from '$lib/api.js';
-	import { loadProjects } from '$lib/stores.js';
+	import { loadProjects, user } from '$lib/stores.js';
+	import { get } from 'svelte/store';
+	import { defaultProjectOwner } from '$lib/session';
 
 	// State
 	let projectName = $state('');
@@ -109,11 +111,9 @@
 				adminOrgs = orgsRes.orgs
 					.filter((o) => o.role === 'admin')
 					.sort((a, b) => a.name.localeCompare(b.name));
-				// Default to the first admin org so the common case
-				// (org admin creating org projects) stays one-click.
-				if (adminOrgs.length > 0) {
-					newOwner = adminOrgs[0].id;
-				}
+				// Default to the first admin org this session can open
+				// (#710: never an SSO-required org from a password session).
+				newOwner = defaultProjectOwner(adminOrgs, get(user)?.token);
 			}
 		} catch {
 			// Fallbacks handle the empty/errored cases — cards show

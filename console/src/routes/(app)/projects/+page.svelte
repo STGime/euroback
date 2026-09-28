@@ -3,7 +3,9 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { api, APIError, type OrgWithMembership, type Project } from '$lib/api.js';
-	import { projects, projectsLoading, projectsError, loadProjects } from '$lib/stores.js';
+	import { projects, projectsLoading, projectsError, loadProjects, user } from '$lib/stores.js';
+	import { get } from 'svelte/store';
+	import { defaultProjectOwner } from '$lib/session';
 
 	// Modal state
 	let showNewModal = $state(false);
@@ -255,11 +257,11 @@
 			preselectPlan === 'legal_team' ? hasLegalTeamBeta :
 			preselectPlan !== undefined;
 		newPlan = preselectPlan && allowedPreselect ? preselectPlan : 'free';
-		// Default owner: first admin'd org if any, else Personal.
-		// Matches the pre-picker auto-attach behaviour so the common
-		// case (org admin creating org projects) stays one-click; the
-		// switch to Personal is a single click for the outlier case.
-		newOwner = adminOrgs.length > 0 ? adminOrgs[0].id : 'personal';
+		// Default owner: first admin'd org this session can open (an
+		// SSO-required org only when signed in with its SSO, #710), else
+		// Personal — keeps the common case one-click without defaulting
+		// to a project the user couldn't open.
+		newOwner = defaultProjectOwner(adminOrgs, get(user)?.token);
 		createError = '';
 		showNewModal = true;
 	}
