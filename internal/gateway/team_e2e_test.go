@@ -2015,7 +2015,7 @@ func (e *teamEnv) addAPIKeys(t *testing.T, projectID string) string {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	if err := tenant.StoreAPIKeys(ctx, tx, projectID, pubHash, pub[:14], secHash, sec[:14]); err != nil {
+	if err := tenant.StoreAPIKeys(ctx, tx, projectID, pub, pubHash, pub[:14], secHash, sec[:14]); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2216,7 +2216,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tenant.StoreAPIKeys(ctx, tx, projectID, pubHash, pub[:14], secHash, sec[:14]); err != nil {
+	if err := tenant.StoreAPIKeys(ctx, tx, projectID, pub, pubHash, pub[:14], secHash, sec[:14]); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -19,21 +19,26 @@ type APIKeyResponse struct {
 	Type      string     `json:"type"`
 	CreatedAt time.Time  `json:"created_at"`
 	LastUsed  *time.Time `json:"last_used_at"`
+	// PublicKey is the full public key (public-type rows only; empty until
+	// known for keys created before migration 000132 and not used since).
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 // APIKeyCreatedResponse includes the full plaintext keys (shown once on creation).
 type APIKeyCreatedResponse struct {
-	PublicKey  string `json:"public_key"`
-	SecretKey  string `json:"secret_key"`
+	PublicKey string `json:"public_key"`
+	SecretKey string `json:"secret_key"`
 }
 
-// HandleListAPIKeys returns the API keys for a project (prefixes only).
+// HandleListAPIKeys returns the API keys for a project: prefixes, plus the
+// full public key (it's public by design). Secret keys never come back.
 func HandleListAPIKeys(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
 		rows, err := pool.Query(r.Context(),
-			`SELECT id, key_prefix, type, created_at, last_used_at
+			`SELECT id, key_prefix, type, created_at, last_used_at,
+			        CASE WHEN type = 'public' THEN coalesce(public_key, '') ELSE '' END
 			 FROM api_keys WHERE project_id = $1 ORDER BY created_at ASC`, projectID)
 		if err != nil {
 			slog.Error("list api keys failed", "error", err)
@@ -45,7 +50,7 @@ func HandleListAPIKeys(pool *pgxpool.Pool) http.HandlerFunc {
 		keys := make([]APIKeyResponse, 0)
 		for rows.Next() {
 			var k APIKeyResponse
-			if err := rows.Scan(&k.ID, &k.KeyPrefix, &k.Type, &k.CreatedAt, &k.LastUsed); err != nil {
+			if err := rows.Scan(&k.ID, &k.KeyPrefix, &k.Type, &k.CreatedAt, &k.LastUsed, &k.PublicKey); err != nil {
 				slog.Error("scan api key failed", "error", err)
 				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 				return
@@ -59,7 +64,8 @@ func HandleListAPIKeys(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // HandleRegenerateAPIKeys deletes existing keys and generates a new pair.
-// The plaintext keys are returned once — they cannot be retrieved again.
+// The secret key is returned once and can't be retrieved again; the public
+// key stays retrievable (HandleListAPIKeys).
 func HandleRegenerateAPIKeys(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
@@ -89,7 +95,7 @@ func HandleRegenerateAPIKeys(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := StoreAPIKeys(r.Context(), tx, projectID, pubHash, pubPrefix, secHash, secPrefix); err != nil {
+		if err := StoreAPIKeys(r.Context(), tx, projectID, pubKey, pubHash, pubPrefix, secHash, secPrefix); err != nil {
 			slog.Error("store new api keys failed", "error", err)
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 			return

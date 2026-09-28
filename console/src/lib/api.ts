@@ -2933,6 +2933,9 @@ export interface APIKey {
 	type: string;
 	created_at: string;
 	last_used_at: string | null;
+	/** Full public key (public keys only; absent for keys created before
+	 *  migration 000132 until they're next used). Secret keys never. */
+	public_key?: string;
 }
 
 export interface ConnectInfo {

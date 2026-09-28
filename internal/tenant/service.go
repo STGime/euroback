@@ -668,7 +668,7 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		publicKeyPrefix := publicKey[:14]
 		secretKeyPrefix := secretKey[:14]
 
-		if err := StoreAPIKeys(ctx, tx, projectID, publicKeyHash, publicKeyPrefix, secretKeyHash, secretKeyPrefix); err != nil {
+		if err := StoreAPIKeys(ctx, tx, projectID, publicKey, publicKeyHash, publicKeyPrefix, secretKeyHash, secretKeyPrefix); err != nil {
 			return nil, fmt.Errorf("store api keys: %w", err)
 		}
 
