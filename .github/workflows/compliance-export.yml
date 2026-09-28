@@ -74,7 +74,7 @@ jobs:
           UPGRADE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
         run: |
           pg_dump --version
-          go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection'
+          go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection|FailStaleRunning'
           go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker'
 
       # Not an export suite, but the only job with a production-role PG16:

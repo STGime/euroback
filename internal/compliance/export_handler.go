@@ -23,6 +23,32 @@ func writeExportError(w http.ResponseWriter, msg string, status int) {
 	writeExportJSON(w, map[string]string{"error": msg}, status)
 }
 
+// endUserExportFailed is what an end user sees instead of the internal
+// failure text.
+const endUserExportFailed = "the export could not be completed; please contact the app's support"
+
+// EndUserExportView is the export as the end user who requested it sees
+// it (#665): `complete`, but not the per-table warnings or the failure
+// text — those can name the project's tables and carry Postgres error
+// text, and belong to the developer (platform API and console). The S3
+// key (bucket layout) is internal too.
+func EndUserExportView(req *ExportRequest) *ExportRequest {
+	if req == nil {
+		return nil
+	}
+	v := *req
+	v.Warnings = nil
+	v.S3Key = nil
+	// Only a failed export reports an error (a stale one on a completed
+	// export would contradict its download link).
+	v.Error = nil
+	if v.Status == "failed" {
+		msg := endUserExportFailed
+		v.Error = &msg
+	}
+	return &v
+}
+
 // HandleRequestTenantExport creates a full-tenant DSAR export job.
 // POST /platform/projects/{id}/compliance/export
 func HandleRequestTenantExport(exportSvc *ExportService) http.HandlerFunc {
@@ -388,7 +414,7 @@ func HandleSelfServeExport(pool *pgxpool.Pool, s3 *storage.S3Client, auditSvc *a
 			})
 		}
 
-		writeExportJSON(w, req, http.StatusAccepted)
+		writeExportJSON(w, EndUserExportView(req), http.StatusAccepted)
 	}
 }
 
@@ -431,6 +457,6 @@ func HandleSelfServeExportStatus(pool *pgxpool.Pool, s3 *storage.S3Client, audit
 			}
 		}
 
-		writeExportJSON(w, req, http.StatusOK)
+		writeExportJSON(w, EndUserExportView(req), http.StatusOK)
 	}
 }

@@ -266,7 +266,7 @@ func (s *ExportService) CheckRateLimit(ctx context.Context, projectID string, us
 // MarkRunning updates the export to running state.
 func (s *ExportService) MarkRunning(ctx context.Context, exportID string) error {
 	_, err := s.Pool.Exec(ctx,
-		`UPDATE export_requests SET status = 'running', started_at = now() WHERE id = $1`,
+		`UPDATE export_requests SET status = 'running', started_at = now(), error = NULL, completed_at = NULL, s3_key = NULL WHERE id = $1`,
 		exportID,
 	)
 	return err
@@ -285,7 +285,7 @@ func (s *ExportService) MarkCompleted(ctx context.Context, exportID, s3Key strin
 	}
 	_, err := s.Pool.Exec(ctx,
 		`UPDATE export_requests
-		 SET status = 'completed', s3_key = $2, file_size = $3,
+		 SET status = 'completed', s3_key = $2, file_size = $3, error = NULL,
 		     complete = $4, warnings = $5,
 		     completed_at = now(), expires_at = now() + interval '7 days'
 		 WHERE id = $1`,
@@ -390,7 +390,33 @@ func sanitiseFilenamePart(s string) string {
 }
 
 // CleanupExpired deletes expired export records and their S3 objects.
+// staleRunningExportAfter: an export still "running" this long after it
+// started never finished — its worker was killed (a deploy, #725), River
+// discarded or cancelled the job, or its bookkeeping failed. Well past the
+// longest legitimate run: 2 attempts × the 30-min job timeout, plus River's
+// 1 h rescue delay for a killed attempt.
+const staleRunningExportAfter = 3 * time.Hour
+
+// failStaleRunning marks exports stuck in "running" as failed, so the
+// requester sees an outcome and the rate limit (which counts non-failed
+// requests) lets them ask again.
+func (s *ExportService) failStaleRunning(ctx context.Context) {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE export_requests
+		    SET status = 'failed', error = 'the export did not finish', completed_at = now()
+		  WHERE status = 'running' AND started_at < now() - make_interval(secs => $1)`,
+		staleRunningExportAfter.Seconds())
+	if err != nil {
+		slog.Error("failed to fail stale running exports", "error", err)
+		return
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		slog.Warn("marked stale running exports as failed", "count", n)
+	}
+}
+
 func (s *ExportService) CleanupExpired(ctx context.Context) {
+	s.failStaleRunning(ctx)
 	rows, err := s.Pool.Query(ctx,
 		`DELETE FROM export_requests WHERE expires_at < now() RETURNING s3_key, project_id`)
 	if err != nil {
@@ -518,6 +544,9 @@ const (
 	TableExported  = "exported"
 	TableTruncated = "truncated"
 	TableFailed    = "failed"
+	// TableSkipped: a relation deliberately not exported as data (views,
+	// materialized views, foreign tables — #665); see Reason.
+	TableSkipped = "skipped"
 )
 
 // TableExport records what an export wrote for one table.
@@ -527,6 +556,8 @@ type TableExport struct {
 	Rows   int    `json:"rows"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+	// Reason explains a skipped relation.
+	Reason string `json:"reason,omitempty"`
 	// RedactedColumns were left out on purpose: credential columns of
 	// the platform-managed tables (query.SensitiveSystemColumns).
 	RedactedColumns []string `json:"redacted_columns,omitempty"`
@@ -589,12 +620,40 @@ func errorText(err error) string {
 	return err.Error()
 }
 
+// redactTableErrors drops the database error text of failed tables, for
+// the per-user archive's _metadata.json (#665): that archive goes to the
+// data subject, and error text can carry Postgres internals. The status
+// stays; the developer sees the details in the console (export_requests).
+func redactTableErrors(tables []TableExport) []TableExport {
+	out := make([]TableExport, len(tables))
+	for i, t := range tables {
+		t.Error = ""
+		out[i] = t
+	}
+	return out
+}
+
+// userArchiveWarnings is warnings with the table lines rebuilt without
+// error text (redactTableErrors). warnings must start with
+// tableWarnings(tables), as WriteUserExport builds it.
+func userArchiveWarnings(tables []TableExport, warnings []string) []string {
+	n := len(tableWarnings(tables))
+	if n > len(warnings) {
+		n = len(warnings)
+	}
+	return append(tableWarnings(redactTableErrors(tables)), warnings[n:]...)
+}
+
 // tableWarnings turns non-exported tables into warning lines.
 func tableWarnings(tables []TableExport) []string {
 	var out []string
 	for _, t := range tables {
 		switch t.Status {
 		case TableFailed:
+			if t.Error == "" {
+				out = append(out, fmt.Sprintf("table %q was not exported", t.Table))
+				continue
+			}
 			out = append(out, fmt.Sprintf("table %q was not exported: %s", t.Table, t.Error))
 		case TableTruncated:
 			out = append(out, fmt.Sprintf("table %q was truncated at %d rows", t.Table, t.Rows))
@@ -726,6 +785,44 @@ func ListTenantTables(ctx context.Context, q querier, schemaName string) ([]stri
 	return tables, nil
 }
 
+// ListSkippedRelations returns the relations of a tenant schema that an
+// export deliberately doesn't read as data, as skipped entries for
+// _metadata.json (#665), so the archive accounts for everything in the
+// schema: views and materialized views (derived data; their definitions
+// are in schema/schema.sql) and foreign tables (data lives elsewhere; the
+// export also refuses to read them, restrict_nonsystem_relation_kind).
+func ListSkippedRelations(ctx context.Context, q querier, schemaName string) ([]TableExport, error) {
+	rows, err := q.Query(ctx,
+		`SELECT c.relname, c.relkind::text
+		 FROM pg_class c
+		 JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relkind IN ('v', 'm', 'f')
+		 ORDER BY c.relname`,
+		schemaName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list skipped relations: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TableExport
+	for rows.Next() {
+		var name, kind string
+		if err := rows.Scan(&name, &kind); err != nil {
+			return nil, err
+		}
+		reason := "view: derived data, definition in " + schemaDumpFile
+		switch kind {
+		case "m":
+			reason = "materialized view: derived data, definition in " + schemaDumpFile
+		case "f":
+			reason = "foreign table: data is stored outside this database, definition in " + schemaDumpFile
+		}
+		out = append(out, TableExport{Table: name, Status: TableSkipped, Reason: reason})
+	}
+	return out, rows.Err()
+}
+
 // ExportMetadata is the _metadata.json file in the export zip.
 type ExportMetadata struct {
 	// FormatVersion is ExportFormatVersion (absent in version 1).
@@ -735,6 +832,8 @@ type ExportMetadata struct {
 	UserID        *string   `json:"user_id,omitempty"`
 	Format        string    `json:"format"`
 	ExportedAt    time.Time `json:"exported_at"`
+	// TableCount counts data tables (plus the user archive's _users entry);
+	// `tables` also lists skipped relations (views etc.), which it excludes.
 	TableCount    int       `json:"table_count"`
 	TotalRows     int       `json:"total_rows"`
 	// Complete is true only when every table was exported in full and
@@ -924,13 +1023,33 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 			res.TotalRows += te.Rows
 			exported = append(exported, te)
 		}
+		// Views etc. are listed as skipped (#665). Failing to list them
+		// doesn't fail the export (the rows are all there), but the
+		// archive no longer accounts for every relation, so like a failed
+		// section it's a warning and makes the export incomplete.
+		// In its own savepoint, so a failure doesn't abort the snapshot.
+		var skipped []TableExport
+		sp, err := tx.Begin(ctx)
+		if err == nil {
+			if skipped, err = ListSkippedRelations(ctx, sp, schemaName); err != nil {
+				_ = sp.Rollback(ctx)
+			} else {
+				err = sp.Commit(ctx)
+			}
+		}
+		if err != nil {
+			skipped = nil
+			slog.Warn("export: could not list views", "error", err, "project_id", projectID)
+			res.Warnings = append(res.Warnings, "views and foreign tables could not be listed")
+		}
+		exported = append(exported, skipped...)
 		return nil
 	})
 	if err != nil {
 		_ = zw.Close()
 		return nil, err
 	}
-	res.Warnings = tableWarnings(exported)
+	res.Warnings = append(tableWarnings(exported), res.Warnings...)
 	sections = append(sections,
 		exportAuthManifest(ctx, pool, zw, projectID),
 		exportStorageManifest(ctx, zw, opts, projectID, contentTypes))
@@ -1096,8 +1215,8 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, 
 		TableCount:          len(refs) + 1,
 		TotalRows:           res.TotalRows,
 		Complete:            res.Complete,
-		Warnings:            res.Warnings,
-		Tables:              exported,
+		Warnings:            userArchiveWarnings(exported, res.Warnings),
+		Tables:              redactTableErrors(exported),
 		RowLimitPerTable:    maxRowsPerTable,
 		AuditLogUnavailable: auditUnavailable,
 	}

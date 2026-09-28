@@ -2,6 +2,12 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added — `ExportRequest.complete`
+
+The type of `auth.exportMyData()` / `getMyExport()` results declares `complete` (the gateway already returns it): `false` when the archive is missing something. Gateway change (#665): for end users, `error` is now a generic message and the response no longer carries `warnings` or `s3_key` (never declared in this type) — the app's developer sees the details in the console.
+
 ## 0.8.1 — 2026-09-28
 
 ### Fixed — the session's user after an OAuth sign-in (#720)

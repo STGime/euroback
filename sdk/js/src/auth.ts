@@ -99,8 +99,13 @@ export interface ExportRequest {
   format: 'json' | 'csv'
   /** Only set when status === 'completed'. Presigned, 1h TTL. */
   download_url?: string
-  /** Set when status === 'failed'. */
+  /** Set when status === 'failed' — a generic message; the app's developer
+   *  sees the details in the console. */
   error?: string
+  /** Set once completed: false when the archive is missing something (a
+   *  table that couldn't be read, a truncated table, …). The app's
+   *  developer sees the details in the console. */
+  complete?: boolean
   file_size?: number
   /** When the download link itself stops working. 7 days after completion. */
   expires_at?: string
