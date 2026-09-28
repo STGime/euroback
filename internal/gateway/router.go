@@ -399,13 +399,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		if err != nil {
 			slog.Warn("internal storage handler not mounted", "error", err)
 		} else {
-			liveRepo := dbprovider.NewRepo(pool)
 			ish.TenantPool = func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
-				if _, err := liveRepo.GetLiveByProject(ctx, projectID); err != nil {
-					if errors.Is(err, pgx.ErrNoRows) {
-						return pool, nil // Free / Pro: shared cluster
-					}
+				// Same live-row rule as GetLiveByProject, without loading
+				// the row (ciphertexts) on every call.
+				var dedicated bool
+				if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.project_databases
+					WHERE project_id = $1 AND state IN ('provisioning', 'active', 'restoring') AND deleted_at IS NULL)`,
+					projectID).Scan(&dedicated); err != nil {
 					return nil, fmt.Errorf("dedicated database lookup: %w", err)
+				}
+				if !dedicated {
+					return pool, nil // Free / Pro: shared cluster
 				}
 				if !enableSDKRouting || poolCache == nil {
 					return nil, errors.New("Team-tier routing disabled (TEAM_TIER_ROUTING, VAULT_ENCRYPTION_KEY)")

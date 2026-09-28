@@ -1368,6 +1368,21 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if ok, err := env.s3.ObjectExists(ctx, env.bucket, "fn/runner.txt"); err != nil || !ok {
 			return fmt.Errorf("function upload not in S3: %v %v", ok, err)
 		}
+		// A user-less upload never takes an existing file away from its
+		// end user (e.g. a webhook rewriting users/<id>/…).
+		var endUser string
+		if err := env.ded.QueryRow(ctx, `SELECT id::text FROM `+pgx.Identifier{env.schema, "users"}.Sanitize()+` ORDER BY created_at LIMIT 1`).Scan(&endUser); err != nil {
+			return fmt.Errorf("pick an end user: %w", err)
+		}
+		if _, err := env.ded.Exec(ctx, `UPDATE `+pgx.Identifier{env.schema, "storage_objects"}.Sanitize()+` SET uploaded_by = $1 WHERE key = 'fn/runner.txt'`, endUser); err != nil {
+			return err
+		}
+		if r := sdk("POST", "/v1/functions/e2e-runner", `{}`); r.code != http.StatusOK {
+			return fmt.Errorf("second invoke: %d %s", r.code, r.body)
+		}
+		if owner := env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = 'fn/runner.txt'", "storage_objects"); owner != endUser {
+			return fmt.Errorf("user-less re-upload changed the owner to %q, want the end user %s", owner, endUser)
+		}
 		return nil
 	})
 
@@ -2019,6 +2034,11 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 			"FUNCTIONS_RUNNER_HMAC_SECRET":         string(runnerHMAC),
 			"FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED": "true",
 			"GATEWAY_INTERNAL_URL":                 gatewaySrv.URL,
+			// Not inherited from the developer's shell: direct tenant
+			// connections, default cap.
+			"FUNC_DB_POOLER_URL":     "",
+			"RUNNER_TENANT_CONN_CAP": "",
+			"DATABASE_URL":           "",
 		})
 		runnerOn = true
 	}
@@ -2044,7 +2064,8 @@ func startRunner(t *testing.T, cfg teamTestConfig, port int, env map[string]stri
 	// certificate. When production trusts Scaleway's CA instead (stage B),
 	// dedicated instances must be covered too.
 	cmd := exec.Command(cfg.deno, "run", "--allow-net", "--allow-env", "--allow-read="+dir,
-		"--unstable-worker-options", "--unsafely-ignore-certificate-errors=localhost,127.0.0.1", filepath.Join(dir, "server.ts"))
+		"--unstable-worker-options", "--unsafely-ignore-certificate-errors=localhost,127.0.0.1", "--no-lock",
+		filepath.Join(dir, "server.ts"))
 	cmd.Env = append(os.Environ(), "PORT="+strconv.Itoa(port))
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)

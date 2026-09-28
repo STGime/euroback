@@ -58,10 +58,11 @@ jobs:
         run: command -v psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
 
       # The real functions runner (#676): function_invoke_real_runner
-      # starts functions-runner/server.ts per scenario.
+      # starts functions-runner/server.ts per scenario. Same Deno as
+      # production (deploy/docker/Dockerfile.fn: denoland/deno:2.1.0).
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
+          deno-version: v2.1.0
 
       - name: Team e2e harness
         run: scripts/test-team.sh
