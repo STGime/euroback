@@ -66,16 +66,22 @@
 	let lovableMessage = $state('');
 	let lovableError = $state('');
 
+	// The key hint belongs to one project: reset it when the project changes.
+	let keyPrefixFor = '';
 	$effect(() => {
-		if (activeTab === 'lovable' && !publicKeyPrefix) {
+		if (projectId !== keyPrefixFor) {
+			publicKeyPrefix = '';
+			keyPrefixFor = projectId ?? '';
+		}
+		if (activeTab === 'lovable' && !publicKeyPrefix && projectId) {
 			api.listAPIKeys(projectId)
 				.then((keys) => { publicKeyPrefix = keys.find((k) => k.type === 'public')?.key_prefix ?? ''; })
 				.catch(() => { /* optional hint */ });
 		}
 	});
 
-	let lovableEnv = $derived(info ? `VITE_EUROBASE_URL=${info.api_url}\nVITE_EUROBASE_PUBLIC_KEY=eb_pk_…  # your project's public key` : '');
-	let lovablePrompt = $derived(info ? `Use the /eurobase skill. This app uses Eurobase as its backend, not Lovable Cloud or Supabase. My project URL is ${info.api_url} and my public key is eb_pk_…. Build …` : '');
+	let lovableEnv = $derived(info ? `VITE_EUROBASE_URL=${info.api_url}\nVITE_EUROBASE_PROJECT_ID=${info.project_id}\nVITE_EUROBASE_PUBLIC_KEY=eb_pk_…  # your project's public key` : '');
+	let lovablePrompt = $derived(info ? `Use the /eurobase skill. This app uses Eurobase as its backend, not Lovable Cloud or Supabase. Put these in .env: VITE_EUROBASE_URL=${info.api_url}, VITE_EUROBASE_PROJECT_ID=${info.project_id}, VITE_EUROBASE_PUBLIC_KEY=eb_pk_…. Build …` : '');
 
 	// The URLs typed in, as origins; invalid entries reported.
 	let lovableOrigins = $derived.by(() => {
@@ -103,8 +109,7 @@
 	async function addLovableUrls() {
 		lovableMessage = '';
 		lovableError = '';
-		const existing: AuthConfig | undefined = projectCtx?.project?.auth_config;
-		if (!projectCtx || !existing) {
+		if (!projectCtx || !projectId) {
 			lovableError = 'Project settings not loaded yet — try again in a moment.';
 			return;
 		}
@@ -112,13 +117,22 @@
 			lovableError = 'Fix the highlighted URLs first (https://… only).';
 			return;
 		}
-		const { cors, redirects } = lovablePlan;
-		if (cors.length === 0 && redirects.length === 0) {
-			lovableMessage = 'Nothing to add — these URLs are already allowed.';
-			return;
-		}
 		lovableSaving = true;
 		try {
+			// Merge into the settings as they are now, not as this page
+			// loaded them (another tab or admin may have changed them).
+			const fresh = await api.getProject(projectId);
+			const existing: AuthConfig | undefined = fresh?.auth_config;
+			if (!existing) throw new Error('Could not load the project settings.');
+			projectCtx.updateProject(fresh);
+			const haveCors = new Set(existing.cors_origins ?? []);
+			const haveRedirects = new Set(existing.redirect_urls ?? []);
+			const cors = lovablePlan.cors.filter((c) => !haveCors.has(c));
+			const redirects = lovablePlan.redirects.filter((r) => !haveRedirects.has(r));
+			if (cors.length === 0 && redirects.length === 0) {
+				lovableMessage = 'Nothing to add — these URLs are already allowed.';
+				return;
+			}
 			const merged: AuthConfig = {
 				...existing,
 				cors_origins: [...(existing.cors_origins ?? []), ...cors],
@@ -168,7 +182,7 @@
 
 		<!-- IDE tabs -->
 		<div class="mt-6 border-b border-gray-200">
-			<nav class="flex gap-6" aria-label="IDE tabs">
+			<nav class="flex gap-6 overflow-x-auto whitespace-nowrap" aria-label="IDE tabs">
 				{#each [
 					{ id: 'claude', label: 'Claude Code' },
 					{ id: 'lovable', label: 'Lovable' },

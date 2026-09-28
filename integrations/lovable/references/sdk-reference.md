@@ -1,6 +1,6 @@
 # @eurobase/sdk reference for Lovable apps
 
-Written against `@eurobase/sdk` 0.8.x. All examples assume the shared client: `import { eb } from '@/lib/eurobase'`.
+Written against `@eurobase/sdk` 0.8.x. All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
 
 ## Return shapes
 
@@ -18,7 +18,7 @@ Written against `@eurobase/sdk` 0.8.x. All examples assume the shared client: `i
 | `storage.getPublicUrl` | `string` (public folders only) |
 | `storage.list` | `{ objects, has_more, next_cursor, error }` |
 | `storage.download` | `Blob` |
-| `functions.invoke` | `{ data, error: { status, message } or null }` |
+| `functions.invoke` | `{ data, error: { status, message } or null }` (`status` is `0` today — show `message`, don't branch on `status`) |
 
 `AuthSession = { access_token, refresh_token, expires_in, token_type, user }`
 `AuthUser = { id, email, display_name?, avatar_url?, metadata?, created_at, updated_at }`
@@ -42,7 +42,7 @@ const { data: project, error } = await eb.db.from('projects').eq('id', id).singl
 
 // Insert (returns the new row)
 const { data: created, error } = await eb.db.from('projects')
-  .insert({ name, user_id: eb.auth.getSession()!.user.id })
+  .insert({ name, user_id: await currentUserId() })
 
 // Update by id (returns the updated row)
 await eb.db.from('projects').update(id, { status: 'archived' })
@@ -111,6 +111,10 @@ export const useAuth = () => useContext(AuthContext)
 
 Protected page: while `loading`, render a spinner; if `!session`, navigate to `/login`. Don't decide on the server.
 
+### Server-side rendering (TanStack Start)
+
+Newer Lovable projects render pages on the server, where there is no `localStorage` and so no session. Call `eb.auth.*`, `eb.db.*`, `eb.storage.*` and `eb.realtime.*` only in the browser — `useEffect`, event handlers, client-side TanStack Query hooks — and never in route `loader`s, `beforeLoad` or server functions: they'd see a signed-out user, and a module-level client on the server is shared between visitors. Put auth checks in a client component, not in `beforeLoad`. Older React + Vite projects run entirely in the browser.
+
 Sign in / sign up:
 
 ```typescript
@@ -122,11 +126,11 @@ const { error } = await eb.auth.signUp({
 })
 ```
 
-If the project requires email confirmation, `signUp` succeeds but the user must click the email link before `signIn` works. Show a "check your inbox" screen.
+If the project requires email confirmation, `signUp` still returns a session (and fires `SIGNED_IN`), but the user must click the email link before they can use the app — call `eb.auth.signOut()` right after `signUp` and show a "check your inbox" screen.
 
 ## Auth flows
 
-Each flow needs a page in the app and its full URL in the Eurobase console → project → Auth → **Allowed redirect URLs** (exact match for email flows; OAuth also accepts deeper paths under an allowed URL). The app's origins also go into **Allowed CORS origins**. Remind the user to add the preview URL, the published `*.lovable.app` URL and any custom domain to both — wildcards are not accepted. (Console → project → Connect → Lovable tab adds them.)
+Each flow needs a page in the app and its full URL in the Eurobase console → project → Auth → **Allowed redirect URLs** (exact match for email flows; OAuth also accepts deeper paths under an allowed URL). The app's origins also go into **Allowed CORS origins**. Remind the user to add the preview URL, the published `*.lovable.app` URL and any custom domain to both — wildcards like `*.lovable.app` don't work. (Console → project → Connect → Lovable tab adds them.)
 
 Email verification (`/verify`):
 
@@ -162,8 +166,8 @@ eb.auth.signInWithOAuth('google', { redirectTo: `${location.origin}/auth/callbac
 // /auth/callback (client-side):
 const { data, error } = eb.auth.handleOAuthCallback()   // reads tokens from the URL hash
 if (data) {
-  const { data: user } = await eb.auth.getUser()         // callback session has no user details yet
-  navigate('/')
+  const { data: user } = await eb.auth.getUser()         // the callback session has no user details yet —
+  navigate('/')                                          // use currentUserId() (not getSession().user.id) until the next token refresh
 }
 ```
 
@@ -179,7 +183,7 @@ Rate-limited to one export per user per day by default.
 ## Storage
 
 ```typescript
-const userId = eb.auth.getSession()!.user.id
+const userId = await currentUserId()
 const path = `${userId}/${crypto.randomUUID()}-${file.name}`
 
 const { key, error } = await eb.storage.upload(path, file, { contentType: file.type })
@@ -203,6 +207,21 @@ Who can see what:
 - Public files: `eb.storage.getPublicUrl('themes/hero.jpg')` gives a plain URL for `<img src>` (public key only; it throws with a secret key).
 - To show user A's file to user B (avatars in a list), use an edge function with service access that returns signed URLs for the files B may see.
 
+## Tables and row-level security presets
+
+Tables created with the Eurobase connector (or the console) get row-level security with a preset. Pick deliberately:
+
+| Preset | Who can read | Who can write | Use for |
+|---|---|---|---|
+| `owner_access` | only the owner | only the owner | private per-user data (default with a `user_id`, `owner_id` or `created_by` column) |
+| `authenticated_read_owner_write` | signed-in users | only the owner | team or community data |
+| `public_read_owner_write` | everyone | only the owner | public profiles, posts |
+| `read_only` | everyone | nobody from the app | reference data you seed |
+| `service_only` | nobody from the app | nobody from the app | data only edge functions touch |
+| `full_access` | everyone | everyone | only when the user explicitly wants an anonymous public table |
+
+Raw SQL policies: every insert runs `INSERT ... RETURNING *`, and Postgres checks the SELECT policy when reading the row back, so pair every INSERT policy with a SELECT policy.
+
 ## Realtime
 
 ```typescript
@@ -214,7 +233,7 @@ useEffect(() => {
 }, [])
 ```
 
-Events carry `type`, `record`, `old_record`. The server filters by owner column (`user_id`, `owner_id`, `created_by`, `uploaded_by`): signed-in users receive only their own rows on tables that have one, and anonymous visitors receive nothing from those tables. Custom RLS policies are **not** enforced over realtime yet, so don't subscribe to tables whose privacy depends on custom policies.
+The client needs `projectId` (see `SKILL.md` setup) — without it, signed-in users can't connect. Events carry `type`, `record`, `old_record`. The server filters by owner column (`user_id`, `owner_id`, `created_by`, `uploaded_by`): signed-in users receive only their own rows on tables that have one, and anonymous visitors receive nothing from those tables. Custom RLS policies are **not** enforced over realtime yet, so don't subscribe to tables whose privacy depends on custom policies.
 
 ## Edge functions
 
@@ -242,7 +261,7 @@ const handler: EdgeHandler = async (req, ctx) => {
 export default handler
 ```
 
-Treat `ctx.db.sql` as privileged: always scope queries with `ctx.user.id` yourself and use `$1` parameters, never string concatenation. `ctx` also has `storage.upload / createSignedUrl / delete`, `env`, and `requestId`.
+`ctx.user` is set when the caller is signed in and the function has **Require JWT** on (the default); a function with it off also accepts signed-out callers, and `ctx.user` is then `null`. Treat `ctx.db.sql` as privileged: always scope queries with `ctx.user.id` yourself and use `$1` parameters, never string concatenation. `ctx` also has `storage.upload / createSignedUrl / delete`, `env`, and `requestId`.
 
 Calling it from the app:
 
