@@ -988,7 +988,7 @@
 							<div class="mt-3 space-y-3">
 								<div>
 									<label for="google-client-id" class="block text-xs font-medium text-gray-700">Client ID</label>
-									<input id="google-client-id" type="text" bind:value={googleClientId} placeholder="123456789.apps.googleusercontent.com" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<input id="google-client-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={googleClientId} placeholder="123456789.apps.googleusercontent.com" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
 									<label for="google-client-secret" class="block text-xs font-medium text-gray-700">
@@ -1002,7 +1002,7 @@
 									</label>
 									<input
 										id="google-client-secret"
-										type="password"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
 										bind:value={googleClientSecret}
 										oninput={() => googleSecretDirty = true}
 										placeholder={googleSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'GOCSPX-...'}
@@ -1045,7 +1045,7 @@
 							<div class="mt-3 space-y-3">
 								<div>
 									<label for="github-client-id" class="block text-xs font-medium text-gray-700">Client ID</label>
-									<input id="github-client-id" type="text" bind:value={githubClientId} placeholder="Iv1.abc123..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<input id="github-client-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={githubClientId} placeholder="Iv1.abc123..." class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
 									<label for="github-client-secret" class="block text-xs font-medium text-gray-700">
@@ -1059,7 +1059,7 @@
 									</label>
 									<input
 										id="github-client-secret"
-										type="password"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
 										bind:value={githubClientSecret}
 										oninput={() => githubSecretDirty = true}
 										placeholder={githubSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'secret_...'}
@@ -1102,7 +1102,7 @@
 							<div class="mt-3 space-y-3">
 								<div>
 									<label for="linkedin-client-id" class="block text-xs font-medium text-gray-700">Client ID</label>
-									<input id="linkedin-client-id" type="text" bind:value={linkedinClientId} placeholder="77abc123def456" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<input id="linkedin-client-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={linkedinClientId} placeholder="77abc123def456" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
 									<label for="linkedin-client-secret" class="block text-xs font-medium text-gray-700">
@@ -1116,7 +1116,7 @@
 									</label>
 									<input
 										id="linkedin-client-secret"
-										type="password"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
 										bind:value={linkedinClientSecret}
 										oninput={() => linkedinSecretDirty = true}
 										placeholder={linkedinSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'secret_...'}
@@ -1159,15 +1159,15 @@
 							<div class="mt-3 space-y-3">
 								<div>
 									<label for="apple-client-id" class="block text-xs font-medium text-gray-700">Service ID (Client ID)</label>
-									<input id="apple-client-id" type="text" bind:value={appleClientId} placeholder="com.example.myapp" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<input id="apple-client-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={appleClientId} placeholder="com.example.myapp" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
 									<label for="apple-team-id" class="block text-xs font-medium text-gray-700">Team ID</label>
-									<input id="apple-team-id" type="text" bind:value={appleTeamId} placeholder="ABCDE12345" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<input id="apple-team-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={appleTeamId} placeholder="ABCDE12345" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
 									<label for="apple-key-id" class="block text-xs font-medium text-gray-700">Key ID</label>
-									<input id="apple-key-id" type="text" bind:value={appleKeyId} placeholder="ABC123DEFG" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<input id="apple-key-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={appleKeyId} placeholder="ABC123DEFG" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
 									<label for="apple-private-key" class="block text-xs font-medium text-gray-700">
@@ -1228,7 +1228,7 @@
 							<div class="mt-3 space-y-3">
 								<div>
 									<label for="microsoft-client-id" class="block text-xs font-medium text-gray-700">Application (client) ID</label>
-									<input id="microsoft-client-id" type="text" bind:value={microsoftClientId} placeholder="00000000-0000-0000-0000-000000000000" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<input id="microsoft-client-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={microsoftClientId} placeholder="00000000-0000-0000-0000-000000000000" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
 								</div>
 								<div>
 									<label for="microsoft-tenant-id" class="block text-xs font-medium text-gray-700">
@@ -1250,7 +1250,7 @@
 									</label>
 									<input
 										id="microsoft-client-secret"
-										type="password"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
 										bind:value={microsoftClientSecret}
 										oninput={() => microsoftSecretDirty = true}
 										placeholder={microsoftSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'Client secret value (not the secret ID)'}
@@ -1791,7 +1791,7 @@
 					<div class="p-4 space-y-3">
 						<div>
 							<label for="smtp-username" class="block text-xs font-medium text-gray-700 mb-1">Username</label>
-							<input id="smtp-username" type="text" bind:value={smtpUsername} placeholder="apikey or you@example.com"
+							<input id="smtp-username" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={smtpUsername} placeholder="apikey or you@example.com"
 								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
 						</div>
 						<div>
@@ -1801,7 +1801,7 @@
 									<span class="text-gray-400 font-normal">(leave blank to keep the saved one)</span>
 								{/if}
 							</label>
-							<input id="smtp-password" type="password" bind:value={smtpPassword} placeholder={smtpExisting?.has_password ? '••••••••' : 'SMTP password'}
+							<input id="smtp-password" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" bind:value={smtpPassword} placeholder={smtpExisting?.has_password ? '••••••••' : 'SMTP password'}
 								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
 							<p class="mt-1 text-[11px] text-gray-500">Stored encrypted at rest with your project's per-tenant key. Never returned by the API after save.</p>
 						</div>

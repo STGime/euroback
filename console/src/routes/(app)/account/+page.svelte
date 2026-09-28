@@ -444,19 +444,19 @@
 		</div>
 		<div class="px-5 py-4 space-y-3">
 			<input
-				type="password"
+				type="password" autocomplete="current-password"
 				bind:value={currentPassword}
 				placeholder="Current password"
 				class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none"
 			/>
 			<input
-				type="password"
+				type="password" autocomplete="new-password"
 				bind:value={newPassword}
 				placeholder="New password (min 8 characters)"
 				class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none"
 			/>
 			<input
-				type="password"
+				type="password" autocomplete="new-password"
 				bind:value={confirmPassword}
 				placeholder="Confirm new password"
 				class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none"
@@ -556,7 +556,7 @@
 						<p class="text-xs text-amber-900">For your security, confirm your current password to {reauthAction.kind === 'add' ? 'add' : 'remove'} a passkey.</p>
 						<div class="flex gap-2">
 							<input
-								type="password"
+								type="password" autocomplete="current-password"
 								bind:value={reauthPassword}
 								placeholder="Current password"
 								onkeydown={(e) => { if (e.key === 'Enter') submitReauth(); }}

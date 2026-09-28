@@ -303,12 +303,12 @@
 				{/if}
 				<div>
 					<label for="secret-name" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-					<input id="secret-name" type="text" bind:value={createName} placeholder="e.g. STRIPE_API_KEY"
+					<input id="secret-name" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={createName} placeholder="e.g. STRIPE_API_KEY"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
 				</div>
 				<div>
 					<label for="secret-value" class="block text-sm font-medium text-gray-700 mb-1">Value</label>
-					<input id="secret-value" type="password" bind:value={createValue} placeholder="Secret value"
+					<input id="secret-value" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" bind:value={createValue} placeholder="Secret value"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
 				</div>
 				<div>
@@ -349,7 +349,7 @@
 				{/if}
 				<div>
 					<label for="edit-value" class="block text-sm font-medium text-gray-700 mb-1">New Value <span class="text-gray-400 font-normal">(leave empty to keep current)</span></label>
-					<input id="edit-value" type="password" bind:value={editValue} placeholder="New secret value"
+					<input id="edit-value" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" bind:value={editValue} placeholder="New secret value"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
 				</div>
 				<div>

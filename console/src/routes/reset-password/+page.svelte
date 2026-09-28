@@ -81,7 +81,7 @@
 						<label for="password" class="block text-sm font-medium text-gray-700">New password</label>
 						<input
 							id="password"
-							type="password"
+							type="password" autocomplete="new-password"
 							bind:value={password}
 							required
 							minlength="8"
@@ -94,7 +94,7 @@
 						<label for="confirm-password" class="block text-sm font-medium text-gray-700">Confirm password</label>
 						<input
 							id="confirm-password"
-							type="password"
+							type="password" autocomplete="new-password"
 							bind:value={confirmPassword}
 							required
 							minlength="8"
