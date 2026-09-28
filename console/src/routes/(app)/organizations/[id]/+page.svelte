@@ -337,6 +337,7 @@
 						<label for="sso-client-id" class="block text-sm font-medium text-gray-700">Client ID</label>
 						<input
 							id="sso-client-id"
+							autocomplete="off" data-1p-ignore data-lpignore="true"
 							type="text"
 							bind:value={ssoClientID}
 							required
@@ -348,7 +349,7 @@
 						<label for="sso-client-secret" class="block text-sm font-medium text-gray-700">Client Secret</label>
 						<input
 							id="sso-client-secret"
-							type="password"
+							type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')}
 							bind:value={ssoClientSecret}
 							placeholder={detail.sso?.client_secret_set ? '•••••••• (leave blank to keep current)' : ''}
 							required={!detail.sso?.client_secret_set}
