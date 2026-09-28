@@ -114,15 +114,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// from outside the cluster. Only the functions runner pod has the
 	// HMAC secret. Mounted only when both the secret and an S3 client
 	// are available.
-	if fnRunnerHMACSecret != "" && s3Client != nil {
-		ish, err := functions.NewInternalStorageHandler(pool, s3Client, fnRunnerHMACSecret)
-		if err != nil {
-			slog.Warn("internal storage handler not mounted", "error", err)
-		} else {
-			r.Mount("/internal/functions/storage", ish.Routes())
-			slog.Info("internal storage RPC enabled at /internal/functions/storage")
-		}
-	}
+	// (Mounted below, once the Team-tier pool cache exists — #676.)
 
 	// Tenant service.
 	tenantSvc := tenant.NewTenantService(pool)
@@ -394,6 +386,39 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			ctx := query.WithDedicatedDB(query.ContextWithTenantPool(r.Context(), p))
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}
+
+	// Edge functions' ctx.storage (#85) — mounted here, after the pool
+	// cache: a Team project's storage_objects live on its dedicated
+	// database (#676). Same rule as sdkTenantPoolMw: the runtime pool
+	// (service role inside the handler, like on shared) or refuse —
+	// never the shared cluster, and nothing reaches S3 before the pool
+	// is resolved.
+	if fnRunnerHMACSecret != "" && s3Client != nil {
+		ish, err := functions.NewInternalStorageHandler(pool, s3Client, fnRunnerHMACSecret)
+		if err != nil {
+			slog.Warn("internal storage handler not mounted", "error", err)
+		} else {
+			ish.TenantPool = func(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+				// Same live-row rule as GetLiveByProject, without loading
+				// the row (ciphertexts) on every call.
+				var dedicated bool
+				if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.project_databases
+					WHERE project_id = $1 AND state IN ('provisioning', 'active', 'restoring') AND deleted_at IS NULL)`,
+					projectID).Scan(&dedicated); err != nil {
+					return nil, fmt.Errorf("dedicated database lookup: %w", err)
+				}
+				if !dedicated {
+					return pool, nil // Free / Pro: shared cluster
+				}
+				if !enableSDKRouting || poolCache == nil {
+					return nil, errors.New("Team-tier routing disabled (TEAM_TIER_ROUTING, VAULT_ENCRYPTION_KEY)")
+				}
+				return poolCache.Get(ctx, projectID)
+			}
+			r.Mount("/internal/functions/storage", ish.Routes())
+			slog.Info("internal storage RPC enabled at /internal/functions/storage")
+		}
 	}
 
 	// poolResolver bridges query.PoolResolver → poolCache without

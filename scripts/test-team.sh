@@ -100,6 +100,8 @@ cd "$REPO_ROOT"
 TEAM_TEST_SHARED_ADMIN="postgres://postgres:postgres@localhost:$SH_PORT/eurobase?sslmode=disable" \
 TEAM_TEST_SHARED_GATEWAY="postgres://eurobase_gateway:localdev@localhost:$SH_PORT/eurobase?sslmode=disable" \
 TEAM_TEST_SHARED_DEVELOPER="postgres://eurobase_developer:localdev@localhost:$SH_PORT/eurobase?sslmode=disable" \
+TEAM_TEST_SHARED_RUNNER="postgres://eurobase_function_runner:localdev@localhost:$SH_PORT/eurobase?sslmode=disable" \
+TEAM_TEST_DENO="$(command -v deno || true)" \
 TEAM_TEST_DED_OWNER="postgres://eurobase_owner:ownerpw@localhost:$DED_PORT/eb_fresh" \
 TEAM_TEST_DED_ADMIN="postgres://postgres:postgres@localhost:$DED_PORT/eb_fresh?sslmode=disable" \
 TEAM_TEST_S3_ENDPOINT="http://localhost:$S3_PORT" TEAM_TEST_S3_KEY="$GARAGE_KEY_ID" TEAM_TEST_S3_SECRET="$GARAGE_SECRET" \

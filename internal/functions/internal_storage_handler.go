@@ -37,9 +37,37 @@ import (
 // InternalStorageHandler bundles dependencies for the runner-facing
 // storage RPC endpoints.
 type InternalStorageHandler struct {
-	pool      *pgxpool.Pool
-	s3        *storage.S3Client
+	pool       *pgxpool.Pool
+	s3         *storage.S3Client
 	hmacSecret []byte
+
+	// TenantPool resolves the pool that holds the project's
+	// storage_objects (#676): a Team project's dedicated database
+	// (runtime pool) or an error — never the shared cluster, which has no
+	// schema for a project created as Team and a stale copy for one
+	// upgraded from Pro. Nil = every project is on the shared cluster
+	// (h.pool). Wired by the gateway router with the same rules as the
+	// SDK's tenant-pool middleware.
+	TenantPool func(ctx context.Context, projectID string) (*pgxpool.Pool, error)
+}
+
+// ErrTenantPoolUnavailable: the project's storage metadata lives on a
+// database that can't be reached right now.
+var ErrTenantPoolUnavailable = errors.New("the project's database is not available right now")
+
+// metaPool returns the pool for the project's storage metadata.
+func (h *InternalStorageHandler) metaPool(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+	if h.TenantPool == nil {
+		return h.pool, nil
+	}
+	return h.TenantPool(ctx, projectID)
+}
+
+// refuseUnavailable answers 503 when the project's metadata pool can't be
+// resolved — before anything reaches S3, so no object is left untracked.
+func refuseUnavailable(w http.ResponseWriter, projectID string, err error) {
+	slog.Error("internal storage: project database unavailable (no shared fallback)", "project_id", projectID, "error", err)
+	http.Error(w, `{"error":"the project's database is not available right now; retry shortly"}`, http.StatusServiceUnavailable)
 }
 
 // NewInternalStorageHandler constructs the handler. Returns an error if
@@ -93,28 +121,37 @@ func (h *InternalStorageHandler) projectMeta(ctx context.Context, projectID stri
 
 // recordUpload mirrors what storage.UploadFile does after a successful
 // S3 PUT — write to <schema>.storage_objects so usage tracking and
-// download visibility checks see the file. Unlike SDK uploads (which
-// never change an existing owner), a function sets uploaded_by
-// outright: function code is the project developer's and runs as
-// service role, so it may assign or reassign ownership deliberately.
-func (h *InternalStorageHandler) recordUpload(ctx context.Context, schema, key, contentType, userID string, size int64) {
-	if schema == "" || h.pool == nil {
-		return
+// download visibility checks see the file. An invocation with an end
+// user sets uploaded_by to that user outright (function code is the
+// developer's and runs as service role, so it may reassign ownership
+// deliberately). A user-less invocation (webhook, cron, service call)
+// records a new object as a developer file (NULL owner) but never clears
+// an existing owner: rewriting users/<id>/… from a webhook must not take
+// the file away from its end user.
+func (h *InternalStorageHandler) recordUpload(ctx context.Context, pool *pgxpool.Pool, schema, key, contentType, userID string, size int64) error {
+	if schema == "" || pool == nil {
+		return errors.New("no schema or database for the project")
 	}
 	escSchema := strings.ReplaceAll(schema, `"`, `""`)
+	ownerSet := "uploaded_by = EXCLUDED.uploaded_by"
+	// Not '' — not a uuid (the insert used to fail and every user-less
+	// upload was left untracked in S3).
+	var owner any
+	if userID != "" {
+		owner = userID
+	} else {
+		ownerSet = "uploaded_by = storage_objects.uploaded_by"
+	}
 	q := fmt.Sprintf(
 		`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
 		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (key) DO UPDATE SET content_type = $2, size_bytes = $3, uploaded_by = $4`,
-		escSchema,
+		 ON CONFLICT (key) DO UPDATE SET content_type = $2, size_bytes = $3, %s`,
+		escSchema, ownerSet,
 	)
-	if err := edb.RunAsService(ctx, h.pool, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, q, key, contentType, size, userID)
+	return edb.RunAsService(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, key, contentType, size, owner)
 		return err
-	}); err != nil {
-		slog.Error("internal storage: failed to record upload in storage_objects",
-			"error", err, "schema", schema, "key", key)
-	}
+	})
 }
 
 // upload accepts a raw body PUT; key is in X-Storage-Key, content type
@@ -158,6 +195,11 @@ func (h *InternalStorageHandler) upload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	bucket := "eurobase-" + slug
+	metaPool, err := h.metaPool(r.Context(), projectID)
+	if err != nil {
+		refuseUnavailable(w, projectID, err)
+		return
+	}
 
 	if err := h.s3.UploadObject(r.Context(), bucket, key, bytes.NewReader(body), contentType, int64(len(body))); err != nil {
 		slog.Error("internal storage upload: S3 put failed", "error", err, "bucket", bucket, "key", key)
@@ -165,7 +207,19 @@ func (h *InternalStorageHandler) upload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	h.recordUpload(r.Context(), schema, key, contentType, userID, int64(len(body)))
+	// Fatal, like the SDK upload: a pool can resolve and still fail to
+	// connect (pgxpool is lazy) — an object S3 has but storage_objects
+	// doesn't is invisible to listings and usage, and the SDK would
+	// refuse its key forever. Remove it and fail the call.
+	if err := h.recordUpload(r.Context(), metaPool, schema, key, contentType, userID, int64(len(body))); err != nil {
+		slog.Error("internal storage: failed to record upload in storage_objects — removing the object",
+			"error", err, "schema", schema, "key", key)
+		if derr := h.s3.DeleteObject(context.WithoutCancel(r.Context()), bucket, key); derr != nil {
+			slog.Error("internal storage upload: failed to remove the untracked object", "error", derr, "bucket", bucket, "key", key)
+		}
+		http.Error(w, `{"error":"upload could not be recorded; retry shortly"}`, http.StatusServiceUnavailable)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -298,19 +352,28 @@ func (h *InternalStorageHandler) delete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	bucket := "eurobase-" + slug
+	metaPool, err := h.metaPool(r.Context(), projectID)
+	if err != nil {
+		refuseUnavailable(w, projectID, err)
+		return
+	}
 
 	if err := h.s3.DeleteObject(r.Context(), bucket, key); err != nil {
 		slog.Error("internal storage delete: S3 delete failed", "error", err, "bucket", bucket, "key", key)
 		http.Error(w, `{"error":"delete failed"}`, http.StatusBadGateway)
 		return
 	}
-	if schema != "" && h.pool != nil {
+	if schema != "" && metaPool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
 		q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1`, escSchema)
-		_ = edb.RunAsService(r.Context(), h.pool, func(ctx context.Context, tx pgx.Tx) error {
+		if err := edb.RunAsService(r.Context(), metaPool, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, q, key)
 			return err
-		})
+		}); err != nil {
+			// The object is gone; the row stays until the next delete of
+			// the same key (or an ops sweep). Visible, not silent.
+			slog.Error("internal storage delete: object removed but its storage_objects row wasn't", "error", err, "schema", schema, "key", key)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
