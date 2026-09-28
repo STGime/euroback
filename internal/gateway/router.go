@@ -324,6 +324,30 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			return p
 		}
 	}
+	// Vault reads outside a project-scoped request (project listings, org
+	// change, settings responses: OAuth secret_set) go to a Team project's
+	// dedicated database, or report "unknown" — never the shared
+	// cluster's copy (#689).
+	tenantSvc.SetVaultRouting(func(ctx context.Context, projectID string) (context.Context, error) {
+		var dedicated bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.project_databases
+			WHERE project_id = $1 AND state IN ('provisioning', 'active', 'restoring') AND deleted_at IS NULL)`,
+			projectID).Scan(&dedicated); err != nil {
+			return nil, fmt.Errorf("dedicated database lookup: %w", err)
+		}
+		if !dedicated {
+			return ctx, nil
+		}
+		if ownerPoolFor == nil {
+			return nil, errors.New("Team-tier routing unavailable (no connection cipher)")
+		}
+		p := ownerPoolFor(ctx, projectID)
+		if p == nil {
+			return nil, errors.New("the project's dedicated database is unavailable")
+		}
+		return query.WithDedicatedDB(query.ContextWithTenantPool(ctx, p)), nil
+	})
+
 	var enduserPoolResolver enduser.PoolResolver
 	var tenantPoolResolver tenant.TenantPoolResolver
 	if ownerPoolFor != nil {
@@ -1152,7 +1176,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("viewer")).Get("/compliance/audit-export", compliance.HandleListDestinations(pool, limitsSvc, destSvc))
 			r.With(tenant.RequireMinRole("admin")).Patch("/compliance/audit-export/{destID}", compliance.HandleUpdateDestination(pool, limitsSvc, destSvc, auditSvc))
 			r.With(tenant.RequireMinRole("admin")).Delete("/compliance/audit-export/{destID}", compliance.HandleRemoveDestination(pool, limitsSvc, destSvc, auditSvc))
-			r.With(tenant.RequireMinRole("admin")).Post("/compliance/audit-export/{destID}/test", compliance.HandleTestDestination(pool, limitsSvc, destSvc, testDelivererAdapter, syslogTestAdapter, vaultLookup))
+			// The test reads the destination's secret from the project's
+			// vault: a Team project's dedicated database (or 503), never
+			// the shared cluster's copy (#689).
+			r.With(tenant.RequireMinRole("admin"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Post("/compliance/audit-export/{destID}/test", compliance.HandleTestDestination(pool, limitsSvc, destSvc, testDelivererAdapter, syslogTestAdapter, vaultLookup))
 
 			// Breach register (Tier-1 #4, closes #172). Append-only by
 			// migration 000065. Admin-only because the register names

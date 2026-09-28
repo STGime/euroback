@@ -829,8 +829,12 @@ func MaskSecretsJSON(raw []byte) []byte {
 // AnnotateOAuthSecretStatus accepts auth_config JSON and a lookup function
 // that returns whether a given provider has a vault entry. It decorates the
 // oauth_providers map entries with "secret_set": true/false so the UI can
-// show "Secret configured" without ever fetching the actual secret.
-func AnnotateOAuthSecretStatus(raw []byte, hasSecret func(provider string) bool) []byte {
+// show "Secret configured" without ever fetching the actual secret. When
+// the lookup can't tell (known=false — e.g. a Team project's dedicated
+// database is unavailable, #689) the entry gets "secret_status":"unknown"
+// and no secret_set, so the console never claims a stored secret is
+// missing.
+func AnnotateOAuthSecretStatus(raw []byte, hasSecret func(provider string) (set, known bool)) []byte {
 	if len(raw) == 0 {
 		return raw
 	}
@@ -851,7 +855,13 @@ func AnnotateOAuthSecretStatus(raw []byte, hasSecret func(provider string) bool)
 		if !ok {
 			continue
 		}
-		provider["secret_set"] = hasSecret(providerName)
+		if set, known := hasSecret(providerName); known {
+			provider["secret_set"] = set
+			delete(provider, "secret_status")
+		} else {
+			delete(provider, "secret_set")
+			provider["secret_status"] = "unknown"
+		}
 		delete(provider, "client_secret")
 		oauth[providerName] = provider
 	}

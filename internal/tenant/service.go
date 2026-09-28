@@ -103,6 +103,18 @@ type TenantService struct {
 	// fallback any more). Optional; the worker's periodic pass catches
 	// up within minutes when nil or when this call fails.
 	funcLogins FuncLoginEnsurer
+	// vaultCtx puts the project's vault database on ctx for reads made
+	// outside a project-scoped request (project listings, org change,
+	// settings responses) — a Team project's dedicated database, never
+	// the shared cluster's copy (#689). Error = can't tell right now.
+	// Nil = every project's vault is on the shared cluster (dev/tests).
+	vaultCtx func(ctx context.Context, projectID string) (context.Context, error)
+}
+
+// SetVaultRouting sets how vault reads for a project outside its own
+// request context find the project's database (#689).
+func (s *TenantService) SetVaultRouting(fn func(ctx context.Context, projectID string) (context.Context, error)) {
+	s.vaultCtx = fn
 }
 
 // FuncLoginEnsurer is satisfied by *tenantlogin.Ensurer.
@@ -787,17 +799,29 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 		return nil, fmt.Errorf("query project: %w", err)
 	}
 	p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
-	p.AuthConfig = s.annotateAuthConfig(ctx, p.SchemaName, p.AuthConfig)
+	p.AuthConfig = s.annotateAuthConfig(ctx, p.ID, p.SchemaName, p.AuthConfig)
 	return &p, nil
 }
 
 // annotateAuthConfig strips any stale client_secret values from auth_config
 // and decorates each OAuth provider with a "secret_set" boolean based on the
-// vault. Safe to call when the vault is not configured — the result will
-// simply report secret_set=false for every provider.
-func (s *TenantService) annotateAuthConfig(ctx context.Context, schemaName string, raw []byte) []byte {
-	return AnnotateOAuthSecretStatus(raw, func(provider string) bool {
-		return s.HasOAuthClientSecret(ctx, schemaName, provider)
+// project's own vault — a Team project's dedicated database (#689). When
+// that can't be read the providers get secret_status "unknown" instead of
+// a false "not set". Safe to call when the vault is not configured — the
+// result will simply report secret_set=false for every provider.
+func (s *TenantService) annotateAuthConfig(ctx context.Context, projectID, schemaName string, raw []byte) []byte {
+	vctx, routeErr := ctx, error(nil)
+	if s.vaultCtx != nil {
+		vctx, routeErr = s.vaultCtx(ctx, projectID)
+		if routeErr != nil {
+			slog.Warn("oauth secret status unknown: project's vault database unavailable", "project_id", projectID, "error", routeErr)
+		}
+	}
+	return AnnotateOAuthSecretStatus(raw, func(provider string) (bool, bool) {
+		if routeErr != nil {
+			return false, false
+		}
+		return s.oauthClientSecretStatus(vctx, schemaName, provider)
 	})
 }
 
@@ -998,7 +1022,7 @@ func (s *TenantService) listDirectMemberProjects(ctx context.Context, platformUs
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
-		p.AuthConfig = s.annotateAuthConfig(ctx, p.SchemaName, p.AuthConfig)
+		p.AuthConfig = s.annotateAuthConfig(ctx, p.ID, p.SchemaName, p.AuthConfig)
 		projects = append(projects, p)
 	}
 
@@ -1090,7 +1114,7 @@ func (s *TenantService) listProjectsByIDs(ctx context.Context, ids []string) ([]
 			return nil, fmt.Errorf("scan org project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
-		p.AuthConfig = s.annotateAuthConfig(ctx, p.SchemaName, p.AuthConfig)
+		p.AuthConfig = s.annotateAuthConfig(ctx, p.ID, p.SchemaName, p.AuthConfig)
 		projects = append(projects, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -1319,12 +1343,21 @@ func (s *TenantService) GetOAuthClientSecret(ctx context.Context, schemaName, pr
 // provider. Used by AnnotateOAuthSecretStatus to decorate API responses
 // with a "secret_set" boolean so the UI can show "Secret configured".
 func (s *TenantService) HasOAuthClientSecret(ctx context.Context, schemaName, providerName string) bool {
+	set, _ := s.oauthClientSecretStatus(ctx, schemaName, providerName)
+	return set
+}
+
+// oauthClientSecretStatus is HasOAuthClientSecret that also says whether
+// the answer is known: a vault read that fails (e.g. a Team project's
+// dedicated database refused, #689) is "unknown", not "not set". No vault
+// configured at all is a known "not set".
+func (s *TenantService) oauthClientSecretStatus(ctx context.Context, schemaName, providerName string) (set, known bool) {
 	if s.secrets == nil || !s.secrets.Configured() {
-		return false
+		return false, true
 	}
 	has, err := s.secrets.HasRaw(ctx, schemaName, oauthSecretVaultKey(providerName))
 	if err != nil {
-		return false
+		return false, false
 	}
-	return has
+	return has, true
 }

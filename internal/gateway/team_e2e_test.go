@@ -1458,6 +1458,96 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// OAuth secret status (#689): project listings report secret_set from
+	// the project's own vault — a Team project's dedicated database, not
+	// the shared cluster's copy — and "unknown" (not false) when it can't
+	// be read; the audit-export test reads the right vault or refuses.
+	check(t, env, "oauth_secret_status_routed", func() error {
+		ctx := context.Background()
+		cfg := tenant.DefaultAuthConfig()
+		cfg.OAuthProviders = map[string]tenant.OAuthProviderConfig{
+			"github": {Enabled: true, ClientID: "e2e-gh", ClientSecret: "e2e-gh-secret"},
+			"google": {Enabled: true, ClientID: "e2e-google"},
+		}
+		body, _ := json.Marshal(map[string]any{"auth_config": cfg})
+		settings := func(projectID string, body []byte) *httpResult {
+			req := httptest.NewRequest("PATCH", "http://api.eurobase.test/v1/tenants/"+projectID, bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+env.platformJWT)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: "PATCH /v1/tenants/" + projectID, code: rec.Code, body: rec.Body.String()}
+		}
+		if r := settings(env.projectID, body); r.code >= 300 {
+			return r
+		}
+		if env.upgraded {
+			// A decoy only the stale shared copy has.
+			vt := pgx.Identifier{env.schema, "vault_secrets"}.Sanitize()
+			if _, err := env.shared.Exec(ctx, `INSERT INTO `+vt+` (name, secret, nonce) VALUES ('oauth.google.client_secret', '\x00', '\x00')`); err != nil {
+				return fmt.Errorf("plant decoy: %w", err)
+			}
+			defer env.shared.Exec(ctx, `DELETE FROM `+vt+` WHERE name = 'oauth.google.client_secret'`) //nolint:errcheck
+		}
+		type provider struct {
+			SecretSet    *bool  `json:"secret_set"`
+			SecretStatus string `json:"secret_status"`
+		}
+		list := func() (map[string]map[string]provider, error) {
+			req := httptest.NewRequest("GET", "http://api.eurobase.test/v1/tenants", nil)
+			req.Header.Set("Authorization", "Bearer "+env.platformJWT)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				return nil, fmt.Errorf("GET /v1/tenants: %d %s", rec.Code, rec.Body.String())
+			}
+			var projects []struct {
+				ID         string `json:"id"`
+				AuthConfig struct {
+					OAuth map[string]provider `json:"oauth_providers"`
+				} `json:"auth_config"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &projects); err != nil {
+				return nil, err
+			}
+			out := map[string]map[string]provider{}
+			for _, p := range projects {
+				out[p.ID] = p.AuthConfig.OAuth
+			}
+			return out, nil
+		}
+		got, err := list()
+		if err != nil {
+			return err
+		}
+		gh, g := got[env.projectID]["github"], got[env.projectID]["google"]
+		if gh.SecretSet == nil || !*gh.SecretSet || g.SecretSet == nil || *g.SecretSet {
+			return fmt.Errorf("listing secret_set github=%v google=%v, want true / false from the project's own vault", gh.SecretSet, g.SecretSet)
+		}
+		if env.scenario == "free" {
+			return nil
+		}
+		// Unavailable dedicated database: "unknown", never "not set".
+		stuck := env.addProvisioningTeamProject(t)
+		if _, err := env.shared.Exec(ctx, `UPDATE projects SET auth_config = jsonb_set(coalesce(auth_config, '{}'::jsonb), '{oauth_providers}',
+			'{"github": {"enabled": true, "client_id": "x"}}'::jsonb) WHERE id = $1`, stuck); err != nil {
+			return err
+		}
+		if got, err = list(); err != nil {
+			return err
+		}
+		if p := got[stuck]["github"]; p.SecretSet != nil || p.SecretStatus != "unknown" {
+			return fmt.Errorf("provisioning Team project: secret_set %v status %q, want status unknown and no secret_set", p.SecretSet, p.SecretStatus)
+		}
+		// The audit-export test reads the destination secret from the
+		// project's vault: refused while the dedicated database isn't
+		// serving, never read from the shared cluster.
+		if r := env.consoleFor(stuck, "POST", "/compliance/audit-export/00000000-0000-4000-8000-000000000000/test", ""); r.code != http.StatusServiceUnavailable {
+			return fmt.Errorf("audit-export test for a provisioning Team project: %d %s, want 503", r.code, r.body)
+		}
+		return nil
+	})
+
 	// Connection page (#698): a read-only request gets the SELECT-only
 	// login or nothing — never the owner credential, even while the
 	// read-only slot is still empty.
