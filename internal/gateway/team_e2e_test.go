@@ -10,17 +10,22 @@ import (
 	"errors"
 	"fmt"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/dbprovider"
+	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
@@ -53,14 +58,16 @@ import (
 // (401/403, membership 404, maintenance 503) always FAIL.
 func TestTeamEndToEnd(t *testing.T) {
 	cfg := teamTestConfig{
-		sharedAdmin: os.Getenv("TEAM_TEST_SHARED_ADMIN"),
-		sharedGW:    os.Getenv("TEAM_TEST_SHARED_GATEWAY"),
-		sharedDev:   os.Getenv("TEAM_TEST_SHARED_DEVELOPER"),
-		dedOwner:    os.Getenv("TEAM_TEST_DED_OWNER"),
-		dedAdmin:    os.Getenv("TEAM_TEST_DED_ADMIN"),
-		s3Endpoint:  os.Getenv("TEAM_TEST_S3_ENDPOINT"),
-		s3Key:       os.Getenv("TEAM_TEST_S3_KEY"),
-		s3Secret:    os.Getenv("TEAM_TEST_S3_SECRET"),
+		sharedAdmin:  os.Getenv("TEAM_TEST_SHARED_ADMIN"),
+		sharedGW:     os.Getenv("TEAM_TEST_SHARED_GATEWAY"),
+		sharedDev:    os.Getenv("TEAM_TEST_SHARED_DEVELOPER"),
+		sharedRunner: os.Getenv("TEAM_TEST_SHARED_RUNNER"),
+		deno:         os.Getenv("TEAM_TEST_DENO"),
+		dedOwner:     os.Getenv("TEAM_TEST_DED_OWNER"),
+		dedAdmin:     os.Getenv("TEAM_TEST_DED_ADMIN"),
+		s3Endpoint:   os.Getenv("TEAM_TEST_S3_ENDPOINT"),
+		s3Key:        os.Getenv("TEAM_TEST_S3_KEY"),
+		s3Secret:     os.Getenv("TEAM_TEST_S3_SECRET"),
 	}
 	if cfg.sharedAdmin == "" || cfg.dedOwner == "" || cfg.s3Endpoint == "" {
 		t.Skip("run via scripts/test-team.sh")
@@ -1260,6 +1267,138 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Edge functions through the real Deno runner (#676): an invocation
+	// via the SDK route runs ctx.db.sql / ctx.vault.get / ctx.storage on the
+	// project's own database — dedicated for Team, shared for Free — as
+	// <schema>_func, and the storage callback records the object there.
+	check(t, env, "function_invoke_real_runner", func() error {
+		if !env.runnerOn {
+			t.Skip("no deno (TEAM_TEST_DENO); CI runs this with TEAM_TEST_REQUIRE_RUNNER=1")
+		}
+		ctx := context.Background()
+		// The worker's login pass, with the runner's secret.
+		ensurer, err := tenantlogin.NewEnsurer(env.dev, "eurobase", env.funcSecret)
+		if err != nil {
+			return err
+		}
+		if env.scenario == "free" {
+			if _, err := ensurer.EnsureAll(ctx); err != nil {
+				return fmt.Errorf("EnsureAll: %w", err)
+			}
+		} else {
+			repo := dbprovider.NewRepo(env.shared)
+			ensurer.PrepareDedicated = func(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+				ready, err := dbprovider.FuncRoleReady(ctx, pool, schema)
+				if err != nil || ready {
+					return err
+				}
+				return dbprovider.EnsureFuncRole(ctx, pool, schema)
+			}
+			ensurer.GrantDedicatedConnect = func(ctx context.Context, projectID, schema string, pool *pgxpool.Pool) error {
+				if _, err := env.ded.Exec(ctx, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
+					pgx.Identifier{env.dedDB}.Sanitize(), pgx.Identifier{tenantlogin.FuncRole(schema)}.Sanitize())); err != nil {
+					return err
+				}
+				return dbprovider.EnsureFuncRole(ctx, pool, schema)
+			}
+			open := func(ctx context.Context, projectID string) (*pgxpool.Pool, tenantlogin.DedicatedDB, error) {
+				if projectID != env.projectID {
+					return nil, tenantlogin.DedicatedDB{}, nil
+				}
+				rec, err := repo.GetLiveByProject(ctx, projectID)
+				if err != nil {
+					return nil, tenantlogin.DedicatedDB{}, err
+				}
+				p, err := dbprovider.OpenOwnerPoolFor(ctx, rec, env.cipher)
+				return p, tenantlogin.DedicatedDB{ID: rec.ID, Database: rec.DatabaseName}, err
+			}
+			if n, err := ensurer.EnsureTeam(ctx, open); err != nil || n != 1 {
+				return fmt.Errorf("EnsureTeam: ensured %d, err %v", n, err)
+			}
+		}
+
+		code := `export default async function handler(req, ctx) {
+  var who = await ctx.db.sql("SELECT current_database() AS db, current_user AS role");
+  var ins = await ctx.db.sql("INSERT INTO todos (title) VALUES ($1) RETURNING id", ["from the runner"]);
+  var secret = await ctx.vault.get("E2E_CONSOLE_SECRET");
+  var up = await ctx.storage.upload("fn/runner.txt", "hello from the runner", { contentType: "text/plain" });
+  return new Response(JSON.stringify({ db: who[0].db, role: who[0].role, todo: ins[0].id, secret: secret, upload: up }),
+    { headers: { "Content-Type": "application/json" } });
+}`
+		// User-less invocation (service context), so no end-user JWT.
+		body, _ := json.Marshal(map[string]any{"name": "e2e-runner", "code": code, "verify_jwt": false})
+		if r := console("POST", "/functions", string(body)); r.code >= 300 {
+			return r
+		}
+		r := sdk("POST", "/v1/functions/e2e-runner", `{}`)
+		if r.code != http.StatusOK {
+			return fmt.Errorf("invoke: %d %s", r.code, r.body)
+		}
+		var got struct {
+			DB, Role, Todo, Secret string
+			Upload                 struct{ Key string }
+		}
+		if err := json.Unmarshal([]byte(r.body), &got); err != nil {
+			return fmt.Errorf("invoke response %q: %w", r.body, err)
+		}
+		wantDB := env.dedDB
+		if env.scenario == "free" {
+			wantDB = "eurobase"
+		}
+		if got.DB != wantDB || got.Role != tenantlogin.FuncRole(env.schema) {
+			return fmt.Errorf("ran on %s as %s, want %s as %s", got.DB, got.Role, wantDB, tenantlogin.FuncRole(env.schema))
+		}
+		if got.Secret != "v1" {
+			return fmt.Errorf("ctx.vault.get = %q, want the project's secret", got.Secret)
+		}
+		if n := env.dedCount(t, "todos", fmt.Sprintf("id = '%s'", got.Todo)); n != 1 {
+			return fmt.Errorf("ctx.db.sql row not in the project's database (count %d)", n)
+		}
+		if got.Upload.Key != "fn/runner.txt" {
+			return fmt.Errorf("ctx.storage.upload returned %+v", got.Upload)
+		}
+		if n := env.dedCount(t, "storage_objects", "key = 'fn/runner.txt'"); n != 1 {
+			return fmt.Errorf("function upload not tracked in the project's storage_objects (count %d)", n)
+		}
+		// A user-less invocation's upload is a developer file (NULL owner),
+		// so shared folders (#697) cover it.
+		if owner := env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = 'fn/runner.txt'", "storage_objects"); owner != "<null>" {
+			return fmt.Errorf("user-less function upload recorded with owner %q, want NULL", owner)
+		}
+		if ok, err := env.s3.ObjectExists(ctx, env.bucket, "fn/runner.txt"); err != nil || !ok {
+			return fmt.Errorf("function upload not in S3: %v %v", ok, err)
+		}
+		return nil
+	})
+
+	// ctx.storage for a Team project whose database can't be used (here:
+	// still provisioning) is refused before S3 — never recorded on the
+	// shared cluster, never left untracked.
+	check(t, env, "function_storage_refused_without_dedicated_db", func() error {
+		ctx := context.Background()
+		stuck := env.addProvisioningTeamProject(t)
+		body := []byte("x")
+		req := httptest.NewRequest("POST", "http://api.eurobase.test/internal/functions/storage/upload", bytes.NewReader(body))
+		req.Header.Set("X-Project-ID", stuck)
+		req.Header.Set("X-Schema-Name", "tenant_"+strings.ReplaceAll(stuck, "-", "_"))
+		req.Header.Set("X-Storage-Key", "fn/stuck.txt")
+		req.Header.Set("Content-Type", "text/plain")
+		functions.SignStorage(env.runnerHMAC, req.Header, functions.StorageOpUpload, functions.SHA256Hex(body), time.Now())
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			return fmt.Errorf("upload for a provisioning Team project: %d %s, want 503", rec.Code, rec.Body.String())
+		}
+		var slug string
+		if err := env.shared.QueryRow(ctx, `SELECT slug FROM projects WHERE id = $1`, stuck).Scan(&slug); err != nil {
+			return err
+		}
+		if ok, _ := env.s3.ObjectExists(ctx, "eurobase-"+slug, "fn/stuck.txt"); ok {
+			return fmt.Errorf("object reached S3 before the refusal")
+		}
+		return nil
+	})
+
 	// Connection page (#698): a read-only request gets the SELECT-only
 	// login or nothing — never the owner credential, even while the
 	// read-only slot is still empty.
@@ -1359,12 +1498,13 @@ type knownGap struct {
 
 // teamOnlyChecks don't apply to a Free / Pro project (shared cluster).
 var teamOnlyChecks = map[string]bool{
-	"console_fails_closed_without_dedicated_pool": true,
-	"console_fails_closed_while_provisioning":     true,
-	"readonly_connection_limit":                   true,
-	"shared_cluster_untouched":                    true,
-	"credential_reseal":                           true,
-	"console_connection_roles":                    true,
+	"console_fails_closed_without_dedicated_pool":   true,
+	"console_fails_closed_while_provisioning":       true,
+	"readonly_connection_limit":                     true,
+	"shared_cluster_untouched":                      true,
+	"credential_reseal":                             true,
+	"console_connection_roles":                      true,
+	"function_storage_refused_without_dedicated_db": true,
 }
 
 var teamKnownGaps = map[string]knownGap{}
@@ -1452,6 +1592,8 @@ SELECT (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class
 
 type teamTestConfig struct {
 	sharedAdmin, sharedGW, sharedDev string
+	sharedRunner                     string // eurobase_function_runner's login (the real Deno runner)
+	deno                             string // path to deno; "" = runner checks skip (fail with TEAM_TEST_REQUIRE_RUNNER=1)
 	dedOwner, dedAdmin               string // URLs; the database is replaced per scenario
 	runtimePW, readonlyPW            string
 	s3Endpoint, s3Key, s3Secret      string
@@ -1477,6 +1619,9 @@ type teamEnv struct {
 	s3                *storage.S3Client
 	cipher            *dbprovider.Cipher
 	keyB64            string
+	funcSecret        []byte // FUNC_PASSWORD_SECRET the runner derives tenant logins from
+	runnerHMAC        []byte // FUNCTIONS_RUNNER_HMAC_SECRET (gateway ↔ runner)
+	runnerOn          bool   // the real Deno runner is up for this scenario
 	bucket            string
 	ownerEmail        string
 	gw, dev           *pgxpool.Pool // shared-cluster runtime + developer pools
@@ -1840,13 +1985,93 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	if ok, err := s3Client.BucketExists(ctx, "eurobase-"+slug); err != nil || !ok {
 		t.Fatalf("bucket eurobase-%s missing after create: %v", slug, err)
 	}
+	// The real functions runner (#676): the Deno server from
+	// functions-runner/, started per scenario (its VAULT_ENCRYPTION_KEY is
+	// the scenario's), wired to this router both ways — invocations go
+	// gateway → runner, ctx.storage calls come back runner → gateway.
+	funcSecret, runnerHMAC := []byte(randHexT(t, 32)), []byte(randHexT(t, 32))
+	runnerURL, runnerOn := "", false
+	var fnSigner *functions.Signer
+	var runnerPort int
+	if cfg.deno != "" {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		runnerPort = ln.Addr().(*net.TCPAddr).Port
+		ln.Close()
+		runnerURL = fmt.Sprintf("http://127.0.0.1:%d", runnerPort)
+		if fnSigner, err = functions.NewSigner(string(runnerHMAC)); err != nil {
+			t.Fatal(err)
+		}
+	} else if os.Getenv("TEAM_TEST_REQUIRE_RUNNER") == "1" {
+		t.Fatal("TEAM_TEST_REQUIRE_RUNNER=1 but no deno (TEAM_TEST_DENO)")
+	}
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, s3Client, nil, nil,
-		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, "", nil, "", nil, nil, nil, nil, SSOWiring{}, nil, nil)
+		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil)
+	if cfg.deno != "" {
+		gatewaySrv := httptest.NewServer(router)
+		t.Cleanup(gatewaySrv.Close)
+		startRunner(t, cfg, runnerPort, map[string]string{
+			"DATABASE_URL_FUNCTION_RUNNER":         cfg.sharedRunner,
+			"FUNC_PASSWORD_SECRET":                 string(funcSecret),
+			"VAULT_ENCRYPTION_KEY":                 keyB64,
+			"FUNCTIONS_RUNNER_HMAC_SECRET":         string(runnerHMAC),
+			"FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED": "true",
+			"GATEWAY_INTERNAL_URL":                 gatewaySrv.URL,
+		})
+		runnerOn = true
+	}
 
 	return &teamEnv{
 		router: router, platformJWT: jwt, projectID: projectID, slug: slug, schema: schema, dedDB: dedDB,
 		secretKey: sec, publicKey: pub, s3: s3Client, bucket: "eurobase-" + slug, cipher: cipher, keyB64: keyB64, scenario: scenario, upgraded: upgraded, sharedFingerprint: sharedFP, shared: admin,
 		ownerUser: ownerUser, ownerEmail: ownerEmail, gw: gw, dev: dev, rt: rt, ded: dedAdmin,
+		funcSecret: funcSecret, runnerHMAC: runnerHMAC, runnerOn: runnerOn,
+	}
+}
+
+// startRunner runs functions-runner/server.ts (the production entrypoint)
+// on port and waits until it listens.
+func startRunner(t *testing.T, cfg teamTestConfig, port int, env map[string]string) {
+	t.Helper()
+	dir, err := filepath.Abs("../../functions-runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Like production (deploy/docker/Dockerfile.fn), certificate checks
+	// are off — here only for the local dedicated instance's self-signed
+	// certificate. When production trusts Scaleway's CA instead (stage B),
+	// dedicated instances must be covered too.
+	cmd := exec.Command(cfg.deno, "run", "--allow-net", "--allow-env", "--allow-read="+dir,
+		"--unstable-worker-options", "--unsafely-ignore-certificate-errors=localhost,127.0.0.1", filepath.Join(dir, "server.ts"))
+	cmd.Env = append(os.Environ(), "PORT="+strconv.Itoa(port))
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start runner: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		if t.Failed() {
+			t.Logf("runner output:\n%s", out.String())
+		}
+	})
+	deadline := time.Now().Add(60 * time.Second) // first run downloads remote imports
+	for {
+		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if err == nil {
+			c.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runner didn't listen on %d within 60s:\n%s", port, out.String())
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
