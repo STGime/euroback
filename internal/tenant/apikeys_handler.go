@@ -24,7 +24,8 @@ type APIKeyResponse struct {
 	PublicKey string `json:"public_key,omitempty"`
 }
 
-// APIKeyCreatedResponse includes the full plaintext keys (shown once on creation).
+// APIKeyCreatedResponse includes the full plaintext keys. The secret key is
+// shown only here; the public key stays retrievable via HandleListAPIKeys.
 type APIKeyCreatedResponse struct {
 	PublicKey string `json:"public_key"`
 	SecretKey string `json:"secret_key"`

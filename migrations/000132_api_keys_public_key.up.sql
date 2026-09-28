@@ -2,7 +2,7 @@
 --
 -- The project's PUBLIC key (eb_pk_…) is public by design — it ships in
 -- every browser app — so the console can show it again instead of only at
--- creation (Connect page, Lovable onboarding). Stored in plaintext for
+-- creation (Settings, the Connect page .env). Stored in plaintext for
 -- public-type rows only; secret keys stay hash-only (key_hash), enforced by
 -- the CHECK below.
 --

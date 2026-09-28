@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eurobase/euroback/internal/auth"
 )
@@ -85,6 +87,13 @@ func TestAPIKeys_PublicKeyRetrievable(t *testing.T) {
 		t.Fatal("CHECK allowed public_key on a secret row")
 	}
 
+	// The CHECK also refuses a non-eb_pk_ value on a public row.
+	if _, err := pool.Exec(ctx,
+		`UPDATE api_keys SET public_key = 'eb_sk_x' WHERE project_id = $1 AND type = 'public'`,
+		project.ID); err == nil {
+		t.Fatal("CHECK allowed a non-eb_pk_ public_key")
+	}
+
 	// Simulate a pre-000132 key, then use it (and the secret key) once.
 	if _, err := pool.Exec(ctx, `UPDATE api_keys SET public_key = NULL WHERE project_id = $1`, project.ID); err != nil {
 		t.Fatalf("clear: %v", err)
@@ -92,7 +101,22 @@ func TestAPIKeys_PublicKeyRetrievable(t *testing.T) {
 	if k, _ := listKeys(t, list, project.ID); publicOf(k).PublicKey != "" {
 		t.Fatal("expected no public key before backfill")
 	}
-	mw := auth.NewAPIKeyMiddleware(pool).Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// In CI the middleware runs on the real gateway login, as in
+	// production, so a missing UPDATE grant on the new column would show
+	// (the middleware's UPDATE error is swallowed).
+	mwPool := pool
+	if u := os.Getenv("APIKEY_TEST_GATEWAY_URL"); u != "" {
+		gp, err := pgxpool.New(ctx, u)
+		if err != nil {
+			t.Fatalf("gateway pool: %v", err)
+		}
+		t.Cleanup(gp.Close)
+		mwPool = gp
+	}
+	if _, err := pool.Exec(ctx, `UPDATE api_keys SET last_used_at = NULL WHERE project_id = $1`, project.ID); err != nil {
+		t.Fatalf("reset last_used_at: %v", err)
+	}
+	mw := auth.NewAPIKeyMiddleware(mwPool).Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	for _, key := range []string{project.SecretKey, project.PublicKey} {
@@ -110,12 +134,34 @@ func TestAPIKeys_PublicKeyRetrievable(t *testing.T) {
 		if strings.Contains(body, project.SecretKey) {
 			t.Fatal("secret key appears in the key list after use")
 		}
-		if publicOf(k).PublicKey == project.PublicKey {
+		// The secret key's use must still record last_used_at (its
+		// UPDATE passes a NULL $2 — a typing error there would be silent).
+		var secretUsed bool
+		if err := pool.QueryRow(ctx,
+			`SELECT last_used_at IS NOT NULL FROM api_keys WHERE project_id = $1 AND type = 'secret'`,
+			project.ID).Scan(&secretUsed); err != nil {
+			t.Fatalf("secret last_used_at: %v", err)
+		}
+		if publicOf(k).PublicKey == project.PublicKey && secretUsed {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("public key not backfilled (got %q)", publicOf(k).PublicKey)
+			t.Fatalf("public key not backfilled (got %q) or secret last_used_at not set (%v)", publicOf(k).PublicKey, secretUsed)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+
+	// A stored value is never overwritten by a later use.
+	if _, err := pool.Exec(ctx,
+		`UPDATE api_keys SET public_key = 'eb_pk_sentinel' WHERE project_id = $1 AND type = 'public'`,
+		project.ID); err != nil {
+		t.Fatalf("set sentinel: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/db/todos", nil)
+	req.Header.Set("apikey", project.PublicKey)
+	mw.ServeHTTP(httptest.NewRecorder(), req)
+	time.Sleep(500 * time.Millisecond)
+	if k, _ := listKeys(t, list, project.ID); publicOf(k).PublicKey != "eb_pk_sentinel" {
+		t.Fatalf("stored public key overwritten: %q", publicOf(k).PublicKey)
 	}
 }

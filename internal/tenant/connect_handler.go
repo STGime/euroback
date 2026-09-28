@@ -97,8 +97,17 @@ func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 		// minted at https://console.eurobase.app/account.
 		mcpConfig := generateMCPConfig()
 
-		// Build .env template.
-		envTemplate := fmt.Sprintf("EUROBASE_URL=%s\nEUROBASE_PUBLIC_KEY=eb_pk_...\nEUROBASE_SECRET_KEY=eb_sk_...", apiURL)
+		// Build .env template, with the real public key once it's known
+		// (migration 000132; it's public). The secret key is never retrievable.
+		publicKey := "eb_pk_..."
+		var storedPublicKey *string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT public_key FROM api_keys WHERE project_id = $1 AND type = 'public'
+			  ORDER BY created_at DESC LIMIT 1`, projectID,
+		).Scan(&storedPublicKey); err == nil && storedPublicKey != nil && *storedPublicKey != "" {
+			publicKey = *storedPublicKey
+		}
+		envTemplate := fmt.Sprintf("EUROBASE_URL=%s\nEUROBASE_PUBLIC_KEY=%s\nEUROBASE_SECRET_KEY=eb_sk_...", apiURL, publicKey)
 
 		// Sample code snippets.
 		sampleCode := map[string]string{

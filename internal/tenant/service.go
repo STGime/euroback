@@ -34,7 +34,8 @@ type Project struct {
 	APIURL     string          `json:"api_url"`
 	AuthConfig json.RawMessage `json:"auth_config,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
-	// PublicKey and SecretKey are only populated on creation (plaintext shown once).
+	// PublicKey and SecretKey are only populated on creation. The secret key
+	// is shown only then; the public key is also listed later (api-keys).
 	PublicKey string `json:"public_key,omitempty"`
 	SecretKey string `json:"secret_key,omitempty"`
 	// Phase B lifecycle columns (migration 000076). Nullable in JSON

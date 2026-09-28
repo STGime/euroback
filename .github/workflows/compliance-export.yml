@@ -23,6 +23,8 @@ on:
       - migrations/**
       - deploy/docker/Dockerfile.worker
       - .github/workflows/compliance-export.yml
+      - internal/tenant/apikeys*.go
+      - internal/auth/apikey_middleware.go
   workflow_dispatch:
 
 permissions:
@@ -74,6 +76,15 @@ jobs:
           pg_dump --version
           go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection'
           go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker'
+
+      # Not an export suite, but the only job with a production-role PG16:
+      # the retrievable public key (000132) — storage, CHECK, and the API-key
+      # middleware's backfill on the real gateway login.
+      - name: API keys (public key)
+        env:
+          DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+          APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
+        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable'
 
   worker-image:
     runs-on: ubuntu-latest

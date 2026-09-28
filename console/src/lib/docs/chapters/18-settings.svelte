@@ -9,8 +9,8 @@
 
 				<h3 class="text-lg font-semibold text-gray-900">API key management</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>View keys</strong> &mdash; see your public and secret API keys (secret is masked by default)</li>
-					<li><strong>Regenerate keys</strong> &mdash; generate a new secret key instantly. The old key stops working immediately.</li>
+					<li><strong>View keys</strong> &mdash; the public key is shown in full (it ships in your app anyway; any project member, viewers included, can copy it). The secret key is shown only once, when it is created &mdash; afterwards just its prefix. A public key created before this was available appears in full after its first use.</li>
+					<li><strong>Regenerate keys</strong> &mdash; generate a new public and secret key pair instantly. The old keys stop working immediately &mdash; also the way to cut off a former member who copied the public key.</li>
 				</ul>
 
 				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">
