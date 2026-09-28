@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	edb "github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -55,8 +58,12 @@ const (
 	testMaxResponseBody = 1 << 20
 )
 
-// testInFlight allows one console test per project at a time.
+// testInFlight allows one console test per project at a time (per
+// gateway replica — the gateway runs one).
 var testInFlight sync.Map
+
+// headerNameRe is an RFC 7230 token.
+var headerNameRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 // HandleTestInvoke — POST /platform/projects/{id}/functions/{name}/test.
 // Mounted behind PlatformTenantContext (project context; a Team project's
@@ -96,6 +103,30 @@ func HandleTestInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer
 			jsonError(w, "request body too large (max 1 MB)", http.StatusRequestEntityTooLarge)
 			return
 		}
+		for k, v := range req.Headers {
+			if !headerNameRe.MatchString(k) || strings.ContainsAny(v, "\r\n\x00") {
+				jsonError(w, fmt.Sprintf("invalid header %q", k), http.StatusBadRequest)
+				return
+			}
+		}
+		if req.UserID != "" {
+			if _, err := uuid.Parse(req.UserID); err != nil {
+				jsonError(w, "user_id must be a user id (uuid)", http.StatusBadRequest)
+				return
+			}
+		}
+		// Like the public chain's MaintenanceModeMiddleware: no test runs
+		// while the project's data is being moved (upgrade cutover).
+		var inMaintenance bool
+		if err := pool.QueryRow(r.Context(), `SELECT maintenance_mode FROM public.projects WHERE id = $1`, projectID).Scan(&inMaintenance); err != nil {
+			slog.Error("function test: maintenance check", "error", err, "project_id", projectID)
+			jsonError(w, "could not start the test run", http.StatusServiceUnavailable)
+			return
+		}
+		if inMaintenance {
+			jsonError(w, "the project is in maintenance; try again shortly", http.StatusServiceUnavailable)
+			return
+		}
 
 		ctx := r.Context()
 		if req.UserID != "" {
@@ -111,13 +142,25 @@ func HandleTestInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer
 			}
 			ctx = auth.ContextWithEndUserClaims(ctx, &auth.EndUserClaims{UserID: req.UserID, Email: email, ProjectID: projectID})
 		}
+		// Audited before running — and not tied to the request, so a closed
+		// tab can't leave an impersonated run unrecorded.
+		if a := audit.FromContext(r.Context()); a != nil {
+			aid, aemail := audit.ActorFromContext(r.Context())
+			meta := map[string]any{"function": name, "method": method}
+			if req.UserID != "" {
+				meta["as_user"] = req.UserID
+			}
+			a.Log(context.WithoutCancel(r.Context()), projectID, aid, aemail, "function.test_invoked",
+				audit.WithTarget("edge_function", name), audit.WithMetadata(meta))
+		}
+
 		var logs []byte
 		ctx = context.WithValue(ctx, logSinkKey{}, func(b []byte) { logs = b })
 		rctx := chi.NewRouteContext()
 		rctx.URLParams.Add("name", name)
 		ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
 
-		target := "/v1/functions/" + name
+		target := "/v1/functions/" + url.PathEscape(name)
 		if q := strings.TrimPrefix(req.Query, "?"); q != "" {
 			target += "?" + q
 		}
@@ -155,15 +198,6 @@ func HandleTestInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer
 			res.Logs = logs
 		}
 
-		if a := audit.FromContext(r.Context()); a != nil {
-			aid, aemail := audit.ActorFromContext(r.Context())
-			meta := map[string]any{"function": name, "method": method, "status": rec.Code}
-			if req.UserID != "" {
-				meta["as_user"] = req.UserID
-			}
-			a.Log(r.Context(), projectID, aid, aemail, "function.test_invoked",
-				audit.WithTarget("edge_function", name), audit.WithMetadata(meta))
-		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(res)
@@ -182,7 +216,8 @@ func lookupEndUser(ctx context.Context, shared *pgxpool.Pool, schema, userID str
 		p = shared
 	}
 	var email string
-	q := fmt.Sprintf(`SELECT email FROM "%s".users WHERE id = $1::uuid`, strings.ReplaceAll(schema, `"`, `""`))
+	// email is nullable (phone-only users, migrations 000032/000040).
+	q := fmt.Sprintf(`SELECT coalesce(email, '') FROM "%s".users WHERE id = $1::uuid`, strings.ReplaceAll(schema, `"`, `""`))
 	err := edb.RunAsService(ctx, p, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, userID).Scan(&email)
 	})

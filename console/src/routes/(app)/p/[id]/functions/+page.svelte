@@ -90,7 +90,7 @@
 		if (selectedFn.verify_jwt) parts.push(`  -H 'Authorization: Bearer <end-user access token>'`);
 		for (const line of testHeaders.split('\n')) if (line.trim()) parts.push(`  -H '${line.trim().replace(/'/g, "'\\''")}'`);
 		if (testMethod !== 'GET' && testBody) {
-			parts.push(`  -H 'Content-Type: application/json'`);
+			if (!/^\s*content-type\s*:/im.test(testHeaders)) parts.push(`  -H 'Content-Type: application/json'`);
 			parts.push(`  -d '${testBody.replace(/'/g, "'\\''")}'`);
 		}
 		return parts.join(' \\\n');
@@ -864,7 +864,7 @@ module.exports = async (req, ctx) => {
 							</div>
 						{/if}
 
-						<!-- Logs panel -->
+						<!-- Test panel (#712) -->
 						{#if showTest}
 							<div class="border-b border-gray-200 px-4 py-3 space-y-3">
 								<div class="flex items-center justify-between">
@@ -926,6 +926,7 @@ module.exports = async (req, ctx) => {
 							</div>
 						{/if}
 
+						<!-- Logs panel -->
 						{#if showLogs}
 							<div class="border-t border-gray-200">
 								<div class="flex items-center justify-between px-4 py-2 bg-gray-50">

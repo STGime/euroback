@@ -106,6 +106,11 @@ func forwardableQuery(rawQuery string) string {
 	return q.Encode()
 }
 
+// logSinkKey carries an optional func([]byte) that receives the
+// invocation's decoded log lines (JSON) — set by the console's Test run
+// (#712); unexported, so public traffic can't set it.
+type logSinkKey struct{}
+
 // HandleInvoke proxies a function invocation to the Function Runner service.
 // If no runner is configured, it returns 501 Not Implemented.
 //
@@ -116,11 +121,6 @@ func forwardableQuery(rawQuery string) string {
 // runner is in soft-mode (warn-only) — gateway pods without the secret
 // can keep working until the secret + corresponding env var land in
 // every environment.
-// logSinkKey carries an optional func([]byte) that receives the
-// invocation's decoded log lines (JSON) — set by the console's Test run
-// (#712), never by public traffic.
-type logSinkKey struct{}
-
 func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Signer) http.HandlerFunc {
 	client := &http.Client{Timeout: 65 * time.Second} // slightly above max function timeout
 

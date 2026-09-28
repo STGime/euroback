@@ -1407,10 +1407,33 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if !strings.Contains(string(res.Logs), "test run") {
 			return fmt.Errorf("logs of this invocation missing: %s", res.Logs)
 		}
-		// Unknown user → 400, nothing invoked.
-		r := console("POST", "/functions/e2e-console-test/test", `{"user_id":"00000000-0000-4000-8000-000000000000"}`)
-		if r.code != http.StatusBadRequest {
-			return fmt.Errorf("unknown user: %d %s, want 400", r.code, r.body)
+		// A phone-only end user (email NULL) can be run as too.
+		var phoneUID string
+		if err := env.ded.QueryRow(ctx, `INSERT INTO `+pgx.Identifier{env.schema, "users"}.Sanitize()+` (phone) VALUES ('+4915100000000') RETURNING id::text`).Scan(&phoneUID); err != nil {
+			return fmt.Errorf("insert phone-only user: %w", err)
+		}
+		if res, err := run(`{"method":"POST","body":"{}","user_id":"` + phoneUID + `"}`); err != nil || res.Status != http.StatusOK || !strings.Contains(res.Body, phoneUID) {
+			return fmt.Errorf("as a phone-only user: %+v %v", res, err)
+		}
+		// Refused up front (400), nothing invoked: unknown user, not a
+		// uuid, an invalid header name.
+		for _, bad := range []string{
+			`{"user_id":"00000000-0000-4000-8000-000000000000"}`,
+			`{"user_id":"not-a-uuid"}`,
+			`{"headers":{"Bad Name":"x"}}`,
+		} {
+			if r := console("POST", "/functions/e2e-console-test/test", bad); r.code != http.StatusBadRequest {
+				return fmt.Errorf("%s: %d %s, want 400", bad, r.code, r.body)
+			}
+		}
+		// No test runs while the project is in maintenance.
+		if _, err := env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = true WHERE id = $1`, env.projectID); err != nil {
+			return err
+		}
+		r := console("POST", "/functions/e2e-console-test/test", `{}`)
+		_, _ = env.shared.Exec(ctx, `UPDATE projects SET maintenance_mode = false WHERE id = $1`, env.projectID)
+		if r.code != http.StatusServiceUnavailable {
+			return fmt.Errorf("in maintenance: %d %s, want 503", r.code, r.body)
 		}
 		return nil
 	})
