@@ -1002,7 +1002,7 @@
 									</label>
 									<input
 										id="google-client-secret"
-										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')}
 										bind:value={googleClientSecret}
 										oninput={() => googleSecretDirty = true}
 										placeholder={googleSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'GOCSPX-...'}
@@ -1059,7 +1059,7 @@
 									</label>
 									<input
 										id="github-client-secret"
-										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')}
 										bind:value={githubClientSecret}
 										oninput={() => githubSecretDirty = true}
 										placeholder={githubSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'secret_...'}
@@ -1116,7 +1116,7 @@
 									</label>
 									<input
 										id="linkedin-client-secret"
-										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')}
 										bind:value={linkedinClientSecret}
 										oninput={() => linkedinSecretDirty = true}
 										placeholder={linkedinSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'secret_...'}
@@ -1181,6 +1181,7 @@
 									</label>
 									<textarea
 										id="apple-private-key"
+										autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true"
 										bind:value={applePrivateKey}
 										oninput={() => appleSecretDirty = true}
 										rows="4"
@@ -1235,7 +1236,7 @@
 										Tenant ID
 										<span class="ml-1 text-gray-400 font-normal">(leave blank for multi-tenant + personal accounts)</span>
 									</label>
-									<input id="microsoft-tenant-id" type="text" bind:value={microsoftTenantId} placeholder="common  |  organizations  |  consumers  |  &lt;tenant-guid&gt;" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors font-mono" />
+									<input id="microsoft-tenant-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={microsoftTenantId} placeholder="common  |  organizations  |  consumers  |  &lt;tenant-guid&gt;" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors font-mono" />
 									<p class="mt-1 text-xs text-gray-500">Use a specific tenant GUID to restrict sign-in to a single organisation (enterprise SSO).</p>
 								</div>
 								<div>
@@ -1250,7 +1251,7 @@
 									</label>
 									<input
 										id="microsoft-client-secret"
-										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
+										type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')}
 										bind:value={microsoftClientSecret}
 										oninput={() => microsoftSecretDirty = true}
 										placeholder={microsoftSecretSet ? '•••••••••••••• (leave blank to keep current)' : 'Client secret value (not the secret ID)'}
@@ -1801,7 +1802,7 @@
 									<span class="text-gray-400 font-normal">(leave blank to keep the saved one)</span>
 								{/if}
 							</label>
-							<input id="smtp-password" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" bind:value={smtpPassword} placeholder={smtpExisting?.has_password ? '••••••••' : 'SMTP password'}
+							<input id="smtp-password" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')} bind:value={smtpPassword} placeholder={smtpExisting?.has_password ? '••••••••' : 'SMTP password'}
 								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
 							<p class="mt-1 text-[11px] text-gray-500">Stored encrypted at rest with your project's per-tenant key. Never returned by the API after save.</p>
 						</div>

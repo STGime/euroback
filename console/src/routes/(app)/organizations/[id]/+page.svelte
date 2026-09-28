@@ -349,7 +349,7 @@
 						<label for="sso-client-secret" class="block text-sm font-medium text-gray-700">Client Secret</label>
 						<input
 							id="sso-client-secret"
-							type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true"
+							type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')}
 							bind:value={ssoClientSecret}
 							placeholder={detail.sso?.client_secret_set ? '•••••••• (leave blank to keep current)' : ''}
 							required={!detail.sso?.client_secret_set}

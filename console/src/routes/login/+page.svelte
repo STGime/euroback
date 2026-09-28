@@ -494,6 +494,7 @@
 							<input
 								id="email"
 								type="email"
+								autocomplete="username"
 								bind:value={email}
 								required
 								placeholder="you@company.eu"
@@ -508,6 +509,7 @@
 									<input
 										id="password"
 										type={showPassword ? 'text' : 'password'}
+										autocomplete={isSignUp ? 'new-password' : 'current-password'}
 										bind:value={password}
 										required
 										minlength={isSignUp ? PASSWORD_MIN_LENGTH : 8}
@@ -539,6 +541,7 @@
 									<input
 										id="confirm-password"
 										type={showPassword ? 'text' : 'password'}
+										autocomplete="new-password"
 										bind:value={confirmPassword}
 										required
 										minlength={PASSWORD_MIN_LENGTH}
