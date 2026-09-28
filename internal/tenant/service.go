@@ -810,19 +810,40 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 // a false "not set". Safe to call when the vault is not configured — the
 // result will simply report secret_set=false for every provider.
 func (s *TenantService) annotateAuthConfig(ctx context.Context, projectID, schemaName string, raw []byte) []byte {
-	vctx, routeErr := ctx, error(nil)
+	// Bounded: an unreachable dedicated host must not stall a whole
+	// project listing (pools connect lazily) — it reads as "unknown".
+	ctx, cancel := context.WithTimeout(ctx, annotateTimeout)
+	defer cancel()
+	vctx, failed := ctx, false
 	if s.vaultCtx != nil {
-		vctx, routeErr = s.vaultCtx(ctx, projectID)
-		if routeErr != nil {
-			slog.Warn("oauth secret status unknown: project's vault database unavailable", "project_id", projectID, "error", routeErr)
+		var err error
+		if vctx, err = s.vaultCtx(ctx, projectID); err != nil {
+			slog.Warn("oauth secret status unknown: project's vault database unavailable", "project_id", projectID, "error", err)
+			failed = true
 		}
 	}
 	return AnnotateOAuthSecretStatus(raw, func(provider string) (bool, bool) {
-		if routeErr != nil {
+		if failed {
 			return false, false
 		}
-		return s.oauthClientSecretStatus(vctx, schemaName, provider)
+		set, known := s.oauthClientSecretStatus(vctx, schemaName, provider)
+		if !known {
+			failed = true // don't wait on the same database again for the next provider
+		}
+		return set, known
 	})
+}
+
+// annotateTimeout bounds one project's OAuth secret-status lookup.
+const annotateTimeout = 3 * time.Second
+
+// annotateAll decorates a listing — after its rows are closed, so no
+// platform connection is held while vaults are read.
+func (s *TenantService) annotateAll(ctx context.Context, projects []Project) {
+	for i := range projects {
+		p := &projects[i]
+		p.AuthConfig = s.annotateAuthConfig(ctx, p.ID, p.SchemaName, p.AuthConfig)
+	}
 }
 
 // ListProjects returns all projects the given platform user is a member of
@@ -1022,13 +1043,14 @@ func (s *TenantService) listDirectMemberProjects(ctx context.Context, platformUs
 			return nil, fmt.Errorf("scan project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
-		p.AuthConfig = s.annotateAuthConfig(ctx, p.ID, p.SchemaName, p.AuthConfig)
 		projects = append(projects, p)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate project rows: %w", err)
 	}
+	rows.Close()
+	s.annotateAll(ctx, projects)
 
 	return projects, nil
 }
@@ -1114,12 +1136,13 @@ func (s *TenantService) listProjectsByIDs(ctx context.Context, ids []string) ([]
 			return nil, fmt.Errorf("scan org project row: %w", err)
 		}
 		p.APIURL = fmt.Sprintf("https://%s.eurobase.app", p.Slug)
-		p.AuthConfig = s.annotateAuthConfig(ctx, p.ID, p.SchemaName, p.AuthConfig)
 		projects = append(projects, p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate projects by ids: %w", err)
 	}
+	rows.Close()
+	s.annotateAll(ctx, projects)
 	return projects, nil
 }
 

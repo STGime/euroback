@@ -96,14 +96,11 @@ func (s *VaultService) Configured() bool {
 //                                                     LEFT JOIN of project_databases; otherwise HasDedicatedDB
 //                                                     stays false and the middleware no-ops silently.
 //
-// Known-not-yet-migrated call sites (tracked as follow-ups; break on Team-tier):
-//
-//   * Compliance audit-export test destination path (vaultLookup closure
-//     at gateway/router.go — needs PlatformTenantContext on
-//     /compliance/audit-export/{destID}/test).
-//   * MigrateOAuthSecretsToVault startup task (main.go) — runs before
-//     any request context; needs a per-project pool-cache handoff
-//     analogous to the token-cleanup follow-up (#392).
+// Callers without a request (#689): project listings / settings
+// responses use TenantService.SetVaultRouting; the worker's audit
+// deliverers use workers.TenantVaultResolver; MigrateOAuthSecretsToVault
+// skips projects with a dedicated database. The audit-export test route
+// is behind PlatformTenantContext.
 //
 // When you add a new vault caller, mount one of the middlewares
 // above (or add a new one), or your Team-tier users get a hard 500.

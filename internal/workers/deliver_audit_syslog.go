@@ -48,6 +48,9 @@ type DeliverAuditSyslogWorker struct {
 	Pool      *pgxpool.Pool
 	Deliverer *export.SyslogDeliverer
 	Vault     *vault.VaultService
+	// TenantVault routes the cert read to a Team project's dedicated
+	// vault (#689). Nil = shared cluster only (tests).
+	TenantVault TenantVaultResolver
 }
 
 func (w *DeliverAuditSyslogWorker) Work(ctx context.Context, job *river.Job[jobs.DeliverAuditSyslogArgs]) error {
@@ -87,7 +90,15 @@ func (w *DeliverAuditSyslogWorker) Work(ctx context.Context, job *river.Job[jobs
 	// Nil-safe: NULL secret_ref → server-cert-only TLS.
 	var clientCert *tls.Certificate
 	if secretRef != nil && *secretRef != "" && w.Vault != nil {
-		sec, err := w.Vault.Get(ctx, schemaName, *secretRef)
+		vctx, release := ctx, func() {}
+		if w.TenantVault != nil {
+			var err error
+			if vctx, release, err = w.TenantVault(ctx, projectID); err != nil {
+				return fmt.Errorf("resolve syslog client cert %q: project vault unavailable: %w", *secretRef, err)
+			}
+		}
+		sec, err := w.Vault.Get(vctx, schemaName, *secretRef)
+		release()
 		if err != nil {
 			return fmt.Errorf("resolve syslog client cert %q: %w", *secretRef, err)
 		}

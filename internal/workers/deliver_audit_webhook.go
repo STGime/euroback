@@ -47,6 +47,9 @@ type DeliverAuditWebhookWorker struct {
 	Pool      *pgxpool.Pool
 	Deliverer *export.Deliverer
 	Vault     *vault.VaultService
+	// TenantVault routes the secret read to a Team project's dedicated
+	// vault (#689). Nil = shared cluster only (tests).
+	TenantVault TenantVaultResolver
 }
 
 func (w *DeliverAuditWebhookWorker) Work(ctx context.Context, job *river.Job[jobs.DeliverAuditWebhookArgs]) error {
@@ -90,7 +93,15 @@ func (w *DeliverAuditWebhookWorker) Work(ctx context.Context, job *river.Job[job
 	// "unauthenticated" semantics).
 	var secret []byte
 	if secretRef != nil && *secretRef != "" && w.Vault != nil {
-		sec, err := w.Vault.Get(ctx, schemaName, *secretRef)
+		vctx, release := ctx, func() {}
+		if w.TenantVault != nil {
+			var err error
+			if vctx, release, err = w.TenantVault(ctx, projectID); err != nil {
+				return fmt.Errorf("resolve webhook secret %q: project vault unavailable: %w", *secretRef, err)
+			}
+		}
+		sec, err := w.Vault.Get(vctx, schemaName, *secretRef)
+		release()
 		if err != nil {
 			return fmt.Errorf("resolve webhook secret %q: %w", *secretRef, err)
 		}
