@@ -25,7 +25,7 @@ If any is missing, ask the user: the Eurobase console → project → **Connect*
 
 ## Setup
 
-Install `@eurobase/sdk` **0.8.0+**, create one shared client and import it everywhere:
+Install `@eurobase/sdk` **0.8.1+**, create one shared client and import it everywhere:
 
 ```typescript
 // src/lib/eurobase.ts
@@ -37,8 +37,8 @@ export const eb = createClient({
   projectId: import.meta.env.VITE_EUROBASE_PROJECT_ID, // required for realtime with signed-in users
 })
 
-// The signed-in user's id. After an OAuth redirect the session's user is
-// empty until the next token refresh, so fall back to asking the server.
+// The signed-in user's id. SDK 0.8.1+ fills it right after an OAuth
+// redirect; the server fallback keeps older installs (0.8.0) working.
 export async function currentUserId(): Promise<string | null> {
   const id = eb.auth.getSession()?.user.id
   if (id) return id

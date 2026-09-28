@@ -9,6 +9,28 @@ import { httpClient } from './http'
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Read the claims of a JWT without verifying it (the gateway verifies every
+ * request; this only fills the client-side session). Returns null for
+ * anything that isn't a decodable three-part token.
+ */
+function decodeJwtClaims(token: string): Record<string, unknown> | null {
+  const parts = token.split('.')
+  if (parts.length !== 3 || typeof atob !== 'function') return null
+  try {
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    b64 += '='.repeat((4 - (b64.length % 4)) % 4)
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    const json = typeof TextDecoder !== 'undefined' ? new TextDecoder().decode(bytes) : bin
+    const claims = JSON.parse(json)
+    return claims && typeof claims === 'object' ? claims : null
+  } catch {
+    return null
+  }
+}
+
 export interface AuthUser {
   id: string
   email: string
@@ -356,21 +378,29 @@ export class AuthClient {
     }
 
     this.setSession(session)
-    this.emit('SIGNED_IN', session)
+    this.emit('SIGNED_IN', this.session!)
 
     // Clean the URL hash.
     if (typeof window.history !== 'undefined') {
       window.history.replaceState(null, '', window.location.pathname + window.location.search)
     }
 
-    return { data: session, error: null }
+    return { data: this.session, error: null }
   }
 
-  /** Get the current user from the server. */
+  /**
+   * Get the current user from the server. Also refreshes the stored
+   * session's `user` (same user id only), so `getSession().user` carries
+   * the full profile afterwards.
+   */
   async getUser(): Promise<{ data: AuthUser | null; error: string | null }> {
     const result = await this.http.get('/v1/auth/user')
     if (result.error) {
       return { data: null, error: result.error }
+    }
+    if (this.session && result?.id && result.id === this.session.user?.id) {
+      this.session = { ...this.session, user: { ...this.session.user, ...result } }
+      this.persistSession(this.session)
     }
     return { data: result, error: null }
   }
@@ -441,6 +471,24 @@ export class AuthClient {
   // ── Internal ──
 
   private setSession(session: AuthSession) {
+    // An OAuth callback (and a session stored by SDK ≤ 0.8.0 after one)
+    // has no user yet: take id / email from the access token's claims
+    // (`sub`, `email`) so getSession().user.id is usable right away (#720).
+    if (!session.user?.id) {
+      const claims = decodeJwtClaims(session.access_token)
+      if (claims && typeof claims.sub === 'string' && claims.sub) {
+        session = {
+          ...session,
+          user: {
+            ...session.user,
+            created_at: session.user?.created_at ?? '',
+            updated_at: session.user?.updated_at ?? '',
+            id: claims.sub,
+            email: typeof claims.email === 'string' ? claims.email : (session.user?.email ?? ''),
+          },
+        }
+      }
+    }
     this.session = session
     this.http.setAccessToken(session.access_token)
     this.persistSession(session)

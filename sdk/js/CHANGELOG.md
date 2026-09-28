@@ -2,6 +2,16 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.8.1 — 2026-09-28
+
+### Fixed — the session's user after an OAuth sign-in (#720)
+
+`auth.handleOAuthCallback()` stored the session with an empty user (`id: ''`, `email: ''`) until the next token refresh, so `getSession().user.id` right after an OAuth sign-in broke inserts (`user_id` not a uuid) and storage keys. The session's `user.id` and `user.email` now come from the access token's claims (`sub`, `email`) straight away, and in the returned session, the persisted session and the `SIGNED_IN` event. A session stored by 0.8.0 after an OAuth sign-in is repaired when it's restored.
+
+`auth.getUser()` now also writes the returned profile (display name, avatar, timestamps, …) into the stored session when it's the same user.
+
+No gateway change needed.
+
 ## 0.8.0 — 2026-09-27
 
 ### Added — `storage.getPublicUrl(key)`
