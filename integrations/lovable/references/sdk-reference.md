@@ -1,6 +1,6 @@
 # @eurobase/sdk reference for Lovable apps
 
-Written against `@eurobase/sdk` 0.8.x. All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
+Written against `@eurobase/sdk` 0.8.1+. All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
 
 ## Return shapes
 
@@ -166,8 +166,9 @@ eb.auth.signInWithOAuth('google', { redirectTo: `${location.origin}/auth/callbac
 // /auth/callback (client-side):
 const { data, error } = eb.auth.handleOAuthCallback()   // reads tokens from the URL hash
 if (data) {
-  const { data: user } = await eb.auth.getUser()         // the callback session has no user details yet —
-  navigate('/')                                          // use currentUserId() (not getSession().user.id) until the next token refresh
+  // 0.8.1+: data.user.id / email are set right away; getUser() adds the rest of the profile
+  const { data: user } = await eb.auth.getUser()
+  navigate('/')
 }
 ```
 

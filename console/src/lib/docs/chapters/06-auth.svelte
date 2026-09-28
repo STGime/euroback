@@ -305,7 +305,8 @@ eb.auth.signInWithOAuth('google', {'{'}
 
 // On your callback page — extract tokens from URL fragment
 const {'{'} data, error {'}'} = await eb.auth.handleOAuthCallback()
-// data.access_token, data.user — user is now signed in</pre>
+// data.access_token, data.user — user is now signed in
+// (SDK 0.8.1+: data.user.id / email are set right away; getUser() adds the profile)</pre>
 				</div>
 
 				<h4 class="text-base font-semibold text-gray-900 mt-4">REST API</h4>
