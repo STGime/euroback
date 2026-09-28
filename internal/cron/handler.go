@@ -400,7 +400,7 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
-		res, err := dry.DryRun(r.Context(), schema, req.ActionType, strings.TrimSpace(req.Action), runAs)
+		res, err := dry.DryRun(r.Context(), projectID, schema, req.ActionType, strings.TrimSpace(req.Action), runAs)
 		if err != nil {
 			// Validation errors and database errors (permission denied,
 			// syntax, statement timeout, …) are the caller's to see;
@@ -408,6 +408,13 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 			var pgErr *pgconn.PgError
 			if isDryRunValidationErr(err) || errors.As(err, &pgErr) {
 				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// Our own not-ready / login errors carry no host details and
+			// tell the developer what's going on (e.g. a Team database
+			// still provisioning, #677).
+			if errors.Is(err, errTenantDBNotReady) || errors.Is(err, errTenantConnect) {
+				jsonError(w, err.Error(), http.StatusServiceUnavailable)
 				return
 			}
 			slog.Error("cron dry run failed", "error", err, "project_id", projectID)

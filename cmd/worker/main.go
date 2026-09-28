@@ -580,6 +580,11 @@ func main() {
 		slog.Error("parse DATABASE_URL for cron tenant logins", "error", err)
 	} else if secret := os.Getenv("FUNC_PASSWORD_SECRET"); len(secret) >= tenantlogin.MinSecretLen {
 		cronExec = cronExec.WithTenantLogins(cronBase, []byte(secret))
+		// Team projects run on their dedicated instance (#677), never the
+		// shared cluster. The developer pool may execute
+		// public.runner_get_tenant_db; without DATABASE_URL_DEVELOPER (dev)
+		// the lookup is refused and sql/rpc jobs fail rather than guess.
+		cronExec = cronExec.WithTenantRouting(developerPool)
 	} else {
 		slog.Warn("FUNC_PASSWORD_SECRET not set — sql/rpc cron schedules will fail")
 	}

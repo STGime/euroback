@@ -951,7 +951,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// Test Run (#645): dry-run as the tenant login, like the worker.
 			var cronDry *cron.Executor
 			if secret := os.Getenv("FUNC_PASSWORD_SECRET"); len(secret) >= tenantlogin.MinSecretLen {
-				cronDry = cron.NewExecutor(nil, nil).WithTenantLogins(pool.Config().ConnConfig, []byte(secret))
+				// Team projects dry-run on their dedicated instance (#677).
+				cronDry = cron.NewExecutor(nil, nil).WithTenantLogins(pool.Config().ConnConfig, []byte(secret)).
+					WithTenantRouting(developerPool)
 			}
 			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc, cronDry))
 			r.With(tenant.RequireMinRole("viewer")).Get("/api-keys", tenant.HandleListAPIKeys(pool))

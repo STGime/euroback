@@ -40,6 +40,14 @@ const MinSecretLen = 32
 // internal/cron/handler.go), plus one spare.
 const FuncConnLimit = 8
 
+// DedicatedFuncConnLimit is the limit on a Team project's dedicated
+// instance (#677). There the runner connects directly — one connection
+// per runner pod, not through PgBouncer's pool of 2 — so it must cover
+// the functions HPA max (6) plus rollout surge (2), a cron job (worker,
+// jobs run one at a time), a console dry run, and one spare. It fits the
+// instance's platform budget (AGENTS.md, Team-tier routing).
+const DedicatedFuncConnLimit = 12
+
 // scramIterations matches PostgreSQL's default scram_iterations.
 const scramIterations = 4096
 
@@ -135,7 +143,7 @@ func NewEnsurer(adminPool *pgxpool.Pool, database string, secret []byte) (*Ensur
 // credentials and verifies CONNECT (a GRANT by a non-owner can silently
 // no-op, so the check is authoritative).
 func (e *Ensurer) EnsureOne(ctx context.Context, schema string) error {
-	return ensureOn(ctx, e.adminPool, e.database, e.secret, schema, schema, true)
+	return ensureOn(ctx, e.adminPool, e.database, e.secret, schema, schema, FuncConnLimit, true)
 }
 
 // EnsureDedicated does the same on a Team project's dedicated instance
@@ -148,10 +156,10 @@ func EnsureDedicated(ctx context.Context, ownerPool *pgxpool.Pool, database stri
 	if databaseID == "" {
 		return errors.New("dedicated function login: no database id")
 	}
-	return ensureOn(ctx, ownerPool, database, secret, schema, DedicatedSubject(databaseID, schema), false)
+	return ensureOn(ctx, ownerPool, database, secret, schema, DedicatedSubject(databaseID, schema), DedicatedFuncConnLimit, false)
 }
 
-func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret []byte, schema, subject string, asMigrator bool) error {
+func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret []byte, schema, subject string, connLimit int, asMigrator bool) error {
 	if !schemaRe.MatchString(schema) {
 		return fmt.Errorf("invalid tenant schema %q", schema)
 	}
@@ -191,7 +199,7 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 	// SQL; it cannot change its connection limit). RESET ALL drops any
 	// role-level defaults the tenant set on itself.
 	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN CONNECTION LIMIT %d PASSWORD '%s'",
-		pgx.Identifier{role}.Sanitize(), FuncConnLimit, verifier)); err != nil {
+		pgx.Identifier{role}.Sanitize(), connLimit, verifier)); err != nil {
 		return fmt.Errorf("set login on %s: %w", role, err)
 	}
 	// Both scopes: role-wide and per-database defaults (a role may set
