@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/jackc/pgx/v5"
@@ -43,6 +44,29 @@ type Executor struct {
 	// every tenant schema. Unset => sql / rpc jobs fail (no fallback).
 	tenantBase   *pgx.ConnConfig
 	tenantSecret []byte
+
+	// routeDB resolves where a project's tenant data lives (#677): nil =
+	// every project is on the shared cluster (tests). Production wires a
+	// pool that can run public.runner_get_tenant_db (dbprovider.ResolveTenantDB).
+	routeDB dbprovider.TenantDBQuerier
+}
+
+// WithTenantSQL configures everything customer SQL needs — the tenant
+// logins and the per-project routing (#677). The worker, the gateway's
+// Test Run and the Team harness all use it, so the harness covers the
+// production wiring.
+func (e *Executor) WithTenantSQL(base *pgx.ConnConfig, secret []byte, routeDB dbprovider.TenantDBQuerier) *Executor {
+	return e.WithTenantLogins(base, secret).WithTenantRouting(routeDB)
+}
+
+// WithTenantRouting makes sql / rpc jobs and dry runs of a Team project run
+// on its dedicated instance (#677) — as that instance's <schema>_func, with
+// the per-instance password — or fail while it isn't serving. Never the
+// shared cluster for a Team project. q must be able to execute
+// public.runner_get_tenant_db (the developer pool).
+func (e *Executor) WithTenantRouting(q dbprovider.TenantDBQuerier) *Executor {
+	e.routeDB = q
+	return e
 }
 
 // WithTenantLogins configures the per-tenant logins used for sql / rpc
@@ -201,12 +225,20 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 // over HTTP (same HMAC-signed path the SDK uses), so SQL-injection
 // concerns don't apply there — the action is the function name.
 func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
+	err := e.executeJobAction(ctx, job)
+	if errors.Is(err, errTenantDBNotReady) || errors.Is(err, errTenantRouting) {
+		return fmt.Errorf("%w — the job will retry at its next run", err)
+	}
+	return err
+}
+
+func (e *Executor) executeJobAction(ctx context.Context, job DueJob) error {
 	switch job.ActionType {
 	case "sql":
 		if err := validateCronSQLAction(job.Action, job.SchemaName); err != nil {
 			return err
 		}
-		return e.runInTenantTx(ctx, job.SchemaName, job.RunAs, func(ctx context.Context, tx pgx.Tx) error {
+		return e.runInTenantTx(ctx, job.ProjectID, job.SchemaName, job.RunAs, func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := execExtended(ctx, tx, job.Action); err != nil {
 				return fmt.Errorf("execute sql: %w", err)
 			}
@@ -216,7 +248,7 @@ func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
 		if err := validateCronRPCName(job.Action); err != nil {
 			return err
 		}
-		return e.runInTenantTx(ctx, job.SchemaName, job.RunAs, func(ctx context.Context, tx pgx.Tx) error {
+		return e.runInTenantTx(ctx, job.ProjectID, job.SchemaName, job.RunAs, func(ctx context.Context, tx pgx.Tx) error {
 			sql := fmt.Sprintf("SELECT %s()", quoteIdent(job.Action))
 			if _, err := execExtended(ctx, tx, sql); err != nil {
 				return fmt.Errorf("execute rpc: %w", err)
@@ -322,15 +354,16 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 // transaction with `SET LOCAL search_path` and `statement_timeout`.
 // search_path does NOT include `public`; qualified references outside
 // the tenant are also refused by validateCronSQLAction.
-func (e *Executor) runInTenantTx(ctx context.Context, schemaName, runAs string, fn func(context.Context, pgx.Tx) error) error {
+func (e *Executor) runInTenantTx(ctx context.Context, projectID, schemaName, runAs string, fn func(context.Context, pgx.Tx) error) error {
 	if e.tenantBase == nil || len(e.tenantSecret) == 0 {
 		return fmt.Errorf("sql/rpc cron actions need per-tenant logins (FUNC_PASSWORD_SECRET) on the worker")
 	}
-	cfg := e.tenantBase.Copy()
-	cfg.User = tenantlogin.FuncRole(schemaName)
-	cfg.Password = tenantlogin.FuncPassword(e.tenantSecret, schemaName)
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
+	cfg, err := e.tenantConnConfig(cctx, projectID, schemaName)
+	if err != nil {
+		return err
+	}
 	conn, err := pgx.ConnectConfig(cctx, cfg)
 	if err != nil {
 		// The driver error names the role and the internal host; keep it
@@ -373,6 +406,43 @@ func (e *Executor) runInTenantTx(ctx context.Context, schemaName, runAs string, 
 		return err
 	}
 	return tx.Commit(cctx)
+}
+
+// tenantConnConfig is the connection for projectID's customer SQL: the
+// shared cluster as <schema>_func, or a Team project's dedicated instance
+// as its <schema>_func with the per-instance password (#677). A dedicated
+// database that isn't serving fails the job (retried at its next run).
+func (e *Executor) tenantConnConfig(ctx context.Context, projectID, schemaName string) (*pgx.ConnConfig, error) {
+	role := tenantlogin.FuncRole(schemaName)
+	var db dbprovider.TenantDB
+	if e.routeDB != nil {
+		var err error
+		db, err = dbprovider.ResolveTenantDB(ctx, e.routeDB, projectID)
+		if errors.Is(err, dbprovider.ErrTenantDBNotReady) {
+			return nil, errTenantDBNotReady
+		}
+		if err != nil {
+			slog.Error("cron: tenant database lookup", "project_id", projectID, "error", err)
+			return nil, errTenantRouting
+		}
+	}
+	if !db.Dedicated {
+		cfg := e.tenantBase.Copy()
+		cfg.User = role
+		cfg.Password = tenantlogin.FuncPassword(e.tenantSecret, schemaName)
+		cfg.RuntimeParams["application_name"] = "eurobase-cron"
+		return cfg, nil
+	}
+	pw := tenantlogin.FuncPassword(e.tenantSecret, tenantlogin.DedicatedSubject(db.ID, schemaName))
+	cfg, err := pgx.ParseConfig(dbprovider.BuildOwnerDSN(role, pw, db.Host, db.Port, db.Database))
+	if err != nil {
+		slog.Error("cron: dedicated database config", "project_id", projectID, "error", err)
+		return nil, errTenantConnect
+	}
+	cfg.ConnectTimeout = 10 * time.Second
+	// Identifiable in the customer's pg_stat_activity / connection budget.
+	cfg.RuntimeParams["application_name"] = "eurobase-cron"
+	return cfg, nil
 }
 
 // execExtended runs sql (no arguments) over the extended query protocol,
@@ -461,6 +531,15 @@ func (e *dryRunInputError) Unwrap() error { return e.err }
 // generic (the driver error, which names hosts, is logged instead).
 var errTenantConnect = errors.New("could not connect as the project's database role; it may still be provisioning — the job will retry at its next run")
 
+// errTenantDBNotReady: a Team project's dedicated database isn't serving
+// (provisioning, restoring, upgrading, maintenance).
+var errTenantDBNotReady = errors.New("the project's database isn't available right now (provisioning, restoring or maintenance)")
+
+// errTenantRouting: the lookup of where the project's data lives failed —
+// a platform problem (e.g. the lookup role lacks EXECUTE on
+// public.runner_get_tenant_db), not the project's; details are logged.
+var errTenantRouting = errors.New("scheduled jobs can't reach the project's database right now (platform routing unavailable)")
+
 // errDryRunRollback makes runInTenantTx roll back after a dry run.
 var errDryRunRollback = errors.New("dry run: rolled back")
 
@@ -477,7 +556,7 @@ type DryRunResult struct {
 // Backs the console's Test Run (#645). Not undone: sequence nextval()
 // advances (never transactional in Postgres), and any side effect outside
 // the database (none are reachable from the tenant role today).
-func (e *Executor) DryRun(ctx context.Context, schemaName, actionType, action, runAs string) (*DryRunResult, error) {
+func (e *Executor) DryRun(ctx context.Context, projectID, schemaName, actionType, action, runAs string) (*DryRunResult, error) {
 	var sql string
 	switch actionType {
 	case "sql":
@@ -498,7 +577,7 @@ func (e *Executor) DryRun(ctx context.Context, schemaName, actionType, action, r
 	}
 	start := time.Now()
 	var rows int64
-	err := e.runInTenantTx(ctx, schemaName, runAs, func(ctx context.Context, tx pgx.Tx) error {
+	err := e.runInTenantTx(ctx, projectID, schemaName, runAs, func(ctx context.Context, tx pgx.Tx) error {
 		// Below the gateway's 30 s request timeout, so a slow statement
 		// reports a clear statement-timeout error.
 		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '25s'"); err != nil {

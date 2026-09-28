@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/plans"
@@ -1116,8 +1117,12 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if err := conn.QueryRow(ctx, `SELECT rolconnlimit FROM pg_roles WHERE rolname = current_user`).Scan(&limit); err != nil {
 			return err
 		}
-		if limit != tenantlogin.FuncConnLimit {
-			return fmt.Errorf("%s CONNECTION LIMIT = %d, want %d", role, limit, tenantlogin.FuncConnLimit)
+		wantLimit := tenantlogin.DedicatedFuncConnLimit
+		if env.scenario == "free" {
+			wantLimit = tenantlogin.FuncConnLimit
+		}
+		if limit != wantLimit {
+			return fmt.Errorf("%s CONNECTION LIMIT = %d, want %d", role, limit, wantLimit)
 		}
 		// Data the function sees: the project's own tables, including one
 		// created after provisioning (default privileges), and on Team the
@@ -1277,44 +1282,8 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		ctx := context.Background()
 		// The worker's login pass, with the runner's secret.
-		ensurer, err := tenantlogin.NewEnsurer(env.dev, "eurobase", env.funcSecret)
-		if err != nil {
+		if err := env.ensureFuncLogins(ctx); err != nil {
 			return err
-		}
-		if env.scenario == "free" {
-			if _, err := ensurer.EnsureAll(ctx); err != nil {
-				return fmt.Errorf("EnsureAll: %w", err)
-			}
-		} else {
-			repo := dbprovider.NewRepo(env.shared)
-			ensurer.PrepareDedicated = func(ctx context.Context, pool *pgxpool.Pool, schema string) error {
-				ready, err := dbprovider.FuncRoleReady(ctx, pool, schema)
-				if err != nil || ready {
-					return err
-				}
-				return dbprovider.EnsureFuncRole(ctx, pool, schema)
-			}
-			ensurer.GrantDedicatedConnect = func(ctx context.Context, projectID, schema string, pool *pgxpool.Pool) error {
-				if _, err := env.ded.Exec(ctx, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
-					pgx.Identifier{env.dedDB}.Sanitize(), pgx.Identifier{tenantlogin.FuncRole(schema)}.Sanitize())); err != nil {
-					return err
-				}
-				return dbprovider.EnsureFuncRole(ctx, pool, schema)
-			}
-			open := func(ctx context.Context, projectID string) (*pgxpool.Pool, tenantlogin.DedicatedDB, error) {
-				if projectID != env.projectID {
-					return nil, tenantlogin.DedicatedDB{}, nil
-				}
-				rec, err := repo.GetLiveByProject(ctx, projectID)
-				if err != nil {
-					return nil, tenantlogin.DedicatedDB{}, err
-				}
-				p, err := dbprovider.OpenOwnerPoolFor(ctx, rec, env.cipher)
-				return p, tenantlogin.DedicatedDB{ID: rec.ID, Database: rec.DatabaseName}, err
-			}
-			if n, err := ensurer.EnsureTeam(ctx, open); err != nil || n != 1 {
-				return fmt.Errorf("EnsureTeam: ensured %d, err %v", n, err)
-			}
 		}
 
 		code := `export default async function handler(req, ctx) {
@@ -1410,6 +1379,81 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if ok, _ := env.s3.ObjectExists(ctx, "eurobase-"+slug, "fn/stuck.txt"); ok {
 			return fmt.Errorf("object reached S3 before the refusal")
+		}
+		return nil
+	})
+
+	// Cron sql / rpc (#677): a scheduled job and the console's Test Run
+	// run on the project's own database as <schema>_func — dedicated for
+	// Team, shared for Free — with run_as honoured; never the shared
+	// cluster for a Team project.
+	check(t, env, "cron_sql_rpc_routed", func() error {
+		ctx := context.Background()
+		if err := env.ensureFuncLogins(ctx); err != nil {
+			return err
+		}
+		// Test Run through the router: sql rolls back, rpc runs.
+		r := console("POST", "/cron/test", `{"action_type":"sql","action":"INSERT INTO todos (title) VALUES ('cron dry run')","run_as":"service"}`)
+		if r.code != http.StatusOK || !strings.Contains(r.body, `"rows_affected":1`) {
+			return fmt.Errorf("sql test run: %d %s", r.code, r.body)
+		}
+		if n := env.dedCount(t, "todos", "title = 'cron dry run'"); n != 0 {
+			return fmt.Errorf("test run wasn't rolled back (%d rows)", n)
+		}
+		if r := console("POST", "/cron/test", `{"action_type":"rpc","action":"ded_only_fn"}`); r.code != http.StatusOK {
+			return fmt.Errorf("rpc test run (a function only the project's own database has): %d %s", r.code, r.body)
+		}
+		// A scheduled job, run by the worker's executor.
+		if r := console("POST", "/cron", `{"name":"e2e-cron","schedule":"* * * * *","action_type":"sql","action":"INSERT INTO todos (title) VALUES ('from cron')","run_as":"service"}`); r.code >= 300 {
+			return r
+		}
+		defer env.shared.Exec(ctx, `UPDATE cron_jobs SET enabled = false WHERE project_id = $1`, env.projectID) //nolint:errcheck
+		// As cmd/worker wires it (WithTenantSQL).
+		exec := cron.NewExecutor(cron.NewCronService(env.gw), env.gw).
+			WithTenantSQL(env.gw.Config().ConnConfig, env.funcSecret, env.dev)
+		if err := exec.RunDueJobs(ctx); err != nil {
+			return fmt.Errorf("RunDueJobs: %w", err)
+		}
+		var status, errText string
+		if err := env.shared.QueryRow(ctx, `SELECT r.status, coalesce(r.error, '') FROM cron_job_runs r JOIN cron_jobs j ON j.id = r.job_id
+			WHERE j.project_id = $1 AND j.name = 'e2e-cron' ORDER BY r.started_at DESC LIMIT 1`, env.projectID).Scan(&status, &errText); err != nil {
+			return fmt.Errorf("cron run record: %w", err)
+		}
+		if status != "success" {
+			return fmt.Errorf("cron run %s: %s", status, errText)
+		}
+		if n := env.dedCount(t, "todos", "title = 'from cron'"); n != 1 {
+			return fmt.Errorf("cron row not in the project's database (count %d)", n)
+		}
+		return nil
+	})
+
+	// A Team project whose database isn't serving: the Test Run is
+	// refused with the not-ready message, never run on the shared cluster.
+	check(t, env, "cron_refused_without_dedicated_db", func() error {
+		ctx := context.Background()
+		stuck := env.addProvisioningTeamProject(t)
+		r := env.consoleFor(stuck, "POST", "/cron/test", `{"action_type":"sql","action":"SELECT 1"}`)
+		if r.code == http.StatusOK || !strings.Contains(r.body, "isn't available right now") || strings.Contains(r.body, "next run") {
+			return fmt.Errorf("test run for a provisioning Team project: %d %s — want the not-ready refusal", r.code, r.body)
+		}
+		// A scheduled job for it fails the same way (and says it retries).
+		if r := env.consoleFor(stuck, "POST", "/cron", `{"name":"stuck-cron","schedule":"* * * * *","action_type":"sql","action":"SELECT 1"}`); r.code >= 300 {
+			return r
+		}
+		defer env.shared.Exec(ctx, `UPDATE cron_jobs SET enabled = false WHERE project_id = $1`, stuck) //nolint:errcheck
+		exec := cron.NewExecutor(cron.NewCronService(env.gw), env.gw).
+			WithTenantSQL(env.gw.Config().ConnConfig, env.funcSecret, env.dev)
+		if err := exec.RunDueJobs(ctx); err != nil {
+			return fmt.Errorf("RunDueJobs: %w", err)
+		}
+		var status, errText string
+		if err := env.shared.QueryRow(ctx, `SELECT r.status, coalesce(r.error, '') FROM cron_job_runs r JOIN cron_jobs j ON j.id = r.job_id
+			WHERE j.project_id = $1 ORDER BY r.started_at DESC LIMIT 1`, stuck).Scan(&status, &errText); err != nil {
+			return fmt.Errorf("cron run record: %w", err)
+		}
+		if status != "error" || !strings.Contains(errText, "isn't available right now") || !strings.Contains(errText, "next run") {
+			return fmt.Errorf("scheduled job for a provisioning Team project: %s %q — want the not-ready failure", status, errText)
 		}
 		return nil
 	})
@@ -1520,6 +1564,7 @@ var teamOnlyChecks = map[string]bool{
 	"credential_reseal":                             true,
 	"console_connection_roles":                      true,
 	"function_storage_refused_without_dedicated_db": true,
+	"cron_refused_without_dedicated_db":             true,
 }
 
 var teamKnownGaps = map[string]knownGap{}
@@ -1754,6 +1799,52 @@ func (e *teamEnv) runnerRoute(ctx context.Context, projectID string) ([]runnerRo
 		out = append(out, row)
 	}
 	return out, r.Err()
+}
+
+// ensureFuncLogins runs the worker's tenant-login pass with env.funcSecret
+// for this project (shared: EnsureAll; Team: EnsureTeam with the provider
+// CONNECT stand-in), as the runner and cron need it.
+func (e *teamEnv) ensureFuncLogins(ctx context.Context) error {
+	ensurer, err := tenantlogin.NewEnsurer(e.dev, "eurobase", e.funcSecret)
+	if err != nil {
+		return err
+	}
+	if e.scenario == "free" {
+		if _, err := ensurer.EnsureAll(ctx); err != nil {
+			return fmt.Errorf("EnsureAll: %w", err)
+		}
+		return nil
+	}
+	repo := dbprovider.NewRepo(e.shared)
+	ensurer.PrepareDedicated = func(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+		ready, err := dbprovider.FuncRoleReady(ctx, pool, schema)
+		if err != nil || ready {
+			return err
+		}
+		return dbprovider.EnsureFuncRole(ctx, pool, schema)
+	}
+	ensurer.GrantDedicatedConnect = func(ctx context.Context, projectID, schema string, pool *pgxpool.Pool) error {
+		if _, err := e.ded.Exec(ctx, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
+			pgx.Identifier{e.dedDB}.Sanitize(), pgx.Identifier{tenantlogin.FuncRole(schema)}.Sanitize())); err != nil {
+			return err
+		}
+		return dbprovider.EnsureFuncRole(ctx, pool, schema)
+	}
+	open := func(ctx context.Context, projectID string) (*pgxpool.Pool, tenantlogin.DedicatedDB, error) {
+		if projectID != e.projectID {
+			return nil, tenantlogin.DedicatedDB{}, nil // other scenarios' projects (their own cipher)
+		}
+		rec, err := repo.GetLiveByProject(ctx, projectID)
+		if err != nil {
+			return nil, tenantlogin.DedicatedDB{}, err
+		}
+		p, err := dbprovider.OpenOwnerPoolFor(ctx, rec, e.cipher)
+		return p, tenantlogin.DedicatedDB{ID: rec.ID, Database: rec.DatabaseName}, err
+	}
+	if n, err := ensurer.EnsureTeam(ctx, open); err != nil || n != 1 {
+		return fmt.Errorf("EnsureTeam: ensured %d, err %v", n, err)
+	}
+	return nil
 }
 
 func (e *teamEnv) addProvisioningTeamProject(t *testing.T) string {
@@ -2022,6 +2113,8 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	} else if os.Getenv("TEAM_TEST_REQUIRE_RUNNER") == "1" {
 		t.Fatal("TEAM_TEST_REQUIRE_RUNNER=1 but no deno (TEAM_TEST_DENO)")
 	}
+	// The console's cron Test Run (#645) dry-runs as the tenant login.
+	t.Setenv("FUNC_PASSWORD_SECRET", string(funcSecret))
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, s3Client, nil, nil,
 		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil)
 	if cfg.deno != "" {

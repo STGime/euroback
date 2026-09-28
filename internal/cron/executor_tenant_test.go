@@ -73,7 +73,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	e := (&Executor{}).WithTenantLogins(base, secret)
 
 	var who, path string
-	if err := e.runInTenantTx(ctx, schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
+	if err := e.runInTenantTx(ctx, "", schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, "SELECT session_user, current_setting('search_path')").Scan(&who, &path)
 	}); err != nil {
 		t.Fatalf("runInTenantTx: %v", err)
@@ -89,7 +89,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	// "none" leaves it unset.
 	for _, tc := range []struct{ runAs, want string }{{RunAsService, "service"}, {RunAsNone, ""}} {
 		var role string
-		if err := e.runInTenantTx(ctx, schemaA, tc.runAs, func(ctx context.Context, tx pgx.Tx) error {
+		if err := e.runInTenantTx(ctx, "", schemaA, tc.runAs, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, "SELECT coalesce(current_setting('app.end_user_role', true), '')").Scan(&role)
 		}); err != nil {
 			t.Fatalf("runInTenantTx(%s): %v", tc.runAs, err)
@@ -127,7 +127,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 		want  int
 	}{{RunAsService, 1}, {RunAsNone, 0}} {
 		var n int
-		if err := e.runInTenantTx(ctx, schemaA, tc.runAs, func(ctx context.Context, tx pgx.Tx) error {
+		if err := e.runInTenantTx(ctx, "", schemaA, tc.runAs, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, "SELECT count(*) FROM svc_only").Scan(&n)
 		}); err != nil {
 			t.Fatalf("count as %s: %v", tc.runAs, err)
@@ -138,7 +138,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	}
 
 	// DryRun (#645): reports what the job would do, then rolls back.
-	res, err := e.DryRun(ctx, schemaA, "sql", "DELETE FROM svc_only", RunAsService)
+	res, err := e.DryRun(ctx, "", schemaA, "sql", "DELETE FROM svc_only", RunAsService)
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 		t.Errorf("DryRun = %+v, want 1 row affected, dry_run", res)
 	}
 	var still int
-	if err := e.runInTenantTx(ctx, schemaA, RunAsService, func(ctx context.Context, tx pgx.Tx) error {
+	if err := e.runInTenantTx(ctx, "", schemaA, RunAsService, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, "SELECT count(*) FROM svc_only").Scan(&still)
 	}); err != nil {
 		t.Fatal(err)
@@ -154,15 +154,15 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	if still != 1 {
 		t.Errorf("after DryRun the table has %d rows, want 1 (rolled back)", still)
 	}
-	if res, err := e.DryRun(ctx, schemaA, "sql", "DELETE FROM svc_only", RunAsNone); err != nil || res.RowsAffected == nil || *res.RowsAffected != 0 {
+	if res, err := e.DryRun(ctx, "", schemaA, "sql", "DELETE FROM svc_only", RunAsNone); err != nil || res.RowsAffected == nil || *res.RowsAffected != 0 {
 		t.Errorf("DryRun as none = %+v, %v; want 0 rows", res, err)
 	}
-	if _, err := e.DryRun(ctx, schemaA, "sql", "GRANT SELECT ON svc_only TO PUBLIC", RunAsService); err == nil {
+	if _, err := e.DryRun(ctx, "", schemaA, "sql", "GRANT SELECT ON svc_only TO PUBLIC", RunAsService); err == nil {
 		t.Error("DryRun accepted a GRANT")
 	}
 
 	// The tenant role has no access to another tenant's schema.
-	err = e.runInTenantTx(ctx, schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
+	err = e.runInTenantTx(ctx, "", schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, "SELECT count(*) FROM "+pgx.Identifier{schemaB, "todos"}.Sanitize())
 		return err
 	})
@@ -171,7 +171,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	}
 
 	// The server refuses a second statement on this path.
-	err = e.runInTenantTx(ctx, schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
+	err = e.runInTenantTx(ctx, "", schemaA, RunAsNone, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := execExtended(ctx, tx, "SELECT 1; SELECT 2")
 		return err
 	})
@@ -180,7 +180,7 @@ func TestExecutor_RunsAsTenantLogin(t *testing.T) {
 	}
 
 	// Not configured => refuse rather than fall back to a shared role.
-	if err := (&Executor{}).runInTenantTx(ctx, schemaA, RunAsNone, func(context.Context, pgx.Tx) error { return nil }); err == nil {
+	if err := (&Executor{}).runInTenantTx(ctx, "", schemaA, RunAsNone, func(context.Context, pgx.Tx) error { return nil }); err == nil {
 		t.Error("runInTenantTx without tenant logins: want error")
 	}
 }
