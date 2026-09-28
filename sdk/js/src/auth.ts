@@ -14,7 +14,8 @@ import { httpClient } from './http'
  * request; this only fills the client-side session). Returns null for
  * anything that isn't a decodable three-part token.
  */
-function decodeJwtClaims(token: string): Record<string, unknown> | null {
+function decodeJwtClaims(token: unknown): Record<string, unknown> | null {
+  if (typeof token !== 'string') return null
   const parts = token.split('.')
   if (parts.length !== 3 || typeof atob !== 'function') return null
   try {
@@ -389,9 +390,10 @@ export class AuthClient {
   }
 
   /**
-   * Get the current user from the server. Also refreshes the stored
-   * session's `user` (same user id only), so `getSession().user` carries
-   * the full profile afterwards.
+   * Get the current user from the server. Also replaces the stored
+   * session's `user` with it (same user id only — the server's profile is
+   * authoritative, so cleared fields don't linger), so `getSession().user`
+   * carries the full profile afterwards.
    */
   async getUser(): Promise<{ data: AuthUser | null; error: string | null }> {
     const result = await this.http.get('/v1/auth/user')
@@ -399,7 +401,7 @@ export class AuthClient {
       return { data: null, error: result.error }
     }
     if (this.session && result?.id && result.id === this.session.user?.id) {
-      this.session = { ...this.session, user: { ...this.session.user, ...result } }
+      this.session = { ...this.session, user: result as AuthUser }
       this.persistSession(this.session)
     }
     return { data: result, error: null }
@@ -474,6 +476,8 @@ export class AuthClient {
     // An OAuth callback (and a session stored by SDK ≤ 0.8.0 after one)
     // has no user yet: take id / email from the access token's claims
     // (`sub`, `email`) so getSession().user.id is usable right away (#720).
+    // Unverified until the first server call — the gateway verifies every
+    // request; never base client-side authorization on it.
     if (!session.user?.id) {
       const claims = decodeJwtClaims(session.access_token)
       if (claims && typeof claims.sub === 'string' && claims.sub) {
@@ -484,7 +488,10 @@ export class AuthClient {
             created_at: session.user?.created_at ?? '',
             updated_at: session.user?.updated_at ?? '',
             id: claims.sub,
-            email: typeof claims.email === 'string' ? claims.email : (session.user?.email ?? ''),
+            // Phone sign-ins put the phone number in `email`; only take an address.
+            email: typeof claims.email === 'string' && claims.email.includes('@')
+              ? claims.email
+              : (session.user?.email ?? ''),
           },
         }
       }

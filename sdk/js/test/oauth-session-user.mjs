@@ -55,6 +55,12 @@ assert.equal(replaced, '/auth/callback', 'hash cleaned')
 nextUser = { id: USER_ID, email: EMAIL, display_name: 'Zoë', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' }
 await eb.auth.getUser()
 assert.equal(eb.auth.getSession().user.display_name, 'Zoë')
+// A cleared field (omitted by the server) doesn't linger.
+nextUser = { id: USER_ID, email: EMAIL, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-03T00:00:00Z' }
+await eb.auth.getUser()
+assert.equal(eb.auth.getSession().user.display_name, undefined, 'cleared display_name dropped')
+nextUser = { id: USER_ID, email: EMAIL, display_name: 'Zoë', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' }
+await eb.auth.getUser()
 assert.equal(eb.auth.getSession().user.created_at, '2026-01-01T00:00:00Z')
 assert.equal(JSON.parse(store.get('eurobase_auth_session')).user.display_name, 'Zoë', 'profile persisted')
 
@@ -79,6 +85,25 @@ store.clear()
 const r3 = eb3.auth.handleOAuthCallback()
 assert.equal(r3.error, null)
 assert.equal(r3.data.user.id, '')
+
+// Runtimes without TextDecoder (React Native / Hermes): the id still fills.
+const savedTD = globalThis.TextDecoder
+globalThis.TextDecoder = undefined
+store.clear()
+window.location.hash = `#access_token=${jwt({ sub: USER_ID, email: 'a@example.com' })}&refresh_token=rt-4`
+const eb4 = createClient({ url: 'https://example.eurobase.app', apiKey: 'eb_pk_test' })
+assert.equal(eb4.auth.handleOAuthCallback().data.user.id, USER_ID, 'fills without TextDecoder')
+globalThis.TextDecoder = savedTD
+
+// A phone number in the email claim (phone sign-ins) is not taken as email.
+store.clear()
+window.location.hash = `#access_token=${jwt({ sub: USER_ID, email: '+4512345678' })}&refresh_token=rt-5`
+const eb5 = createClient({ url: 'https://example.eurobase.app', apiKey: 'eb_pk_test' })
+assert.equal(eb5.auth.handleOAuthCallback().data.user.email, '')
+
+// A stored session without an access token doesn't throw in the claims decode.
+store.set('eurobase_auth_session', JSON.stringify({ refresh_token: 'rt-6', user: { id: '' } }))
+createClient({ url: 'https://example.eurobase.app', apiKey: 'eb_pk_test' })
 
 console.log('oauth-session-user: ok')
 process.exit(0)
