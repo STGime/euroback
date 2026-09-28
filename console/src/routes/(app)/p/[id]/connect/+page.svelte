@@ -71,20 +71,27 @@
 
 	// The key hint belongs to one project: reset it when the project changes.
 	let keyPrefixFor = '';
+	// Project whose key list was fetched (or is in flight) — one request per project.
+	let keyFetchFor = '';
 	$effect(() => {
 		if (projectId !== keyPrefixFor) {
 			publicKeyPrefix = '';
 			publicKey = '';
 			keyPrefixFor = projectId ?? '';
 		}
-		if ((activeTab === 'lovable' || activeTab === 'generic') && !publicKeyPrefix && projectId) {
-			api.listAPIKeys(projectId)
+		if ((activeTab === 'lovable' || activeTab === 'generic') && projectId && keyFetchFor !== projectId) {
+			const pid = projectId;
+			keyFetchFor = pid;
+			api.listAPIKeys(pid)
 				.then((keys) => {
+					// Navigated to another project while in flight: never show
+					// project A's key next to project B's id.
+					if (pid !== keyPrefixFor) return;
 					const pub = keys.find((k) => k.type === 'public');
 					publicKeyPrefix = pub?.key_prefix ?? '';
 					publicKey = pub?.public_key ?? '';
 				})
-				.catch(() => { /* optional hint */ });
+				.catch(() => { if (pid === keyFetchFor) keyFetchFor = ''; /* optional hint; retry on next tab switch */ });
 		}
 	});
 
