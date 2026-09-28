@@ -28,7 +28,15 @@ func MigrateOAuthSecretsToVault(ctx context.Context, pool *pgxpool.Pool, store S
 		`SELECT id, schema_name, auth_config
 		 FROM projects
 		 WHERE auth_config IS NOT NULL
-		   AND auth_config::text LIKE '%client_secret%'`,
+		   AND auth_config::text LIKE '%client_secret%'
+		   -- A Team project's vault is on its dedicated database: this
+		   -- startup task writes the shared vault only, and must not move
+		   -- its secret there and strip it from auth_config (#689). Left
+		   -- in place; the console re-saves it through the routed path.
+		   AND NOT EXISTS (SELECT 1 FROM project_databases pd
+		                    WHERE pd.project_id = projects.id
+		                      AND pd.state IN ('provisioning', 'active', 'restoring')
+		                      AND pd.deleted_at IS NULL)`,
 	)
 	if err != nil {
 		return fmt.Errorf("scan projects for oauth secrets: %w", err)

@@ -537,9 +537,10 @@ func main() {
 		slog.Warn("VAULT_ENCRYPTION_KEY not set, webhook signing disabled — destinations with secret_ref will fail to deliver")
 	}
 	river.AddWorker(riverWorkers, &workers.DeliverAuditWebhookWorker{
-		Pool:      pool,
-		Deliverer: export.NewDeliverer(export.ClientConfig{}),
-		Vault:     vaultSvc,
+		Pool:        pool,
+		Deliverer:   export.NewDeliverer(export.ClientConfig{}),
+		Vault:       vaultSvc,
+		TenantVault: workers.NewTenantVaultResolver(providerRepo, cipher),
 	})
 
 	// #355 audit syslog deliverer. Same SSRF-safe dial semantics
@@ -547,9 +548,10 @@ func main() {
 	// instead of HMAC-signed HTTPS. Vault holds the optional TLS
 	// client cert PEM bundle for mutual-TLS to the sink.
 	river.AddWorker(riverWorkers, &workers.DeliverAuditSyslogWorker{
-		Pool:      pool,
-		Deliverer: export.NewSyslogDeliverer(),
-		Vault:     vaultSvc,
+		Pool:        pool,
+		Deliverer:   export.NewSyslogDeliverer(),
+		Vault:       vaultSvc,
+		TenantVault: workers.NewTenantVaultResolver(providerRepo, cipher),
 	})
 
 	// ── Create River client in worker mode ──

@@ -70,6 +70,9 @@
 	let googleClientId = $state('');
 	let googleClientSecret = $state('');
 	let googleSecretSet = $state(false);
+	// Some provider's secret status couldn't be read (the project's vault
+	// database is unavailable, #689) — don't imply secrets are missing.
+	let secretStatusUnknown = $state(false);
 	let googleSecretDirty = $state(false);
 	let githubEnabled = $state(false);
 	let githubClientId = $state('');
@@ -353,6 +356,7 @@
 			magicLinkUrl = projectCtx.project?.auth_config?.magic_link_url ?? '';
 
 			const oauthCfg = projectCtx.project?.auth_config?.oauth_providers;
+			secretStatusUnknown = Object.values(oauthCfg ?? {}).some((p) => p?.secret_status === 'unknown');
 			if (oauthCfg?.google) {
 				googleEnabled = oauthCfg.google.enabled ?? false;
 				googleClientId = oauthCfg.google.client_id ?? '';
@@ -584,6 +588,7 @@
 			// new state (and clear the form fields so the user doesn't see their
 			// just-entered secret lingering).
 			const oauthCfg = updated?.auth_config?.oauth_providers;
+			secretStatusUnknown = Object.values(oauthCfg ?? {}).some((p) => p?.secret_status === 'unknown');
 			if (oauthCfg?.google) {
 				googleSecretSet = oauthCfg.google.secret_set ?? googleSecretSet;
 			}
@@ -805,6 +810,12 @@
 			<!-- Auth Methods -->
 			<div>
 				<h3 class="text-sm font-semibold text-gray-900">Auth Methods</h3>
+				{#if secretStatusUnknown}
+					<div class="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+						We couldn't check which OAuth client secrets are stored — the project's database isn't reachable
+						right now. Leave the secret fields blank to keep any secret that's already set.
+					</div>
+				{/if}
 				<div class="mt-3 space-y-3">
 					<div class="rounded-lg border border-gray-200 px-4 py-3">
 						<div class="flex items-center justify-between">

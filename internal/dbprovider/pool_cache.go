@@ -228,6 +228,9 @@ func (c *PoolCache) get(ctx context.Context, projectID string, ownerMode bool) (
 		return nil, fmt.Errorf("pool cache: parse dsn: %w", err)
 	}
 	cfg.MaxConns = c.maxConn
+	// An unreachable instance fails in bounded time instead of the OS TCP
+	// timeout (callers like project listings wait on it).
+	cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
 	// SDK / console traffic (customer SQL, RPC, triggers) runs here:
