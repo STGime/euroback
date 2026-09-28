@@ -952,8 +952,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			var cronDry *cron.Executor
 			if secret := os.Getenv("FUNC_PASSWORD_SECRET"); len(secret) >= tenantlogin.MinSecretLen {
 				// Team projects dry-run on their dedicated instance (#677).
-				cronDry = cron.NewExecutor(nil, nil).WithTenantLogins(pool.Config().ConnConfig, []byte(secret)).
-					WithTenantRouting(developerPool)
+				cronDry = cron.NewExecutor(nil, nil).WithTenantSQL(pool.Config().ConnConfig, []byte(secret), developerPool)
+				if ok, err := dbprovider.CanResolveTenantDB(context.Background(), developerPool); err != nil || !ok {
+					slog.Error("cron Test Run: this gateway can't resolve projects' databases (public.runner_get_tenant_db) — test runs will fail; set DATABASE_URL_DEVELOPER",
+						"can_execute", ok, "error", err)
+				}
 			}
 			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc, cronDry))
 			r.With(tenant.RequireMinRole("viewer")).Get("/api-keys", tenant.HandleListAPIKeys(pool))

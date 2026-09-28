@@ -413,7 +413,7 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 			// Our own not-ready / login errors carry no host details and
 			// tell the developer what's going on (e.g. a Team database
 			// still provisioning, #677).
-			if errors.Is(err, errTenantDBNotReady) || errors.Is(err, errTenantConnect) {
+			if errors.Is(err, errTenantDBNotReady) || errors.Is(err, errTenantConnect) || errors.Is(err, errTenantRouting) {
 				jsonError(w, err.Error(), http.StatusServiceUnavailable)
 				return
 			}

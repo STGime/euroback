@@ -1408,9 +1408,9 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return r
 		}
 		defer env.shared.Exec(ctx, `UPDATE cron_jobs SET enabled = false WHERE project_id = $1`, env.projectID) //nolint:errcheck
+		// As cmd/worker wires it (WithTenantSQL).
 		exec := cron.NewExecutor(cron.NewCronService(env.gw), env.gw).
-			WithTenantLogins(env.gw.Config().ConnConfig, env.funcSecret).
-			WithTenantRouting(env.dev)
+			WithTenantSQL(env.gw.Config().ConnConfig, env.funcSecret, env.dev)
 		if err := exec.RunDueJobs(ctx); err != nil {
 			return fmt.Errorf("RunDueJobs: %w", err)
 		}
@@ -1431,10 +1431,29 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 	// A Team project whose database isn't serving: the Test Run is
 	// refused with the not-ready message, never run on the shared cluster.
 	check(t, env, "cron_refused_without_dedicated_db", func() error {
+		ctx := context.Background()
 		stuck := env.addProvisioningTeamProject(t)
 		r := env.consoleFor(stuck, "POST", "/cron/test", `{"action_type":"sql","action":"SELECT 1"}`)
-		if r.code == http.StatusOK || !strings.Contains(r.body, "isn't available right now") {
+		if r.code == http.StatusOK || !strings.Contains(r.body, "isn't available right now") || strings.Contains(r.body, "next run") {
 			return fmt.Errorf("test run for a provisioning Team project: %d %s — want the not-ready refusal", r.code, r.body)
+		}
+		// A scheduled job for it fails the same way (and says it retries).
+		if r := env.consoleFor(stuck, "POST", "/cron", `{"name":"stuck-cron","schedule":"* * * * *","action_type":"sql","action":"SELECT 1"}`); r.code >= 300 {
+			return r
+		}
+		defer env.shared.Exec(ctx, `UPDATE cron_jobs SET enabled = false WHERE project_id = $1`, stuck) //nolint:errcheck
+		exec := cron.NewExecutor(cron.NewCronService(env.gw), env.gw).
+			WithTenantSQL(env.gw.Config().ConnConfig, env.funcSecret, env.dev)
+		if err := exec.RunDueJobs(ctx); err != nil {
+			return fmt.Errorf("RunDueJobs: %w", err)
+		}
+		var status, errText string
+		if err := env.shared.QueryRow(ctx, `SELECT r.status, coalesce(r.error, '') FROM cron_job_runs r JOIN cron_jobs j ON j.id = r.job_id
+			WHERE j.project_id = $1 ORDER BY r.started_at DESC LIMIT 1`, stuck).Scan(&status, &errText); err != nil {
+			return fmt.Errorf("cron run record: %w", err)
+		}
+		if status != "error" || !strings.Contains(errText, "isn't available right now") || !strings.Contains(errText, "next run") {
+			return fmt.Errorf("scheduled job for a provisioning Team project: %s %q — want the not-ready failure", status, errText)
 		}
 		return nil
 	})

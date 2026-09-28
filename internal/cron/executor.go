@@ -51,6 +51,14 @@ type Executor struct {
 	routeDB dbprovider.TenantDBQuerier
 }
 
+// WithTenantSQL configures everything customer SQL needs — the tenant
+// logins and the per-project routing (#677). The worker, the gateway's
+// Test Run and the Team harness all use it, so the harness covers the
+// production wiring.
+func (e *Executor) WithTenantSQL(base *pgx.ConnConfig, secret []byte, routeDB dbprovider.TenantDBQuerier) *Executor {
+	return e.WithTenantLogins(base, secret).WithTenantRouting(routeDB)
+}
+
 // WithTenantRouting makes sql / rpc jobs and dry runs of a Team project run
 // on its dedicated instance (#677) — as that instance's <schema>_func, with
 // the per-instance password — or fail while it isn't serving. Never the
@@ -217,6 +225,14 @@ func (e *Executor) RunDueJobs(ctx context.Context) error {
 // over HTTP (same HMAC-signed path the SDK uses), so SQL-injection
 // concerns don't apply there — the action is the function name.
 func (e *Executor) executeJob(ctx context.Context, job DueJob) error {
+	err := e.executeJobAction(ctx, job)
+	if errors.Is(err, errTenantDBNotReady) || errors.Is(err, errTenantRouting) {
+		return fmt.Errorf("%w — the job will retry at its next run", err)
+	}
+	return err
+}
+
+func (e *Executor) executeJobAction(ctx context.Context, job DueJob) error {
 	switch job.ActionType {
 	case "sql":
 		if err := validateCronSQLAction(job.Action, job.SchemaName); err != nil {
@@ -407,13 +423,14 @@ func (e *Executor) tenantConnConfig(ctx context.Context, projectID, schemaName s
 		}
 		if err != nil {
 			slog.Error("cron: tenant database lookup", "project_id", projectID, "error", err)
-			return nil, errTenantConnect
+			return nil, errTenantRouting
 		}
 	}
 	if !db.Dedicated {
 		cfg := e.tenantBase.Copy()
 		cfg.User = role
 		cfg.Password = tenantlogin.FuncPassword(e.tenantSecret, schemaName)
+		cfg.RuntimeParams["application_name"] = "eurobase-cron"
 		return cfg, nil
 	}
 	pw := tenantlogin.FuncPassword(e.tenantSecret, tenantlogin.DedicatedSubject(db.ID, schemaName))
@@ -423,6 +440,8 @@ func (e *Executor) tenantConnConfig(ctx context.Context, projectID, schemaName s
 		return nil, errTenantConnect
 	}
 	cfg.ConnectTimeout = 10 * time.Second
+	// Identifiable in the customer's pg_stat_activity / connection budget.
+	cfg.RuntimeParams["application_name"] = "eurobase-cron"
 	return cfg, nil
 }
 
@@ -514,7 +533,12 @@ var errTenantConnect = errors.New("could not connect as the project's database r
 
 // errTenantDBNotReady: a Team project's dedicated database isn't serving
 // (provisioning, restoring, upgrading, maintenance).
-var errTenantDBNotReady = errors.New("the project's database isn't available right now (provisioning, restoring or maintenance) — the job will retry at its next run")
+var errTenantDBNotReady = errors.New("the project's database isn't available right now (provisioning, restoring or maintenance)")
+
+// errTenantRouting: the lookup of where the project's data lives failed —
+// a platform problem (e.g. the lookup role lacks EXECUTE on
+// public.runner_get_tenant_db), not the project's; details are logged.
+var errTenantRouting = errors.New("scheduled jobs can't reach the project's database right now (platform routing unavailable)")
 
 // errDryRunRollback makes runInTenantTx roll back after a dry run.
 var errDryRunRollback = errors.New("dry run: rolled back")

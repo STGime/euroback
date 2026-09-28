@@ -62,3 +62,15 @@ func ResolveTenantDB(ctx context.Context, q TenantDBQuerier, projectID string) (
 	t.Dedicated = true
 	return t, rows.Err()
 }
+
+// CanResolveTenantDB reports whether q's role may execute
+// public.runner_get_tenant_db — checked at startup so a missing developer
+// pool (DATABASE_URL_DEVELOPER) shows up as one clear error instead of
+// every sql / rpc cron job failing its lookup.
+func CanResolveTenantDB(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) (bool, error) {
+	var ok bool
+	err := q.QueryRow(ctx, `SELECT has_function_privilege('public.runner_get_tenant_db(uuid)', 'EXECUTE')`).Scan(&ok)
+	return ok, err
+}
