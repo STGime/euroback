@@ -23,17 +23,40 @@ import (
 // vacuum horizon — on the shared cluster (#665): when it fires, the job
 // context is canceled, the transaction rolls back and the snapshot is
 // released. Both export kinds run at most MaxAttempts (2) times.
+//
+// Per attempt: a timed-out export is not retried (see exportAttemptFinal),
+// since a timeout is almost always deterministic for a given tenant size.
 const exportJobTimeout = 30 * time.Minute
+
+// exportAttemptFinal reports whether this attempt's failure is the export's
+// final outcome: the last attempt, or a timeout (not retried). Earlier
+// failures leave the row "running" — River retries — so an end user
+// polling the export doesn't see "failed" and then a completed export.
+func exportAttemptFinal(jobCtx context.Context, attempt, maxAttempts int) bool {
+	return attempt >= maxAttempts || errors.Is(jobCtx.Err(), context.DeadlineExceeded)
+}
+
+// exportResult turns a timed-out attempt's error into a River cancel, so it
+// isn't retried (the snapshot would be held for another full timeout).
+func exportResult(jobCtx context.Context, err error) error {
+	if err != nil && errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+		return river.JobCancel(err)
+	}
+	return err
+}
 
 // exportSlowAfter: an export running longer than this is logged as a
 // warning ("export slow") — the signal to add a budget or split exports
 // before tenants grow into exportJobTimeout.
 const exportSlowAfter = 5 * time.Minute
 
-// exportFailContext is the context failure bookkeeping runs on. When the
-// job timeout fires, the job context is already canceled, and marking the
-// export failed on it would leave the row "running" forever.
-func exportFailContext(ctx context.Context) (context.Context, context.CancelFunc) {
+// exportBookkeepingContext is the context the export_requests bookkeeping
+// and its audit rows run on (MarkFailed, and MarkCompleted once the archive
+// is uploaded). When the job timeout fires, the job context is already
+// canceled; bookkeeping on it would leave the row "running" forever — and,
+// after a successful upload, an archive no row points at, which the expiry
+// cleanup would never delete.
+func exportBookkeepingContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 }
 
@@ -78,13 +101,17 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 			outcome = "failed"
 		}
 		logExportDuration(logger, started, outcome)
+		err = exportResult(ctx, err)
 	}()
 
 	exportSvc := compliance.NewExportService(w.DBPool, w.S3, w.AuditSvc)
 	failExport := func(stage string, err error) {
-		ctx, cancel := exportFailContext(ctx)
+		final := exportAttemptFinal(ctx, job.Attempt, job.MaxAttempts)
+		ctx, cancel := exportBookkeepingContext(ctx)
 		defer cancel()
-		_ = exportSvc.MarkFailed(ctx, args.ExportID, err.Error())
+		if final {
+			_ = exportSvc.MarkFailed(ctx, args.ExportID, err.Error())
+		}
 		// Closes #100 (failed-paths follow-up). Workers run async so
 		// the requester's HTTP response is already returned by the
 		// time we get here; the audit row is the only place a failure
@@ -96,9 +123,10 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 				audit.ActionExportFailed,
 				audit.WithTarget("export", args.ExportID),
 				audit.WithMetadata(map[string]any{
-					"scope": "tenant",
-					"stage": stage,
-					"error": err.Error(),
+					"scope":      "tenant",
+					"stage":      stage,
+					"error":      err.Error(),
+					"will_retry": !final,
 				}))
 		}
 	}
@@ -157,7 +185,15 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 		return fmt.Errorf("upload: %w", err)
 	}
 
-	if err := exportSvc.MarkCompleted(ctx, args.ExportID, s3Key, size, result); err != nil {
+	// The archive is uploaded: record it even if the job context expires
+	// now, or remove it — never leave an archive no row points at.
+	bctx, bcancel := exportBookkeepingContext(ctx)
+	defer bcancel()
+	if err := exportSvc.MarkCompleted(bctx, args.ExportID, s3Key, size, result); err != nil {
+		if derr := w.S3.DeleteObject(bctx, s3Bucket, s3Key); derr != nil {
+			logger.Error("export archive uploaded but not recorded, and could not be deleted", "key", s3Key, "error", derr)
+		}
+		failExport("mark_completed", err)
 		return fmt.Errorf("mark completed: %w", err)
 	}
 	if !result.Complete {
@@ -171,7 +207,7 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 	// and put the matching export_id in target_id so the two rows
 	// link cleanly.
 	if w.AuditSvc != nil {
-		w.AuditSvc.Log(ctx, args.ProjectID, "", "",
+		w.AuditSvc.Log(bctx, args.ProjectID, "", "",
 			audit.ActionExportCompleted,
 			audit.WithTarget("export", args.ExportID),
 			audit.WithMetadata(map[string]any{
@@ -214,13 +250,17 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 			outcome = "failed"
 		}
 		logExportDuration(logger, started, outcome)
+		err = exportResult(ctx, err)
 	}()
 
 	exportSvc := compliance.NewExportService(w.DBPool, w.S3, w.AuditSvc)
 	failExport := func(stage string, err error) {
-		ctx, cancel := exportFailContext(ctx)
+		final := exportAttemptFinal(ctx, job.Attempt, job.MaxAttempts)
+		ctx, cancel := exportBookkeepingContext(ctx)
 		defer cancel()
-		_ = exportSvc.MarkFailed(ctx, args.ExportID, err.Error())
+		if final {
+			_ = exportSvc.MarkFailed(ctx, args.ExportID, err.Error())
+		}
 		if w.AuditSvc != nil {
 			w.AuditSvc.Log(ctx, args.ProjectID, "", "",
 				audit.ActionExportFailed,
@@ -230,6 +270,7 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 					"target_user_id": args.UserID,
 					"stage":          stage,
 					"error":          err.Error(),
+					"will_retry":     !final,
 				}))
 		}
 	}
@@ -281,7 +322,15 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 		return fmt.Errorf("upload: %w", err)
 	}
 
-	if err := exportSvc.MarkCompleted(ctx, args.ExportID, s3Key, size, result); err != nil {
+	// The archive is uploaded: record it even if the job context expires
+	// now, or remove it — never leave an archive no row points at.
+	bctx, bcancel := exportBookkeepingContext(ctx)
+	defer bcancel()
+	if err := exportSvc.MarkCompleted(bctx, args.ExportID, s3Key, size, result); err != nil {
+		if derr := w.S3.DeleteObject(bctx, s3Bucket, s3Key); derr != nil {
+			logger.Error("export archive uploaded but not recorded, and could not be deleted", "key", s3Key, "error", derr)
+		}
+		failExport("mark_completed", err)
 		return fmt.Errorf("mark completed: %w", err)
 	}
 	if !result.Complete {
@@ -290,7 +339,7 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 
 	// Closes #100, per-user / self-serve variant.
 	if w.AuditSvc != nil {
-		w.AuditSvc.Log(ctx, args.ProjectID, "", "",
+		w.AuditSvc.Log(bctx, args.ProjectID, "", "",
 			audit.ActionExportCompleted,
 			audit.WithTarget("export", args.ExportID),
 			audit.WithMetadata(map[string]any{

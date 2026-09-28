@@ -40,4 +40,38 @@ func TestEndUserExportView(t *testing.T) {
 	if v := EndUserExportView(ok); v.Error != nil {
 		t.Errorf("no error on success, got %q", *v.Error)
 	}
+	// A completed export with a stale error from a failed earlier attempt
+	// reports no error.
+	stale := &ExportRequest{ID: "e3", Status: "completed", Error: &errText, DownloadURL: "https://s3.example/y"}
+	if v := EndUserExportView(stale); v.Error != nil {
+		t.Errorf("completed export shows an error: %q", *v.Error)
+	}
+}
+
+// #665: the per-user archive (it goes to the data subject) keeps each
+// table's status but not the database error text.
+func TestUserArchiveMetadataRedaction(t *testing.T) {
+	tables := []TableExport{
+		{Table: "orders", Status: TableExported, Rows: 3},
+		{Table: "notes", Status: TableFailed, Error: `permission denied for table notes (SQLSTATE 42501)`},
+		{Table: "events", Status: TableTruncated, Rows: 100000},
+	}
+	warnings := append(tableWarnings(tables), "the audit log could not be exported")
+
+	red := redactTableErrors(tables)
+	if red[1].Error != "" || red[1].Status != TableFailed || tables[1].Error == "" {
+		t.Errorf("redactTableErrors: got %+v (original %+v)", red[1], tables[1])
+	}
+	got := strings.Join(userArchiveWarnings(tables, warnings), "\n")
+	if strings.Contains(got, "SQLSTATE") || strings.Contains(got, "permission denied") {
+		t.Errorf("archive warnings carry error text: %s", got)
+	}
+	for _, want := range []string{`table "notes" was not exported`, `table "events" was truncated`, "the audit log could not be exported"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("archive warnings lack %q: %s", want, got)
+		}
+	}
+	if n := len(userArchiveWarnings(tables, warnings)); n != len(warnings) {
+		t.Errorf("warning count %d, want %d", n, len(warnings))
+	}
 }

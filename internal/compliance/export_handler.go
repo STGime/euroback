@@ -39,7 +39,10 @@ func EndUserExportView(req *ExportRequest) *ExportRequest {
 	v := *req
 	v.Warnings = nil
 	v.S3Key = nil
-	if v.Error != nil {
+	// Only a failed export reports an error (a stale one on a completed
+	// export would contradict its download link).
+	v.Error = nil
+	if v.Status == "failed" {
 		msg := endUserExportFailed
 		v.Error = &msg
 	}

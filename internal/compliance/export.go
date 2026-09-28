@@ -266,7 +266,7 @@ func (s *ExportService) CheckRateLimit(ctx context.Context, projectID string, us
 // MarkRunning updates the export to running state.
 func (s *ExportService) MarkRunning(ctx context.Context, exportID string) error {
 	_, err := s.Pool.Exec(ctx,
-		`UPDATE export_requests SET status = 'running', started_at = now() WHERE id = $1`,
+		`UPDATE export_requests SET status = 'running', started_at = now(), error = NULL, completed_at = NULL WHERE id = $1`,
 		exportID,
 	)
 	return err
@@ -285,7 +285,7 @@ func (s *ExportService) MarkCompleted(ctx context.Context, exportID, s3Key strin
 	}
 	_, err := s.Pool.Exec(ctx,
 		`UPDATE export_requests
-		 SET status = 'completed', s3_key = $2, file_size = $3,
+		 SET status = 'completed', s3_key = $2, file_size = $3, error = NULL,
 		     complete = $4, warnings = $5,
 		     completed_at = now(), expires_at = now() + interval '7 days'
 		 WHERE id = $1`,
@@ -594,12 +594,40 @@ func errorText(err error) string {
 	return err.Error()
 }
 
+// redactTableErrors drops the database error text of failed tables, for
+// the per-user archive's _metadata.json (#665): that archive goes to the
+// data subject, and error text can carry Postgres internals. The status
+// stays; the developer sees the details in the console (export_requests).
+func redactTableErrors(tables []TableExport) []TableExport {
+	out := make([]TableExport, len(tables))
+	for i, t := range tables {
+		t.Error = ""
+		out[i] = t
+	}
+	return out
+}
+
+// userArchiveWarnings is warnings with the table lines rebuilt without
+// error text (redactTableErrors). warnings must start with
+// tableWarnings(tables), as WriteUserExport builds it.
+func userArchiveWarnings(tables []TableExport, warnings []string) []string {
+	n := len(tableWarnings(tables))
+	if n > len(warnings) {
+		n = len(warnings)
+	}
+	return append(tableWarnings(redactTableErrors(tables)), warnings[n:]...)
+}
+
 // tableWarnings turns non-exported tables into warning lines.
 func tableWarnings(tables []TableExport) []string {
 	var out []string
 	for _, t := range tables {
 		switch t.Status {
 		case TableFailed:
+			if t.Error == "" {
+				out = append(out, fmt.Sprintf("table %q was not exported", t.Table))
+				continue
+			}
 			out = append(out, fmt.Sprintf("table %q was not exported: %s", t.Table, t.Error))
 		case TableTruncated:
 			out = append(out, fmt.Sprintf("table %q was truncated at %d rows", t.Table, t.Rows))
@@ -778,6 +806,8 @@ type ExportMetadata struct {
 	UserID        *string   `json:"user_id,omitempty"`
 	Format        string    `json:"format"`
 	ExportedAt    time.Time `json:"exported_at"`
+	// TableCount counts data tables (plus the user archive's _users entry);
+	// `tables` also lists skipped relations (views etc.), which it excludes.
 	TableCount    int       `json:"table_count"`
 	TotalRows     int       `json:"total_rows"`
 	// Complete is true only when every table was exported in full and
@@ -968,7 +998,9 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 			exported = append(exported, te)
 		}
 		// Views etc. are listed as skipped (#665). Failing to list them
-		// is a warning, not a failed export: the rows are all there.
+		// doesn't fail the export (the rows are all there), but the
+		// archive no longer accounts for every relation, so like a failed
+		// section it's a warning and makes the export incomplete.
 		// In its own savepoint, so a failure doesn't abort the snapshot.
 		var skipped []TableExport
 		sp, err := tx.Begin(ctx)
@@ -1157,8 +1189,8 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, 
 		TableCount:          len(refs) + 1,
 		TotalRows:           res.TotalRows,
 		Complete:            res.Complete,
-		Warnings:            res.Warnings,
-		Tables:              exported,
+		Warnings:            userArchiveWarnings(exported, res.Warnings),
+		Tables:              redactTableErrors(exported),
 		RowLimitPerTable:    maxRowsPerTable,
 		AuditLogUnavailable: auditUnavailable,
 	}
