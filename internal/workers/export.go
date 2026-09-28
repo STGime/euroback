@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/compliance"
@@ -15,6 +16,37 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 )
+
+// exportJobTimeout is the wall-clock budget of one export attempt
+// (River's default is 1 minute, #370). It is also the upper bound on how
+// long an export holds its REPEATABLE READ snapshot — and with it the
+// vacuum horizon — on the shared cluster (#665): when it fires, the job
+// context is canceled, the transaction rolls back and the snapshot is
+// released. Both export kinds run at most MaxAttempts (2) times.
+const exportJobTimeout = 30 * time.Minute
+
+// exportSlowAfter: an export running longer than this is logged as a
+// warning ("export slow") — the signal to add a budget or split exports
+// before tenants grow into exportJobTimeout.
+const exportSlowAfter = 5 * time.Minute
+
+// exportFailContext is the context failure bookkeeping runs on. When the
+// job timeout fires, the job context is already canceled, and marking the
+// export failed on it would leave the row "running" forever.
+func exportFailContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+}
+
+// logExportDuration logs how long an export attempt took; slow ones as a
+// warning.
+func logExportDuration(logger *slog.Logger, started time.Time, outcome string) {
+	d := time.Since(started)
+	if d > exportSlowAfter {
+		logger.Warn("export slow", "duration_seconds", int(d.Seconds()), "outcome", outcome)
+		return
+	}
+	logger.Info("export duration", "duration_seconds", int(d.Seconds()), "outcome", outcome)
+}
 
 // TenantExportWorker handles async full-tenant DSAR exports.
 type TenantExportWorker struct {
@@ -31,12 +63,27 @@ type TenantExportWorker struct {
 	Dedicated DedicatedResolver
 }
 
-func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.TenantExportArgs]) error {
+// Timeout overrides River's 1-minute default (#370).
+func (w *TenantExportWorker) Timeout(*river.Job[jobs.TenantExportArgs]) time.Duration {
+	return exportJobTimeout
+}
+
+func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.TenantExportArgs]) (err error) {
 	args := job.Args
 	logger := slog.With("export_id", args.ExportID, "project_id", args.ProjectID, "type", "tenant")
+	started := time.Now()
+	defer func() {
+		outcome := "completed"
+		if err != nil {
+			outcome = "failed"
+		}
+		logExportDuration(logger, started, outcome)
+	}()
 
 	exportSvc := compliance.NewExportService(w.DBPool, w.S3, w.AuditSvc)
 	failExport := func(stage string, err error) {
+		ctx, cancel := exportFailContext(ctx)
+		defer cancel()
 		_ = exportSvc.MarkFailed(ctx, args.ExportID, err.Error())
 		// Closes #100 (failed-paths follow-up). Workers run async so
 		// the requester's HTTP response is already returned by the
@@ -152,12 +199,27 @@ type UserExportWorker struct {
 	Dedicated DedicatedResolver
 }
 
-func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExportArgs]) error {
+// Timeout overrides River's 1-minute default (#370).
+func (w *UserExportWorker) Timeout(*river.Job[jobs.UserExportArgs]) time.Duration {
+	return exportJobTimeout
+}
+
+func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExportArgs]) (err error) {
 	args := job.Args
 	logger := slog.With("export_id", args.ExportID, "project_id", args.ProjectID, "user_id", args.UserID, "type", "user")
+	started := time.Now()
+	defer func() {
+		outcome := "completed"
+		if err != nil {
+			outcome = "failed"
+		}
+		logExportDuration(logger, started, outcome)
+	}()
 
 	exportSvc := compliance.NewExportService(w.DBPool, w.S3, w.AuditSvc)
 	failExport := func(stage string, err error) {
+		ctx, cancel := exportFailContext(ctx)
+		defer cancel()
 		_ = exportSvc.MarkFailed(ctx, args.ExportID, err.Error())
 		if w.AuditSvc != nil {
 			w.AuditSvc.Log(ctx, args.ProjectID, "", "",

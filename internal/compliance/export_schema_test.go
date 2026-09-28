@@ -200,6 +200,7 @@ func TestTenantExport_SchemaSection(t *testing.T) {
 		`CREATE FUNCTION `+s+`.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`,
 		`CREATE TRIGGER slots_touch BEFORE UPDATE ON `+s+`.slots FOR EACH ROW EXECUTE FUNCTION `+s+`.touch()`,
 		`CREATE VIEW `+s+`.lane_names AS SELECT name FROM `+s+`.lanes`,
+		`CREATE MATERIALIZED VIEW `+s+`.lane_count AS SELECT count(*) AS n FROM `+s+`.lanes`,
 		`COMMENT ON TABLE `+s+`.lanes IS 'shooting lanes'`,
 		`INSERT INTO `+s+`.lanes (name) VALUES ('one'), ('two')`,
 		`RESET ROLE`,
@@ -266,6 +267,21 @@ func TestTenantExport_SchemaSection(t *testing.T) {
 		}
 		if _, ok := entries[storageManifestFile]; !ok {
 			t.Error("no storage manifest")
+		}
+		// Views are accounted for in _metadata.json as skipped (#665),
+		// without making the export incomplete; tables stay exported.
+		byName := map[string]TableExport{}
+		for _, te := range meta.Tables {
+			byName[te.Table] = te
+		}
+		for name, prefix := range map[string]string{"lane_names": "view:", "lane_count": "materialized view:"} {
+			te, ok := byName[name]
+			if !ok || te.Status != TableSkipped || !strings.HasPrefix(te.Reason, prefix) || te.File != "" {
+				t.Errorf("%s in _metadata.json tables = %+v (present %v), want skipped %q", name, te, ok, prefix)
+			}
+		}
+		if te := byName["lanes"]; te.Status != TableExported || te.Rows != 2 {
+			t.Errorf("lanes = %+v", te)
 		}
 	})
 

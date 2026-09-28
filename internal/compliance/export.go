@@ -518,6 +518,9 @@ const (
 	TableExported  = "exported"
 	TableTruncated = "truncated"
 	TableFailed    = "failed"
+	// TableSkipped: a relation deliberately not exported as data (views,
+	// materialized views, foreign tables — #665); see Reason.
+	TableSkipped = "skipped"
 )
 
 // TableExport records what an export wrote for one table.
@@ -527,6 +530,8 @@ type TableExport struct {
 	Rows   int    `json:"rows"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+	// Reason explains a skipped relation.
+	Reason string `json:"reason,omitempty"`
 	// RedactedColumns were left out on purpose: credential columns of
 	// the platform-managed tables (query.SensitiveSystemColumns).
 	RedactedColumns []string `json:"redacted_columns,omitempty"`
@@ -724,6 +729,44 @@ func ListTenantTables(ctx context.Context, q querier, schemaName string) ([]stri
 		tables = append(tables, name)
 	}
 	return tables, nil
+}
+
+// ListSkippedRelations returns the relations of a tenant schema that an
+// export deliberately doesn't read as data, as skipped entries for
+// _metadata.json (#665), so the archive accounts for everything in the
+// schema: views and materialized views (derived data; their definitions
+// are in schema/schema.sql) and foreign tables (data lives elsewhere; the
+// export also refuses to read them, restrict_nonsystem_relation_kind).
+func ListSkippedRelations(ctx context.Context, q querier, schemaName string) ([]TableExport, error) {
+	rows, err := q.Query(ctx,
+		`SELECT c.relname, c.relkind::text
+		 FROM pg_class c
+		 JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relkind IN ('v', 'm', 'f')
+		 ORDER BY c.relname`,
+		schemaName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list skipped relations: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TableExport
+	for rows.Next() {
+		var name, kind string
+		if err := rows.Scan(&name, &kind); err != nil {
+			return nil, err
+		}
+		reason := "view: derived data, definition in " + schemaDumpFile
+		switch kind {
+		case "m":
+			reason = "materialized view: derived data, definition in " + schemaDumpFile
+		case "f":
+			reason = "foreign table: data is stored outside this database, definition in " + schemaDumpFile
+		}
+		out = append(out, TableExport{Table: name, Status: TableSkipped, Reason: reason})
+	}
+	return out, rows.Err()
 }
 
 // ExportMetadata is the _metadata.json file in the export zip.
@@ -924,13 +967,31 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 			res.TotalRows += te.Rows
 			exported = append(exported, te)
 		}
+		// Views etc. are listed as skipped (#665). Failing to list them
+		// is a warning, not a failed export: the rows are all there.
+		// In its own savepoint, so a failure doesn't abort the snapshot.
+		var skipped []TableExport
+		sp, err := tx.Begin(ctx)
+		if err == nil {
+			if skipped, err = ListSkippedRelations(ctx, sp, schemaName); err != nil {
+				_ = sp.Rollback(ctx)
+			} else {
+				err = sp.Commit(ctx)
+			}
+		}
+		if err != nil {
+			skipped = nil
+			slog.Warn("export: could not list views", "error", err, "project_id", projectID)
+			res.Warnings = append(res.Warnings, "views and foreign tables could not be listed")
+		}
+		exported = append(exported, skipped...)
 		return nil
 	})
 	if err != nil {
 		_ = zw.Close()
 		return nil, err
 	}
-	res.Warnings = tableWarnings(exported)
+	res.Warnings = append(tableWarnings(exported), res.Warnings...)
 	sections = append(sections,
 		exportAuthManifest(ctx, pool, zw, projectID),
 		exportStorageManifest(ctx, zw, opts, projectID, contentTypes))
