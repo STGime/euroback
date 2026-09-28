@@ -102,7 +102,7 @@
 	let lovableOrigins = $derived.by(() => {
 		const out: { label: string; raw: string; origin: string | null; note?: string; error?: string }[] = [];
 		for (const [label, raw] of [['Preview URL', lovablePreview], ['Published URL', lovablePublished], ['Custom domain', lovableCustom]] as const) {
-			if (raw.trim()) out.push({ label, raw, ...lovableAppOrigin(raw) });
+			if (raw.trim()) out.push({ label, raw, ...lovableAppOrigin(raw, label === 'Preview URL') });
 		}
 		return out;
 	});
@@ -129,7 +129,7 @@
 			return;
 		}
 		if (lovableOrigins.some((o) => !o.origin)) {
-			lovableError = 'Fix the URLs marked below first.';
+			lovableError = 'Fix the URLs marked in red first.';
 			return;
 		}
 		lovableSaving = true;
@@ -387,7 +387,7 @@
 							] as field}
 								<label class="text-xs text-gray-700">{field.label}
 									{#if field.bind === 'preview'}
-										<input bind:value={lovablePreview} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePreview.trim() && !lovableAppOrigin(lovablePreview).origin ? 'border-red-400' : 'border-gray-300'}" />
+										<input bind:value={lovablePreview} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePreview.trim() && !lovableAppOrigin(lovablePreview, true).origin ? 'border-red-400' : 'border-gray-300'}" />
 									{:else if field.bind === 'published'}
 										<input bind:value={lovablePublished} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePublished.trim() && !lovableAppOrigin(lovablePublished).origin ? 'border-red-400' : 'border-gray-300'}" />
 									{:else}
