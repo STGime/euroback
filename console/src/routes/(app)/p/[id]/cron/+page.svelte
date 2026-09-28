@@ -906,9 +906,18 @@
 						</div>
 					{/if}
 
-					<div class="mt-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 font-mono text-xs text-gray-600">
-						{formSchedule || '* * * * *'}
-					</div>
+					<!-- Empty until a preset or Custom is chosen: say so, rather than
+					     showing "* * * * *", which looks like a chosen schedule while
+					     Create Job stays disabled. -->
+					{#if formSchedule.trim()}
+						<div class="mt-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 font-mono text-xs text-gray-600">
+							{formSchedule}
+						</div>
+					{:else}
+						<div class="mt-2 rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+							Pick a schedule above (a preset or Custom) — required to create the job.
+						</div>
+					{/if}
 				</div>
 
 				<!-- Action Type -->
