@@ -159,6 +159,13 @@
 					<li>
 						When a user's password session hits an org-owned <em>org detail</em> route (<code class="rounded bg-gray-100 px-1 text-[11px]">/platform/orgs/&lt;id&gt;</code>), the console sends them to <code class="rounded bg-gray-100 px-1 text-[11px]">/login?sso_required_for=&lt;org&gt;</code>. On project or realtime 403s the browser goes to plain <code class="rounded bg-gray-100 px-1 text-[11px]">/login</code>; the user picks <strong>Sign in with SSO</strong> themselves and enters their email. Deep-link handling of the <code class="rounded bg-gray-100 px-1 text-[11px]">sso_required_for</code> query param on the login page is a follow-up.
 					</li>
+					<li>
+						The same applies to the org's <em>projects</em>: any 403 there names the organization, and the console opens
+						the sign-in page in SSO mode with an explanation, then returns you to the page you were on.
+						A new project created from a password session is <strong>never attached</strong> to an SSO-required org
+						automatically (it lands as a personal project); choosing that org explicitly is refused until you sign in
+						with its SSO.
+					</li>
 				</ol>
 				<div class="rounded-md bg-red-50 border border-red-200 p-3 text-xs text-red-900">
 					<strong>No admin exemption.</strong> The <em>Require SSO</em> toggle applies to every session equally — admin, member, or superadmin. If you flip it while signed in with a password, your <em>very next request</em> to a project belonging to the org gets 403. Have an SSO login ready before you enable it, or you'll immediately lock yourself out until you re-sign-in via SSO.

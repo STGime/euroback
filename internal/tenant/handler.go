@@ -43,6 +43,18 @@ type CreateProjectRequest struct {
 	Plan          string  `json:"plan,omitempty"`   // defaults to "free"
 	OrgID         *string `json:"org_id,omitempty"`
 	OrgIDExplicit bool    `json:"-"`
+	// Session is the creating console session (#710): nil when there is
+	// none (billing webhook). A project is never attached to an
+	// SSO-required org the session can't open — it would be unreachable
+	// the moment it's created.
+	Session *CreateSession `json:"-"`
+}
+
+// CreateSession is the part of the caller's session that decides which
+// orgs it may create projects in.
+type CreateSession struct {
+	LoginVia string
+	SsoOrgID string
 }
 
 // smsGateBlocks reports whether an auth-config save should be rejected
@@ -268,6 +280,7 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		// #70 diagnostic: log right before the INSERT so we can see if
 		// anything between decode and CreateProject mutated req.Plan.
 		slog.Info("create project: handing to service", "plan", req.Plan, "name", req.Name)
+		req.Session = &CreateSession{LoginVia: claims.LoginVia, SsoOrgID: claims.SsoOrgID}
 		project, err := svc.CreateProject(r.Context(), claims.Subject, claims.Email, req)
 		if err != nil {
 			slog.Error("failed to create project", "error", err, "user_id", claims.Subject)
@@ -281,6 +294,10 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 			}
 			if errors.Is(err, ErrOrgAttachForbidden) {
 				http.Error(w, `{"error":"you must be an admin of the target organization to attach a project to it","code":"org_attach_forbidden"}`, http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ErrSSORequiredForOrg) {
+				WriteSSORequired(w, err, "that organization requires SSO sign-in; sign in with its SSO to create projects in it")
 				return
 			}
 			if errors.Is(err, ErrOrgAttachTargetGone) {
@@ -520,9 +537,7 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// here directly.
 		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
 			if errors.Is(err, ErrSSORequiredForOrg) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+				WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 				return
 			}
 			if errors.Is(err, ErrProjectNotFound) {
@@ -643,9 +658,7 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// caller is authorised, apply the SSO gate.
 		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
 			if errors.Is(err, ErrSSORequiredForOrg) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+				WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 				return
 			}
 			// ErrProjectNotFound would only fire on a race with

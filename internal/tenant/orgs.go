@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -753,6 +754,30 @@ func isUniqueViolation(err error) bool {
 // a fresh SSO handshake.
 var ErrSSORequiredForOrg = errors.New("this organization requires SSO sign-in")
 
+// SSORequiredError is ErrSSORequiredForOrg naming the org, so the 403
+// can tell the console which org's SSO sign-in to start (#710) — a
+// project route's URL doesn't contain it.
+type SSORequiredError struct{ OrgID string }
+
+func (e *SSORequiredError) Error() string { return ErrSSORequiredForOrg.Error() }
+
+// Is makes errors.Is(err, ErrSSORequiredForOrg) hold.
+func (e *SSORequiredError) Is(target error) bool { return target == ErrSSORequiredForOrg }
+
+// WriteSSORequired answers 403 sso_required_for_org, with the org's id
+// when err carries it (SSORequiredError). The id is only revealed to
+// callers who already passed the membership check.
+func WriteSSORequired(w http.ResponseWriter, err error, msg string) {
+	body := map[string]string{"error": msg, "code": "sso_required_for_org"}
+	var se *SSORequiredError
+	if errors.As(err, &se) && se.OrgID != "" {
+		body["org_id"] = se.OrgID
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 // SetSSORequired flips organizations.sso_required (migration 000121).
 // Caller must be an admin of the org. When set to true, every
 // existing session backed by password login (login_via != 'sso') or
@@ -836,7 +861,7 @@ func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, c
 		return nil
 	}
 	if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, *orgID, *ssoRequired) {
-		return ErrSSORequiredForOrg
+		return &SSORequiredError{OrgID: *orgID}
 	}
 	return nil
 }

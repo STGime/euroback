@@ -626,11 +626,17 @@ export class EurobaseAPI {
 			if (res.status === 403 && typeof window !== 'undefined') {
 				try {
 					const parsed = JSON.parse(body);
-					if (parsed?.code === 'sso_required_for_org') {
+					if (parsed?.code === 'sso_required_for_org' && !window.location.pathname.startsWith('/login')) {
+						// The gateway names the org (#710); older responses only
+						// had it in /platform/orgs/<id> paths.
 						const orgMatch = path.match(/\/platform\/orgs\/([0-9a-f-]{36})/i);
-						const targetOrg = orgMatch ? orgMatch[1] : '';
-						const q = targetOrg ? `?sso_required_for=${targetOrg}` : '';
-						window.location.href = `/login${q}`;
+						const targetOrg: string = parsed.org_id || (orgMatch ? orgMatch[1] : '');
+						const q = new URLSearchParams();
+						if (targetOrg) q.set('sso_required_for', targetOrg);
+						else q.set('sso_required', '1');
+						// Come back to this page after the SSO sign-in.
+						q.set('redirect', window.location.pathname + window.location.search);
+						window.location.href = `/login?${q.toString()}`;
 					}
 				} catch { /* not a JSON error body */ }
 			}

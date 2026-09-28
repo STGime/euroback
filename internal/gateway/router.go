@@ -1668,9 +1668,7 @@ func projectMembershipMiddleware(pool, developerPool *pgxpool.Pool, isDev bool) 
 			// readable code so the console can bounce.
 			if err := tenant.EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
 				if errors.Is(err, tenant.ErrSSORequiredForOrg) {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusForbidden)
-					_, _ = w.Write([]byte(`{"error":"this project's organization requires SSO sign-in","code":"sso_required_for_org"}`))
+					tenant.WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 					return
 				}
 				// ErrProjectNotFound here would only fire on a race

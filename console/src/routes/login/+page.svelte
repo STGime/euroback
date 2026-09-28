@@ -10,6 +10,11 @@
 	import { passkeysSupported, getPasskeyAssertion, passkeyErrorMessage } from '$lib/webauthn';
 
 	let email = $state('');
+	// Sent here by a 403 sso_required_for_org (#710): the page the user
+	// was on belongs to an org that requires SSO sign-in.
+	const ssoRequiredFor = $page.url.searchParams.get('sso_required_for') ?? '';
+	const ssoRequired = ssoRequiredFor !== '' || $page.url.searchParams.get('sso_required') === '1';
+	const SSO_REDIRECT_KEY = 'eurobase_sso_redirect';
 	let password = $state('');
 	let confirmPassword = $state('');
 	let showPassword = $state(false);
@@ -80,8 +85,20 @@
 		return raw;
 	}
 
+	// Only same-site paths (no open redirect via ?redirect=).
+	function safeRedirect(u: string | null): string | null {
+		return u && u.startsWith('/') && !u.startsWith('//') && !u.startsWith('/\\') ? u : null;
+	}
+
 	async function redirectAfterLogin() {
-		const redirectUrl = $page.url.searchParams.get('redirect');
+		// ?redirect= survives a password sign-in; the SSO round-trip
+		// lands back on bare /login, so it's kept in sessionStorage then.
+		let stored: string | null = null;
+		try {
+			stored = sessionStorage.getItem(SSO_REDIRECT_KEY);
+			sessionStorage.removeItem(SSO_REDIRECT_KEY);
+		} catch { /* storage unavailable */ }
+		const redirectUrl = safeRedirect($page.url.searchParams.get('redirect')) ?? safeRedirect(stored);
 		if (redirectUrl) {
 			await goto(redirectUrl);
 			return;
@@ -133,6 +150,12 @@
 	onMount(() => {
 		passkeyAvailable = passkeysSupported();
 		void handleSSOFragment();
+		if (ssoRequired) {
+			ssoMode = true;
+			try {
+				email = localStorage.getItem('eurobase_email') ?? '';
+			} catch { /* storage unavailable */ }
+		}
 	});
 
 	// A session was just minted by password alone — the account has no
@@ -207,6 +230,10 @@
 		error = '';
 		ssoSubmitting = true;
 		try {
+			const back = safeRedirect($page.url.searchParams.get('redirect'));
+			try {
+				if (back) sessionStorage.setItem(SSO_REDIRECT_KEY, back);
+			} catch { /* storage unavailable */ }
 			const res = await api.initSSO(email.trim());
 			// Full-page redirect to the IdP — do not use goto() (SvelteKit
 			// client nav) since the URL is on a different origin.
@@ -428,6 +455,13 @@
 					<!-- Team-tier SSO flow: email-only form; backend
 					     resolves the org and returns the IdP URL. -->
 					<form onsubmit={handleSSOSubmit} class="mt-6 space-y-4">
+						{#if ssoRequired}
+							<div class="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+								The project you opened belongs to an organization that requires single sign-on.
+								Sign in with your organization's SSO to continue — your password sign-in doesn't
+								give access to it.
+							</div>
+						{/if}
 						<div>
 							<label for="sso-email" class="block text-sm font-medium text-gray-700">Work email</label>
 							<input

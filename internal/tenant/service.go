@@ -525,31 +525,49 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		if s.developerPool == nil {
 			return nil, fmt.Errorf("org attach unavailable: developer pool not configured")
 		}
-		var one int
+		var ssoRequired bool
 		err := s.developerPool.QueryRow(ctx,
-			`SELECT 1 FROM public.org_members
-			 WHERE org_id = $1::uuid AND platform_user_id = $2::uuid AND role = 'admin'`,
+			`SELECT o.sso_required FROM public.org_members om
+			   JOIN public.organizations o ON o.id = om.org_id
+			 WHERE om.org_id = $1::uuid AND om.platform_user_id = $2::uuid AND om.role = 'admin'`,
 			*req.OrgID, platformUserID,
-		).Scan(&one)
+		).Scan(&ssoRequired)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrOrgAttachForbidden
 			}
 			return nil, fmt.Errorf("check org admin membership: %w", err)
 		}
+		// Creating into an SSO-required org from a session that can't
+		// open its projects: refuse, naming the org, so the console can
+		// start that org's SSO sign-in (#710). No session (billing
+		// webhook): the checkout was started from a valid one.
+		if req.Session != nil && !SessionSatisfiesSSOFor(req.Session.LoginVia, req.Session.SsoOrgID, *req.OrgID, ssoRequired) {
+			return nil, &SSORequiredError{OrgID: *req.OrgID}
+		}
 		orgID = req.OrgID
 	default:
 		// Auto-attach.
 		if s.developerPool != nil {
+			// Only orgs whose projects this session can open (#710): an
+			// SSO-required org only for a session SSO-signed-in to that
+			// org (SessionSatisfiesSSOFor). Otherwise the new project would
+			// be unreachable at once (every request 403, the console
+			// bouncing to /login). No session (billing) = not SSO.
+			loginVia, ssoOrgID := "", ""
+			if req.Session != nil {
+				loginVia, ssoOrgID = req.Session.LoginVia, req.Session.SsoOrgID
+			}
 			var id string
 			err := s.developerPool.QueryRow(ctx,
 				`SELECT o.id::text
 				 FROM public.organizations o
 				 JOIN public.org_members om ON om.org_id = o.id
 				 WHERE om.platform_user_id = $1::uuid AND om.role = 'admin'
+				   AND (NOT o.sso_required OR ($2 = $4 AND o.id::text = $3))
 				 ORDER BY (o.created_by = $1::uuid) DESC, o.created_at ASC
 				 LIMIT 1`,
-				platformUserID,
+				platformUserID, loginVia, ssoOrgID, auth.LoginViaSSO,
 			).Scan(&id)
 			if err == nil {
 				orgID = &id

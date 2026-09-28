@@ -87,7 +87,7 @@ func (h *OrgsHandler) enforceOrgSSO(w http.ResponseWriter, claims *auth.Claims, 
 	if SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
 		return true
 	}
-	writeJSONErrCode(w, http.StatusForbidden, "sso_required_for_org", "this organization requires SSO sign-in")
+	WriteSSORequired(w, &SSORequiredError{OrgID: org.ID}, "this organization requires SSO sign-in")
 	return false
 }
 
@@ -206,7 +206,7 @@ func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 		// with a machine-readable code so the console can bounce to
 		// a fresh SSO handshake.
 		if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
-			writeJSONErrCode(w, http.StatusForbidden, "sso_required_for_org", "this organization requires SSO sign-in")
+			WriteSSORequired(w, &SSORequiredError{OrgID: org.ID}, "this organization requires SSO sign-in")
 			return
 		}
 		members, err := h.Svc.ListMembers(r.Context(), orgID)
