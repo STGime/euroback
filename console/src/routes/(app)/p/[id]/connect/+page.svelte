@@ -59,6 +59,9 @@
 	// ── Lovable tab ──
 	const projectCtx: { id: string; project: Project | null; updateProject: (p: Project) => void } | undefined = getContext('projectId');
 	let publicKeyPrefix = $state('');
+	// Full public key (migration 000132) — empty until known for keys that
+	// predate it and haven't been used since.
+	let publicKey = $state('');
 	let lovablePreview = $state('');
 	let lovablePublished = $state('');
 	let lovableCustom = $state('');
@@ -71,17 +74,22 @@
 	$effect(() => {
 		if (projectId !== keyPrefixFor) {
 			publicKeyPrefix = '';
+			publicKey = '';
 			keyPrefixFor = projectId ?? '';
 		}
-		if (activeTab === 'lovable' && !publicKeyPrefix && projectId) {
+		if ((activeTab === 'lovable' || activeTab === 'generic') && !publicKeyPrefix && projectId) {
 			api.listAPIKeys(projectId)
-				.then((keys) => { publicKeyPrefix = keys.find((k) => k.type === 'public')?.key_prefix ?? ''; })
+				.then((keys) => {
+					const pub = keys.find((k) => k.type === 'public');
+					publicKeyPrefix = pub?.key_prefix ?? '';
+					publicKey = pub?.public_key ?? '';
+				})
 				.catch(() => { /* optional hint */ });
 		}
 	});
 
-	let lovableEnv = $derived(info ? `VITE_EUROBASE_URL=${info.api_url}\nVITE_EUROBASE_PROJECT_ID=${info.project_id}\nVITE_EUROBASE_PUBLIC_KEY=eb_pk_…  # your project's public key` : '');
-	let lovablePrompt = $derived(info ? `Use the /eurobase skill. This app uses Eurobase as its backend, not Lovable Cloud or Supabase. Put these in .env: VITE_EUROBASE_URL=${info.api_url}, VITE_EUROBASE_PROJECT_ID=${info.project_id}, VITE_EUROBASE_PUBLIC_KEY=eb_pk_…. Build …` : '');
+	let lovableEnv = $derived(info ? `VITE_EUROBASE_URL=${info.api_url}\nVITE_EUROBASE_PROJECT_ID=${info.project_id}\nVITE_EUROBASE_PUBLIC_KEY=${publicKey || "eb_pk_…  # your project's public key"}` : '');
+	let lovablePrompt = $derived(info ? `Use the /eurobase skill. This app uses Eurobase as its backend, not Lovable Cloud or Supabase. Put these in .env: VITE_EUROBASE_URL=${info.api_url}, VITE_EUROBASE_PROJECT_ID=${info.project_id}, VITE_EUROBASE_PUBLIC_KEY=${publicKey || 'eb_pk_…'}. Build …` : '');
 
 	// The URLs typed in, as origins; invalid entries reported.
 	let lovableOrigins = $derived.by(() => {
@@ -287,8 +295,8 @@
 							<div>
 								<p class="text-sm font-semibold text-gray-900">2. Environment (.env in the Lovable project)</p>
 								<p class="text-xs text-gray-500">
-									Only the <strong>public</strong> key goes into Lovable{#if publicKeyPrefix} — yours starts with <code class="font-mono">{publicKeyPrefix}</code>{/if}.
-									It was shown when the project was created; if you no longer have it, regenerate the keys in <a href="/p/{projectId}/settings" class="text-eurobase-700 hover:underline">Settings</a> (apps using the old key stop working).
+									Only the <strong>public</strong> key goes into Lovable{#if publicKey} — it's filled in below{:else if publicKeyPrefix} — yours starts with <code class="font-mono">{publicKeyPrefix}</code>{/if}.
+									{#if !publicKey}It appears here in full once the key has been used (or copy it from when the project was created); otherwise regenerate the keys in <a href="/p/{projectId}/settings" class="text-eurobase-700 hover:underline">Settings</a> (apps using the old key stop working).{/if}
 									Never put a secret key (<code class="font-mono">eb_sk_…</code>) into Lovable.
 								</p>
 							</div>
@@ -620,7 +628,7 @@
 								<p class="text-xs text-gray-500">Alternative: pass a single URL instead of separate url + apiKey</p>
 							</div>
 						</div>
-						<code class="block rounded-lg bg-gray-900 px-4 py-3 text-sm font-mono text-gray-100 overflow-x-auto">eurobase://<span class="text-amber-400">YOUR_PUBLIC_KEY</span>@{info.slug}.eurobase.app</code>
+						<code class="block rounded-lg bg-gray-900 px-4 py-3 text-sm font-mono text-gray-100 overflow-x-auto">eurobase://<span class="text-amber-400">{publicKey || 'YOUR_PUBLIC_KEY'}</span>@{info.slug}.eurobase.app</code>
 					</div>
 
 					<!-- MCP endpoint -->
