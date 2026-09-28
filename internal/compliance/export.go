@@ -266,7 +266,7 @@ func (s *ExportService) CheckRateLimit(ctx context.Context, projectID string, us
 // MarkRunning updates the export to running state.
 func (s *ExportService) MarkRunning(ctx context.Context, exportID string) error {
 	_, err := s.Pool.Exec(ctx,
-		`UPDATE export_requests SET status = 'running', started_at = now(), error = NULL, completed_at = NULL WHERE id = $1`,
+		`UPDATE export_requests SET status = 'running', started_at = now(), error = NULL, completed_at = NULL, s3_key = NULL WHERE id = $1`,
 		exportID,
 	)
 	return err
@@ -390,7 +390,33 @@ func sanitiseFilenamePart(s string) string {
 }
 
 // CleanupExpired deletes expired export records and their S3 objects.
+// staleRunningExportAfter: an export still "running" this long after it
+// started never finished — its worker was killed (a deploy, #725), River
+// discarded or cancelled the job, or its bookkeeping failed. Well past the
+// longest legitimate run: 2 attempts × the 30-min job timeout, plus River's
+// 1 h rescue delay for a killed attempt.
+const staleRunningExportAfter = 3 * time.Hour
+
+// failStaleRunning marks exports stuck in "running" as failed, so the
+// requester sees an outcome and the rate limit (which counts non-failed
+// requests) lets them ask again.
+func (s *ExportService) failStaleRunning(ctx context.Context) {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE export_requests
+		    SET status = 'failed', error = 'the export did not finish', completed_at = now()
+		  WHERE status = 'running' AND started_at < now() - make_interval(secs => $1)`,
+		staleRunningExportAfter.Seconds())
+	if err != nil {
+		slog.Error("failed to fail stale running exports", "error", err)
+		return
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		slog.Warn("marked stale running exports as failed", "count", n)
+	}
+}
+
 func (s *ExportService) CleanupExpired(ctx context.Context) {
+	s.failStaleRunning(ctx)
 	rows, err := s.Pool.Query(ctx,
 		`DELETE FROM export_requests WHERE expires_at < now() RETURNING s3_key, project_id`)
 	if err != nil {

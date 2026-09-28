@@ -15,6 +15,7 @@ import (
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // exportJobTimeout is the wall-clock budget of one export attempt
@@ -28,18 +29,26 @@ import (
 // since a timeout is almost always deterministic for a given tenant size.
 const exportJobTimeout = 30 * time.Minute
 
-// exportAttemptFinal reports whether this attempt's failure is the export's
-// final outcome: the last attempt, or a timeout (not retried). Earlier
-// failures leave the row "running" — River retries — so an end user
-// polling the export doesn't see "failed" and then a completed export.
-func exportAttemptFinal(jobCtx context.Context, attempt, maxAttempts int) bool {
-	return attempt >= maxAttempts || errors.Is(jobCtx.Err(), context.DeadlineExceeded)
+// exportFailure classifies a failed attempt, once (failExport decides and
+// Work's return follows that decision — deciding twice could leave the row
+// "running" with no retry left, if the deadline passed in between).
+//   - final: the export's outcome is decided — the row is marked failed.
+//     The last attempt, a timeout, or a cancel from River UI / ops (River
+//     doesn't retry that either). Earlier failures leave the row
+//     "running" for River's retry, so an end user polling the export
+//     doesn't see "failed" and then a completed export.
+//   - noRetry: a timeout; Work returns river.JobCancel so River doesn't
+//     retry it (the snapshot would be held for another full timeout).
+func exportFailure(jobCtx context.Context, attempt, maxAttempts int) (final, noRetry bool) {
+	timedOut := errors.Is(jobCtx.Err(), context.DeadlineExceeded)
+	remote := errors.Is(context.Cause(jobCtx), rivertype.ErrJobCancelledRemotely)
+	return attempt >= maxAttempts || timedOut || remote, timedOut
 }
 
-// exportResult turns a timed-out attempt's error into a River cancel, so it
-// isn't retried (the snapshot would be held for another full timeout).
-func exportResult(jobCtx context.Context, err error) error {
-	if err != nil && errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+// exportResult is Work's return value: a River cancel when failExport
+// decided the attempt must not be retried.
+func exportResult(err error, noRetry bool) error {
+	if err != nil && noRetry {
 		return river.JobCancel(err)
 	}
 	return err
@@ -95,18 +104,20 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 	args := job.Args
 	logger := slog.With("export_id", args.ExportID, "project_id", args.ProjectID, "type", "tenant")
 	started := time.Now()
+	var noRetry bool // set by failExport
 	defer func() {
 		outcome := "completed"
 		if err != nil {
 			outcome = "failed"
 		}
 		logExportDuration(logger, started, outcome)
-		err = exportResult(ctx, err)
+		err = exportResult(err, noRetry)
 	}()
 
 	exportSvc := compliance.NewExportService(w.DBPool, w.S3, w.AuditSvc)
 	failExport := func(stage string, err error) {
-		final := exportAttemptFinal(ctx, job.Attempt, job.MaxAttempts)
+		final, nr := exportFailure(ctx, job.Attempt, job.MaxAttempts)
+		noRetry = nr
 		ctx, cancel := exportBookkeepingContext(ctx)
 		defer cancel()
 		if final {
@@ -190,7 +201,12 @@ func (w *TenantExportWorker) Work(ctx context.Context, job *river.Job[jobs.Tenan
 	bctx, bcancel := exportBookkeepingContext(ctx)
 	defer bcancel()
 	if err := exportSvc.MarkCompleted(bctx, args.ExportID, s3Key, size, result); err != nil {
-		if derr := w.S3.DeleteObject(bctx, s3Bucket, s3Key); derr != nil {
+		// A fresh context: bctx has likely expired if that's why
+		// MarkCompleted failed.
+		dctx, dcancel := exportBookkeepingContext(ctx)
+		derr := w.S3.DeleteObject(dctx, s3Bucket, s3Key)
+		dcancel()
+		if derr != nil {
 			logger.Error("export archive uploaded but not recorded, and could not be deleted", "key", s3Key, "error", derr)
 		}
 		failExport("mark_completed", err)
@@ -244,18 +260,20 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 	args := job.Args
 	logger := slog.With("export_id", args.ExportID, "project_id", args.ProjectID, "user_id", args.UserID, "type", "user")
 	started := time.Now()
+	var noRetry bool // set by failExport
 	defer func() {
 		outcome := "completed"
 		if err != nil {
 			outcome = "failed"
 		}
 		logExportDuration(logger, started, outcome)
-		err = exportResult(ctx, err)
+		err = exportResult(err, noRetry)
 	}()
 
 	exportSvc := compliance.NewExportService(w.DBPool, w.S3, w.AuditSvc)
 	failExport := func(stage string, err error) {
-		final := exportAttemptFinal(ctx, job.Attempt, job.MaxAttempts)
+		final, nr := exportFailure(ctx, job.Attempt, job.MaxAttempts)
+		noRetry = nr
 		ctx, cancel := exportBookkeepingContext(ctx)
 		defer cancel()
 		if final {
@@ -327,7 +345,12 @@ func (w *UserExportWorker) Work(ctx context.Context, job *river.Job[jobs.UserExp
 	bctx, bcancel := exportBookkeepingContext(ctx)
 	defer bcancel()
 	if err := exportSvc.MarkCompleted(bctx, args.ExportID, s3Key, size, result); err != nil {
-		if derr := w.S3.DeleteObject(bctx, s3Bucket, s3Key); derr != nil {
+		// A fresh context: bctx has likely expired if that's why
+		// MarkCompleted failed.
+		dctx, dcancel := exportBookkeepingContext(ctx)
+		derr := w.S3.DeleteObject(dctx, s3Bucket, s3Key)
+		dcancel()
+		if derr != nil {
 			logger.Error("export archive uploaded but not recorded, and could not be deleted", "key", s3Key, "error", derr)
 		}
 		failExport("mark_completed", err)

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/riverqueue/river/rivertype"
 )
 
 // #370: River's default job timeout is 1 minute; a large export must get
@@ -39,30 +41,41 @@ func TestExportBookkeepingContext_SurvivesCanceledJob(t *testing.T) {
 	}
 }
 
-// A failed attempt is final on the last attempt or on a timeout (which is
-// not retried); earlier failures leave the export "running" for the retry.
-func TestExportAttemptFinal(t *testing.T) {
+// A failed attempt is final on the last attempt, a timeout or a remote
+// cancel; only a timeout is turned into a River cancel (no retry).
+func TestExportFailure(t *testing.T) {
 	live := context.Background()
-	if exportAttemptFinal(live, 1, 2) {
-		t.Error("attempt 1 of 2 is not final")
+	if final, nr := exportFailure(live, 1, 2); final || nr {
+		t.Errorf("attempt 1 of 2: final=%v noRetry=%v, want false/false", final, nr)
 	}
-	if !exportAttemptFinal(live, 2, 2) {
-		t.Error("attempt 2 of 2 is final")
+	if final, nr := exportFailure(live, 2, 2); !final || nr {
+		t.Errorf("attempt 2 of 2: final=%v noRetry=%v, want true/false", final, nr)
 	}
 	timedOut, cancel := context.WithDeadline(live, time.Now().Add(-time.Second))
 	defer cancel()
-	if !exportAttemptFinal(timedOut, 1, 2) {
-		t.Error("a timed-out attempt is final")
+	if final, nr := exportFailure(timedOut, 1, 2); !final || !nr {
+		t.Errorf("timeout: final=%v noRetry=%v, want true/true", final, nr)
 	}
-	// A timeout becomes a River cancel (no retry); other errors pass through.
+	remote, rcancel := context.WithCancelCause(live)
+	rcancel(rivertype.ErrJobCancelledRemotely)
+	if final, nr := exportFailure(remote, 1, 2); !final || nr {
+		t.Errorf("remote cancel: final=%v noRetry=%v, want true/false", final, nr)
+	}
+	shutdown, scancel := context.WithCancel(live)
+	scancel()
+	if final, _ := exportFailure(shutdown, 1, 2); final {
+		t.Error("a plain cancel (shutdown) on attempt 1 is not final: River retries it")
+	}
+
 	boom := errors.New("boom")
-	if err := exportResult(timedOut, boom); err == boom || !errors.Is(err, boom) {
-		t.Errorf("timeout: got %v, want a JobCancel wrapping boom", err)
+	var ce *rivertype.JobCancelError
+	if err := exportResult(boom, true); !errors.As(err, &ce) || !errors.Is(err, boom) {
+		t.Errorf("noRetry: got %v, want a JobCancelError wrapping boom", err)
 	}
-	if err := exportResult(live, boom); err != boom {
-		t.Errorf("no timeout: got %v, want boom unchanged", err)
+	if err := exportResult(boom, false); err != boom {
+		t.Errorf("retryable: got %v, want boom unchanged", err)
 	}
-	if err := exportResult(timedOut, nil); err != nil {
+	if err := exportResult(nil, true); err != nil {
 		t.Errorf("success stays nil, got %v", err)
 	}
 }
