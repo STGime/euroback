@@ -51,7 +51,7 @@ The client keeps the session (in `localStorage`) and sends the user's token with
 
 ## Tell the user: allow the app's URLs
 
-When you first wire up Eurobase, and whenever auth changes, tell the user: Eurobase console → project → **Auth** → add the Lovable preview URL, the published `*.lovable.app` URL and any custom domain to **Allowed CORS origins** (without it every call fails with a CORS error) and to **Allowed redirect URLs** with the sign-in pages (`/verify`, `/reset-password`, `/magic`, `/auth/callback`). Wildcards like `*.lovable.app` don't work. Shortcut: console → project → **Connect** → **Lovable** adds them in one step.
+When you first wire up Eurobase, and whenever auth changes, tell the user: Eurobase console → project → **Auth** → add the preview origins (inside the editor the preview runs on `https://<project-id>.lovableproject.com`, in its own tab on `https://id-preview--<project-id>.lovable.app` — both are needed), the published `*.lovable.app` URL and any custom domain to **Allowed CORS origins** (without it every call fails with a CORS error) and to **Allowed redirect URLs** with the sign-in pages (`/verify`, `/reset-password`, `/magic`, `/auth/callback`). Wildcards like `*.lovable.app` don't work. Shortcut: console → project → **Connect** → **Lovable**: paste the editor URL (`lovable.dev/projects/…`) as the preview URL — it adds both preview origins — plus the published URL.
 
 ## Server-side rendering
 

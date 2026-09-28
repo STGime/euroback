@@ -25,37 +25,57 @@ export function appOrigin(raw: string): string | null {
 const LOVABLE_EDITOR_HOSTS = new Set(['lovable.dev', 'www.lovable.dev']);
 const LOVABLE_PROJECT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Both origins a Lovable project's preview runs on (see lovableAppOrigins). */
+export function lovablePreviewOrigins(projectId: string): string[] {
+	const id = projectId.toLowerCase();
+	return [`https://${id}.lovableproject.com`, `https://id-preview--${id}.lovable.app`];
+}
+
+/** The Lovable project id in a preview-type URL (editor, either preview host), or ''. */
+function lovablePreviewProjectId(u: URL): string {
+	const host = u.hostname.replace(/\.$/, '');
+	let id = '';
+	if (LOVABLE_EDITOR_HOSTS.has(host)) id = u.pathname.match(/^\/projects\/([^/?#]+)/)?.[1] ?? '';
+	else if (host.endsWith('.lovableproject.com')) id = host.slice(0, -'.lovableproject.com'.length);
+	else if (host.startsWith('id-preview--') && host.endsWith('.lovable.app')) id = host.slice('id-preview--'.length, -'.lovable.app'.length);
+	return LOVABLE_PROJECT_ID.test(id) ? id : '';
+}
+
 /**
- * The app origin for a URL pasted into the Lovable tab. The address bar
- * while working in Lovable shows the *editor* (lovable.dev/projects/<id>),
- * but the preview app runs in an iframe on its own origin,
- * https://id-preview--<id>.lovable.app — so an editor URL is turned into
- * that (only for the preview field: `preview`), and lovable.dev itself
- * (never an app origin) is refused with a hint.
+ * The app origins for a URL pasted into the Lovable tab.
+ *
+ * A Lovable project's preview runs on two origins (verified 2026-09-28 in
+ * the gateway's CORS log): inside the editor, the preview pane is an iframe
+ * on https://<id>.lovableproject.com; opened in its own tab it is
+ * https://id-preview--<id>.lovable.app. The address bar while working in
+ * Lovable shows neither — it shows the editor, lovable.dev/projects/<id>.
+ * So in the preview field (`preview`) any of the three gives both preview
+ * origins; lovable.dev itself (never an app origin) is refused with a hint.
+ * Other URLs give their own origin (https only; http for localhost).
  */
-export function lovableAppOrigin(raw: string, preview = false): { origin: string | null; note?: string; error?: string } {
+export function lovableAppOrigins(raw: string, preview = false): { origins: string[]; note?: string; error?: string } {
 	const s = raw.trim();
 	let u: URL;
 	try {
 		u = new URL(s);
 	} catch {
-		return { origin: null, error: 'Not a URL — paste the full address, starting with https://' };
+		return { origins: [], error: 'Not a URL — paste the full address, starting with https://' };
+	}
+	const id = preview ? lovablePreviewProjectId(u) : '';
+	if (id) {
+		const origins = lovablePreviewOrigins(id);
+		return { origins, note: `Lovable preview — adding both preview addresses: ${origins.join(' and ')}` };
 	}
 	if (LOVABLE_EDITOR_HOSTS.has(u.hostname.replace(/\.$/, ''))) {
-		const id = u.pathname.match(/^\/projects\/([^/?#]+)/)?.[1] ?? '';
-		if (preview && LOVABLE_PROJECT_ID.test(id)) {
-			const origin = `https://id-preview--${id.toLowerCase()}.lovable.app`;
-			return { origin, note: `That's the Lovable editor — using your app's preview address, ${origin}` };
-		}
 		return {
-			origin: null,
+			origins: [],
 			error: preview
-				? "That's the Lovable editor (lovable.dev), not your app. Paste your project's editor URL (lovable.dev/projects/…) or the preview address (https://id-preview--….lovable.app)."
+				? "That's the Lovable editor (lovable.dev), not your app. Paste your project's editor URL from the address bar (lovable.dev/projects/…)."
 				: "That's the Lovable editor (lovable.dev), not your app. Paste the address your app is published at (Lovable → Publish)."
 		};
 	}
 	const origin = appOrigin(s);
-	return origin ? { origin } : { origin: null, error: 'Use an https:// address (http only for localhost).' };
+	return origin ? { origins: [origin] } : { origins: [], error: 'Use an https:// address (http only for localhost).' };
 }
 
 /** The pages the skill builds for email and OAuth flows. */

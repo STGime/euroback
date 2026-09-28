@@ -3,7 +3,7 @@
 	import { browser } from '$app/environment';
 	import { getContext } from 'svelte';
 	import { api, type ConnectInfo, type AuthConfig, type Project } from '$lib/api.js';
-	import { lovableSkill, lovableSdkReference, lovableAppOrigin, lovableEntries } from '$lib/lovable';
+	import { lovableSkill, lovableSdkReference, lovableAppOrigins, lovableEntries } from '$lib/lovable';
 
 	type IdeTab = 'claude' | 'lovable' | 'codex' | 'cursor' | 'windsurf' | 'generic';
 	const STORAGE_KEY = 'eurobase:connect-tab';
@@ -100,9 +100,9 @@
 
 	// The URLs typed in, as origins; invalid entries reported.
 	let lovableOrigins = $derived.by(() => {
-		const out: { label: string; raw: string; origin: string | null; note?: string; error?: string }[] = [];
+		const out: { label: string; raw: string; origins: string[]; note?: string; error?: string }[] = [];
 		for (const [label, raw] of [['Preview URL', lovablePreview], ['Published URL', lovablePublished], ['Custom domain', lovableCustom]] as const) {
-			if (raw.trim()) out.push({ label, raw, ...lovableAppOrigin(raw, label === 'Preview URL') });
+			if (raw.trim()) out.push({ label, raw, ...lovableAppOrigins(raw, label === 'Preview URL') });
 		}
 		return out;
 	});
@@ -113,10 +113,11 @@
 		const cors: string[] = [];
 		const redirects: string[] = [];
 		for (const o of lovableOrigins) {
-			if (!o.origin) continue;
-			const e = lovableEntries(o.origin);
-			for (const c of e.cors) if (!haveCors.has(c) && !cors.includes(c)) cors.push(c);
-			for (const r of e.redirects) if (!haveRedirects.has(r) && !redirects.includes(r)) redirects.push(r);
+			for (const origin of o.origins) {
+				const e = lovableEntries(origin);
+				for (const c of e.cors) if (!haveCors.has(c) && !cors.includes(c)) cors.push(c);
+				for (const r of e.redirects) if (!haveRedirects.has(r) && !redirects.includes(r)) redirects.push(r);
+			}
 		}
 		return { cors, redirects };
 	});
@@ -128,7 +129,7 @@
 			lovableError = 'Project settings not loaded yet — try again in a moment.';
 			return;
 		}
-		if (lovableOrigins.some((o) => !o.origin)) {
+		if (lovableOrigins.some((o) => o.origins.length === 0)) {
 			lovableError = 'Fix the URLs marked in red first.';
 			return;
 		}
@@ -387,11 +388,11 @@
 							] as field}
 								<label class="text-xs text-gray-700">{field.label}
 									{#if field.bind === 'preview'}
-										<input bind:value={lovablePreview} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePreview.trim() && !lovableAppOrigin(lovablePreview, true).origin ? 'border-red-400' : 'border-gray-300'}" />
+										<input bind:value={lovablePreview} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePreview.trim() && lovableAppOrigins(lovablePreview, true).origins.length === 0 ? 'border-red-400' : 'border-gray-300'}" />
 									{:else if field.bind === 'published'}
-										<input bind:value={lovablePublished} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePublished.trim() && !lovableAppOrigin(lovablePublished).origin ? 'border-red-400' : 'border-gray-300'}" />
+										<input bind:value={lovablePublished} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePublished.trim() && lovableAppOrigins(lovablePublished).origins.length === 0 ? 'border-red-400' : 'border-gray-300'}" />
 									{:else}
-										<input bind:value={lovableCustom} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovableCustom.trim() && !lovableAppOrigin(lovableCustom).origin ? 'border-red-400' : 'border-gray-300'}" />
+										<input bind:value={lovableCustom} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovableCustom.trim() && lovableAppOrigins(lovableCustom).origins.length === 0 ? 'border-red-400' : 'border-gray-300'}" />
 									{/if}
 								</label>
 							{/each}
