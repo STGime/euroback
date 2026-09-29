@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { scopeFromProfile, sqlReadOnly, explain } from '../dist/api-client.js';
-import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey } from '../dist/query.js';
+import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey, readsInternalTable } from '../dist/query.js';
 import { scopeNote, createMcpServer, TOOL_ANNOTATIONS } from '../dist/server.js';
 
 const P = '0b1e5d6a-0000-4000-8000-000000000001';
@@ -82,6 +82,21 @@ test('filters on reserved parameter names are refused', () => {
 test('export archives are off limits', () => {
   for (const k of ['exports/p/x.zip', '/exports/p/x.zip', 'EXPORTS/p/x.zip']) assert.ok(isExportArchiveKey(k), k);
   for (const k of ['exportsx/a', 'avatars/exports/a', 'report-exports.csv']) assert.ok(!isExportArchiveKey(k), k);
+});
+
+test('queryTable refuses the platform tables (end users need an approved tool)', () => {
+  for (const t of ['users', 'user_identities', 'refresh_tokens', 'email_tokens', 'vault_secrets', 'storage_objects', 'storage_shared_prefixes']) {
+    assert.equal(readsInternalTable(t), t);
+  }
+  assert.equal(readsInternalTable('notes', ['id', 'owner:users(email)']), 'users');
+  assert.equal(readsInternalTable('notes', ['*', 'users!inner(*)']), 'users');
+  assert.equal(readsInternalTable('notes', ['a:vault_secrets ( secret )']), 'vault_secrets');
+  assert.equal(readsInternalTable('notes', ['id', 'users', 'tags(name)']), undefined);
+  assert.equal(readsInternalTable('app_users'), undefined);
+  // Same set as the gateway's internal tables.
+  const go = readFileSync(new URL('../../internal/query/internal_tables.go', import.meta.url), 'utf8');
+  const block = go.match(/var internalTenantTables = map\[string\]bool\{([^}]*)\}/)[1];
+  for (const [, t] of block.matchAll(/"([a-z_]+)":/g)) assert.equal(readsInternalTable(t), t, t);
 });
 
 test('storage keys and download kinds', () => {

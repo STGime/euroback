@@ -2,10 +2,12 @@
 	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
-	import { getContext } from 'svelte';
+	import { getContext, onDestroy } from 'svelte';
 	import { api, type ConnectInfo, type AuthConfig, type Project } from '$lib/api.js';
 	import { lovableSkill, lovableSdkReference, lovableAppOrigins, lovableEntries } from '$lib/lovable';
-	import ProjectTokenButton from '$lib/components/ProjectTokenButton.svelte';
+	import ProjectTokenButton, { forgetProjectToken } from '$lib/components/ProjectTokenButton.svelte';
+	// A token created here is shown until Done or until leaving the page.
+	onDestroy(forgetProjectToken);
 
 	type IdeTab = 'claude' | 'lovable' | 'codex' | 'cursor' | 'windsurf' | 'generic';
 	const STORAGE_KEY = 'eurobase:connect-tab';

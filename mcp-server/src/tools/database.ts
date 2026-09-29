@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { sqlReadOnly, type ApiClient } from '../api-client.js';
-import { buildQueryString, pathSegment, type QueryTableInput } from '../query.js';
+import { buildQueryString, pathSegment, readsInternalTable, type QueryTableInput } from '../query.js';
 
 export function registerDatabaseTools(server: McpServer, getClient: () => ApiClient) {
   server.tool(
@@ -101,6 +101,13 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
         .describe('Return an aggregate instead of rows'),
     },
     async (input) => {
+      const internal = readsInternalTable(input.table, input.columns);
+      if (internal) {
+        return {
+          content: [{ type: 'text' as const, text: `queryTable doesn't read the platform table "${internal}" (end users, tokens, vault, storage bookkeeping). Use listUsers for end users, or runSQL — both ask the user first.` }],
+          isError: true,
+        };
+      }
       const qs = buildQueryString(input as QueryTableInput);
       const data = await getClient().get(`/platform/projects/${input.projectId}/data/${pathSegment(input.table)}${qs}`);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };

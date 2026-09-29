@@ -3,6 +3,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { ApiClient } from './api-client.js';
 import { createMcpServer } from './server.js';
 
+// Build one server before listening: a tool without annotations or an SDK
+// upgrade that breaks their wiring then fails the pod's startup instead of
+// every /mcp request (the probes only hit /health).
+createMcpServer(() => ({ scope: { scoped: false } }) as unknown as ApiClient);
+
 const app = express();
 app.use(express.json());
 

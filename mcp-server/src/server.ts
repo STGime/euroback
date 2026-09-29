@@ -43,7 +43,12 @@ ${scopeNote(scope)}`,
 
   // Attach annotations to every registered tool, however it was
   // registered (server.tool or registerTool).
-  const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })._registeredTools;
+  // _registeredTools is the SDK's private map (1.29, pinned with ~): if an
+  // upgrade renames it, fail loudly rather than serve unannotated tools.
+  const registered = (server as unknown as { _registeredTools?: Record<string, RegisteredTool> })._registeredTools;
+  if (!registered || typeof registered !== 'object' || Object.keys(registered).length === 0) {
+    throw new Error('@modelcontextprotocol/sdk: registered tool map not found — check the TOOL_ANNOTATIONS wiring after an SDK upgrade');
+  }
   for (const [name, t] of Object.entries(registered)) {
     const annotations = TOOL_ANNOTATIONS[name];
     if (!annotations) {
@@ -59,7 +64,8 @@ ${scopeNote(scope)}`,
  * MCP tool annotations: clients (Claude Code, Lovable, Cursor…) use them to
  * decide what to auto-approve — read-only tools needn't interrupt the user
  * for every call; writes and anything destructive should. Every tool must
- * have an entry (createMcpServer refuses to start otherwise). None reach
+ * have an entry (createMcpServer throws otherwise; index.ts builds one at
+ * startup so a missing entry stops the pod, not every request). None reach
  * outside Eurobase (openWorldHint false), except invokeFunction, whose
  * function code may call anything.
  */
