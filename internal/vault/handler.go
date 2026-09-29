@@ -83,26 +83,17 @@ func handlePlatformRekey(svc *VaultService, pool *pgxpool.Pool) http.HandlerFunc
 	}
 }
 
-// resolveSchema looks up the schema_name for a project the authenticated user
-// has access to (via project_members). The PlatformTenantContext middleware
-// already verifies membership before vault routes run.
+// resolveSchema looks up the schema_name for the project. Access is
+// decided before vault routes run — the project middleware and
+// PlatformTenantContext (tenant.CallerProjectRole: owner, member or org)
+// plus RequireMinRole("admin") — so no membership check here (the old
+// project_members-only one refused org admins).
 func resolveSchema(r *http.Request, pool *pgxpool.Pool) (string, string, error) {
-	claims, ok := auth.ClaimsFromContext(r.Context())
-	if !ok {
+	if _, ok := auth.ClaimsFromContext(r.Context()); !ok {
 		return "", "", fmt.Errorf("unauthorized")
 	}
 
 	projectID := chi.URLParam(r, "id")
-
-	// Verify membership.
-	var memberCount int
-	pool.QueryRow(r.Context(),
-		`SELECT count(*) FROM project_members WHERE project_id = $1 AND user_id = $2`,
-		projectID, claims.Subject,
-	).Scan(&memberCount)
-	if memberCount == 0 {
-		return "", "", fmt.Errorf("project not found")
-	}
 
 	var schemaName string
 	err := pool.QueryRow(r.Context(),
