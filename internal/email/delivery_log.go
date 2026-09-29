@@ -10,10 +10,12 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/time/rate"
 )
 
 // Auth email flows.
@@ -63,6 +65,19 @@ const DeliveryLogRetention = 14 * 24 * time.Hour
 // maxDetailLen caps free text (errors, rejected URLs) per entry.
 const maxDetailLen = 500
 
+// maxDomainLen caps the domain kept by MaskEmail; a longer one isn't a
+// real address (DNS names are at most 253 characters).
+const maxDomainLen = 253
+
+// Per-project write budget: the auth endpoints are public, so a flood of
+// requests must not turn into a flood of rows (or push real entries out
+// of view). Beyond it, entries are dropped — the email itself is
+// unaffected.
+const (
+	logRatePerSecond = 1
+	logBurst         = 60
+)
+
 // DeliveryLogEntry is one row of the log.
 type DeliveryLogEntry struct {
 	ID        int64     `json:"id"`
@@ -80,6 +95,10 @@ type DeliveryLogEntry struct {
 // may only INSERT into the table (000135).
 type DeliveryLog struct {
 	pool *pgxpool.Pool
+
+	mu       sync.Mutex
+	limiters map[string]*rate.Limiter
+	dropped  map[string]time.Time // last "dropping" warning per project
 }
 
 // NewDeliveryLog returns a log writer; a nil pool gives a no-op log.
@@ -87,13 +106,32 @@ func NewDeliveryLog(pool *pgxpool.Pool) *DeliveryLog {
 	if pool == nil {
 		return nil
 	}
-	return &DeliveryLog{pool: pool}
+	return &DeliveryLog{pool: pool, limiters: map[string]*rate.Limiter{}, dropped: map[string]time.Time{}}
+}
+
+// allow spends one entry of the project's write budget.
+func (l *DeliveryLog) allow(projectID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lim, ok := l.limiters[projectID]
+	if !ok {
+		lim = rate.NewLimiter(rate.Limit(logRatePerSecond), logBurst)
+		l.limiters[projectID] = lim
+	}
+	if lim.Allow() {
+		return true
+	}
+	if time.Since(l.dropped[projectID]) > time.Minute {
+		l.dropped[projectID] = time.Now()
+		slog.Warn("email log: write budget exceeded, dropping entries", "project_id", projectID)
+	}
+	return false
 }
 
 // Record writes one entry, best effort: an auth request never fails or
 // waits long because of its log line.
 func (l *DeliveryLog) Record(ctx context.Context, projectID string, e DeliveryLogEntry) {
-	if l == nil || projectID == "" {
+	if l == nil || projectID == "" || !l.allow(projectID) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
@@ -135,16 +173,28 @@ func ListDeliveryLog(ctx context.Context, pool *pgxpool.Pool, projectID string, 
 	return out, rows.Err()
 }
 
-// CleanupDeliveryLog deletes entries older than DeliveryLogRetention.
+// CleanupDeliveryLog deletes entries older than DeliveryLogRetention, in
+// batches (each its own statement, so no long lock after a busy day).
 // Developer pool, like ListDeliveryLog.
 func CleanupDeliveryLog(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
-	tag, err := pool.Exec(ctx,
-		`DELETE FROM public.project_email_log WHERE created_at < now() - make_interval(secs => $1)`,
-		DeliveryLogRetention.Seconds())
-	if err != nil {
-		return 0, err
+	var total int64
+	for {
+		batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		tag, err := pool.Exec(batchCtx,
+			`DELETE FROM public.project_email_log WHERE id IN (
+			   SELECT id FROM public.project_email_log
+			   WHERE created_at < now() - make_interval(secs => $1)
+			   LIMIT 10000)`,
+			DeliveryLogRetention.Seconds())
+		cancel()
+		if err != nil {
+			return total, err
+		}
+		total += tag.RowsAffected()
+		if tag.RowsAffected() < 10000 {
+			return total, nil
+		}
 	}
-	return tag.RowsAffected(), nil
 }
 
 // MaskEmail keeps the first character of the local part and the domain:
@@ -158,6 +208,9 @@ func MaskEmail(addr string) string {
 		return "****"
 	}
 	local, domain := addr[:at], addr[at+1:]
+	if len(domain) > maxDomainLen || !utf8.ValidString(domain) {
+		return "(invalid address)"
+	}
 	if local == "" {
 		return "****@" + domain
 	}

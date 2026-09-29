@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/netguard"
+	"golang.org/x/time/rate"
 )
 
 func TestMaskEmail(t *testing.T) {
@@ -195,4 +196,32 @@ func atoiMust(t *testing.T, s string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+func TestDeliveryLogWriteBudget(t *testing.T) {
+	l := &DeliveryLog{limiters: map[string]*rate.Limiter{}, dropped: map[string]time.Time{}}
+	allowed := 0
+	for i := 0; i < logBurst+20; i++ {
+		if l.allow("p1") {
+			allowed++
+		}
+	}
+	if allowed != logBurst {
+		t.Fatalf("burst: allowed %d, want %d", allowed, logBurst)
+	}
+	if !l.allow("p2") {
+		t.Fatal("another project has its own budget")
+	}
+}
+
+func TestDescribeSMTPError_HidesResolver(t *testing.T) {
+	err := &SMTPError{Stage: StageDial, Addr: "nope.invalid:587",
+		Err: &net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host", Name: "nope.invalid", Server: "10.32.0.10:53", IsNotFound: true}}}
+	if !strings.Contains(err.Error(), "10.32.0.10") {
+		t.Fatalf("test setup: raw error should name the resolver: %q", err.Error())
+	}
+	d := DescribeSMTPError(err)
+	if strings.Contains(d, "10.32.0.10") || !strings.Contains(d, "lookup nope.invalid: no such host") || !strings.Contains(d, "host name wasn't found") {
+		t.Errorf("described: %q", d)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -567,7 +568,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID,
 	})
 	if err != nil {
 		// User not found — return nil to prevent enumeration.
-		s.emailService.RecordSkipped(ctx, projectID, email.FlowPasswordReset, emailAddr, email.ReasonNoUser, "")
+		recordLookupSkip(ctx, s.emailService, projectID, email.FlowPasswordReset, emailAddr, err)
 		return nil
 	}
 
@@ -678,7 +679,7 @@ func (s *AuthService) RequestMagicLink(ctx context.Context, schemaName, projectI
 	})
 	if err != nil {
 		// User not found — return nil to prevent enumeration.
-		s.emailService.RecordSkipped(ctx, projectID, email.FlowMagicLink, emailAddr, email.ReasonNoUser, "")
+		recordLookupSkip(ctx, s.emailService, projectID, email.FlowMagicLink, emailAddr, err)
 		return nil
 	}
 
@@ -983,7 +984,7 @@ func (s *AuthService) ResendVerification(ctx context.Context, schemaName, projec
 		return tx.QueryRow(ctx, q, emailAddr).Scan(&userID, &emailConfirmedAt)
 	})
 	if err != nil {
-		s.emailService.RecordSkipped(ctx, projectID, email.FlowVerification, emailAddr, email.ReasonNoUser, "")
+		recordLookupSkip(ctx, s.emailService, projectID, email.FlowVerification, emailAddr, err)
 		return nil // prevent enumeration
 	}
 
@@ -1147,8 +1148,35 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 // none is configured for the flow.
 func recordRedirectSkip(ctx context.Context, es *email.EmailService, projectID, flow, to, requested string) {
 	if requested != "" {
-		es.RecordSkipped(ctx, projectID, flow, to, email.ReasonRedirectRejected, requested)
+		es.RecordSkipped(ctx, projectID, flow, to, email.ReasonRedirectRejected, redirectForLog(requested))
 		return
 	}
 	es.RecordSkipped(ctx, projectID, flow, to, email.ReasonNoRedirect, "")
+}
+
+// recordLookupSkip logs an auth email skipped because the user lookup
+// failed: no such user, or (anything else) an internal error — never
+// "no user" for a user that may well exist.
+func recordLookupSkip(ctx context.Context, es *email.EmailService, projectID, flow, to string, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		es.RecordSkipped(ctx, projectID, flow, to, email.ReasonNoUser, "")
+		return
+	}
+	slog.Error("auth email: user lookup failed", "project_id", projectID, "flow", flow, "error", err)
+	es.RecordSkipped(ctx, projectID, flow, to, email.ReasonInternal, "The user lookup failed.")
+}
+
+// redirectForLog keeps the scheme, host and path of a rejected redirect
+// URL — what's needed to compare it with the allowlist — and drops the
+// query and fragment (tokens, personal data).
+func redirectForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "(not a valid absolute URL)"
+	}
+	out := u.Scheme + "://" + u.Host + u.EscapedPath()
+	if len(out) > 200 {
+		out = out[:200] + "…"
+	}
+	return out
 }

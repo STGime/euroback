@@ -216,8 +216,8 @@
 	const REASON_TEXT: Record<string, string> = {
 		no_user: 'No user with this email in the project. Magic links, password resets and confirmation resends only go to existing users — sign the user up first.',
 		already_confirmed: 'This email address is already confirmed.',
-		redirect_rejected: "The request's redirect URL isn't in the project's allowed redirect URLs (Settings → Redirect URLs).",
-		no_redirect_configured: 'No redirect URL is configured for this email type (Settings → Redirect URLs).',
+		redirect_rejected: "The request's redirect URL isn't in the project's Allowed redirect URLs (Settings).",
+		no_redirect_configured: 'No URL is set for this email type under Email-flow redirect URLs (Settings).',
 		email_not_configured: 'Email sending is not configured on this Eurobase environment.',
 		custom_smtp_failed: "Your SMTP server didn't take the message.",
 		platform_failed: "Eurobase's email service didn't take the message.",
@@ -1813,7 +1813,7 @@
 		</div>
 	{/if}
 
-	<!-- SMTP Tab (#235 Part 1, BYO custom SMTP) -->
+	<!-- Email log Tab (000135) -->
 	{#if activeTab === 'email_log'}
 		<div class="mt-6 space-y-4">
 			<div class="flex items-start justify-between gap-4">
@@ -1832,7 +1832,9 @@
 
 			{#if emailLogError}
 				<div class="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{emailLogError}</div>
-			{:else if !emailLogLoading && emailLog.length === 0}
+			{:else if emailLogLoading && emailLog.length === 0}
+				<div class="text-sm text-gray-500">Loading…</div>
+			{:else if emailLog.length === 0}
 				<div class="rounded-lg border border-dashed border-gray-200 px-4 py-8 text-center text-sm text-gray-500">No auth emails requested in the last {emailLogRetention} days.</div>
 			{:else}
 				<div class="overflow-x-auto rounded-lg border border-gray-200">
@@ -1875,6 +1877,7 @@
 		</div>
 	{/if}
 
+	<!-- SMTP Tab (#235 Part 1, BYO custom SMTP) -->
 	{#if activeTab === 'smtp'}
 		<div class="mt-6 space-y-6 max-w-2xl">
 			<div>

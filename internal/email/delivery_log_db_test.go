@@ -64,12 +64,19 @@ func TestEmailLog_ProductionRoles(t *testing.T) {
 	// …but can't read, change or delete.
 	for _, q := range []string{
 		`SELECT count(*) FROM public.project_email_log`,
+		`SELECT last_value FROM public.project_email_log_id_seq`,
 		`UPDATE public.project_email_log SET detail = 'x'`,
 		`DELETE FROM public.project_email_log`,
 	} {
 		if _, err := gw.Exec(ctx, q); err == nil || !strings.Contains(err.Error(), "permission denied") {
 			t.Errorf("gateway %q: want permission denied, got %v", q, err)
 		}
+	}
+
+	// Over-long text is refused by the table itself, whoever writes it.
+	if _, err := admin.Exec(ctx, `INSERT INTO public.project_email_log (project_id, flow, recipient, outcome)
+		VALUES ($1, 'magic_link', repeat('x', 301), 'skipped')`, projectID); err == nil || !strings.Contains(err.Error(), "check constraint") {
+		t.Errorf("over-long recipient: want a check violation, got %v", err)
 	}
 
 	// The developer pool lists, newest first, masked.

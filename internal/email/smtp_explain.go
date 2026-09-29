@@ -62,18 +62,26 @@ func SMTPEgressBlocked() bool { return smtpEgressBlocked.Load() }
 
 // EgressBlockedNotice is shown wherever custom SMTP is configured while
 // the block is in place.
-const EgressBlockedNotice = "Eurobase's hosting provider currently blocks outgoing SMTP connections (ports 25, 465 and 587), so Eurobase can't reach your SMTP server yet. We're working on lifting this. Until then, auth emails go out through Eurobase's default sender."
+const EgressBlockedNotice = "Eurobase's hosting provider currently blocks outgoing SMTP connections (ports 25, 465 and 587), so Eurobase can't reach your SMTP server yet. We're working on lifting this. Until then, disconnect custom SMTP: a verified sender is still used and its emails fail, while without one auth emails go out through Eurobase's default sender."
 
-// DescribeSMTPError is the explanation followed by the raw error.
+// DescribeSMTPError is the explanation followed by the raw error. It is
+// shown to the project's developers: a DNS error names the resolver that
+// answered ("lookup x on 10.0.0.10:53: …"), an internal address, so it's
+// reduced to the name and the result.
 func DescribeSMTPError(err error) string {
 	if err == nil {
 		return ""
 	}
+	raw := err.Error()
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		raw = fmt.Sprintf("lookup %s: %s", dnsErr.Name, dnsErr.Err)
+	}
 	hint := ExplainSMTPError(err)
 	if hint == "" {
-		return err.Error()
+		return raw
 	}
-	return hint + " (" + err.Error() + ")"
+	return hint + " (" + raw + ")"
 }
 
 // ExplainSMTPError says, in a sentence or two, what probably went wrong

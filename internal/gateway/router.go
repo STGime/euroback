@@ -1054,9 +1054,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 
 			// Auth email log (000135): what happened to each verification /
-			// reset / magic-link request. Developer and up — like the Users
-			// page, it names end users (masked). Read on the developer pool:
-			// the runtime role may only insert.
+			// reset / magic-link request. Developer and up: it names end
+			// users (masked), which developers can already read with SQL.
+			// Read on the developer pool: the runtime role may only insert.
 			if developerPool != nil {
 				r.With(tenant.RequireMinRole("developer")).Get("/email-log", email.HandleDeliveryLog(developerPool))
 			}
