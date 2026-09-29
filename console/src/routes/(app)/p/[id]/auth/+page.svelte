@@ -152,7 +152,7 @@
 	let smtpUsername = $state('');
 	let smtpFromEmail = $state('');
 	let smtpFromName = $state('');
-	let smtpEncryption = $state<'starttls' | 'tls' | 'none'>('starttls');
+	let smtpEncryption = $state<'starttls' | 'tls' | 'none'>('starttls'); // 'none' only in configs saved before it was refused
 	let smtpPassword = $state('');
 	let smtpSaving = $state(false);
 	let smtpSaveMessage = $state('');
@@ -1774,7 +1774,7 @@
 							</div>
 							<div>
 								<label for="smtp-port" class="block text-xs font-medium text-gray-700 mb-1">Port</label>
-								<input id="smtp-port" type="number" min="1" max="65535" bind:value={smtpPort} placeholder="587"
+								<input id="smtp-port" type="number" min="465" max="2525" bind:value={smtpPort} placeholder="587"
 									class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
 							</div>
 						</div>
@@ -1784,7 +1784,6 @@
 								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600">
 								<option value="starttls">STARTTLS (port 587, recommended)</option>
 								<option value="tls">TLS / SMTPS (port 465)</option>
-								<option value="none">None — plaintext (do not use over the internet)</option>
 							</select>
 						</div>
 					</div>

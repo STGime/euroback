@@ -77,6 +77,25 @@ func TestValidateUpsert(t *testing.T) {
 		{"empty from_email", func(r *UpsertRequest) { r.FromEmail = "" }},
 		{"malformed from_email", func(r *UpsertRequest) { r.FromEmail = "not-an-email" }},
 		{"unsupported encryption", func(r *UpsertRequest) { r.Encryption = "ssl" }},
+		{"plaintext encryption", func(r *UpsertRequest) { r.Encryption = EncryptionNone }},
+		{"no username", func(r *UpsertRequest) { r.Username = "" }},
+		{"port 25", func(r *UpsertRequest) { r.Port = 25 }},
+		{"non-mail port", func(r *UpsertRequest) { r.Port = 6432 }},
+		{"loopback literal", func(r *UpsertRequest) { r.Host = "127.0.0.1" }},
+		{"private literal", func(r *UpsertRequest) { r.Host = "10.32.0.10" }},
+		{"metadata address", func(r *UpsertRequest) { r.Host = "169.254.42.42" }},
+		{"pod range", func(r *UpsertRequest) { r.Host = "100.64.1.2" }},
+		{"ipv6 loopback", func(r *UpsertRequest) { r.Host = "[::1]" }},
+		{"single-label name", func(r *UpsertRequest) { r.Host = "pgbouncer" }},
+		{"cluster service name", func(r *UpsertRequest) { r.Host = "gateway.eurobase.svc.cluster.local" }},
+		{"localhost", func(r *UpsertRequest) { r.Host = "localhost" }},
+	}
+	for _, port := range []int{465, 587, 2525} {
+		r := good
+		r.Port = port
+		if err := validateUpsert(r); err != nil {
+			t.Errorf("port %d rejected: %v", port, err)
+		}
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -81,16 +81,21 @@ infra alerts, beta-allowlist invites) stays on the platform path.
   provider supports it and the upgrade enforces TLS ≥ 1.2 on our side.
 - `tls` — direct TLS / SMTPS (port 465 standard). Same security
   posture as STARTTLS once connected.
-- `none` — plaintext, no upgrade. Surfaced in the UI with a "don't
-  use this over the internet" advisory; useful only for an internal
-  relay on a private network.
+- `none` — no longer accepted (saving or sending). The value stays in
+  the table's CHECK so older rows still load; such a sender is refused at
+  send time.
 
-> **Important:** Go's stdlib `smtp.PlainAuth` refuses to send
-> credentials over a plaintext connection (except to `localhost`).
-> So `encryption=none` + a non-empty username/password will fail at
-> auth time with a clear error from stdlib (`unencrypted connection`),
-> not silently leak the password on the wire. Use `none` only for an
-> internal relay that needs no auth (rare).
+## Where Eurobase connects
+
+The SMTP host must be a public internet server, and the port a mail
+submission port: 587, 465 or 2525. A login (username + password) is
+required. These are checked when the sender is saved and again on every
+send (`checkSenderRules`), and the connection itself goes through
+`internal/netguard`: the host name is resolved at send time and only a
+public address is dialed — the connection goes to the checked address,
+so a name that later resolves elsewhere can't redirect it. Host names
+that only resolve inside a network (`localhost`, single labels,
+`.local`, `.internal`, `.svc`, …) are refused before any lookup.
 
 ## Sealed-at-rest contract
 

@@ -379,9 +379,12 @@ func validateUpsert(r UpsertRequest) error {
 		return fmt.Errorf("from_email is not a valid address: %w", err)
 	}
 	if _, ok := validEncryptions[r.Encryption]; !ok {
-		return fmt.Errorf("encryption must be one of starttls/tls/none, got %q", r.Encryption)
+		return fmt.Errorf("encryption must be one of starttls/tls, got %q", r.Encryption)
 	}
-	return nil
+	if strings.TrimSpace(r.Username) == "" {
+		return errors.New("username is required (the login of your SMTP account)")
+	}
+	return checkSenderRules(strings.TrimSpace(r.Host), r.Port, r.Encryption)
 }
 
 // sovereigntyWarningFor checks the host against a small list of known

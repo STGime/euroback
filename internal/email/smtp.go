@@ -35,12 +35,38 @@ package email
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
 	"strings"
 	"time"
+
+	"github.com/eurobase/euroback/internal/netguard"
 )
+
+// dialSMTP connects to a custom SMTP server; tests replace it to reach a
+// local server (which the real dialer refuses).
+var dialSMTP = netguard.DialPublic
+
+// allowedSMTPPorts are the mail submission ports: 587 (STARTTLS), 465
+// (TLS) and 2525 (the alternative some providers offer). Port 25 is for
+// server-to-server delivery, not for sending as an account.
+var allowedSMTPPorts = map[int]bool{465: true, 587: true, 2525: true}
+
+// checkSenderRules: public host, a submission port, encryption.
+func checkSenderRules(host string, port int, enc SenderEncryption) error {
+	if err := netguard.CheckHostName(host); err != nil {
+		return errors.New("SMTP host must be a public internet address (a host name like smtp.example.com)")
+	}
+	if !allowedSMTPPorts[port] {
+		return fmt.Errorf("SMTP port must be 587 (STARTTLS), 465 (TLS) or 2525, got %d", port)
+	}
+	if enc != EncryptionSTARTTLS && enc != EncryptionTLS {
+		return errors.New("SMTP encryption must be STARTTLS or TLS")
+	}
+	return nil
+}
 
 // customSMTPDialTimeout caps the TCP dial. Separate from the
 // post-dial budget so a slow handshake doesn't get charged the dial
@@ -64,23 +90,38 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 	}
 	addr := net.JoinHostPort(sender.Host, fmt.Sprintf("%d", sender.Port))
 
-	dialer := &net.Dialer{Timeout: customSMTPDialTimeout}
+	// Checked on every send, not only on save: rows saved before these
+	// rules existed must not be used either.
+	if err := checkSenderRules(sender.Host, sender.Port, sender.Encryption); err != nil {
+		return err
+	}
+	if sender.Username == "" || sender.Password == "" {
+		return errors.New("SMTP login required: set the username and password of your SMTP account")
+	}
 
-	var (
-		conn net.Conn
-		err  error
-	)
-	switch sender.Encryption {
-	case EncryptionTLS:
-		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+	dialer := &net.Dialer{Timeout: customSMTPDialTimeout}
+	dialCtx, cancelDial := context.WithTimeout(ctx, customSMTPDialTimeout)
+	defer cancelDial()
+
+	// Only ever to a public address: resolved and checked here, and the
+	// connection goes to the checked address (see internal/netguard).
+	conn, err := dialSMTP(dialCtx, dialer, sender.Host, fmt.Sprintf("%d", sender.Port))
+	if err != nil {
+		if errors.Is(err, netguard.ErrNotPublic) {
+			return errors.New("SMTP host must be a public internet address")
+		}
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	if sender.Encryption == EncryptionTLS {
+		tlsConn := tls.Client(conn, &tls.Config{
 			ServerName: sender.Host,
 			MinVersion: tls.VersionTLS12,
 		})
-	default: // starttls and none both start in plaintext
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-	}
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
+		if err := tlsConn.HandshakeContext(dialCtx); err != nil {
+			conn.Close()
+			return fmt.Errorf("dial %s: %w", addr, err)
+		}
+		conn = tlsConn
 	}
 	defer conn.Close()
 
