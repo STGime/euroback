@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	import { api, DEFAULT_RATE_LIMITS, MAX_RATE_LIMITS, type AuthConfig, type EmailTemplate, type ProjectEmailSender, type RateLimits } from '$lib/api.js';
+	import { api, DEFAULT_RATE_LIMITS, MAX_RATE_LIMITS, type AuthConfig, type EmailLogEntry, type EmailTemplate, type ProjectEmailSender, type RateLimits } from '$lib/api.js';
 
 	const projectCtx: { id: string; project: import('$lib/api.js').Project | null; updateProject: (p: import('$lib/api.js').Project) => void } = getContext('projectId');
 
 	// Tab state
-	let activeTab = $state<'settings' | 'templates' | 'rate_limits' | 'smtp'>('settings');
+	let activeTab = $state<'settings' | 'templates' | 'rate_limits' | 'smtp' | 'email_log'>('settings');
 
 	// Email status
 	let emailConfigured = $state<boolean | null>(null);
@@ -182,11 +182,68 @@
 			.catch(() => (planLimitsRequested = false));
 	}
 
+	// ---- Email log tab: what happened to each auth email request ----
+	let emailLog = $state<EmailLogEntry[]>([]);
+	let emailLogLoading = $state(false);
+	let emailLogError = $state('');
+	let emailLogRetention = $state(14);
+
+	async function loadEmailLog() {
+		emailLogLoading = true;
+		emailLogError = '';
+		try {
+			const res = await api.getEmailLog(projectCtx.id, 200);
+			emailLog = res.entries;
+			emailLogRetention = res.retention_days;
+		} catch (err) {
+			const status = (err as { status?: number })?.status;
+			emailLogError = status === 403
+				? 'The email log needs the Developer role or higher — it names end users.'
+				: err instanceof Error ? err.message : 'Failed to load the email log';
+		} finally {
+			emailLogLoading = false;
+		}
+	}
+
+	const FLOW_LABELS: Record<EmailLogEntry['flow'], string> = {
+		verification: 'Email confirmation',
+		password_reset: 'Password reset',
+		magic_link: 'Magic link'
+	};
+
+	// Why an email wasn't sent, in words. Keep in sync with the reasons in
+	// internal/email/delivery_log.go.
+	const REASON_TEXT: Record<string, string> = {
+		no_user: 'No user with this email in the project. Magic links, password resets and confirmation resends only go to existing users — sign the user up first.',
+		already_confirmed: 'This email address is already confirmed.',
+		redirect_rejected: "The request's redirect URL isn't in the project's allowed redirect URLs (Settings → Redirect URLs).",
+		no_redirect_configured: 'No redirect URL is configured for this email type (Settings → Redirect URLs).',
+		email_not_configured: 'Email sending is not configured on this Eurobase environment.',
+		custom_smtp_failed: "Your SMTP server didn't take the message.",
+		platform_failed: "Eurobase's email service didn't take the message.",
+		internal_error: "The email couldn't be prepared."
+	};
+
+	function emailLogExplanation(e: EmailLogEntry): string {
+		if (e.outcome === 'sent') {
+			return e.via === 'custom_smtp' ? 'Handed to your SMTP server.' : "Handed to Eurobase's email service (Scaleway TEM).";
+		}
+		const base = (e.reason && REASON_TEXT[e.reason]) || e.reason || '';
+		if (e.reason === 'redirect_rejected' && e.detail) return `${base} Requested: ${e.detail}`;
+		return e.detail && e.reason !== 'redirect_rejected' ? `${base} ${e.detail}`.trim() : base;
+	}
+
+	// Platform-side notice for custom SMTP (outbound SMTP blocked).
+	let smtpNotice = $state('');
+
 	async function loadSmtp() {
 		smtpLoading = true;
 		loadPlanLimits();
 		smtpSaveError = '';
 		smtpTestError = '';
+		api.getEmailSenderStatus(projectCtx.id)
+			.then((st) => (smtpNotice = st.egress_blocked ? (st.notice ?? '') : ''))
+			.catch(() => (smtpNotice = ''));
 		try {
 			const s = await api.getProjectEmailSender(projectCtx.id);
 			hydrateSmtp(s);
@@ -810,6 +867,12 @@
 				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeTab === 'smtp' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
 			>
 				SMTP
+			</button>
+			<button
+				onclick={() => { activeTab = 'email_log'; loadEmailLog(); }}
+				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeTab === 'email_log' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
+			>
+				Email log
 			</button>
 		</nav>
 	</div>
@@ -1751,6 +1814,67 @@
 	{/if}
 
 	<!-- SMTP Tab (#235 Part 1, BYO custom SMTP) -->
+	{#if activeTab === 'email_log'}
+		<div class="mt-6 space-y-4">
+			<div class="flex items-start justify-between gap-4">
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Email log</h3>
+					<p class="mt-1 text-xs text-gray-500 max-w-2xl">
+						Every confirmation, password-reset and magic-link request, and what happened to it. The auth API answers “OK” either way, so it never reveals which addresses have accounts — this is where you see whether an email actually went out, and why not. Addresses are shortened; entries are kept {emailLogRetention} days.
+					</p>
+				</div>
+				<button
+					onclick={loadEmailLog}
+					disabled={emailLogLoading}
+					class="shrink-0 rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50 cursor-pointer"
+				>{emailLogLoading ? 'Loading…' : 'Refresh'}</button>
+			</div>
+
+			{#if emailLogError}
+				<div class="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{emailLogError}</div>
+			{:else if !emailLogLoading && emailLog.length === 0}
+				<div class="rounded-lg border border-dashed border-gray-200 px-4 py-8 text-center text-sm text-gray-500">No auth emails requested in the last {emailLogRetention} days.</div>
+			{:else}
+				<div class="overflow-x-auto rounded-lg border border-gray-200">
+					<table class="min-w-full divide-y divide-gray-200 text-xs">
+						<thead class="bg-gray-50 text-left text-gray-500">
+							<tr>
+								<th class="px-3 py-2 font-medium">Time</th>
+								<th class="px-3 py-2 font-medium">Email</th>
+								<th class="px-3 py-2 font-medium">To</th>
+								<th class="px-3 py-2 font-medium">Result</th>
+								<th class="px-3 py-2 font-medium">Details</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-gray-100 bg-white">
+							{#each emailLog as e (e.id)}
+								<tr class="align-top">
+									<td class="px-3 py-2 whitespace-nowrap text-gray-500">{new Date(e.created_at).toLocaleString()}</td>
+									<td class="px-3 py-2 whitespace-nowrap text-gray-900">{FLOW_LABELS[e.flow] ?? e.flow}</td>
+									<td class="px-3 py-2 whitespace-nowrap font-mono text-gray-700">{e.recipient}</td>
+									<td class="px-3 py-2 whitespace-nowrap">
+										{#if e.outcome === 'sent'}
+											<span class="rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-700">Sent</span>
+										{:else if e.outcome === 'skipped'}
+											<span class="rounded-full bg-gray-100 px-2 py-0.5 font-medium text-gray-700">Not sent</span>
+										{:else}
+											<span class="rounded-full bg-red-100 px-2 py-0.5 font-medium text-red-700">Failed</span>
+										{/if}
+									</td>
+									<td class="px-3 py-2 text-gray-700">
+										{emailLogExplanation(e)}
+										{#if e.message_id}<div class="mt-0.5 font-mono text-[11px] text-gray-400">id {e.message_id}</div>{/if}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+				<p class="text-xs text-gray-500">“Sent” means the email service accepted the message. If it still doesn't arrive, check the recipient's spam folder, then ask their mail provider — include the time and id.</p>
+			{/if}
+		</div>
+	{/if}
+
 	{#if activeTab === 'smtp'}
 		<div class="mt-6 space-y-6 max-w-2xl">
 			<div>
@@ -1768,6 +1892,10 @@
 						{#if smtpExisting}A sender saved earlier isn't used on this plan; after upgrading, run a test send to use it again. You can also remove it below.{/if}
 					</p>
 				</div>
+			{/if}
+
+			{#if smtpNotice}
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">{smtpNotice}</div>
 			{/if}
 
 			{#if smtpLoading}

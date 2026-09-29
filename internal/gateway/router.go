@@ -1050,6 +1050,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.With(tenant.RequireMinRole("admin")).Put("/email-sender", email.HandlePutSender(senderSvc, smtpGate))
 				r.With(tenant.RequireMinRole("admin")).Delete("/email-sender", email.HandleDeleteSender(senderSvc))
 				r.With(tenant.RequireMinRole("admin")).Post("/email-sender/test", email.HandleTestSender(senderSvc, smtpGate))
+				r.With(tenant.RequireMinRole("admin")).Get("/email-sender/status", email.HandleSenderStatus())
+			}
+
+			// Auth email log (000135): what happened to each verification /
+			// reset / magic-link request. Developer and up — like the Users
+			// page, it names end users (masked). Read on the developer pool:
+			// the runtime role may only insert.
+			if developerPool != nil {
+				r.With(tenant.RequireMinRole("developer")).Get("/email-log", email.HandleDeliveryLog(developerPool))
 			}
 
 			// Vault (encrypted secrets storage) — platform-authenticated.

@@ -112,10 +112,7 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 	// connection goes to the checked address (see internal/netguard).
 	conn, err := smtpDialer.DialContext(ctx, host, fmt.Sprintf("%d", sender.Port))
 	if err != nil {
-		if errors.Is(err, netguard.ErrNotPublic) {
-			return fmt.Errorf("dial %s: SMTP host not found in public DNS, or not a public internet address", addr)
-		}
-		return fmt.Errorf("dial %s: %w", addr, err)
+		return &SMTPError{Stage: StageDial, Addr: addr, Encryption: sender.Encryption, Err: err}
 	}
 	if sender.Encryption == EncryptionTLS {
 		tlsConn := tls.Client(conn, &tls.Config{
@@ -127,7 +124,7 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 		cancelHS()
 		if err != nil {
 			conn.Close()
-			return fmt.Errorf("dial %s: %w", addr, err)
+			return &SMTPError{Stage: StageDial, Addr: addr, Encryption: sender.Encryption, Err: err}
 		}
 		conn = tlsConn
 	}
@@ -141,7 +138,7 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
-		return fmt.Errorf("smtp client: %w", err)
+		return &SMTPError{Stage: StageGreeting, Addr: addr, Encryption: sender.Encryption, Err: err}
 	}
 	defer client.Quit() //nolint:errcheck — best-effort cleanup
 
@@ -150,36 +147,35 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 			ServerName: host,
 			MinVersion: tls.VersionTLS12,
 		}); err != nil {
-			return fmt.Errorf("starttls: %w", err)
+			return &SMTPError{Stage: StageSTARTTLS, Addr: addr, Encryption: sender.Encryption, Err: err}
 		}
 	}
 
-	// Authenticate if the provider needs it. Bare-relay (no username +
-	// no password) is supported for the rare internal-relay case.
+	// senderUsable guarantees a login.
 	if sender.Username != "" || sender.Password != "" {
 		auth := smtp.PlainAuth("", sender.Username, sender.Password, host)
 		if err := client.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
+			return &SMTPError{Stage: StageAuth, Addr: addr, Encryption: sender.Encryption, Err: err}
 		}
 	}
 
 	if err := client.Mail(sender.FromEmail); err != nil {
-		return fmt.Errorf("MAIL FROM: %w", err)
+		return &SMTPError{Stage: StageMailFrom, Addr: addr, Encryption: sender.Encryption, Err: err}
 	}
 	if err := client.Rcpt(to); err != nil {
-		return fmt.Errorf("RCPT TO: %w", err)
+		return &SMTPError{Stage: StageRcptTo, Addr: addr, Encryption: sender.Encryption, Err: err}
 	}
 
 	wc, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("DATA: %w", err)
+		return &SMTPError{Stage: StageData, Addr: addr, Encryption: sender.Encryption, Err: err}
 	}
 	if _, err := wc.Write(buildMIMEMessage(sender, to, subject, htmlBody)); err != nil {
 		wc.Close()
-		return fmt.Errorf("write body: %w", err)
+		return &SMTPError{Stage: StageWriteBody, Addr: addr, Encryption: sender.Encryption, Err: err}
 	}
 	if err := wc.Close(); err != nil {
-		return fmt.Errorf("close DATA: %w", err)
+		return &SMTPError{Stage: StageCloseData, Addr: addr, Encryption: sender.Encryption, Err: err}
 	}
 	return nil
 }

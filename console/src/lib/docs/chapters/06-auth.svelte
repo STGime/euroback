@@ -108,7 +108,12 @@
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Magic link page</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Same shape. Trigger with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.requestMagicLink(email)</code>; complete with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.signInWithMagicLink(token)</code>. On success the user is signed in and you can redirect to your app's home page.
+					Same shape. Trigger with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.requestMagicLink(email)</code>; complete with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.signInWithMagicLink(token)</code>. On success the user is signed in and you can redirect to your app's home page. The email only goes to an address that already has an account (see <em>Magic Links</em> below).
+				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Email log: did the email go out?</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					These requests answer “OK” whether or not an email was sent, so they never reveal which addresses have accounts. <strong>Auth &rarr; Email log</strong> shows what really happened to each one: sent (with the email service's id), not sent (no user with that address, redirect URL not allowed, already confirmed) or failed (with the reason, e.g. your SMTP server rejected the login). Addresses are shortened (p****@example.com) and entries are kept 14 days. Needs the Developer role.
 				</p>
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Per-request override (multi-tenant apps)</h4>
@@ -189,6 +194,9 @@ await eb.auth.signOut()</pre>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
 					Enable magic links in <strong>Auth &rarr; Settings &rarr; Magic Links</strong> toggle. Both email/password and magic links can be active at the same time.
 				</p>
+				<div class="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+					<strong>Magic links only go to existing users.</strong> A magic link signs a user in; it doesn't create one. Sign the user up first (for example with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.signUp</code>, or add them under <strong>Auth &rarr; Users</strong>). For an address with no account, <code class="bg-gray-100 border border-gray-200 rounded px-1">requestMagicLink</code> still returns success and sends nothing, so your app can't be used to find out which addresses are registered. The same applies to <code class="bg-gray-100 border border-gray-200 rounded px-1">forgotPassword</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">resendVerification</code>. To see what happened to a request, open <strong>Auth &rarr; Email log</strong>.
+				</div>
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-3">
 					<button

@@ -49,7 +49,17 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">If the test fails</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The console shows the exact error your provider returned &mdash; auth failed, TLS failed, recipient rejected, etc. Fix the config and re-test.
+					The console first says what probably went wrong and what to change, then shows the exact error your provider returned. Common cases:
+				</p>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1 mt-2">
+					<li><strong>No answer / timeout</strong> &mdash; wrong host or port, or the server only accepts connections from its own network. If Eurobase itself can't make outgoing SMTP connections at the moment, the SMTP tab shows a notice saying so.</li>
+					<li><strong>Connection refused</strong> &mdash; wrong port. Most providers use 587 with STARTTLS, or 465 with TLS.</li>
+					<li><strong>“Doesn't use TLS from the start” / no greeting</strong> &mdash; the encryption doesn't match the port: 465 needs TLS, 587 needs STARTTLS.</li>
+					<li><strong>Login rejected</strong> &mdash; wrong username or password; some providers need an app-specific password for SMTP.</li>
+					<li><strong>From address refused</strong> &mdash; the From address must be one your SMTP account may send as.</li>
+				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Once the sender is in use, <strong>Auth &rarr; Email log</strong> shows every auth email and whether your server took it, with the same explanations when it didn't.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
 					<strong>If you were already verified and a test starts failing,</strong> the project keeps using the last-known-good config until either a successful retest or a config change. A transient blip from your provider doesn't silently regress your project to the platform sender behind your back.

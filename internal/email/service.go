@@ -51,6 +51,10 @@ type EmailService struct {
 	// that include them: off-plan (a downgrade) the defaults are sent;
 	// the saved templates stay for after an upgrade.
 	templateGate TemplateGate
+
+	// deliveryLog, when set, records every auth email's outcome for the
+	// project's developers (000135). nil = no log.
+	deliveryLog *DeliveryLog
 }
 
 // TemplateGate says whether the project's plan includes custom email
@@ -104,6 +108,59 @@ func (s *EmailService) refuseOffPlanSender(ctx context.Context, projectID string
 	}
 }
 
+// WithDeliveryLog wires the per-project auth email log.
+func (s *EmailService) WithDeliveryLog(l *DeliveryLog) *EmailService {
+	s.deliveryLog = l
+	return s
+}
+
+// RecordSkipped logs an auth email that was deliberately not sent (no
+// such user, redirect not allowed, …). The SDK caller still gets "OK";
+// the project's developers see the reason in the console.
+func (s *EmailService) RecordSkipped(ctx context.Context, projectID, flow, to, reason, detail string) {
+	if s == nil {
+		return
+	}
+	s.deliveryLog.Record(ctx, projectID, DeliveryLogEntry{
+		Flow: flow, Recipient: to, Outcome: OutcomeSkipped, Reason: reason, Detail: detail,
+	})
+}
+
+// recordSend logs the outcome of an auth email send.
+func (s *EmailService) recordSend(ctx context.Context, projectID, flow, to string, d Delivery, err error) {
+	s.deliveryLog.Record(ctx, projectID, classifySend(flow, to, d, err))
+}
+
+// classifySend turns a send's result into a log entry.
+func classifySend(flow, to string, d Delivery, err error) DeliveryLogEntry {
+	e := DeliveryLogEntry{Flow: flow, Recipient: to, Via: d.Via, MessageID: d.MessageID}
+	switch {
+	case err == nil && d.Via == "":
+		e.Outcome, e.Reason = OutcomeSkipped, ReasonEmailNotConfigured
+	case err == nil:
+		e.Outcome = OutcomeSent
+	case d.Via == ViaCustomSMTP:
+		e.Outcome, e.Reason, e.Detail = OutcomeFailed, ReasonCustomSMTPFailed, DescribeSMTPError(err)
+	case d.Via == ViaPlatform:
+		// TEM's error body is operator detail; the project gets the status.
+		e.Outcome, e.Reason, e.Detail = OutcomeFailed, ReasonPlatformFailed, "Eurobase's email service didn't accept the message."
+		var te *TEMError
+		if errors.As(err, &te) {
+			e.Detail = fmt.Sprintf("Eurobase's email service didn't accept the message (HTTP %d).", te.Status)
+		}
+	default:
+		e.Outcome, e.Reason, e.Detail = OutcomeFailed, ReasonInternal, "The email couldn't be prepared."
+	}
+	return e
+}
+
+// Delivery is how an email left the platform: Via "" when it didn't get
+// as far as a send (not configured, or failed while being prepared).
+type Delivery struct {
+	Via       string
+	MessageID string // TEM email id, platform sends only
+}
+
 // sendProjectScoped is the central dispatcher for "send email for
 // project X". If the project has a verified custom SMTP sender,
 // the send goes through that path; otherwise it falls back to the
@@ -120,7 +177,7 @@ func (s *EmailService) refuseOffPlanSender(ctx context.Context, projectID string
 // surface the error rather than silently falling back to the
 // platform sender — the failure is what the operator needs to fix,
 // not a hidden retry that hides the problem.
-func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, subject, htmlBody string) error {
+func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, subject, htmlBody string) (Delivery, error) {
 	if s.senderSvc != nil && projectID != "" {
 		sender, err := s.senderSvc.LoadForSend(ctx, projectID)
 		switch {
@@ -147,7 +204,7 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 				break
 			}
 			// Verified custom sender — use it.
-			return sendViaCustomSMTP(ctx, sender, to, subject, htmlBody)
+			return Delivery{Via: ViaCustomSMTP}, sendViaCustomSMTP(ctx, sender, to, subject, htmlBody)
 		case errors.Is(err, ErrNotConfigured), errors.Is(err, ErrSenderNotVerified):
 			// Fall through to platform send.
 		default:
@@ -155,7 +212,12 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 				"project_id", projectID, "error", err)
 		}
 	}
-	return s.client.Send(ctx, to, subject, htmlBody)
+	if !s.client.Configured() {
+		_ = s.client.Send(ctx, to, subject, htmlBody) // logs instead of sending
+		return Delivery{}, nil
+	}
+	id, err := s.client.SendWithID(ctx, to, subject, htmlBody)
+	return Delivery{Via: ViaPlatform, MessageID: id}, err
 }
 
 // Configured returns whether TEM credentials are set.
@@ -192,9 +254,15 @@ func (s *EmailService) SendRaw(ctx context.Context, to, subject, htmlBody string
 // can point at either `https://app.example.com/verify` or
 // `https://app.example.com/callback?flow=verify`.
 func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
+	d, err := s.sendVerificationEmail(ctx, projectID, projectName, schemaName, userID, userEmail, redirectURL)
+	s.recordSend(ctx, projectID, FlowVerification, userEmail, d, err)
+	return err
+}
+
+func (s *EmailService) sendVerificationEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) (Delivery, error) {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
-		return err
+		return Delivery{}, err
 	}
 
 	q := fmt.Sprintf(
@@ -206,7 +274,7 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 		_, err := tx.Exec(ctx, q, userID, tokenHash)
 		return err
 	}); err != nil {
-		return fmt.Errorf("store verification token: %w", err)
+		return Delivery{}, fmt.Errorf("store verification token: %w", err)
 	}
 
 	customSubject, customHTML, err := s.loadCustomTemplate(ctx, projectID, "verification")
@@ -222,7 +290,7 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 		ExpiresIn:   "24 hours",
 	})
 	if err != nil {
-		return fmt.Errorf("render verification email: %w", err)
+		return Delivery{}, fmt.Errorf("render verification email: %w", err)
 	}
 
 	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
@@ -231,9 +299,15 @@ func (s *EmailService) SendVerificationEmail(ctx context.Context, projectID, pro
 // SendPasswordResetEmail sends a password reset link to the end-user.
 // See SendVerificationEmail for the redirectURL contract.
 func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
+	d, err := s.sendPasswordResetEmail(ctx, projectID, projectName, schemaName, userID, userEmail, redirectURL)
+	s.recordSend(ctx, projectID, FlowPasswordReset, userEmail, d, err)
+	return err
+}
+
+func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) (Delivery, error) {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
-		return err
+		return Delivery{}, err
 	}
 
 	q := fmt.Sprintf(
@@ -245,7 +319,7 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 		_, err := tx.Exec(ctx, q, userID, tokenHash)
 		return err
 	}); err != nil {
-		return fmt.Errorf("store password reset token: %w", err)
+		return Delivery{}, fmt.Errorf("store password reset token: %w", err)
 	}
 
 	customSubject, customHTML, err := s.loadCustomTemplate(ctx, projectID, "password_reset")
@@ -261,7 +335,7 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 		ExpiresIn:   "1 hour",
 	})
 	if err != nil {
-		return fmt.Errorf("render password reset email: %w", err)
+		return Delivery{}, fmt.Errorf("render password reset email: %w", err)
 	}
 
 	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
@@ -270,9 +344,15 @@ func (s *EmailService) SendPasswordResetEmail(ctx context.Context, projectID, pr
 // SendMagicLinkEmail sends a magic link sign-in email to the end-user.
 // See SendVerificationEmail for the redirectURL contract.
 func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {
+	d, err := s.sendMagicLinkEmail(ctx, projectID, projectName, schemaName, userID, userEmail, redirectURL)
+	s.recordSend(ctx, projectID, FlowMagicLink, userEmail, d, err)
+	return err
+}
+
+func (s *EmailService) sendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) (Delivery, error) {
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
-		return err
+		return Delivery{}, err
 	}
 
 	q := fmt.Sprintf(
@@ -284,7 +364,7 @@ func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projec
 		_, err := tx.Exec(ctx, q, userID, tokenHash)
 		return err
 	}); err != nil {
-		return fmt.Errorf("store magic link token: %w", err)
+		return Delivery{}, fmt.Errorf("store magic link token: %w", err)
 	}
 
 	customSubject, customHTML, err := s.loadCustomTemplate(ctx, projectID, "magic_link")
@@ -300,7 +380,7 @@ func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projec
 		ExpiresIn:   "15 minutes",
 	})
 	if err != nil {
-		return fmt.Errorf("render magic link email: %w", err)
+		return Delivery{}, fmt.Errorf("render magic link email: %w", err)
 	}
 
 	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)

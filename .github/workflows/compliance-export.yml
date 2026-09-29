@@ -27,6 +27,7 @@ on:
       - internal/tenant/orgs*.go
       - internal/tenant/org_invitation*.go
       - internal/auth/apikey_middleware.go
+      - internal/email/delivery_log*.go
   workflow_dispatch:
 
 permissions:
@@ -88,6 +89,15 @@ jobs:
           APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           PAT_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs'
+
+      # The auth email log (000135): the gateway may only insert, the
+      # developer pool lists and cleans up.
+      - name: Email log under the production roles
+        env:
+          EMAIL_LOG_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+          EMAIL_LOG_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
+          EMAIL_LOG_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
+        run: go test -count=1 -v ./internal/email/ -run 'TestEmailLog_ProductionRoles'
 
       # The org invitation service runs on the developer pool in
       # production: run its test as that role too (a missing grant fails).

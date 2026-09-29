@@ -50,7 +50,9 @@ eb.auth.signInWithOAuth('google', {
 // Handle OAuth callback (on your callback page)
 const { data: session, error } = eb.auth.handleOAuthCallback()
 
-// Magic link
+// Magic link — only sent to users that already exist (sign them up first).
+// Unknown addresses get no email and no error, so the call can't reveal who
+// has an account; the console's Auth → Email log shows what happened.
 await eb.auth.requestMagicLink('user@example.com')
 await eb.auth.signInWithMagicLink(token)
 

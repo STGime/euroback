@@ -92,13 +92,28 @@ type temAddress struct {
 
 // Send sends an email via Scaleway TEM. If unconfigured, it logs instead.
 func (c *EmailClient) Send(ctx context.Context, to, subject, htmlBody string) error {
+	_, err := c.SendWithID(ctx, to, subject, htmlBody)
+	return err
+}
+
+// temResponse is the part of TEM's create-email response we keep: the
+// email id, which `scw tem email get` and TEM's console look up.
+type temResponse struct {
+	Emails []struct {
+		ID string `json:"id"`
+	} `json:"emails"`
+}
+
+// SendWithID is Send, returning TEM's email id ("" when unconfigured or
+// when the response carries none).
+func (c *EmailClient) SendWithID(ctx context.Context, to, subject, htmlBody string) (string, error) {
 	if !c.Configured() {
 		slog.Warn("email not configured, logging instead",
 			"to", to,
 			"subject", subject,
 		)
 		slog.Debug("email body (not sent)", "html", htmlBody)
-		return nil
+		return "", nil
 	}
 
 	payload := temRequest{
@@ -111,13 +126,13 @@ func (c *EmailClient) Send(ctx context.Context, to, subject, htmlBody string) er
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal email payload: %w", err)
+		return "", fmt.Errorf("marshal email payload: %w", err)
 	}
 
 	url := fmt.Sprintf("https://api.scaleway.com/transactional-email/v1alpha1/regions/%s/emails", c.region)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Auth-Token", c.authToken)
@@ -125,7 +140,7 @@ func (c *EmailClient) Send(ctx context.Context, to, subject, htmlBody string) er
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		slog.Error("TEM API request failed", "error", err, "to", to, "subject", subject)
-		return fmt.Errorf("TEM API request: %w", err)
+		return "", fmt.Errorf("TEM API request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -137,11 +152,27 @@ func (c *EmailClient) Send(ctx context.Context, to, subject, htmlBody string) er
 			"to", to,
 			"subject", subject,
 		)
-		return fmt.Errorf("TEM API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", &TEMError{Status: resp.StatusCode, Body: string(respBody)}
 	}
 
-	slog.Info("email sent", "to", to, "subject", subject)
-	return nil
+	var parsed temResponse
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&parsed)
+	id := ""
+	if len(parsed.Emails) > 0 {
+		id = parsed.Emails[0].ID
+	}
+	slog.Info("email sent", "to", to, "subject", subject, "tem_email_id", id)
+	return id, nil
+}
+
+// TEMError is a non-2xx answer from the TEM API.
+type TEMError struct {
+	Status int
+	Body   string
+}
+
+func (e *TEMError) Error() string {
+	return fmt.Sprintf("TEM API returned %d: %s", e.Status, e.Body)
 }
 
 // SendBulk sends one HTML email to every recipient via BCC so

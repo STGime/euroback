@@ -7,6 +7,9 @@ package email
 //   PUT    /email-sender         upsert config + seal new password
 //   DELETE /email-sender         clear config (fall back to platform)
 //   POST   /email-sender/test    send a verification email, mark verified
+//   GET    /email-sender/status  platform conditions (outbound SMTP blocked)
+//
+// Also GET /email-log (HandleDeliveryLog): the auth email log.
 //
 // All routes are admin-only; the wiring lives in internal/gateway/router.go.
 
@@ -17,10 +20,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // HandleGetSender returns the current sender config for the project, or
@@ -119,6 +124,40 @@ func HandleDeleteSender(svc *SenderService) http.HandlerFunc {
 	}
 }
 
+// HandleSenderStatus reports platform-side conditions for custom SMTP:
+// whether outbound SMTP is currently blocked (and the notice to show).
+func HandleSenderStatus() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		out := map[string]any{"egress_blocked": SMTPEgressBlocked()}
+		if SMTPEgressBlocked() {
+			out["notice"] = EgressBlockedNotice
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
+// HandleDeliveryLog returns the project's auth email log, newest first
+// (?limit=, default 100, max 500). pool must be able to read
+// project_email_log — the developer pool.
+func HandleDeliveryLog(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		entries, err := ListDeliveryLog(r.Context(), pool, projectID, limit)
+		if err != nil {
+			slog.Error("list email log failed", "project_id", projectID, "error", err)
+			httpJSONError(w, "failed to load the email log", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries":        entries,
+			"retention_days": int(DeliveryLogRetention.Hours() / 24),
+		})
+	}
+}
+
 // testSendRequest is the payload for POST /email-sender/test.
 type testSendRequest struct {
 	To string `json:"to"`
@@ -166,10 +205,13 @@ func HandleTestSender(svc *SenderService, gate PlanGate) http.HandlerFunc {
 
 		if err := sendViaCustomSMTP(r.Context(), sender, req.To, subject, body); err != nil {
 			slog.Warn("custom SMTP test send failed", "project_id", projectID, "host", sender.Host, "error", err)
-			_ = svc.MarkFailed(r.Context(), projectID, err.Error())
+			// The explanation first, then the raw error — stored too, so
+			// the console shows it again later.
+			described := DescribeSMTPError(err)
+			_ = svc.MarkFailed(r.Context(), projectID, described)
 			// 422 — the request was understood and the sender exists,
 			// but the test failed for a config reason.
-			httpJSONError(w, err.Error(), http.StatusUnprocessableEntity)
+			httpJSONError(w, described, http.StatusUnprocessableEntity)
 			return
 		}
 		if err := svc.MarkVerified(r.Context(), projectID); err != nil {

@@ -150,7 +150,7 @@ const token = new URLSearchParams(location.search).get('token')!
 const { error } = await eb.auth.resetPassword(token, newPassword)
 ```
 
-Magic link:
+Magic link — **only sent to users that already exist**: a magic link signs a user in, it doesn't create one. Sign the user up first (`signUp`). For an unknown address `requestMagicLink` returns no error and sends nothing (so it can't reveal who has an account) — show "check your inbox" either way, and don't treat a missing email as a bug in your code. The same holds for `forgotPassword` and `resendVerification`. The user can see what happened to each request in the Eurobase console → project → Auth → Email log.
 
 ```typescript
 await eb.auth.requestMagicLink(email, { emailRedirectTo: `${location.origin}/magic` })
