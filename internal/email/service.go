@@ -40,6 +40,11 @@ type EmailService struct {
 	// ErrNotConfigured on the lookup — both fall back to the platform
 	// path unchanged.
 	senderSvc *SenderService
+
+	// planGate, when set, keeps custom SMTP to the plans that include it:
+	// a project off those plans (never upgraded, or downgraded) sends
+	// through the platform even with a verified sender saved.
+	planGate PlanGate
 }
 
 // NewEmailService creates a new email service.
@@ -56,6 +61,12 @@ func NewEmailService(client *EmailClient, pool *pgxpool.Pool, consoleURL string)
 // the platform-sender-only path, identical to pre-#235 behaviour.
 func (s *EmailService) WithSenderService(svc *SenderService) *EmailService {
 	s.senderSvc = svc
+	return s
+}
+
+// WithPlanGate wires the plan check for custom SMTP.
+func (s *EmailService) WithPlanGate(g PlanGate) *EmailService {
+	s.planGate = g
 	return s
 }
 
@@ -79,6 +90,9 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 	if s.senderSvc != nil && projectID != "" {
 		sender, err := s.senderSvc.LoadForSend(ctx, projectID)
 		switch {
+		case err == nil && s.planGate != nil && s.planGate.CheckBYOSMTP(ctx, projectID) != nil:
+			// Not on this plan: the platform sends. The sender stays
+			// verified, so it works again after an upgrade.
 		case err == nil:
 			// A sender verified before the host / port / encryption / login
 			// rules existed may break them. It is never used: it's un-

@@ -45,11 +45,40 @@ func HandleGetSender(svc *SenderService) http.HandlerFunc {
 	}
 }
 
+// PlanGate says whether the project's plan includes custom SMTP
+// (plans.LimitsService.CheckBYOSMTP; Pro and up).
+type PlanGate interface {
+	CheckBYOSMTP(ctx context.Context, projectID string) error
+}
+
+// refuseOffPlan answers 403 when the plan doesn't include custom SMTP.
+// nil gate = no plan enforcement (tests, dev).
+func refuseOffPlan(w http.ResponseWriter, r *http.Request, gate PlanGate, projectID string) bool {
+	if gate == nil {
+		return false
+	}
+	if err := gate.CheckBYOSMTP(r.Context(), projectID); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Custom SMTP is available on the Pro plan and up. Upgrade the project to use your own SMTP server.",
+			"code":  "plan_required",
+		})
+		return true
+	}
+	return false
+}
+
 // HandlePutSender upserts the sender config + seals a new password.
 // An empty password on an existing sender preserves the stored one.
-func HandlePutSender(svc *SenderService) http.HandlerFunc {
+// Pro and up (the plan gate); reading and removing a config work on
+// every plan, so a downgraded project can still see and clear it.
+func HandlePutSender(svc *SenderService, gate PlanGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
+		if refuseOffPlan(w, r, gate, projectID) {
+			return
+		}
 		var req UpsertRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpJSONError(w, "invalid request body", http.StatusBadRequest)
@@ -97,9 +126,12 @@ type testSendRequest struct {
 //
 // The test email is a small "your custom SMTP works" notice — the
 // goal is to exercise the dial + auth + RCPT path, not to look pretty.
-func HandleTestSender(svc *SenderService) http.HandlerFunc {
+func HandleTestSender(svc *SenderService, gate PlanGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
+		if refuseOffPlan(w, r, gate, projectID) {
+			return
+		}
 		var req testSendRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.To) == "" {
 			httpJSONError(w, "request body must include {to: \"...\"}", http.StatusBadRequest)

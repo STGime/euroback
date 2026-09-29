@@ -163,8 +163,15 @@
 	let smtpTestError = $state('');
 	let smtpTestMessage = $state('');
 
+	// Custom SMTP is Pro and up (plan_limits.byo_smtp). null = not known
+	// yet or the lookup failed: the form stays usable and the API decides.
+	let smtpPlanAllowed = $state<boolean | null>(null);
+
 	async function loadSmtp() {
 		smtpLoading = true;
+		api.getUsage(projectCtx.id)
+			.then((u) => (smtpPlanAllowed = u.limits?.byo_smtp ?? null))
+			.catch(() => (smtpPlanAllowed = null));
 		smtpSaveError = '';
 		smtpTestError = '';
 		try {
@@ -1731,6 +1738,16 @@
 				</p>
 			</div>
 
+			{#if smtpPlanAllowed === false}
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50 px-4 py-3 text-sm text-gray-800">
+					<p class="font-medium">Custom SMTP is part of the Pro plan.</p>
+					<p class="mt-1 text-xs text-gray-600">
+						On this plan, auth emails go out through Eurobase's sender. <a href="/billing" class="font-medium text-eurobase-700 hover:underline">Upgrade the project</a> to send them from your own SMTP server.
+						{#if smtpExisting}A sender saved earlier isn't used on this plan — you can still remove it below.{/if}
+					</p>
+				</div>
+			{/if}
+
 			{#if smtpLoading}
 				<div class="text-sm text-gray-500">Loading…</div>
 			{:else}
@@ -1831,7 +1848,7 @@
 					{:else}
 						<div></div>
 					{/if}
-					<button type="button" onclick={handleSaveSmtp} disabled={smtpSaving}
+					<button type="button" onclick={handleSaveSmtp} disabled={smtpSaving || smtpPlanAllowed === false}
 						class="rounded-md bg-eurobase-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-eurobase-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
 						{smtpSaving ? 'Saving…' : 'Save'}
 					</button>
@@ -1847,7 +1864,7 @@
 						<div class="flex gap-2">
 							<input type="email" bind:value={smtpTestTo} placeholder="you@example.com"
 								class="flex-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
-							<button type="button" onclick={handleTestSmtp} disabled={smtpTesting || !smtpTestTo}
+							<button type="button" onclick={handleTestSmtp} disabled={smtpTesting || !smtpTestTo || smtpPlanAllowed === false}
 								class="rounded-md border border-gray-300 px-4 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors">
 								{smtpTesting ? 'Sending…' : 'Send test'}
 							</button>
