@@ -155,10 +155,11 @@ func refuseDelegatedSession(w http.ResponseWriter, r *http.Request, what string)
 }
 
 // RequirePersonalSession refuses personal access tokens and SSO sessions
-// (see refuseDelegatedSession): for accepting or declining invitations.
+// (see refuseDelegatedSession): for things that belong to the person —
+// accepting or declining invitations, billing, creating an organization.
 func RequirePersonalSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if refuseDelegatedSession(w, r, "accept or decline invitations") {
+		if refuseDelegatedSession(w, r, "do this") {
 			return
 		}
 		next.ServeHTTP(w, r)

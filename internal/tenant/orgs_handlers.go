@@ -84,6 +84,10 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 // (an out-of-band ops path); the "must have OIDC config to enable"
 // guard catches the common footgun of enabling before configuring.
 func (h *OrgsHandler) enforceOrgSSO(w http.ResponseWriter, claims *auth.Claims, org *Org) bool {
+	if !SSOSessionInScope(claims, org.ID) {
+		WriteSSOOutOfScope(w)
+		return false
+	}
 	if SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
 		return true
 	}
@@ -205,6 +209,10 @@ func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 		// SSO and this session isn't SSO-backed for THIS org, refuse
 		// with a machine-readable code so the console can bounce to
 		// a fresh SSO handshake.
+		if !SSOSessionInScope(claims, org.ID) {
+			WriteSSOOutOfScope(w)
+			return
+		}
 		if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
 			WriteSSORequired(w, &SSORequiredError{OrgID: org.ID}, "this organization requires SSO sign-in")
 			return

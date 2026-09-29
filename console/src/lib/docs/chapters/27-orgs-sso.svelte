@@ -204,6 +204,7 @@
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li>Client secret is encrypted at rest with AES-256-GCM using a server-side platform key (<code class="rounded bg-gray-100 px-1 text-[11px]">PLATFORM_ENCRYPTION_KEY</code>). Never persisted plaintext.</li>
 					<li>Access to org-owned projects is gated on <code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>: an SSO login only succeeds for a member, and nobody becomes a member without accepting an invitation, signed in as themselves. So an org admin can't pull someone else's account into their org, and a third-party IdP that returns a valid ID token for someone who isn't a member still can't get a platform session.</li>
+					<li>An SSO session only works for its own organization: its projects and settings. Your own projects, other organizations, billing, tokens and account settings need your own sign-in (password or passkey).</li>
 					<li>Platform superadmin accounts never sign in with SSO (password or passkey only).</li>
 					<li>Org settings and membership (SSO config, SSO required, invites, removals) can only be changed in the console, not with a personal access token.</li>
 					<li>SSO sessions have the same lifetime as password logins (24 h access token, refresh via the standard flow).</li>

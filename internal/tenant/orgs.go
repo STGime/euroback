@@ -32,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -511,6 +512,13 @@ type OrgInvitation struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 }
 
+// isUUID: invitation ids come from the URL; a malformed one is simply not
+// found (404), not a failed cast (500).
+func isUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
+}
+
 // ErrInvitationNotFound: no pending invitation with that id for the caller.
 var ErrInvitationNotFound = errors.New("invitation not found")
 
@@ -619,6 +627,9 @@ func (s *OrgsService) queryInvitations(ctx context.Context, where string, arg st
 // membership. Only the invitee can accept (the invitation is keyed to
 // their platform user id).
 func (s *OrgsService) AcceptInvitation(ctx context.Context, userID, invitationID string) (*OrgMember, error) {
+	if !isUUID(invitationID) {
+		return nil, ErrInvitationNotFound
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
@@ -655,6 +666,9 @@ func (s *OrgsService) AcceptInvitation(ctx context.Context, userID, invitationID
 
 // DeclineInvitation deletes the caller's own pending invitation.
 func (s *OrgsService) DeclineInvitation(ctx context.Context, userID, invitationID string) error {
+	if !isUUID(invitationID) {
+		return ErrInvitationNotFound
+	}
 	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM public.org_invitations WHERE id = $1::uuid AND platform_user_id = $2::uuid
 	`, invitationID, userID)
@@ -669,6 +683,9 @@ func (s *OrgsService) DeclineInvitation(ctx context.Context, userID, invitationI
 
 // RevokeInvitation deletes a pending invitation of the org (org admins).
 func (s *OrgsService) RevokeInvitation(ctx context.Context, orgID, invitationID string) error {
+	if !isUUID(invitationID) {
+		return ErrInvitationNotFound
+	}
 	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM public.org_invitations WHERE id = $1::uuid AND org_id = $2::uuid
 	`, invitationID, orgID)
@@ -981,6 +998,30 @@ func (s *OrgsService) SetSSORequired(ctx context.Context, orgID, callerID string
 // off, no org) and (nil, ErrProjectNotFound) if the project row is
 // missing. Callers translate ErrSSORequiredForOrg → 403
 // sso_required_for_org.
+// ErrSSOSessionOutOfScope: a session from an organization's single sign-on
+// used on something outside that organization. An SSO session works only
+// for its own org and the org's projects: the org's admins run its
+// identity provider, so it must not reach the person's own projects or
+// other orgs. Those need the person's own sign-in (password or passkey).
+var ErrSSOSessionOutOfScope = errors.New("sso session is limited to its organization")
+
+// SSOSessionInScope reports whether a session may act on something that
+// belongs to orgID ("" = not in any org, e.g. a personal project). Only
+// SSO sessions are limited: to their own org.
+func SSOSessionInScope(claims *auth.Claims, orgID string) bool {
+	if claims == nil || claims.LoginVia != auth.LoginViaSSO {
+		return true
+	}
+	return orgID != "" && orgID == claims.SsoOrgID
+}
+
+// WriteSSOOutOfScope answers 403 for ErrSSOSessionOutOfScope.
+func WriteSSOOutOfScope(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":"this session comes from an organization's single sign-on and only works for that organization; sign in with your password or passkey","code":"sso_session_out_of_scope"}`))
+}
+
 func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, claims *auth.Claims, projectID string) error {
 	if developerPool == nil || claims == nil {
 		return nil
@@ -999,6 +1040,13 @@ func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, c
 			return ErrProjectNotFound
 		}
 		return fmt.Errorf("lookup project sso_required: %w", err)
+	}
+	projOrg := ""
+	if orgID != nil {
+		projOrg = *orgID
+	}
+	if !SSOSessionInScope(claims, projOrg) {
+		return ErrSSOSessionOutOfScope
 	}
 	if orgID == nil || ssoRequired == nil || !*ssoRequired {
 		return nil

@@ -125,6 +125,10 @@ For each teammate:
    accept. Invitations expire after 30 days; admins see pending
    ones on the org page and can withdraw them.
 
+An SSO session only works for its own organization (its projects and
+settings). Members' own projects, other organizations, billing, tokens
+and account settings need their own sign-in.
+
 Membership changes (invite, remove, SSO settings) can only be made
 from a console session, not with a personal access token. Accepting
 an invitation needs the invitee's own sign-in — not a token and not

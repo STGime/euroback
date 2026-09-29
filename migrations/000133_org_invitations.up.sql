@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS public.org_invitations (
     invited_by       UUID REFERENCES public.platform_users(id) ON DELETE SET NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at       TIMESTAMPTZ NOT NULL DEFAULT now() + interval '30 days',
+    -- true for the memberships this migration turned into invitations
+    -- (the down migration restores only those).
+    from_membership  BOOLEAN NOT NULL DEFAULT false,
     UNIQUE (org_id, platform_user_id)
 );
 
@@ -38,8 +41,8 @@ WITH movable AS (
        AND EXISTS (SELECT 1 FROM public.org_members c
                     WHERE c.org_id = o.id AND c.platform_user_id = o.created_by)
 ), invited AS (
-    INSERT INTO public.org_invitations (org_id, platform_user_id, role, invited_by)
-    SELECT org_id, platform_user_id, role, created_by FROM movable
+    INSERT INTO public.org_invitations (org_id, platform_user_id, role, invited_by, from_membership)
+    SELECT org_id, platform_user_id, role, created_by, true FROM movable
     ON CONFLICT (org_id, platform_user_id) DO NOTHING
     RETURNING org_id, platform_user_id
 )

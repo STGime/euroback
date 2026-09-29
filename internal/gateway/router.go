@@ -728,7 +728,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// what (incl. SSO sign-in): console sessions only, never
 				// a personal access token.
 				r.Use(auth.RequireConsoleSession)
-				r.Post("/", h.HandleCreateOrg())
+				r.With(auth.RequirePersonalSession).Post("/", h.HandleCreateOrg())
 				r.Get("/", h.HandleListOrgs())
 				// Pending invitations of the caller (static path before {id}).
 				r.Get("/invitations", h.HandleListMyInvitations())
@@ -791,14 +791,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// Act need buyer name + address on invoices. These
 				// endpoints intentionally work even when billing is
 				// off so a user can pre-fill before the launch flip.
-				r.Get("/profile", billing.HandleGetBillingProfile(billingSvc))
-				r.Put("/profile", billing.HandleUpsertBillingProfile(billingSvc))
-				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
-				r.Post("/checkout/new-project", billing.HandleNewProjectCheckout(billingSvc))
-				r.Get("/invoices", billing.HandleListInvoices(billingSvc))
-				r.Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
-				r.Post("/subscriptions/{id}/cancel", billing.HandleCancelSubscription(billingSvc))
-				r.Get("/projects/{project_id}/subscription", billing.HandleGetProjectSubscription(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/profile", billing.HandleGetBillingProfile(billingSvc))
+				r.With(auth.RequirePersonalSession).Put("/profile", billing.HandleUpsertBillingProfile(billingSvc))
+				r.With(auth.RequirePersonalSession).Post("/checkout", billing.HandleCreateCheckout(billingSvc))
+				r.With(auth.RequirePersonalSession).Post("/checkout/new-project", billing.HandleNewProjectCheckout(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/invoices", billing.HandleListInvoices(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
+				r.With(auth.RequirePersonalSession).Post("/subscriptions/{id}/cancel", billing.HandleCancelSubscription(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/projects/{project_id}/subscription", billing.HandleGetProjectSubscription(billingSvc))
 			})
 
 			// UNAUTHENTICATED: Mollie's webhook endpoint. Mollie
@@ -1681,6 +1681,10 @@ func projectMembershipMiddleware(pool, developerPool *pgxpool.Pool, isDev bool) 
 			// session isn't SSO-backed gets 403 with the machine-
 			// readable code so the console can bounce.
 			if err := tenant.EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
+				if errors.Is(err, tenant.ErrSSOSessionOutOfScope) {
+					tenant.WriteSSOOutOfScope(w)
+					return
+				}
 				if errors.Is(err, tenant.ErrSSORequiredForOrg) {
 					tenant.WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 					return
@@ -1918,6 +1922,9 @@ func buildRealtimeAuthorize(pool, developerPool *pgxpool.Pool, platformAuth *aut
 				return realtime.AuthorizedClient{}, realtime.ErrForbidden
 			}
 			if err := tenant.EnforceOrgSSOForProject(ctx, developerPool, platformClaims, requestedProjectID); err != nil {
+				if errors.Is(err, tenant.ErrSSOSessionOutOfScope) {
+					return realtime.AuthorizedClient{}, realtime.ErrForbidden
+				}
 				if errors.Is(err, tenant.ErrSSORequiredForOrg) {
 					return realtime.AuthorizedClient{}, realtime.ErrForbidden
 				}

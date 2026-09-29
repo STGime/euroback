@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/eurobase/euroback/internal/auth"
 )
 
 // Org membership needs the invitee's consent: an invite is pending and
@@ -47,6 +49,11 @@ func TestOrgInvitation_NeedsInviteeConsent(t *testing.T) {
 	// Duplicates are refused.
 	if _, err := svc.InviteMember(ctx, org.ID, adminID, "consent-invitee@test.eurobase.local", RoleOrgMember); !errors.Is(err, ErrInvitationExists) {
 		t.Fatalf("second invite: %v", err)
+	}
+
+	// A malformed id is "not found", not an error.
+	if _, err := svc.AcceptInvitation(ctx, inviteeID, "not-a-uuid"); !errors.Is(err, ErrInvitationNotFound) {
+		t.Fatalf("malformed id: %v", err)
 	}
 
 	// Nobody else can accept or decline it — not another user, not the admin.
@@ -123,5 +130,66 @@ func TestOrgInvitation_NeedsInviteeConsent(t *testing.T) {
 	}
 	if err := svc.RevokeInvitation(ctx, org2.ID, pending[0].ID); !errors.Is(err, ErrInvitationNotFound) {
 		t.Fatalf("cross-org revoke: %v", err)
+	}
+}
+
+// An SSO session works only for its own org: that org's projects and
+// settings, never the person's other projects or other orgs.
+func TestSSOSessionScopedToItsOrg(t *testing.T) {
+	sso := &auth.Claims{Subject: "u1", LoginVia: auth.LoginViaSSO, SsoOrgID: "org-a"}
+	if !SSOSessionInScope(sso, "org-a") || SSOSessionInScope(sso, "org-b") || SSOSessionInScope(sso, "") {
+		t.Fatal("SSO session scope wrong")
+	}
+	for _, via := range []string{auth.LoginViaPassword, auth.LoginViaPasskey, auth.LoginViaPAT, ""} {
+		c := &auth.Claims{Subject: "u1", LoginVia: via}
+		if !SSOSessionInScope(c, "") || !SSOSessionInScope(c, "org-b") {
+			t.Fatalf("%q session limited", via)
+		}
+	}
+
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	userID := insertTestPlatformUser(t, pool, "sso-scope@test.eurobase.local")
+	svc := &TenantService{pool: pool, developerPool: pool}
+	personal, err := svc.CreateProject(ctx, userID, "sso-scope@test.eurobase.local", CreateProjectRequest{Name: "Personal", Slug: "test-sso-scope-personal", Region: "fr-par", Plan: "free"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupProject(t, pool, personal.ID) })
+	orgProj, err := svc.CreateProject(ctx, userID, "sso-scope@test.eurobase.local", CreateProjectRequest{Name: "Org", Slug: "test-sso-scope-org", Region: "fr-par", Plan: "free"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupProject(t, pool, orgProj.ID) })
+	orgs, _ := NewOrgsService(pool, nil)
+	org, err := orgs.CreateOrg(ctx, userID, "SSO scope fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE id = $1::uuid`, org.ID) })
+	if _, err := pool.Exec(ctx, `UPDATE projects SET org_id = $1 WHERE id = $2`, org.ID, orgProj.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	session := &auth.Claims{Subject: userID, Email: "sso-scope@test.eurobase.local", LoginVia: auth.LoginViaSSO, SsoOrgID: org.ID}
+	if err := EnforceOrgSSOForProject(ctx, pool, session, orgProj.ID); err != nil {
+		t.Fatalf("SSO session refused on its org's project: %v", err)
+	}
+	if err := EnforceOrgSSOForProject(ctx, pool, session, personal.ID); !errors.Is(err, ErrSSOSessionOutOfScope) {
+		t.Fatalf("SSO session reached a personal project: %v", err)
+	}
+	password := &auth.Claims{Subject: userID, LoginVia: auth.LoginViaPassword}
+	if err := EnforceOrgSSOForProject(ctx, pool, password, personal.ID); err != nil {
+		t.Fatalf("password session refused: %v", err)
+	}
+	list, err := svc.ListProjects(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != orgProj.ID {
+		t.Fatalf("SSO session lists %d projects (%+v), want only the org's", len(list), list)
+	}
+	if list, _ := svc.ListProjects(ctx, password); len(list) != 2 {
+		t.Fatalf("password session lists %d projects, want 2", len(list))
 	}
 }

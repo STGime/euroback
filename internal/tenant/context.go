@@ -123,6 +123,10 @@ func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// touching the project, not just callers reaching it via
 			// the org-membership union in ListProjects.
 			if err := EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
+				if errors.Is(err, ErrSSOSessionOutOfScope) {
+					WriteSSOOutOfScope(w)
+					return
+				}
 				if errors.Is(err, ErrSSORequiredForOrg) {
 					WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 					return
@@ -282,6 +286,10 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool, resolver TenantPo
 			// SSO enforcement (migration 000121) — see
 			// PlatformTenantContext for rationale.
 			if err := EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
+				if errors.Is(err, ErrSSOSessionOutOfScope) {
+					WriteSSOOutOfScope(w)
+					return
+				}
 				if errors.Is(err, ErrSSORequiredForOrg) {
 					WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 					return

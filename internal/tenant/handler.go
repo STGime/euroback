@@ -536,6 +536,10 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// (mounted at /{id}/org sibling to /{id}), so we enforce
 		// here directly.
 		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+			if errors.Is(err, ErrSSOSessionOutOfScope) {
+				WriteSSOOutOfScope(w)
+				return
+			}
 			if errors.Is(err, ErrSSORequiredForOrg) {
 				WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 				return
@@ -674,6 +678,10 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// SSO enforcement (migration 000121) — now that we know the
 		// caller is authorised, apply the SSO gate.
 		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+			if errors.Is(err, ErrSSOSessionOutOfScope) {
+				WriteSSOOutOfScope(w)
+				return
+			}
 			if errors.Is(err, ErrSSORequiredForOrg) {
 				WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 				return

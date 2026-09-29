@@ -882,10 +882,23 @@ func (s *TenantService) annotateAll(ctx context.Context, projects []Project) {
 // is skipped and behaviour matches the pre-#536 hotfix rollback.
 // Never emits SQLSTATE 42501 on org_members even when the org pool
 // is nil.
-func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) ([]Project, error) {
+func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (out []Project, outErr error) {
 	if claims == nil {
 		return nil, fmt.Errorf("ListProjects: nil claims")
 	}
+	// A session from an org's SSO lists only that org's projects.
+	defer func() {
+		if claims.LoginVia != auth.LoginViaSSO || outErr != nil {
+			return
+		}
+		kept := out[:0]
+		for _, p := range out {
+			if p.OrgID != nil && SSOSessionInScope(claims, *p.OrgID) {
+				kept = append(kept, p)
+			}
+		}
+		out = kept
+	}()
 	platformUserID := claims.Subject
 	// Direct-member branch. Runs on gateway pool as today.
 	projects, err := s.listDirectMemberProjects(ctx, platformUserID)
