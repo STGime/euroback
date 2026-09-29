@@ -260,7 +260,7 @@
 							</button>
 						</div>
 						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.claude}</pre>
-						<ProjectTokenButton projectId={projectId ?? ''} tokenName="claude-code" />
+						<ProjectTokenButton projectId={projectId ?? ''} projectName={info.project_name} tokenName="claude-code" configTemplate={info.mcp_config.claude} />
 						<p class="mt-3 text-xs text-gray-500">Or add to <code class="rounded bg-gray-100 px-1 font-mono">~/.claude/settings.json</code>:</p>
 						<pre class="mt-2 rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto">{info.mcp_config.claude_json}</pre>
 					</div>
@@ -371,7 +371,7 @@
 							Use a <strong>Developer</strong> token for this project, so Lovable can create and change tables here — and nothing in your other projects.
 							To change the token later: Lovable can't edit a connection — delete it (Connectors → Eurobase) and add it again with the new token.
 						</p>
-						<ProjectTokenButton projectId={projectId ?? ''} defaultRole="developer" tokenName="lovable" />
+						<ProjectTokenButton projectId={projectId ?? ''} projectName={info.project_name} defaultRole="developer" tokenName="lovable" />
 					</div>
 
 					<!-- 5. Allowed URLs -->
@@ -479,7 +479,7 @@
 							</button>
 						</div>
 						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.codex}</pre>
-						<ProjectTokenButton projectId={projectId ?? ''} tokenName="codex" />
+						<ProjectTokenButton projectId={projectId ?? ''} projectName={info.project_name} tokenName="codex" configTemplate={info.mcp_config.codex} />
 					</div>
 
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
@@ -539,7 +539,7 @@
 							</button>
 						</div>
 						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.cursor}</pre>
-						<ProjectTokenButton projectId={projectId ?? ''} tokenName="cursor" />
+						<ProjectTokenButton projectId={projectId ?? ''} projectName={info.project_name} tokenName="cursor" configTemplate={info.mcp_config.cursor} />
 					</div>
 
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
@@ -599,7 +599,7 @@
 							</button>
 						</div>
 						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.windsurf}</pre>
-						<ProjectTokenButton projectId={projectId ?? ''} tokenName="windsurf" />
+						<ProjectTokenButton projectId={projectId ?? ''} projectName={info.project_name} tokenName="windsurf" configTemplate={info.mcp_config.windsurf} />
 					</div>
 				</div>
 

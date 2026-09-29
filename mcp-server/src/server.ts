@@ -33,15 +33,6 @@ When running SQL queries, prefer SELECT for exploration. Only run INSERT/UPDATE/
 ${scopeNote(scope)}`,
   });
 
-  // Collect every tool as it's registered, then attach its annotations.
-  const registered = new Map<string, RegisteredTool>();
-  const tool = server.tool.bind(server) as (...args: unknown[]) => RegisteredTool;
-  (server as unknown as { tool: (...args: unknown[]) => RegisteredTool }).tool = (...args: unknown[]) => {
-    const t = tool(...args);
-    registered.set(args[0] as string, t);
-    return t;
-  };
-
   registerProjectTools(server, getClient);
   registerDatabaseTools(server, getClient);
   registerAuthTools(server, getClient);
@@ -50,13 +41,15 @@ ${scopeNote(scope)}`,
   registerFunctionTools(server, getClient);
   registerStatusTools(server, getClient);
 
-  (server as unknown as { tool: unknown }).tool = tool;
-  for (const [name, t] of registered) {
+  // Attach annotations to every registered tool, however it was
+  // registered (server.tool or registerTool).
+  const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })._registeredTools;
+  for (const [name, t] of Object.entries(registered)) {
     const annotations = TOOL_ANNOTATIONS[name];
     if (!annotations) {
       throw new Error(`MCP tool ${name} has no annotations — add it to TOOL_ANNOTATIONS`);
     }
-    t.update({ annotations });
+    t.update({ title: annotations.title, annotations });
   }
 
   return server;
@@ -81,8 +74,12 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   downloadFile: { title: 'Read file', readOnlyHint: true, openWorldHint: false },
   listFunctions: { title: 'List functions', readOnlyHint: true, openWorldHint: false },
   listSecrets: { title: 'List secrets', readOnlyHint: true, openWorldHint: false },
-  getSecret: { title: 'Read secret', readOnlyHint: true, openWorldHint: false },
-  listUsers: { title: 'List end users', readOnlyHint: true, openWorldHint: false },
+  // Deliberately NOT readOnlyHint: clients auto-approve read-only tools, and
+  // a decrypted secret (or end users' personal data) must never reach the
+  // model without the user saying yes — e.g. after a prompt injection in
+  // table data asked for it.
+  getSecret: { title: 'Reveal secret', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  listUsers: { title: 'List end users', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   healthCheck: { title: 'Health check', readOnlyHint: true, openWorldHint: false },
   // Writes.
   createTable: { title: 'Create table', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

@@ -137,4 +137,9 @@ test('tool annotations', () => {
     assert.equal(tools[w].annotations.readOnlyHint, false, w);
     assert.equal(tools[w].annotations.destructiveHint, true, w);
   }
+  // Secrets and end users' data always need the user's OK.
+  for (const p of ['getSecret', 'listUsers', 'getSignedUrl']) assert.equal(tools[p].annotations.readOnlyHint, false, p);
+  // No stale entries: the table and the registered tools match.
+  assert.deepEqual(Object.keys(TOOL_ANNOTATIONS).sort(), names.sort());
+  assert.equal(tools.runSQL.title, 'Run SQL');
 });
