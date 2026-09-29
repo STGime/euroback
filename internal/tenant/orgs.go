@@ -497,10 +497,32 @@ func (s *OrgsService) GetOIDCConfigPublic(ctx context.Context, orgID string) (*O
 
 // ── Membership management ─────────────────────────────────────
 
-// InviteMember adds a platform_user to the org by email. The user
-// must already exist in platform_users — MVP doesn't send an email
-// invitation to non-users. Follow-up PR adds email invitation flow.
-func (s *OrgsService) InviteMember(ctx context.Context, orgID, email, role string) (*OrgMember, error) {
+// OrgInvitation is a pending invitation: the invitee becomes a member
+// only by accepting it (AcceptInvitation), signed in as themselves.
+type OrgInvitation struct {
+	ID             string    `json:"id"`
+	OrgID          string    `json:"org_id"`
+	OrgName        string    `json:"org_name,omitempty"`
+	PlatformUserID string    `json:"platform_user_id"`
+	Email          string    `json:"email"`
+	Role           string    `json:"role"`
+	InvitedByEmail string    `json:"invited_by_email,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+}
+
+// ErrInvitationNotFound: no pending invitation with that id for the caller.
+var ErrInvitationNotFound = errors.New("invitation not found")
+
+// ErrInvitationExists: the user already has a pending invitation to the org.
+var ErrInvitationExists = errors.New("the user already has a pending invitation")
+
+// InviteMember invites an existing platform user to the org by email. It
+// creates a *pending* invitation, not a membership: membership counts for
+// project access and SSO sign-in, so it needs the invitee's consent —
+// they accept in the console, signed in with their own credentials
+// (AcceptInvitation). The user must already exist in platform_users.
+func (s *OrgsService) InviteMember(ctx context.Context, orgID, invitedBy, email, role string) (*OrgInvitation, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return nil, errors.New("email is required")
@@ -523,21 +545,140 @@ func (s *OrgsService) InviteMember(ctx context.Context, orgID, email, role strin
 		return nil, fmt.Errorf("lookup user: %w", err)
 	}
 
-	var m OrgMember
+	var member bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM public.org_members WHERE org_id = $1::uuid AND platform_user_id = $2::uuid)
+	`, orgID, userID).Scan(&member); err != nil {
+		return nil, fmt.Errorf("check membership: %w", err)
+	}
+	if member {
+		return nil, ErrMemberExists
+	}
+
+	// An expired invitation doesn't block a new one.
+	if _, err := s.pool.Exec(ctx, `
+		DELETE FROM public.org_invitations
+		 WHERE org_id = $1::uuid AND platform_user_id = $2::uuid AND expires_at <= now()
+	`, orgID, userID); err != nil {
+		return nil, fmt.Errorf("clear expired invitation: %w", err)
+	}
+
+	inv := OrgInvitation{OrgID: orgID, PlatformUserID: userID, Email: email, Role: role}
 	err = s.pool.QueryRow(ctx, `
-		INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
-		VALUES ($1::uuid, $2::uuid, $3, 'manual')
-		RETURNING id::text, platform_user_id::text, $4::text AS email, role, invited_via, created_at
-	`, orgID, userID, role, email).Scan(
-		&m.ID, &m.PlatformUserID, &m.Email, &m.Role, &m.InvitedVia, &m.CreatedAt,
-	)
+		INSERT INTO public.org_invitations (org_id, platform_user_id, role, invited_by)
+		VALUES ($1::uuid, $2::uuid, $3, NULLIF($4, '')::uuid)
+		RETURNING id::text, created_at, expires_at
+	`, orgID, userID, role, invitedBy).Scan(&inv.ID, &inv.CreatedAt, &inv.ExpiresAt)
 	if err != nil {
 		if isUniqueViolation(err) {
-			return nil, ErrMemberExists
+			return nil, ErrInvitationExists
 		}
+		return nil, fmt.Errorf("insert invitation: %w", err)
+	}
+	return &inv, nil
+}
+
+// ListPendingInvitations returns an org's pending invitations (org admins
+// see them next to the members).
+func (s *OrgsService) ListPendingInvitations(ctx context.Context, orgID string) ([]OrgInvitation, error) {
+	return s.queryInvitations(ctx, `WHERE i.org_id = $1::uuid`, orgID)
+}
+
+// ListInvitationsForUser returns the caller's own pending invitations.
+func (s *OrgsService) ListInvitationsForUser(ctx context.Context, userID string) ([]OrgInvitation, error) {
+	return s.queryInvitations(ctx, `WHERE i.platform_user_id = $1::uuid`, userID)
+}
+
+func (s *OrgsService) queryInvitations(ctx context.Context, where string, arg string) ([]OrgInvitation, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT i.id::text, i.org_id::text, o.name, i.platform_user_id::text, u.email, i.role,
+		       coalesce(b.email, ''), i.created_at, i.expires_at
+		  FROM public.org_invitations i
+		  JOIN public.organizations o ON o.id = i.org_id
+		  JOIN public.platform_users u ON u.id = i.platform_user_id
+		  LEFT JOIN public.platform_users b ON b.id = i.invited_by
+		 `+where+` AND i.expires_at > now()
+		 ORDER BY i.created_at ASC
+		 LIMIT 500`, arg)
+	if err != nil {
+		return nil, fmt.Errorf("list invitations: %w", err)
+	}
+	defer rows.Close()
+	out := make([]OrgInvitation, 0, 4)
+	for rows.Next() {
+		var inv OrgInvitation
+		if err := rows.Scan(&inv.ID, &inv.OrgID, &inv.OrgName, &inv.PlatformUserID, &inv.Email, &inv.Role, &inv.InvitedByEmail, &inv.CreatedAt, &inv.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("scan invitation: %w", err)
+		}
+		out = append(out, inv)
+	}
+	return out, rows.Err()
+}
+
+// AcceptInvitation turns the caller's own pending invitation into a
+// membership. Only the invitee can accept (the invitation is keyed to
+// their platform user id).
+func (s *OrgsService) AcceptInvitation(ctx context.Context, userID, invitationID string) (*OrgMember, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var orgID, role string
+	err = tx.QueryRow(ctx, `
+		DELETE FROM public.org_invitations
+		 WHERE id = $1::uuid AND platform_user_id = $2::uuid AND expires_at > now()
+		RETURNING org_id::text, role
+	`, invitationID, userID).Scan(&orgID, &role)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrInvitationNotFound
+		}
+		return nil, fmt.Errorf("take invitation: %w", err)
+	}
+	var m OrgMember
+	err = tx.QueryRow(ctx, `
+		INSERT INTO public.org_members (org_id, platform_user_id, role, invited_via)
+		VALUES ($1::uuid, $2::uuid, $3, 'manual')
+		ON CONFLICT (org_id, platform_user_id) DO UPDATE SET role = public.org_members.role
+		RETURNING id::text, platform_user_id::text, role, invited_via, created_at
+	`, orgID, userID, role).Scan(&m.ID, &m.PlatformUserID, &m.Role, &m.InvitedVia, &m.CreatedAt)
+	if err != nil {
 		return nil, fmt.Errorf("insert member: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
 	return &m, nil
+}
+
+// DeclineInvitation deletes the caller's own pending invitation.
+func (s *OrgsService) DeclineInvitation(ctx context.Context, userID, invitationID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM public.org_invitations WHERE id = $1::uuid AND platform_user_id = $2::uuid
+	`, invitationID, userID)
+	if err != nil {
+		return fmt.Errorf("decline invitation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInvitationNotFound
+	}
+	return nil
+}
+
+// RevokeInvitation deletes a pending invitation of the org (org admins).
+func (s *OrgsService) RevokeInvitation(ctx context.Context, orgID, invitationID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM public.org_invitations WHERE id = $1::uuid AND org_id = $2::uuid
+	`, invitationID, orgID)
+	if err != nil {
+		return fmt.Errorf("revoke invitation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInvitationNotFound
+	}
+	return nil
 }
 
 // RemoveMember drops an org_members row. Admin-only. Refuses to

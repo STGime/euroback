@@ -22,6 +22,10 @@ const (
 	// step-up (#621). Not accepted by organizations.sso_required —
 	// only LoginViaSSO for the matching org is.
 	LoginViaPasskey = "passkey"
+	// LoginViaPAT: a personal access token (set by PATService.Validate).
+	// Tokens are handed to tools; account- and org-level actions refuse
+	// them (RequireConsoleSession).
+	LoginViaPAT = "pat"
 )
 
 // Claims holds the authenticated user's identity extracted from a JWT.

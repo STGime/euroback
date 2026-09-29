@@ -1,4 +1,5 @@
 <script lang="ts">
+	import type { OrgInvitation } from '$lib/api';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { api, APIError, type OrgWithMembership } from '$lib/api.js';
@@ -43,9 +44,38 @@
 		profileLoaded = true;
 	});
 
+	// Pending invitations to orgs: membership only starts when the
+	// invitee accepts here.
+	let invitations = $state<OrgInvitation[]>([]);
+	let invitationBusy = $state('');
+	let invitationError = $state('');
+
+	async function loadInvitations() {
+		try {
+			invitations = (await api.listMyOrgInvitations()).invitations ?? [];
+		} catch {
+			invitations = [];
+		}
+	}
+
+	async function respondInvitation(inv: OrgInvitation, accept: boolean) {
+		invitationBusy = inv.id;
+		invitationError = '';
+		try {
+			if (accept) await api.acceptOrgInvitation(inv.id);
+			else await api.declineOrgInvitation(inv.id);
+			await load(); // also reloads the invitations
+		} catch (err) {
+			invitationError = err instanceof Error ? err.message : 'Failed to respond to the invitation';
+		} finally {
+			invitationBusy = '';
+		}
+	}
+
 	async function load() {
 		loading = true;
 		error = '';
+		void loadInvitations();
 		try {
 			const res = await api.listOrgs();
 			orgs = res.orgs ?? [];
@@ -136,6 +166,25 @@
 			</a>
 		{/if}
 	</div>
+
+	{#if invitations.length > 0}
+		<div class="mt-6 space-y-3">
+			{#each invitations as inv (inv.id)}
+				<div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-eurobase-200 bg-eurobase-50/50 px-5 py-4">
+					<p class="text-sm text-gray-800">
+						{#if inv.invited_by_email}<strong>{inv.invited_by_email}</strong> invited you{:else}You're invited{/if}
+						to join <strong>{inv.org_name}</strong> as <strong>{inv.role}</strong>.
+						<span class="block text-xs text-gray-500">You only become a member if you accept. Members get access to the organization's projects — and the organization's single sign-on (run by its admins) can then sign you in to your Eurobase account. Only accept organizations you trust.</span>
+					</p>
+					<div class="flex gap-2">
+						<button type="button" disabled={invitationBusy === inv.id} onclick={() => respondInvitation(inv, false)} class="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 cursor-pointer">Decline</button>
+						<button type="button" disabled={invitationBusy === inv.id} onclick={() => respondInvitation(inv, true)} class="rounded-lg bg-eurobase-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-eurobase-700 disabled:opacity-50 cursor-pointer">Accept</button>
+					</div>
+				</div>
+			{/each}
+			{#if invitationError}<p class="text-sm text-red-600">{invitationError}</p>{/if}
+		</div>
+	{/if}
 
 	{#if loading || !profileLoaded}
 		<div class="mt-16 flex flex-col items-center text-center">

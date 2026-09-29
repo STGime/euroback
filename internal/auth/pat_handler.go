@@ -15,6 +15,9 @@ import (
 // GET /platform/auth/account/tokens
 func HandleListPATs(svc *PATService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseDelegatedSession(w, r, "list or manage tokens") {
+			return
+		}
 		claims, ok := ClaimsFromContext(r.Context())
 		if !ok {
 			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
@@ -51,8 +54,11 @@ func HandleCreatePAT(svc *PATService) http.HandlerFunc {
 		// middleware sets IsSuperadmin=false for PAT claims, but doesn't
 		// otherwise distinguish the auth source — so we re-check the
 		// Authorization header directly.
-		if isPATAuth(r) {
+		if IsPATSession(r) {
 			writeJSONError(w, "personal access tokens cannot create other tokens; sign in to the console first", http.StatusForbidden)
+			return
+		}
+		if refuseDelegatedSession(w, r, "create tokens") {
 			return
 		}
 
@@ -91,6 +97,9 @@ func HandleCreatePAT(svc *PATService) http.HandlerFunc {
 // DELETE /platform/auth/account/tokens/{id}
 func HandleRevokePAT(svc *PATService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseDelegatedSession(w, r, "revoke tokens") {
+			return
+		}
 		claims, ok := ClaimsFromContext(r.Context())
 		if !ok {
 			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
@@ -114,6 +123,69 @@ func HandleRevokePAT(svc *PATService) http.HandlerFunc {
 		slog.Info("pat revoked", "user_id", claims.Subject, "token_id", tokenID)
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// refusePAT answers 403 and returns true when the request authenticated
+// with a personal access token. Account-level actions (delete the account,
+// change the password, manage tokens and passkeys) need a console session:
+// a token is handed to tools (an MCP connector, CI), and whoever holds it
+// must not be able to take over or destroy the account.
+func refusePAT(w http.ResponseWriter, r *http.Request, what string) bool {
+	if !IsPATSession(r) {
+		return false
+	}
+	writeJSONError(w, "personal access tokens cannot "+what+"; sign in to the console", http.StatusForbidden)
+	return true
+}
+
+// refuseDelegatedSession refuses what refusePAT refuses, and also a session
+// from an organization's SSO: the org's admin runs that identity provider,
+// so such a session must not act for the person — manage their tokens,
+// delete or re-secure their account, or accept invitations in their name.
+// Those need the user's own sign-in (password or passkey).
+func refuseDelegatedSession(w http.ResponseWriter, r *http.Request, what string) bool {
+	if refusePAT(w, r, what) {
+		return true
+	}
+	if c, ok := ClaimsFromContext(r.Context()); ok && c != nil && c.LoginVia == LoginViaSSO {
+		writeJSONError(w, "a session from an organization's single sign-on cannot "+what+"; sign in with your password or passkey", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
+// RequirePersonalSession refuses personal access tokens and SSO sessions
+// (see refuseDelegatedSession): for accepting or declining invitations.
+func RequirePersonalSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuseDelegatedSession(w, r, "accept or decline invitations") {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// IsPATSession reports whether the request authenticated with a personal
+// access token: the claims say so (set where the token was validated), or
+// — belt and braces — the Authorization header carries one.
+func IsPATSession(r *http.Request) bool {
+	if c, ok := ClaimsFromContext(r.Context()); ok && c != nil && c.LoginVia == LoginViaPAT {
+		return true
+	}
+	return isPATAuth(r)
+}
+
+// RequireConsoleSession refuses personal access tokens (403). For routes
+// that change who can access what — org settings and membership, project
+// membership — which stay in the console: a token is handed to tools, and
+// whoever holds it must not be able to grant themselves or others access.
+func RequireConsoleSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refusePAT(w, r, "change organization or member settings") {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func isPATAuth(r *http.Request) bool {

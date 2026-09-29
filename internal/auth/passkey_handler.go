@@ -143,7 +143,7 @@ func requireConsoleSession(w http.ResponseWriter, r *http.Request) (*Claims, boo
 		writeJSONError(w, "unauthorized", http.StatusUnauthorized)
 		return nil, false
 	}
-	if isPATAuth(r) {
+	if IsPATSession(r) {
 		writeJSONError(w, "personal access tokens cannot manage passkeys; sign in to the console", http.StatusForbidden)
 		return nil, false
 	}

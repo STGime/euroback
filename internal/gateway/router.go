@@ -705,7 +705,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			} else {
 				r.Use(platformAuth.Handler)
 			}
-			r.Post("/accept", tenant.HandleAcceptInvitation(pool))
+			r.With(auth.RequirePersonalSession).Post("/accept", tenant.HandleAcceptInvitation(pool))
 		})
 
 		// Team-tier organizations — CRUD + membership + SSO config.
@@ -724,13 +724,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 			if ssoConfig.Orgs != nil {
 				h := &tenant.OrgsHandler{Svc: ssoConfig.Orgs, Mailer: emailService}
+				// Org settings and membership decide who can access
+				// what (incl. SSO sign-in): console sessions only, never
+				// a personal access token.
+				r.Use(auth.RequireConsoleSession)
 				r.Post("/", h.HandleCreateOrg())
 				r.Get("/", h.HandleListOrgs())
+				// Pending invitations of the caller (static path before {id}).
+				r.Get("/invitations", h.HandleListMyInvitations())
+				r.With(auth.RequirePersonalSession).Post("/invitations/{invId}/accept", h.HandleAcceptInvitation())
+				r.With(auth.RequirePersonalSession).Post("/invitations/{invId}/decline", h.HandleDeclineInvitation())
 				r.Get("/{id}", h.HandleGetOrg())
 				r.Patch("/{id}/sso", h.HandleSetSSOConfig())
 				r.Patch("/{id}/sso-required", h.HandleSetSSORequired())
 				r.Post("/{id}/members", h.HandleInviteMember())
 				r.Delete("/{id}/members/{userId}", h.HandleRemoveMember())
+				r.Delete("/{id}/invitations/{invId}", h.HandleRevokeInvitation())
 			} else {
 				r.Handle("/*", http.HandlerFunc(ssoDisabledHandler))
 			}
@@ -1216,10 +1225,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// short-circuits before that DB call. Belt-and-braces; the
 			// inner check stays so the cleanup is a separate follow-up.
 			r.With(tenant.RequireMinRole("viewer")).Get("/members", tenant.HandleListMembers(pool))
-			r.With(tenant.RequireMinRole("admin")).Post("/members/invite", tenant.HandleInviteMember(pool, sendEmailFn))
-			r.With(tenant.RequireMinRole("admin")).Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
-			r.With(tenant.RequireMinRole("admin")).Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
-			r.With(tenant.RequireMinRole("owner")).Patch("/members/{userId}", tenant.HandleChangeRole(pool))
+			// Membership changes decide who can access the project:
+			// console sessions only, never a personal access token.
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Post("/members/invite", tenant.HandleInviteMember(pool, sendEmailFn))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Patch("/members/{userId}", tenant.HandleChangeRole(pool))
 
 			// Edge Functions (serverless compute management).
 			fnSvc := functions.NewService(pool, vaultSvc)
@@ -1373,7 +1384,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// Kept as a separate route from PATCH /{id} because the shape
 		// + auth check (owner + org membership) is entirely different
 		// from the auth_config flow.
-		r.Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
+		r.With(auth.RequireConsoleSession).Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
 		r.Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 

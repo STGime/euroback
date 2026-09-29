@@ -79,6 +79,13 @@
 				const res = await api.listOrgs();
 				if (!stillCurrent()) return;
 				hasAnyOrgMembership = (res.orgs?.length ?? 0) > 0;
+				// A pending org invitation also shows the entry, so the
+				// invitee can find and accept (or decline) it.
+				if (!hasAnyOrgMembership) {
+					const inv = await api.listMyOrgInvitations().catch(() => ({ invitations: [] }));
+					if (!stillCurrent()) return;
+					hasAnyOrgMembership = (inv.invitations?.length ?? 0) > 0;
+				}
 			} catch {
 				if (!stillCurrent()) return;
 				hasAnyOrgMembership = false;

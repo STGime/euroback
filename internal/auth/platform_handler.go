@@ -210,6 +210,9 @@ func HandleUpdateProfile(svc *PlatformAuthService) http.HandlerFunc {
 // HandleChangePassword returns an HTTP handler for POST /platform/auth/account/change-password.
 func HandleChangePassword(svc *PlatformAuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseDelegatedSession(w, r, "change the password") {
+			return
+		}
 		claims, ok := ClaimsFromContext(r.Context())
 		if !ok {
 			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
@@ -243,6 +246,9 @@ func HandleChangePassword(svc *PlatformAuthService) http.HandlerFunc {
 // HandleDeleteAccount returns an HTTP handler for POST /platform/auth/account/delete.
 func HandleDeleteAccount(svc *PlatformAuthService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseDelegatedSession(w, r, "delete the account") {
+			return
+		}
 		claims, ok := ClaimsFromContext(r.Context())
 		if !ok {
 			writeJSONError(w, "unauthorized", http.StatusUnauthorized)

@@ -97,6 +97,7 @@
 		inviteError = '';
 		try {
 			await api.inviteOrgMember(orgId, inviteEmail.trim(), inviteRole);
+			inviteNotice = `Invitation sent to ${inviteEmail.trim()}. They become a member once they accept it in the console.`;
 			showInvite = false;
 			inviteEmail = '';
 			await load();
@@ -104,6 +105,21 @@
 			inviteError = err instanceof Error ? err.message : 'Failed to invite member';
 		} finally {
 			inviting = false;
+		}
+	}
+
+	let inviteNotice = $state('');
+	let revokingInvitation = $state('');
+
+	async function revokeInvitation(invitationId: string) {
+		revokingInvitation = invitationId;
+		try {
+			await api.revokeOrgInvitation(orgId, invitationId);
+			await load();
+		} catch (err) {
+			inviteError = err instanceof Error ? err.message : 'Failed to withdraw the invitation';
+		} finally {
+			revokingInvitation = '';
 		}
 	}
 
@@ -280,6 +296,21 @@
 					</li>
 				{/each}
 			</ul>
+			{#if inviteNotice}<p class="mt-3 text-sm text-emerald-700">{inviteNotice}</p>{/if}
+			{#if detail.role === 'admin' && (detail.pending_invitations?.length ?? 0) > 0}
+				<h3 class="mt-6 text-sm font-semibold text-gray-900">Pending invitations</h3>
+				<p class="text-xs text-gray-500">Not members yet — they join when they accept in the console.</p>
+				<ul class="mt-2 divide-y divide-gray-100">
+					{#each detail.pending_invitations ?? [] as inv (inv.id)}
+						<li class="flex items-center justify-between py-2">
+							<p class="text-sm text-gray-700">{inv.email} <span class="text-xs text-gray-400">· {inv.role} · invited {formatDate(inv.created_at)}</span></p>
+							<button type="button" disabled={revokingInvitation === inv.id} onclick={() => revokeInvitation(inv.id)} class="text-xs font-medium text-red-600 hover:text-red-700 disabled:opacity-50 cursor-pointer">
+								{revokingInvitation === inv.id ? 'Withdrawing…' : 'Withdraw'}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
 		</section>
 
 		<!-- SSO section (admin-only, per plan) -->

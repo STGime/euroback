@@ -99,9 +99,12 @@
 					<li>Save.</li>
 				</ol>
 				<p class="text-sm text-gray-700">
-					Bea receives a notification email from Eurobase — subject <em>"You've been added to LexVault on Eurobase"</em>
-					— naming Alex as the inviter and linking to the sign-in page. The DB row is written before the mail is
-					sent, so a mail-provider hiccup never leaves her in a half-invited state.
+					Bea receives an email from Eurobase — subject <em>"You're invited to join LexVault on Eurobase"</em> —
+					naming Alex as the inviter. The invitation is <strong>pending</strong>: Bea signs in to the console with her
+					usual sign-in and accepts it under <strong>Organizations</strong> (or declines it). Only then is she a
+					member — with access to the org's projects and SSO sign-in. Alex sees her under <em>Pending invitations</em>
+					until then and can withdraw the invitation. The email is only a pointer: the invitation is in the
+					console even if the mail never arrives.
 				</p>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">5. Bea signs in with SSO</h3>
@@ -200,7 +203,9 @@
 				<h3 class="text-base font-semibold text-gray-900 pt-2">Security notes</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li>Client secret is encrypted at rest with AES-256-GCM using a server-side platform key (<code class="rounded bg-gray-100 px-1 text-[11px]">PLATFORM_ENCRYPTION_KEY</code>). Never persisted plaintext.</li>
-					<li>Access to org-owned projects is gated on <code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>: an SSO login only succeeds for an email an org admin has already invited. Two properties fall out of that: (1) the load-bearing trust is on your org admins to only invite people they mean to; (2) a third-party IdP that returns a valid ID token for a user we've never invited still cannot get a platform session.</li>
+					<li>Access to org-owned projects is gated on <code class="rounded bg-gray-100 px-1 text-[11px]">org_members</code>: an SSO login only succeeds for a member, and nobody becomes a member without accepting an invitation, signed in as themselves. So an org admin can't pull someone else's account into their org, and a third-party IdP that returns a valid ID token for someone who isn't a member still can't get a platform session.</li>
+					<li>Platform superadmin accounts never sign in with SSO (password or passkey only).</li>
+					<li>Org settings and membership (SSO config, SSO required, invites, removals) can only be changed in the console, not with a personal access token.</li>
 					<li>SSO sessions have the same lifetime as password logins (24 h access token, refresh via the standard flow).</li>
 				</ul>
 			</div>
