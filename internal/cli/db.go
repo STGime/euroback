@@ -3,20 +3,14 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/eurobase/euroback/internal/query"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 // systemTables are platform-managed tables hidden from user listing.
-var systemTables = map[string]bool{
-	"users":           true,
-	"refresh_tokens":  true,
-	"storage_objects": true,
-	"email_tokens":    true,
-	"vault_secrets":   true,
-	"storage_shared_prefixes": true,
-}
+var systemTables = query.InternalTenantTables()
 
 // DbCmd returns the parent "db" command.
 func DbCmd() *cobra.Command {
@@ -59,10 +53,10 @@ func dbTablesCmd() *cobra.Command {
 			}
 
 			var tables []struct {
-				Name       string `json:"name"`
-				ColumnCount int   `json:"column_count"`
-				RowCount   int64  `json:"row_count"`
-				RLS        bool   `json:"rls_enabled"`
+				Name        string `json:"name"`
+				ColumnCount int    `json:"column_count"`
+				RowCount    int64  `json:"row_count"`
+				RLS         bool   `json:"rls_enabled"`
 			}
 			if err := json.Unmarshal(data, &tables); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
@@ -248,10 +242,10 @@ func dbQueryCmd() *cobra.Command {
 			}
 
 			var result struct {
-				Columns     []string                   `json:"columns"`
-				Rows        []map[string]interface{}    `json:"rows"`
-				RowCount    int                         `json:"row_count"`
-				ExecTimeMs  float64                     `json:"execution_time_ms"`
+				Columns    []string                 `json:"columns"`
+				Rows       []map[string]interface{} `json:"rows"`
+				RowCount   int                      `json:"row_count"`
+				ExecTimeMs float64                  `json:"execution_time_ms"`
 			}
 			if err := json.Unmarshal(data, &result); err != nil {
 				return fmt.Errorf("parsing response: %w", err)

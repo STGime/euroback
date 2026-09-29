@@ -37,8 +37,55 @@ var ErrInternalTable = errors.New("internal table")
 // page, so a Viewer (console session or token) must not reach those rows
 // through the data API either (#702). Developer and up can read every
 // table with SQL in the console, so they keep data-API access.
+//
+// Fail closed: every platform role other than developer / admin / owner
+// (a future lower role, an unexpected value) is restricted. "" is the SDK
+// path (no platform role), guarded by RLS and the column denylist instead.
 func viewerHidesInternal(ctx context.Context) bool {
-	return PlatformRoleFromContext(ctx) == "viewer"
+	switch PlatformRoleFromContext(ctx) {
+	case "", "developer", "admin", "owner":
+		return false
+	default:
+		return true
+	}
+}
+
+// RoleSeesInternalTables reports whether a project role may read the
+// internal tables (developer and up) — for surfaces outside this package
+// such as realtime subscriptions.
+func RoleSeesInternalTables(role string) bool {
+	switch role {
+	case "developer", "admin", "owner":
+		return true
+	}
+	return false
+}
+
+// InternalTenantTables returns a copy of the internal-table set.
+func InternalTenantTables() map[string]bool {
+	out := make(map[string]bool, len(internalTenantTables))
+	for t := range internalTenantTables {
+		out[t] = true
+	}
+	return out
+}
+
+// PublishableRow returns a copy of a row for realtime events without the
+// credential columns of the internal tables (password / token hashes,
+// vault ciphertext): events go to every subscriber of the channel,
+// whoever wrote the row.
+func PublishableRow(table string, row map[string]interface{}) map[string]interface{} {
+	denied := SensitiveSystemColumns(table)
+	if denied == nil || row == nil {
+		return row
+	}
+	out := make(map[string]interface{}, len(row))
+	for k, v := range row {
+		if !denied[k] {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // checkInternalTableRead refuses a platform Viewer's read of an internal

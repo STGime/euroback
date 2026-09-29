@@ -391,6 +391,7 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool, resolver TenantPo
 			// Stash the org-aware effective role for RequireRole
 			// downstream — same rationale as PlatformTenantContext.
 			ctx = WithRole(ctx, role)
+			ctx = query.WithPlatformRole(ctx, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

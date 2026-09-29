@@ -30,6 +30,16 @@ func TestInternalTableReadGuard(t *testing.T) {
 			t.Errorf("role %q refused: %v", PlatformRoleFromContext(ctx), err)
 		}
 	}
+	// Fail closed: an unknown platform role is restricted too.
+	if err := checkInternalTableRead(WithPlatformRole(context.Background(), "auditor"), "users"); !errors.Is(err, ErrInternalTable) {
+		t.Errorf("unknown role reads users: %v", err)
+	}
+	if got := PublishableRow("users", map[string]interface{}{"id": 1, "email": "a", "password_hash": "x"}); got["password_hash"] != nil || got["email"] != "a" {
+		t.Errorf("PublishableRow users = %v", got)
+	}
+	if got := PublishableRow("vault_secrets", map[string]interface{}{"name": "n", "secret": "s", "nonce": "n"}); got["secret"] != nil || got["nonce"] != nil {
+		t.Errorf("PublishableRow vault_secrets = %v", got)
+	}
 	got := visibleSchemaTables(viewer, []string{"todos", "users", "vault_secrets", "orders"})
 	if len(got) != 2 || got[0] != "todos" || got[1] != "orders" {
 		t.Errorf("viewer schema tables = %v", got)

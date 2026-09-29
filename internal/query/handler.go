@@ -406,7 +406,7 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishInsert(r.Context(), ProjectIDFromContext(r.Context()), tableName, row)
+			_ = pub.PublishInsert(r.Context(), ProjectIDFromContext(r.Context()), tableName, PublishableRow(tableName, row))
 		}
 
 		slog.Debug("row inserted", "schema", schema, "table", tableName)
@@ -446,7 +446,7 @@ func handleUpdateRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishUpdate(r.Context(), ProjectIDFromContext(r.Context()), tableName, row, nil)
+			_ = pub.PublishUpdate(r.Context(), ProjectIDFromContext(r.Context()), tableName, PublishableRow(tableName, row), nil)
 		}
 
 		slog.Debug("row updated", "schema", schema, "table", tableName, "id", rowID)

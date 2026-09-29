@@ -1239,11 +1239,7 @@ type RLSAuditEntry struct {
 // auditPlatformTables are tenant-schema tables managed by the platform; they
 // get their own policies during provisioning and don't need to appear in the
 // self-serve RLS audit (which flags developer-owned tables).
-var auditPlatformTables = map[string]bool{
-	"users": true, "refresh_tokens": true, "storage_objects": true,
-	"email_tokens": true, "user_identities": true, "vault_secrets": true,
-	"storage_shared_prefixes": true,
-}
+var auditPlatformTables = internalTenantTables
 
 // AuditRLS returns an RLS-posture snapshot for every user-facing table in the
 // tenant schema. Use it to surface tables where RLS is disabled or has no

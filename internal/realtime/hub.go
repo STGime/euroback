@@ -33,6 +33,7 @@ type Client struct {
 	tenantID      string
 	endUserID     string
 	service       bool
+	denied        map[string]bool // tables whose db: channels are refused
 	subscriptions []string // channels like "db:users", "db:users:uuid", "storage:bucket"
 	send          chan []byte
 	mu            sync.Mutex // protects subscriptions

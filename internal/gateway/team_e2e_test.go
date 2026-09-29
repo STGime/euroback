@@ -693,6 +693,10 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := as(env.platformJWT, "/schema"); r.code != 200 || !strings.Contains(r.body, `"name":"vault_secrets"`) {
 			return fmt.Errorf("owner schema listing lost internal tables: %w", r)
 		}
+		// The Connect page / generated agent files don't list them either.
+		if r := as(jwt, "/connect"); r.code != 200 || strings.Contains(r.body, "password_hash") || strings.Contains(r.body, `"name":"vault_secrets"`) {
+			return fmt.Errorf("viewer connect info lists internal tables: %w", r)
+		}
 		return nil
 	})
 

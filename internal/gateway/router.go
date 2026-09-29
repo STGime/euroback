@@ -1937,11 +1937,17 @@ func buildRealtimeAuthorize(pool, developerPool *pgxpool.Pool, platformAuth *aut
 			).Scan(&plan); err != nil {
 				return realtime.AuthorizedClient{}, fmt.Errorf("load project plan: %w", err)
 			}
-			return realtime.AuthorizedClient{
+			ac := realtime.AuthorizedClient{
 				ProjectID: requestedProjectID,
 				Plan:      plan,
 				Service:   true,
-			}, nil
+			}
+			// Same access as the console data API: below developer, no
+			// internal-table channels.
+			if !query.RoleSeesInternalTables(role) {
+				ac.DeniedTables = query.InternalTenantTables()
+			}
+			return ac, nil
 		}
 
 		// 3. End-user JWT — validated against the requested project's
