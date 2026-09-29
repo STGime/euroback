@@ -715,7 +715,7 @@
 								<li>Create, list or revoke tokens, or manage passkeys (sign in to the console for that)</li>
 								<li>Change your password or delete your account</li>
 							</ul>
-							<p class="mt-2 text-gray-600">Tokens don't expire — revoke one here when you no longer need it.</p>
+							<p class="mt-2 text-gray-600">Tokens don't expire — revoke one here when you no longer need it. Things a token creates (API keys it regenerates, functions, cron jobs, webhooks) keep working after it's revoked.</p>
 						</div>
 						<div>
 							<label for="token-name" class="block text-xs font-medium text-gray-700 mb-1">Name</label>

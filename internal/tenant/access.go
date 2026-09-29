@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"log/slog"
 	"net/http"
 
@@ -221,13 +222,25 @@ func capSessionRole(claims *auth.Claims, projectID string, role string) string {
 	if claims == nil || claims.PATProjectID == "" || role == "" {
 		return role
 	}
-	if claims.PATProjectID != projectID {
+	if !sameUUID(claims.PATProjectID, projectID) {
 		return ""
+	}
+	switch claims.PATRole {
+	case "viewer", "developer", "admin":
+	default:
+		return "" // unknown token role: no access (fail closed)
 	}
 	if roleLevel[claims.PATRole] < roleLevel[role] {
 		return claims.PATRole
 	}
 	return role
+}
+
+// sameUUID compares two UUIDs by value (case / formatting aside).
+func sameUUID(a, b string) bool {
+	ua, errA := uuid.Parse(a)
+	ub, errB := uuid.Parse(b)
+	return errA == nil && errB == nil && ua == ub
 }
 
 // OwnerOrOrgAdmin reports whether the user owns the project or is an admin

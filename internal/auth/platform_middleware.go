@@ -88,7 +88,7 @@ func ScopedTokenAllowed(method, path string) bool {
 // parsing because their format isn't a JWT and would fail the signature
 // check with a confusing error.
 func (m *PlatformAuthMiddleware) resolve(r *http.Request, tokenStr string) (*Claims, error) {
-	if strings.HasPrefix(tokenStr, PATPrefix) {
+	if IsPATToken(tokenStr) {
 		if m.pat == nil {
 			return nil, errors.New("pat received but PATService not configured")
 		}

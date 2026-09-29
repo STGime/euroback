@@ -84,7 +84,7 @@ func HandleCreatePAT(svc *PATService) http.HandlerFunc {
 			switch {
 			case errors.Is(err, ErrPATProjectNotFound):
 				writeJSONError(w, err.Error(), http.StatusNotFound)
-			case errors.Is(err, ErrPATRoleTooHigh):
+			case errors.Is(err, ErrPATRoleTooHigh), errors.Is(err, ErrPATProjectRequiresSSO):
 				writeJSONError(w, err.Error(), http.StatusForbidden)
 			default:
 				writeJSONError(w, err.Error(), http.StatusBadRequest)
@@ -199,11 +199,24 @@ func RequireConsoleSession(next http.Handler) http.Handler {
 	})
 }
 
+// RefuseScopedTokens refuses project-scoped tokens (403) on a route whose
+// action is never theirs, whatever their role — belt and braces next to
+// ScopedTokenAllowed.
+func RefuseScopedTokens(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, ok := ClaimsFromContext(r.Context()); ok && c != nil && c.PATProjectID != "" {
+			writeJSONError(w, "a project token can't do this; sign in to the console", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func isPATAuth(r *http.Request) bool {
 	const bearer = "Bearer "
 	h := r.Header.Get("Authorization")
 	if len(h) <= len(bearer) {
 		return false
 	}
-	return len(h) > len(bearer)+len(PATPrefix) && h[len(bearer):len(bearer)+len(PATPrefix)] == PATPrefix
+	return IsPATToken(h[len(bearer):])
 }

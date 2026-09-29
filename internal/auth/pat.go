@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -18,6 +19,18 @@ import (
 // detect PATs in the Authorization header so we route them to DB lookup
 // instead of the JWT validator.
 const PATPrefix = "eb_pat_"
+
+// ScopedPATPrefix starts every project-scoped token (#702). A different
+// prefix on purpose: gateway code from before scoped tokens only accepts
+// eb_pat_, so after a rollback — or on an old pod during a rolling deploy —
+// a scoped token fails (401) instead of being read as an account-wide one.
+const ScopedPATPrefix = "eb_ptk_"
+
+// IsPATToken reports whether a bearer token is a personal access token of
+// either kind.
+func IsPATToken(token string) bool {
+	return strings.HasPrefix(token, PATPrefix) || strings.HasPrefix(token, ScopedPATPrefix)
+}
 
 // PAT represents a personal access token row. The plaintext token is never
 // stored or returned after creation — only the prefix (for display) and
@@ -50,6 +63,11 @@ type ProjectRoleFunc func(ctx context.Context, claims *Claims, projectID string)
 // the project.
 var ErrPATRoleTooHigh = errors.New("a token's access can't exceed your own role in the project")
 
+// ErrPATProjectRequiresSSO: the project's organization requires SSO
+// sign-in, which a token can't satisfy — a token for it would be refused
+// on every use.
+var ErrPATProjectRequiresSSO = errors.New("this project's organization requires SSO sign-in; tokens can't be used with it")
+
 // ErrPATProjectNotFound: no access to the project the token is for.
 var ErrPATProjectNotFound = errors.New("project not found")
 
@@ -80,13 +98,13 @@ var ErrPATNotFound = errors.New("personal access token not found or expired")
 // generatePAT produces a fresh token in the form `eb_pat_<32 hex chars>`.
 // Returns the plaintext token (shown to the user once), the display prefix
 // (first 14 chars — `eb_pat_` + 7 hex), and the hex-encoded SHA-256 hash.
-func generatePAT() (token, prefix, hash string, err error) {
+func generatePAT(tokenPrefix string) (token, prefix, hash string, err error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", "", "", fmt.Errorf("generate pat random: %w", err)
 	}
 	body := hex.EncodeToString(buf)
-	token = PATPrefix + body
+	token = tokenPrefix + body
 	prefix = token[:14]
 	sum := sha256.Sum256([]byte(token))
 	hash = hex.EncodeToString(sum[:])
@@ -125,6 +143,9 @@ func (s *PATService) Create(ctx context.Context, in CreateInput) (*CreateResult,
 	if in.ProjectID == "" {
 		return nil, fmt.Errorf("project_id is required: a token is for one project")
 	}
+	if _, err := uuid.Parse(in.ProjectID); err != nil {
+		return nil, ErrPATProjectNotFound
+	}
 	if in.Role == "" {
 		in.Role = "viewer"
 	}
@@ -136,6 +157,9 @@ func (s *PATService) Create(ctx context.Context, in CreateInput) (*CreateResult,
 	}
 	own, err := s.projectRole(ctx, in.Claims, in.ProjectID)
 	if err != nil {
+		if errors.Is(err, ErrPATProjectRequiresSSO) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("check project role: %w", err)
 	}
 	if own == "" {
@@ -145,7 +169,7 @@ func (s *PATService) Create(ctx context.Context, in CreateInput) (*CreateResult,
 		return nil, ErrPATRoleTooHigh
 	}
 
-	token, prefix, hash, err := generatePAT()
+	token, prefix, hash, err := generatePAT(ScopedPATPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +231,7 @@ func (s *PATService) Revoke(ctx context.Context, userID, tokenID string) error {
 // always have IsSuperadmin = false: PATs are explicitly scoped down from
 // the underlying account so a leaked token can't reach the admin surface.
 func (s *PATService) Validate(ctx context.Context, plaintextToken string) (*Claims, error) {
-	if !strings.HasPrefix(plaintextToken, PATPrefix) {
+	if !IsPATToken(plaintextToken) {
 		return nil, ErrPATNotFound
 	}
 	sum := sha256.Sum256([]byte(plaintextToken))
@@ -246,6 +270,15 @@ func (s *PATService) Validate(ctx context.Context, plaintextToken string) (*Clai
 			`UPDATE public.personal_access_tokens SET last_used_at = now() WHERE id = $1`, tokenID)
 	}()
 
+	// Fail closed on anything inconsistent: a scoped token must have both
+	// project and role and the scoped prefix; a legacy token neither.
+	scopedRow := projectID != nil || role != nil
+	if scopedRow && (projectID == nil || role == nil || !patRoles[*role]) {
+		return nil, ErrPATNotFound
+	}
+	if scopedRow != strings.HasPrefix(plaintextToken, ScopedPATPrefix) {
+		return nil, ErrPATNotFound
+	}
 	c := &Claims{
 		LoginVia:     LoginViaPAT,
 		Subject:      userID,
@@ -253,7 +286,7 @@ func (s *PATService) Validate(ctx context.Context, plaintextToken string) (*Clai
 		IsSuperadmin: false, // PATs never carry superadmin
 		PATID:        tokenID,
 	}
-	if projectID != nil && role != nil {
+	if scopedRow {
 		c.PATProjectID, c.PATRole = *projectID, *role
 	}
 	return c, nil

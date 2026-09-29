@@ -885,6 +885,23 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 		}
 		out = kept
 	}()
+	// A project-scoped token: only its own project, looked up directly
+	// (no need to enumerate — and annotate — every project of its
+	// creator). The deferred filter above stays as a backstop.
+	if claims.PATProjectID != "" && s.developerPool != nil {
+		role, err := CallerProjectRole(ctx, s.developerPool, s.pool, claims, claims.PATProjectID)
+		if err != nil {
+			return nil, err
+		}
+		if role == "" {
+			return []Project{}, nil
+		}
+		ps, err := s.listProjectsByIDs(ctx, []string{claims.PATProjectID})
+		if err == nil {
+			s.enrichOrgNames(ctx, ps)
+		}
+		return ps, err
+	}
 	platformUserID := claims.Subject
 	// Direct-member branch. Runs on gateway pool as today.
 	projects, err := s.listDirectMemberProjects(ctx, platformUserID)

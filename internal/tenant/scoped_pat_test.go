@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/eurobase/euroback/internal/auth"
@@ -111,11 +112,33 @@ func TestScopedPATs(t *testing.T) {
 		t.Fatalf("removed creator's token still works: %q", role)
 	}
 
+	// A scoped token uses the scoped prefix; a scoped row presented with
+	// the legacy prefix (or the reverse) is refused — fail closed.
+	if !strings.HasPrefix(dev.PlaintextToken, auth.ScopedPATPrefix) {
+		t.Fatalf("scoped token prefix: %s", dev.PlaintextToken[:8])
+	}
+	swapped := "eb_ptk_legacy0123456789abcdef0123456789ab"
+	if _, err := pool.Exec(ctx, `INSERT INTO personal_access_tokens (user_id, name, prefix, token_hash)
+		VALUES ($1, 'swapped', 'eb_ptk_legacy', encode(sha256($2::bytea), 'hex'))`, owner, swapped); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pats.Validate(ctx, swapped); err == nil {
+		t.Fatal("legacy row accepted with the scoped prefix")
+	}
+
 	// Deleting the project deletes its tokens.
 	var n int
 	_ = pool.QueryRow(ctx, `SELECT count(*) FROM personal_access_tokens WHERE project_id = $1`, p1).Scan(&n)
 	if n != 2 {
 		t.Fatalf("tokens for p1 = %d, want 2", n)
+	}
+	cleanupProject(t, pool, p1)
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM personal_access_tokens WHERE project_id = $1`, p1).Scan(&n)
+	if n != 0 {
+		t.Fatalf("tokens left after deleting the project: %d", n)
+	}
+	if _, err := pats.Validate(ctx, dev.PlaintextToken); err == nil {
+		t.Fatal("token of a deleted project still validates")
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM personal_access_tokens WHERE user_id = ANY($1::uuid[])`, []string{owner, viewer}) })
 }
