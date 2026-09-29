@@ -41,6 +41,23 @@ function lovablePreviewProjectId(u: URL): string {
 	return LOVABLE_PROJECT_ID.test(id) ? id : '';
 }
 
+// A published Lovable subdomain (<name>.lovable.app): one DNS label.
+const LOVABLE_APP_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * The published app's name for a `<name>.lovable.app` or
+ * `preview--<name>.lovable.app` URL, or '' (other hosts, the id-preview
+ * host, nested subdomains).
+ */
+function lovablePublishedName(u: URL): string {
+	const host = u.hostname.replace(/\.$/, '');
+	if (!host.endsWith('.lovable.app')) return '';
+	let name = host.slice(0, -'.lovable.app'.length);
+	if (name.startsWith('id-preview--')) return '';
+	if (name.startsWith('preview--')) name = name.slice('preview--'.length);
+	return LOVABLE_APP_NAME.test(name) && !name.startsWith('preview--') ? name : '';
+}
+
 /**
  * The app origins for a URL pasted into the Lovable tab.
  *
@@ -51,7 +68,10 @@ function lovablePreviewProjectId(u: URL): string {
  * Lovable shows neither — it shows the editor, lovable.dev/projects/<id>.
  * So in the preview field (`preview`) any of the three gives both preview
  * origins; lovable.dev itself (never an app origin) is refused with a hint.
- * Other URLs give their own origin (https only; http for localhost).
+ * A published app (https://<name>.lovable.app) also has a shareable
+ * preview on https://preview--<name>.lovable.app (the same live test):
+ * either one, in any field, gives both. Other URLs give their own origin
+ * (https only; http for localhost).
  */
 export function lovableAppOrigins(raw: string, preview = false): { origins: string[]; note?: string; error?: string } {
 	const s = raw.trim();
@@ -73,6 +93,11 @@ export function lovableAppOrigins(raw: string, preview = false): { origins: stri
 				? "That's the Lovable editor (lovable.dev), not your app. Paste your project's editor URL from the address bar (lovable.dev/projects/…)."
 				: "That's the Lovable editor (lovable.dev), not your app. Paste the address your app is published at (Lovable → Publish)."
 		};
+	}
+	const name = u.protocol === 'https:' ? lovablePublishedName(u) : '';
+	if (name) {
+		const origins = [`https://${name}.lovable.app`, `https://preview--${name}.lovable.app`];
+		return { origins, note: `Lovable app — adding it and its shareable preview: ${origins.join(' and ')}` };
 	}
 	const origin = appOrigin(s);
 	return origin ? { origins: [origin] } : { origins: [], error: 'Use an https:// address (http only for localhost).' };

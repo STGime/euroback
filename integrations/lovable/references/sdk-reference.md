@@ -130,7 +130,7 @@ If the project requires email confirmation, `signUp` still returns a session (an
 
 ## Auth flows
 
-Each flow needs a page in the app and its full URL in the Eurobase console → project → Auth → **Allowed redirect URLs** (exact match for email flows; OAuth also accepts deeper paths under an allowed URL). The app's origins also go into **Allowed CORS origins**. Remind the user to add both preview origins (`https://<project-id>.lovableproject.com` and `https://id-preview--<project-id>.lovable.app`), the published `*.lovable.app` URL and any custom domain to both — wildcards like `*.lovable.app` don't work. (Console → project → Connect → Lovable tab adds them.)
+Each flow needs a page in the app and its full URL in the Eurobase console → project → Auth → **Allowed redirect URLs** (exact match for email flows; OAuth also accepts deeper paths under an allowed URL). The app's origins also go into **Allowed CORS origins**. Remind the user to add both preview origins (`https://<project-id>.lovableproject.com` and `https://id-preview--<project-id>.lovable.app`), the published `https://<name>.lovable.app` URL and its shareable preview `https://preview--<name>.lovable.app`, and any custom domain to both — wildcards like `*.lovable.app` don't work. (Console → project → Connect → Lovable tab adds them.)
 
 Email verification (`/verify`):
 
