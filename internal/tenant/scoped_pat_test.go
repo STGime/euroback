@@ -3,10 +3,12 @@ package tenant
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Project-scoped tokens end to end at the service level (#702): creation
@@ -31,8 +33,28 @@ func TestScopedPATs(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, p1, viewer); err != nil {
 		t.Fatal(err)
 	}
-	pats := auth.NewPATService(pool).WithProjectRole(func(ctx context.Context, c *auth.Claims, projectID string) (string, error) {
-		return CallerProjectRole(ctx, pool, pool, c, projectID)
+	// As in production when CI provides the role URLs: the token service
+	// on the gateway login, the role lookup on the developer login — a
+	// grant change on personal_access_tokens / org tables fails here.
+	patPool, devPool := pool, pool
+	if u := os.Getenv("APIKEY_TEST_GATEWAY_URL"); u != "" {
+		gp, err := pgxpool.New(ctx, u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(gp.Close)
+		patPool = gp
+	}
+	if u := os.Getenv("PAT_TEST_DEVELOPER_URL"); u != "" {
+		dp, err := pgxpool.New(ctx, u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(dp.Close)
+		devPool = dp
+	}
+	pats := auth.NewPATService(patPool).WithProjectRole(func(ctx context.Context, c *auth.Claims, projectID string) (string, error) {
+		return CallerProjectRole(ctx, devPool, patPool, c, projectID)
 	})
 	session := func(uid, email string) *auth.Claims {
 		return &auth.Claims{Subject: uid, Email: email, LoginVia: auth.LoginViaPassword}

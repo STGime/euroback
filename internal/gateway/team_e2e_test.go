@@ -797,6 +797,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			{"GET", "/migrations", ""},
 			{"GET", "/vault", ""},
 			{"GET", "/members", ""},
+			{"GET", "/users", ""},
 			{"GET", "/api-keys", ""},
 			{"GET", "/functions", ""},
 			{"GET", "/storage", ""},

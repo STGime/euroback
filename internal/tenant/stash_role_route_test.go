@@ -33,8 +33,11 @@ func TestStashCallerRole_Routes(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			uid := req.Header.Get("X-Test-User")
-			next.ServeHTTP(w, req.WithContext(auth.ContextWithClaims(req.Context(), &auth.Claims{Subject: uid, LoginVia: auth.LoginViaPassword})))
+			c := &auth.Claims{Subject: req.Header.Get("X-Test-User"), LoginVia: auth.LoginViaPassword}
+			if role := req.Header.Get("X-Test-Token-Role"); role != "" {
+				c.LoginVia, c.PATID, c.PATProjectID, c.PATRole = auth.LoginViaPAT, "t", req.Header.Get("X-Test-Token-Project"), role
+			}
+			next.ServeHTTP(w, req.WithContext(auth.ContextWithClaims(req.Context(), c)))
 		})
 	})
 	r.With(StashCallerRole(pool, pool)).Patch("/v1/tenants/{id}/org", HandleSetProjectOrg(pool, svc))
@@ -61,5 +64,17 @@ func TestStashCallerRole_Routes(t *testing.T) {
 	}
 	if code := do("DELETE", "/v1/tenants/"+proj.ID, member, ""); code != http.StatusForbidden {
 		t.Errorf("project admin delete: %d, want 403", code)
+	}
+	// The owner's read-only token (#702): the capped role (viewer) can't
+	// delete, although the owner could — the cap, not the allowlist, is
+	// what refuses here (RefuseScopedTokens isn't on this test route).
+	req := httptest.NewRequest("DELETE", "/v1/tenants/"+proj.ID, nil)
+	req.Header.Set("X-Test-User", owner)
+	req.Header.Set("X-Test-Token-Role", "viewer")
+	req.Header.Set("X-Test-Token-Project", proj.ID)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("owner's read-only token delete: %d, want 403", rec.Code)
 	}
 }

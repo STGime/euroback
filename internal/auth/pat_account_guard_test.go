@@ -146,3 +146,39 @@ func TestScopedTokenAllowed(t *testing.T) {
 		}
 	}
 }
+
+// The middleware itself enforces the scope (not only ScopedTokenAllowed
+// in isolation): a scoped token is refused outside its project routes
+// with pat_out_of_scope; a legacy token and a console session aren't.
+func TestPlatformAuthMiddleware_ScopedTokenEnforced(t *testing.T) {
+	claimsFor := map[string]*Claims{
+		"scoped":  {Subject: "u1", LoginVia: LoginViaPAT, PATID: "t1", PATProjectID: "0b1e5d6a-0000-4000-8000-000000000001", PATRole: "viewer"},
+		"legacy":  {Subject: "u1", LoginVia: LoginViaPAT, PATID: "t2"},
+		"console": {Subject: "u1", LoginVia: LoginViaPassword},
+	}
+	m := &PlatformAuthMiddleware{resolveForTest: func(tok string) (*Claims, error) { return claimsFor[tok], nil }}
+	h := m.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	do := func(tok, method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := do("scoped", "GET", "/platform/orgs"); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "pat_out_of_scope") {
+		t.Errorf("scoped token on /platform/orgs: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do("scoped", "DELETE", "/v1/tenants/x"); rec.Code != http.StatusForbidden {
+		t.Errorf("scoped token delete: %d", rec.Code)
+	}
+	for _, c := range []struct{ tok, method, path string }{
+		{"scoped", "GET", "/platform/projects/x/data/todos"},
+		{"scoped", "GET", "/v1/tenants"},
+		{"legacy", "GET", "/platform/orgs"},
+		{"console", "GET", "/platform/orgs"},
+	} {
+		if rec := do(c.tok, c.method, c.path); rec.Code != http.StatusNoContent {
+			t.Errorf("%s %s %s: %d, want through", c.tok, c.method, c.path, rec.Code)
+		}
+	}
+}
