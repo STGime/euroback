@@ -88,7 +88,13 @@ export async function loadProjects(): Promise<void> {
 /**
  * Clear all auth state and redirect to login.
  */
+/** Set by an explicit sign-out so the app shell sends the user to a
+ * plain /login — not back to the page they signed out from (the next
+ * person signing in on this tab must not land there). */
+export const signOut = { explicit: false };
+
 export function logout(): void {
+	signOut.explicit = true;
 	api.clearToken();
 	if (typeof localStorage !== 'undefined') {
 		localStorage.removeItem('eurobase_token');

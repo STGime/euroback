@@ -103,8 +103,8 @@
 					naming Alex as the inviter. The invitation is <strong>pending</strong>: Bea signs in to the console with her
 					usual sign-in and accepts it under <strong>Organizations</strong> (or declines it). Only then is she a
 					member — with access to the org's projects and SSO sign-in. Alex sees her under <em>Pending invitations</em>
-					until then and can withdraw the invitation. The email is only a pointer: the invitation is in the
-					console even if the mail never arrives.
+					until then and can withdraw the invitation. The email's button opens the invitation in the console (after
+					signing in if needed); it's also listed under Organizations if the mail never arrives.
 				</p>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">5. Bea signs in with SSO</h3>

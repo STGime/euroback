@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 
 	edb "github.com/eurobase/euroback/internal/db"
@@ -322,6 +323,13 @@ func (s *EmailService) SendPlatformVerificationEmail(ctx context.Context, userID
 	return s.client.Send(ctx, userEmail, subject, body)
 }
 
+// OrgInvitationURL opens an org invitation in the console (after sign-in
+// the console returns there); accepting still needs the invitee's own
+// sign-in.
+func OrgInvitationURL(consoleURL, invitationID string) string {
+	return consoleURL + "/organizations?invitation=" + url.QueryEscape(invitationID)
+}
+
 // SendPlatformOrgInvitationEmail notifies a platform user that an
 // org admin invited them to a Team-tier organization. The invitation
 // is pending until they accept it in the console (Organizations),
@@ -331,8 +339,8 @@ func (s *EmailService) SendPlatformVerificationEmail(ctx context.Context, userID
 // Fire-and-forget from the caller's perspective — a send failure
 // (missing TEM creds in dev, provider hiccup) does NOT roll back
 // the invite; the caller logs and moves on. #583.
-func (s *EmailService) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail string) error {
-	actionURL := s.consoleURL + "/organizations"
+func (s *EmailService) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail, invitationID string) error {
+	actionURL := OrgInvitationURL(s.consoleURL, invitationID)
 	subject, body, err := RenderTemplate("org_invitation", "", "", TemplateData{
 		UserEmail:    invitedEmail,
 		ProjectName:  "Eurobase Console",

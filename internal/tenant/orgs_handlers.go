@@ -37,7 +37,7 @@ import (
 // send" — matches every other platform-mail integration in the
 // codebase (empty config is legal in dev).
 type PlatformOrgMailer interface {
-	SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail string) error
+	SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail, invitationID string) error
 }
 
 // OrgsHandler wires HTTP handlers over the OrgsService.
@@ -422,11 +422,12 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 				inviterEmail = "An organization admin"
 			}
 			invitedEmail := m.Email
+			invitationID := m.ID
 			orgName := org.Name
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				if err := h.Mailer.SendPlatformOrgInvitationEmail(ctx, invitedEmail, orgName, inviterEmail); err != nil {
+				if err := h.Mailer.SendPlatformOrgInvitationEmail(ctx, invitedEmail, orgName, inviterEmail, invitationID); err != nil {
 					slog.Warn("org invitation email send failed — invite still committed",
 						"invited_email", invitedEmail,
 						"org_id", orgID,
