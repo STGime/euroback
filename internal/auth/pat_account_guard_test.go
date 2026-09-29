@@ -115,3 +115,34 @@ func TestPersonalActionsRefuseSSOSessions(t *testing.T) {
 		}
 	}
 }
+
+// Deny by default for a project-scoped token: only project routes, the
+// project list and the profile.
+func TestScopedTokenAllowed(t *testing.T) {
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{"GET", "/platform/projects/p1/data/todos", true},
+		{"POST", "/platform/projects/p1/data/sql", true},
+		{"GET", "/v1/tenants", true},
+		{"GET", "/platform/auth/account/profile", true},
+		{"POST", "/v1/tenants", false},
+		{"PATCH", "/v1/tenants/p1", false},
+		{"PATCH", "/v1/tenants/p1/org", false},
+		{"DELETE", "/v1/tenants/p1", false},
+		{"PATCH", "/platform/auth/account/profile", false},
+		{"GET", "/platform/auth/account/tokens", false},
+		{"GET", "/platform/orgs", false},
+		{"POST", "/platform/invitations/accept", false},
+		{"GET", "/platform/billing/invoices", false},
+		{"POST", "/platform/support", false},
+		{"GET", "/platform/config/plans", false},
+		{"GET", "/platform/admin/users", false},
+		{"GET", "/platform/projectsX", false},
+	} {
+		if got := ScopedTokenAllowed(c.method, c.path); got != c.want {
+			t.Errorf("%s %s: %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+}

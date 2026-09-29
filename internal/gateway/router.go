@@ -552,7 +552,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 	// PAT service — shared with platformAuth (via WithPATService in main.go)
 	// for token validation, and used directly here by the CRUD handlers.
-	patSvc := auth.NewPATService(pool)
+	// Token creation checks the requested role against the creator's own
+	// role in the project — the same lookup every access decision uses.
+	patSvc := auth.NewPATService(pool).WithProjectRole(func(ctx context.Context, c *auth.Claims, projectID string) (string, error) {
+		return tenant.CallerProjectRole(ctx, developerPool, pool, c, projectID)
+	})
 
 	// End-user JWT middleware (optional — anonymous if no token).
 	endUserMw := auth.NewEndUserMiddleware()
@@ -831,6 +835,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					ctx := audit.WithContext(r.Context(), auditSvc)
 					if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
 						ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+						ctx = audit.WithActorToken(ctx, claims.PATID)
 					}
 					next.ServeHTTP(w, r.WithContext(ctx))
 				})
@@ -936,6 +941,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					ctx := audit.WithContext(r.Context(), auditSvc)
 					if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
 						ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+						ctx = audit.WithActorToken(ctx, claims.PATID)
 					}
 					next.ServeHTTP(w, r.WithContext(ctx))
 				})
@@ -1363,6 +1369,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				ctx := audit.WithContext(r.Context(), auditSvc)
 				if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
 					ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+					ctx = audit.WithActorToken(ctx, claims.PATID)
 				}
 				next.ServeHTTP(w, r.WithContext(ctx))
 			})

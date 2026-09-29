@@ -700,6 +700,90 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Project-scoped tokens (#702): a token with role X gets exactly what a
+	// console user with role X gets on the project's routes (same status
+	// codes), and nothing outside the project.
+	check(t, env, "scoped_token_parity", func() error {
+		ctx := context.Background()
+		pats := auth.NewPATService(env.gw).WithProjectRole(func(ctx context.Context, c *auth.Claims, projectID string) (string, error) {
+			return tenant.CallerProjectRole(ctx, env.dev, env.gw, c, projectID)
+		})
+		member := func(role string) (jwt, token string, err error) {
+			uid, email := uuid.NewString(), "pat-"+role+"-"+env.scenario+"@e2e.test"
+			if _, err = env.shared.Exec(ctx, `INSERT INTO platform_users (id, email) VALUES ($1, $2)`, uid, email); err != nil {
+				return
+			}
+			if _, err = env.shared.Exec(ctx, `INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3)`, env.projectID, uid, role); err != nil {
+				return
+			}
+			if jwt, _, err = env.platformAuth.IssuePlatformJWT(uid, email, false); err != nil {
+				return
+			}
+			res, cerr := pats.Create(ctx, auth.CreateInput{Claims: &auth.Claims{Subject: uid, Email: email, LoginVia: auth.LoginViaPassword}, Name: "parity", ProjectID: env.projectID, Role: role})
+			if cerr != nil {
+				return "", "", cerr
+			}
+			return jwt, res.PlaintextToken, nil
+		}
+		do := func(bearer, method, path, body string) *httpResult {
+			url := "http://api.eurobase.test/platform/projects/" + env.projectID + path
+			if strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/platform/") {
+				url = "http://api.eurobase.test" + path
+			}
+			req := httptest.NewRequest(method, url, strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+bearer)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		routes := []struct{ method, path, body string }{
+			{"GET", "/data/todos", ""},
+			{"GET", "/data/users", ""},
+			{"GET", "/schema", ""},
+			{"POST", "/data/sql", `{"sql":"SELECT 1 AS one"}`},
+			{"POST", "/schema/tables", `{}`},
+			{"GET", "/vault", ""},
+			{"GET", "/members", ""},
+			{"GET", "/api-keys", ""},
+			{"GET", "/functions", ""},
+			{"GET", "/storage", ""},
+		}
+		for _, role := range []string{"viewer", "developer"} {
+			jwt, token, err := member(role)
+			if err != nil {
+				return fmt.Errorf("%s member: %w", role, err)
+			}
+			for _, rt := range routes {
+				console, tok := do(jwt, rt.method, rt.path, rt.body), do(token, rt.method, rt.path, rt.body)
+				if console.code != tok.code {
+					return fmt.Errorf("%s: %s %s — console %d, token %d (%s)", role, rt.method, rt.path, console.code, tok.code, tok.body)
+				}
+			}
+			// Outside the project: refused, with a code the MCP server can use.
+			if r := do(token, "GET", "/platform/orgs", ""); r.code != http.StatusForbidden || !strings.Contains(r.body, "pat_out_of_scope") {
+				return fmt.Errorf("%s token on /platform/orgs: %w", role, r)
+			}
+			if r := do(token, "POST", "/v1/tenants", `{"name":"x","slug":"x","region":"fr-par"}`); r.code != http.StatusForbidden {
+				return fmt.Errorf("%s token created a project: %w", role, r)
+			}
+			// The project list shows only the token's project.
+			if r := do(token, "GET", "/v1/tenants", ""); r.code != 200 || !strings.Contains(r.body, env.projectID) || strings.Count(r.body, `"slug"`) != 1 {
+				return fmt.Errorf("%s token project list: %w", role, r)
+			}
+			// The profile reports the scope.
+			if r := do(token, "GET", "/platform/auth/account/profile", ""); r.code != 200 || !strings.Contains(r.body, `"scoped":true`) || !strings.Contains(r.body, `"role":"`+role+`"`) {
+				return fmt.Errorf("%s token profile: %w", role, r)
+			}
+		}
+		// Sanity: the two roles really differ on SQL (else parity proves little).
+		vj, _, _ := member("admin")
+		if r := do(vj, "POST", "/data/sql", `{"sql":"SELECT 1 AS one"}`); r.code != 200 {
+			return fmt.Errorf("admin console SQL: %w", r)
+		}
+		return nil
+	})
+
 	check(t, env, "console_table_editor_read_update", func() error {
 		r := console("GET", "/data/todos", "")
 		if r.code != 200 || !strings.Contains(r.body, "from-console") || strings.Contains(r.body, decoyTitle) {
@@ -2441,7 +2525,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	}
 	// The console's cron Test Run (#645) dry-runs as the tenant login.
 	t.Setenv("FUNC_PASSWORD_SECRET", string(funcSecret))
-	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc), platformSvc, nil, nil, s3Client, nil, nil,
+	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc).WithPATService(auth.NewPATService(gw)), platformSvc, nil, nil, s3Client, nil, nil,
 		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil)
 	if cfg.deno != "" {
 		gatewaySrv := httptest.NewServer(router)

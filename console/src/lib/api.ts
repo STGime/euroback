@@ -253,6 +253,10 @@ export interface PersonalAccessToken {
 	expires_at: string | null;
 	last_used_at: string | null;
 	created_at: string;
+	/** Project-scoped token (#702): the project and access level. Both
+	 *  null for a legacy token that works on all your projects. */
+	project_id: string | null;
+	role: 'viewer' | 'developer' | 'admin' | null;
 }
 
 /**
@@ -895,10 +899,10 @@ export class EurobaseAPI {
 	 * Create a new personal access token. The plaintext token is returned
 	 * in the response and is only shown once — store it immediately.
 	 */
-	async createPAT(name: string, expiresAt?: string | null): Promise<{ token: string; pat: PersonalAccessToken }> {
+	async createPAT(name: string, projectId: string, role: 'viewer' | 'developer' | 'admin'): Promise<{ token: string; pat: PersonalAccessToken }> {
 		return this.fetch('/platform/auth/account/tokens', {
 			method: 'POST',
-			body: JSON.stringify({ name, expires_at: expiresAt ?? null })
+			body: JSON.stringify({ name, project_id: projectId, role })
 		});
 	}
 

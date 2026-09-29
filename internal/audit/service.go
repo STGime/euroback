@@ -193,6 +193,18 @@ func (s *Service) Log(ctx context.Context, projectID, actorID, actorEmail, actio
 		fn(&o)
 	}
 
+	if patID, _ := ctx.Value(patCtxKey{}).(string); patID != "" {
+		// A copy: the caller's map isn't ours to change.
+		m := make(map[string]interface{}, len(o.metadata)+1)
+		for k, v := range o.metadata {
+			m[k] = v
+		}
+		if _, set := m["pat_id"]; !set {
+			m["pat_id"] = patID
+		}
+		o.metadata = m
+	}
+
 	metaJSON := []byte("{}")
 	if o.metadata != nil {
 		if b, err := json.Marshal(o.metadata); err == nil {
@@ -350,6 +362,18 @@ func WithContext(ctx context.Context, svc *Service) context.Context {
 // or the audit injection middleware in the router.
 func WithActor(ctx context.Context, id, email string) context.Context {
 	return context.WithValue(ctx, actorCtxKey{}, &actor{ID: id, Email: email})
+}
+
+type patCtxKey struct{}
+
+// WithActorToken records the personal access token the request used (#702),
+// so audit entries show which token — e.g. which MCP tool — acted. Log adds
+// it to the entry's metadata as pat_id (inside the hash chain).
+func WithActorToken(ctx context.Context, patID string) context.Context {
+	if patID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, patCtxKey{}, patID)
 }
 
 // ActorFromContext retrieves the actor ID and email from the context.

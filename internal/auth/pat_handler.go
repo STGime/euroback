@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -62,9 +61,12 @@ func HandleCreatePAT(svc *PATService) http.HandlerFunc {
 			return
 		}
 
+		// New tokens are for one project with one role (#702); no
+		// expiry — revoke in the console when no longer needed.
 		var req struct {
-			Name      string     `json:"name"`
-			ExpiresAt *time.Time `json:"expires_at"`
+			Name      string `json:"name"`
+			ProjectID string `json:"project_id"`
+			Role      string `json:"role"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, "invalid request body", http.StatusBadRequest)
@@ -72,17 +74,25 @@ func HandleCreatePAT(svc *PATService) http.HandlerFunc {
 		}
 
 		result, err := svc.Create(r.Context(), CreateInput{
-			UserID:    claims.Subject,
+			Claims:    claims,
 			Name:      req.Name,
-			ExpiresAt: req.ExpiresAt,
+			ProjectID: req.ProjectID,
+			Role:      req.Role,
 		})
 		if err != nil {
 			slog.Warn("create pat failed", "error", err, "user_id", claims.Subject)
-			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			switch {
+			case errors.Is(err, ErrPATProjectNotFound):
+				writeJSONError(w, err.Error(), http.StatusNotFound)
+			case errors.Is(err, ErrPATRoleTooHigh):
+				writeJSONError(w, err.Error(), http.StatusForbidden)
+			default:
+				writeJSONError(w, err.Error(), http.StatusBadRequest)
+			}
 			return
 		}
 
-		slog.Info("pat created", "user_id", claims.Subject, "token_id", result.PAT.ID, "name", result.PAT.Name)
+		slog.Info("pat created", "user_id", claims.Subject, "token_id", result.PAT.ID, "name", result.PAT.Name, "project_id", req.ProjectID, "role", req.Role)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{

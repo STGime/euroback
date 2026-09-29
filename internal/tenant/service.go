@@ -859,6 +859,19 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 	if claims == nil {
 		return nil, fmt.Errorf("ListProjects: nil claims")
 	}
+	// A project-scoped token lists only its project (#702).
+	defer func() {
+		if claims.PATProjectID == "" || outErr != nil {
+			return
+		}
+		kept := out[:0]
+		for _, p := range out {
+			if p.ID == claims.PATProjectID {
+				kept = append(kept, p)
+			}
+		}
+		out = kept
+	}()
 	// A session from an org's SSO lists only that org's projects.
 	defer func() {
 		if claims.LoginVia != auth.LoginViaSSO || outErr != nil {

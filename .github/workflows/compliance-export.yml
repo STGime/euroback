@@ -86,7 +86,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
-        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject'
+        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs'
 
       # The org invitation service runs on the developer pool in
       # production: run its test as that role too (a missing grant fails).

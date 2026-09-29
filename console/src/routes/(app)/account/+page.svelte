@@ -29,7 +29,11 @@
 	let tokensError = $state('');
 	let showCreateToken = $state(false);
 	let newTokenName = $state('');
-	let newTokenExpiry = $state(''); // YYYY-MM-DD or empty
+	// New tokens are for one project with one access level (#702).
+	let newTokenProject = $state('');
+	let newTokenRole = $state<'viewer' | 'developer' | 'admin'>('viewer');
+	let tokenProjects = $state<{ id: string; name: string; slug: string }[]>([]);
+	let projectNames = $derived(new Map(tokenProjects.map((p) => [p.id, p.name])));
 	let creatingToken = $state(false);
 	let createTokenError = $state('');
 	let plaintextToken = $state(''); // shown once after creation
@@ -225,6 +229,7 @@
 	async function loadTokens() {
 		tokensLoading = true;
 		tokensError = '';
+		void api.listProjects().then((ps) => { tokenProjects = ps; }).catch(() => {});
 		try {
 			tokens = await api.listPATs();
 		} catch (err) {
@@ -240,14 +245,18 @@
 			createTokenError = 'Name is required.';
 			return;
 		}
+		if (!newTokenProject) {
+			createTokenError = 'Choose the project this token is for.';
+			return;
+		}
 		creatingToken = true;
 		try {
-			const expiresAt = newTokenExpiry ? new Date(newTokenExpiry + 'T00:00:00Z').toISOString() : null;
-			const res = await api.createPAT(newTokenName.trim(), expiresAt);
+			const res = await api.createPAT(newTokenName.trim(), newTokenProject, newTokenRole);
 			plaintextToken = res.token;
 			tokens = [res.pat, ...tokens];
 			newTokenName = '';
-			newTokenExpiry = '';
+			newTokenProject = '';
+			newTokenRole = 'viewer';
 			showCreateToken = false;
 		} catch (err) {
 			createTokenError = err instanceof Error ? err.message : 'Failed to create token';
@@ -283,7 +292,12 @@
 		copiedToken = false;
 	}
 
+	const roleLabel: Record<string, string> = { viewer: 'Read-only', developer: 'Developer', admin: 'Admin' };
+
 	function tokenStatus(t: PersonalAccessToken): { label: string; klass: string } {
+		if (t.project_id && t.role) {
+			return { label: roleLabel[t.role] ?? t.role, klass: t.role === 'viewer' ? 'bg-gray-100 text-gray-700' : 'bg-amber-100 text-amber-800' };
+		}
 		if (t.expires_at) {
 			const exp = new Date(t.expires_at);
 			if (exp < new Date()) return { label: 'expired', klass: 'bg-red-100 text-red-700' };
@@ -609,7 +623,7 @@
 		<div class="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
 			<div>
 				<h3 class="text-sm font-semibold text-gray-900">Personal Access Tokens</h3>
-				<p class="mt-0.5 text-xs text-gray-500">Long-lived bearer tokens for the MCP server, CLI, and CI. Authenticate as you, but never carry superadmin powers.</p>
+				<p class="mt-0.5 text-xs text-gray-500">Bearer tokens for the MCP server, CLI and CI. Each token is for one project, with the access you choose — never more than your own role there.</p>
 			</div>
 			<button
 				type="button"
@@ -659,6 +673,11 @@
 									<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium {st.klass}">{st.label}</span>
 								</div>
 								<p class="mt-0.5 text-xs font-mono text-gray-500">{t.prefix}…</p>
+								{#if t.project_id}
+									<p class="mt-0.5 text-xs text-gray-600">Project: <span class="font-medium">{projectNames.get(t.project_id) ?? t.project_id}</span></p>
+								{:else}
+									<p class="mt-0.5 text-xs text-amber-700">All projects (legacy) — this token reaches every project you're in. Create a project token and revoke this one.</p>
+								{/if}
 								<p class="mt-0.5 text-[11px] text-gray-400">
 									Created {new Date(t.created_at).toLocaleDateString('en-GB')}
 									{#if t.last_used_at} · Last used {new Date(t.last_used_at).toLocaleDateString('en-GB')}{:else} · Never used{/if}
@@ -687,15 +706,16 @@
 						<div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700 leading-relaxed">
 							<p class="font-medium text-gray-800">What this token can do:</p>
 							<ul class="mt-1 ml-4 list-disc space-y-0.5">
-								<li>Read and write any project you own or are a member of</li>
-								<li>Use the MCP server, SDK, and platform API on your behalf</li>
+								<li>Work on <strong>one project</strong>, with the access you choose below — exactly what a member with that role can do in the console</li>
+								<li>Never more than your own role in that project (if yours is lowered, the token's is too)</li>
 							</ul>
 							<p class="mt-2 font-medium text-gray-800">What it cannot do:</p>
 							<ul class="mt-1 ml-4 list-disc space-y-0.5">
-								<li>Access superadmin endpoints (allowlist, cross-tenant project list)</li>
+								<li>Reach your other projects, organizations, billing or account settings</li>
 								<li>Create, list or revoke tokens, or manage passkeys (sign in to the console for that)</li>
 								<li>Change your password or delete your account</li>
 							</ul>
+							<p class="mt-2 text-gray-600">Tokens don't expire — revoke one here when you no longer need it.</p>
 						</div>
 						<div>
 							<label for="token-name" class="block text-xs font-medium text-gray-700 mb-1">Name</label>
@@ -709,16 +729,26 @@
 							/>
 						</div>
 						<div>
-							<label for="token-expiry" class="block text-xs font-medium text-gray-700 mb-1">Expiry <span class="text-gray-400">(optional)</span></label>
-							<input
-								id="token-expiry"
-								type="date"
-								bind:value={newTokenExpiry}
-								min={new Date(Date.now() + 86400000).toISOString().slice(0, 10)}
+							<label for="token-project" class="block text-xs font-medium text-gray-700 mb-1">Project</label>
+							<select
+								id="token-project"
+								bind:value={newTokenProject}
 								class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none"
-							/>
-							<p class="mt-1 text-[11px] text-gray-500">Leave blank for no expiry.</p>
+							>
+								<option value="" disabled>Choose a project…</option>
+								{#each tokenProjects as p (p.id)}
+									<option value={p.id}>{p.name} ({p.slug})</option>
+								{/each}
+							</select>
 						</div>
+						<fieldset>
+							<legend class="block text-xs font-medium text-gray-700 mb-1">Access</legend>
+							<div class="space-y-1.5 text-sm text-gray-800">
+								<label class="flex items-start gap-2"><input type="radio" name="token-role" value="viewer" bind:group={newTokenRole} class="mt-1" /><span><strong>Read-only</strong> <span class="text-gray-500">— read tables, rows and files</span></span></label>
+								<label class="flex items-start gap-2"><input type="radio" name="token-role" value="developer" bind:group={newTokenRole} class="mt-1" /><span><strong>Developer</strong> <span class="text-gray-500">— also create and change tables, run SQL, deploy functions</span></span></label>
+								<label class="flex items-start gap-2"><input type="radio" name="token-role" value="admin" bind:group={newTokenRole} class="mt-1" /><span><strong>Admin</strong> <span class="text-gray-500">— also secrets, API keys and project settings</span></span></label>
+							</div>
+						</fieldset>
 						{#if createTokenError}
 							<p class="text-xs text-red-600">{createTokenError}</p>
 						{/if}
@@ -726,7 +756,7 @@
 					<div class="flex justify-end gap-2 border-t border-gray-100 px-5 py-3">
 						<button
 							type="button"
-							onclick={() => { showCreateToken = false; newTokenName = ''; newTokenExpiry = ''; createTokenError = ''; }}
+							onclick={() => { showCreateToken = false; newTokenName = ''; newTokenProject = ''; newTokenRole = 'viewer'; createTokenError = ''; }}
 							class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer"
 						>Cancel</button>
 						<button
