@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { scopeFromProfile, sqlReadOnly, explain } from '../dist/api-client.js';
-import { buildQueryString, storageKeyPath, downloadKind, pathSegment } from '../dist/query.js';
+import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey } from '../dist/query.js';
 import { scopeNote } from '../dist/server.js';
 
 const P = '0b1e5d6a-0000-4000-8000-000000000001';
@@ -77,6 +77,11 @@ test('filters on reserved parameter names are refused', () => {
   for (const col of ['select', 'order', 'limit', 'offset', 'aggregate']) {
     assert.throws(() => buildQueryString({ projectId: P, table: 't', filters: [{ column: col, op: 'eq', value: '1' }] }), /clashes/);
   }
+});
+
+test('export archives are off limits', () => {
+  for (const k of ['exports/p/x.zip', '/exports/p/x.zip', 'EXPORTS/p/x.zip']) assert.ok(isExportArchiveKey(k), k);
+  for (const k of ['exportsx/a', 'avatars/exports/a', 'report-exports.csv']) assert.ok(!isExportArchiveKey(k), k);
 });
 
 test('storage keys and download kinds', () => {

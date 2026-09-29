@@ -50,6 +50,15 @@ export function buildQueryString(input: QueryTableInput): string {
   return s ? `?${s}` : '';
 }
 
+/**
+ * Compliance export archives (exports/<project-id>/…, #655) are full
+ * project dumps: the MCP tools never read them or sign links to them —
+ * download them from the console (Compliance → Data Export).
+ */
+export function isExportArchiveKey(key: string): boolean {
+  return key.replace(/^\/+/, '').toLowerCase().startsWith('exports/');
+}
+
 /** Path of a storage key under /storage/, each segment encoded. Empty,
  *  "." and ".." segments are refused: fetch would resolve them before the
  *  gateway's own key check, reaching other API routes. */

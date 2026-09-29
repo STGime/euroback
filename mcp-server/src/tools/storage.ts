@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { ApiClient } from '../api-client.js';
-import { downloadKind, storageKeyPath } from '../query.js';
+import { downloadKind, isExportArchiveKey, storageKeyPath } from '../query.js';
 
 /** Largest image returned as an image (the model's per-image limit, after base64). */
 const IMAGE_CAP = 3_500_000;
@@ -31,6 +31,7 @@ export function registerStorageTools(server: McpServer, getClient: () => ApiClie
       key: z.string().min(1).describe('The file key/path'),
     },
     async ({ projectId, key }) => {
+      if (isExportArchiveKey(key)) return exportRefusal();
       const raw = await getClient().getRaw(`/platform/projects/${projectId}/storage/${storageKeyPath(key)}`, IMAGE_CAP);
       const kind = downloadKind(raw.contentType);
       const meta = { key, content_type: raw.contentType, bytes_read: raw.bytes.length, truncated: raw.truncated };
@@ -60,10 +61,18 @@ export function registerStorageTools(server: McpServer, getClient: () => ApiClie
       expiresIn: z.number().optional().describe('URL expiry in seconds (default 3600)'),
     },
     async ({ projectId, key, expiresIn }) => {
+      if (isExportArchiveKey(key)) return exportRefusal();
       const body: Record<string, unknown> = { key, operation: 'download' };
       if (expiresIn) body.expires_in = expiresIn;
       const data = await getClient().post(`/platform/projects/${projectId}/storage/signed-url`, body);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
   );
+}
+
+function exportRefusal() {
+  return {
+    content: [{ type: 'text' as const, text: 'Compliance export archives (exports/…) are full project dumps and are not available through MCP. Download them in the Eurobase console → Compliance → Data Export.' }],
+    isError: true,
+  };
 }
