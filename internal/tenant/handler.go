@@ -676,14 +676,17 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			return
 		}
 
-		// Authorization first, THEN SSO enforcement. Round-2 review
-		// caught that the previous ordering leaked project existence:
-		// SSO-block-returning-404 for missing project vs
-		// CanDeleteProject-returning-403 for unauthorised let a
-		// probing user distinguish "exists" (403) from "doesn't"
-		// (404). Doing authz first collapses both to 403 for anyone
-		// who isn't authorised, and only authorised callers ever
-		// reach the SSO check.
+		// Authorization first, THEN SSO enforcement. StashCallerRole
+		// already answered 404 for anyone without access to the project;
+		// a member who may not delete it gets 403 here. Two checks, both
+		// needed: the session's (capped) role from CallerProjectRole must
+		// be admin or owner — so a limited session (e.g. a read-only
+		// token, #702) can't delete — and the user must own the project
+		// or administer its org (a project admin may not delete).
+		if role := RoleFromContext(r.Context()); !HasRole(role, "admin") {
+			http.Error(w, `{"error":"forbidden: requires project owner role or org admin"}`, http.StatusForbidden)
+			return
+		}
 		canDelete, err := svc.CanDeleteProject(r.Context(), projectID, claims.Subject)
 		if err != nil {
 			slog.Error("check delete permission", "error", err, "project_id", projectID)

@@ -1384,8 +1384,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// Kept as a separate route from PATCH /{id} because the shape
 		// + auth check (owner + org membership) is entirely different
 		// from the auth_config flow.
-		r.With(auth.RequireConsoleSession, tenant.StashCallerRole(pool, developerPool)).Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
-		r.With(tenant.StashCallerRole(pool, developerPool)).Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
+		r.With(auth.RequireConsoleSession, tenant.StashCallerRole(developerPool, pool)).Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
+		r.With(tenant.StashCallerRole(developerPool, pool)).Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 
 	// ── WebSocket realtime route ──
