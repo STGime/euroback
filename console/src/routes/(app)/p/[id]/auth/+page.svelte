@@ -169,9 +169,11 @@
 
 	async function loadSmtp() {
 		smtpLoading = true;
-		api.getUsage(projectCtx.id)
-			.then((u) => (smtpPlanAllowed = u.limits?.byo_smtp ?? null))
-			.catch(() => (smtpPlanAllowed = null));
+		if (smtpPlanAllowed === null) {
+			api.getUsage(projectCtx.id)
+				.then((u) => (smtpPlanAllowed = u.limits?.byo_smtp ?? null))
+				.catch(() => (smtpPlanAllowed = null));
+		}
 		smtpSaveError = '';
 		smtpTestError = '';
 		try {
@@ -1743,7 +1745,7 @@
 					<p class="font-medium">Custom SMTP is part of the Pro plan.</p>
 					<p class="mt-1 text-xs text-gray-600">
 						On this plan, auth emails go out through Eurobase's sender. <a href="/billing" class="font-medium text-eurobase-700 hover:underline">Upgrade the project</a> to send them from your own SMTP server.
-						{#if smtpExisting}A sender saved earlier isn't used on this plan — you can still remove it below.{/if}
+						{#if smtpExisting}A sender saved earlier isn't used on this plan; after upgrading, run a test send to use it again. You can also remove it below.{/if}
 					</p>
 				</div>
 			{/if}

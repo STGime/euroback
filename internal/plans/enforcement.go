@@ -2,6 +2,7 @@ package plans
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -11,13 +12,13 @@ import (
 // owner already has PLUS the closed-beta flags on their platform_user
 // row:
 //
-//   * team_beta_access or legal_team_beta_access → team's ProjectLimit
+//   - team_beta_access or legal_team_beta_access → team's ProjectLimit
 //     applies (currently 50). This handles the "beta-granted user with
 //     2 Free projects" case that would otherwise hit Free's limit=2
 //     before ever getting to create their first Team project.
-//   * else any existing team/legal_team project → team's ProjectLimit
-//   * else any existing pro project → pro's ProjectLimit (10)
-//   * else free's ProjectLimit (2)
+//   - else any existing team/legal_team project → team's ProjectLimit
+//   - else any existing pro project → pro's ProjectLimit (10)
+//   - else free's ProjectLimit (2)
 //
 // The check runs BEFORE the request body is decoded (handler.go:137),
 // so we can't plumb the requested plan through — the beta-flag check
@@ -170,6 +171,11 @@ func (s *LimitsService) CheckCustomDomain(ctx context.Context, projectID string)
 	return nil
 }
 
+// ErrNotOnPlan: the project's plan doesn't include the feature. Any other
+// error from a Check* is a lookup failure — don't tell a paying customer
+// to upgrade because of it.
+var ErrNotOnPlan = errors.New("not on this plan")
+
 // CheckBYOSMTP gates bring-your-own-SMTP for auth mail (Phase B
 // binary Pro-only gate, migration 000075).
 func (s *LimitsService) CheckBYOSMTP(ctx context.Context, projectID string) error {
@@ -179,7 +185,7 @@ func (s *LimitsService) CheckBYOSMTP(ctx context.Context, projectID string) erro
 	}
 	if !limits.BYOSMTP {
 		slog.Warn("BYO SMTP not available", "project_id", projectID, "plan", limits.Plan)
-		return fmt.Errorf("BYO SMTP is not available on the %s plan, upgrade to pro", limits.Plan)
+		return fmt.Errorf("%w: BYO SMTP is not available on the %s plan, upgrade to pro", ErrNotOnPlan, limits.Plan)
 	}
 	return nil
 }

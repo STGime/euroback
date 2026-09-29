@@ -13,7 +13,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900">Where to find it</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					In the console: <strong>Auth &rarr; SMTP</strong> tab. Only project admins can configure this &mdash; members with the "developer" or "viewer" role can't see the credentials. Custom SMTP is part of the <strong>Pro</strong> plan and up; on Free, auth emails go out through Eurobase's sender (a sender saved earlier is kept but not used until the project is upgraded).
+					In the console: <strong>Auth &rarr; SMTP</strong> tab. Only project admins can configure this &mdash; members with the "developer" or "viewer" role can't see the credentials. Custom SMTP is part of the <strong>Pro</strong> plan and up; on Free, auth emails go out through Eurobase's sender (a sender saved earlier is kept but not used; after upgrading, run a test send to use it again).
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What you'll need from your provider</h3>

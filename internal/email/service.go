@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -70,6 +71,22 @@ func (s *EmailService) WithPlanGate(g PlanGate) *EmailService {
 	return s
 }
 
+// refuseOffPlanSender runs when a verified custom sender isn't used
+// because of the plan. Off-plan, it's un-verified: after an upgrade the
+// admin re-tests it rather than auth mail going to credentials that may
+// have gone stale meanwhile. A failed plan lookup only logs — the project
+// may well be paying, and its sender stays as it is.
+func (s *EmailService) refuseOffPlanSender(ctx context.Context, projectID string, err error) {
+	if !errors.Is(err, plans.ErrNotOnPlan) {
+		slog.Error("custom SMTP: plan check failed, this email goes out through the platform sender",
+			"project_id", projectID, "error", err)
+		return
+	}
+	if uerr := s.senderSvc.MarkPlanRefused(ctx, projectID); uerr != nil {
+		slog.Error("un-verify off-plan custom SMTP sender failed", "project_id", projectID, "error", uerr)
+	}
+}
+
 // sendProjectScoped is the central dispatcher for "send email for
 // project X". If the project has a verified custom SMTP sender,
 // the send goes through that path; otherwise it falls back to the
@@ -90,10 +107,16 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 	if s.senderSvc != nil && projectID != "" {
 		sender, err := s.senderSvc.LoadForSend(ctx, projectID)
 		switch {
-		case err == nil && s.planGate != nil && s.planGate.CheckBYOSMTP(ctx, projectID) != nil:
-			// Not on this plan: the platform sends. The sender stays
-			// verified, so it works again after an upgrade.
 		case err == nil:
+			// Not on this plan (or the plan couldn't be checked): the
+			// platform sends — never the custom sender without a plan
+			// that includes it.
+			if s.planGate != nil {
+				if perr := s.planGate.CheckBYOSMTP(ctx, projectID); perr != nil {
+					s.refuseOffPlanSender(ctx, projectID, perr)
+					break
+				}
+			}
 			// A sender verified before the host / port / encryption / login
 			// rules existed may break them. It is never used: it's un-
 			// verified with the reason (the console shows it) and the

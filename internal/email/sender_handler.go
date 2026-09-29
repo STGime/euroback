@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -58,6 +59,11 @@ func refuseOffPlan(w http.ResponseWriter, r *http.Request, gate PlanGate, projec
 		return false
 	}
 	if err := gate.CheckBYOSMTP(r.Context(), projectID); err != nil {
+		if !errors.Is(err, plans.ErrNotOnPlan) {
+			slog.Error("custom SMTP: plan check failed", "project_id", projectID, "error", err)
+			httpJSONError(w, "couldn't check the project's plan, try again", http.StatusServiceUnavailable)
+			return true
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]string{
