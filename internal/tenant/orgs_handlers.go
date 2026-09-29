@@ -179,6 +179,16 @@ func (h *OrgsHandler) HandleListOrgs() http.HandlerFunc {
 			writeJSONErr(w, http.StatusInternalServerError, "list failed")
 			return
 		}
+		// An SSO session sees only its own org.
+		if c, ok := auth.ClaimsFromContext(r.Context()); ok && c != nil && c.LoginVia == auth.LoginViaSSO {
+			kept := orgs[:0]
+			for _, o := range orgs {
+				if SSOSessionInScope(c, o.ID) {
+					kept = append(kept, o)
+				}
+			}
+			orgs = kept
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"orgs":  orgs,
@@ -470,6 +480,13 @@ func (h *OrgsHandler) HandleListMyInvitations() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := requireCallerID(w, r)
 		if !ok {
+			return
+		}
+		// Invitations are the person's own business: none for an SSO
+		// session (accepting needs the person's own sign-in anyway).
+		if c, ok := auth.ClaimsFromContext(r.Context()); ok && c != nil && c.LoginVia == auth.LoginViaSSO {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"invitations": []OrgInvitation{}})
 			return
 		}
 		invs, err := h.Svc.ListInvitationsForUser(r.Context(), userID)

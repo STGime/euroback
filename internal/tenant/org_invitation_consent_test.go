@@ -2,10 +2,15 @@ package tenant
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/go-chi/chi/v5"
 )
 
 // Org membership needs the invitee's consent: an invite is pending and
@@ -191,5 +196,110 @@ func TestSSOSessionScopedToItsOrg(t *testing.T) {
 	}
 	if list, _ := svc.ListProjects(ctx, password); len(list) != 2 {
 		t.Fatalf("password session lists %d projects, want 2", len(list))
+	}
+}
+
+// The rest of the SSO-session scope: creating a project (lands in the SSO
+// org, never personal / another org), moving a project (never out of the
+// SSO org), and the org / invitation lists (only the SSO org, no
+// invitations).
+func TestSSOSessionScope_CreateMoveList(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	email := "sso-scope2@test.eurobase.local"
+	userID := insertTestPlatformUser(t, pool, email)
+	if _, err := pool.Exec(ctx, `UPDATE platform_users SET team_beta_access = true WHERE id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	otherAdmin := insertTestPlatformUser(t, pool, "sso-scope2-other@test.eurobase.local")
+	orgs, _ := NewOrgsService(pool, nil)
+	orgA, err := orgs.CreateOrg(ctx, userID, "SSO scope A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orgB, err := orgs.CreateOrg(ctx, otherAdmin, "SSO scope B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.organizations WHERE id = ANY($1::uuid[])`, []string{orgA.ID, orgB.ID})
+	})
+	// user is also a member of B (accepted), and has a pending invitation elsewhere.
+	inv, err := orgs.InviteMember(ctx, orgB.ID, otherAdmin, email, RoleOrgAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orgs.AcceptInvitation(ctx, userID, inv.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	sso := &auth.Claims{Subject: userID, Email: email, LoginVia: auth.LoginViaSSO, SsoOrgID: orgA.ID}
+	password := &auth.Claims{Subject: userID, Email: email, LoginVia: auth.LoginViaPassword}
+	call := func(h http.HandlerFunc, method, path, body string, claims *auth.Claims, params map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		rc := chi.NewRouteContext()
+		for k, v := range params {
+			rc.URLParams.Add(k, v)
+		}
+		c := context.WithValue(req.Context(), chi.RouteCtxKey, rc)
+		c = auth.ContextWithClaims(c, claims)
+		c = WithRole(c, "owner")
+		rec := httptest.NewRecorder()
+		h(rec, req.WithContext(c))
+		return rec
+	}
+	oh := &OrgsHandler{Svc: orgs}
+
+	// Lists: only the SSO org; no invitations.
+	rec := call(oh.HandleListOrgs(), "GET", "/platform/orgs", "", sso, nil)
+	if !strings.Contains(rec.Body.String(), orgA.ID) || strings.Contains(rec.Body.String(), orgB.ID) {
+		t.Fatalf("SSO org list: %s", rec.Body.String())
+	}
+	if rec := call(oh.HandleListOrgs(), "GET", "/platform/orgs", "", password, nil); !strings.Contains(rec.Body.String(), orgB.ID) {
+		t.Fatalf("password org list lost org B: %s", rec.Body.String())
+	}
+	if rec := call(oh.HandleListMyInvitations(), "GET", "/platform/orgs/invitations", "", sso, nil); !strings.Contains(rec.Body.String(), `"invitations":[]`) {
+		t.Fatalf("SSO invitations list: %s", rec.Body.String())
+	}
+
+	// Create: an SSO session without an org lands in the SSO org; personal
+	// or another org is refused.
+	svc := &TenantService{pool: pool, developerPool: pool}
+	create := HandleCreateProject(pool, svc)
+	rec = call(create, "POST", "/v1/tenants", `{"name":"SSO made","slug":"test-sso-made","region":"fr-par","plan":"free"}`, sso, nil)
+	if rec.Code >= 300 {
+		t.Fatalf("SSO create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	t.Cleanup(func() { cleanupProject(t, pool, created.ID) })
+	var createdOrg *string
+	_ = pool.QueryRow(ctx, `SELECT org_id::text FROM projects WHERE id = $1`, created.ID).Scan(&createdOrg)
+	if createdOrg == nil || *createdOrg != orgA.ID {
+		t.Fatalf("SSO-created project not in the SSO org: %v", createdOrg)
+	}
+	for _, body := range []string{
+		`{"name":"x","slug":"test-sso-personal","region":"fr-par","plan":"free","org_id":null}`,
+		`{"name":"x","slug":"test-sso-otherorg","region":"fr-par","plan":"free","org_id":"` + orgB.ID + `"}`,
+	} {
+		if rec := call(create, "POST", "/v1/tenants", body, sso, nil); rec.Code != http.StatusForbidden {
+			t.Fatalf("SSO create %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Move: an SSO session can't move its org's project out (to personal or B).
+	setOrg := HandleSetProjectOrg(pool, svc)
+	for _, body := range []string{`{"org_id":null}`, `{"org_id":"` + orgB.ID + `"}`} {
+		rec := call(setOrg, "PATCH", "/v1/tenants/"+created.ID+"/org", body, sso, map[string]string{"id": created.ID})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("SSO move %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	var org string
+	_ = pool.QueryRow(ctx, `SELECT org_id::text FROM projects WHERE id = $1`, created.ID).Scan(&org)
+	if org != orgA.ID {
+		t.Fatalf("project moved: org %q", org)
 	}
 }
