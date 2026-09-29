@@ -189,6 +189,7 @@ func (s *PATService) Validate(ctx context.Context, plaintextToken string) (*Clai
 	}()
 
 	return &Claims{
+		LoginVia:     LoginViaPAT,
 		Subject:      userID,
 		Email:        email,
 		IsSuperadmin: false, // PATs never carry superadmin

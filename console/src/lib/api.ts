@@ -2687,12 +2687,33 @@ export class EurobaseAPI {
 	}
 
 	/** Invite a user to the org by email (admin-only). Role
-	 * defaults to "member" if omitted. */
-	async inviteOrgMember(orgId: string, email: string, role: 'admin' | 'member' = 'member'): Promise<OrgMember> {
-		return this.fetch<OrgMember>(`/platform/orgs/${orgId}/members`, {
+	 * defaults to "member" if omitted. Creates a pending invitation:
+	 * the user becomes a member only when they accept it. */
+	async inviteOrgMember(orgId: string, email: string, role: 'admin' | 'member' = 'member'): Promise<{ status: 'pending'; invitation: OrgInvitation }> {
+		return this.fetch(`/platform/orgs/${orgId}/members`, {
 			method: 'POST',
 			body: JSON.stringify({ email, role })
 		});
+	}
+
+	/** Withdraw a pending invitation (org admin). */
+	async revokeOrgInvitation(orgId: string, invitationId: string): Promise<void> {
+		await this.fetch(`/platform/orgs/${orgId}/invitations/${invitationId}`, { method: 'DELETE' });
+	}
+
+	/** The caller's own pending org invitations. */
+	async listMyOrgInvitations(): Promise<{ invitations: OrgInvitation[] }> {
+		return this.fetch('/platform/orgs/invitations');
+	}
+
+	/** Accept one of the caller's own org invitations. */
+	async acceptOrgInvitation(invitationId: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/orgs/invitations/${invitationId}/accept`, { method: 'POST' });
+	}
+
+	/** Decline one of the caller's own org invitations. */
+	async declineOrgInvitation(invitationId: string): Promise<void> {
+		await this.fetch(`/platform/orgs/invitations/${invitationId}/decline`, { method: 'POST' });
 	}
 
 	/** Remove a member from the org (admin-only). Cannot remove
@@ -2782,10 +2803,23 @@ export interface OIDCConfigPublic {
 	client_secret_set: boolean;
 }
 
+export interface OrgInvitation {
+	id: string;
+	org_id: string;
+	org_name?: string;
+	platform_user_id: string;
+	email: string;
+	role: 'admin' | 'member';
+	invited_by_email?: string;
+	created_at: string;
+}
+
 export interface OrgDetail {
 	org: Org;
 	role: 'admin' | 'member';
 	members: OrgMember[];
+	/** Admins only: invitations not yet accepted (not members). */
+	pending_invitations?: OrgInvitation[];
 	sso: OIDCConfigPublic | null;
 }
 

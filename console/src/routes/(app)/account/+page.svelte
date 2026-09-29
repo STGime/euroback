@@ -693,7 +693,7 @@
 							<p class="mt-2 font-medium text-gray-800">What it cannot do:</p>
 							<ul class="mt-1 ml-4 list-disc space-y-0.5">
 								<li>Access superadmin endpoints (allowlist, cross-tenant project list)</li>
-								<li>Create more tokens (sign in to the console for that)</li>
+								<li>Create, list or revoke tokens, or manage passkeys (sign in to the console for that)</li>
 								<li>Change your password or delete your account</li>
 							</ul>
 						</div>

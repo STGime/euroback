@@ -84,6 +84,10 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 // (an out-of-band ops path); the "must have OIDC config to enable"
 // guard catches the common footgun of enabling before configuring.
 func (h *OrgsHandler) enforceOrgSSO(w http.ResponseWriter, claims *auth.Claims, org *Org) bool {
+	if !SSOSessionInScope(claims, org.ID) {
+		WriteSSOOutOfScope(w)
+		return false
+	}
 	if SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
 		return true
 	}
@@ -175,6 +179,16 @@ func (h *OrgsHandler) HandleListOrgs() http.HandlerFunc {
 			writeJSONErr(w, http.StatusInternalServerError, "list failed")
 			return
 		}
+		// An SSO session sees only its own org.
+		if c, ok := auth.ClaimsFromContext(r.Context()); ok && c != nil && c.LoginVia == auth.LoginViaSSO {
+			kept := orgs[:0]
+			for _, o := range orgs {
+				if SSOSessionInScope(c, o.ID) {
+					kept = append(kept, o)
+				}
+			}
+			orgs = kept
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"orgs":  orgs,
@@ -205,6 +219,10 @@ func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 		// SSO and this session isn't SSO-backed for THIS org, refuse
 		// with a machine-readable code so the console can bounce to
 		// a fresh SSO handshake.
+		if !SSOSessionInScope(claims, org.ID) {
+			WriteSSOOutOfScope(w)
+			return
+		}
 		if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
 			WriteSSORequired(w, &SSORequiredError{OrgID: org.ID}, "this organization requires SSO sign-in")
 			return
@@ -222,12 +240,22 @@ func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 				return
 			}
 		}
+		// Pending invitations (#consent): admins see them next to the
+		// members; they aren't members until the invitee accepts.
+		pending := []OrgInvitation{}
+		if role == RoleOrgAdmin {
+			if pending, err = h.Svc.ListPendingInvitations(r.Context(), orgID); err != nil {
+				writeJSONErr(w, http.StatusInternalServerError, "invitations lookup failed")
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"org":     org,
-			"role":    role,
-			"members": members,
-			"sso":     sso,
+			"org":                 org,
+			"role":                role,
+			"members":             members,
+			"pending_invitations": pending,
+			"sso":                 sso,
 		})
 	}
 }
@@ -354,13 +382,15 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 		if body.Role == "" {
 			body.Role = RoleOrgMember
 		}
-		m, err := h.Svc.InviteMember(r.Context(), orgID, body.Email, body.Role)
+		m, err := h.Svc.InviteMember(r.Context(), orgID, userID, body.Email, body.Role)
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrUserNotFound):
 				writeJSONErr(w, http.StatusNotFound, "no platform user with that email — user must sign up first")
 			case errors.Is(err, ErrMemberExists):
 				writeJSONErr(w, http.StatusConflict, "user is already a member")
+			case errors.Is(err, ErrInvitationExists):
+				writeJSONErr(w, http.StatusConflict, "user already has a pending invitation")
 			default:
 				writeJSONErr(w, http.StatusBadRequest, err.Error())
 			}
@@ -406,7 +436,109 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(m)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "pending", "invitation": m})
+	}
+}
+
+// HandleRevokeInvitation — DELETE /platform/orgs/{id}/invitations/{invId}
+// (org admin): withdraw a pending invitation.
+func (h *OrgsHandler) HandleRevokeInvitation() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := requireCallerID(w, r)
+		if !ok {
+			return
+		}
+		orgID := chi.URLParam(r, "id")
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		org, role, err := h.Svc.GetOrgForMember(r.Context(), userID, orgID)
+		if err != nil {
+			writeJSONErr(w, http.StatusNotFound, "organization not found or not a member")
+			return
+		}
+		if role != RoleOrgAdmin {
+			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
+			return
+		}
+		if claims == nil || !h.enforceOrgSSO(w, claims, org) {
+			return
+		}
+		if err := h.Svc.RevokeInvitation(r.Context(), orgID, chi.URLParam(r, "invId")); err != nil {
+			if errors.Is(err, ErrInvitationNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "invitation not found")
+				return
+			}
+			writeJSONErr(w, http.StatusInternalServerError, "revoke failed")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// HandleListMyInvitations — GET /platform/orgs/invitations: the caller's
+// own pending org invitations.
+func (h *OrgsHandler) HandleListMyInvitations() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := requireCallerID(w, r)
+		if !ok {
+			return
+		}
+		// Invitations are the person's own business: none for an SSO
+		// session (accepting needs the person's own sign-in anyway).
+		if c, ok := auth.ClaimsFromContext(r.Context()); ok && c != nil && c.LoginVia == auth.LoginViaSSO {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"invitations": []OrgInvitation{}})
+			return
+		}
+		invs, err := h.Svc.ListInvitationsForUser(r.Context(), userID)
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, "invitations lookup failed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"invitations": invs})
+	}
+}
+
+// HandleAcceptInvitation — POST /platform/orgs/invitations/{invId}/accept.
+// Only the invitee, signed in to the console as themselves (the route
+// refuses tokens), turns their invitation into a membership.
+func (h *OrgsHandler) HandleAcceptInvitation() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := requireCallerID(w, r)
+		if !ok {
+			return
+		}
+		m, err := h.Svc.AcceptInvitation(r.Context(), userID, chi.URLParam(r, "invId"))
+		if err != nil {
+			if errors.Is(err, ErrInvitationNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "invitation not found")
+				return
+			}
+			slog.Error("accept org invitation", "error", err)
+			writeJSONErr(w, http.StatusInternalServerError, "accept failed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "accepted", "member": m})
+	}
+}
+
+// HandleDeclineInvitation — POST /platform/orgs/invitations/{invId}/decline.
+func (h *OrgsHandler) HandleDeclineInvitation() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := requireCallerID(w, r)
+		if !ok {
+			return
+		}
+		if err := h.Svc.DeclineInvitation(r.Context(), userID, chi.URLParam(r, "invId")); err != nil {
+			if errors.Is(err, ErrInvitationNotFound) {
+				writeJSONErr(w, http.StatusNotFound, "invitation not found")
+				return
+			}
+			writeJSONErr(w, http.StatusInternalServerError, "decline failed")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

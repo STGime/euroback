@@ -107,3 +107,21 @@ func TestRedirectWithError_NoDoubleEncoding(t *testing.T) {
 		t.Errorf("sso_error code lost or wrong: %q", code)
 	}
 }
+
+// An org's identity provider can assert any email, so SSO never signs in
+// a superadmin account, even when it is a member of the org.
+func TestPickSSOCandidate_NeverSuperadmin(t *testing.T) {
+	member := func(string) bool { return true }
+	if c, ok, refused := pickSSOCandidate([]platformUserCandidate{{ID: "admin", IsSuperadmin: true}}, member); ok || c.ID != "" || !refused {
+		t.Fatalf("superadmin picked: id=%q ok=%v refused=%v", c.ID, ok, refused)
+	}
+	if c, ok, _ := pickSSOCandidate([]platformUserCandidate{{ID: "admin", IsSuperadmin: true}, {ID: "u2", Email: "u2@x"}}, member); !ok || c.ID != "u2" || c.Email != "u2@x" {
+		t.Fatalf("want the non-superadmin candidate, got %+v ok=%v", c, ok)
+	}
+	if _, ok, refused := pickSSOCandidate([]platformUserCandidate{{ID: "u1"}}, func(string) bool { return false }); ok || refused {
+		t.Fatalf("non-member picked or refused wrongly: ok=%v refused=%v", ok, refused)
+	}
+	if c, ok, _ := pickSSOCandidate([]platformUserCandidate{{ID: "u1"}}, member); !ok || c.ID != "u1" {
+		t.Fatalf("member not picked: %q %v", c.ID, ok)
+	}
+}

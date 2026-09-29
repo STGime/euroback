@@ -705,7 +705,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			} else {
 				r.Use(platformAuth.Handler)
 			}
-			r.Post("/accept", tenant.HandleAcceptInvitation(pool))
+			r.With(auth.RequirePersonalSession).Post("/accept", tenant.HandleAcceptInvitation(pool))
 		})
 
 		// Team-tier organizations — CRUD + membership + SSO config.
@@ -724,13 +724,22 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			}
 			if ssoConfig.Orgs != nil {
 				h := &tenant.OrgsHandler{Svc: ssoConfig.Orgs, Mailer: emailService}
-				r.Post("/", h.HandleCreateOrg())
+				// Org settings and membership decide who can access
+				// what (incl. SSO sign-in): console sessions only, never
+				// a personal access token.
+				r.Use(auth.RequireConsoleSession)
+				r.With(auth.RequirePersonalSession).Post("/", h.HandleCreateOrg())
 				r.Get("/", h.HandleListOrgs())
+				// Pending invitations of the caller (static path before {id}).
+				r.Get("/invitations", h.HandleListMyInvitations())
+				r.With(auth.RequirePersonalSession).Post("/invitations/{invId}/accept", h.HandleAcceptInvitation())
+				r.With(auth.RequirePersonalSession).Post("/invitations/{invId}/decline", h.HandleDeclineInvitation())
 				r.Get("/{id}", h.HandleGetOrg())
 				r.Patch("/{id}/sso", h.HandleSetSSOConfig())
 				r.Patch("/{id}/sso-required", h.HandleSetSSORequired())
 				r.Post("/{id}/members", h.HandleInviteMember())
 				r.Delete("/{id}/members/{userId}", h.HandleRemoveMember())
+				r.Delete("/{id}/invitations/{invId}", h.HandleRevokeInvitation())
 			} else {
 				r.Handle("/*", http.HandlerFunc(ssoDisabledHandler))
 			}
@@ -782,14 +791,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// Act need buyer name + address on invoices. These
 				// endpoints intentionally work even when billing is
 				// off so a user can pre-fill before the launch flip.
-				r.Get("/profile", billing.HandleGetBillingProfile(billingSvc))
-				r.Put("/profile", billing.HandleUpsertBillingProfile(billingSvc))
-				r.Post("/checkout", billing.HandleCreateCheckout(billingSvc))
-				r.Post("/checkout/new-project", billing.HandleNewProjectCheckout(billingSvc))
-				r.Get("/invoices", billing.HandleListInvoices(billingSvc))
-				r.Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
-				r.Post("/subscriptions/{id}/cancel", billing.HandleCancelSubscription(billingSvc))
-				r.Get("/projects/{project_id}/subscription", billing.HandleGetProjectSubscription(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/profile", billing.HandleGetBillingProfile(billingSvc))
+				r.With(auth.RequirePersonalSession).Put("/profile", billing.HandleUpsertBillingProfile(billingSvc))
+				r.With(auth.RequirePersonalSession).Post("/checkout", billing.HandleCreateCheckout(billingSvc))
+				r.With(auth.RequirePersonalSession).Post("/checkout/new-project", billing.HandleNewProjectCheckout(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/invoices", billing.HandleListInvoices(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
+				r.With(auth.RequirePersonalSession).Post("/subscriptions/{id}/cancel", billing.HandleCancelSubscription(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/projects/{project_id}/subscription", billing.HandleGetProjectSubscription(billingSvc))
 			})
 
 			// UNAUTHENTICATED: Mollie's webhook endpoint. Mollie
@@ -1216,10 +1225,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// short-circuits before that DB call. Belt-and-braces; the
 			// inner check stays so the cleanup is a separate follow-up.
 			r.With(tenant.RequireMinRole("viewer")).Get("/members", tenant.HandleListMembers(pool))
-			r.With(tenant.RequireMinRole("admin")).Post("/members/invite", tenant.HandleInviteMember(pool, sendEmailFn))
-			r.With(tenant.RequireMinRole("admin")).Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
-			r.With(tenant.RequireMinRole("admin")).Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
-			r.With(tenant.RequireMinRole("owner")).Patch("/members/{userId}", tenant.HandleChangeRole(pool))
+			// Membership changes decide who can access the project:
+			// console sessions only, never a personal access token.
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Post("/members/invite", tenant.HandleInviteMember(pool, sendEmailFn))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Patch("/members/{userId}", tenant.HandleChangeRole(pool))
 
 			// Edge Functions (serverless compute management).
 			fnSvc := functions.NewService(pool, vaultSvc)
@@ -1373,7 +1384,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// Kept as a separate route from PATCH /{id} because the shape
 		// + auth check (owner + org membership) is entirely different
 		// from the auth_config flow.
-		r.Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
+		r.With(auth.RequireConsoleSession).Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
 		r.Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 
@@ -1670,6 +1681,10 @@ func projectMembershipMiddleware(pool, developerPool *pgxpool.Pool, isDev bool) 
 			// session isn't SSO-backed gets 403 with the machine-
 			// readable code so the console can bounce.
 			if err := tenant.EnforceOrgSSOForProject(r.Context(), developerPool, claims, projectID); err != nil {
+				if errors.Is(err, tenant.ErrSSOSessionOutOfScope) {
+					tenant.WriteSSOOutOfScope(w)
+					return
+				}
 				if errors.Is(err, tenant.ErrSSORequiredForOrg) {
 					tenant.WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 					return
@@ -1907,6 +1922,9 @@ func buildRealtimeAuthorize(pool, developerPool *pgxpool.Pool, platformAuth *aut
 				return realtime.AuthorizedClient{}, realtime.ErrForbidden
 			}
 			if err := tenant.EnforceOrgSSOForProject(ctx, developerPool, platformClaims, requestedProjectID); err != nil {
+				if errors.Is(err, tenant.ErrSSOSessionOutOfScope) {
+					return realtime.AuthorizedClient{}, realtime.ErrForbidden
+				}
 				if errors.Is(err, tenant.ErrSSORequiredForOrg) {
 					return realtime.AuthorizedClient{}, realtime.ErrForbidden
 				}

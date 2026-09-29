@@ -292,16 +292,18 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 		// tolerate Gmail-collision leftover data (multiple
 		// platform_users rows for the same identity) without pulling
 		// membership into the gateway pool.
-		var userID string
-		var isSuperadmin bool
-		matched := false
-		for _, c := range candidates {
-			if err := h.orgs.EnsureMemberFromSSO(r.Context(), claims.OrgID, c.ID); err == nil {
-				userID = c.ID
-				isSuperadmin = c.IsSuperadmin
-				matched = true
-				break
-			}
+		picked, matched, superadminRefused := pickSSOCandidate(candidates, func(id string) bool {
+			return h.orgs.EnsureMemberFromSSO(r.Context(), claims.OrgID, id) == nil
+		})
+		isSuperadmin := false // SSO sessions never carry superadmin (see pickSSOCandidate)
+		userID := picked.ID
+		// The session carries the account's own email, not the one the
+		// IdP asserted (they can differ in case / Gmail dots).
+		accountEmail := picked.Email
+		if !matched && superadminRefused {
+			slog.Warn("sso callback: refused SSO sign-in for a superadmin account", "org_id", claims.OrgID)
+			h.redirectWithError(w, r, "sso_not_allowed", "this account signs in with password or passkey, not SSO")
+			return
 		}
 		if !matched {
 			slog.Warn("sso callback: no candidate is a member of org",
@@ -316,7 +318,7 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 		// organizations.sso_required (migration 000121) can accept
 		// this session for the org that was actually authed
 		// against — and only that org.
-		accessToken, expiresIn, err := h.authSvc.IssuePlatformJWTForSSO(userID, vt.Claims.Email, isSuperadmin, claims.OrgID)
+		accessToken, expiresIn, err := h.authSvc.IssuePlatformJWTForSSO(userID, accountEmail, isSuperadmin, claims.OrgID)
 		if err != nil {
 			slog.Error("sso callback: JWT issue", "error", err)
 			h.redirectWithError(w, r, "token_issue_failed", "could not issue session token")
@@ -374,6 +376,7 @@ func (h *SSOHandler) redirectWithError(w http.ResponseWriter, r *http.Request, c
 // leaking the row shape.
 type platformUserCandidate struct {
 	ID           string
+	Email        string
 	IsSuperadmin bool
 }
 
@@ -394,6 +397,24 @@ type platformUserCandidate struct {
 // Candidates are returned oldest-first so the SSO callback iterates
 // the most-plausible-real-signup row before any phantom sso-only
 // rows created by pre-#543 auto-provision behaviour.
+// pickSSOCandidate chooses the platform user an SSO sign-in is for: the
+// first candidate (same email) that is a member of the org. A superadmin
+// account is never chosen — the org admin controls the org's identity
+// provider and could assert any email; superadmins sign in with password
+// or passkey. superadminRefused reports that one was skipped.
+func pickSSOCandidate(candidates []platformUserCandidate, isMember func(id string) bool) (user platformUserCandidate, matched, superadminRefused bool) {
+	for _, c := range candidates {
+		if c.IsSuperadmin {
+			superadminRefused = true
+			continue
+		}
+		if isMember(c.ID) {
+			return c, true, superadminRefused
+		}
+	}
+	return platformUserCandidate{}, false, superadminRefused
+}
+
 func lookupPlatformUserCandidates(ctx context.Context, pool *pgxpool.Pool, email string) ([]platformUserCandidate, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
@@ -402,7 +423,7 @@ func lookupPlatformUserCandidates(ctx context.Context, pool *pgxpool.Pool, email
 
 	// Step 1: exact match.
 	rows, err := pool.Query(ctx, `
-		SELECT id::text, COALESCE(is_superadmin, false)
+		SELECT id::text, email, COALESCE(is_superadmin, false)
 		  FROM public.platform_users
 		 WHERE lower(email) = $1
 		 ORDER BY created_at ASC
@@ -412,7 +433,7 @@ func lookupPlatformUserCandidates(ctx context.Context, pool *pgxpool.Pool, email
 	}
 	for rows.Next() {
 		var c platformUserCandidate
-		if err := rows.Scan(&c.ID, &c.IsSuperadmin); err != nil {
+		if err := rows.Scan(&c.ID, &c.Email, &c.IsSuperadmin); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan user (exact): %w", err)
 		}
@@ -432,7 +453,7 @@ func lookupPlatformUserCandidates(ctx context.Context, pool *pgxpool.Pool, email
 	// forms shows up once.
 	if norm := gmailCanonical(email); norm != "" {
 		gmailRows, err := pool.Query(ctx, `
-			SELECT id::text, COALESCE(is_superadmin, false)
+			SELECT id::text, email, COALESCE(is_superadmin, false)
 			  FROM public.platform_users
 			 WHERE lower(split_part(email, '@', 2)) IN ('gmail.com', 'googlemail.com')
 			   AND lower(regexp_replace(split_part(email, '@', 1), '\.|(\+.*)$', '', 'g')) || '@gmail.com' = $1

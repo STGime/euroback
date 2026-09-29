@@ -24,6 +24,8 @@ on:
       - deploy/docker/Dockerfile.worker
       - .github/workflows/compliance-export.yml
       - internal/tenant/apikeys*.go
+      - internal/tenant/orgs*.go
+      - internal/tenant/org_invitation*.go
       - internal/auth/apikey_middleware.go
   workflow_dispatch:
 
@@ -80,11 +82,18 @@ jobs:
       # Not an export suite, but the only job with a production-role PG16:
       # the retrievable public key (000132) — storage, CHECK, and the API-key
       # middleware's backfill on the real gateway login.
-      - name: API keys (public key)
+      - name: Tenant DB tests (API keys, org invitations)
         env:
           DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
-        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable'
+        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession'
+
+      # The org invitation service runs on the developer pool in
+      # production: run its test as that role too (a missing grant fails).
+      - name: Org invitations as eurobase_developer
+        env:
+          DATABASE_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
+        run: go test -count=1 -v ./internal/tenant/ -run 'TestOrgInvitation'
 
   worker-image:
     runs-on: ubuntu-latest

@@ -109,22 +109,30 @@ For each teammate:
    email. This is a hard prerequisite — the org invite endpoint
    returns "no platform user with that email — user must sign up
    first" if they haven't.
-2. **Org admin adds them.** Console → Organizations → your org →
-   **Members** → **Add member** → paste their work email.
+2. **Org admin invites them.** Console → Organizations → your org →
+   **Members** → **Invite member** → paste their work email.
 3. Choose role:
    - `admin` — can invite/remove members, edit SSO config, edit
      org settings.
    - `member` — read-only for org config; can access org-owned
      projects per project permissions.
-4. Save.
+4. Save. The invitation is **pending**.
+5. **Teammate accepts.** They get an email from Eurobase (not from
+   your IdP) naming who invited them. They sign in to the console
+   with their usual sign-in (password or passkey) and accept the
+   invitation under **Organizations**. Only then are they a member:
+   access to org-owned projects and SSO sign-in start with the
+   accept. Invitations expire after 30 days; admins see pending
+   ones on the org page and can withdraw them.
 
-The invitee gets a notification email — sent from Eurobase, not
-from your IdP — telling them who added them and the name of the
-organization, with a **Sign in to Eurobase** button pointing at
-`console.eurobase.app/login`. The DB membership is written before
-the mail is sent, so a mail-provider hiccup never leaves them in
-a half-invited state — the email is a courtesy notification, not
-an accept-flow.
+An SSO session only works for its own organization (its projects and
+settings). Members' own projects, other organizations, billing, tokens
+and account settings need their own sign-in.
+
+Membership changes (invite, remove, SSO settings) can only be made
+from a console session, not with a personal access token. Accepting
+an invitation needs the invitee's own sign-in — not a token and not
+an SSO session.
 
 ## Step 5 — Teammate signs in via SSO
 

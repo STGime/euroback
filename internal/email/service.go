@@ -323,19 +323,16 @@ func (s *EmailService) SendPlatformVerificationEmail(ctx context.Context, userID
 }
 
 // SendPlatformOrgInvitationEmail notifies a platform user that an
-// org admin has added them to a Team-tier organization. Purely
-// informational — the DB row was written before this call, so
-// membership is already effective; the mail is a directional
-// pointer to the SSO login page + heads-up to the invitee that
-// they should sign in with the invited address. No token is stored
-// (no accept-flow). Platform mail always sends from us, never a
+// org admin invited them to a Team-tier organization. The invitation
+// is pending until they accept it in the console (Organizations),
+// signed in as themselves. Platform mail always sends from us, never a
 // tenant's BYO-SMTP.
 //
 // Fire-and-forget from the caller's perspective — a send failure
 // (missing TEM creds in dev, provider hiccup) does NOT roll back
 // the invite; the caller logs and moves on. #583.
 func (s *EmailService) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail string) error {
-	actionURL := s.consoleURL + "/login"
+	actionURL := s.consoleURL + "/organizations"
 	subject, body, err := RenderTemplate("org_invitation", "", "", TemplateData{
 		UserEmail:    invitedEmail,
 		ProjectName:  "Eurobase Console",

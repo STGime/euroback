@@ -96,20 +96,20 @@ var defaultTemplates = map[string]DefaultTemplate{
 <p style="margin:0;color:#71717a;font-size:12px">This link expires in {{.ExpiresIn}}. If you didn't request this, you can safely ignore this email.</p>`),
 	},
 	// org_invitation is a platform-level notification: an org admin
-	// added the recipient to their organization on Eurobase Console.
-	// No token — the DB row already grants membership; the mail is
-	// purely informational + a directional pointer to the SSO login.
+	// invited the recipient to their organization. The invitation is
+	// pending until the recipient accepts it in the console (signed in
+	// as themselves) — membership needs their consent.
 	"org_invitation": {
-		Subject: "You've been added to {{.OrgName}} on Eurobase",
+		Subject: "You're invited to join {{.OrgName}} on Eurobase",
 		BodyHTML: fmt.Sprintf(baseLayout,
 			"Eurobase Console",
 			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
-<p style="margin:0 0 16px;color:#3f3f46;font-size:14px;line-height:1.6"><strong>{{.InviterEmail}}</strong> has added you to <strong>{{.OrgName}}</strong> on Eurobase.</p>
-<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Sign in with SSO using this email address to access org-owned projects. If you don't already have an Eurobase account, sign up first — the invitation waits for you.</p>
+<p style="margin:0 0 16px;color:#3f3f46;font-size:14px;line-height:1.6"><strong>{{.InviterEmail}}</strong> has invited you to join <strong>{{.OrgName}}</strong> on Eurobase.</p>
+<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Sign in to the Eurobase console with your usual sign-in and accept the invitation under <strong>Organizations</strong>. You only become a member once you accept.</p>
 <p style="margin:0 0 24px;text-align:center">
-<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Sign in to Eurobase</a>
+<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Review the invitation</a>
 </p>
-<p style="margin:0;color:#71717a;font-size:12px">If you weren't expecting this, you can safely ignore this email — the person listed above added you and can remove you at any time.</p>`),
+<p style="margin:0;color:#71717a;font-size:12px">If you weren't expecting this, decline the invitation or ignore this email — nothing changes unless you accept.</p>`),
 	},
 }
 

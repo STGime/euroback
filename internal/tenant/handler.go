@@ -281,6 +281,19 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		// anything between decode and CreateProject mutated req.Plan.
 		slog.Info("create project: handing to service", "plan", req.Plan, "name", req.Name)
 		req.Session = &CreateSession{LoginVia: claims.LoginVia, SsoOrgID: claims.SsoOrgID}
+		// An SSO session creates projects in its own org only (as if
+		// that org were chosen): a personal project or another org needs
+		// the person's own sign-in.
+		if claims.LoginVia == auth.LoginViaSSO {
+			if !req.OrgIDExplicit {
+				o := claims.SsoOrgID
+				req.OrgID, req.OrgIDExplicit = &o, true
+			}
+			if req.OrgID == nil || !SSOSessionInScope(claims, *req.OrgID) {
+				WriteSSOOutOfScope(w)
+				return
+			}
+		}
 		project, err := svc.CreateProject(r.Context(), claims.Subject, claims.Email, req)
 		if err != nil {
 			slog.Error("failed to create project", "error", err, "user_id", claims.Subject)
@@ -536,6 +549,10 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// (mounted at /{id}/org sibling to /{id}), so we enforce
 		// here directly.
 		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+			if errors.Is(err, ErrSSOSessionOutOfScope) {
+				WriteSSOOutOfScope(w)
+				return
+			}
 			if errors.Is(err, ErrSSORequiredForOrg) {
 				WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 				return
@@ -570,6 +587,13 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 				return
 			}
 			orgID = &s
+		}
+
+		// An SSO session can't move a project out of its org (the current
+		// org was checked above) — not into another org, not to personal.
+		if claims.LoginVia == auth.LoginViaSSO && (orgID == nil || !SSOSessionInScope(claims, *orgID)) {
+			WriteSSOOutOfScope(w)
+			return
 		}
 
 		// Attaching to an SSO-required org from a session that can't open
@@ -674,6 +698,10 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// SSO enforcement (migration 000121) — now that we know the
 		// caller is authorised, apply the SSO gate.
 		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+			if errors.Is(err, ErrSSOSessionOutOfScope) {
+				WriteSSOOutOfScope(w)
+				return
+			}
 			if errors.Is(err, ErrSSORequiredForOrg) {
 				WriteSSORequired(w, err, "this project's organization requires SSO sign-in")
 				return
