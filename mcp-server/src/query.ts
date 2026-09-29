@@ -51,6 +51,36 @@ export function buildQueryString(input: QueryTableInput): string {
 }
 
 /**
+ * The platform's own tables in every tenant schema (mirror of
+ * internal/query/internal_tables.go): end users, their identities, auth
+ * tokens, the vault, storage bookkeeping. queryTable is marked read-only,
+ * so clients run it without asking; these rows (end users' personal data)
+ * must only reach the model through a tool the user approves — listUsers,
+ * or runSQL.
+ */
+const INTERNAL_TABLES = new Set([
+  'users',
+  'user_identities',
+  'refresh_tokens',
+  'email_tokens',
+  'vault_secrets',
+  'storage_objects',
+  'storage_shared_prefixes',
+]);
+
+/** Whether queryTable must refuse this read: an internal table, directly
+ *  or embedded in the column list (`owner:users(email)`, `users!inner(*)`). */
+export function readsInternalTable(table: string, columns: string[] = []): string | undefined {
+  if (INTERNAL_TABLES.has(table)) return table;
+  for (const c of columns) {
+    for (const m of c.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*(?:![A-Za-z_][A-Za-z0-9_]*\s*)?\(/g)) {
+      if (INTERNAL_TABLES.has(m[1])) return m[1];
+    }
+  }
+  return undefined;
+}
+
+/**
  * Compliance export archives (exports/<project-id>/…, #655) are full
  * project dumps: the MCP tools never read them or sign links to them —
  * download them from the console (Compliance → Data Export).

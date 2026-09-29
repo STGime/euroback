@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { scopeFromProfile, sqlReadOnly, explain } from '../dist/api-client.js';
-import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey } from '../dist/query.js';
-import { scopeNote } from '../dist/server.js';
+import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey, readsInternalTable } from '../dist/query.js';
+import { scopeNote, createMcpServer, TOOL_ANNOTATIONS } from '../dist/server.js';
 
 const P = '0b1e5d6a-0000-4000-8000-000000000001';
 
@@ -84,6 +84,21 @@ test('export archives are off limits', () => {
   for (const k of ['exportsx/a', 'avatars/exports/a', 'report-exports.csv']) assert.ok(!isExportArchiveKey(k), k);
 });
 
+test('queryTable refuses the platform tables (end users need an approved tool)', () => {
+  for (const t of ['users', 'user_identities', 'refresh_tokens', 'email_tokens', 'vault_secrets', 'storage_objects', 'storage_shared_prefixes']) {
+    assert.equal(readsInternalTable(t), t);
+  }
+  assert.equal(readsInternalTable('notes', ['id', 'owner:users(email)']), 'users');
+  assert.equal(readsInternalTable('notes', ['*', 'users!inner(*)']), 'users');
+  assert.equal(readsInternalTable('notes', ['a:vault_secrets ( secret )']), 'vault_secrets');
+  assert.equal(readsInternalTable('notes', ['id', 'users', 'tags(name)']), undefined);
+  assert.equal(readsInternalTable('app_users'), undefined);
+  // Same set as the gateway's internal tables.
+  const go = readFileSync(new URL('../../internal/query/internal_tables.go', import.meta.url), 'utf8');
+  const block = go.match(/var internalTenantTables = map\[string\]bool\{([^}]*)\}/)[1];
+  for (const [, t] of block.matchAll(/"([a-z_]+)":/g)) assert.equal(readsInternalTable(t), t, t);
+});
+
 test('storage keys and download kinds', () => {
   assert.equal(storageKeyPath('/avatars/a b.png'), 'avatars/a%20b.png');
   // No walking to other API routes: fetch would resolve . / .. before the gateway sees them.
@@ -119,4 +134,27 @@ test('no credentials in the MCP server', () => {
     assert.ok(!/process\.env\s*\[/.test(text), `${file.pathname} indexes process.env`);
     assert.ok(!/=\s*process\.env\s*[;\n]/.test(text), `${file.pathname} copies process.env`);
   }
+});
+
+// Every tool carries annotations (clients use them to decide what to
+// auto-approve): reads are readOnlyHint, SQL and function calls destructive.
+test('tool annotations', () => {
+  const server = createMcpServer(() => ({ scope: { scoped: false } }));
+  const tools = server._registeredTools;
+  const names = Object.keys(tools);
+  assert.ok(names.length >= 18, `tools: ${names.length}`);
+  for (const name of names) {
+    assert.ok(tools[name].annotations, `${name} has no annotations`);
+    assert.deepEqual(tools[name].annotations, TOOL_ANNOTATIONS[name], name);
+  }
+  for (const r of ['listTables', 'queryTable', 'downloadFile', 'listProjects']) assert.equal(tools[r].annotations.readOnlyHint, true, r);
+  for (const w of ['runSQL', 'runSQLTransaction', 'invokeFunction', 'setSecret']) {
+    assert.equal(tools[w].annotations.readOnlyHint, false, w);
+    assert.equal(tools[w].annotations.destructiveHint, true, w);
+  }
+  // Secrets and end users' data always need the user's OK.
+  for (const p of ['getSecret', 'listUsers', 'getSignedUrl']) assert.equal(tools[p].annotations.readOnlyHint, false, p);
+  // No stale entries: the table and the registered tools match.
+  assert.deepEqual(Object.keys(TOOL_ANNOTATIONS).sort(), names.sort());
+  assert.equal(tools.runSQL.title, 'Run SQL');
 });
