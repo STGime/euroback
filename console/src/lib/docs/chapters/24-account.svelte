@@ -39,15 +39,16 @@
 					Long-lived bearer tokens for tooling that needs to act as you outside the browser &mdash; the <a href="/docs/mcp" class="text-eurobase-600 hover:underline cursor-pointer">MCP server</a>, the CLI, CI pipelines, scripts. Mint and revoke them in the <strong>Personal Access Tokens</strong> card on the Account page.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					<strong>Creating a token:</strong> click <em>+ New token</em>, give it a memorable name (e.g. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">my laptop</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">ci-prod</code>), optionally set an expiry date, and click <em>Create</em>. The plaintext token (e.g. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eb_pat_205d71172180a3ca3ea0e26f07156429</code>) appears in an amber banner once. Copy it immediately into a password manager or your shell rc &mdash; <strong>it is not retrievable afterwards.</strong> The console only stores a SHA-256 hash.
+					<strong>Creating a token:</strong> click <em>+ New token</em>, give it a memorable name (e.g. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">lovable</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">ci-prod</code>), pick the <strong>project</strong> and the <strong>access</strong> (Read-only, Developer or Admin &mdash; not more than your own role there), and click <em>Create</em>. Tokens don't expire; revoke them when you no longer need them. The plaintext token (e.g. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eb_ptk_205d71172180a3ca3ea0e26f07156429</code>) appears in an amber banner once. Copy it immediately into a password manager or your shell rc &mdash; <strong>it is not retrievable afterwards.</strong> The console only stores a SHA-256 hash.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					<strong>What a PAT can do</strong>: read and write any project you own or are a member of, via the SDK, the platform API, or the MCP server. It authenticates as you across every project, with the same RLS and role checks the rest of the platform enforces.
+					<strong>What a PAT can do</strong>: in its one project, exactly what a member with its access level can do in the console, via the platform API, the CLI or the MCP server. If your own role in the project is lowered, the token's is too; if you leave the project, the token stops working there. Older tokens created before project tokens (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eb_pat_</code>, shown as <em>All projects (legacy)</em>) still reach every project you're in &mdash; replace them with project tokens.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					<strong>What a PAT can't do</strong>:
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1 ml-4 list-disc">
+					<li>Reach another project, your organizations, billing or account settings.</li>
 					<li>Reach the platform admin surface (allowlist management, cross-tenant project list). PATs never carry the <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">is_superadmin</code> claim, even when minted by a superadmin.</li>
 					<li>Mint other PATs &mdash; only an authenticated browser session can do that. Limits the blast radius of a leaked token.</li>
 					<li>Change your password or delete your account.</li>

@@ -366,7 +366,7 @@
 							<div><dt class="text-gray-500">Authentication</dt><dd class="text-gray-900">Bearer token: a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a></dd></div>
 						</dl>
 						<p class="mt-2 text-[11px] text-amber-800">
-							A token can reach all your Eurobase projects: create a dedicated one named "lovable" with an expiry date.
+							Create a token for <strong>this project</strong> with <strong>Developer</strong> access (Account → Tokens), so Lovable can create and change tables here — and nothing in your other projects.
 						</p>
 					</div>
 

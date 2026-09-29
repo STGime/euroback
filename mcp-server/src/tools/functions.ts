@@ -15,14 +15,19 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'invokeFunction',
-    'Invoke an edge function by name with an optional JSON body',
+    'Invoke a deployed edge function (as the console\'s Test button does) and return its status, headers and body. Needs Developer access.',
     {
+      projectId: z.string().describe('The project UUID'),
       functionName: z.string().describe('The function name'),
-      body: z.string().optional().describe('JSON request body'),
+      method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).optional().describe('HTTP method (default POST)'),
+      body: z.string().optional().describe('Request body (e.g. JSON text)'),
+      query: z.string().optional().describe('Query string without "?"'),
     },
-    async ({ functionName, body }) => {
-      const parsed = body ? JSON.parse(body) : undefined;
-      const data = await getClient().post(`/v1/functions/${encodeURIComponent(functionName)}`, parsed);
+    async ({ projectId, functionName, method, body, query }) => {
+      const data = await getClient().post(
+        `/platform/projects/${projectId}/functions/${encodeURIComponent(functionName)}/test`,
+        { method: method ?? 'POST', body: body ?? '', query: query ?? '' }
+      );
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
   );

@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { ApiClient } from '../api-client.js';
+import { sqlReadOnly, type ApiClient } from '../api-client.js';
+import { buildQueryString, type QueryTableInput } from '../query.js';
 
 export function registerDatabaseTools(server: McpServer, getClient: () => ApiClient) {
   server.tool(
@@ -31,22 +32,14 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
     }
   );
 
-  // Closes part of #165. runSQL / runSQLTransaction default to
-  // READ-ONLY mode — the backend wraps the statements in SET
-  // TRANSACTION READ ONLY, so writes raise SQLSTATE 25006 and roll
-  // back. Defence-in-depth on top of the RLS gate in migration 000055
-  // (#164): even if a prompt-injected query tried to write its
-  // exfiltrated tokens into a row the attacker controls, the write
-  // would never commit.
-  //
-  // Opt out only by setting EUROBASE_MCP_ALLOW_WRITES=true on the
-  // MCP server's environment and restarting. Intended for
-  // migration-running scripts; do NOT enable in interactive Cursor /
-  // Claude Code sessions where prompt-injection-via-data is in scope.
-  const allowWrites = process.env.EUROBASE_MCP_ALLOW_WRITES === 'true';
-  const writeNote = allowWrites
-    ? ' EUROBASE_MCP_ALLOW_WRITES=true is set, so this tool runs with write capability.'
-    : ' READ-ONLY: writes will fail with SQLSTATE 25006. To allow writes, set EUROBASE_MCP_ALLOW_WRITES=true on the MCP server and restart.';
+  // SQL writes (#702): a project-scoped token sends statements as asked and
+  // the gateway allows or refuses them by the token's role (Read-only →
+  // refused, Developer → allowed). Legacy account-wide tokens stay
+  // read-only, as before (the backend wraps them in SET TRANSACTION READ
+  // ONLY, so writes fail with SQLSTATE 25006). There is no server-side
+  // switch: the token is the only thing that grants access.
+  const writeNote =
+    ' With a project token, what it may do follows its access level (Read-only: SELECT only — prefer queryTable for reads; Developer and up: writes and DDL). A legacy all-projects token is read-only here.';
 
   server.tool(
     'runSQL',
@@ -58,7 +51,7 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
     },
     async ({ projectId, query }) => {
       const body: Record<string, unknown> = { sql: query };
-      if (!allowWrites) body.read_only = true;
+      if (sqlReadOnly(getClient().scope)) body.read_only = true;
       const data = await getClient().post(`/platform/projects/${projectId}/data/sql`, body);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
@@ -76,8 +69,40 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
     async ({ projectId, statements, limit }) => {
       const body: Record<string, unknown> = { statements };
       if (limit !== undefined) body.limit = limit;
-      if (!allowWrites) body.read_only = true;
+      if (sqlReadOnly(getClient().scope)) body.read_only = true;
       const data = await getClient().post(`/platform/projects/${projectId}/data/sql/transaction`, body);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'queryTable',
+    'Read rows from a table, with filters, column selection, ordering and paging, or an aggregate (count / sum / avg / min / max). Works with every access level including Read-only tokens. Prefer this over runSQL for reads.',
+    {
+      projectId: z.string().describe('The project UUID'),
+      table: z.string().describe('The table name'),
+      columns: z.array(z.string()).optional().describe('Columns to return (default: all)'),
+      filters: z
+        .array(
+          z.object({
+            column: z.string(),
+            op: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'ilike', 'in', 'is']),
+            value: z.string().describe('Value; for "in" a comma-separated list; for "is": null / true / false'),
+          })
+        )
+        .optional()
+        .describe('Filters, ANDed'),
+      orderBy: z.array(z.object({ column: z.string(), descending: z.boolean().optional() })).optional(),
+      limit: z.number().int().positive().max(1000).optional().describe('Max rows (default 20)'),
+      offset: z.number().int().nonnegative().optional(),
+      aggregate: z
+        .object({ fn: z.enum(['count', 'sum', 'avg', 'min', 'max']), column: z.string().optional().describe('Required except for count') })
+        .optional()
+        .describe('Return an aggregate instead of rows'),
+    },
+    async (input) => {
+      const qs = buildQueryString(input as QueryTableInput);
+      const data = await getClient().get(`/platform/projects/${input.projectId}/data/${encodeURIComponent(input.table)}${qs}`);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
   );
