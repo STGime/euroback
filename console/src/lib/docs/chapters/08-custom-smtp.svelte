@@ -26,7 +26,7 @@
 					<li><strong>Encryption</strong> &mdash; STARTTLS for port 587 (most common), TLS for port 465. Unencrypted connections aren't supported.</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					Eurobase connects only to servers on the public internet: host names that only resolve inside a network (such as <code class="bg-gray-100 border border-gray-200 rounded px-1">mail.local</code>) and private or internal IP addresses are refused.
+					Eurobase connects only to servers on the public internet: host names that only resolve inside a network (such as <code class="bg-gray-100 border border-gray-200 rounded px-1">mail.local</code>) and private or internal IP addresses are refused. When you change the host, port or username, enter the password again.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Setting it up</h3>

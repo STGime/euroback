@@ -95,7 +95,17 @@ send (`checkSenderRules`), and the connection itself goes through
 public address is dialed — the connection goes to the checked address,
 so a name that later resolves elsewhere can't redirect it. Host names
 that only resolve inside a network (`localhost`, single labels,
-`.local`, `.internal`, `.svc`, …) are refused before any lookup.
+`.local`, `.internal`, `.svc`, …) are refused before any lookup, and
+names are looked up fully qualified (no resolver search list). "Not
+found" and "not public" are one error.
+
+A sender saved before these rules that breaks them is never used: the
+first send un-verifies it with the reason (`MarkRefused`) and the email
+goes out through the platform sender.
+
+The saved password is kept on edit only while host, port and username
+stay the same — changing any of them requires entering it again, so an
+edit can't redirect the stored password to another server.
 
 ## Sealed-at-rest contract
 

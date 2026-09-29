@@ -142,8 +142,9 @@
 	//
 	// `smtpPassword` is treated specially:
 	//   - blank + existing.has_password → backend preserves the
-	//     stored sealed bytes (no re-prompt needed for edits)
-	//   - blank + no existing password   → sealed columns stay NULL
+	//     stored sealed bytes — only while host, port and username stay
+	//     the same (otherwise the backend asks for the password again)
+	//   - blank + no existing password   → refused (a login is required)
 	//   - non-blank                       → backend re-seals
 	let smtpLoading = $state(true);
 	let smtpExisting = $state<ProjectEmailSender | null>(null);
@@ -1774,7 +1775,7 @@
 							</div>
 							<div>
 								<label for="smtp-port" class="block text-xs font-medium text-gray-700 mb-1">Port</label>
-								<input id="smtp-port" type="number" min="465" max="2525" bind:value={smtpPort} placeholder="587"
+								<input id="smtp-port" type="number" bind:value={smtpPort} placeholder="587" title="587, 465 or 2525"
 									class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
 							</div>
 						</div>
@@ -1798,7 +1799,7 @@
 							<label for="smtp-password" class="block text-xs font-medium text-gray-700 mb-1">
 								Password
 								{#if smtpExisting?.has_password}
-									<span class="text-gray-400 font-normal">(leave blank to keep the saved one)</span>
+									<span class="text-gray-400 font-normal">(leave blank to keep the saved one — unless you change host, port or username)</span>
 								{/if}
 							</label>
 							<input id="smtp-password" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')} bind:value={smtpPassword} placeholder={smtpExisting?.has_password ? '••••••••' : 'SMTP password'}
