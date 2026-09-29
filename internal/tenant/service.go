@@ -291,11 +291,11 @@ func (s *TenantService) SetProjectOrg(ctx context.Context, projectID, platformUs
 	// client can retry with a fresh org list rather than seeing 500.
 	if orgID != nil {
 		_, err = s.pool.Exec(ctx,
-			`UPDATE public.projects SET org_id = $1::uuid, updated_at = now() WHERE id = $2::uuid`,
+			`UPDATE public.projects SET org_id = $1::uuid WHERE id = $2::uuid`,
 			*orgID, projectID)
 	} else {
 		_, err = s.pool.Exec(ctx,
-			`UPDATE public.projects SET org_id = NULL, updated_at = now() WHERE id = $1::uuid`,
+			`UPDATE public.projects SET org_id = NULL WHERE id = $1::uuid`,
 			projectID)
 	}
 	if err != nil {
@@ -806,11 +806,11 @@ func (s *TenantService) GetProject(ctx context.Context, projectID string) (*Proj
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, owner_id, name, slug, schema_name, s3_bucket, region, plan, status,
 		        auth_config, created_at, state, last_active_at, grandfathered_until,
-		        legacy_pro_grace_until
+		        legacy_pro_grace_until, org_id::text
 		 FROM projects WHERE id = $1`,
 		projectID,
 	).Scan(&p.ID, &p.OwnerID, &p.Name, &p.Slug, &p.SchemaName, &p.S3Bucket, &p.Region, &p.Plan, &p.Status,
-		&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil)
+		&p.AuthConfig, &p.CreatedAt, &p.State, &p.LastActiveAt, &p.GrandfatheredUntil, &p.LegacyProGraceUntil, &p.OrgID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("project not found: %s", projectID)

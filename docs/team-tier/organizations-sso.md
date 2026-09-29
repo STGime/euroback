@@ -119,8 +119,9 @@ For each teammate:
 4. Save. The invitation is **pending**.
 5. **Teammate accepts.** They get an email from Eurobase (not from
    your IdP) naming who invited them. They sign in to the console
-   with their usual sign-in (password or passkey) and accept the
-   invitation under **Organizations**. Only then are they a member:
+   with their usual sign-in (password or passkey) — the email's
+   **Review the invitation** button opens it directly — and accept
+   the invitation under **Organizations**. Only then are they a member:
    access to org-owned projects and SSO sign-in start with the
    accept. Invitations expire after 30 days; admins see pending
    ones on the org page and can withdraw them.

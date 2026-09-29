@@ -133,7 +133,9 @@
 		if (!token) {
 			// Guard against re-firing during the goto redirect.
 			if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-				goto('/login');
+				// Come back here after signing in (e.g. an invitation link).
+				const back = window.location.pathname + window.location.search;
+				goto(back === '/' ? '/login' : '/login?redirect=' + encodeURIComponent(back));
 			}
 			return;
 		}

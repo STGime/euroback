@@ -1,6 +1,7 @@
 package email
 
 import (
+	"net/url"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -331,8 +332,10 @@ func (s *EmailService) SendPlatformVerificationEmail(ctx context.Context, userID
 // Fire-and-forget from the caller's perspective — a send failure
 // (missing TEM creds in dev, provider hiccup) does NOT roll back
 // the invite; the caller logs and moves on. #583.
-func (s *EmailService) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail string) error {
-	actionURL := s.consoleURL + "/organizations"
+func (s *EmailService) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail, invitationID string) error {
+	// Opens the invitation in the console (after sign-in, the console
+	// returns here); accepting still needs the invitee's own sign-in.
+	actionURL := s.consoleURL + "/organizations?invitation=" + url.QueryEscape(invitationID)
 	subject, body, err := RenderTemplate("org_invitation", "", "", TemplateData{
 		UserEmail:    invitedEmail,
 		ProjectName:  "Eurobase Console",

@@ -25,6 +25,7 @@ type fakeOrgMailer struct {
 	invitedEmail string
 	orgName      string
 	inviterEmail string
+	invitationID string
 	done         chan struct{}
 	returnErr    error
 }
@@ -33,12 +34,14 @@ func newFakeOrgMailer() *fakeOrgMailer {
 	return &fakeOrgMailer{done: make(chan struct{}, 1)}
 }
 
-func (f *fakeOrgMailer) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail string) error {
+func (f *fakeOrgMailer) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail, invitationID string) error {
+
 	f.mu.Lock()
 	f.calls++
 	f.invitedEmail = invitedEmail
 	f.orgName = orgName
 	f.inviterEmail = inviterEmail
+	f.invitationID = invitationID
 	f.mu.Unlock()
 	select {
 	case f.done <- struct{}{}:
@@ -117,6 +120,11 @@ func TestHandleInviteMember_FiresInvitationEmail(t *testing.T) {
 	}
 	if mailer.invitedEmail != inviteeEmail {
 		t.Errorf("invited_email: got %q, want %q", mailer.invitedEmail, inviteeEmail)
+	}
+	// The email links to this invitation.
+	var pendingID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM public.org_invitations WHERE org_id = $1::uuid`, org.ID).Scan(&pendingID); err != nil || mailer.invitationID != pendingID {
+		t.Errorf("invitation id in email: got %q, want %q (%v)", mailer.invitationID, pendingID, err)
 	}
 	if mailer.orgName != "Invite-email fixture" {
 		t.Errorf("org_name: got %q, want %q", mailer.orgName, "Invite-email fixture")

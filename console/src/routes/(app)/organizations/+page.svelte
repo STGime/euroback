@@ -2,6 +2,9 @@
 	import type { OrgInvitation } from '$lib/api';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import { user } from '$lib/stores';
+	import { sessionSSOOrgId } from '$lib/session';
 	import { api, APIError, type OrgWithMembership } from '$lib/api.js';
 
 	let orgs = $state<OrgWithMembership[]>([]);
@@ -47,6 +50,11 @@
 	// Pending invitations to orgs: membership only starts when the
 	// invitee accepts here.
 	let invitations = $state<OrgInvitation[]>([]);
+	let invitationsLoaded = $state(false);
+	// ?invitation=<id> — the link in the invitation email.
+	const linkedInvitation = page.url.searchParams.get('invitation') ?? '';
+	// Invitations are answered with your own sign-in, not an org's SSO.
+	let ssoSession = $derived(sessionSSOOrgId($user?.token) !== '');
 	let invitationBusy = $state('');
 	let invitationError = $state('');
 
@@ -56,6 +64,7 @@
 		} catch {
 			invitations = [];
 		}
+		invitationsLoaded = true;
 	}
 
 	async function respondInvitation(inv: OrgInvitation, accept: boolean) {
@@ -167,10 +176,23 @@
 		{/if}
 	</div>
 
+	{#if ssoSession && (linkedInvitation || invitations.length === 0)}
+		<div class="mt-6 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900">
+			You're signed in through an organization's single sign-on. Invitations are answered with your own sign-in:
+			sign out, then sign in with your email and password (or passkey) to see and accept them.
+		</div>
+	{:else if linkedInvitation && invitationsLoaded && !invitations.some((i) => i.id === linkedInvitation)}
+		<div class="mt-6 rounded-xl border border-gray-200 bg-gray-50 px-5 py-4 text-sm text-gray-700">
+			This invitation isn't open for {$user?.email ?? 'this account'} — it may have been accepted, declined, withdrawn or
+			expired, or it was sent to a different email address. Signed in with the wrong account? Sign out and sign in with the
+			invited address.
+		</div>
+	{/if}
+
 	{#if invitations.length > 0}
 		<div class="mt-6 space-y-3">
 			{#each invitations as inv (inv.id)}
-				<div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-eurobase-200 bg-eurobase-50/50 px-5 py-4">
+				<div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border px-5 py-4 {inv.id === linkedInvitation ? 'border-eurobase-500 bg-eurobase-50 ring-2 ring-eurobase-200' : 'border-eurobase-200 bg-eurobase-50/50'}">
 					<p class="text-sm text-gray-800">
 						{#if inv.invited_by_email}<strong>{inv.invited_by_email}</strong> invited you{:else}You're invited{/if}
 						to join <strong>{inv.org_name}</strong> as <strong>{inv.role}</strong>.
