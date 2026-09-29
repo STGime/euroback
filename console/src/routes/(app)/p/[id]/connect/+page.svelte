@@ -3,7 +3,7 @@
 	import { browser } from '$app/environment';
 	import { getContext } from 'svelte';
 	import { api, type ConnectInfo, type AuthConfig, type Project } from '$lib/api.js';
-	import { lovableSkill, lovableSdkReference, appOrigin, lovableEntries } from '$lib/lovable';
+	import { lovableSkill, lovableSdkReference, lovableAppOrigins, lovableEntries } from '$lib/lovable';
 
 	type IdeTab = 'claude' | 'lovable' | 'codex' | 'cursor' | 'windsurf' | 'generic';
 	const STORAGE_KEY = 'eurobase:connect-tab';
@@ -100,9 +100,9 @@
 
 	// The URLs typed in, as origins; invalid entries reported.
 	let lovableOrigins = $derived.by(() => {
-		const out: { label: string; raw: string; origin: string | null }[] = [];
+		const out: { label: string; raw: string; origins: string[]; note?: string; error?: string }[] = [];
 		for (const [label, raw] of [['Preview URL', lovablePreview], ['Published URL', lovablePublished], ['Custom domain', lovableCustom]] as const) {
-			if (raw.trim()) out.push({ label, raw, origin: appOrigin(raw) });
+			if (raw.trim()) out.push({ label, raw, ...lovableAppOrigins(raw, label === 'Preview URL') });
 		}
 		return out;
 	});
@@ -113,10 +113,11 @@
 		const cors: string[] = [];
 		const redirects: string[] = [];
 		for (const o of lovableOrigins) {
-			if (!o.origin) continue;
-			const e = lovableEntries(o.origin);
-			for (const c of e.cors) if (!haveCors.has(c) && !cors.includes(c)) cors.push(c);
-			for (const r of e.redirects) if (!haveRedirects.has(r) && !redirects.includes(r)) redirects.push(r);
+			for (const origin of o.origins) {
+				const e = lovableEntries(origin);
+				for (const c of e.cors) if (!haveCors.has(c) && !cors.includes(c)) cors.push(c);
+				for (const r of e.redirects) if (!haveRedirects.has(r) && !redirects.includes(r)) redirects.push(r);
+			}
 		}
 		return { cors, redirects };
 	});
@@ -128,8 +129,8 @@
 			lovableError = 'Project settings not loaded yet — try again in a moment.';
 			return;
 		}
-		if (lovableOrigins.some((o) => !o.origin)) {
-			lovableError = 'Fix the highlighted URLs first (https://… only).';
+		if (lovableOrigins.some((o) => o.origins.length === 0)) {
+			lovableError = 'Fix the URLs marked in red first.';
 			return;
 		}
 		lovableSaving = true;
@@ -381,21 +382,24 @@
 						</p>
 						<div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
 							{#each [
-								{ label: 'Preview URL', placeholder: 'https://id-preview--….lovable.app', bind: 'preview' },
+								{ label: 'Preview URL (or the editor URL from your address bar)', placeholder: 'https://lovable.dev/projects/…', bind: 'preview' },
 								{ label: 'Published URL', placeholder: 'https://my-app.lovable.app', bind: 'published' },
 								{ label: 'Custom domain (optional)', placeholder: 'https://app.example.com', bind: 'custom' }
 							] as field}
 								<label class="text-xs text-gray-700">{field.label}
 									{#if field.bind === 'preview'}
-										<input bind:value={lovablePreview} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePreview.trim() && !appOrigin(lovablePreview) ? 'border-red-400' : 'border-gray-300'}" />
+										<input bind:value={lovablePreview} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePreview.trim() && lovableAppOrigins(lovablePreview, true).origins.length === 0 ? 'border-red-400' : 'border-gray-300'}" />
 									{:else if field.bind === 'published'}
-										<input bind:value={lovablePublished} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePublished.trim() && !appOrigin(lovablePublished) ? 'border-red-400' : 'border-gray-300'}" />
+										<input bind:value={lovablePublished} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovablePublished.trim() && lovableAppOrigins(lovablePublished).origins.length === 0 ? 'border-red-400' : 'border-gray-300'}" />
 									{:else}
-										<input bind:value={lovableCustom} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovableCustom.trim() && !appOrigin(lovableCustom) ? 'border-red-400' : 'border-gray-300'}" />
+										<input bind:value={lovableCustom} placeholder={field.placeholder} autocomplete="off" class="mt-1 block w-full rounded border px-2 py-1.5 font-mono text-xs {lovableCustom.trim() && lovableAppOrigins(lovableCustom).origins.length === 0 ? 'border-red-400' : 'border-gray-300'}" />
 									{/if}
 								</label>
 							{/each}
 						</div>
+						{#each lovableOrigins.filter((o) => o.note || o.error) as o (o.label)}
+							<p class="mt-2 text-xs {o.error ? 'text-red-600' : 'text-amber-700'}"><strong>{o.label}:</strong> {o.error ?? o.note}</p>
+						{/each}
 						{#if lovablePlan.cors.length > 0 || lovablePlan.redirects.length > 0}
 							<div class="mt-3 rounded-lg bg-gray-50 border border-gray-100 p-3 text-xs text-gray-700">
 								<p class="font-medium">Will add:</p>
@@ -412,7 +416,7 @@
 							{#if lovableMessage}<span class="text-xs text-green-700">{lovableMessage}</span>{/if}
 							{#if lovableError}<span class="text-xs text-red-600">{lovableError}</span>{/if}
 						</div>
-						<p class="mt-2 text-[11px] text-gray-400">Needs the admin role on this project. Remove entries later in Auth.</p>
+						<p class="mt-2 text-[11px] text-gray-400">Needs the admin role on this project. Remove entries in Auth when you no longer use them — also after renaming or unpublishing the app, since someone else could later take the old address.</p>
 					</div>
 
 					<!-- 6. First prompt -->
