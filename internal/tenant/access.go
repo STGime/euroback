@@ -242,7 +242,7 @@ func OwnerOrOrgAdmin(ctx context.Context, developerPool, gatewayPool *pgxpool.Po
 // the request for routes outside the project middleware that address a
 // project by {id} (moving it between orgs, deleting it), so RequireRole
 // reads it from the context like everywhere else. No access → 404.
-func StashCallerRole(gatewayPool, developerPool *pgxpool.Pool) func(http.Handler) http.Handler {
+func StashCallerRole(developerPool, gatewayPool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := auth.ClaimsFromContext(r.Context())
