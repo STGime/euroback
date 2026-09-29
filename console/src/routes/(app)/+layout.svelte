@@ -2,7 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { get } from 'svelte/store';
-	import { user, logout } from '$lib/stores.js';
+	import { user, logout, signOut } from '$lib/stores.js';
+	import { loginURLReturningHere } from '$lib/api';
 	import { api, type Project } from '$lib/api.js';
 	import { PUBLIC_BUILD_SHA } from '$env/static/public';
 	import { env } from '$env/dynamic/public';
@@ -133,10 +134,12 @@
 		if (!token) {
 			// Guard against re-firing during the goto redirect.
 			if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-				// Come back here after signing in (e.g. an invitation link).
-				const back = window.location.pathname + window.location.search;
-				goto(back === '/' ? '/login' : '/login?redirect=' + encodeURIComponent(back));
+				// Signed out elsewhere / token cleared: come back here after
+				// signing in (e.g. an invitation link). An explicit sign-out
+				// goes to a plain /login.
+				goto(signOut.explicit ? '/login' : loginURLReturningHere());
 			}
+			signOut.explicit = false;
 			return;
 		}
 		displayName = null;

@@ -97,3 +97,9 @@ func TestRenderTemplate_OrgInvitation_BodyEscapesInjection(t *testing.T) {
 		t.Errorf("body must NOT contain raw <script> — html/template escaping regressed. body:\n%s", body)
 	}
 }
+
+func TestOrgInvitationURL(t *testing.T) {
+	if got := OrgInvitationURL("https://console.eurobase.app", "3f1c…&x=1"); got != "https://console.eurobase.app/organizations?invitation=3f1c%E2%80%A6%26x%3D1" {
+		t.Errorf("OrgInvitationURL = %q", got)
+	}
+}

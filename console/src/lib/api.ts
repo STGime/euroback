@@ -628,7 +628,7 @@ export class EurobaseAPI {
 					localStorage.removeItem('eurobase_email');
 				}
 				if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login') && !window.location.pathname.startsWith('/reset-password')) {
-					window.location.href = '/login';
+					window.location.href = loginURLReturningHere();
 				}
 			}
 			const body = await res.text().catch(() => '');
@@ -694,7 +694,7 @@ export class EurobaseAPI {
 					localStorage.removeItem('eurobase_email');
 				}
 				if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login') && !window.location.pathname.startsWith('/reset-password')) {
-					window.location.href = '/login';
+					window.location.href = loginURLReturningHere();
 				}
 			}
 			const body = await res.text().catch(() => '');
@@ -2761,6 +2761,15 @@ export class EurobaseAPI {
 			body: JSON.stringify({ message }),
 		});
 	}
+}
+
+/** /login that brings the user back to the current page after signing in
+ * (an expired session, an invitation link). The login page only follows
+ * same-origin paths. */
+export function loginURLReturningHere(): string {
+	if (typeof window === 'undefined') return '/login';
+	const back = window.location.pathname + window.location.search;
+	return back === '/' ? '/login' : '/login?redirect=' + encodeURIComponent(back);
 }
 
 export interface Org {

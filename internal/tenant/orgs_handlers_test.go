@@ -35,7 +35,6 @@ func newFakeOrgMailer() *fakeOrgMailer {
 }
 
 func (f *fakeOrgMailer) SendPlatformOrgInvitationEmail(ctx context.Context, invitedEmail, orgName, inviterEmail, invitationID string) error {
-
 	f.mu.Lock()
 	f.calls++
 	f.invitedEmail = invitedEmail
