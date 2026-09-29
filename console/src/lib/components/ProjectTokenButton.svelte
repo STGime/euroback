@@ -46,10 +46,16 @@
 	let copied = $state<'' | 'token' | 'config'>('');
 	// ${…} before $…: "$EUROBASE_PAT" is not a substring of "${EUROBASE_PAT}".
 	const PLACEHOLDERS = ['YOUR_EUROBASE_PAT', '${EUROBASE_PAT}', '$EUROBASE_PAT'];
-	let filledConfig = $derived.by(() => {
-		if (!token || !configTemplate) return '';
-		const filled = PLACEHOLDERS.reduce((c, p) => c.split(p).join(token), configTemplate);
-		return filled === configTemplate ? '' : filled;
+	// A config that reads the token from the environment (Codex's
+	// bearer_token_env_var) has nothing to fill: show the export instead.
+	let filled = $derived.by((): { label: string; text: string } | null => {
+		if (!token || !configTemplate) return null;
+		const text = PLACEHOLDERS.reduce((c, p) => c.split(p).join(token), configTemplate);
+		if (text !== configTemplate) return { label: 'Or the config above, with the token filled in:', text };
+		if (configTemplate.includes('EUROBASE_PAT')) {
+			return { label: 'The config above reads the token from EUROBASE_PAT — set it in your shell:', text: `export EUROBASE_PAT=${token}` };
+		}
+		return null;
 	});
 	let copyTimer: ReturnType<typeof setTimeout> | undefined;
 	$effect(() => () => clearTimeout(copyTimer));
@@ -99,11 +105,11 @@
 			<code class="flex-1 overflow-x-auto whitespace-nowrap rounded bg-gray-900 px-2 py-1.5 font-mono text-gray-100">{token}</code>
 			<button type="button" onclick={() => copy(token, 'token')} class="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 cursor-pointer">{copied === 'token' ? 'Copied!' : 'Copy'}</button>
 		</div>
-		{#if filledConfig}
-			<p class="mt-3 font-medium text-gray-900">Or the config above, with the token filled in:</p>
+		{#if filled}
+			<p class="mt-3 font-medium text-gray-900">{filled.label}</p>
 			<div class="mt-1 flex items-start gap-2">
-				<pre class="flex-1 overflow-x-auto rounded bg-gray-900 px-2 py-1.5 font-mono text-gray-100">{filledConfig}</pre>
-				<button type="button" onclick={() => copy(filledConfig, 'config')} class="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 cursor-pointer">{copied === 'config' ? 'Copied!' : 'Copy'}</button>
+				<pre class="flex-1 overflow-x-auto rounded bg-gray-900 px-2 py-1.5 font-mono text-gray-100">{filled.text}</pre>
+				<button type="button" onclick={() => copy(filled.text, 'config')} class="rounded border border-gray-300 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 cursor-pointer">{copied === 'config' ? 'Copied!' : 'Copy'}</button>
 			</div>
 		{/if}
 		{#if copyFailed}<p class="mt-1.5 text-amber-700">Copy failed — select the text and copy it by hand.</p>{/if}

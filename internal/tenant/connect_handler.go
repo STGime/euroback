@@ -323,11 +323,12 @@ func generateClaudeMD(name, slug, apiURL, plan string, tables []ConnectTable) st
 	fmt.Fprintf(&b, "Eurobase ships an MCP server so Claude Code can operate on this project directly — list tables, run SQL, inspect users/files, read & write Vault secrets, invoke edge functions.\n\n")
 	fmt.Fprintf(&b, "Add it once in your shell:\n\n")
 	fmt.Fprintf(&b, "```bash\n")
+	fmt.Fprintf(&b, "export EUROBASE_PAT=eb_ptk_...   # your project token\n")
 	fmt.Fprintf(&b, "claude mcp add --transport http eurobase %s \\\n", mcpServerURL)
 	fmt.Fprintf(&b, "  --header \"Authorization: Bearer $EUROBASE_PAT\"\n")
 	fmt.Fprintf(&b, "```\n\n")
-	fmt.Fprintf(&b, "`EUROBASE_PAT` is a Personal Access Token. Mint one at <https://console.eurobase.app/account> → *Personal Access Tokens* → *New token*. The plaintext is shown once on creation; store it in a password manager or your shell rc. Tools are auto-namespaced as `mcp__eurobase__*`.\n\n")
-	fmt.Fprintf(&b, "PATs authenticate as you across every project, but never carry superadmin rights — even if your account has them. They cannot mint other tokens, change passwords, or delete the account.\n\n")
+	fmt.Fprintf(&b, "`EUROBASE_PAT` is a project token. Create one on this project's Connect page or at <https://console.eurobase.app/account> → *Personal Access Tokens*. The plaintext is shown once on creation; store it in a password manager or your shell rc. Tools are auto-namespaced as `mcp__eurobase__*`.\n\n")
+	fmt.Fprintf(&b, "A project token (Connect page, or Account → *Personal Access Tokens*) works for this project only, with the access you pick — Read-only, Developer or Admin, never above your own role. It can't change members, organizations or the account.\n\n")
 
 	fmt.Fprintf(&b, "### MCP vs SDK vs migrations — pick the right channel\n\n")
 	fmt.Fprintf(&b, "These are not interchangeable. Same project, three audiences:\n\n")
@@ -410,10 +411,10 @@ func generateCodexMD(name, slug, apiURL, plan string, tables []ConnectTable) str
 	fmt.Fprintf(&b, "```toml\n")
 	fmt.Fprintf(&b, "[mcp_servers.eurobase]\n")
 	fmt.Fprintf(&b, "url = \"%s\"\n", mcpServerURL)
-	fmt.Fprintf(&b, "headers = { Authorization = \"Bearer ${EUROBASE_PAT}\" }\n")
+	fmt.Fprintf(&b, "bearer_token_env_var = \"EUROBASE_PAT\"\n")
 	fmt.Fprintf(&b, "```\n\n")
-	fmt.Fprintf(&b, "`EUROBASE_PAT` is a Personal Access Token minted at <https://console.eurobase.app/account> → *Personal Access Tokens*. The plaintext is shown once; store it in a password manager.\n\n")
-	fmt.Fprintf(&b, "PATs authenticate as you across every project, but never carry superadmin rights — even if your account has them. They cannot mint other tokens, change passwords, or delete the account.\n\n")
+	fmt.Fprintf(&b, "Codex sends the token from the `EUROBASE_PAT` environment variable (`export EUROBASE_PAT=eb_ptk_…` in your shell rc). The plaintext is shown once on creation; store it in a password manager.\n\n")
+	fmt.Fprintf(&b, "A project token (Connect page, or Account → *Personal Access Tokens*) works for this project only, with the access you pick — Read-only, Developer or Admin, never above your own role. It can't change members, organizations or the account.\n\n")
 
 	fmt.Fprintf(&b, "### MCP vs SDK vs migrations — pick the right channel\n\n")
 	fmt.Fprintf(&b, "These are not interchangeable. Same project, three audiences:\n\n")
@@ -497,11 +498,14 @@ func generateCursorRules(name, slug, apiURL string, tables []ConnectTable) strin
 }
 
 // generateMCPConfig returns ready-to-paste MCP-server config snippets keyed
-// by IDE: claude (CLI invocation), claude_json (settings.json block),
-// codex (config.toml block), cursor (mcp.json block), windsurf (mcp.json block).
+// by IDE: claude (CLI invocation), claude_json (.mcp.json block; Claude
+// Code expands ${EUROBASE_PAT} there, so the file holds no token), codex
+// (config.toml block; Codex reads the token from bearer_token_env_var —
+// it ignores a "headers" key), cursor (mcp.json block), windsurf (mcp.json block).
 func generateMCPConfig() map[string]string {
 	return map[string]string{
-		"claude": fmt.Sprintf(`claude mcp add --transport http eurobase %s \
+		"claude": fmt.Sprintf(`export EUROBASE_PAT=YOUR_EUROBASE_PAT
+claude mcp add --transport http eurobase %s \
   --header "Authorization: Bearer $EUROBASE_PAT"`, mcpServerURL),
 
 		"claude_json": fmt.Sprintf(`{
@@ -510,7 +514,7 @@ func generateMCPConfig() map[string]string {
       "type": "http",
       "url": "%s",
       "headers": {
-        "Authorization": "Bearer YOUR_EUROBASE_PAT"
+        "Authorization": "Bearer ${EUROBASE_PAT}"
       }
     }
   }
@@ -518,7 +522,7 @@ func generateMCPConfig() map[string]string {
 
 		"codex": fmt.Sprintf(`[mcp_servers.eurobase]
 url = "%s"
-headers = { Authorization = "Bearer ${EUROBASE_PAT}" }`, mcpServerURL),
+bearer_token_env_var = "EUROBASE_PAT"`, mcpServerURL),
 
 		"cursor": fmt.Sprintf(`{
   "mcpServers": {

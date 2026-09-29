@@ -65,6 +65,9 @@ claude mcp add --transport http eurobase https://mcp.eurobase.app/mcp \
 					>{copiedId === 'mcp-claude-cli' ? 'Copied!' : 'Copy'}</button>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed">
+					For Codex, the <code class="rounded bg-gray-100 px-1 font-mono text-xs">~/.codex/config.toml</code> entry reads the token from the same variable with <code class="rounded bg-gray-100 px-1 font-mono text-xs">bearer_token_env_var = "EUROBASE_PAT"</code> &mdash; Codex ignores a <code class="rounded bg-gray-100 px-1 font-mono text-xs">headers</code> key, so a config written that way connects without a token.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed">
 					After this, Alex can ask Claude Code things like <em>"how many active LexVault users signed up this week?"</em> and it will run the SELECT itself.
 				</p>
 

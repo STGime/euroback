@@ -263,7 +263,7 @@
 						</div>
 						<pre class="rounded-lg bg-gray-900 px-4 py-3 text-xs font-mono text-gray-100 overflow-x-auto">{info.mcp_config.claude}</pre>
 						<ProjectTokenButton projectId={projectId ?? ''} projectName={info.project_name} tokenName="claude-code" configTemplate={info.mcp_config.claude} />
-						<p class="mt-3 text-xs text-gray-500">Or add to <code class="rounded bg-gray-100 px-1 font-mono">~/.claude/settings.json</code>:</p>
+						<p class="mt-3 text-xs text-gray-500">Or add to <code class="rounded bg-gray-100 px-1 font-mono">.mcp.json</code> in your project root. Claude Code fills in <code class="rounded bg-gray-100 px-1 font-mono">${'{'}EUROBASE_PAT{'}'}</code> from your environment, so the file holds no token and can be committed:</p>
 						<pre class="mt-2 rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto">{info.mcp_config.claude_json}</pre>
 					</div>
 
@@ -471,7 +471,7 @@
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">MCP Server</p>
-								<p class="text-xs text-gray-500">Append to <code class="rounded bg-gray-100 px-1 font-mono">~/.codex/config.toml</code> so Codex can run SQL, manage Vault, and invoke functions on this project.</p>
+								<p class="text-xs text-gray-500">Append to <code class="rounded bg-gray-100 px-1 font-mono">~/.codex/config.toml</code> so Codex can run SQL, manage Vault, and invoke functions on this project. Codex sends the token from the <code class="rounded bg-gray-100 px-1 font-mono">EUROBASE_PAT</code> environment variable.</p>
 							</div>
 							<button
 								onclick={() => copyToClipboard(info.mcp_config.codex, 'mcp-codex')}
