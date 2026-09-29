@@ -46,6 +46,14 @@ type Claims struct {
 	// re-auth window (a fresh session may manage passkeys without
 	// re-entering the password).
 	IssuedAt time.Time
+	// PATID is the personal access token's id when the request used one.
+	PATID string
+	// PATProjectID / PATRole scope a project-scoped token (#702): it works
+	// only for that project, with at most that role (capped by the
+	// creator's current role in tenant.CallerProjectRole). Both empty for
+	// a legacy account-wide token and for console sessions.
+	PATProjectID string
+	PATRole      string
 }
 
 // ClaimsFromContext extracts the authenticated claims from the request context.

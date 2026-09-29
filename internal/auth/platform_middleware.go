@@ -15,6 +15,8 @@ import (
 type PlatformAuthMiddleware struct {
 	svc *PlatformAuthService
 	pat *PATService
+	// resolveForTest replaces token validation in unit tests.
+	resolveForTest func(tokenStr string) (*Claims, error)
 }
 
 // NewPlatformAuthMiddleware creates a new middleware that validates platform JWTs.
@@ -51,17 +53,47 @@ func (m *PlatformAuthMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
+		if claims.PATProjectID != "" && !ScopedTokenAllowed(r.Method, r.URL.Path) {
+			slog.Info("project-scoped token refused outside its project", "token_id", claims.PATID, "path", r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"this token is for one project; this request is outside it","code":"pat_out_of_scope"}`))
+			return
+		}
+
 		ctx := ContextWithClaims(r.Context(), claims)
 		slog.Debug("platform auth OK", "sub", claims.Subject, "email", claims.Email, "path", r.URL.Path)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
+// ScopedTokenAllowed is the deny-by-default allowlist for a project-scoped
+// token (#702): the project routes (/platform/projects/{id}/… — which
+// project and how much is decided by tenant.CallerProjectRole: another
+// project is a 404, the role is capped), the project list (filtered to
+// the token's project), and the profile (the MCP server validates tokens
+// with it). Everything else — account, orgs, invitations, billing,
+// support, config, project create / settings / move / delete — is refused.
+func ScopedTokenAllowed(method, path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/platform/projects/"):
+		return true
+	case (path == "/v1/tenants" || path == "/v1/tenants/") && method == http.MethodGet:
+		return true
+	case path == "/platform/auth/account/profile" && method == http.MethodGet:
+		return true
+	}
+	return false
+}
+
 // resolve picks PAT vs JWT based on prefix. PATs short-circuit before JWT
 // parsing because their format isn't a JWT and would fail the signature
 // check with a confusing error.
 func (m *PlatformAuthMiddleware) resolve(r *http.Request, tokenStr string) (*Claims, error) {
-	if strings.HasPrefix(tokenStr, PATPrefix) {
+	if m.resolveForTest != nil {
+		return m.resolveForTest(tokenStr)
+	}
+	if IsPATToken(tokenStr) {
 		if m.pat == nil {
 			return nil, errors.New("pat received but PATService not configured")
 		}

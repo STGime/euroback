@@ -166,12 +166,23 @@ func HandleGetProfile(svc *PlatformAuthService) http.HandlerFunc {
 			return
 		}
 
-		if isPATAuth(r) {
+		if IsPATSession(r) {
 			profile.IsSuperadmin = false
 		}
 
+		// The session's scope (#702): the MCP server reads it to tell a
+		// project-scoped token from a legacy account-wide one.
+		type tokenScope struct {
+			Scoped    bool   `json:"scoped"`
+			ProjectID string `json:"project_id,omitempty"`
+			Role      string `json:"role,omitempty"`
+		}
+		ts := tokenScope{Scoped: claims.PATProjectID != "", ProjectID: claims.PATProjectID, Role: claims.PATRole}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(profile)
+		json.NewEncoder(w).Encode(struct {
+			*PlatformProfile
+			Token tokenScope `json:"token"`
+		}{profile, ts})
 	}
 }
 

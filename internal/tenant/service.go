@@ -859,6 +859,19 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 	if claims == nil {
 		return nil, fmt.Errorf("ListProjects: nil claims")
 	}
+	// A project-scoped token lists only its project (#702).
+	defer func() {
+		if claims.PATProjectID == "" || outErr != nil {
+			return
+		}
+		kept := out[:0]
+		for _, p := range out {
+			if p.ID == claims.PATProjectID {
+				kept = append(kept, p)
+			}
+		}
+		out = kept
+	}()
 	// A session from an org's SSO lists only that org's projects.
 	defer func() {
 		if claims.LoginVia != auth.LoginViaSSO || outErr != nil {
@@ -872,6 +885,23 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 		}
 		out = kept
 	}()
+	// A project-scoped token: only its own project, looked up directly
+	// (no need to enumerate — and annotate — every project of its
+	// creator). The deferred filter above stays as a backstop.
+	if claims.PATProjectID != "" && s.developerPool != nil {
+		role, err := CallerProjectRole(ctx, s.developerPool, s.pool, claims, claims.PATProjectID)
+		if err != nil {
+			return nil, err
+		}
+		if role == "" {
+			return []Project{}, nil
+		}
+		ps, err := s.listProjectsByIDs(ctx, []string{claims.PATProjectID})
+		if err == nil {
+			s.enrichOrgNames(ctx, ps)
+		}
+		return ps, err
+	}
 	platformUserID := claims.Subject
 	// Direct-member branch. Runs on gateway pool as today.
 	projects, err := s.listDirectMemberProjects(ctx, platformUserID)

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -62,9 +61,12 @@ func HandleCreatePAT(svc *PATService) http.HandlerFunc {
 			return
 		}
 
+		// New tokens are for one project with one role (#702); no
+		// expiry — revoke in the console when no longer needed.
 		var req struct {
-			Name      string     `json:"name"`
-			ExpiresAt *time.Time `json:"expires_at"`
+			Name      string `json:"name"`
+			ProjectID string `json:"project_id"`
+			Role      string `json:"role"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, "invalid request body", http.StatusBadRequest)
@@ -72,17 +74,25 @@ func HandleCreatePAT(svc *PATService) http.HandlerFunc {
 		}
 
 		result, err := svc.Create(r.Context(), CreateInput{
-			UserID:    claims.Subject,
+			Claims:    claims,
 			Name:      req.Name,
-			ExpiresAt: req.ExpiresAt,
+			ProjectID: req.ProjectID,
+			Role:      req.Role,
 		})
 		if err != nil {
 			slog.Warn("create pat failed", "error", err, "user_id", claims.Subject)
-			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			switch {
+			case errors.Is(err, ErrPATProjectNotFound):
+				writeJSONError(w, err.Error(), http.StatusNotFound)
+			case errors.Is(err, ErrPATRoleTooHigh), errors.Is(err, ErrPATProjectRequiresSSO):
+				writeJSONError(w, err.Error(), http.StatusForbidden)
+			default:
+				writeJSONError(w, err.Error(), http.StatusBadRequest)
+			}
 			return
 		}
 
-		slog.Info("pat created", "user_id", claims.Subject, "token_id", result.PAT.ID, "name", result.PAT.Name)
+		slog.Info("pat created", "user_id", claims.Subject, "token_id", result.PAT.ID, "name", result.PAT.Name, "project_id", req.ProjectID, "role", req.Role)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -189,11 +199,24 @@ func RequireConsoleSession(next http.Handler) http.Handler {
 	})
 }
 
+// RefuseScopedTokens refuses project-scoped tokens (403) on a route whose
+// action is never theirs, whatever their role — belt and braces next to
+// ScopedTokenAllowed.
+func RefuseScopedTokens(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, ok := ClaimsFromContext(r.Context()); ok && c != nil && c.PATProjectID != "" {
+			writeJSONError(w, "a project token can't do this; sign in to the console", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func isPATAuth(r *http.Request) bool {
 	const bearer = "Bearer "
 	h := r.Header.Get("Authorization")
 	if len(h) <= len(bearer) {
 		return false
 	}
-	return len(h) > len(bearer)+len(PATPrefix) && h[len(bearer):len(bearer)+len(PATPrefix)] == PATPrefix
+	return IsPATToken(h[len(bearer):])
 }

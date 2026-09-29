@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -18,6 +19,18 @@ import (
 // detect PATs in the Authorization header so we route them to DB lookup
 // instead of the JWT validator.
 const PATPrefix = "eb_pat_"
+
+// ScopedPATPrefix starts every project-scoped token (#702). A different
+// prefix on purpose: gateway code from before scoped tokens only accepts
+// eb_pat_, so after a rollback — or on an old pod during a rolling deploy —
+// a scoped token fails (401) instead of being read as an account-wide one.
+const ScopedPATPrefix = "eb_ptk_"
+
+// IsPATToken reports whether a bearer token is a personal access token of
+// either kind.
+func IsPATToken(token string) bool {
+	return strings.HasPrefix(token, PATPrefix) || strings.HasPrefix(token, ScopedPATPrefix)
+}
 
 // PAT represents a personal access token row. The plaintext token is never
 // stored or returned after creation — only the prefix (for display) and
@@ -30,11 +43,47 @@ type PAT struct {
 	ExpiresAt  *time.Time `json:"expires_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	CreatedAt  time.Time  `json:"created_at"`
+	// ProjectID / Role: a project-scoped token (#702). Both nil for a
+	// legacy account-wide token.
+	ProjectID *string `json:"project_id"`
+	Role      *string `json:"role"`
 }
+
+// PAT roles a project-scoped token can have. "owner" is never offered:
+// owner-only actions (delete / transfer the project, billing) need a
+// console session.
+var patRoles = map[string]bool{"viewer": true, "developer": true, "admin": true}
+
+// ProjectRoleFunc returns the caller's current role in a project ("" = no
+// access). Wired to tenant.CallerProjectRole by the router (the auth
+// package can't import tenant).
+type ProjectRoleFunc func(ctx context.Context, claims *Claims, projectID string) (string, error)
+
+// ErrPATRoleTooHigh: the requested token role exceeds the creator's role in
+// the project.
+var ErrPATRoleTooHigh = errors.New("a token's access can't exceed your own role in the project")
+
+// ErrPATProjectRequiresSSO: the project's organization requires SSO
+// sign-in, which a token can't satisfy — a token for it would be refused
+// on every use.
+var ErrPATProjectRequiresSSO = errors.New("this project's organization requires SSO sign-in; tokens can't be used with it")
+
+// ErrPATProjectNotFound: no access to the project the token is for.
+var ErrPATProjectNotFound = errors.New("project not found")
+
+var patRoleLevel = map[string]int{"viewer": 1, "developer": 2, "admin": 3, "owner": 4}
 
 // PATService manages personal access tokens.
 type PATService struct {
-	pool *pgxpool.Pool
+	pool        *pgxpool.Pool
+	projectRole ProjectRoleFunc
+}
+
+// WithProjectRole wires the project-role lookup Create uses to check that
+// a token's role doesn't exceed its creator's.
+func (s *PATService) WithProjectRole(fn ProjectRoleFunc) *PATService {
+	s.projectRole = fn
+	return s
 }
 
 // NewPATService creates a new PAT service.
@@ -49,24 +98,27 @@ var ErrPATNotFound = errors.New("personal access token not found or expired")
 // generatePAT produces a fresh token in the form `eb_pat_<32 hex chars>`.
 // Returns the plaintext token (shown to the user once), the display prefix
 // (first 14 chars — `eb_pat_` + 7 hex), and the hex-encoded SHA-256 hash.
-func generatePAT() (token, prefix, hash string, err error) {
+func generatePAT(tokenPrefix string) (token, prefix, hash string, err error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", "", "", fmt.Errorf("generate pat random: %w", err)
 	}
 	body := hex.EncodeToString(buf)
-	token = PATPrefix + body
+	token = tokenPrefix + body
 	prefix = token[:14]
 	sum := sha256.Sum256([]byte(token))
 	hash = hex.EncodeToString(sum[:])
 	return token, prefix, hash, nil
 }
 
-// CreateInput is the input to Create. ExpiresAt may be nil (never expires).
+// CreateInput is the input to Create. New tokens are project-scoped:
+// ProjectID and Role are required, and there is no expiry (users revoke
+// tokens in the console). Claims are the creator's (console) session.
 type CreateInput struct {
-	UserID    string
+	Claims    *Claims
 	Name      string
-	ExpiresAt *time.Time
+	ProjectID string
+	Role      string
 }
 
 // CreateResult is what Create returns. PlaintextToken is shown once and
@@ -85,22 +137,50 @@ func (s *PATService) Create(ctx context.Context, in CreateInput) (*CreateResult,
 	if len(name) > 100 {
 		return nil, fmt.Errorf("name must be 100 characters or fewer")
 	}
-	if in.ExpiresAt != nil && in.ExpiresAt.Before(time.Now()) {
-		return nil, fmt.Errorf("expires_at must be in the future")
+	if in.Claims == nil {
+		return nil, fmt.Errorf("unauthorized")
+	}
+	if in.ProjectID == "" {
+		return nil, fmt.Errorf("project_id is required: a token is for one project")
+	}
+	if _, err := uuid.Parse(in.ProjectID); err != nil {
+		return nil, ErrPATProjectNotFound
+	}
+	if in.Role == "" {
+		in.Role = "viewer"
+	}
+	if !patRoles[in.Role] {
+		return nil, fmt.Errorf("role must be viewer, developer or admin")
+	}
+	if s.projectRole == nil {
+		return nil, fmt.Errorf("token creation unavailable: project role lookup not configured")
+	}
+	own, err := s.projectRole(ctx, in.Claims, in.ProjectID)
+	if err != nil {
+		if errors.Is(err, ErrPATProjectRequiresSSO) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("check project role: %w", err)
+	}
+	if own == "" {
+		return nil, ErrPATProjectNotFound
+	}
+	if patRoleLevel[in.Role] > patRoleLevel[own] {
+		return nil, ErrPATRoleTooHigh
 	}
 
-	token, prefix, hash, err := generatePAT()
+	token, prefix, hash, err := generatePAT(ScopedPATPrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	var pat PAT
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO public.personal_access_tokens (user_id, name, prefix, token_hash, expires_at)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, user_id, name, prefix, expires_at, last_used_at, created_at`,
-		in.UserID, name, prefix, hash, in.ExpiresAt,
-	).Scan(&pat.ID, &pat.UserID, &pat.Name, &pat.Prefix, &pat.ExpiresAt, &pat.LastUsedAt, &pat.CreatedAt)
+		`INSERT INTO public.personal_access_tokens (user_id, name, prefix, token_hash, project_id, role)
+		 VALUES ($1, $2, $3, $4, $5::uuid, $6)
+		 RETURNING id, user_id, name, prefix, expires_at, last_used_at, created_at, project_id::text, role`,
+		in.Claims.Subject, name, prefix, hash, in.ProjectID, in.Role,
+	).Scan(&pat.ID, &pat.UserID, &pat.Name, &pat.Prefix, &pat.ExpiresAt, &pat.LastUsedAt, &pat.CreatedAt, &pat.ProjectID, &pat.Role)
 	if err != nil {
 		return nil, fmt.Errorf("insert pat: %w", err)
 	}
@@ -111,7 +191,7 @@ func (s *PATService) Create(ctx context.Context, in CreateInput) (*CreateResult,
 // List returns all PATs owned by the given user, newest first.
 func (s *PATService) List(ctx context.Context, userID string) ([]PAT, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, user_id, name, prefix, expires_at, last_used_at, created_at
+		`SELECT id, user_id, name, prefix, expires_at, last_used_at, created_at, project_id::text, role
 		 FROM public.personal_access_tokens
 		 WHERE user_id = $1
 		 ORDER BY created_at DESC`, userID)
@@ -123,7 +203,7 @@ func (s *PATService) List(ctx context.Context, userID string) ([]PAT, error) {
 	out := make([]PAT, 0)
 	for rows.Next() {
 		var p PAT
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Prefix, &p.ExpiresAt, &p.LastUsedAt, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Prefix, &p.ExpiresAt, &p.LastUsedAt, &p.CreatedAt, &p.ProjectID, &p.Role); err != nil {
 			return nil, fmt.Errorf("scan pat: %w", err)
 		}
 		out = append(out, p)
@@ -151,7 +231,7 @@ func (s *PATService) Revoke(ctx context.Context, userID, tokenID string) error {
 // always have IsSuperadmin = false: PATs are explicitly scoped down from
 // the underlying account so a leaked token can't reach the admin surface.
 func (s *PATService) Validate(ctx context.Context, plaintextToken string) (*Claims, error) {
-	if !strings.HasPrefix(plaintextToken, PATPrefix) {
+	if !IsPATToken(plaintextToken) {
 		return nil, ErrPATNotFound
 	}
 	sum := sha256.Sum256([]byte(plaintextToken))
@@ -162,13 +242,15 @@ func (s *PATService) Validate(ctx context.Context, plaintextToken string) (*Clai
 		userID    string
 		email     string
 		expiresAt *time.Time
+		projectID *string
+		role      *string
 	)
 	err := s.pool.QueryRow(ctx,
-		`SELECT t.id, t.user_id, u.email, t.expires_at
+		`SELECT t.id, t.user_id, u.email, t.expires_at, t.project_id::text, t.role
 		 FROM public.personal_access_tokens t
 		 JOIN public.platform_users u ON u.id = t.user_id
 		 WHERE t.token_hash = $1`, hash,
-	).Scan(&tokenID, &userID, &email, &expiresAt)
+	).Scan(&tokenID, &userID, &email, &expiresAt, &projectID, &role)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrPATNotFound
@@ -188,10 +270,24 @@ func (s *PATService) Validate(ctx context.Context, plaintextToken string) (*Clai
 			`UPDATE public.personal_access_tokens SET last_used_at = now() WHERE id = $1`, tokenID)
 	}()
 
-	return &Claims{
+	// Fail closed on anything inconsistent: a scoped token must have both
+	// project and role and the scoped prefix; a legacy token neither.
+	scopedRow := projectID != nil || role != nil
+	if scopedRow && (projectID == nil || role == nil || !patRoles[*role]) {
+		return nil, ErrPATNotFound
+	}
+	if scopedRow != strings.HasPrefix(plaintextToken, ScopedPATPrefix) {
+		return nil, ErrPATNotFound
+	}
+	c := &Claims{
 		LoginVia:     LoginViaPAT,
 		Subject:      userID,
 		Email:        email,
 		IsSuperadmin: false, // PATs never carry superadmin
-	}, nil
+		PATID:        tokenID,
+	}
+	if scopedRow {
+		c.PATProjectID, c.PATRole = *projectID, *role
+	}
+	return c, nil
 }

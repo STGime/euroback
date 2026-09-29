@@ -552,7 +552,21 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 	// PAT service — shared with platformAuth (via WithPATService in main.go)
 	// for token validation, and used directly here by the CRUD handlers.
-	patSvc := auth.NewPATService(pool)
+	// Token creation checks the requested role against the creator's own
+	// role in the project — the same lookup every access decision uses.
+	patSvc := auth.NewPATService(pool).WithProjectRole(func(ctx context.Context, c *auth.Claims, projectID string) (string, error) {
+		role, err := tenant.CallerProjectRole(ctx, developerPool, pool, c, projectID)
+		if err != nil || role == "" {
+			return role, err
+		}
+		// A token can't satisfy an SSO-required org: refuse to create
+		// one that would be refused on every use.
+		tokenClaims := &auth.Claims{Subject: c.Subject, LoginVia: auth.LoginViaPAT}
+		if err := tenant.EnforceOrgSSOForProject(ctx, developerPool, tokenClaims, projectID); errors.Is(err, tenant.ErrSSORequiredForOrg) {
+			return "", auth.ErrPATProjectRequiresSSO
+		}
+		return role, nil
+	})
 
 	// End-user JWT middleware (optional — anonymous if no token).
 	endUserMw := auth.NewEndUserMiddleware()
@@ -831,6 +845,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					ctx := audit.WithContext(r.Context(), auditSvc)
 					if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
 						ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+						ctx = audit.WithActorToken(ctx, claims.PATID)
 					}
 					next.ServeHTTP(w, r.WithContext(ctx))
 				})
@@ -936,6 +951,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					ctx := audit.WithContext(r.Context(), auditSvc)
 					if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
 						ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+						ctx = audit.WithActorToken(ctx, claims.PATID)
 					}
 					next.ServeHTTP(w, r.WithContext(ctx))
 				})
@@ -1363,6 +1379,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				ctx := audit.WithContext(r.Context(), auditSvc)
 				if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
 					ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
+					ctx = audit.WithActorToken(ctx, claims.PATID)
 				}
 				next.ServeHTTP(w, r.WithContext(ctx))
 			})
@@ -1385,7 +1402,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// + auth check (owner + org membership) is entirely different
 		// from the auth_config flow.
 		r.With(auth.RequireConsoleSession, tenant.StashCallerRole(developerPool, pool)).Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
-		r.With(tenant.StashCallerRole(developerPool, pool)).Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
+		// Deleting a project is owner / org-admin only; a project-scoped
+		// token never may (defence in depth: ScopedTokenAllowed already
+		// refuses it). Legacy tokens still can (the CLI deletes projects).
+		r.With(auth.RefuseScopedTokens, tenant.StashCallerRole(developerPool, pool)).Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 
 	// ── WebSocket realtime route ──

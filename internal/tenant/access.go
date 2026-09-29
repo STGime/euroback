@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"log/slog"
 	"net/http"
 
@@ -211,10 +212,35 @@ func CallerProjectRole(ctx context.Context, developerPool, gatewayPool *pgxpool.
 	return capSessionRole(claims, projectID, role), nil
 }
 
-// capSessionRole limits a role by what the session itself may do. Today
-// the identity; project-scoped tokens (#702) cap it here.
-func capSessionRole(_ *auth.Claims, _ string, role string) string {
+// capSessionRole limits a role by what the session itself may do. A
+// project-scoped token (#702) works only for its project — any other
+// project is "no access" (404, like a non-member) — and at most with its
+// own role; the creator's current role caps it too (role here), so a
+// demoted or removed creator's token is demoted or stops working with
+// them. Legacy tokens and console sessions are unchanged.
+func capSessionRole(claims *auth.Claims, projectID string, role string) string {
+	if claims == nil || claims.PATProjectID == "" || role == "" {
+		return role
+	}
+	if !sameUUID(claims.PATProjectID, projectID) {
+		return ""
+	}
+	switch claims.PATRole {
+	case "viewer", "developer", "admin":
+	default:
+		return "" // unknown token role: no access (fail closed)
+	}
+	if roleLevel[claims.PATRole] < roleLevel[role] {
+		return claims.PATRole
+	}
 	return role
+}
+
+// sameUUID compares two UUIDs by value (case / formatting aside).
+func sameUUID(a, b string) bool {
+	ua, errA := uuid.Parse(a)
+	ub, errB := uuid.Parse(b)
+	return errA == nil && errB == nil && ua == ub
 }
 
 // OwnerOrOrgAdmin reports whether the user owns the project or is an admin
