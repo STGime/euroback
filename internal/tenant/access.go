@@ -8,7 +8,12 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/eurobase/euroback/internal/auth"
+	"github.com/go-chi/chi/v5"
+	"log/slog"
+	"net/http"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -165,4 +170,97 @@ func IsProjectAccessible(ctx context.Context, pool *pgxpool.Pool, userID, projec
 	pa.Accessible = pa.ViaOwner || pa.ViaMember || pa.ViaOrg
 	pa.EffectiveRole = composeEffectiveRole(&pa)
 	return &pa, nil
+}
+
+// CallerProjectRole is the one way to learn what the caller may do in a
+// project: every access path (owner, project member, org member — with
+// the org-role mapping above), then the caller's session limits
+// (capSessionRole). "" means no access, including a project that doesn't
+// exist. Every role check — the project middleware, the tenant / storage
+// contexts, realtime, RequireRole — goes through here, so a limit added
+// in capSessionRole applies everywhere (#702). Don't call
+// IsProjectAccessible / ResolveRole for access decisions elsewhere
+// (TestNoDirectRoleLookups enforces it).
+//
+// developerPool is required for the org path (org_members is revoked from
+// the gateway pool, 000114); without it (dev / tests) only direct
+// membership on gatewayPool counts.
+func CallerProjectRole(ctx context.Context, developerPool, gatewayPool *pgxpool.Pool, claims *auth.Claims, projectID string) (string, error) {
+	if claims == nil {
+		return "", nil
+	}
+	var role string
+	if developerPool != nil {
+		pa, err := IsProjectAccessible(ctx, developerPool, claims.Subject, projectID)
+		if err != nil {
+			if errors.Is(err, ErrProjectNotFound) {
+				return "", nil
+			}
+			return "", err
+		}
+		if pa.Accessible {
+			role = pa.EffectiveRole
+		}
+	} else {
+		r, err := ResolveRole(ctx, gatewayPool, projectID, claims.Subject)
+		if err != nil {
+			return "", err
+		}
+		role = r
+	}
+	return capSessionRole(claims, projectID, role), nil
+}
+
+// capSessionRole limits a role by what the session itself may do. Today
+// the identity; project-scoped tokens (#702) cap it here.
+func capSessionRole(_ *auth.Claims, _ string, role string) string {
+	return role
+}
+
+// OwnerOrOrgAdmin reports whether the user owns the project or is an admin
+// of the org it belongs to — who may delete it (a project admin may not).
+// Kept here with CallerProjectRole so access lookups stay in one file.
+func OwnerOrOrgAdmin(ctx context.Context, developerPool, gatewayPool *pgxpool.Pool, userID, projectID string) (bool, error) {
+	if developerPool == nil {
+		role, err := ResolveRole(ctx, gatewayPool, projectID, userID)
+		if err != nil {
+			return false, err
+		}
+		return HasRole(role, "owner"), nil
+	}
+	pa, err := IsProjectAccessible(ctx, developerPool, userID, projectID)
+	if err != nil {
+		if errors.Is(err, ErrProjectNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return pa.ViaOwner || (pa.MemberRole == "owner") || (pa.ViaOrg && pa.OrgRole == RoleOrgAdmin), nil
+}
+
+// StashCallerRole puts the caller's project role (CallerProjectRole) on
+// the request for routes outside the project middleware that address a
+// project by {id} (moving it between orgs, deleting it), so RequireRole
+// reads it from the context like everywhere else. No access → 404.
+func StashCallerRole(developerPool, gatewayPool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := auth.ClaimsFromContext(r.Context())
+			if !ok || claims == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			role, err := CallerProjectRole(r.Context(), developerPool, gatewayPool, claims, chi.URLParam(r, "id"))
+			if err != nil {
+				slog.Error("caller project role", "error", err)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+			if role == "" {
+				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(WithRole(r.Context(), role)))
+		})
+	}
 }

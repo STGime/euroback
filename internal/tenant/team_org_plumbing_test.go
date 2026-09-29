@@ -921,9 +921,10 @@ func TestEnforceOrgSSOForProject(t *testing.T) {
 		t.Fatalf("expected pass for sso session with matching org; got %v", err)
 	}
 
-	// SSO session for a DIFFERENT org refused (cross-org boundary).
-	if err := EnforceOrgSSOForProject(ctx, pool, ssoOnClaimsFor(alice, "00000000-0000-0000-0000-000000000000"), proj.ID); !errors.Is(err, ErrSSORequiredForOrg) {
-		t.Fatalf("expected ErrSSORequiredForOrg for SSO to different org; got %v", err)
+	// SSO session for a DIFFERENT org refused (cross-org boundary): an SSO
+	// session only works for its own org (#728).
+	if err := EnforceOrgSSOForProject(ctx, pool, ssoOnClaimsFor(alice, "00000000-0000-0000-0000-000000000000"), proj.ID); !errors.Is(err, ErrSSOSessionOutOfScope) {
+		t.Fatalf("expected ErrSSOSessionOutOfScope for SSO to different org; got %v", err)
 	}
 }
 

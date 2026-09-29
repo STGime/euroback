@@ -94,17 +94,7 @@ func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// Fixes #612: without this, org members saw org projects
 			// in their list (ListProjects org-union) but 404'd when
 			// they clicked through.
-			var role string
-			var accessErr error
-			if developerPool != nil {
-				pa, err := IsProjectAccessible(r.Context(), developerPool, claims.Subject, projectID)
-				accessErr = err
-				if err == nil && pa.Accessible {
-					role = pa.EffectiveRole
-				}
-			} else {
-				role, accessErr = ResolveRole(r.Context(), pool, projectID, claims.Subject)
-			}
+			role, accessErr := CallerProjectRole(r.Context(), developerPool, pool, claims, projectID)
 			if accessErr != nil || role == "" {
 				slog.Error("platform tenant context: no access",
 					"project_id", projectID,
@@ -270,17 +260,7 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool, resolver TenantPo
 			// (see the doc comment there). Fixes #612 for the storage
 			// surface: org members had storage access via the org-union
 			// project list but 404'd on every storage call.
-			var role string
-			var accessErr error
-			if developerPool != nil {
-				pa, err := IsProjectAccessible(r.Context(), developerPool, claims.Subject, projectID)
-				accessErr = err
-				if err == nil && pa.Accessible {
-					role = pa.EffectiveRole
-				}
-			} else {
-				role, accessErr = ResolveRole(r.Context(), pool, projectID, claims.Subject)
-			}
+			role, accessErr := CallerProjectRole(r.Context(), developerPool, pool, claims, projectID)
 			if accessErr != nil || role == "" {
 				http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 				return
