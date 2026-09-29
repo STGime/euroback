@@ -1,12 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { ApiClient } from '../api-client.js';
+import { pathSegment } from '../query.js';
 
 export function registerVaultTools(server: McpServer, getClient: () => ApiClient) {
   server.tool(
     'listSecrets',
     'List secret names and descriptions in the project vault (values are not returned)',
-    { projectId: z.string().describe('The project UUID') },
+    { projectId: z.string().uuid().describe('The project UUID') },
     async ({ projectId }) => {
       const data = await getClient().get(`/platform/projects/${projectId}/vault`);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
@@ -17,11 +18,11 @@ export function registerVaultTools(server: McpServer, getClient: () => ApiClient
     'getSecret',
     'Get the decrypted value of a secret from the project vault',
     {
-      projectId: z.string().describe('The project UUID'),
+      projectId: z.string().uuid().describe('The project UUID'),
       name: z.string().describe('The secret name'),
     },
     async ({ projectId, name }) => {
-      const data = await getClient().get(`/platform/projects/${projectId}/vault/${encodeURIComponent(name)}`);
+      const data = await getClient().get(`/platform/projects/${projectId}/vault/${pathSegment(name)}`);
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
   );
@@ -30,7 +31,7 @@ export function registerVaultTools(server: McpServer, getClient: () => ApiClient
     'setSecret',
     'Create or update a secret in the project vault',
     {
-      projectId: z.string().describe('The project UUID'),
+      projectId: z.string().uuid().describe('The project UUID'),
       name: z.string().describe('The secret name'),
       value: z.string().describe('The secret value'),
       description: z.string().optional().describe('Optional description'),

@@ -48,6 +48,6 @@ export function scopeNote(scope: TokenScope): string {
   if (!scope.scoped) {
     return 'This token can access all of the user\'s Eurobase projects (a legacy token); SQL through it is read-only. Suggest creating a project token (console → Account → Personal Access Tokens): one project, with the access it needs.';
   }
-  const access = { viewer: 'read-only (tables, rows, files; no SQL, no changes)', developer: 'developer (read, write, SQL, create and change tables, deploy functions)', admin: 'admin (developer access plus secrets, API keys and project settings)' }[scope.role ?? 'viewer'];
+  const access = { viewer: 'read-only (tables, rows, files; no SQL, no changes)', developer: 'developer (read, write, SQL, create and change tables, invoke functions)', admin: 'admin (developer access plus secrets, end users and API keys)' }[scope.role ?? 'viewer'];
   return `This token works for one project only: ${scope.projectId}, with ${access} access. Other projects are not reachable with it.`;
 }

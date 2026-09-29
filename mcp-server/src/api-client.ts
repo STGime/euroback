@@ -56,7 +56,7 @@ export class ApiClient {
       } catch {
         // not JSON
       }
-      throw new ApiError(explain(`API ${method} ${path} failed (${res.status}): ${message}`, res.status, code, this.scope), res.status, code);
+      throw new ApiError(explain(`API ${method} ${path} failed (${res.status}): ${message}`, res.status, code, this.scope, path), res.status, code);
     }
     return res;
   }
@@ -144,17 +144,20 @@ export function scopeFromProfile(profile: { token?: { scoped?: boolean; project_
  * Turn a refusal into something the model (and user) can act on: a token
  * outside its project, or without enough access for the operation.
  */
-export function explain(message: string, status: number, code: string | undefined, scope: TokenScope): string {
+export function explain(message: string, status: number, code: string | undefined, scope: TokenScope, path = ''): string {
   if (code === 'pat_out_of_scope') {
     return `${message}\nThis token is for one project${scope.projectId ? ` (${scope.projectId})` : ''} and can't reach anything else. Create a token for the other project in the Eurobase console → Account → Personal Access Tokens.`;
   }
   if (status === 403 && scope.scoped) {
     const hint = scope.role === 'viewer'
       ? 'This token is read-only. For reads, use queryTable (rows, filters, counts). To make changes, create a Developer token for this project in the Eurobase console → Account → Personal Access Tokens.'
-      : `This token has ${scope.role} access, which isn't enough for this. Create a token with more access in the Eurobase console → Account → Personal Access Tokens.`;
+      : `This token has ${scope.role} access, which isn't enough for this${scope.role === 'developer' ? ' (secrets, end users and API keys need Admin)' : ''}. Create a token with more access in the Eurobase console → Account → Personal Access Tokens.`;
     return `${message}\n${hint}`;
   }
-  if (status === 404 && scope.scoped) {
+  // A 404 for ANOTHER project than the token's (not a missing file / table
+  // in its own project).
+  const pathProject = /^\/platform\/projects\/([^/?#]+)/.exec(path)?.[1];
+  if (status === 404 && scope.scoped && pathProject && pathProject.toLowerCase() !== scope.projectId?.toLowerCase()) {
     return `${message}\nThis token only works for project ${scope.projectId}.`;
   }
   return message;

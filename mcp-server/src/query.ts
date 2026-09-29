@@ -11,8 +11,27 @@ export interface QueryTableInput {
   aggregate?: { fn: string; column?: string };
 }
 
+/** Query parameters the data API reads itself: a filter on a column of that
+ *  name can't be expressed (it would be dropped or misread), so refuse it. */
+const RESERVED_PARAMS = new Set(['select', 'order', 'limit', 'offset', 'aggregate']);
+
+/** One URL path segment from a name (table, function, secret): refused if
+ *  empty, "." / "..", or containing "/" — so a model-supplied name can't
+ *  walk to another API route. */
+export function pathSegment(name: string): string {
+  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
+    throw new Error(`invalid name: ${JSON.stringify(name)}`);
+  }
+  return encodeURIComponent(name);
+}
+
 /** `?select=…&col=op.value&order=…&limit=…&offset=…&aggregate=…` for GET /data/{table}. */
 export function buildQueryString(input: QueryTableInput): string {
+  for (const f of input.filters ?? []) {
+    if (RESERVED_PARAMS.has(f.column)) {
+      throw new Error(`can't filter on a column named "${f.column}" with queryTable (it clashes with a query parameter); use runSQL`);
+    }
+  }
   const q = new URLSearchParams();
   if (input.columns?.length) q.set('select', input.columns.join(','));
   for (const f of input.filters ?? []) {
@@ -31,19 +50,22 @@ export function buildQueryString(input: QueryTableInput): string {
   return s ? `?${s}` : '';
 }
 
-/** Path of a storage key under /storage/, each segment encoded. */
+/** Path of a storage key under /storage/, each segment encoded. Empty,
+ *  "." and ".." segments are refused: fetch would resolve them before the
+ *  gateway's own key check, reaching other API routes. */
 export function storageKeyPath(key: string): string {
-  return key
-    .replace(/^\/+/, '')
-    .split('/')
-    .map((seg) => encodeURIComponent(seg))
-    .join('/');
+  const segs = key.replace(/^\/+/, '').split('/');
+  if (segs.length === 0 || segs.some((s) => s === '' || s === '.' || s === '..' || s.includes('\\'))) {
+    throw new Error(`invalid storage key: ${JSON.stringify(key)}`);
+  }
+  return segs.map((seg) => encodeURIComponent(seg)).join('/');
 }
 
 /** How downloadFile returns a file: images as images, text as text, else metadata only. */
 export function downloadKind(contentType: string): 'image' | 'text' | 'binary' {
   const ct = contentType.toLowerCase().split(';')[0].trim();
-  if (ct.startsWith('image/') && ct !== 'image/svg+xml') return 'image';
+  // Only formats MCP clients / the model accept as images.
+  if (['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(ct)) return 'image';
   if (ct.startsWith('text/') || ['application/json', 'application/xml', 'application/javascript', 'application/x-ndjson', 'image/svg+xml', 'application/csv'].includes(ct)) {
     return 'text';
   }

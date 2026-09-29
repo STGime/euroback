@@ -42,10 +42,10 @@
 				<ul class="text-sm text-gray-700 space-y-1 ml-4 list-disc">
 					<li><strong>Read-only</strong> &mdash; list and describe tables, read rows with filters and counts (<code class="rounded bg-gray-100 px-1 text-xs font-mono">queryTable</code>), list and read files (<code class="rounded bg-gray-100 px-1 text-xs font-mono">downloadFile</code>). No SQL, no changes. The default, and enough for questions like "how many users signed up this week?".</li>
 					<li><strong>Developer</strong> &mdash; also SQL (reads and writes), creating and changing tables, deploying and invoking functions, signed URLs. What an AI app builder such as Lovable needs to change your schema.</li>
-					<li><strong>Admin</strong> &mdash; also secrets, API keys and project settings.</li>
+					<li><strong>Admin</strong> &mdash; also secrets (Vault), end users and API keys. Project settings (auth providers, CORS, redirect URLs) stay in the console.</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Tokens never reach your other projects, organizations, billing or account settings, never carry superadmin rights, and can't create other tokens. A token refused for lack of access says so, and which access it would need. Older <em>all projects</em> tokens (<code class="rounded bg-gray-100 px-1 text-xs font-mono">eb_pat_</code>) still work, read-only for SQL through MCP &mdash; replace them with project tokens.
+					Tokens never reach your other projects, organizations, billing or account settings, never carry superadmin rights, and can't create other tokens. A refusal says the token lacks access, and for a Read-only token that a Developer token would do. Older <em>all projects</em> tokens (<code class="rounded bg-gray-100 px-1 text-xs font-mono">eb_pat_</code>) still work, read-only for SQL through MCP &mdash; replace them with project tokens.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Revoke a PAT any time from the same screen. Tokens are stored as SHA-256 hashes &mdash; the plaintext exists only on your machine after creation.

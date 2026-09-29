@@ -16,7 +16,7 @@ export function registerProjectTools(server: McpServer, getClient: () => ApiClie
   server.tool(
     'getProject',
     'Get details of a specific Eurobase project by ID',
-    { projectId: z.string().describe('The project UUID') },
+    { projectId: z.string().uuid().describe('The project UUID') },
     async ({ projectId }) => {
       const projects = await getClient().get('/v1/tenants') as any[];
       const project = projects.find((p: any) => p.id === projectId);
