@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { getContext } from 'svelte';
 	import { api, type EdgeFunction, type EdgeFunctionLog, type TableSchema, type FunctionTrigger, type EdgeFunctionVersion, type FunctionMetrics } from '$lib/api.js';
@@ -142,7 +143,7 @@
 
 	async function loadSchema() {
 		schemaLoading = true;
-		const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
+		const hiddenTables = INTERNAL_TABLES;
 		try {
 			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 		} catch {

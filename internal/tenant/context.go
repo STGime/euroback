@@ -232,6 +232,9 @@ func platformTenantContext(pool, developerPool *pgxpool.Pool, resolver TenantPoo
 			// in members.go silently bypassed the org path for org
 			// admins doing project-management calls.
 			ctx = WithRole(ctx, role)
+			// The data API and schema listing give the role exactly its
+			// console access (a Viewer: no internal tables, #702).
+			ctx = query.WithPlatformRole(ctx, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -388,6 +391,7 @@ func PlatformStorageContext(pool, developerPool *pgxpool.Pool, resolver TenantPo
 			// Stash the org-aware effective role for RequireRole
 			// downstream — same rationale as PlatformTenantContext.
 			ctx = WithRole(ctx, role)
+			ctx = query.WithPlatformRole(ctx, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

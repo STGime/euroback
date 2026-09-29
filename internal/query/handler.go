@@ -201,6 +201,7 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+		tables = visibleSchemaTables(r.Context(), tables)
 
 		// For each table, get column info enriched with constraints, indexes,
 		// and triggers.
@@ -405,7 +406,7 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishInsert(r.Context(), ProjectIDFromContext(r.Context()), tableName, row)
+			_ = pub.PublishInsert(r.Context(), ProjectIDFromContext(r.Context()), tableName, PublishableRow(tableName, row))
 		}
 
 		slog.Debug("row inserted", "schema", schema, "table", tableName)
@@ -445,7 +446,7 @@ func handleUpdateRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishUpdate(r.Context(), ProjectIDFromContext(r.Context()), tableName, row, nil)
+			_ = pub.PublishUpdate(r.Context(), ProjectIDFromContext(r.Context()), tableName, PublishableRow(tableName, row), nil)
 		}
 
 		slog.Debug("row updated", "schema", schema, "table", tableName, "id", rowID)
@@ -531,7 +532,7 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 // handleQueryError writes the appropriate HTTP error response for a query engine error.
 // Returns true if it handled the error, false if the caller should use a generic 500.
 func handleQueryError(w http.ResponseWriter, err error) bool {
-	if errors.Is(err, ErrPlatformManagedTable) {
+	if errors.Is(err, ErrPlatformManagedTable) || errors.Is(err, ErrInternalTable) {
 		jsonError(w, err.Error(), http.StatusForbidden)
 		return true
 	}

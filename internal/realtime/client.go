@@ -3,6 +3,7 @@ package realtime
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -87,6 +88,14 @@ func readPump(client *Client) {
 
 		switch msg.Action {
 		case "subscribe":
+			if client.channelDenied(msg.Channel) {
+				resp, _ := json.Marshal(map[string]string{"action": "error", "channel": msg.Channel, "error": "not allowed for this role"})
+				select {
+				case client.send <- resp:
+				default:
+				}
+				continue
+			}
 			client.hub.Subscribe(client, msg.Channel)
 			ack, _ := json.Marshal(map[string]string{
 				"action":  "subscribed",
@@ -164,4 +173,17 @@ func writePump(client *Client) {
 			}
 		}
 	}
+}
+
+// channelDenied reports whether a db:<table>[:…] channel names a table
+// this client may not subscribe to.
+func (c *Client) channelDenied(channel string) bool {
+	if len(c.denied) == 0 || !strings.HasPrefix(channel, "db:") {
+		return false
+	}
+	table := strings.TrimPrefix(channel, "db:")
+	if i := strings.IndexByte(table, ':'); i >= 0 {
+		table = table[:i]
+	}
+	return c.denied[table]
 }

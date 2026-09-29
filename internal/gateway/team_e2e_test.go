@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -639,6 +640,62 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if n := env.dedCount(t, "todos", "title = 'from-sql-editor'"); n != 1 {
 			return fmt.Errorf("row not on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	// A project Viewer gets exactly its console access through the data API
+	// and schema listing (#702): project tables yes, the platform's internal
+	// tables (users, vault, tokens, identities, storage bookkeeping) no.
+	// Developer and up keep reading them (they have the SQL editor).
+	check(t, env, "console_viewer_no_internal_tables", func() error {
+		ctx := context.Background()
+		viewer, email := uuid.NewString(), "viewer-"+env.scenario+"@e2e.test"
+		if _, err := env.shared.Exec(ctx, `INSERT INTO platform_users (id, email) VALUES ($1, $2)`, viewer, email); err != nil {
+			return fmt.Errorf("create viewer: %w", err)
+		}
+		if _, err := env.shared.Exec(ctx, `INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, env.projectID, viewer); err != nil {
+			return fmt.Errorf("add viewer: %w", err)
+		}
+		jwt, _, err := env.platformAuth.IssuePlatformJWT(viewer, email, false)
+		if err != nil {
+			return err
+		}
+		as := func(token, path string) *httpResult {
+			req := httptest.NewRequest("GET", "http://api.eurobase.test/platform/projects/"+env.projectID+path, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: "GET " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		for _, tbl := range []string{"users", "user_identities", "refresh_tokens", "email_tokens", "vault_secrets", "storage_objects", "storage_shared_prefixes"} {
+			if r := as(jwt, "/data/"+tbl); r.code != http.StatusForbidden {
+				return fmt.Errorf("viewer read internal table %s: %w", tbl, r)
+			}
+			if r := as(jwt, "/data/"+tbl+"?aggregate=count"); r.code != http.StatusForbidden {
+				return fmt.Errorf("viewer counted internal table %s: %w", tbl, r)
+			}
+			if r := as(env.platformJWT, "/data/"+tbl); r.code != 200 {
+				return fmt.Errorf("owner can no longer read %s: %w", tbl, r)
+			}
+		}
+		// Embedding an internal table as a relation is refused too.
+		if r := as(jwt, "/data/todos?select=id,users(email)"); r.code != http.StatusForbidden {
+			return fmt.Errorf("viewer embedded users: %w", r)
+		}
+		if r := as(jwt, "/data/todos"); r.code != 200 {
+			return fmt.Errorf("viewer can't read a project table: %w", r)
+		}
+		r := as(jwt, "/schema")
+		if r.code != 200 || strings.Contains(r.body, `"name":"vault_secrets"`) || strings.Contains(r.body, `"name":"users"`) || !strings.Contains(r.body, `"name":"todos"`) {
+			return fmt.Errorf("viewer schema listing: %w", r)
+		}
+		if r := as(env.platformJWT, "/schema"); r.code != 200 || !strings.Contains(r.body, `"name":"vault_secrets"`) {
+			return fmt.Errorf("owner schema listing lost internal tables: %w", r)
+		}
+		// The Connect page / generated agent files don't list them either.
+		if r := as(jwt, "/connect"); r.code != 200 || strings.Contains(r.body, "password_hash") || strings.Contains(r.body, `"name":"vault_secrets"`) {
+			return fmt.Errorf("viewer connect info lists internal tables: %w", r)
 		}
 		return nil
 	})

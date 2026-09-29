@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { INTERNAL_TABLES } from '$lib/utils';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { api, type TableSchema, type ColumnInfo, type RLSPolicy, type RLSAuditResponse } from '$lib/api.js';
@@ -121,7 +122,7 @@
 		schemaLoading = true;
 		schemaError = null;
 		try {
-			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
+			const hiddenTables = INTERNAL_TABLES;
 			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 			if (tables.length > 0 && !selectedTable) {
 				selectTableAndLoad(tables[0].name);

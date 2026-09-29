@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/eurobase/euroback/internal/query"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -222,6 +223,12 @@ func introspectSchema(ctx context.Context, pool *pgxpool.Pool, schemaName string
 	for tableRows.Next() {
 		var tableName string
 		if err := tableRows.Scan(&tableName); err != nil {
+			continue
+		}
+		// The platform's own tables (users, vault, tokens…) aren't part
+		// of the app's schema: keep them out of the generated agent
+		// files and the Connect page.
+		if query.IsInternalTenantTable(tableName) {
 			continue
 		}
 		tables = append(tables, ConnectTable{Name: tableName})

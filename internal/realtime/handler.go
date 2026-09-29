@@ -40,6 +40,9 @@ type AuthorizedClient struct {
 	Plan      string
 	EndUserID string
 	Service   bool
+	// DeniedTables are tables whose db:<table> channels this client may
+	// not subscribe to (a console Viewer: the internal tables).
+	DeniedTables map[string]bool
 }
 
 // Authorize validates the caller's token for the requested project and
@@ -166,6 +169,7 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 			tenantID:  projectID, // hub still uses "tenantID" internally; semantically it's projectID now
 			endUserID: ac.EndUserID,
 			service:   ac.Service,
+			denied:    ac.DeniedTables,
 			send:      make(chan []byte, 256),
 		}
 
