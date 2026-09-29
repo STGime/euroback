@@ -6,7 +6,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { scopeFromProfile, sqlReadOnly, explain } from '../dist/api-client.js';
 import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey } from '../dist/query.js';
-import { scopeNote } from '../dist/server.js';
+import { scopeNote, createMcpServer, TOOL_ANNOTATIONS } from '../dist/server.js';
 
 const P = '0b1e5d6a-0000-4000-8000-000000000001';
 
@@ -118,5 +118,23 @@ test('no credentials in the MCP server', () => {
     }
     assert.ok(!/process\.env\s*\[/.test(text), `${file.pathname} indexes process.env`);
     assert.ok(!/=\s*process\.env\s*[;\n]/.test(text), `${file.pathname} copies process.env`);
+  }
+});
+
+// Every tool carries annotations (clients use them to decide what to
+// auto-approve): reads are readOnlyHint, SQL and function calls destructive.
+test('tool annotations', () => {
+  const server = createMcpServer(() => ({ scope: { scoped: false } }));
+  const tools = server._registeredTools;
+  const names = Object.keys(tools);
+  assert.ok(names.length >= 18, `tools: ${names.length}`);
+  for (const name of names) {
+    assert.ok(tools[name].annotations, `${name} has no annotations`);
+    assert.deepEqual(tools[name].annotations, TOOL_ANNOTATIONS[name], name);
+  }
+  for (const r of ['listTables', 'queryTable', 'downloadFile', 'listProjects']) assert.equal(tools[r].annotations.readOnlyHint, true, r);
+  for (const w of ['runSQL', 'runSQLTransaction', 'invokeFunction', 'setSecret']) {
+    assert.equal(tools[w].annotations.readOnlyHint, false, w);
+    assert.equal(tools[w].annotations.destructiveHint, true, w);
   }
 });

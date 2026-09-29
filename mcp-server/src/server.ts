@@ -1,4 +1,5 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { ApiClient, TokenScope } from './api-client.js';
 import { registerProjectTools } from './tools/projects.js';
 import { registerDatabaseTools } from './tools/database.js';
@@ -32,6 +33,15 @@ When running SQL queries, prefer SELECT for exploration. Only run INSERT/UPDATE/
 ${scopeNote(scope)}`,
   });
 
+  // Collect every tool as it's registered, then attach its annotations.
+  const registered = new Map<string, RegisteredTool>();
+  const tool = server.tool.bind(server) as (...args: unknown[]) => RegisteredTool;
+  (server as unknown as { tool: (...args: unknown[]) => RegisteredTool }).tool = (...args: unknown[]) => {
+    const t = tool(...args);
+    registered.set(args[0] as string, t);
+    return t;
+  };
+
   registerProjectTools(server, getClient);
   registerDatabaseTools(server, getClient);
   registerAuthTools(server, getClient);
@@ -40,8 +50,50 @@ ${scopeNote(scope)}`,
   registerFunctionTools(server, getClient);
   registerStatusTools(server, getClient);
 
+  (server as unknown as { tool: unknown }).tool = tool;
+  for (const [name, t] of registered) {
+    const annotations = TOOL_ANNOTATIONS[name];
+    if (!annotations) {
+      throw new Error(`MCP tool ${name} has no annotations — add it to TOOL_ANNOTATIONS`);
+    }
+    t.update({ annotations });
+  }
+
   return server;
 }
+
+/**
+ * MCP tool annotations: clients (Claude Code, Lovable, Cursor…) use them to
+ * decide what to auto-approve — read-only tools needn't interrupt the user
+ * for every call; writes and anything destructive should. Every tool must
+ * have an entry (createMcpServer refuses to start otherwise). None reach
+ * outside Eurobase (openWorldHint false), except invokeFunction, whose
+ * function code may call anything.
+ */
+export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
+  // Reads.
+  listProjects: { title: 'List projects', readOnlyHint: true, openWorldHint: false },
+  getProject: { title: 'Get project', readOnlyHint: true, openWorldHint: false },
+  listTables: { title: 'List tables', readOnlyHint: true, openWorldHint: false },
+  describeTable: { title: 'Describe table', readOnlyHint: true, openWorldHint: false },
+  queryTable: { title: 'Query table', readOnlyHint: true, openWorldHint: false },
+  listFiles: { title: 'List files', readOnlyHint: true, openWorldHint: false },
+  downloadFile: { title: 'Read file', readOnlyHint: true, openWorldHint: false },
+  listFunctions: { title: 'List functions', readOnlyHint: true, openWorldHint: false },
+  listSecrets: { title: 'List secrets', readOnlyHint: true, openWorldHint: false },
+  getSecret: { title: 'Read secret', readOnlyHint: true, openWorldHint: false },
+  listUsers: { title: 'List end users', readOnlyHint: true, openWorldHint: false },
+  healthCheck: { title: 'Health check', readOnlyHint: true, openWorldHint: false },
+  // Writes.
+  createTable: { title: 'Create table', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // Creates a link that works without sign-in: not a read.
+  getSignedUrl: { title: 'Create signed URL', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  setSecret: { title: 'Set secret', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  // SQL can UPDATE / DELETE / DROP.
+  runSQL: { title: 'Run SQL', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  runSQLTransaction: { title: 'Run SQL transaction', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  invokeFunction: { title: 'Invoke function', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+};
 
 /** What this connection's token may do, for the model. */
 export function scopeNote(scope: TokenScope): string {
