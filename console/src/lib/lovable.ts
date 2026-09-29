@@ -41,8 +41,14 @@ function lovablePreviewProjectId(u: URL): string {
 	return LOVABLE_PROJECT_ID.test(id) ? id : '';
 }
 
-// A published Lovable subdomain (<name>.lovable.app): one DNS label.
-const LOVABLE_APP_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+// A published Lovable subdomain (<name>.lovable.app) we derive a preview
+// origin for: one DNS label short enough that "preview--" + name is still
+// one (≤ 63), and with no "--". Lovable's router uses "<prefix>--<name>"
+// (preview--, id-preview--) to tell previews from apps, so we rely on
+// Lovable reserving "--" labels — a name containing "--" (incl. xn--
+// punycode) is ambiguous under that grammar, so it gets no derived origin
+// (its own origin only, which is always safe).
+const LOVABLE_APP_NAME = /^[a-z0-9](?:[a-z0-9-]{0,52}[a-z0-9])?$/;
 
 /**
  * The published app's name for a `<name>.lovable.app` or
@@ -55,7 +61,7 @@ function lovablePublishedName(u: URL): string {
 	let name = host.slice(0, -'.lovable.app'.length);
 	if (name.startsWith('id-preview--')) return '';
 	if (name.startsWith('preview--')) name = name.slice('preview--'.length);
-	return LOVABLE_APP_NAME.test(name) && !name.startsWith('preview--') ? name : '';
+	return LOVABLE_APP_NAME.test(name) && !name.includes('--') ? name : '';
 }
 
 /**
@@ -94,7 +100,7 @@ export function lovableAppOrigins(raw: string, preview = false): { origins: stri
 				: "That's the Lovable editor (lovable.dev), not your app. Paste the address your app is published at (Lovable → Publish)."
 		};
 	}
-	const name = u.protocol === 'https:' ? lovablePublishedName(u) : '';
+	const name = u.protocol === 'https:' && !u.username && !u.password && !u.port ? lovablePublishedName(u) : '';
 	if (name) {
 		const origins = [`https://${name}.lovable.app`, `https://preview--${name}.lovable.app`];
 		return { origins, note: `Lovable app — adding it and its shareable preview: ${origins.join(' and ')}` };

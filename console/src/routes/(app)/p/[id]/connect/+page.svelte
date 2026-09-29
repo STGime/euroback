@@ -416,7 +416,7 @@
 							{#if lovableMessage}<span class="text-xs text-green-700">{lovableMessage}</span>{/if}
 							{#if lovableError}<span class="text-xs text-red-600">{lovableError}</span>{/if}
 						</div>
-						<p class="mt-2 text-[11px] text-gray-400">Needs the admin role on this project. Remove entries later in Auth.</p>
+						<p class="mt-2 text-[11px] text-gray-400">Needs the admin role on this project. Remove entries in Auth when you no longer use them — also after renaming or unpublishing the app, since someone else could later take the old address.</p>
 					</div>
 
 					<!-- 6. First prompt -->
