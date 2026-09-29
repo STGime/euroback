@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
 	import { getContext } from 'svelte';
@@ -36,7 +37,7 @@
 		loading = true;
 		error = null;
 		try {
-			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
+			const hiddenTables = INTERNAL_TABLES;
 			info = await api.getConnectInfo(projectId);
 			info.tables = info.tables.filter(t => !hiddenTables.has(t.name));
 		} catch (err) {

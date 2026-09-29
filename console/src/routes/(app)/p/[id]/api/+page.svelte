@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { getContext, onMount } from 'svelte';
 	import { api, type Project, type TableSchema } from '$lib/api.js';
@@ -13,7 +14,7 @@
 
 	onMount(async () => {
 		try {
-			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
+			const hiddenTables = INTERNAL_TABLES;
 			tables = (await api.getSchema(projectId)).filter(t => !hiddenTables.has(t.name));
 			if (tables.length > 0) selectedTable = tables[0].name;
 		} catch { /* ignore */ }

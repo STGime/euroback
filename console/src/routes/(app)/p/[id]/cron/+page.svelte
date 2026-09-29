@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { api, type CronJob, type CronJobRun, type DBFunction, type TableSchema } from '$lib/api.js';
 	import { onMount } from 'svelte';
@@ -97,7 +98,7 @@
 	let schemaTables: TableSchema[] = $state([]);
 	let schemaLoading = $state(false);
 	let expandedTable: string | null = $state(null);
-	const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
+	const hiddenTables = INTERNAL_TABLES;
 
 	async function loadSchema() {
 		if (schemaTables.length > 0) return;

@@ -1,11 +1,12 @@
 <script lang="ts">
+	import { INTERNAL_TABLES } from '$lib/utils';
 	import { onMount } from 'svelte';
 	import ELK from 'elkjs/lib/elk.bundled.js';
 	import type { TableSchema } from '$lib/api.js';
 
 	let { tables: rawTables = [] }: { tables: TableSchema[] } = $props();
 
-	const HIDDEN_TABLES = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
+	const HIDDEN_TABLES = INTERNAL_TABLES;
 	let tables = $derived(rawTables.filter(t => !HIDDEN_TABLES.has(t.name)));
 
 	// Layout state

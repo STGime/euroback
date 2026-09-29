@@ -193,6 +193,9 @@ var validAggregates = map[string]bool{
 // AggregateQuery builds and executes a parameterized aggregate query.
 // Returns the aggregate result value and any error.
 func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName string, params QueryParams) (interface{}, error) {
+	if err := checkInternalTableRead(ctx, tableName); err != nil {
+		return nil, err
+	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return nil, err
@@ -255,6 +258,9 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 	resolved := make([]ResolvedRelation, 0, len(relations))
 
 	for _, rel := range relations {
+		if err := checkInternalTableRead(ctx, rel.Table); err != nil {
+			return nil, err
+		}
 		// Validate the related table exists.
 		if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, rel.Table); err != nil {
 			return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
@@ -309,6 +315,9 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 // It validates the table and columns against pg_catalog before executing.
 // Returns the result rows, total count, and any error.
 func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName string, params QueryParams) ([]map[string]interface{}, int, error) {
+	if err := checkInternalTableRead(ctx, tableName); err != nil {
+		return nil, 0, err
+	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
 		return nil, 0, err

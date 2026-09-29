@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { INTERNAL_TABLES } from '$lib/utils';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getContext } from 'svelte';
@@ -19,7 +20,7 @@
 				api.getLogs(projectId, { limit: 1 }),
 				api.getUsage(projectId).catch(() => null)
 			]);
-			const hiddenTables = new Set(['users', 'refresh_tokens', 'storage_objects', 'email_tokens', 'vault_secrets', 'storage_shared_prefixes']);
+			const hiddenTables = INTERNAL_TABLES;
 			tableCount = String(schema.filter(t => !hiddenTables.has(t.name)).length);
 			requestCount = logs.stats.total_requests.toLocaleString();
 			usage = usageData;

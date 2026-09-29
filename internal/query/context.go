@@ -130,6 +130,23 @@ func DeveloperRoleFromContext(ctx context.Context) bool {
 	return v
 }
 
+type platformRoleKey struct{}
+
+// WithPlatformRole records the project role of a console / platform-API
+// caller (viewer, developer, admin, owner). Set by the platform tenant
+// context; the SDK path never sets it. Used where the data API must give
+// a role exactly the access it has in the console (#702): a Viewer reads
+// project data, never the platform's internal tables.
+func WithPlatformRole(ctx context.Context, role string) context.Context {
+	return context.WithValue(ctx, platformRoleKey{}, role)
+}
+
+// PlatformRoleFromContext returns the role set by WithPlatformRole, or "".
+func PlatformRoleFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(platformRoleKey{}).(string)
+	return s
+}
+
 // ErrDedicatedPoolUnavailable: the project keeps its tenant data on a
 // dedicated database and no pool for it is on the request. Callers refuse
 // (503) — never fall back to the shared cluster (#678).

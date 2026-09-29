@@ -86,3 +86,19 @@ export function inferContentType(key: string, apiContentType?: string): string {
 	const ext = getFileExtension(key);
 	return mimeMap[ext] || 'application/octet-stream';
 }
+
+/**
+ * The platform's own tables in every tenant schema (end users, identities,
+ * auth tokens, vault, storage bookkeeping). They have their own console
+ * pages (Users, Vault, Storage) and are hidden from table lists. Keep in
+ * sync with internalTenantTables in internal/query/internal_tables.go.
+ */
+export const INTERNAL_TABLES: ReadonlySet<string> = new Set([
+	'users',
+	'user_identities',
+	'refresh_tokens',
+	'email_tokens',
+	'vault_secrets',
+	'storage_objects',
+	'storage_shared_prefixes'
+]);
