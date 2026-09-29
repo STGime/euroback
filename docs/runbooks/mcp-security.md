@@ -42,15 +42,14 @@ A generic `runSQL` call via MCP gets `app.end_user_role='service'` but **not** `
 
 Adding a new caller to that list is a security-review-worthy change. If you're tempted to use `RunAsAuthService` from a new path, ask: does this path read or write credential / token / vault data? If not, use the existing `RunAsService`.
 
-### 2. Read-only MCP `runSQL` by default (#165)
+### 2. The token decides what MCP may write (#702, replaces #165's switch)
 
-The MCP server's `runSQL` and `runSQLTransaction` tools now set `read_only: true` on the platform `/data/sql` request body by default. The backend wraps the transaction in `SET TRANSACTION READ ONLY`, so any embedded INSERT / UPDATE / DELETE / DDL raises `SQLSTATE 25006` (`read_only_sql_transaction`) and rolls back.
+The MCP server has no access of its own, and no server-side switch: what a connection may do comes from its token.
 
-Effect on the attack chain: even if a prompt-injected `runSQL` query could read tokens (defeated by layer 1, but defence in depth), it cannot write them back into a row the attacker can later read. The exfil step fails.
+- **Project tokens** (`eb_ptk_…`, one project, one access level). The SQL tools send statements as asked and the gateway allows or refuses them by the token's role. A **Read-only** token can't run SQL at all; it reads through `queryTable` / `downloadFile`. A **Developer** or **Admin** token can write and change the schema — including under a prompt-injected instruction.
+- **Legacy all-projects tokens** (`eb_pat_…`). The SQL tools set `read_only: true`, so the backend wraps the transaction in `SET TRANSACTION READ ONLY` and any INSERT / UPDATE / DELETE / DDL raises `SQLSTATE 25006` and rolls back — #165's defence, unchanged for these tokens.
 
-**Opt out** by setting `EUROBASE_MCP_ALLOW_WRITES=true` on the MCP server's environment and restarting. Intended for migration-running scripts (`eurobase admin migrate`) — **never enable for interactive Cursor / Claude Code sessions** where prompt-injection-via-data is in scope.
-
-The tool description visible to the LLM updates dynamically to reflect the current mode, so the LLM doesn't try to coach the user into bypassing the limit.
+**Trade-off (accepted):** a Developer token given to an AI tool (Lovable, Claude Code, Cursor) no longer has #165's read-only backstop against prompt injection via data. Guidance: give tools a **Read-only** token unless they need to change the project, scope write tokens to one project (they can't reach any other), and revoke them when done. `EUROBASE_MCP_ALLOW_WRITES` no longer exists.
 
 ### 3. Output sanitisation (planned)
 
@@ -74,7 +73,7 @@ Filter by these in Compliance → Audit Log to spot unusual MCP traffic. A spike
 When you run the MCP server locally and connect Cursor or Claude Code:
 
 - **Treat your project DB as a hostile input source when reviewing data via the LLM.** Rows that came in through the public SDK are attacker-controlled text. Don't assume the LLM will recognise instructions embedded in support messages, comments, profile bios, etc.
-- **Leave `EUROBASE_MCP_ALLOW_WRITES` unset for interactive sessions.** If you need a migration, run the CLI directly: `eurobase admin migrate up`.
+- **Give interactive sessions a Read-only project token** unless they must change the schema. For migrations, run the CLI directly: `eurobase admin migrate up`.
 - **Audit-log review is part of the on-call rotation.** Look for `mcp.sql.*` actions in the Compliance feed of any project you administer.
 
 ## What this DOES NOT protect against

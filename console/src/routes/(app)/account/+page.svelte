@@ -746,7 +746,7 @@
 							<div class="space-y-1.5 text-sm text-gray-800">
 								<label class="flex items-start gap-2"><input type="radio" name="token-role" value="viewer" bind:group={newTokenRole} class="mt-1" /><span><strong>Read-only</strong> <span class="text-gray-500">— read tables, rows and files</span></span></label>
 								<label class="flex items-start gap-2"><input type="radio" name="token-role" value="developer" bind:group={newTokenRole} class="mt-1" /><span><strong>Developer</strong> <span class="text-gray-500">— also create and change tables, run SQL, deploy functions</span></span></label>
-								<label class="flex items-start gap-2"><input type="radio" name="token-role" value="admin" bind:group={newTokenRole} class="mt-1" /><span><strong>Admin</strong> <span class="text-gray-500">— also secrets, API keys and project settings</span></span></label>
+								<label class="flex items-start gap-2"><input type="radio" name="token-role" value="admin" bind:group={newTokenRole} class="mt-1" /><span><strong>Admin</strong> <span class="text-gray-500">— also secrets, end users and API keys</span></span></label>
 							</div>
 						</fieldset>
 						{#if createTokenError}

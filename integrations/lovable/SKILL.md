@@ -90,7 +90,7 @@ Filters: `eq, neq, gt, gte, lt, lte, like, ilike, in` (date ranges with `gte` + 
 
 Every table needs `id uuid primary key default gen_random_uuid()` (update/delete use `id`) and usually `created_at timestamptz default now()`; per-user data gets `user_id uuid`, set from `currentUserId()` on insert.
 
-Use the Eurobase MCP connector if connected: inspect the schema first, create tables with its create-table tool. Row-level security is switched on with a preset (`owner_access` by default for tables with `user_id`); presets are listed in the reference. Avoid `full_access` unless the user asks for an anonymous public table. Without the connector, give the user the SQL for the console's SQL editor; don't pretend the table exists.
+Use the Eurobase MCP connector if connected: inspect the schema first, create tables with its create-table tool and change them with its SQL tools (they need a Developer token for the project; if the connector says the token is read-only, ask the user for one). Row-level security is switched on with a preset (`owner_access` by default for tables with `user_id`); presets are listed in the reference. Avoid `full_access` unless the user asks for an anonymous public table. Without the connector, give the user the SQL for the console's SQL editor; don't pretend the table exists.
 
 Raw SQL policies: pair every INSERT policy with a SELECT policy (inserts run `RETURNING *`). The console's table editor bypasses RLS, so "works in the console" proves nothing.
 
