@@ -105,15 +105,14 @@ func RequireRole(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, pro
 		return nil, "", false
 	}
 
+	// The role comes from the context only — set by the middleware that
+	// ran tenant.CallerProjectRole for this request (project middleware,
+	// PlatformTenantContext, StashCallerRole). No fallback lookup: a route
+	// without one refuses (fail closed) instead of deciding access
+	// differently.
 	resolved := RoleFromContext(r.Context())
 	if resolved == "" {
-		var err error
-		resolved, err = ResolveRole(r.Context(), pool, projectID, c.Subject)
-		if err != nil {
-			slog.Error("resolve role failed", "error", err)
-			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-			return nil, "", false
-		}
+		slog.Error("RequireRole: no caller role on the request — route lacks a role middleware", "path", r.URL.Path, "project_id", projectID)
 	}
 	if resolved == "" || !HasRole(resolved, minRole) {
 		http.Error(w, `{"error":"forbidden: requires `+minRole+` role"}`, http.StatusForbidden)

@@ -188,39 +188,11 @@ var ErrOrgAttachForbidden = errors.New("caller is not an admin of the target org
 // out of the authz path makes the two failure modes (auth vs. SSO)
 // distinguishable in the handler for accurate error codes.
 func (s *TenantService) CanDeleteProject(ctx context.Context, projectID, platformUserID string) (bool, error) {
-	// Path 1: direct project owner. Uses the gateway pool via ResolveRole.
-	role, err := ResolveRole(ctx, s.pool, projectID, platformUserID)
+	ok, err := OwnerOrOrgAdmin(ctx, s.developerPool, s.pool, platformUserID, projectID)
 	if err != nil {
-		return false, fmt.Errorf("resolve project role: %w", err)
+		return false, fmt.Errorf("check delete permission: %w", err)
 	}
-	if HasRole(role, "owner") {
-		return true, nil
-	}
-
-	// Path 2: org admin. Requires developer-pool routing since the
-	// join spans org_members (REVOKE-ALL on gateway per 000114). If
-	// the developer pool is nil, fall back to owner-only.
-	if s.developerPool == nil {
-		return false, nil
-	}
-	var one int
-	err = s.developerPool.QueryRow(ctx,
-		`SELECT 1
-		 FROM public.projects p
-		 JOIN public.org_members om ON om.org_id = p.org_id
-		 WHERE p.id = $1::uuid
-		   AND om.platform_user_id = $2::uuid
-		   AND om.role = 'admin'
-		   AND p.org_id IS NOT NULL`,
-		projectID, platformUserID,
-	).Scan(&one)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	return false, fmt.Errorf("check org admin for project: %w", err)
+	return ok, nil
 }
 
 // ErrOrgAttachTargetGone is returned when SetProjectOrg / auto-attach
@@ -797,6 +769,7 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		CreatedAt:  createdAt,
 		PublicKey:  publicKey,
 		SecretKey:  secretKey,
+		OrgID:      orgID,
 	}, nil
 }
 
