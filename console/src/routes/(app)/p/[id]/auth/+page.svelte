@@ -175,7 +175,10 @@
 	let planChecked = $state(false);
 
 	function loadPlanLimits(): Promise<void> {
-		if (!planLimitsLoad) setTimeout(() => (planChecked = true), 5000);
+		if (!planLimitsLoad) {
+			planChecked = false; // also on a retry after a failed lookup
+			setTimeout(() => (planChecked = true), 5000);
+		}
 		planLimitsLoad ??= api.getUsage(projectCtx.id)
 			.then((u) => {
 				smtpPlanAllowed = u.limits?.byo_smtp ?? null;
