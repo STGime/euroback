@@ -239,8 +239,10 @@
 
 	async function loadSmtp() {
 		smtpLoading = true;
-		// The plan decides what this tab shows: wait for it (no form flash).
-		const planLoad = loadPlanLimits();
+		// The plan decides what this tab shows: wait for it (no form flash),
+		// at most 5 s — a stalled lookup shows the form and the API decides.
+		const planLoad = Promise.race([loadPlanLimits(), new Promise<void>((r) => setTimeout(r, 5000))]);
+		smtpSaveMessage = '';
 		smtpSaveError = '';
 		smtpTestError = '';
 		api.getEmailSenderStatus(projectCtx.id)
