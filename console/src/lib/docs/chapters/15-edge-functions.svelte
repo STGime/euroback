@@ -177,6 +177,11 @@ export default handler</pre>
 					</table>
 				</div>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Network access</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Functions can call any public internet address (<code class="bg-gray-100 border border-gray-200 rounded px-1">fetch</code>, or raw TCP). Addresses inside Eurobase's network aren't reachable. Outgoing mail ports (25, 465, 587 and 2525) are blocked: to send email from a function, use your email provider's HTTPS API instead of SMTP.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Use Cases</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li><strong>Payment webhooks</strong> — Process Mollie callbacks, update order status</li>

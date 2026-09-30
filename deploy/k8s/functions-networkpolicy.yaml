@@ -76,3 +76,44 @@ spec:
               - 192.168.0.0/16
               - 169.254.0.0/16
               - 100.64.0.0/10
+---
+# No outbound mail from function code (SMTP 25, submission 465 / 587 /
+# 2525), to any destination. Edge functions run customer code with open
+# internet egress (the rule above); without this, a function could send
+# mail directly from the cluster's IPs — spam or abuse that would land on
+# the platform's IP reputation and Scaleway account, not the customer's.
+# (Scaleway's default security group blocks 25/465/587 on the nodes for
+# now; this keeps mail closed for functions once that's lifted for the
+# gateway's custom SMTP.) Functions that send mail use an email API over
+# HTTPS.
+#
+# A Cilium deny rule: deny wins over every allow (the NetworkPolicy
+# above), and a standard NetworkPolicy can't subtract ports from an
+# allow. Needs enable-non-default-deny-policies (on in Kapsule's Cilium
+# config). enableDefaultDeny is off: this policy only takes away, the
+# NetworkPolicy above decides what's allowed.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: functions-deny-smtp
+  namespace: eurobase
+spec:
+  endpointSelector:
+    matchLabels:
+      app: functions
+  enableDefaultDeny:
+    egress: false
+    ingress: false
+  egressDeny:
+    - toEntities:
+        - all
+      toPorts:
+        - ports:
+            - port: "25"
+              protocol: TCP
+            - port: "465"
+              protocol: TCP
+            - port: "587"
+              protocol: TCP
+            - port: "2525"
+              protocol: TCP
