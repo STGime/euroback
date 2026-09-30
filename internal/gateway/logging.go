@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eurobase/euroback/internal/email"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -204,4 +205,26 @@ func cleanupOldLogs(ctx context.Context, pool *pgxpool.Pool) {
 	if result.RowsAffected() > 0 {
 		slog.Info("cleaned up old request logs", "deleted", result.RowsAffected())
 	}
+}
+
+// StartEmailLogCleanup deletes auth email log entries past their
+// retention, hourly. pool must be the developer pool (the runtime role
+// can't delete from project_email_log).
+func StartEmailLogCleanup(ctx context.Context, pool *pgxpool.Pool) {
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			if n, err := email.CleanupDeliveryLog(ctx, pool); err != nil {
+				slog.Error("failed to clean up the auth email log", "error", err)
+			} else if n > 0 {
+				slog.Info("cleaned up the auth email log", "deleted", n)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }

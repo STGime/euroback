@@ -276,6 +276,16 @@ func main() {
 		slog.Warn("SCW_TEM_SECRET_KEY or EMAIL_FROM_ADDRESS not set, emails will be logged instead of sent")
 	}
 
+	// Auth email log (000135): the gateway role may only insert; the
+	// console reads it and the cleanup deletes on the developer pool.
+	emailService.WithDeliveryLog(email.NewDeliveryLog(pool))
+	if developerPool != nil {
+		gateway.StartEmailLogCleanup(ctx, developerPool)
+	}
+	// Outbound SMTP blocked by the hosting provider: custom-SMTP connect
+	// timeouts are explained as that, and the console shows a notice.
+	email.SetSMTPEgressBlocked(os.Getenv("CUSTOM_SMTP_EGRESS_BLOCKED") == "true")
+
 	// Wire email into platform auth.
 	platformAuthSvc.SetEmailService(emailService)
 

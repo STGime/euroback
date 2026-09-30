@@ -125,6 +125,21 @@ export interface ProjectEmailSender {
 	sovereignty_warning?: string;
 }
 
+/** One auth email request (GET /platform/projects/{id}/email-log). The
+ * SDK auth endpoints answer "OK" whether or not an email went out; this
+ * is what actually happened. `recipient` is masked (p****@example.com). */
+export interface EmailLogEntry {
+	id: number;
+	created_at: string;
+	flow: 'verification' | 'password_reset' | 'magic_link';
+	recipient: string;
+	outcome: 'sent' | 'skipped' | 'failed';
+	reason?: string;
+	via?: 'platform' | 'custom_smtp';
+	message_id?: string;
+	detail?: string;
+}
+
 /** Payload for PUT /platform/projects/{id}/email-sender. Empty password
  * on an existing sender keeps the stored sealed bytes — the operator
  * can edit other fields without re-typing the secret. */
@@ -1228,6 +1243,16 @@ export class EurobaseAPI {
 			method: 'POST',
 			body: JSON.stringify({ to })
 		});
+	}
+
+	/** Platform conditions for custom SMTP (outbound SMTP blocked, …). */
+	async getEmailSenderStatus(projectId: string): Promise<{ egress_blocked: boolean; notice?: string }> {
+		return this.fetch<{ egress_blocked: boolean; notice?: string }>(`/platform/projects/${projectId}/email-sender/status`);
+	}
+
+	/** The project's auth email log, newest first. */
+	async getEmailLog(projectId: string, limit = 100): Promise<{ entries: EmailLogEntry[]; retention_days: number }> {
+		return this.fetch<{ entries: EmailLogEntry[]; retention_days: number }>(`/platform/projects/${projectId}/email-log?limit=${limit}`);
 	}
 
 	/** Get schema change history for a project. */
