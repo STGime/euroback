@@ -170,8 +170,12 @@
 	let smtpPlanAllowed = $state<boolean | null>(null);
 	let templatesPlanAllowed = $state<boolean | null>(null);
 	let planLimitsLoad: Promise<void> | null = null;
+	// true once the plan is known, the lookup failed, or 5 s passed — the
+	// templates tab renders its content only then (no editor flash on Free).
+	let planChecked = $state(false);
 
 	function loadPlanLimits(): Promise<void> {
+		if (!planLimitsLoad) setTimeout(() => (planChecked = true), 5000);
 		planLimitsLoad ??= api.getUsage(projectCtx.id)
 			.then((u) => {
 				smtpPlanAllowed = u.limits?.byo_smtp ?? null;
@@ -179,7 +183,8 @@
 			})
 			.catch(() => {
 				planLimitsLoad = null; // retry next time
-			});
+			})
+			.finally(() => (planChecked = true));
 		return planLimitsLoad;
 	}
 
@@ -1498,7 +1503,10 @@
 					</p>
 				</div>
 			{/if}
-			{#if templatesLoading}
+			{#if templatesPlanAllowed === false}
+				<!-- Off-plan: the notice only — templates can't be saved or used
+				     on this plan. -->
+			{:else if templatesLoading || !planChecked}
 				<p class="text-sm text-gray-500">Loading templates...</p>
 			{:else if editingType}
 				<!-- Template editor -->
