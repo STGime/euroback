@@ -18,13 +18,16 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What you'll need from your provider</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>Host</strong> &mdash; the SMTP server hostname (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp-relay.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">in.mailjet.com</code>).</li>
-					<li><strong>Port</strong> &mdash; usually 587 (STARTTLS) or 465 (TLS). Check your provider's docs.</li>
-					<li><strong>Username + Password</strong> &mdash; the SMTP credentials from your provider. Often the username is an API key identifier and the "password" is the secret half.</li>
+					<li><strong>Host</strong> &mdash; the SMTP server's public host name (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp-relay.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">in.mailjet.com</code>).</li>
+					<li><strong>Port</strong> &mdash; 587 (STARTTLS) or 465 (TLS); 2525 if your provider offers it. Port 25 isn't accepted: it's for server-to-server delivery, not for sending from an account.</li>
+					<li><strong>Username + Password</strong> (required) &mdash; the SMTP credentials from your provider. Often the username is an API key identifier and the "password" is the secret half.</li>
 					<li><strong>From address</strong> &mdash; the email address auth messages will come from (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">noreply@yourdomain.com</code>). Must be a domain you've verified with your provider.</li>
 					<li><strong>From name</strong> &mdash; optional display name (e.g. "LexVault").</li>
-					<li><strong>Encryption</strong> &mdash; pick STARTTLS for port 587 (most common), TLS for port 465, or None only for an internal relay on a private network.</li>
+					<li><strong>Encryption</strong> &mdash; STARTTLS for port 587 (most common), TLS for port 465. Unencrypted connections aren't supported.</li>
 				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Eurobase connects only to servers on the public internet: host names that only resolve inside a network (such as <code class="bg-gray-100 border border-gray-200 rounded px-1">mail.local</code>) and private or internal IP addresses are refused. When you change the host, port or username, enter the password again.
+				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Setting it up</h3>
 				<ol class="text-sm text-gray-700 space-y-2 ml-4 list-decimal">

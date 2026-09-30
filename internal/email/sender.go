@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/netguard"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -227,6 +228,25 @@ func (s *SenderService) Upsert(ctx context.Context, projectID string, req Upsert
 	if err := validateUpsert(req); err != nil {
 		return nil, err
 	}
+	req.Host = netguard.Normalize(req.Host)
+	req.Username = strings.TrimSpace(req.Username)
+
+	// The stored password is only kept for the same server and account:
+	// otherwise changing the host would send it to a server of the
+	// editor's choosing on the next test send.
+	if req.Password == "" {
+		existing, err := s.LoadConfig(ctx, projectID)
+		switch {
+		case errors.Is(err, ErrNotConfigured):
+			return nil, errors.New("password is required")
+		case err != nil:
+			return nil, err
+		case !existing.HasPassword:
+			return nil, errors.New("password is required")
+		case netguard.Normalize(existing.Host) != req.Host || existing.Port != req.Port || existing.Username != req.Username:
+			return nil, errors.New("enter the password again when you change the host, port or username")
+		}
+	}
 
 	// Seal new password, or carry over the existing sealed columns.
 	var (
@@ -351,6 +371,17 @@ func (s *SenderService) MarkFailed(ctx context.Context, projectID string, errMsg
 	return err
 }
 
+// MarkRefused un-verifies a sender that no longer meets the rules (see
+// senderUsable) and records why, so the project falls back to the
+// platform sender and the console says what to change.
+func (s *SenderService) MarkRefused(ctx context.Context, projectID string, reason string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE public.project_email_senders
+		 SET verified_at = NULL, last_error = $2, last_error_at = now()
+		 WHERE project_id = $1`, projectID, "Not used any more: "+reason)
+	return err
+}
+
 func (s *SenderService) schemaName(ctx context.Context, projectID string) (string, error) {
 	var schemaName string
 	err := s.pool.QueryRow(ctx,
@@ -379,9 +410,12 @@ func validateUpsert(r UpsertRequest) error {
 		return fmt.Errorf("from_email is not a valid address: %w", err)
 	}
 	if _, ok := validEncryptions[r.Encryption]; !ok {
-		return fmt.Errorf("encryption must be one of starttls/tls/none, got %q", r.Encryption)
+		return fmt.Errorf("encryption must be one of starttls/tls, got %q", r.Encryption)
 	}
-	return nil
+	if strings.TrimSpace(r.Username) == "" {
+		return errors.New("username is required (the login of your SMTP account)")
+	}
+	return checkSenderRules(strings.TrimSpace(r.Host), r.Port, r.Encryption)
 }
 
 // sovereigntyWarningFor checks the host against a small list of known

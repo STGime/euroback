@@ -35,12 +35,49 @@ package email
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
 	"strings"
 	"time"
+
+	"github.com/eurobase/euroback/internal/netguard"
 )
+
+// smtpDialer connects to custom SMTP servers — public addresses only;
+// tests replace its Lookup / Dial.
+var smtpDialer = &netguard.Dialer{Timeout: customSMTPDialTimeout}
+
+// allowedSMTPPorts are the mail submission ports: 587 (STARTTLS), 465
+// (TLS) and 2525 (the alternative some providers offer). Port 25 is for
+// server-to-server delivery, not for sending as an account.
+var allowedSMTPPorts = map[int]bool{465: true, 587: true, 2525: true}
+
+// checkSenderRules: public host, a submission port, encryption.
+func checkSenderRules(host string, port int, enc SenderEncryption) error {
+	if err := netguard.CheckHostName(host); err != nil {
+		return errors.New("SMTP host must be a public internet address (a host name like smtp.example.com)")
+	}
+	if !allowedSMTPPorts[port] {
+		return fmt.Errorf("SMTP port must be 587 (STARTTLS), 465 (TLS) or 2525, got %d", port)
+	}
+	if enc != EncryptionSTARTTLS && enc != EncryptionTLS {
+		return errors.New("SMTP encryption must be STARTTLS or TLS")
+	}
+	return nil
+}
+
+// senderUsable: the sender meets the rules and has a login.
+func senderUsable(sender *ProjectSender) error {
+	if err := checkSenderRules(sender.Host, sender.Port, sender.Encryption); err != nil {
+		return err
+	}
+	if sender.Username == "" || sender.Password == "" {
+		return errors.New("SMTP login required: set the username and password of your SMTP account")
+	}
+	return nil
+}
 
 // customSMTPDialTimeout caps the TCP dial. Separate from the
 // post-dial budget so a slow handshake doesn't get charged the dial
@@ -62,25 +99,37 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 	if sender == nil {
 		return fmt.Errorf("sendViaCustomSMTP: nil sender")
 	}
-	addr := net.JoinHostPort(sender.Host, fmt.Sprintf("%d", sender.Port))
+	// Checked on every send, not only on save: rows saved before these
+	// rules existed must not be used either.
+	if err := senderUsable(sender); err != nil {
+		return err
+	}
 
-	dialer := &net.Dialer{Timeout: customSMTPDialTimeout}
+	host := netguard.Normalize(sender.Host)
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", sender.Port))
 
-	var (
-		conn net.Conn
-		err  error
-	)
-	switch sender.Encryption {
-	case EncryptionTLS:
-		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-			ServerName: sender.Host,
+	// Only ever to a public address: resolved and checked here, and the
+	// connection goes to the checked address (see internal/netguard).
+	conn, err := smtpDialer.DialContext(ctx, host, fmt.Sprintf("%d", sender.Port))
+	if err != nil {
+		if errors.Is(err, netguard.ErrNotPublic) {
+			return fmt.Errorf("dial %s: SMTP host not found in public DNS, or not a public internet address", addr)
+		}
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	if sender.Encryption == EncryptionTLS {
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName: host,
 			MinVersion: tls.VersionTLS12,
 		})
-	default: // starttls and none both start in plaintext
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-	}
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
+		hsCtx, cancelHS := context.WithTimeout(ctx, customSMTPDialTimeout)
+		err := tlsConn.HandshakeContext(hsCtx)
+		cancelHS()
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("dial %s: %w", addr, err)
+		}
+		conn = tlsConn
 	}
 	defer conn.Close()
 
@@ -90,7 +139,7 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 	// ate most of the budget.
 	_ = conn.SetDeadline(time.Now().Add(customSMTPPostDialBudget))
 
-	client, err := smtp.NewClient(conn, sender.Host)
+	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		return fmt.Errorf("smtp client: %w", err)
 	}
@@ -98,7 +147,7 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 
 	if sender.Encryption == EncryptionSTARTTLS {
 		if err := client.StartTLS(&tls.Config{
-			ServerName: sender.Host,
+			ServerName: host,
 			MinVersion: tls.VersionTLS12,
 		}); err != nil {
 			return fmt.Errorf("starttls: %w", err)
@@ -108,7 +157,7 @@ func sendViaCustomSMTP(ctx context.Context, sender *ProjectSender, to, subject, 
 	// Authenticate if the provider needs it. Bare-relay (no username +
 	// no password) is supported for the rare internal-relay case.
 	if sender.Username != "" || sender.Password != "" {
-		auth := smtp.PlainAuth("", sender.Username, sender.Password, sender.Host)
+		auth := smtp.PlainAuth("", sender.Username, sender.Password, host)
 		if err := client.Auth(auth); err != nil {
 			return fmt.Errorf("smtp auth: %w", err)
 		}

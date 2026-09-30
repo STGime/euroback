@@ -80,6 +80,18 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 		sender, err := s.senderSvc.LoadForSend(ctx, projectID)
 		switch {
 		case err == nil:
+			// A sender verified before the host / port / encryption / login
+			// rules existed may break them. It is never used: it's un-
+			// verified with the reason (the console shows it) and the
+			// email goes out through the platform, as for an unverified one.
+			if rerr := senderUsable(sender); rerr != nil {
+				slog.Warn("custom SMTP sender no longer allowed, falling back to platform",
+					"project_id", projectID, "reason", rerr)
+				if uerr := s.senderSvc.MarkRefused(ctx, projectID, rerr.Error()); uerr != nil {
+					slog.Error("un-verify custom SMTP sender failed", "project_id", projectID, "error", uerr)
+				}
+				break
+			}
 			// Verified custom sender — use it.
 			return sendViaCustomSMTP(ctx, sender, to, subject, htmlBody)
 		case errors.Is(err, ErrNotConfigured), errors.Is(err, ErrSenderNotVerified):
