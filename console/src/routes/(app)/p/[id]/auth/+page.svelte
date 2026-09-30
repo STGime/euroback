@@ -169,17 +169,26 @@
 	// the API decides. Loaded once, when the SMTP or templates tab opens.
 	let smtpPlanAllowed = $state<boolean | null>(null);
 	let templatesPlanAllowed = $state<boolean | null>(null);
-	let planLimitsRequested = false;
+	let planLimitsLoad: Promise<void> | null = null;
+	// true once the plan is known, the lookup failed, or 5 s passed — the
+	// templates tab renders its content only then (no editor flash on Free).
+	let planChecked = $state(false);
 
-	function loadPlanLimits() {
-		if (planLimitsRequested) return;
-		planLimitsRequested = true;
-		api.getUsage(projectCtx.id)
+	function loadPlanLimits(): Promise<void> {
+		if (!planLimitsLoad) {
+			planChecked = false; // also on a retry after a failed lookup
+			setTimeout(() => (planChecked = true), 5000);
+		}
+		planLimitsLoad ??= api.getUsage(projectCtx.id)
 			.then((u) => {
 				smtpPlanAllowed = u.limits?.byo_smtp ?? null;
 				templatesPlanAllowed = u.limits?.custom_templates ?? null;
 			})
-			.catch(() => (planLimitsRequested = false));
+			.catch(() => {
+				planLimitsLoad = null; // retry next time
+			})
+			.finally(() => (planChecked = true));
+		return planLimitsLoad;
 	}
 
 	// ---- Email log tab: what happened to each auth email request ----
@@ -238,7 +247,10 @@
 
 	async function loadSmtp() {
 		smtpLoading = true;
-		loadPlanLimits();
+		// The plan decides what this tab shows: wait for it (no form flash),
+		// at most 5 s — a stalled lookup shows the form and the API decides.
+		const planLoad = Promise.race([loadPlanLimits(), new Promise<void>((r) => setTimeout(r, 5000))]);
+		smtpSaveMessage = '';
 		smtpSaveError = '';
 		smtpTestError = '';
 		api.getEmailSenderStatus(projectCtx.id)
@@ -250,6 +262,7 @@
 		} catch (err) {
 			smtpSaveError = err instanceof Error ? err.message : 'Failed to load SMTP config';
 		} finally {
+			await planLoad;
 			smtpLoading = false;
 		}
 	}
@@ -1493,7 +1506,10 @@
 					</p>
 				</div>
 			{/if}
-			{#if templatesLoading}
+			{#if templatesPlanAllowed === false}
+				<!-- Off-plan: the notice only — templates can't be saved or used
+				     on this plan. -->
+			{:else if templatesLoading || !planChecked}
 				<p class="text-sm text-gray-500">Loading templates...</p>
 			{:else if editingType}
 				<!-- Template editor -->
@@ -1892,7 +1908,7 @@
 					<p class="font-medium">Custom SMTP is part of the Pro plan.</p>
 					<p class="mt-1 text-xs text-gray-600">
 						On this plan, auth emails go out through Eurobase's sender. <a href="/billing" class="font-medium text-eurobase-700 hover:underline">Upgrade the project</a> to send them from your own SMTP server.
-						{#if smtpExisting}A sender saved earlier isn't used on this plan; after upgrading, run a test send to use it again. You can also remove it below.{/if}
+						{#if smtpExisting}After upgrading, run a test send to use the sender saved earlier.{/if}
 					</p>
 				</div>
 			{/if}
@@ -1903,6 +1919,18 @@
 
 			{#if smtpLoading}
 				<div class="text-sm text-gray-500">Loading…</div>
+			{:else if smtpPlanAllowed === false}
+				<!-- Off-plan: no settings form (nothing here can be used on this
+				     plan); only a sender saved earlier can be removed. -->
+				{#if smtpExisting}
+					<div class="flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-gray-50 p-4 text-xs text-gray-700">
+						<span>A sender saved earlier (<span class="font-mono">{smtpExisting.host}</span>) is kept but not used on this plan.</span>
+						<button type="button" onclick={handleDeleteSmtp} disabled={smtpSaving}
+							class="shrink-0 rounded-md border border-gray-300 px-3 py-1.5 font-medium text-gray-700 hover:bg-white disabled:opacity-50 cursor-pointer">Remove</button>
+					</div>
+				{/if}
+				{#if smtpSaveMessage}<div class="text-xs text-emerald-700">{smtpSaveMessage}</div>{/if}
+				{#if smtpSaveError}<div class="text-xs text-red-700">{smtpSaveError}</div>{/if}
 			{:else}
 				{#if smtpExisting}
 					<div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-xs space-y-1.5">
@@ -2001,7 +2029,7 @@
 					{:else}
 						<div></div>
 					{/if}
-					<button type="button" onclick={handleSaveSmtp} disabled={smtpSaving || smtpPlanAllowed === false}
+					<button type="button" onclick={handleSaveSmtp} disabled={smtpSaving}
 						class="rounded-md bg-eurobase-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-eurobase-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
 						{smtpSaving ? 'Saving…' : 'Save'}
 					</button>
@@ -2017,7 +2045,7 @@
 						<div class="flex gap-2">
 							<input type="email" bind:value={smtpTestTo} placeholder="you@example.com"
 								class="flex-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
-							<button type="button" onclick={handleTestSmtp} disabled={smtpTesting || !smtpTestTo || smtpPlanAllowed === false}
+							<button type="button" onclick={handleTestSmtp} disabled={smtpTesting || !smtpTestTo}
 								class="rounded-md border border-gray-300 px-4 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors">
 								{smtpTesting ? 'Sending…' : 'Send test'}
 							</button>
