@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/plans"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -40,6 +41,28 @@ type EmailService struct {
 	// ErrNotConfigured on the lookup — both fall back to the platform
 	// path unchanged.
 	senderSvc *SenderService
+
+	// planGate, when set, keeps custom SMTP to the plans that include it:
+	// a project off those plans (never upgraded, or downgraded) sends
+	// through the platform even with a verified sender saved.
+	planGate PlanGate
+
+	// templateGate, when set, keeps custom email templates to the plans
+	// that include them: off-plan (a downgrade) the defaults are sent;
+	// the saved templates stay for after an upgrade.
+	templateGate TemplateGate
+}
+
+// TemplateGate says whether the project's plan includes custom email
+// templates (plans.LimitsService.CheckCustomTemplates; Pro and up).
+type TemplateGate interface {
+	CheckCustomTemplates(ctx context.Context, projectID string) error
+}
+
+// WithTemplateGate wires the plan check for custom templates.
+func (s *EmailService) WithTemplateGate(g TemplateGate) *EmailService {
+	s.templateGate = g
+	return s
 }
 
 // NewEmailService creates a new email service.
@@ -57,6 +80,28 @@ func NewEmailService(client *EmailClient, pool *pgxpool.Pool, consoleURL string)
 func (s *EmailService) WithSenderService(svc *SenderService) *EmailService {
 	s.senderSvc = svc
 	return s
+}
+
+// WithPlanGate wires the plan check for custom SMTP.
+func (s *EmailService) WithPlanGate(g PlanGate) *EmailService {
+	s.planGate = g
+	return s
+}
+
+// refuseOffPlanSender runs when a verified custom sender isn't used
+// because of the plan. Off-plan, it's un-verified: after an upgrade the
+// admin re-tests it rather than auth mail going to credentials that may
+// have gone stale meanwhile. A failed plan lookup only logs — the project
+// may well be paying, and its sender stays as it is.
+func (s *EmailService) refuseOffPlanSender(ctx context.Context, projectID string, err error) {
+	if !errors.Is(err, plans.ErrNotOnPlan) {
+		slog.Error("custom SMTP: plan check failed, this email goes out through the platform sender",
+			"project_id", projectID, "error", err)
+		return
+	}
+	if uerr := s.senderSvc.MarkPlanRefused(ctx, projectID); uerr != nil {
+		slog.Error("un-verify off-plan custom SMTP sender failed", "project_id", projectID, "error", uerr)
+	}
 }
 
 // sendProjectScoped is the central dispatcher for "send email for
@@ -80,6 +125,15 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 		sender, err := s.senderSvc.LoadForSend(ctx, projectID)
 		switch {
 		case err == nil:
+			// Not on this plan (or the plan couldn't be checked): the
+			// platform sends — never the custom sender without a plan
+			// that includes it.
+			if s.planGate != nil {
+				if perr := s.planGate.CheckBYOSMTP(ctx, projectID); perr != nil {
+					s.refuseOffPlanSender(ctx, projectID, perr)
+					break
+				}
+			}
 			// A sender verified before the host / port / encryption / login
 			// rules existed may break them. It is never used: it's un-
 			// verified with the reason (the console shows it) and the
@@ -428,6 +482,16 @@ func (s *EmailService) loadCustomTemplate(ctx context.Context, projectID, templa
 			return "", "", nil
 		}
 		return "", "", err
+	}
+	// Saved on a plan that included them, but the project has since
+	// moved off it: send the default. A failed plan lookup keeps the
+	// custom template (a paying project most likely; cosmetic either way).
+	if s.templateGate != nil {
+		if gerr := s.templateGate.CheckCustomTemplates(ctx, projectID); errors.Is(gerr, plans.ErrNotOnPlan) {
+			return "", "", nil
+		} else if gerr != nil {
+			slog.Warn("custom templates: plan check failed, using the saved template", "project_id", projectID, "error", gerr)
+		}
 	}
 	return subject, bodyHTML, nil
 }

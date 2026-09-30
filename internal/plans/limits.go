@@ -128,6 +128,30 @@ func (s *LimitsService) tenantPool(ctx context.Context, projectID string) *pgxpo
 	return s.pool
 }
 
+// planLimitsColumns / scanTargets: every plan_limits column PlanLimits
+// carries, in one place — GetLimits and the plans endpoint both use them
+// (the endpoint once listed fewer columns, so the pricing page saw the
+// newer flags as false for every plan).
+const planLimitsColumns = `plan, db_size_mb, storage_mb, bandwidth_mb, mau_limit,
+	rate_limit_rps, ws_connections, upload_size_mb, webhook_limit,
+	project_limit, log_retention_days, custom_templates, edge_function_limit,
+	dsar_console_ui, custom_domain, byo_smtp, quota_alerts,
+	price_cents, dedicated_db, pitr_days, backup_retention_days,
+	audit_log_retention_days,
+	included_restores_per_month, on_demand_backups_enabled`
+
+func (l *PlanLimits) scanTargets() []any {
+	return []any{
+		&l.Plan, &l.DBSizeMB, &l.StorageMB, &l.BandwidthMB, &l.MAULimit,
+		&l.RateLimitRPS, &l.WSConnections, &l.UploadSizeMB, &l.WebhookLimit,
+		&l.ProjectLimit, &l.LogRetentionDays, &l.CustomTemplates, &l.EdgeFunctionLimit,
+		&l.DSARConsoleUI, &l.CustomDomain, &l.BYOSMTP, &l.QuotaAlerts,
+		&l.PriceCents, &l.DedicatedDB, &l.PITRDays, &l.BackupRetentionDays,
+		&l.AuditLogRetentionDays,
+		&l.IncludedRestoresPerMonth, &l.OnDemandBackupsEnabled,
+	}
+}
+
 // GetLimits returns the limits for the given plan name. Results are cached in memory.
 func (s *LimitsService) GetLimits(ctx context.Context, plan string) (*PlanLimits, error) {
 	// Check cache first.
@@ -141,23 +165,8 @@ func (s *LimitsService) GetLimits(ctx context.Context, plan string) (*PlanLimits
 	// Query database.
 	var l PlanLimits
 	err := s.pool.QueryRow(ctx,
-		`SELECT plan, db_size_mb, storage_mb, bandwidth_mb, mau_limit,
-		        rate_limit_rps, ws_connections, upload_size_mb, webhook_limit,
-		        project_limit, log_retention_days, custom_templates, edge_function_limit,
-		        dsar_console_ui, custom_domain, byo_smtp, quota_alerts,
-		        price_cents, dedicated_db, pitr_days, backup_retention_days,
-		        audit_log_retention_days,
-		        included_restores_per_month, on_demand_backups_enabled
-		 FROM plan_limits WHERE plan = $1`, plan,
-	).Scan(
-		&l.Plan, &l.DBSizeMB, &l.StorageMB, &l.BandwidthMB, &l.MAULimit,
-		&l.RateLimitRPS, &l.WSConnections, &l.UploadSizeMB, &l.WebhookLimit,
-		&l.ProjectLimit, &l.LogRetentionDays, &l.CustomTemplates, &l.EdgeFunctionLimit,
-		&l.DSARConsoleUI, &l.CustomDomain, &l.BYOSMTP, &l.QuotaAlerts,
-		&l.PriceCents, &l.DedicatedDB, &l.PITRDays, &l.BackupRetentionDays,
-		&l.AuditLogRetentionDays,
-		&l.IncludedRestoresPerMonth, &l.OnDemandBackupsEnabled,
-	)
+		`SELECT `+planLimitsColumns+` FROM plan_limits WHERE plan = $1`, plan,
+	).Scan(l.scanTargets()...)
 	if err != nil {
 		slog.Error("failed to load plan limits", "plan", plan, "error", err)
 		return nil, fmt.Errorf("plan %q not found: %w", plan, err)

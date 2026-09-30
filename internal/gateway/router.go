@@ -1019,6 +1019,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 			// Email template management.
 			if emailService != nil {
+				if limitsSvc != nil {
+					emailService.WithTemplateGate(limitsSvc)
+				}
 				tmplHandler := email.NewTemplateHandler(pool, emailService, limitsSvc)
 				r.With(tenant.RequireMinRole("viewer")).Get("/email-templates", tmplHandler.HandleList())
 				r.With(tenant.RequireMinRole("developer")).Put("/email-templates/{type}", tmplHandler.HandleUpdate())
@@ -1035,13 +1038,18 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// wired in main.go's NewEmailService chain.
 			if vaultSvc != nil && vaultSvc.Configured() {
 				senderSvc := email.NewSenderService(pool, vaultSvc)
+				// Custom SMTP is Pro and up (feature matrix; plans.CheckBYOSMTP).
+				var smtpGate email.PlanGate
+				if limitsSvc != nil {
+					smtpGate = limitsSvc
+				}
 				if emailService != nil {
-					emailService.WithSenderService(senderSvc)
+					emailService.WithSenderService(senderSvc).WithPlanGate(smtpGate)
 				}
 				r.With(tenant.RequireMinRole("admin")).Get("/email-sender", email.HandleGetSender(senderSvc))
-				r.With(tenant.RequireMinRole("admin")).Put("/email-sender", email.HandlePutSender(senderSvc))
+				r.With(tenant.RequireMinRole("admin")).Put("/email-sender", email.HandlePutSender(senderSvc, smtpGate))
 				r.With(tenant.RequireMinRole("admin")).Delete("/email-sender", email.HandleDeleteSender(senderSvc))
-				r.With(tenant.RequireMinRole("admin")).Post("/email-sender/test", email.HandleTestSender(senderSvc))
+				r.With(tenant.RequireMinRole("admin")).Post("/email-sender/test", email.HandleTestSender(senderSvc, smtpGate))
 			}
 
 			// Vault (encrypted secrets storage) — platform-authenticated.

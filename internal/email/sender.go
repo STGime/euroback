@@ -382,6 +382,18 @@ func (s *SenderService) MarkRefused(ctx context.Context, projectID string, reaso
 	return err
 }
 
+// MarkPlanRefused un-verifies a sender on a project whose plan doesn't
+// include custom SMTP (a downgrade): after an upgrade it's used again
+// only once a test send has succeeded.
+func (s *SenderService) MarkPlanRefused(ctx context.Context, projectID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE public.project_email_senders
+		 SET verified_at = NULL, last_error = $2, last_error_at = now()
+		 WHERE project_id = $1`, projectID,
+		"Not used on this project's plan: custom SMTP is part of Pro and up. After upgrading, run a test send to use it again.")
+	return err
+}
+
 func (s *SenderService) schemaName(ctx context.Context, projectID string) (string, error) {
 	var schemaName string
 	err := s.pool.QueryRow(ctx,
