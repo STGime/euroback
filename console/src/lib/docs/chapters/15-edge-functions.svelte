@@ -177,6 +177,11 @@ export default handler</pre>
 					</table>
 				</div>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Network access</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Functions can call any public internet address (<code class="bg-gray-100 border border-gray-200 rounded px-1">fetch</code>, or raw TCP). Private and internal addresses aren't reachable. To send email, use your email provider: its HTTPS API, or its SMTP server on a submission port with your account's login — port 2525 for now (587 and 465 are currently blocked by our hosting provider; we're working on opening them). Port 25 (direct delivery to recipients' mail servers) is blocked.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Use Cases</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li><strong>Payment webhooks</strong> — Process Mollie callbacks, update order status</li>

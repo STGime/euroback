@@ -76,3 +76,44 @@ spec:
               - 192.168.0.0/16
               - 169.254.0.0/16
               - 100.64.0.0/10
+---
+# No direct mail delivery (SMTP port 25) from function code, to any
+# destination. Edge functions run customer code with open internet egress
+# (the rule above). Port 25 is server-to-server delivery without a login:
+# the receiving servers see the cluster's IPs as the sender, so spam or
+# abuse from one function would land on the platform's IP reputation and
+# Scaleway account, for every customer. Sending through the customer's
+# own provider stays allowed: submission ports (465 / 587 / 2525) need
+# the customer's login, and the provider delivers from its own servers.
+# (Scaleway's default security group blocks 25/465/587 on the nodes for
+# now; this keeps mail closed for functions once that's lifted for the
+# gateway's custom SMTP.) Functions that send mail use an email API over
+# HTTPS.
+#
+# A Cilium deny rule: deny wins over every allow (the NetworkPolicy
+# above), in one place that a later allow can't undo (a NetworkPolicy
+# could only express it as port ranges around 25). No enableDefaultDeny:
+# with only egressDeny rules Cilium defaults ingress to not-enforced
+# (unchanged) and egress to enforced, which the NetworkPolicy above
+# already makes it. If that NetworkPolicy were ever removed, this policy
+# alone would default-deny ALL egress (DNS, pooler, gateway, internet) —
+# every function breaks; it fails closed, not gracefully.
+# Rolling back: kubectl apply doesn't prune, so reverting this file
+# leaves the policy in place — `kubectl -n eurobase delete cnp
+# functions-deny-smtp`. Check: scripts/ops/functions-egress-probe.sh.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: functions-deny-smtp
+  namespace: eurobase
+spec:
+  endpointSelector:
+    matchLabels:
+      app: functions
+  egressDeny:
+    - toEntities:
+        - all
+      toPorts:
+        - ports:
+            - port: "25"
+              protocol: TCP
