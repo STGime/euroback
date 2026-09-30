@@ -179,7 +179,7 @@ export default handler</pre>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Network access</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Functions can call any public internet address (<code class="bg-gray-100 border border-gray-200 rounded px-1">fetch</code>, or raw TCP). Addresses inside Eurobase's network aren't reachable. Outgoing mail ports (25, 465, 587 and 2525) are blocked: to send email from a function, use your email provider's HTTPS API instead of SMTP.
+					Functions can call any public internet address (<code class="bg-gray-100 border border-gray-200 rounded px-1">fetch</code>, or raw TCP). Private and internal addresses aren't reachable. To send email, use your email provider: its HTTPS API, or its SMTP server on a submission port (587, 465 or 2525) with your account's login. Port 25 (direct delivery to recipients' mail servers) is blocked.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Use Cases</h3>
