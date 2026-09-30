@@ -163,17 +163,28 @@
 	let smtpTestError = $state('');
 	let smtpTestMessage = $state('');
 
-	// Custom SMTP is Pro and up (plan_limits.byo_smtp). null = not known
-	// yet or the lookup failed: the form stays usable and the API decides.
+	// Plan-gated features on this page (Pro and up): custom SMTP
+	// (plan_limits.byo_smtp) and custom templates (custom_templates).
+	// null = not known yet or the lookup failed: the forms stay usable and
+	// the API decides. Loaded once, when the SMTP or templates tab opens.
 	let smtpPlanAllowed = $state<boolean | null>(null);
+	let templatesPlanAllowed = $state<boolean | null>(null);
+	let planLimitsRequested = false;
+
+	function loadPlanLimits() {
+		if (planLimitsRequested) return;
+		planLimitsRequested = true;
+		api.getUsage(projectCtx.id)
+			.then((u) => {
+				smtpPlanAllowed = u.limits?.byo_smtp ?? null;
+				templatesPlanAllowed = u.limits?.custom_templates ?? null;
+			})
+			.catch(() => (planLimitsRequested = false));
+	}
 
 	async function loadSmtp() {
 		smtpLoading = true;
-		if (smtpPlanAllowed === null) {
-			api.getUsage(projectCtx.id)
-				.then((u) => (smtpPlanAllowed = u.limits?.byo_smtp ?? null))
-				.catch(() => (smtpPlanAllowed = null));
-		}
+		loadPlanLimits();
 		smtpSaveError = '';
 		smtpTestError = '';
 		try {
@@ -754,6 +765,7 @@
 		if (activeTab === 'templates' && templates.length === 0) {
 			loadTemplates();
 		}
+		if (activeTab === 'templates') loadPlanLimits();
 	});
 </script>
 
@@ -1410,6 +1422,14 @@
 	<!-- Email Templates Tab -->
 	{#if activeTab === 'templates'}
 		<div class="mt-6 space-y-4">
+			{#if templatesPlanAllowed === false}
+				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50 px-4 py-3 text-sm text-gray-800">
+					<p class="font-medium">Custom email templates are part of the Pro plan.</p>
+					<p class="mt-1 text-xs text-gray-600">
+						On this plan, auth emails use Eurobase's default templates. Templates saved earlier are kept and used again after an upgrade. <a href="/billing" class="font-medium text-eurobase-700 hover:underline">Upgrade the project</a> to use your own.
+					</p>
+				</div>
+			{/if}
 			{#if templatesLoading}
 				<p class="text-sm text-gray-500">Loading templates...</p>
 			{:else if editingType}

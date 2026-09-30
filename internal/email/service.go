@@ -46,6 +46,23 @@ type EmailService struct {
 	// a project off those plans (never upgraded, or downgraded) sends
 	// through the platform even with a verified sender saved.
 	planGate PlanGate
+
+	// templateGate, when set, keeps custom email templates to the plans
+	// that include them: off-plan (a downgrade) the defaults are sent;
+	// the saved templates stay for after an upgrade.
+	templateGate TemplateGate
+}
+
+// TemplateGate says whether the project's plan includes custom email
+// templates (plans.LimitsService.CheckCustomTemplates; Pro and up).
+type TemplateGate interface {
+	CheckCustomTemplates(ctx context.Context, projectID string) error
+}
+
+// WithTemplateGate wires the plan check for custom templates.
+func (s *EmailService) WithTemplateGate(g TemplateGate) *EmailService {
+	s.templateGate = g
+	return s
 }
 
 // NewEmailService creates a new email service.
@@ -465,6 +482,16 @@ func (s *EmailService) loadCustomTemplate(ctx context.Context, projectID, templa
 			return "", "", nil
 		}
 		return "", "", err
+	}
+	// Saved on a plan that included them, but the project has since
+	// moved off it: send the default. A failed plan lookup keeps the
+	// custom template (a paying project most likely; cosmetic either way).
+	if s.templateGate != nil {
+		if gerr := s.templateGate.CheckCustomTemplates(ctx, projectID); errors.Is(gerr, plans.ErrNotOnPlan) {
+			return "", "", nil
+		} else if gerr != nil {
+			slog.Warn("custom templates: plan check failed, using the saved template", "project_id", projectID, "error", gerr)
+		}
 	}
 	return subject, bodyHTML, nil
 }

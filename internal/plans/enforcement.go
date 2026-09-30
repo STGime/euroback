@@ -138,7 +138,7 @@ func (s *LimitsService) CheckCustomTemplates(ctx context.Context, projectID stri
 
 	if !limits.CustomTemplates {
 		slog.Warn("custom templates not available", "project_id", projectID, "plan", limits.Plan)
-		return fmt.Errorf("custom email templates are not available on the %s plan, upgrade to pro", limits.Plan)
+		return fmt.Errorf("%w: custom email templates are not available on the %s plan, upgrade to pro", ErrNotOnPlan, limits.Plan)
 	}
 
 	return nil

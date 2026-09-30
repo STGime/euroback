@@ -1019,6 +1019,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 			// Email template management.
 			if emailService != nil {
+				if limitsSvc != nil {
+					emailService.WithTemplateGate(limitsSvc)
+				}
 				tmplHandler := email.NewTemplateHandler(pool, emailService, limitsSvc)
 				r.With(tenant.RequireMinRole("viewer")).Get("/email-templates", tmplHandler.HandleList())
 				r.With(tenant.RequireMinRole("developer")).Put("/email-templates/{type}", tmplHandler.HandleUpdate())

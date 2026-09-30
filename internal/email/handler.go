@@ -2,6 +2,7 @@ package email
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -100,6 +101,11 @@ func (h *TemplateHandler) HandleUpdate() http.HandlerFunc {
 		// Check if plan allows custom templates.
 		if h.limitsSvc != nil {
 			if err := h.limitsSvc.CheckCustomTemplates(r.Context(), projectID); err != nil {
+				if !errors.Is(err, plans.ErrNotOnPlan) {
+					slog.Error("custom templates: plan check failed", "project_id", projectID, "error", err)
+					writeJSONError(w, "couldn't check the project's plan, try again", http.StatusServiceUnavailable)
+					return
+				}
 				writeJSONError(w, err.Error(), http.StatusForbidden)
 				return
 			}
