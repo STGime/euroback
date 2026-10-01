@@ -26,6 +26,8 @@ on:
       - internal/tenant/apikeys*.go
       - internal/tenant/orgs*.go
       - internal/tenant/org_invitation*.go
+      - internal/tenant/superadmin_sso*.go
+      - internal/auth/superadmin_bypass.go
       - internal/auth/apikey_middleware.go
       - internal/email/delivery_log*.go
   workflow_dispatch:
@@ -88,7 +90,7 @@ jobs:
           DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           PAT_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
-        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs'
+        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs|TestSuperadminBypassVerify'
 
       # The auth email log (000135): the gateway may only insert, the
       # developer pool lists and cleans up.

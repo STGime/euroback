@@ -53,8 +53,9 @@ type CreateProjectRequest struct {
 // CreateSession is the part of the caller's session that decides which
 // orgs it may create projects in.
 type CreateSession struct {
-	LoginVia string
-	SsoOrgID string
+	LoginVia     string
+	SsoOrgID     string
+	IsSuperadmin bool // superadmin passkey sessions pass sso_required (SuperadminPasskeyBypass)
 }
 
 // smsGateBlocks reports whether an auth-config save should be rejected
@@ -280,7 +281,7 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		// #70 diagnostic: log right before the INSERT so we can see if
 		// anything between decode and CreateProject mutated req.Plan.
 		slog.Info("create project: handing to service", "plan", req.Plan, "name", req.Name)
-		req.Session = &CreateSession{LoginVia: claims.LoginVia, SsoOrgID: claims.SsoOrgID}
+		req.Session = &CreateSession{LoginVia: claims.LoginVia, SsoOrgID: claims.SsoOrgID, IsSuperadmin: claims.IsSuperadmin}
 		// An SSO session creates projects in its own org only (as if
 		// that org were chosen): a personal project or another org needs
 		// the person's own sign-in.
@@ -548,7 +549,7 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// prevent. Route is outside projectMembershipMiddleware
 		// (mounted at /{id}/org sibling to /{id}), so we enforce
 		// here directly.
-		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+		if err := EnforceOrgSSOForProjectChange(r.Context(), svc.developerPool, claims, projectID, "change project org"); err != nil {
 			if errors.Is(err, ErrSSOSessionOutOfScope) {
 				WriteSSOOutOfScope(w)
 				return
@@ -600,6 +601,7 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		// its projects would make this project unreachable at once (#710).
 		// Only checked for orgs the caller belongs to (SetProjectOrg
 		// refuses the rest), so it reveals nothing about other orgs.
+		noteMoveInto := false
 		if orgID != nil && svc.developerPool != nil {
 			var ssoRequired bool
 			err := svc.developerPool.QueryRow(r.Context(),
@@ -607,10 +609,11 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 				   JOIN public.organizations o ON o.id = om.org_id
 				 WHERE om.org_id = $1::uuid AND om.platform_user_id = $2::uuid`,
 				*orgID, claims.Subject).Scan(&ssoRequired)
-			if err == nil && !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, *orgID, ssoRequired) {
+			if err == nil && !ClaimsSatisfySSOFor(r.Context(), svc.developerPool, claims, *orgID, ssoRequired) {
 				WriteSSORequired(w, &SSORequiredError{OrgID: *orgID}, "that organization requires SSO sign-in; sign in with its SSO to move projects into it")
 				return
 			}
+			noteMoveInto = err == nil && ssoRequired
 		}
 
 		if err := svc.SetProjectOrg(r.Context(), projectID, claims.Subject, orgID); err != nil {
@@ -629,6 +632,10 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 			slog.Error("set project org failed", "error", err, "project_id", projectID)
 			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 			return
+		}
+		if noteMoveInto {
+			noteSuperadminSSOBypass(r.Context(), claims, *orgID, projectID, true,
+				map[string]interface{}{"action": "move project into org"})
 		}
 
 		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
@@ -700,7 +707,7 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 
 		// SSO enforcement (migration 000121) — now that we know the
 		// caller is authorised, apply the SSO gate.
-		if err := EnforceOrgSSOForProject(r.Context(), svc.developerPool, claims, projectID); err != nil {
+		if err := EnforceOrgSSOForProjectChange(r.Context(), svc.developerPool, claims, projectID, "delete project"); err != nil {
 			if errors.Is(err, ErrSSOSessionOutOfScope) {
 				WriteSSOOutOfScope(w)
 				return

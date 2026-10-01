@@ -163,6 +163,10 @@ type LimitsChecker interface {
 // are read-only after construction.
 type Service struct {
 	pool *pgxpool.Pool
+	// ssoBypassAudit records a superadmin passkey bypass of an org's
+	// sso_required at checkout (tenant.AuditSuperadminSSOBypass; this
+	// package can't import tenant). nil = log only.
+	ssoBypassAudit func(ctx context.Context, userID, email, orgID string, detail map[string]interface{})
 	// developerPool is the eurobase_developer connection used for
 	// billing-PII paths (billing_profiles reads/writes + invoice
 	// render JOIN). Migration 000106 REVOKEs public.billing_profiles
@@ -269,6 +273,12 @@ func (s *Service) WithProjectCreator(pc ProjectCreator) *Service {
 // WithLimits attaches the project-limit checker so NewProjectCheckout
 // can enforce the per-owner project cap BEFORE opening a Mollie
 // payment. Optional but strongly recommended — see #407 review 🟡 #4.
+// WithSSOBypassAudit wires the audit for superadmin SSO bypasses.
+func (s *Service) WithSSOBypassAudit(f func(ctx context.Context, userID, email, orgID string, detail map[string]interface{})) *Service {
+	s.ssoBypassAudit = f
+	return s
+}
+
 func (s *Service) WithLimits(l LimitsChecker) *Service {
 	s.limits = l
 	return s
@@ -553,8 +563,9 @@ type NewProjectCheckoutRequest struct {
 	// The session starting the checkout (#710): an explicit org that
 	// requires SSO is refused unless this session is SSO-signed-in to it
 	// — otherwise the paid project would be unreachable at once.
-	LoginVia string
-	SsoOrgID string
+	LoginVia     string
+	SsoOrgID     string
+	IsSuperadmin bool
 }
 
 // OrgSSORequiredError: the explicitly chosen org requires SSO and the
@@ -671,9 +682,21 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 			}
 			return nil, fmt.Errorf("billing: check org admin membership: %w", err)
 		}
-		// Same rule as tenant.SessionSatisfiesSSOFor (no import cycle):
-		// refuse before any payment, not after.
-		if ssoRequired && !(req.LoginVia == auth.LoginViaSSO && req.SsoOrgID == *req.OrgID) {
+		// Same rule as tenant.ClaimsSatisfySSOFor (no import cycle),
+		// incl. the superadmin passkey bypass: refuse before any
+		// payment, not after.
+		ssoOK := req.LoginVia == auth.LoginViaSSO && req.SsoOrgID == *req.OrgID
+		superadminPasskey := ssoRequired && !ssoOK && req.IsSuperadmin && req.LoginVia == auth.LoginViaPasskey &&
+			auth.VerifySuperadminPasskeyBypass(ctx, s.developerPool, userID)
+		if superadminPasskey {
+			slog.Warn("superadmin passed an organization's SSO requirement with a passkey",
+				"user_id", userID, "org_id", *req.OrgID, "action", "checkout for a project in the org")
+			if s.ssoBypassAudit != nil {
+				s.ssoBypassAudit(ctx, userID, "", *req.OrgID, map[string]interface{}{
+					"action": "checkout for a project in org", "slug": req.Slug, "requested": true})
+			}
+		}
+		if ssoRequired && !ssoOK && !superadminPasskey {
 			return nil, &OrgSSORequiredError{OrgID: *req.OrgID}
 		}
 	}

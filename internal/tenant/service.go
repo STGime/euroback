@@ -516,7 +516,15 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		// start that org's SSO sign-in (#710). No session (billing
 		// webhook): the checkout was started from a valid one.
 		if req.Session != nil && !SessionSatisfiesSSOFor(req.Session.LoginVia, req.Session.SsoOrgID, *req.OrgID, ssoRequired) {
-			return nil, &SSORequiredError{OrgID: *req.OrgID}
+			// Superadmin passkey bypass (ClaimsSatisfySSOFor), for an
+			// explicitly chosen org only — never by auto-attach below.
+			bypass := SuperadminPasskeyBypass(req.Session.IsSuperadmin, req.Session.LoginVia) &&
+				superadminBypassVerifier(ctx, s.developerPool, platformUserID)
+			if !bypass {
+				return nil, &SSORequiredError{OrgID: *req.OrgID}
+			}
+			noteSuperadminSSOBypass(ctx, &auth.Claims{Subject: platformUserID, Email: email, LoginVia: req.Session.LoginVia},
+				*req.OrgID, "", true, map[string]interface{}{"action": "create project in org", "slug": req.Slug, "requested": true})
 		}
 		orgID = req.OrgID
 	default:
@@ -941,11 +949,12 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 			// Filter out sso_required orgs the session can't satisfy,
 			// then dedupe against direct-member set.
 			missing := make([]string, 0, len(orgProjects))
+			satisfies := ssoChecker(ctx, s.developerPool, claims) // account check at most once
 			for _, r := range orgProjects {
 				if _, dup := seen[r.projectID]; dup {
 					continue
 				}
-				if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, r.orgID, r.ssoRequired) {
+				if !satisfies(r.orgID, r.ssoRequired) {
 					// Session isn't SSO-backed for this org — omit
 					// the org-only row. Direct-member rows are
 					// unaffected (they were already in `projects`).

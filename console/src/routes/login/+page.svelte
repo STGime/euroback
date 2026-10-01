@@ -98,7 +98,12 @@
 		}
 	}
 
-	async function redirectAfterLogin() {
+	// via: how this sign-in happened. After a bounce from a page that needs
+	// SSO, only an SSO session for that org — or a platform administrator's
+	// passkey session — can open it; any other sign-in going back there
+	// would bounce again (a loop), so it lands on the projects list. The
+	// gateway decides; this only avoids sending someone into a loop.
+	async function redirectAfterLogin(via: 'password' | 'passkey' | 'sso' = 'password') {
 		// ?redirect= survives a password sign-in; the SSO round-trip
 		// lands back on bare /login, so it's kept in sessionStorage then.
 		let stored: string | null = null;
@@ -106,7 +111,13 @@
 			stored = sessionStorage.getItem(SSO_REDIRECT_KEY);
 			sessionStorage.removeItem(SSO_REDIRECT_KEY);
 		} catch { /* storage unavailable */ }
-		const redirectUrl = safeRedirect($page.url.searchParams.get('redirect')) ?? safeRedirect(stored);
+		let skipRedirect = ssoRequired && via !== 'sso';
+		if (skipRedirect && via === 'passkey') {
+			try {
+				skipRedirect = !(await api.getProfile()).is_superadmin;
+			} catch { /* keep skipping */ }
+		}
+		const redirectUrl = skipRedirect ? null : (safeRedirect($page.url.searchParams.get('redirect')) ?? safeRedirect(stored));
 		if (redirectUrl) {
 			await goto(redirectUrl);
 			return;
@@ -143,7 +154,7 @@
 				// Non-fatal; fallback keeps token, email = "".
 			}
 			history.replaceState({}, '', window.location.pathname + window.location.search);
-			await redirectAfterLogin();
+			await redirectAfterLogin('sso');
 			return true;
 		}
 		if (errCode) {
@@ -179,9 +190,9 @@
 		} catch { /* storage blocked — skip the nudge */ }
 	}
 
-	async function finishLogin(token: string, signedInEmail: string) {
+	async function finishLogin(token: string, signedInEmail: string, via: 'password' | 'passkey' = 'password') {
 		user.set({ token, email: signedInEmail });
-		await redirectAfterLogin();
+		await redirectAfterLogin(via);
 	}
 
 	// Username-less sign-in: the browser offers every passkey it holds
@@ -194,7 +205,7 @@
 			const ch = await api.passkeyLoginBegin();
 			const credential = await getPasskeyAssertion(ch.options);
 			const res = await api.passkeyLoginFinish(ch.challenge_id, credential);
-			await finishLogin(res.access_token!, res.user.email);
+			await finishLogin(res.access_token!, res.user.email, 'passkey');
 		} catch (err) {
 			if (err instanceof APIError && err.code === 'email_not_verified') {
 				needsVerification = true;
@@ -217,7 +228,7 @@
 			const credential = await getPasskeyAssertion(stepUp.options);
 			const res = await api.passkeyStepUp(stepUp.token, credential);
 			stepUp = null;
-			await finishLogin(res.access_token!, res.user.email);
+			await finishLogin(res.access_token!, res.user.email, 'passkey');
 		} catch (err) {
 			if (err instanceof APIError) {
 				// The MFA token is single-use: any server-side failure
@@ -471,7 +482,7 @@
 						{#if ssoRequired}
 							<div class="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
 								The page you opened belongs to an organization that requires single sign-on.
-								Sign in with your organization's SSO to continue — your password sign-in doesn't
+								Sign in with your organization's SSO to continue — a password sign-in doesn't
 								give access to it.
 							</div>
 						{/if}
@@ -494,6 +505,16 @@
 						>
 							{ssoSubmitting ? 'Redirecting…' : 'Continue with SSO'}
 						</button>
+						{#if ssoRequired && passkeysSupported()}
+							<button
+								type="button"
+								onclick={handlePasskeySignIn}
+								disabled={passkeyBusy}
+								class="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors cursor-pointer disabled:opacity-50"
+							>
+								{passkeyBusy ? 'Waiting for passkey…' : 'Platform administrator? Sign in with your passkey'}
+							</button>
+						{/if}
 						<div class="text-center">
 							<button type="button" onclick={() => { ssoMode = false; error = ''; }} class="text-xs text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to password sign-in</button>
 						</div>
@@ -536,6 +557,11 @@
 					</div>
 				{:else}
 					<form onsubmit={handleSubmit} class="mt-6 space-y-4">
+						{#if ssoRequired && !isSignUp && !isForgotPassword}
+							<div class="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+								The page you opened needs your organization's SSO. Signing in with your password takes you to your projects instead; platform administrators can open it with a passkey.
+							</div>
+						{/if}
 						<div>
 							<label for="email" class="block text-sm font-medium text-gray-700">Email address</label>
 							<input
