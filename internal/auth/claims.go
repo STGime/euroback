@@ -20,7 +20,9 @@ const (
 	LoginViaSSO      = "sso"
 	// LoginViaPasskey: passkey-only sign-in or password → passkey
 	// step-up (#621). Not accepted by organizations.sso_required —
-	// only LoginViaSSO for the matching org is.
+	// only LoginViaSSO for the matching org is — except for a
+	// superadmin whose account passes VerifySuperadminPasskeyBypass
+	// (tenant.ClaimsSatisfySSOFor).
 	LoginViaPasskey = "passkey"
 	// LoginViaPAT: a personal access token (set by PATService.Validate).
 	// Tokens are handed to tools; account- and org-level actions refuse

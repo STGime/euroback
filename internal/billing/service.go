@@ -676,7 +676,12 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 		// incl. the superadmin passkey bypass: refuse before any
 		// payment, not after.
 		ssoOK := req.LoginVia == auth.LoginViaSSO && req.SsoOrgID == *req.OrgID
-		superadminPasskey := req.IsSuperadmin && req.LoginVia == auth.LoginViaPasskey
+		superadminPasskey := ssoRequired && !ssoOK && req.IsSuperadmin && req.LoginVia == auth.LoginViaPasskey &&
+			auth.VerifySuperadminPasskeyBypass(ctx, s.developerPool, userID)
+		if superadminPasskey {
+			slog.Warn("superadmin passed an organization's SSO requirement with a passkey",
+				"user_id", userID, "org_id", *req.OrgID, "action", "checkout for a project in the org")
+		}
 		if ssoRequired && !ssoOK && !superadminPasskey {
 			return nil, &OrgSSORequiredError{OrgID: *req.OrgID}
 		}

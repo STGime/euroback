@@ -139,6 +139,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 	// Audit service — shared across all route groups that need to log actions.
 	auditSvc := audit.NewService(pool)
+	// Superadmin passkey bypasses of an org's sso_required are audited
+	// wherever they're checked (tenant.ClaimsSatisfySSOFor).
+	tenant.SetSSOBypassAuditor(auditSvc)
 	if vaultSvc != nil && vaultSvc.Configured() {
 		tenantSvc.SetSecretStore(vaultSvc)
 	}

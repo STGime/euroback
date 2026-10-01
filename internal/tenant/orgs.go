@@ -1054,10 +1054,10 @@ func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, c
 	if orgID == nil || ssoRequired == nil || !*ssoRequired {
 		return nil
 	}
-	if !ClaimsSatisfySSOFor(claims, *orgID, *ssoRequired) {
+	if !ClaimsSatisfySSOFor(ctx, developerPool, claims, *orgID, *ssoRequired) {
 		return &SSORequiredError{OrgID: *orgID}
 	}
-	noteSuperadminSSOBypass(ctx, claims, *orgID, projectID)
+	noteSuperadminSSOBypass(ctx, claims, *orgID, projectID, false, nil)
 	return nil
 }
 
@@ -1092,46 +1092,86 @@ func SessionSatisfiesSSOFor(loginVia, ssoOrgID, targetOrgID string, ssoRequired 
 // satisfies any org's sso_required. Superadmins never sign in through an
 // org's SSO (pickSSOCandidate — the org's IdP could assert their email),
 // so without this a superadmin who belongs to an SSO-required org could
-// never open it. A passkey, not a password: a leaked superadmin password
-// mustn't open every SSO-only org the account is in. Logged and audited
-// (noteSuperadminSSOBypass). Doesn't widen access: membership still
-// decides which projects / orgs the account reaches.
+// never open it. This is only the claims half; ClaimsSatisfySSOFor also
+// re-checks the account (auth.VerifySuperadminPasskeyBypass). Membership
+// still decides which projects / orgs the account reaches.
 func SuperadminPasskeyBypass(isSuperadmin bool, loginVia string) bool {
 	return isSuperadmin && loginVia == auth.LoginViaPasskey
 }
 
+// superadminBypassVerifier re-checks a claimed bypass against the
+// database; tests replace it.
+var superadminBypassVerifier = auth.VerifySuperadminPasskeyBypass
+
 // ClaimsSatisfySSOFor is SessionSatisfiesSSOFor for a request's claims,
-// including the superadmin passkey bypass. Use it wherever claims exist.
-func ClaimsSatisfySSOFor(claims *auth.Claims, targetOrgID string, ssoRequired bool) bool {
+// including the superadmin passkey bypass, which needs (on pool — the
+// developer pool) that the account is still a superadmin and has a
+// passkey registered more than a day ago. Without a pool, or on any
+// lookup error, there's no bypass (fail closed). Use it for every SSO
+// check where claims exist.
+func ClaimsSatisfySSOFor(ctx context.Context, pool *pgxpool.Pool, claims *auth.Claims, targetOrgID string, ssoRequired bool) bool {
 	if claims == nil {
 		return !ssoRequired
 	}
-	return SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, targetOrgID, ssoRequired) ||
-		SuperadminPasskeyBypass(claims.IsSuperadmin, claims.LoginVia)
+	if SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, targetOrgID, ssoRequired) {
+		return true
+	}
+	if !SuperadminPasskeyBypass(claims.IsSuperadmin, claims.LoginVia) || pool == nil {
+		return false
+	}
+	return superadminBypassVerifier(ctx, pool, claims.Subject)
 }
 
-// superadminSSONoted dedupes the bypass audit: one entry per
-// (superadmin, org) per hour, not one per API call.
-var superadminSSONoted sync.Map // key "user|org" → time.Time
+// ssoBypassAuditor writes superadmin.sso_bypass audit entries; set once
+// at startup (SetSSOBypassAuditor). Global so every check can audit,
+// whatever middleware put on the request context.
+var ssoBypassAuditor *audit.Service
 
-// noteSuperadminSSOBypass logs (and, with a project, audits) a superadmin
-// passing an org's sso_required via the passkey bypass.
-func noteSuperadminSSOBypass(ctx context.Context, claims *auth.Claims, orgID, projectID string) {
+// SetSSOBypassAuditor wires the audit service for superadmin SSO bypasses.
+func SetSSOBypassAuditor(svc *audit.Service) { ssoBypassAuditor = svc }
+
+// superadminSSONoted dedupes read-access audit entries: one per
+// (superadmin, org, project) per hour, not one per API call. Entries
+// older than an hour are pruned on write.
+var (
+	superadminSSONotedMu sync.Mutex
+	superadminSSONoted   = map[string]time.Time{}
+)
+
+// noteSuperadminSSOBypass logs and audits a superadmin passing an org's
+// sso_required via the passkey bypass. Call it only after the check
+// passed. projectID "" = an org-level action (the audit log's global
+// chain). change = true for actions that modify something: audited
+// every time, not deduped.
+func noteSuperadminSSOBypass(ctx context.Context, claims *auth.Claims, orgID, projectID string, change bool, detail map[string]interface{}) {
 	if claims == nil || SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, orgID, true) {
 		return // not a bypass: a real SSO session for this org
 	}
-	key := claims.Subject + "|" + orgID
-	if t, ok := superadminSSONoted.Load(key); ok && time.Since(t.(time.Time)) < time.Hour {
+	if !change {
+		key := claims.Subject + "|" + orgID + "|" + projectID
+		now := time.Now()
+		superadminSSONotedMu.Lock()
+		if t, ok := superadminSSONoted[key]; ok && now.Sub(t) < time.Hour {
+			superadminSSONotedMu.Unlock()
+			return
+		}
+		for k, t := range superadminSSONoted {
+			if now.Sub(t) >= time.Hour {
+				delete(superadminSSONoted, k)
+			}
+		}
+		superadminSSONoted[key] = now
+		superadminSSONotedMu.Unlock()
+	}
+	slog.Warn("superadmin passed an organization's SSO requirement with a passkey",
+		"user_id", claims.Subject, "org_id", orgID, "project_id", projectID, "change", change)
+	if ssoBypassAuditor == nil {
 		return
 	}
-	superadminSSONoted.Store(key, time.Now())
-	slog.Warn("superadmin passed an organization's SSO requirement with a passkey",
-		"user_id", claims.Subject, "org_id", orgID, "project_id", projectID)
-	if projectID != "" {
-		if svc := audit.FromContext(ctx); svc != nil {
-			svc.Log(ctx, projectID, claims.Subject, claims.Email, "superadmin.sso_bypass",
-				audit.WithMetadata(map[string]interface{}{"org_id": orgID, "login_via": claims.LoginVia}))
-		}
+	meta := map[string]interface{}{"org_id": orgID, "login_via": claims.LoginVia, "change": change}
+	for k, v := range detail {
+		meta[k] = v
 	}
+	ssoBypassAuditor.Log(context.WithoutCancel(ctx), projectID, claims.Subject, claims.Email, "superadmin.sso_bypass", audit.WithMetadata(meta))
 }
 

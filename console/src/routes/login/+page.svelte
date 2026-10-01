@@ -99,10 +99,10 @@
 	}
 
 	// via: how this sign-in happened. After a bounce from a page that needs
-	// SSO, a password session can't open that page — going back there would
-	// bounce again (a loop) — so it lands on the projects list instead. A
-	// passkey session may open it (platform administrators, #superadmin
-	// passkey bypass), an SSO session for the org does.
+	// SSO, only an SSO session for that org — or a platform administrator's
+	// passkey session — can open it; any other sign-in going back there
+	// would bounce again (a loop), so it lands on the projects list. The
+	// gateway decides; this only avoids sending someone into a loop.
 	async function redirectAfterLogin(via: 'password' | 'passkey' | 'sso' = 'password') {
 		// ?redirect= survives a password sign-in; the SSO round-trip
 		// lands back on bare /login, so it's kept in sessionStorage then.
@@ -111,7 +111,12 @@
 			stored = sessionStorage.getItem(SSO_REDIRECT_KEY);
 			sessionStorage.removeItem(SSO_REDIRECT_KEY);
 		} catch { /* storage unavailable */ }
-		const skipRedirect = ssoRequired && via === 'password';
+		let skipRedirect = ssoRequired && via !== 'sso';
+		if (skipRedirect && via === 'passkey') {
+			try {
+				skipRedirect = !(await api.getProfile()).is_superadmin;
+			} catch { /* keep skipping */ }
+		}
 		const redirectUrl = skipRedirect ? null : (safeRedirect($page.url.searchParams.get('redirect')) ?? safeRedirect(stored));
 		if (redirectUrl) {
 			await goto(redirectUrl);
@@ -478,7 +483,7 @@
 							<div class="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
 								The page you opened belongs to an organization that requires single sign-on.
 								Sign in with your organization's SSO to continue — a password sign-in doesn't
-								give access to it. (Platform administrators: sign in with your passkey.)
+								give access to it.
 							</div>
 						{/if}
 						<div>
@@ -500,6 +505,16 @@
 						>
 							{ssoSubmitting ? 'Redirecting…' : 'Continue with SSO'}
 						</button>
+						{#if ssoRequired && passkeysSupported()}
+							<button
+								type="button"
+								onclick={handlePasskeySignIn}
+								disabled={passkeyBusy}
+								class="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors cursor-pointer disabled:opacity-50"
+							>
+								{passkeyBusy ? 'Waiting for passkey…' : 'Platform administrator? Sign in with your passkey'}
+							</button>
+						{/if}
 						<div class="text-center">
 							<button type="button" onclick={() => { ssoMode = false; error = ''; }} class="text-xs text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to password sign-in</button>
 						</div>

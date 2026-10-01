@@ -83,14 +83,17 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 // READING the org. Recovery from misconfig: superadmin escalation
 // (an out-of-band ops path); the "must have OIDC config to enable"
 // guard catches the common footgun of enabling before configuring.
-func (h *OrgsHandler) enforceOrgSSO(w http.ResponseWriter, claims *auth.Claims, org *Org) bool {
+func (h *OrgsHandler) enforceOrgSSO(w http.ResponseWriter, r *http.Request, claims *auth.Claims, org *Org) bool {
 	if !SSOSessionInScope(claims, org.ID) {
 		WriteSSOOutOfScope(w)
 		return false
 	}
-	if ClaimsSatisfySSOFor(claims, org.ID, org.SsoRequired) {
+	if ClaimsSatisfySSOFor(r.Context(), h.Svc.pool, claims, org.ID, org.SsoRequired) {
 		if org.SsoRequired {
-			noteSuperadminSSOBypass(context.Background(), claims, org.ID, "")
+			// Org changes through the bypass (SSO config, members,
+			// sso_required itself) are audited every time.
+			noteSuperadminSSOBypass(r.Context(), claims, org.ID, "", r.Method != http.MethodGet,
+				map[string]interface{}{"method": r.Method, "path": r.URL.Path})
 		}
 		return true
 	}
@@ -226,12 +229,12 @@ func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 			WriteSSOOutOfScope(w)
 			return
 		}
-		if !ClaimsSatisfySSOFor(claims, org.ID, org.SsoRequired) {
+		if !ClaimsSatisfySSOFor(r.Context(), h.Svc.pool, claims, org.ID, org.SsoRequired) {
 			WriteSSORequired(w, &SSORequiredError{OrgID: org.ID}, "this organization requires SSO sign-in")
 			return
 		}
 		if org.SsoRequired {
-			noteSuperadminSSOBypass(r.Context(), claims, org.ID, "")
+			noteSuperadminSSOBypass(r.Context(), claims, org.ID, "", false, nil)
 		}
 		members, err := h.Svc.ListMembers(r.Context(), orgID)
 		if err != nil {
@@ -308,7 +311,7 @@ func (h *OrgsHandler) HandleSetSSOConfig() http.HandlerFunc {
 			writeJSONErr(w, http.StatusUnauthorized, "session missing")
 			return
 		}
-		if !h.enforceOrgSSO(w, claims, org) {
+		if !h.enforceOrgSSO(w, r, claims, org) {
 			return
 		}
 		var body struct {
@@ -374,7 +377,7 @@ func (h *OrgsHandler) HandleInviteMember() http.HandlerFunc {
 			writeJSONErr(w, http.StatusUnauthorized, "session missing")
 			return
 		}
-		if !h.enforceOrgSSO(w, claims, org) {
+		if !h.enforceOrgSSO(w, r, claims, org) {
 			return
 		}
 		var body struct {
@@ -466,7 +469,7 @@ func (h *OrgsHandler) HandleRevokeInvitation() http.HandlerFunc {
 			writeJSONErr(w, http.StatusForbidden, ErrOrgAdminOnly.Error())
 			return
 		}
-		if claims == nil || !h.enforceOrgSSO(w, claims, org) {
+		if claims == nil || !h.enforceOrgSSO(w, r, claims, org) {
 			return
 		}
 		if err := h.Svc.RevokeInvitation(r.Context(), orgID, chi.URLParam(r, "invId")); err != nil {
@@ -584,7 +587,7 @@ func (h *OrgsHandler) HandleRemoveMember() http.HandlerFunc {
 			writeJSONErr(w, http.StatusUnauthorized, "session missing")
 			return
 		}
-		if !h.enforceOrgSSO(w, claims, org) {
+		if !h.enforceOrgSSO(w, r, claims, org) {
 			return
 		}
 		if err := h.Svc.RemoveMember(r.Context(), orgID, targetID); err != nil {
@@ -647,7 +650,7 @@ func (h *OrgsHandler) HandleSetSSORequired() http.HandlerFunc {
 			writeJSONErr(w, http.StatusUnauthorized, "session missing")
 			return
 		}
-		if !h.enforceOrgSSO(w, claims, org) {
+		if !h.enforceOrgSSO(w, r, claims, org) {
 			return
 		}
 		var body struct {

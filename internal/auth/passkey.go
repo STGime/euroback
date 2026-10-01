@@ -13,7 +13,9 @@ package auth
 // organizations.sso_required: SessionSatisfiesSSOFor only accepts
 // login_via=sso for the matching org, so a passkey session reaches the
 // user's personal projects but not SSO-required org projects — the same
-// per-resource behaviour password sessions have today.
+// per-resource behaviour password sessions have today. One exception:
+// superadmins (tenant.ClaimsSatisfySSOFor + VerifySuperadminPasskeyBypass),
+// who can never sign in through an org's SSO.
 //
 // Ceremony state (the WebAuthn challenge) is stored server-side in
 // public.platform_webauthn_challenges and consumed with DELETE …

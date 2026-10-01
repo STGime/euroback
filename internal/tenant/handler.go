@@ -608,9 +608,13 @@ func HandleSetProjectOrg(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 				   JOIN public.organizations o ON o.id = om.org_id
 				 WHERE om.org_id = $1::uuid AND om.platform_user_id = $2::uuid`,
 				*orgID, claims.Subject).Scan(&ssoRequired)
-			if err == nil && !ClaimsSatisfySSOFor(claims, *orgID, ssoRequired) {
+			if err == nil && !ClaimsSatisfySSOFor(r.Context(), svc.developerPool, claims, *orgID, ssoRequired) {
 				WriteSSORequired(w, &SSORequiredError{OrgID: *orgID}, "that organization requires SSO sign-in; sign in with its SSO to move projects into it")
 				return
+			}
+			if err == nil && ssoRequired {
+				noteSuperadminSSOBypass(r.Context(), claims, *orgID, projectID, true,
+					map[string]interface{}{"action": "move project into org"})
 			}
 		}
 
