@@ -1026,6 +1026,18 @@ func WriteSSOOutOfScope(w http.ResponseWriter) {
 }
 
 func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, claims *auth.Claims, projectID string) error {
+	return enforceOrgSSOForProject(ctx, developerPool, claims, projectID, "")
+}
+
+// EnforceOrgSSOForProjectChange is EnforceOrgSSOForProject for a request
+// that changes the project's org membership or deletes it: a superadmin
+// bypass is audited every time (action names the change), not deduped
+// as a read.
+func EnforceOrgSSOForProjectChange(ctx context.Context, developerPool *pgxpool.Pool, claims *auth.Claims, projectID, action string) error {
+	return enforceOrgSSOForProject(ctx, developerPool, claims, projectID, action)
+}
+
+func enforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, claims *auth.Claims, projectID, changeAction string) error {
 	if developerPool == nil || claims == nil {
 		return nil
 	}
@@ -1057,7 +1069,12 @@ func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, c
 	if !ClaimsSatisfySSOFor(ctx, developerPool, claims, *orgID, *ssoRequired) {
 		return &SSORequiredError{OrgID: *orgID}
 	}
-	noteSuperadminSSOBypass(ctx, claims, *orgID, projectID, false, nil)
+	if changeAction != "" {
+		noteSuperadminSSOBypass(ctx, claims, *orgID, projectID, true,
+			map[string]interface{}{"action": changeAction, "requested": true})
+	} else {
+		noteSuperadminSSOBypass(ctx, claims, *orgID, projectID, false, nil)
+	}
 	return nil
 }
 
@@ -1120,6 +1137,35 @@ func ClaimsSatisfySSOFor(ctx context.Context, pool *pgxpool.Pool, claims *auth.C
 		return false
 	}
 	return superadminBypassVerifier(ctx, pool, claims.Subject)
+}
+
+// AuditSuperadminSSOBypass records a bypassed change made outside a
+// request's claims (billing checkout, which can't import this package's
+// callers). For billing.Service.WithSSOBypassAudit.
+func AuditSuperadminSSOBypass(ctx context.Context, userID, email, orgID string, detail map[string]interface{}) {
+	noteSuperadminSSOBypass(ctx, &auth.Claims{Subject: userID, Email: email, LoginVia: auth.LoginViaPasskey}, orgID, "", true, detail)
+}
+
+// ssoChecker answers ClaimsSatisfySSOFor for many orgs in one request,
+// running the account check (a query) at most once.
+func ssoChecker(ctx context.Context, pool *pgxpool.Pool, claims *auth.Claims) func(orgID string, ssoRequired bool) bool {
+	var verified *bool
+	return func(orgID string, ssoRequired bool) bool {
+		if claims == nil {
+			return !ssoRequired
+		}
+		if SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, orgID, ssoRequired) {
+			return true
+		}
+		if !SuperadminPasskeyBypass(claims.IsSuperadmin, claims.LoginVia) || pool == nil {
+			return false
+		}
+		if verified == nil {
+			v := superadminBypassVerifier(ctx, pool, claims.Subject)
+			verified = &v
+		}
+		return *verified
+	}
 }
 
 // ssoBypassAuditor writes superadmin.sso_bypass audit entries; set once

@@ -163,6 +163,10 @@ type LimitsChecker interface {
 // are read-only after construction.
 type Service struct {
 	pool *pgxpool.Pool
+	// ssoBypassAudit records a superadmin passkey bypass of an org's
+	// sso_required at checkout (tenant.AuditSuperadminSSOBypass; this
+	// package can't import tenant). nil = log only.
+	ssoBypassAudit func(ctx context.Context, userID, email, orgID string, detail map[string]interface{})
 	// developerPool is the eurobase_developer connection used for
 	// billing-PII paths (billing_profiles reads/writes + invoice
 	// render JOIN). Migration 000106 REVOKEs public.billing_profiles
@@ -269,6 +273,12 @@ func (s *Service) WithProjectCreator(pc ProjectCreator) *Service {
 // WithLimits attaches the project-limit checker so NewProjectCheckout
 // can enforce the per-owner project cap BEFORE opening a Mollie
 // payment. Optional but strongly recommended — see #407 review 🟡 #4.
+// WithSSOBypassAudit wires the audit for superadmin SSO bypasses.
+func (s *Service) WithSSOBypassAudit(f func(ctx context.Context, userID, email, orgID string, detail map[string]interface{})) *Service {
+	s.ssoBypassAudit = f
+	return s
+}
+
 func (s *Service) WithLimits(l LimitsChecker) *Service {
 	s.limits = l
 	return s
@@ -681,6 +691,10 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 		if superadminPasskey {
 			slog.Warn("superadmin passed an organization's SSO requirement with a passkey",
 				"user_id", userID, "org_id", *req.OrgID, "action", "checkout for a project in the org")
+			if s.ssoBypassAudit != nil {
+				s.ssoBypassAudit(ctx, userID, "", *req.OrgID, map[string]interface{}{
+					"action": "checkout for a project in org", "slug": req.Slug, "requested": true})
+			}
 		}
 		if ssoRequired && !ssoOK && !superadminPasskey {
 			return nil, &OrgSSORequiredError{OrgID: *req.OrgID}

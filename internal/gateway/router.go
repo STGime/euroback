@@ -157,6 +157,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// tenant.CreateProject once Mollie confirms first payment
 		// on a NewProjectCheckout intent. See issue #406.
 		billingSvc.WithProjectCreator(tenantSvc)
+		billingSvc.WithSSOBypassAudit(tenant.AuditSuperadminSSOBypass)
 		// Wire the project-limit checker so NewProjectCheckout
 		// enforces the per-owner project cap BEFORE opening a
 		// Mollie payment (#407 review 🟡 #4). Nil-safe on the
