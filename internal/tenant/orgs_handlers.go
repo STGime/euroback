@@ -88,7 +88,10 @@ func (h *OrgsHandler) enforceOrgSSO(w http.ResponseWriter, claims *auth.Claims, 
 		WriteSSOOutOfScope(w)
 		return false
 	}
-	if SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
+	if ClaimsSatisfySSOFor(claims, org.ID, org.SsoRequired) {
+		if org.SsoRequired {
+			noteSuperadminSSOBypass(context.Background(), claims, org.ID, "")
+		}
 		return true
 	}
 	WriteSSORequired(w, &SSORequiredError{OrgID: org.ID}, "this organization requires SSO sign-in")
@@ -223,9 +226,12 @@ func (h *OrgsHandler) HandleGetOrg() http.HandlerFunc {
 			WriteSSOOutOfScope(w)
 			return
 		}
-		if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, org.ID, org.SsoRequired) {
+		if !ClaimsSatisfySSOFor(claims, org.ID, org.SsoRequired) {
 			WriteSSORequired(w, &SSORequiredError{OrgID: org.ID}, "this organization requires SSO sign-in")
 			return
+		}
+		if org.SsoRequired {
+			noteSuperadminSSOBypass(r.Context(), claims, org.ID, "")
 		}
 		members, err := h.Svc.ListMembers(r.Context(), orgID)
 		if err != nil {

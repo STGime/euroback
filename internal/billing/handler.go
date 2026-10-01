@@ -216,6 +216,7 @@ func HandleNewProjectCheckout(svc *Service) http.HandlerFunc {
 			OrgID:         req.OrgID,
 			LoginVia:      claims.LoginVia,
 			SsoOrgID:      claims.SsoOrgID,
+			IsSuperadmin:  claims.IsSuperadmin,
 		})
 		if err != nil {
 			switch {

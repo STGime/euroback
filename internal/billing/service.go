@@ -553,8 +553,9 @@ type NewProjectCheckoutRequest struct {
 	// The session starting the checkout (#710): an explicit org that
 	// requires SSO is refused unless this session is SSO-signed-in to it
 	// — otherwise the paid project would be unreachable at once.
-	LoginVia string
-	SsoOrgID string
+	LoginVia     string
+	SsoOrgID     string
+	IsSuperadmin bool
 }
 
 // OrgSSORequiredError: the explicitly chosen org requires SSO and the
@@ -671,9 +672,12 @@ func (s *Service) NewProjectCheckout(ctx context.Context, userID string, req New
 			}
 			return nil, fmt.Errorf("billing: check org admin membership: %w", err)
 		}
-		// Same rule as tenant.SessionSatisfiesSSOFor (no import cycle):
-		// refuse before any payment, not after.
-		if ssoRequired && !(req.LoginVia == auth.LoginViaSSO && req.SsoOrgID == *req.OrgID) {
+		// Same rule as tenant.ClaimsSatisfySSOFor (no import cycle),
+		// incl. the superadmin passkey bypass: refuse before any
+		// payment, not after.
+		ssoOK := req.LoginVia == auth.LoginViaSSO && req.SsoOrgID == *req.OrgID
+		superadminPasskey := req.IsSuperadmin && req.LoginVia == auth.LoginViaPasskey
+		if ssoRequired && !ssoOK && !superadminPasskey {
 			return nil, &OrgSSORequiredError{OrgID: *req.OrgID}
 		}
 	}

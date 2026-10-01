@@ -515,7 +515,8 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		// open its projects: refuse, naming the org, so the console can
 		// start that org's SSO sign-in (#710). No session (billing
 		// webhook): the checkout was started from a valid one.
-		if req.Session != nil && !SessionSatisfiesSSOFor(req.Session.LoginVia, req.Session.SsoOrgID, *req.OrgID, ssoRequired) {
+		if req.Session != nil && !SessionSatisfiesSSOFor(req.Session.LoginVia, req.Session.SsoOrgID, *req.OrgID, ssoRequired) &&
+			!SuperadminPasskeyBypass(req.Session.IsSuperadmin, req.Session.LoginVia) {
 			return nil, &SSORequiredError{OrgID: *req.OrgID}
 		}
 		orgID = req.OrgID
@@ -527,9 +528,10 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 			// org (SessionSatisfiesSSOFor). Otherwise the new project would
 			// be unreachable at once (every request 403, the console
 			// bouncing to /login). No session (billing) = not SSO.
-			loginVia, ssoOrgID := "", ""
+			loginVia, ssoOrgID, bypass := "", "", false
 			if req.Session != nil {
 				loginVia, ssoOrgID = req.Session.LoginVia, req.Session.SsoOrgID
+				bypass = SuperadminPasskeyBypass(req.Session.IsSuperadmin, req.Session.LoginVia)
 			}
 			var id string
 			err := s.developerPool.QueryRow(ctx,
@@ -537,10 +539,10 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 				 FROM public.organizations o
 				 JOIN public.org_members om ON om.org_id = o.id
 				 WHERE om.platform_user_id = $1::uuid AND om.role = 'admin'
-				   AND (NOT o.sso_required OR ($2 = $4 AND o.id::text = $3))
+				   AND (NOT o.sso_required OR ($2 = $4 AND o.id::text = $3) OR $5)
 				 ORDER BY (o.created_by = $1::uuid) DESC, o.created_at ASC
 				 LIMIT 1`,
-				platformUserID, loginVia, ssoOrgID, auth.LoginViaSSO,
+				platformUserID, loginVia, ssoOrgID, auth.LoginViaSSO, bypass,
 			).Scan(&id)
 			if err == nil {
 				orgID = &id
@@ -945,7 +947,7 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 				if _, dup := seen[r.projectID]; dup {
 					continue
 				}
-				if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, r.orgID, r.ssoRequired) {
+				if !ClaimsSatisfySSOFor(claims, r.orgID, r.ssoRequired) {
 					// Session isn't SSO-backed for this org — omit
 					// the org-only row. Direct-member rows are
 					// unaffected (they were already in `projects`).

@@ -26,11 +26,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -1051,9 +1054,10 @@ func EnforceOrgSSOForProject(ctx context.Context, developerPool *pgxpool.Pool, c
 	if orgID == nil || ssoRequired == nil || !*ssoRequired {
 		return nil
 	}
-	if !SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, *orgID, *ssoRequired) {
+	if !ClaimsSatisfySSOFor(claims, *orgID, *ssoRequired) {
 		return &SSORequiredError{OrgID: *orgID}
 	}
+	noteSuperadminSSOBypass(ctx, claims, *orgID, projectID)
 	return nil
 }
 
@@ -1082,5 +1086,52 @@ func SessionSatisfiesSSOFor(loginVia, ssoOrgID, targetOrgID string, ssoRequired 
 		return true
 	}
 	return loginVia == auth.LoginViaSSO && ssoOrgID == targetOrgID
+}
+
+// SuperadminPasskeyBypass: a platform superadmin signed in with a passkey
+// satisfies any org's sso_required. Superadmins never sign in through an
+// org's SSO (pickSSOCandidate — the org's IdP could assert their email),
+// so without this a superadmin who belongs to an SSO-required org could
+// never open it. A passkey, not a password: a leaked superadmin password
+// mustn't open every SSO-only org the account is in. Logged and audited
+// (noteSuperadminSSOBypass). Doesn't widen access: membership still
+// decides which projects / orgs the account reaches.
+func SuperadminPasskeyBypass(isSuperadmin bool, loginVia string) bool {
+	return isSuperadmin && loginVia == auth.LoginViaPasskey
+}
+
+// ClaimsSatisfySSOFor is SessionSatisfiesSSOFor for a request's claims,
+// including the superadmin passkey bypass. Use it wherever claims exist.
+func ClaimsSatisfySSOFor(claims *auth.Claims, targetOrgID string, ssoRequired bool) bool {
+	if claims == nil {
+		return !ssoRequired
+	}
+	return SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, targetOrgID, ssoRequired) ||
+		SuperadminPasskeyBypass(claims.IsSuperadmin, claims.LoginVia)
+}
+
+// superadminSSONoted dedupes the bypass audit: one entry per
+// (superadmin, org) per hour, not one per API call.
+var superadminSSONoted sync.Map // key "user|org" → time.Time
+
+// noteSuperadminSSOBypass logs (and, with a project, audits) a superadmin
+// passing an org's sso_required via the passkey bypass.
+func noteSuperadminSSOBypass(ctx context.Context, claims *auth.Claims, orgID, projectID string) {
+	if claims == nil || SessionSatisfiesSSOFor(claims.LoginVia, claims.SsoOrgID, orgID, true) {
+		return // not a bypass: a real SSO session for this org
+	}
+	key := claims.Subject + "|" + orgID
+	if t, ok := superadminSSONoted.Load(key); ok && time.Since(t.(time.Time)) < time.Hour {
+		return
+	}
+	superadminSSONoted.Store(key, time.Now())
+	slog.Warn("superadmin passed an organization's SSO requirement with a passkey",
+		"user_id", claims.Subject, "org_id", orgID, "project_id", projectID)
+	if projectID != "" {
+		if svc := audit.FromContext(ctx); svc != nil {
+			svc.Log(ctx, projectID, claims.Subject, claims.Email, "superadmin.sso_bypass",
+				audit.WithMetadata(map[string]interface{}{"org_id": orgID, "login_via": claims.LoginVia}))
+		}
+	}
 }
 
