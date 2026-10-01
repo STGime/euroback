@@ -110,6 +110,14 @@ export function sqlStatements(sql: string): SqlWord[][] {
   return stmts;
 }
 
+/** Why SECURITY DEFINER is refused and what works instead (#661). Mirrors
+ * query.SecurityDefinerRejection in the gateway (privilege_guard.go). */
+export const SECURITY_DEFINER_REJECTION =
+  "SECURITY DEFINER is not allowed: a definer function runs with the privileges of the role that owns it, not the caller's, and here that is a platform role, so it would bypass your project's isolation and row-level security. " +
+  "Use SECURITY INVOKER (the default) and let RLS decide; policies can admit trusted callers with is_service_role(). " +
+  'For work that must reach every user\'s rows, run it as the service role: a cron job with "Run as service role", an edge function called without a user session, or the service key on your server. ' +
+  "See https://console.eurobase.app/docs/rls#security-definer";
+
 /** Returns an error message, or null when the SQL is acceptable. */
 export function privilegeStatementError(sql: string): string | null {
   const deny = (what: string) =>
@@ -182,7 +190,7 @@ export function privilegeStatementError(sql: string): string | null {
           if (kw(i + 1) === "to") return deny("OWNER TO");
           break;
         case "definer":
-          if (kw(i - 1) === "security") return deny("SECURITY DEFINER");
+          if (kw(i - 1) === "security") return SECURITY_DEFINER_REJECTION;
           break;
       }
     }

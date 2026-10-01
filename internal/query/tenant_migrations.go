@@ -91,7 +91,7 @@ var forbiddenMigStatementRes = []struct {
 	re  *regexp.Regexp
 	msg string
 }{
-	{regexp.MustCompile(`(?i)\bsecurity\s+definer\b`), "SECURITY DEFINER functions are not allowed in migrations"},
+	{regexp.MustCompile(`(?i)\bsecurity\s+definer\b`), SecurityDefinerRejection},
 	{regexp.MustCompile(`(?i)\b(commit|rollback|savepoint|prepare\s+transaction)\b`), "transaction control statements are not allowed — the migration already runs in a transaction"},
 	{regexp.MustCompile(`(?i)\bbegin\s*;`), "transaction control statements are not allowed — the migration already runs in a transaction"},
 	{regexp.MustCompile(`(?i)\b(set|reset)\s+(local\s+|session\s+)?(role|session_authorization|search_path)\b`), "changing role or search_path is not allowed in migrations"},
