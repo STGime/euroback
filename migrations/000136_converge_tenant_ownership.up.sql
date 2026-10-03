@@ -7,9 +7,16 @@
 --
 -- DELIBERATELY CONSERVATIVE for safe deployment on a live fleet:
 --   * Only MIGRATOR-owned application tables are reassigned to `_ddl`.
---     provision_tenant_ddl_role (000063) already does this for `relkind='r'`
---     on every `migrations up`; this migration is the one-shot companion
---     and extends nothing risky.
+--     provision_tenant_ddl_role (000063) already does the same reassign for
+--     `relkind='r'` (at tenant create and in its own one-time backfill), so
+--     _ddl-owned tenant tables already exist in prod; this migration is the
+--     one-shot companion and extends nothing risky (adds `relkind='p'`).
+--     RLS-neutral: the platform data API runs as migrator (SET LOCAL ROLE),
+--     and migrator is an INHERIT member of every `_ddl` (000063), so it has
+--     owner-equivalent access and still bypasses RLS on an _ddl-owned table
+--     exactly as on a migrator-owned one (this is what carries custom-RLS
+--     customer tables that lack a service-role branch — do NOT revoke that
+--     membership). SDK traffic runs as the non-owner gateway in both states.
 --   * Gateway- and developer-owned tables are NOT reassigned here. On the
 --     shared cluster `eurobase_gateway` is a non-owner on purpose so RLS is
 --     enforced for SDK traffic; flipping a gateway-owned table's owner would
@@ -18,10 +25,14 @@
 --     gateway role) are only counted + warned here and converged later, in
 --     the step that also moves SDK traffic off the gateway login and settles
 --     each table's service policy.
---   * `_func` is GRANTED DML on every application table regardless of owner,
---     so it can serve customer SQL under RLS once a later step cuts the SDK
---     path over to it. Granting `_func` (a non-owner) changes no current
---     behaviour; RLS still decides.
+--   * `_func` is GRANTED DML on every non-system application table it can be
+--     granted on. Gateway-owned tables work (migrator is a member of
+--     gateway); developer-owned (legacy MCP) tables can't be granted by
+--     migrator (not a member of the developer role) — those fail silently
+--     and are deferred with the reassign (see the inventory below).
+--     Granting `_func` (a non-owner) changes no current behaviour; RLS still
+--     decides. This does give edge functions (already on `_func`) new DML,
+--     under RLS, on gateway-owned tables they'd previously be denied.
 --
 -- System tables (users, user_identities, refresh_tokens, email_tokens,
 -- storage_objects, storage_shared_prefixes, vault_secrets) stay
@@ -32,6 +43,12 @@
 -- A short lock_timeout keeps the one-shot backfill from stalling live
 -- traffic: an object whose ACCESS EXCLUSIVE lock can't be taken quickly is
 -- skipped (counted + warned), not blocked on, and can be re-run later.
+-- Note: golang-migrate runs the whole file in one implicit transaction, so
+-- locks ARE held until it commits — lock_timeout bounds acquisition, not
+-- hold. The set here is small (most tables are already _ddl-owned from
+-- 000063, so few reassigns; the GRANTs take only short locks), and 000063's
+-- fleet-wide reassign already shipped this way; on a much larger fleet,
+-- treat this as a maintenance-window-ish migration.
 -- No explicit BEGIN/COMMIT: golang-migrate wraps the file.
 
 CREATE OR REPLACE FUNCTION public.converge_tenant_ownership(p_schema TEXT)
