@@ -29,6 +29,8 @@ on:
       - internal/tenant/superadmin_sso*.go
       - internal/auth/superadmin_bypass.go
       - internal/auth/apikey_middleware.go
+      - migrations/000136_converge_tenant_ownership.up.sql
+      - internal/query/converge_ownership_test.go
       - internal/email/delivery_log*.go
   workflow_dispatch:
 
@@ -100,6 +102,12 @@ jobs:
           EMAIL_LOG_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           EMAIL_LOG_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/email/ -run 'TestEmailLog_ProductionRoles'
+
+      # Tenant-table ownership convergence (000136): reassigns to _ddl.
+      - name: Converge tenant ownership (000136)
+        env:
+          CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership'
 
       # The org invitation service runs on the developer pool in
       # production: run its test as that role too (a missing grant fails).
