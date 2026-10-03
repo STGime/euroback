@@ -65,6 +65,8 @@ Shared login roles are created via the Scaleway console before their migrations 
 ## Team-tier routing (epic #684)
 - A project with a live `project_databases` row is served from its dedicated instance **or refused — never from the shared cluster**. `tenant.PlatformTenantContext` answers 503 when the owner pool can't be opened; console engines route via `query.TenantPoolFromContext`.
 - **SDK** (`sdkTenantPoolMw` on `/v1/db`, `/v1/auth`, `/v1/vault`, `/v1/storage`, OAuth callbacks) puts a Team project's **runtime** pool on the request (never the owner — SDK stays under RLS), or 503. Storage, vault, edge functions, cron, background jobs and schema/DDL each resolve the dedicated pool the same way and fail closed rather than touch shared. **Never fall back to the shared cluster for a Team project.**
+- **Platform tables (`projects`, `schema_changes`) stay on the shared pool — never read them through the tenant/dedicated pool.** Only the tenant's own application + system tables live on the dedicated instance.
+- Any new per-tenant background job must open a short-lived owner pool (`dbprovider.OpenOwnerPool`, never `PoolCache`) and skip the project on failure — never fall back to shared.
 - Instance size, connection budget and the per-surface details are in the private notes. `scripts/test-team.sh` → `TestTeamEndToEnd` (CI `team-e2e.yml`) drives the real router + runner; open gaps are tracked in `teamKnownGaps` and a fix PR must remove its entry.
 
 ## Team-tier credentials
@@ -94,13 +96,13 @@ When adding a third-party data processor: (1) insert it into `sub_processors` (m
 
 ## Storage object ownership
 - SDK storage is scoped per end user by the `storage_objects` RLS policy (`is_service_role() OR uploaded_by = current_end_user_id()`): download/delete/list/upload all check ownership; a key is claimed before anything reaches S3. Console storage and edge functions are service role.
-- **Shared folders (#697):** a tenant table `storage_shared_prefixes` (visibility authenticated|public), managed via `/platform/projects/{id}/storage-sharing`. Only developer files (`uploaded_by IS NULL`) in a shared folder are shared; end users can't add or overwrite files there. The data API is read-only on `storage_objects` / `storage_shared_prefixes` for non-service callers. **Any new tenant-schema table must be added to the platform-table lists** (console hidden sets, CLI, GDPR export, RLS audit, schema-change tracking).
+- **Shared folders (#697):** a tenant table `storage_shared_prefixes` (visibility authenticated|public), managed via `/platform/projects/{id}/storage-sharing`. Only developer files (`uploaded_by IS NULL`) in a shared folder are shared; end users can't add or overwrite files there. The data API is read-only on `storage_objects` / `storage_shared_prefixes` for non-service callers. **Write checks (`claimKey`, `DeleteFile`) use ownership (`objectOwned`), never read-visibility** — a shared file is readable by others, never theirs to overwrite or delete. **Any new tenant-schema table must be added to the platform-table lists** (console hidden sets, CLI, GDPR export, RLS audit, schema-change tracking).
 
 ## Customer-configured outbound connections
 - Any connection to a host a customer typed in (custom SMTP today) goes through `internal/netguard`: `CheckHostName` on save and `DialPublic` at connect time (resolve, keep public addresses only, dial the checked address). Custom SMTP also needs a submission port (587/465/2525), STARTTLS or TLS, and a login — checked on save and every send. Edge functions can't deliver mail directly (`functions-deny-smtp` blocks TCP 25 to any destination).
 
 ## Auth email log (000135)
-- The SDK auth email endpoints answer "OK" whether or not an email went out (no enumeration). `public.project_email_log` records what happened (sent / skipped + reason / failed); console: Auth → Email log (developer+). The **gateway role may only INSERT**; listing and cleanup run on the developer pool. Recipients masked; 14-day retention.
+- The SDK auth email endpoints answer "OK" whether or not an email went out (no enumeration). `public.project_email_log` records what happened (sent / skipped + reason / failed); console: Auth → Email log (developer+). The **gateway role may only INSERT**; listing and cleanup run on the developer pool. Recipients masked; 14-day retention. A new skip path in `internal/enduser` must call `RecordSkipped` with a reason (and add it to the console's `REASON_TEXT`).
 
 ## SDK releases (`@eurobase/sdk`)
 In order: (1) bump `sdk/js/package.json` + CHANGELOG; (2) tag the merge commit `sdk-vX.Y.Z` and push; (3) `npm publish` from `sdk/js`; (4) GitHub Release from the tag, marked Latest; (5) update version mentions that advertise the latest SDK (console docs, marketing site). Tag the CLI `cli-vX.Y.Z`.
