@@ -61,6 +61,10 @@ func TestConvergeTenantOwnership(t *testing.T) {
 	if _, err := pool.Exec(ctx, `SELECT provision_tenant($1, 'Converge', 'free')`, projectID); err != nil {
 		t.Fatal(err)
 	}
+	// provision_tenant may set its own schema name; read back the real one.
+	if err := pool.QueryRow(ctx, `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
 	mustExec := func(q string) {
 		t.Helper()
 		if _, err := pool.Exec(ctx, q); err != nil {
