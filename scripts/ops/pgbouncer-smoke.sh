@@ -41,10 +41,11 @@ const runner = Deno.env.get("DATABASE_URL_FUNCTION_RUNNER")!;
 // passwords: the gateway platform role is refused by both.
 await check("gateway role via pgbouncer-gateway (refused)", pooled(gw, "pgbouncer-gateway"), "SELECT 1", true);
 await check("gateway role via runner pooler (refused)", pooled(gw, "pgbouncer"), "SELECT 1", true);
-// Discover a tenant schema via a direct gateway connection (not pooled).
-const g = postgres(gw, { max: 1 });
-const [t] = await g`SELECT n.nspname AS s FROM pg_namespace n JOIN pg_roles r ON r.rolname = n.nspname || '_func' AND r.rolcanlogin WHERE n.nspname ~ '^tenant_[0-9a-f_]+$' ORDER BY 1 LIMIT 1`;
-await g.end({ timeout: 5 });
+// The tenant schema is discovered host-side (the smoke pod has no Scaleway
+// CA to verify a direct RDB TLS connection, and the poolers serve no
+// platform role) and passed in via SMOKE_TENANT_SCHEMA.
+const schema = Deno.env.get("SMOKE_TENANT_SCHEMA") ?? "";
+const t = schema ? { s: schema } : null;
 if (t) {
   const pw = await funcPassword(Deno.env.get("FUNC_PASSWORD_SECRET")!, t.s);
   // The tenant _func login works through BOTH poolers' tenant alias.
@@ -54,6 +55,30 @@ if (t) {
   console.log("SKIP tenant checks: no tenant schema found");
 }
 EOF
+# Discover a tenant schema in-cluster (psql trusts sslmode=require without a
+# CA; the smoke pod's Deno runtime can't). Short-lived migrations-image pod
+# as the developer role.
+MIGIMG=$(kubectl -n "$NS" get job migrate -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "rg.fr-par.scw.cloud/eurobase-app/migrations:latest")
+DISC="$POD-disc"
+kubectl -n "$NS" delete pod "$DISC" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+kubectl -n "$NS" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata: { name: $DISC, namespace: $NS, labels: { app: pgbouncer-smoke } }
+spec:
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: $MIGIMG
+      command: ["sh","-c","psql \"\$U\" -tAc \"SELECT n.nspname FROM pg_namespace n JOIN pg_roles r ON r.rolname = n.nspname || '_func' AND r.rolcanlogin WHERE n.nspname ~ '^tenant_[0-9a-f_]+\$' ORDER BY 1 LIMIT 1\""]
+      env:
+        - { name: U, valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_DEVELOPER } } }
+YAML
+for _ in $(seq 1 40); do dp=$(kubectl -n "$NS" get pod "$DISC" -o jsonpath='{.status.phase}' 2>/dev/null); [ "$dp" = Succeeded ] || [ "$dp" = Failed ] && break; sleep 2; done
+TENANT_SCHEMA=$(kubectl -n "$NS" logs "$DISC" 2>/dev/null | tr -d '[:space:]')
+kubectl -n "$NS" delete pod "$DISC" --ignore-not-found >/dev/null 2>&1
+[ -n "$TENANT_SCHEMA" ] && echo "discovered tenant schema: $TENANT_SCHEMA" || echo "no tenant schema found (tenant checks will skip)"
+
 kubectl -n "$NS" create configmap "$POD" --from-file=smoke.ts="$TMP/smoke.ts" >/dev/null
 kubectl -n "$NS" apply -f - >/dev/null <<YAML
 apiVersion: v1
@@ -69,13 +94,15 @@ spec:
         - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL } } }
         - { name: DATABASE_URL_FUNCTION_RUNNER, valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_FUNCTION_RUNNER } } }
         - { name: FUNC_PASSWORD_SECRET, valueFrom: { secretKeyRef: { name: eurobase-secrets, key: FUNC_PASSWORD_SECRET } } }
+        - { name: SMOKE_TENANT_SCHEMA, value: "$TENANT_SCHEMA" }
       volumeMounts: [{ name: smoke, mountPath: /smoke }]
   volumes: [{ name: smoke, configMap: { name: $POD } }]
 YAML
 for _ in $(seq 1 60); do p=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null); [ "$p" = Succeeded ] || [ "$p" = Failed ] && break; sleep 2; done
-OUT=$(kubectl -n "$NS" logs "$POD" 2>&1 | grep -E "^(OK|FAIL)" || true)
-echo "$OUT"
-if [ -z "$OUT" ] || echo "$OUT" | grep -q "^FAIL"; then
+ALL=$(kubectl -n "$NS" logs "$POD" 2>&1)
+echo "$ALL" | grep -E "^(OK|FAIL|SKIP)" || true
+if [ "${p:-}" = Failed ] || ! echo "$ALL" | grep -q "^OK" || echo "$ALL" | grep -q "^FAIL"; then
   echo "pgbouncer smoke test FAILED (pod phase: ${p:-unknown})" >&2
+  echo "$ALL" | tail -20 >&2
   exit 1
 fi
