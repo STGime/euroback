@@ -15,7 +15,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/functions"
-	"github.com/eurobase/euroback/internal/tenantlogin"
+	"github.com/eurobase/euroback/internal/tenantconn"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -355,94 +355,50 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 // search_path does NOT include `public`; qualified references outside
 // the tenant are also refused by validateCronSQLAction.
 func (e *Executor) runInTenantTx(ctx context.Context, projectID, schemaName, runAs string, fn func(context.Context, pgx.Tx) error) error {
-	if e.tenantBase == nil || len(e.tenantSecret) == 0 {
+	res := e.tenantResolver()
+	if res == nil {
 		return fmt.Errorf("sql/rpc cron actions need per-tenant logins (FUNC_PASSWORD_SECRET) on the worker")
 	}
-	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	cfg, err := e.tenantConnConfig(cctx, projectID, schemaName)
-	if err != nil {
-		return err
+	// Cron's session: the tenant schema only (no public — qualified
+	// references outside the tenant are refused by validateCronSQLAction),
+	// a 30s statement cap, and the service RLS identity when run_as=service
+	// (matches a user-less edge-function invocation). standard_conforming_
+	// strings is pinned by the resolver.
+	setup := func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", quoteIdent(schemaName))); err != nil {
+			return fmt.Errorf("set search_path: %w", err)
+		}
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
+			return fmt.Errorf("set statement_timeout: %w", err)
+		}
+		if runAs == RunAsService {
+			if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
+				return fmt.Errorf("set rls role: %w", err)
+			}
+		}
+		return nil
 	}
-	conn, err := pgx.ConnectConfig(cctx, cfg)
-	if err != nil {
-		// The driver error names the role and the internal host; keep it
-		// in the logs, not in cron_job_runs (visible to the tenant).
-		slog.Error("cron: connect as tenant role", "schema", schemaName, "error", err)
+	err := res.RunInTx(ctx, projectID, schemaName, 45*time.Second, setup, fn)
+	// Map the shared package's sentinels to cron's (surfaced, or not, to
+	// cron_job_runs by the handler).
+	switch {
+	case errors.Is(err, tenantconn.ErrNotReady):
+		return errTenantDBNotReady
+	case errors.Is(err, tenantconn.ErrRouting):
+		return errTenantRouting
+	case errors.Is(err, tenantconn.ErrConnect), errors.Is(err, tenantconn.ErrNotConfigured):
 		return errTenantConnect
 	}
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		conn.Close(closeCtx) //nolint:errcheck
-	}()
-
-	tx, err := conn.Begin(cctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(cctx) //nolint:errcheck
-	if _, err := tx.Exec(cctx, fmt.Sprintf("SET LOCAL search_path TO %s", quoteIdent(schemaName))); err != nil {
-		return fmt.Errorf("set search_path: %w", err)
-	}
-	if _, err := tx.Exec(cctx, "SET LOCAL statement_timeout = '30s'"); err != nil {
-		return fmt.Errorf("set statement_timeout: %w", err)
-	}
-	// Tokenize string literals the way the validators do, whatever the
-	// tenant role's own defaults say (transaction-local).
-	if _, err := tx.Exec(cctx, "SET LOCAL standard_conforming_strings = on"); err != nil {
-		return fmt.Errorf("pin string parsing: %w", err)
-	}
-	// RLS identity (#643): "service" matches a user-less edge-function
-	// invocation (functions-runner/role.ts rlsContextStatements), so
-	// tenant policies' is_service_role() branch applies. Transaction-
-	// local; the tenant role still limits the job to its own schema.
-	if runAs == RunAsService {
-		if _, err := tx.Exec(cctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
-			return fmt.Errorf("set rls role: %w", err)
-		}
-	}
-	if err := fn(cctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit(cctx)
+	return err
 }
 
-// tenantConnConfig is the connection for projectID's customer SQL: the
-// shared cluster as <schema>_func, or a Team project's dedicated instance
-// as its <schema>_func with the per-instance password (#677). A dedicated
-// database that isn't serving fails the job (retried at its next run).
-func (e *Executor) tenantConnConfig(ctx context.Context, projectID, schemaName string) (*pgx.ConnConfig, error) {
-	role := tenantlogin.FuncRole(schemaName)
-	var db dbprovider.TenantDB
-	if e.routeDB != nil {
-		var err error
-		db, err = dbprovider.ResolveTenantDB(ctx, e.routeDB, projectID)
-		if errors.Is(err, dbprovider.ErrTenantDBNotReady) {
-			return nil, errTenantDBNotReady
-		}
-		if err != nil {
-			slog.Error("cron: tenant database lookup", "project_id", projectID, "error", err)
-			return nil, errTenantRouting
-		}
+// tenantResolver builds the per-project connection resolver from the
+// configured logins + routing, or nil if logins aren't set.
+func (e *Executor) tenantResolver() *tenantconn.Resolver {
+	if e.tenantBase == nil || len(e.tenantSecret) == 0 {
+		return nil
 	}
-	if !db.Dedicated {
-		cfg := e.tenantBase.Copy()
-		cfg.User = role
-		cfg.Password = tenantlogin.FuncPassword(e.tenantSecret, schemaName)
-		cfg.RuntimeParams["application_name"] = "eurobase-cron"
-		return cfg, nil
-	}
-	pw := tenantlogin.FuncPassword(e.tenantSecret, tenantlogin.DedicatedSubject(db.ID, schemaName))
-	cfg, err := pgx.ParseConfig(dbprovider.BuildOwnerDSN(role, pw, db.Host, db.Port, db.Database))
-	if err != nil {
-		slog.Error("cron: dedicated database config", "project_id", projectID, "error", err)
-		return nil, errTenantConnect
-	}
-	cfg.ConnectTimeout = 10 * time.Second
-	// Identifiable in the customer's pg_stat_activity / connection budget.
-	cfg.RuntimeParams["application_name"] = "eurobase-cron"
-	return cfg, nil
+	return tenantconn.NewResolver(e.tenantBase, e.tenantSecret, e.routeDB, "eurobase-cron")
 }
 
 // execExtended runs sql (no arguments) over the extended query protocol,
@@ -547,8 +503,8 @@ var errDryRunRollback = errors.New("dry run: rolled back")
 type DryRunResult struct {
 	// RowsAffected is nil for rpc actions (SELECT fn() always "returns" 1).
 	RowsAffected *int64 `json:"rows_affected"`
-	DurationMs   int64 `json:"execution_time_ms"`
-	DryRun       bool  `json:"dry_run"`
+	DurationMs   int64  `json:"execution_time_ms"`
+	DryRun       bool   `json:"dry_run"`
 }
 
 // DryRun executes a sql / rpc action exactly like a scheduled run — same
