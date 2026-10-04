@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -12,6 +13,29 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrTenantLoginUnavailable is returned by a TenantLoginRunner when a
+// per-project login can't be opened (not configured, a Team project's
+// dedicated database not serving, a routing or connect failure). Handlers
+// map it to 503 — never a fall-through to a shared platform login, which is
+// the cross-tenant surface this whole path exists to close.
+var ErrTenantLoginUnavailable = errors.New("the project's database login is not available right now")
+
+// TenantLoginRunner runs customer SQL on a per-project database login (the
+// project's own `<schema>_func` role) instead of a shared platform pool,
+// closing the cross-tenant surface where customer SQL on a shared login
+// could pivot between tenant schemas. The gateway supplies an implementation
+// backed by internal/tenantconn + the gateway PgBouncer pooler; when the
+// engine has none (dev without FUNC_PASSWORD_SECRET, or the feature flag
+// off) the SDK paths fall back to the pool as before.
+//
+// Run resolves the project from ctx, opens a transaction on its login
+// (read-only when readOnly), runs setup (search_path / RLS / timeout) then
+// fn, and commits. A login that can't be opened returns
+// ErrTenantLoginUnavailable (wrapped).
+type TenantLoginRunner interface {
+	Run(ctx context.Context, schema string, readOnly bool, setup, fn func(context.Context, pgx.Tx) error) error
+}
 
 // PoolResolver picks the pool to use for a given request context.
 // Returning nil means "use the engine's shared pool" — a convenient
@@ -33,6 +57,7 @@ type PoolResolver func(ctx context.Context) *pgxpool.Pool
 type QueryEngine struct {
 	pool     *pgxpool.Pool
 	resolver PoolResolver
+	login    TenantLoginRunner
 }
 
 // NewQueryEngine creates a new QueryEngine backed by the given connection pool.
@@ -46,6 +71,15 @@ func NewQueryEngine(pool *pgxpool.Pool) *QueryEngine {
 // without a resolver behaves as before (shared pool only).
 func (e *QueryEngine) WithPoolResolver(r PoolResolver) *QueryEngine {
 	e.resolver = r
+	return e
+}
+
+// WithTenantLogin attaches a per-project-login runner so SDK customer SQL
+// (/v1/db/sql and RPC) executes as the project's own `<schema>_func` role
+// instead of the shared gateway pool. Nil-safe — without it the SDK paths
+// behave as before (shared pool / dedicated runtime pool via the resolver).
+func (e *QueryEngine) WithTenantLogin(r TenantLoginRunner) *QueryEngine {
+	e.login = r
 	return e
 }
 
@@ -712,13 +746,26 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 
 	slog.Debug("executing function call", "sql", sql, "args_count", len(paramValues))
 
+	// RPC bodies are customer-defined code — run them on the project's own
+	// `<schema>_func` login when one is configured (same rationale as
+	// /v1/db/sql). RPC keeps `public` on the search_path, matching
+	// WithTenantTx. The existence check above stays on the pool: it reads
+	// only metadata, not customer code.
 	var result interface{}
-	err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	scan := func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, paramValues...).Scan(&result)
-	})
+	}
+	if e.login != nil {
+		err = e.login.Run(ctx, schemaName, false, e.sdkSetup(schemaName, true), scan)
+	} else {
+		err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error { return scan(ctx, tx) })
+	}
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
+		}
+		if errors.Is(err, ErrTenantLoginUnavailable) {
+			return nil, err
 		}
 		return nil, fmt.Errorf("execute function: %w", err)
 	}
@@ -755,6 +802,25 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	rawSQL = strings.TrimSpace(rawSQL)
 	rawSQL = strings.TrimRight(rawSQL, ";")
 	rawSQL = strings.TrimSpace(rawSQL)
+
+	// SDK customer SQL runs on the project's own `<schema>_func` login (not
+	// a shared platform pool) when one is configured — closing the
+	// cross-tenant surface. The login resolves shared-cluster vs a Team
+	// project's dedicated instance itself, so the pool resolver is bypassed
+	// here.
+	if opts.SDKPath && e.login != nil {
+		var columns []string
+		var results []map[string]interface{}
+		err := e.login.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, false), func(ctx context.Context, tx pgx.Tx) error {
+			var ferr error
+			columns, results, ferr = runCustomerSQL(ctx, tx, rawSQL, maxRows)
+			return ferr
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return columns, results, nil
+	}
 
 	pool, routed := e.pickPool(ctx)
 	conn, err := pool.Acquire(ctx)
@@ -849,6 +915,69 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 		return nil, nil, fmt.Errorf("commit: %w", err)
 	}
 
+	return []string{"result"}, []map[string]interface{}{
+		{"result": fmt.Sprintf("%s (%d rows affected)", tag.String(), tag.RowsAffected())},
+	}, nil
+}
+
+// sdkSetup returns the per-transaction session setup for SDK customer SQL:
+// the tenant search_path (SDK /sql drops the `public` fallback — see
+// ExecOptions; RPC keeps it, matching WithTenantTx), the end-user RLS
+// context, and the statement-timeout cap. Used by the per-project-login
+// path; the pool path inlines the equivalent. standard_conforming_strings
+// is pinned by the login runner itself (parser-agreement).
+func (e *QueryEngine) sdkSetup(schemaName string, includePublic bool) func(context.Context, pgx.Tx) error {
+	return func(ctx context.Context, tx pgx.Tx) error {
+		searchPath := quoteIdent(schemaName)
+		if includePublic {
+			searchPath += ", public"
+		}
+		if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+searchPath); err != nil {
+			return fmt.Errorf("set search_path: %w", err)
+		}
+		if err := e.applyRLSContext(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {
+			return fmt.Errorf("set statement_timeout: %w", err)
+		}
+		return nil
+	}
+}
+
+// runCustomerSQL executes one customer statement on an already-open tx: a
+// LIMIT-wrapped read returning columns+rows for a SELECT-like statement, or
+// a one-row "N rows affected" summary for DML/DDL. It never begins or
+// commits — the caller owns the transaction (pool path or per-project
+// login).
+func runCustomerSQL(ctx context.Context, tx pgx.Tx, rawSQL string, maxRows int) ([]string, []map[string]interface{}, error) {
+	upperSQL := strings.ToUpper(strings.TrimSpace(rawSQL))
+	isSelect := strings.HasPrefix(upperSQL, "SELECT") || strings.HasPrefix(upperSQL, "WITH") || strings.HasPrefix(upperSQL, "TABLE")
+	if isSelect {
+		wrappedSQL := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", rawSQL, maxRows)
+		if err := pinStringParsing(ctx, tx); err != nil {
+			return nil, nil, err
+		}
+		rows, err := tx.Query(ctx, wrappedSQL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("execute query: %w", err)
+		}
+		defer rows.Close()
+		fieldDescs := rows.FieldDescriptions()
+		columns := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			columns[i] = fd.Name
+		}
+		results, err := scanRows(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		return columns, results, nil
+	}
+	tag, err := execCustomerStatement(ctx, tx, rawSQL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execute query: %w", err)
+	}
 	return []string{"result"}, []map[string]interface{}{
 		{"result": fmt.Sprintf("%s (%d rows affected)", tag.String(), tag.RowsAffected())},
 	}, nil

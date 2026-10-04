@@ -2609,7 +2609,12 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	// The console's cron Test Run (#645) dry-runs as the tenant login.
 	t.Setenv("FUNC_PASSWORD_SECRET", string(funcSecret))
 	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc).WithPATService(auth.NewPATService(gw)), platformSvc, nil, nil, s3Client, nil, nil,
-		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil)
+		// sdkLogin nil: SDK /sql + /rpc stay on the shared gateway pool in
+		// the e2e (as in prod until SDK_FUNC_LOGIN flips). The per-project-
+		// login seam is covered by engine_tenant_login_test.go; the real
+		// `<schema>_func` execution path is the functions runner's (below)
+		// and the step-3 prod pooler smoke test.
+		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil, nil)
 	if cfg.deno != "" {
 		gatewaySrv := httptest.NewServer(router)
 		t.Cleanup(gatewaySrv.Close)

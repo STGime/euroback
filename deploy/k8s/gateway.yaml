@@ -136,6 +136,23 @@ spec:
               value: "true"
             - name: MOLLIE_ENV
               value: "live"
+            # Per-project login for SDK customer SQL (/v1/db/sql + RPC) —
+            # the step-4 security remediation. Customer SQL runs as the
+            # project's own `<schema>_func` role through the gateway
+            # PgBouncer (pgbouncer-gateway, tenant alias), not the shared
+            # gateway pool. The URL's user/password are overridden per
+            # request with the derived func-role credentials, so this base
+            # carries none; in-cluster hop is sslmode=disable (SCRAM protects
+            # the credential, pooler→RDB is TLS).
+            - name: GATEWAY_DB_POOLER_URL
+              value: postgres://pgbouncer-gateway.eurobase.svc.cluster.local:6432/eurobase_tenant?sslmode=disable
+            # SDK_FUNC_LOGIN is deliberately NOT set yet (default off): the
+            # code ships first so the connection budget and tenant-table
+            # ownership (step 1 inventory) can be verified, then this is set
+            # to "1" to flip SDK customer SQL onto per-project logins.
+            # Requires FUNC_PASSWORD_SECRET (eurobase-secrets) + the URL
+            # above + DATABASE_URL_DEVELOPER; the gateway fails startup if
+            # set without them.
       imagePullSecrets:
         - name: scw-registry
 ---

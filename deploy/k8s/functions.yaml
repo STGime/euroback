@@ -113,13 +113,13 @@ spec:
   # role is now served by TWO poolers (runner + gateway): per tenant
   # PGB_TENANT_POOL_SIZE 2 × 2 replicas each = 4 + 4, + cron + dry run
   # (DirectFuncConnections 2) = 10 <= FuncConnLimit 16. The aggregate
-  # server-connection ceiling is each pooler's tenant alias
-  # (PGB_TENANT_MAX_DB_CONNECTIONS 15 × 2 = 30), so 30 (runner) today +
-  # ~35 platform direct + 2 ≈ 67/~95 usable. The gateway pooler carries
-  # no traffic until the SDK customer-SQL routing PR, which must shrink
-  # the gateway's direct pools (or the gateway pooler's tenant-alias
-  # max_db_connections) before it goes live — 30 (runner) + 30 (gateway)
-  # + ~35 would exceed the budget. Each runner pod also holds up to 3
+  # server-connection ceiling is each pooler's tenant alias: the runner's
+  # PGB_TENANT_MAX_DB_CONNECTIONS 15 × 2 = 30, the gateway's 8 × 2 = 16
+  # (lowered for budget headroom). The gateway pooler carries SDK
+  # customer SQL (/v1/db/sql + RPC) once SDK_FUNC_LOGIN flips (step-4
+  # security remediation; code ships off first). Budget when flipped:
+  # 30 (runner) + 16 (gateway) + ~35 platform direct ≈ 81/~95 usable
+  # (max_connections 100 − reserved). Each runner pod also holds up to 3
   # direct platform-lookup connections. RUNNER_TENANT_CONN_CAP (client
   # connections to the pooler per pod) no longer counts here.
   maxReplicas: 6

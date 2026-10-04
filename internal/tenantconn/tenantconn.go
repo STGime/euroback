@@ -105,6 +105,23 @@ func (r *Resolver) ConnConfig(ctx context.Context, projectID, schemaName string)
 	return cfg, nil
 }
 
+// ConnConfigShared builds the shared-cluster `<schema>_func` config without a
+// routing lookup — for hot paths (SDK SQL / RPC) that already know from the
+// request's project context that the project has no dedicated database. Using
+// it for a Team project would point its customer SQL at the shared cluster,
+// which has no schema for it, so the caller MUST gate on a trusted
+// HasDedicatedDB=false signal.
+func (r *Resolver) ConnConfigShared(schemaName string) (*pgx.ConnConfig, error) {
+	if !r.Configured() {
+		return nil, ErrNotConfigured
+	}
+	cfg := r.base.Copy()
+	cfg.User = tenantlogin.FuncRole(schemaName)
+	cfg.Password = tenantlogin.FuncPassword(r.secret, schemaName)
+	cfg.RuntimeParams["application_name"] = r.appName
+	return cfg, nil
+}
+
 // RunInTx opens a short-lived `<schema>_func` connection for projectID,
 // begins a transaction with txOpts (e.g. `pgx.TxOptions{AccessMode:
 // pgx.ReadOnly}` for the SDK read path; the zero value is read-write,
@@ -117,19 +134,39 @@ func (r *Resolver) ConnConfig(ctx context.Context, projectID, schemaName string)
 // A connect failure returns ErrConnect (the driver error, which names the
 // role and internal host, is logged, not returned).
 func (r *Resolver) RunInTx(ctx context.Context, projectID, schemaName string, budget time.Duration, txOpts pgx.TxOptions, setup, fn func(context.Context, pgx.Tx) error) error {
+	return r.runInTx(ctx, budget, txOpts, setup, fn, func(cctx context.Context) (*pgx.ConnConfig, error) {
+		return r.ConnConfig(cctx, projectID, schemaName)
+	})
+}
+
+// RunInTxShared is RunInTx against the shared cluster without a routing
+// lookup — for hot paths that already know the project has no dedicated
+// database (see ConnConfigShared). The caller MUST gate on a trusted
+// HasDedicatedDB=false signal; a Team project routed here would hit the
+// shared cluster, which has no schema for it.
+func (r *Resolver) RunInTxShared(ctx context.Context, schemaName string, budget time.Duration, txOpts pgx.TxOptions, setup, fn func(context.Context, pgx.Tx) error) error {
+	return r.runInTx(ctx, budget, txOpts, setup, fn, func(context.Context) (*pgx.ConnConfig, error) {
+		return r.ConnConfigShared(schemaName)
+	})
+}
+
+// runInTx holds the body shared by RunInTx / RunInTxShared: it opens a
+// short-lived connection from the config that build returns, begins a tx,
+// pins string parsing, runs setup then fn, and commits.
+func (r *Resolver) runInTx(ctx context.Context, budget time.Duration, txOpts pgx.TxOptions, setup, fn func(context.Context, pgx.Tx) error, build func(context.Context) (*pgx.ConnConfig, error)) error {
 	if budget <= 0 {
 		budget = 45 * time.Second
 	}
 	cctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	cfg, err := r.ConnConfig(cctx, projectID, schemaName)
+	cfg, err := build(cctx)
 	if err != nil {
 		return err
 	}
 	conn, err := pgx.ConnectConfig(cctx, cfg)
 	if err != nil {
-		slog.Error("tenantconn: connect as tenant role", "schema", schemaName, "error", err)
+		slog.Error("tenantconn: connect as tenant role", "role", cfg.User, "error", err)
 		return ErrConnect
 	}
 	defer func() {
