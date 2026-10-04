@@ -756,7 +756,9 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 		return tx.QueryRow(ctx, sql, paramValues...).Scan(&result)
 	}
 	if e.login != nil {
-		err = e.login.Run(ctx, schemaName, false, e.sdkSetup(schemaName, true), scan)
+		// No statement_timeout: WithTenantTx (the pool path) set none, so
+		// flipping SDK_FUNC_LOGIN must not start capping long-running RPCs.
+		err = e.login.Run(ctx, schemaName, false, e.sdkSetup(schemaName, true, ""), scan)
 	} else {
 		err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error { return scan(ctx, tx) })
 	}
@@ -811,7 +813,7 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	if opts.SDKPath && e.login != nil {
 		var columns []string
 		var results []map[string]interface{}
-		err := e.login.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, false), func(ctx context.Context, tx pgx.Tx) error {
+		err := e.login.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, false, "10s"), func(ctx context.Context, tx pgx.Tx) error {
 			var ferr error
 			columns, results, ferr = runCustomerSQL(ctx, tx, rawSQL, maxRows)
 			return ferr
@@ -923,10 +925,13 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 // sdkSetup returns the per-transaction session setup for SDK customer SQL:
 // the tenant search_path (SDK /sql drops the `public` fallback — see
 // ExecOptions; RPC keeps it, matching WithTenantTx), the end-user RLS
-// context, and the statement-timeout cap. Used by the per-project-login
-// path; the pool path inlines the equivalent. standard_conforming_strings
-// is pinned by the login runner itself (parser-agreement).
-func (e *QueryEngine) sdkSetup(schemaName string, includePublic bool) func(context.Context, pgx.Tx) error {
+// context, and (when stmtTimeout != "") a statement-timeout cap. Used by the
+// per-project-login path; the pool path inlines the equivalent.
+// standard_conforming_strings is pinned by the login runner itself
+// (parser-agreement). Each caller passes the timeout its old pool path used:
+// "10s" for /v1/db/sql, none for RPC (WithTenantTx set no statement_timeout,
+// so flipping the flag must not start capping RPCs that run longer).
+func (e *QueryEngine) sdkSetup(schemaName string, includePublic bool, stmtTimeout string) func(context.Context, pgx.Tx) error {
 	return func(ctx context.Context, tx pgx.Tx) error {
 		searchPath := quoteIdent(schemaName)
 		if includePublic {
@@ -938,8 +943,10 @@ func (e *QueryEngine) sdkSetup(schemaName string, includePublic bool) func(conte
 		if err := e.applyRLSContext(ctx, tx); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {
-			return fmt.Errorf("set statement_timeout: %w", err)
+		if stmtTimeout != "" {
+			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+stmtTimeout+"'"); err != nil {
+				return fmt.Errorf("set statement_timeout: %w", err)
+			}
 		}
 		return nil
 	}

@@ -41,6 +41,16 @@ func (s sdkTenantLogin) Run(ctx context.Context, schema string, readOnly bool, s
 		// Team project: route to its dedicated instance (the resolver
 		// resolves the live project_databases row and refuses — never
 		// shared — if it isn't serving).
+		//
+		// PRE-FLIP BLOCKER FOR TEAM (not the shared-cluster Free/Pro path):
+		// this opens a direct, un-pooled `<schema>_func` connection to the
+		// dedicated instance per request (tenantconn bypasses the gateway
+		// PgBouncer for dedicated hosts). It competes with the functions
+		// runner and cron for that instance's DedicatedFuncConnLimit (12),
+		// and every request pays a TLS+SCRAM connect. Before enabling
+		// SDK_FUNC_LOGIN for Team projects, add a pooled/capped dedicated
+		// path (see the dedicated-pooler work, #485) or validate the burst
+		// budget. The shared-cluster path below is pooled via pgbouncer.
 		err = s.resolver.RunInTx(ctx, pc.ProjectID, schema, 0, txOpts, setup, fn)
 	} else {
 		// Free/Pro on the shared cluster: skip the routing lookup.
