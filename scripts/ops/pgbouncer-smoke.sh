@@ -14,7 +14,8 @@ IMG=$(kubectl -n "$NS" get deploy functions -o jsonpath='{.spec.template.spec.co
 
 kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 kubectl -n "$NS" delete configmap "$POD" --ignore-not-found >/dev/null 2>&1 || true
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"; kubectl -n "$NS" delete pod "$POD" --ignore-not-found >/dev/null 2>&1; kubectl -n "$NS" delete configmap "$POD" --ignore-not-found >/dev/null 2>&1' EXIT
+DISC="$POD-disc"
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"; kubectl -n "$NS" delete pod "$POD" "$DISC" --ignore-not-found >/dev/null 2>&1; kubectl -n "$NS" delete configmap "$POD" --ignore-not-found >/dev/null 2>&1' EXIT
 cat > "$TMP/smoke.ts" <<'EOF'
 import { funcPassword } from "/app/tenant_db.ts";
 const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
@@ -57,9 +58,9 @@ if (t) {
 EOF
 # Discover a tenant schema in-cluster (psql trusts sslmode=require without a
 # CA; the smoke pod's Deno runtime can't). Short-lived migrations-image pod
-# as the developer role.
-MIGIMG=$(kubectl -n "$NS" get job migrate -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "rg.fr-par.scw.cloud/eurobase-app/migrations:latest")
-DISC="$POD-disc"
+# as the developer role; its image is whatever the migrate Job runs.
+MIGIMG=$(kubectl -n "$NS" get job migrate -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+[ -n "$MIGIMG" ] || { echo "cannot find the migrate Job's image for schema discovery" >&2; exit 1; }
 kubectl -n "$NS" delete pod "$DISC" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 kubectl -n "$NS" apply -f - >/dev/null <<YAML
 apiVersion: v1
@@ -74,9 +75,20 @@ spec:
       env:
         - { name: U, valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL_DEVELOPER } } }
 YAML
+dp=""
 for _ in $(seq 1 40); do dp=$(kubectl -n "$NS" get pod "$DISC" -o jsonpath='{.status.phase}' 2>/dev/null); [ "$dp" = Succeeded ] || [ "$dp" = Failed ] && break; sleep 2; done
-TENANT_SCHEMA=$(kubectl -n "$NS" logs "$DISC" 2>/dev/null | tr -d '[:space:]')
+# Container logs merge stdout+stderr, so a psql error would land in the raw
+# value. Validate against the schema shape before trusting it: anything that
+# isn't a tenant_… name (incl. error text) is discarded, so it can never
+# break the pod YAML below or masquerade as a schema.
+DISC_RAW=$(kubectl -n "$NS" logs "$DISC" 2>/dev/null | tr -d '[:space:]' || true)
 kubectl -n "$NS" delete pod "$DISC" --ignore-not-found >/dev/null 2>&1
+TENANT_SCHEMA=""
+case "$DISC_RAW" in tenant_[0-9a-f_]*) TENANT_SCHEMA="$DISC_RAW";; esac
+if [ "$dp" != Succeeded ]; then
+  echo "tenant-schema discovery pod did not succeed (phase: ${dp:-unknown})" >&2
+  exit 1
+fi
 [ -n "$TENANT_SCHEMA" ] && echo "discovered tenant schema: $TENANT_SCHEMA" || echo "no tenant schema found (tenant checks will skip)"
 
 kubectl -n "$NS" create configmap "$POD" --from-file=smoke.ts="$TMP/smoke.ts" >/dev/null
