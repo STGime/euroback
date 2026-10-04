@@ -106,25 +106,27 @@ func (r *Resolver) ConnConfig(ctx context.Context, projectID, schemaName string)
 }
 
 // RunInTx opens a short-lived `<schema>_func` connection for projectID,
-// begins a transaction, pins string-literal parsing (parser-agreement with
-// the SQL guards), runs setup (the caller's session settings:
-// search_path, statement_timeout, read-only, RLS identity), then fn, and
-// commits. setup may be nil. The connection is closed on return.
+// begins a transaction with txOpts (e.g. `pgx.TxOptions{AccessMode:
+// pgx.ReadOnly}` for the SDK read path; the zero value is read-write,
+// default isolation), pins string-literal parsing (parser-agreement with
+// the SQL guards), runs setup (the caller's session settings: search_path,
+// statement_timeout, RLS identity), then fn, and commits. setup may be nil.
+// The connection is closed on return. budget bounds the whole operation,
+// routing lookup included (default 45s).
 //
 // A connect failure returns ErrConnect (the driver error, which names the
-// role and internal host, is logged, not returned). budget bounds the
-// whole operation.
-func (r *Resolver) RunInTx(ctx context.Context, projectID, schemaName string, budget time.Duration, setup, fn func(context.Context, pgx.Tx) error) error {
-	cfg, err := r.ConnConfig(ctx, projectID, schemaName)
-	if err != nil {
-		return err
-	}
+// role and internal host, is logged, not returned).
+func (r *Resolver) RunInTx(ctx context.Context, projectID, schemaName string, budget time.Duration, txOpts pgx.TxOptions, setup, fn func(context.Context, pgx.Tx) error) error {
 	if budget <= 0 {
 		budget = 45 * time.Second
 	}
 	cctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
+	cfg, err := r.ConnConfig(cctx, projectID, schemaName)
+	if err != nil {
+		return err
+	}
 	conn, err := pgx.ConnectConfig(cctx, cfg)
 	if err != nil {
 		slog.Error("tenantconn: connect as tenant role", "schema", schemaName, "error", err)
@@ -136,7 +138,7 @@ func (r *Resolver) RunInTx(ctx context.Context, projectID, schemaName string, bu
 		conn.Close(closeCtx) //nolint:errcheck
 	}()
 
-	tx, err := conn.Begin(cctx)
+	tx, err := conn.BeginTx(cctx, txOpts)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}

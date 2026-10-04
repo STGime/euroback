@@ -378,7 +378,7 @@ func (e *Executor) runInTenantTx(ctx context.Context, projectID, schemaName, run
 		}
 		return nil
 	}
-	err := res.RunInTx(ctx, projectID, schemaName, 45*time.Second, setup, fn)
+	err := res.RunInTx(ctx, projectID, schemaName, 45*time.Second, pgx.TxOptions{}, setup, fn)
 	// Map the shared package's sentinels to cron's (surfaced, or not, to
 	// cron_job_runs by the handler).
 	switch {
