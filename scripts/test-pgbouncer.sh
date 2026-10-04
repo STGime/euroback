@@ -56,12 +56,16 @@ docker run -d --name "$PGB_P" --network "$NET" -v "$PUBVOL:/pub" --user 0 \
   eurobase-pgbouncer:test pgbouncer-userlist publish >/dev/null
 docker run -d --name "$PGB_R" --network "$NET" -p 6467:6432 -p 9128:9127 -v "$PUBVOL:/pub:ro" \
   -e PGB_TENANT_SOURCE=file:/pub -e PGB_PLATFORM_URL_VARS= \
+  -e PGB_REPLICAS=1 -e PGB_PEER_TENANT_CONNECTIONS=2 \
   -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s \
   eurobase-pgbouncer:test \
   sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
-docker run -d --name "$PGB_G" --network "$NET" -p 6468:6432 -p 9129:9127 \
-  -e DATABASE_URL="postgres://eurobase_gateway:localdev@$PG:5432/eurobase?sslmode=disable" \
-  -e PGB_PLATFORM_URL_VARS=DATABASE_URL -e PGB_INCLUDE_TENANTS=0 \
+# Gateway pooler: now ALSO tenant-only (serves <schema>_func for the SDK
+# path), same published-userlist source as the runner, just a different
+# ingress in prod. No platform roles, no secret in the pod.
+docker run -d --name "$PGB_G" --network "$NET" -p 6468:6432 -p 9129:9127 -v "$PUBVOL:/pub:ro" \
+  -e PGB_TENANT_SOURCE=file:/pub -e PGB_PLATFORM_URL_VARS= \
+  -e PGB_REPLICAS=1 -e PGB_PEER_TENANT_CONNECTIONS=2 \
   -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s \
   eurobase-pgbouncer:test \
   sh -c 'pgbouncer-userlist init && { pgbouncer-userlist sync & } && exec pgbouncer /run/pgbouncer/pgbouncer.ini' >/dev/null
@@ -84,6 +88,7 @@ PGB_TEST_SECRET="$SECRET" \
 sleep 6 # publisher publishes the new tenant, runner pooler's sidecar picks it up
 PGB_TEST_RUNNER_POOLER="postgres://localhost:6467" PGB_TEST_GATEWAY_POOLER="postgres://localhost:6468" \
 PGB_TEST_RUNNER_METRICS="http://localhost:9128/metrics" PGB_TEST_GATEWAY_METRICS="http://localhost:9129/metrics" \
+PGB_TEST_DIRECT_URL="postgres://eurobase_gateway:localdev@localhost:$PG_PORT/eurobase?sslmode=disable" \
 PGB_TEST_SECRET="$SECRET" \
   go test ./internal/pgbouncerconf/ -run TestPoolerSplit -count=1 -v
 
