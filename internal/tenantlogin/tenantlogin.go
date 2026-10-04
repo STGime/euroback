@@ -52,9 +52,10 @@ const MinSecretLen = 32
 //
 // FUTURE — if a larger user base makes the aggregate (concurrently active
 // tenants × their held _func connections, across both poolers) approach
-// max_connections = 100, the levers are, in order: (1) shrink the per-pool
-// tenant pool sizes (PGB_TENANT_POOL_SIZE on each pooler) — the pooler
-// already bounds aggregate server connections; (2) raise the shared
+// max_connections = 100, the levers are, in order: (1) lower each pooler's
+// tenant-alias server cap (PGB_TENANT_MAX_DB_CONNECTIONS — the pooler's
+// per-alias bound on aggregate server connections; PGB_TENANT_POOL_SIZE
+// only bounds per-tenant concurrency); (2) raise the shared
 // cluster's max_connections (Scaleway RDB, needs a bigger instance);
 // (3) move more projects to Team-tier dedicated instances (their own
 // budget). Lowering FuncConnLimit again only works if the pools fit under

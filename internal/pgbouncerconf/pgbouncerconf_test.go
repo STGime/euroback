@@ -95,9 +95,11 @@ func TestRenderINI_PlatformOnly(t *testing.T) {
 	}
 }
 
-// The gateway pooler (step 3) serves platform roles AND tenant _func (SDK
-// customer SQL): both the gateway alias and the tenant alias are rendered.
-func TestRenderINI_GatewayPoolerPlatformAndTenant(t *testing.T) {
+// RenderINI can serve platform roles AND tenant _func in one pooler (both
+// aliases rendered). The shipped gateway pooler is tenant-only today
+// (PGB_PLATFORM_URL_VARS=""); this covers the renderer for a FUTURE
+// combined pooler.
+func TestRenderINI_PlatformAndTenant(t *testing.T) {
 	s := Settings{ServerTLS: "require", AuthFile: "/run/pgbouncer/userlist.txt", MaxDBConnections: 10,
 		TenantMaxDBConnections: 15, TenantPoolSize: 2, IncludeTenants: true,
 		PlatformPoolSizes: map[string]int{"eurobase_gateway": 10}}
@@ -106,10 +108,10 @@ func TestRenderINI_GatewayPoolerPlatformAndTenant(t *testing.T) {
 	}
 	ini := RenderINI(s)
 	if !strings.Contains(ini, s.TenantDatabase()+" = host=") {
-		t.Error("gateway pooler must render the tenant alias")
+		t.Error("must render the tenant alias")
 	}
 	if !strings.Contains(ini, "eurobase = host=") {
-		t.Error("gateway pooler must still render the platform alias")
+		t.Error("must render the platform alias when platform roles are present")
 	}
 }
 
