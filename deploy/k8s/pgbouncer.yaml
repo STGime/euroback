@@ -92,6 +92,10 @@ spec:
             # Keep equal to spec.replicas (tenant connection budget check).
             - name: PGB_REPLICAS
               value: "2"
+            # The gateway pooler's tenant share (its replicas × pool = 2 × 2),
+            # so this pooler's budget check accounts for both poolers.
+            - name: PGB_PEER_TENANT_CONNECTIONS
+              value: "4"
           volumeMounts: &saMounts
             - { name: run, mountPath: /run/pgbouncer }
             - { name: sa, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }

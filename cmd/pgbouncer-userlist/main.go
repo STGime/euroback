@@ -197,6 +197,7 @@ func loadConfig() (*config, error) {
 		s.PlatformPoolSizes[p.User] = envInt("PGB_POOL_SIZE_"+strings.ToUpper(p.User), 10)
 	}
 	s.Replicas = envInt("PGB_REPLICAS", 1)
+	s.PeerTenantConnections = envInt("PGB_PEER_TENANT_CONNECTIONS", 0)
 	if c.tenants {
 		if err := pgbouncerconf.CheckTenantBudget(s); err != nil {
 			return nil, err

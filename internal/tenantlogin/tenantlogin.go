@@ -33,12 +33,33 @@ import (
 const MinSecretLen = 32
 
 // FuncConnLimit is the per-tenant connection limit on `<schema>_func`.
-// The runner holds at most one connection per tenant per pod, so this
-// must cover the functions HPA maxReplicas (4, deploy/k8s/functions.yaml)
-// plus one surging pod during a rollout, plus one cron job connection
-// (worker), plus one console dry run (gateway, one per project per pod —
-// internal/cron/handler.go), plus one spare.
-const FuncConnLimit = 8
+// It must cover every pooled + direct consumer of a tenant's _func login:
+//   - the runner pooler: replicas (2) × tenant pool (2) = 4;
+//   - the gateway pooler (SDK customer SQL, from step 3): replicas × tenant
+//     pool;
+//   - DirectFuncConnections = 2 (one cron job on the worker, one console
+//     dry run on the gateway), held outside the poolers;
+//   - a spare for a pooler rollout surge.
+//
+// `pgbouncerconf.CheckTenantBudget` asserts this at startup and fails if
+// the configured pools exceed it.
+//
+// Raised 8 → 16 (2026-10-04) to give the gateway pooler headroom for the
+// SDK customer-SQL path (per-project _func logins, #702 / security
+// remediation). Safe on the current fleet: this is a PER-TENANT cap and
+// only *active* tenants hold connections; the hard limit is the shared
+// cluster's max_connections = 100.
+//
+// FUTURE — if a larger user base makes the aggregate (concurrently active
+// tenants × their held _func connections, across both poolers) approach
+// max_connections = 100, the levers are, in order: (1) shrink the per-pool
+// tenant pool sizes (PGB_TENANT_POOL_SIZE on each pooler) — the pooler
+// already bounds aggregate server connections; (2) raise the shared
+// cluster's max_connections (Scaleway RDB, needs a bigger instance);
+// (3) move more projects to Team-tier dedicated instances (their own
+// budget). Lowering FuncConnLimit again only works if the pools fit under
+// it (CheckTenantBudget enforces that).
+const FuncConnLimit = 16
 
 // DedicatedFuncConnLimit is the limit on a Team project's dedicated
 // instance (#677). There the runner connects directly — one connection

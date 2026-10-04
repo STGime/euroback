@@ -1,15 +1,22 @@
-# PgBouncer for the gateway (#651) — separate from the runner's pooler
+# PgBouncer for the gateway — separate from the runner's pooler
 # (pgbouncer.yaml) so client capacity reachable from tenant function code
-# is never the gateway's: only gateway pods may connect, and the functions
-# egress policy only allows `app: pgbouncer`.
+# is never the gateway's: only gateway pods may connect.
 #
-# Platform roles only (PGB_INCLUDE_TENANTS=0): the gateway role now; the
-# developer role in PR 4 (PGB_INCLUDE_DEVELOPER=1). No tenant roles, no
-# FUNC_PASSWORD_SECRET. Unused until PR 4 routes the gateway's pools here;
-# pools open lazily, so it holds no server connections until then.
+# Serves tenant `<schema>_func` roles for the gateway's customer-SQL path
+# (SDK SQL / data API on per-project logins — security remediation). Same
+# proven shape as the runner's pooler: tenant roles only, NO secrets in the
+# pod — the worker publishes the SCRAM verifiers + upstream to the Secret
+# pgbouncer-tenant-userlist, which this pooler reads via a projected
+# service-account token. No FUNC_PASSWORD_SECRET, no DB URL here.
 #
-# Budget (PR 4): PGB_MAX_DB_CONNECTIONS per replica × 2 comes on top of the
-# budget — shrink the gateway's direct pools as they move (AGENTS.md).
+# The gateway's own platform pools (eurobase_gateway / developer) stay as
+# direct connections for now; pooling those is a later, separate change.
+#
+# Budget: counted against FuncConnLimit together with the runner's pooler —
+# replicas × PGB_TENANT_POOL_SIZE here + PGB_PEER_TENANT_CONNECTIONS (the
+# runner's) + DirectFuncConnections ≤ FuncConnLimit (pgbouncerconf.
+# CheckTenantBudget, asserted at startup). Keep PGB_REPLICAS = spec.replicas
+# and PGB_PEER_TENANT_CONNECTIONS = the runner's replicas × its pool.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,6 +42,8 @@ spec:
         prometheus.io/port: "9127"
         prometheus.io/path: "/metrics"
     spec:
+      serviceAccountName: pgbouncer-gateway
+      automountServiceAccountToken: false
       shareProcessNamespace: true
       terminationGracePeriodSeconds: 90
       securityContext:
@@ -47,24 +56,34 @@ spec:
           image: rg.fr-par.scw.cloud/eurobase-app/pgbouncer:latest
           command: ["pgbouncer-userlist", "init"]
           env: &pgbEnv
-            - name: DATABASE_URL
-              valueFrom: { secretKeyRef: { name: eurobase-secrets, key: DATABASE_URL } }
-            - name: PGB_UPSTREAM_URL_VAR
-              value: DATABASE_URL
+            # Tenant roles only, from the worker-published Secret (read-only
+            # via the projected service-account token). No platform roles,
+            # no FUNC_PASSWORD_SECRET, no DB URL in this pod.
+            - name: PGB_TENANT_SOURCE
+              value: k8s-secret:pgbouncer-tenant-userlist
             - name: PGB_PLATFORM_URL_VARS
-              value: DATABASE_URL
-            - name: PGB_INCLUDE_TENANTS
-              value: "0"
+              value: ""
             - name: PGB_DIR
               value: /run/pgbouncer
             - name: PGB_SERVER_TLS
               value: require
+            # Platform alias serves no role here (only the stats user).
             - name: PGB_MAX_DB_CONNECTIONS
-              value: "10"
-            - name: PGB_POOL_SIZE_EUROBASE_GATEWAY
-              value: "10"
-          volumeMounts:
+              value: "1"
+            - name: PGB_TENANT_MAX_DB_CONNECTIONS
+              value: "15"
+            - name: PGB_TENANT_POOL_SIZE
+              value: "2"
+            # Keep equal to spec.replicas (tenant connection budget check).
+            - name: PGB_REPLICAS
+              value: "2"
+            # The runner pooler's tenant share (its replicas × pool = 2 × 2),
+            # so this pooler's budget check accounts for both poolers.
+            - name: PGB_PEER_TENANT_CONNECTIONS
+              value: "4"
+          volumeMounts: &saMounts
             - { name: run, mountPath: /run/pgbouncer }
+            - { name: sa, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
           securityContext: &restricted
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -101,8 +120,7 @@ spec:
           ports:
             - { name: metrics, containerPort: 9127 }
           env: *pgbEnv
-          volumeMounts:
-            - { name: run, mountPath: /run/pgbouncer }
+          volumeMounts: *saMounts
           securityContext: *restricted
           resources:
             requests: { cpu: 10m, memory: 32Mi }
@@ -112,6 +130,15 @@ spec:
       volumes:
         - name: run
           emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        # SA token for the render/userlist containers only (get on
+        # pgbouncer-tenant-userlist) — not mounted into the pgbouncer
+        # container. It only grants read of data pgbouncer already holds.
+        - name: sa
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, expirationSeconds: 3600 }
+              - configMap: { name: kube-root-ca.crt, items: [{ key: ca.crt, path: ca.crt }] }
+              - downwardAPI: { items: [{ path: namespace, fieldRef: { fieldPath: metadata.namespace } }] }
 ---
 apiVersion: v1
 kind: Service
