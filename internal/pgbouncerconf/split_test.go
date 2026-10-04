@@ -39,28 +39,34 @@ func TestPoolerSplit(t *testing.T) {
 		return c.QueryRow(ctx, "SELECT 1").Scan(&one)
 	}
 
-	// A tenant with a login (the e2e test provisioned one).
-	gw, err := pgx.Connect(ctx, gatewayPooler+"/eurobase?sslmode=disable&user=eurobase_gateway&password=localdev")
+	// A tenant with a login (the e2e test provisioned one) — discovered via
+	// a direct connection, since neither pooler now serves the platform role.
+	direct, err := pgx.Connect(ctx, os.Getenv("PGB_TEST_DIRECT_URL"))
 	if err != nil {
-		t.Fatalf("gateway via gateway pooler: %v", err)
+		t.Fatalf("direct connect: %v", err)
 	}
 	var schema string
-	err = gw.QueryRow(ctx, `SELECT n.nspname FROM pg_namespace n JOIN pg_roles r ON r.rolname = n.nspname || '_func' AND r.rolcanlogin
+	err = direct.QueryRow(ctx, `SELECT n.nspname FROM pg_namespace n JOIN pg_roles r ON r.rolname = n.nspname || '_func' AND r.rolcanlogin
 		WHERE n.nspname ~ '^tenant_[0-9a-f_]+$' ORDER BY 1 LIMIT 1`).Scan(&schema)
-	gw.Close(ctx)
+	direct.Close(ctx)
 	if err != nil {
 		t.Fatalf("find tenant: %v", err)
 	}
 	tenantUser, tenantPw := tenantlogin.FuncRole(schema), tenantlogin.FuncPassword([]byte(secret), schema)
 
+	// Both poolers serve the tenant _func role and refuse the gateway
+	// platform role (both hold no platform passwords).
 	if err := connect(runnerPooler, "eurobase_tenant", tenantUser, tenantPw); err != nil {
 		t.Errorf("tenant via runner pooler: %v", err)
+	}
+	if err := connect(gatewayPooler, "eurobase_tenant", tenantUser, tenantPw); err != nil {
+		t.Errorf("tenant via gateway pooler: %v", err)
 	}
 	if err := connect(runnerPooler, "eurobase", "eurobase_gateway", "localdev"); err == nil {
 		t.Error("runner pooler accepted the gateway role — it must hold no platform passwords")
 	}
-	if err := connect(gatewayPooler, "eurobase_tenant", tenantUser, tenantPw); err == nil {
-		t.Error("gateway pooler served a tenant role")
+	if err := connect(gatewayPooler, "eurobase", "eurobase_gateway", "localdev"); err == nil {
+		t.Error("gateway pooler accepted the gateway role — it serves tenant _func only")
 	}
 
 	for name, url := range map[string]string{"runner": runnerMetrics, "gateway": gatewayMetrics} {
@@ -72,9 +78,8 @@ func TestPoolerSplit(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		wants := []string{"pgbouncer_up 1", "pgbouncer_clients_waiting{database=", "pgbouncer_client_connections ", "pgbouncer_max_client_conn 500"}
-		if name == "runner" {
-			wants = append(wants, "pgbouncer_userlist_published_age_seconds ") // #653
-		}
+		// Both poolers read a published userlist now, so both emit the age metric.
+		wants = append(wants, "pgbouncer_userlist_published_age_seconds ")
 		for _, want := range wants {
 			if !strings.Contains(string(body), want) {
 				t.Errorf("%s metrics missing %q:\n%s", name, want, body)

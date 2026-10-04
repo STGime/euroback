@@ -64,16 +64,23 @@ func TestPlatformUserFromURL(t *testing.T) {
 }
 
 func TestCheckTenantBudget(t *testing.T) {
+	// One pooler, no peer: 2×2 + 0 + 2 = 6 ≤ 16.
 	if err := CheckTenantBudget(Settings{Replicas: 2, TenantPoolSize: 2}); err != nil {
 		t.Errorf("2×2+2 within FuncConnLimit: %v", err)
 	}
-	if err := CheckTenantBudget(Settings{Replicas: 4, TenantPoolSize: 2}); err == nil {
-		t.Error("4×2+2 > FuncConnLimit: want error")
+	// Both poolers accounted for: gateway 2×2 + runner peer 4 + 2 = 10 ≤ 16.
+	if err := CheckTenantBudget(Settings{Replicas: 2, TenantPoolSize: 2, PeerTenantConnections: 4}); err != nil {
+		t.Errorf("2×2 + 4 peer + 2 within FuncConnLimit: %v", err)
+	}
+	// Over the limit: 2×6 + 4 peer + 2 = 18 > 16.
+	if err := CheckTenantBudget(Settings{Replicas: 2, TenantPoolSize: 6, PeerTenantConnections: 4}); err == nil {
+		t.Error("2×6 + 4 peer + 2 > FuncConnLimit: want error")
 	}
 }
 
-// The gateway's pooler (#651) serves platform roles only: no tenant alias.
-func TestRenderINI_GatewayPooler(t *testing.T) {
+// Platform-only Settings (no IncludeTenants) render no tenant alias, so a
+// tenant role can't open an extra unbudgeted pool.
+func TestRenderINI_PlatformOnly(t *testing.T) {
 	s := Settings{ServerTLS: "require", AuthFile: "/run/pgbouncer/userlist.txt", MaxDBConnections: 10,
 		TenantPoolSize: 2, PlatformPoolSizes: map[string]int{"eurobase_gateway": 10}}
 	if err := s.UpstreamFromURL("postgres://u:p@db.example:14319/eurobase"); err != nil {
@@ -81,10 +88,30 @@ func TestRenderINI_GatewayPooler(t *testing.T) {
 	}
 	ini := RenderINI(s)
 	if strings.Contains(ini, "eurobase_tenant") {
-		t.Error("gateway pooler must not render the tenant alias")
+		t.Error("platform-only pooler must not render the tenant alias")
 	}
 	if strings.Contains(ini, "stats_users") {
 		t.Error("stats_users rendered without a StatsUser")
+	}
+}
+
+// RenderINI can serve platform roles AND tenant _func in one pooler (both
+// aliases rendered). The shipped gateway pooler is tenant-only today
+// (PGB_PLATFORM_URL_VARS=""); this covers the renderer for a FUTURE
+// combined pooler.
+func TestRenderINI_PlatformAndTenant(t *testing.T) {
+	s := Settings{ServerTLS: "require", AuthFile: "/run/pgbouncer/userlist.txt", MaxDBConnections: 10,
+		TenantMaxDBConnections: 15, TenantPoolSize: 2, IncludeTenants: true,
+		PlatformPoolSizes: map[string]int{"eurobase_gateway": 10}}
+	if err := s.UpstreamFromURL("postgres://u:p@db.example:14319/eurobase"); err != nil {
+		t.Fatal(err)
+	}
+	ini := RenderINI(s)
+	if !strings.Contains(ini, s.TenantDatabase()+" = host=") {
+		t.Error("must render the tenant alias")
+	}
+	if !strings.Contains(ini, "eurobase = host=") {
+		t.Error("must render the platform alias when platform roles are present")
 	}
 }
 

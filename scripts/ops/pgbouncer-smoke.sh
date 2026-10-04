@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Read-only smoke test of the in-cluster PgBouncers (#641, #651): from a
-# one-off pod, connect as the gateway role through pgbouncer-gateway, as one
-# tenant's `<schema>_func` role through the runner's pooler (derived
-# password — SCRAM pass-through), and check the runner's pooler refuses the
-# gateway role. SELECTs only.
+# Read-only smoke test of the in-cluster PgBouncers: from a one-off pod,
+# connect as one tenant's `<schema>_func` role (derived password — SCRAM
+# pass-through) through BOTH poolers' tenant alias (the runner's and the
+# gateway's — the gateway's now serves tenant _func for the SDK path), and
+# check both poolers refuse the gateway platform role. SELECTs only.
 # Secrets are read from eurobase-secrets inside the pod, never printed.
 #
 # Usage: ./scripts/ops/pgbouncer-smoke.sh
@@ -37,15 +37,21 @@ async function check(label: string, url: string, q: string, expectFail = false) 
 }
 const gw = Deno.env.get("DATABASE_URL")!;
 const runner = Deno.env.get("DATABASE_URL_FUNCTION_RUNNER")!;
-await check("gateway via pgbouncer-gateway", pooled(gw, "pgbouncer-gateway"), "SELECT current_user, now()");
-// The runner's pooler holds no platform passwords (#651).
-await check("gateway via runner pooler", pooled(gw, "pgbouncer"), "SELECT 1", true);
-const g = postgres(pooled(gw, "pgbouncer-gateway"), { max: 1 });
+// Both poolers now serve tenant `_func` only and hold no platform
+// passwords: the gateway platform role is refused by both.
+await check("gateway role via pgbouncer-gateway (refused)", pooled(gw, "pgbouncer-gateway"), "SELECT 1", true);
+await check("gateway role via runner pooler (refused)", pooled(gw, "pgbouncer"), "SELECT 1", true);
+// Discover a tenant schema via a direct gateway connection (not pooled).
+const g = postgres(gw, { max: 1 });
 const [t] = await g`SELECT n.nspname AS s FROM pg_namespace n JOIN pg_roles r ON r.rolname = n.nspname || '_func' AND r.rolcanlogin WHERE n.nspname ~ '^tenant_[0-9a-f_]+$' ORDER BY 1 LIMIT 1`;
 await g.end({ timeout: 5 });
 if (t) {
   const pw = await funcPassword(Deno.env.get("FUNC_PASSWORD_SECRET")!, t.s);
+  // The tenant _func login works through BOTH poolers' tenant alias.
   await check(`tenant ${t.s.slice(0, 15)}… via runner pooler`, pooled(runner, "pgbouncer", t.s + "_func", pw), "SELECT session_user");
+  await check(`tenant ${t.s.slice(0, 15)}… via gateway pooler`, pooled(gw, "pgbouncer-gateway", t.s + "_func", pw), "SELECT session_user");
+} else {
+  console.log("SKIP tenant checks: no tenant schema found");
 }
 EOF
 kubectl -n "$NS" create configmap "$POD" --from-file=smoke.ts="$TMP/smoke.ts" >/dev/null

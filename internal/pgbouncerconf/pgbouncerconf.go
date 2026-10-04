@@ -53,6 +53,12 @@ type Settings struct {
 	TenantPoolSize int
 	// Replicas is the number of PgBouncer instances.
 	Replicas int
+	// PeerTenantConnections is the tenant _func connections the OTHER
+	// pooler holds per tenant (replicas × its tenant pool). A tenant's
+	// _func role is now served by two poolers — the runner's and the
+	// gateway's (#651, SDK customer SQL) — so each pooler's budget check
+	// must account for the other's share against FuncConnLimit.
+	PeerTenantConnections int
 	// PlatformPoolSizes sets a per-user pool for the platform roles.
 	PlatformPoolSizes map[string]int
 	// IncludeTenants renders the tenant alias (the runner's pooler). The
@@ -250,9 +256,9 @@ func CheckTenantBudget(s Settings) error {
 	if replicas < 1 {
 		replicas = 1
 	}
-	if need := replicas*s.TenantPoolSize + DirectFuncConnections; need > tenantlogin.FuncConnLimit {
-		return fmt.Errorf("tenant budget: %d replicas × pool %d + %d direct = %d > FuncConnLimit %d",
-			replicas, s.TenantPoolSize, DirectFuncConnections, need, tenantlogin.FuncConnLimit)
+	if need := replicas*s.TenantPoolSize + s.PeerTenantConnections + DirectFuncConnections; need > tenantlogin.FuncConnLimit {
+		return fmt.Errorf("tenant budget: %d replicas × pool %d + %d peer + %d direct = %d > FuncConnLimit %d",
+			replicas, s.TenantPoolSize, s.PeerTenantConnections, DirectFuncConnections, need, tenantlogin.FuncConnLimit)
 	}
 	return nil
 }
