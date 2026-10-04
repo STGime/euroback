@@ -70,8 +70,15 @@ spec:
             # Platform alias serves no role here (only the stats user).
             - name: PGB_MAX_DB_CONNECTIONS
               value: "1"
+            # Alias-wide ceiling: at most 8 server connections per replica
+            # (× 2 = 16) to the shared cluster for ALL tenants' SDK
+            # customer SQL. Lower than the runner pooler's 15 so the global
+            # budget holds when SDK_FUNC_LOGIN flips: 30 (runner alias) + 16
+            # (this alias) + ~35 platform direct ≈ 81 of ~95 usable
+            # (max_connections 100 − reserved). Raise only alongside the
+            # functions.yaml budget + the shared cluster's max_connections.
             - name: PGB_TENANT_MAX_DB_CONNECTIONS
-              value: "15"
+              value: "8"
             - name: PGB_TENANT_POOL_SIZE
               value: "2"
             # Keep equal to spec.replicas (tenant connection budget check).

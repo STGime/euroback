@@ -2,6 +2,7 @@ package query
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -298,6 +299,13 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 
 		if err != nil {
 			slog.Error("sql execution failed", "error", err, "schema", schema)
+			// The project's per-project login couldn't be opened (not
+			// configured, or a Team project's dedicated DB not serving):
+			// 503, never a fall-through to a shared login.
+			if errors.Is(err, ErrTenantLoginUnavailable) {
+				jsonError(w, "the project's database is not available right now", http.StatusServiceUnavailable)
+				return
+			}
 			// Closes #52. SDK callers (readOnly path) get a sanitised
 			// message — the raw pgx Error() output leaks Detail/Hint/
 			// position which can echo offending values, internal paths,

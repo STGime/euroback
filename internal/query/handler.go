@@ -517,6 +517,10 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 		result, err := engine.CallFunction(r.Context(), schema, funcName, args)
 		if err != nil {
 			slog.Error("rpc call failed", "error", err, "schema", schema, "function", funcName)
+			if errors.Is(err, ErrTenantLoginUnavailable) {
+				jsonError(w, "the project's database is not available right now", http.StatusServiceUnavailable)
+				return
+			}
 			if isNotFoundError(err) {
 				jsonError(w, err.Error(), http.StatusNotFound)
 				return

@@ -120,4 +120,44 @@ func TestConvergeTenantOwnership(t *testing.T) {
 	// nothing on them — covered by the ownership assertions above (users /
 	// storage_shared_prefixes stay migrator-owned). _func's existing
 	// provisioning grants are out of scope here.
+
+	// Pre-flip readiness gate for SDK_FUNC_LOGIN (step 4). These are the two
+	// invariants that must hold before SDK customer SQL moves onto the
+	// `_func` login: (1) no application table still owned by the gateway,
+	// (2) `_func` has full DML on every application table.
+	gwOwned, missingDML, err := TenantFuncReadiness(ctx, pool, schema)
+	if err != nil {
+		t.Fatalf("TenantFuncReadiness: %v", err)
+	}
+	// converge granted _func DML on every application table (reassigned and
+	// deferred alike), so nothing is missing DML even before the flip.
+	if len(missingDML) != 0 {
+		t.Errorf("_func missing DML on %v after converge; want none", missingDML)
+	}
+	// t_gateway is still gateway-owned (step 1 defers the reassign), so the
+	// readiness check must FLAG it — this is exactly the condition that must
+	// reach zero before the flag flips.
+	flagged := false
+	for _, n := range gwOwned {
+		if n == "t_gateway" {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Errorf("readiness did not flag the gateway-owned t_gateway (got %v)", gwOwned)
+	}
+
+	// Simulate the pre-flip remediation: reassign the gateway-owned table to
+	// _ddl. Readiness then reports clean — safe to flip for this schema.
+	mustExec(fmt.Sprintf(`ALTER TABLE %s.t_gateway OWNER TO %s`, schema, ddl))
+	gwOwned, missingDML, err = TenantFuncReadiness(ctx, pool, schema)
+	if err != nil {
+		t.Fatalf("TenantFuncReadiness (post-reassign): %v", err)
+	}
+	if len(gwOwned) != 0 {
+		t.Errorf("gateway still owns %v after reassign; want none", gwOwned)
+	}
+	if len(missingDML) != 0 {
+		t.Errorf("_func missing DML on %v after reassign; want none", missingDML)
+	}
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/eurobase/euroback/internal/sovereignty"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/tenantconn"
 	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/vault"
@@ -60,7 +61,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, upgradeSvc *upgrade.Service, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, upgradeSvc *upgrade.Service, sdkLogin *tenantconn.Resolver, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -1553,6 +1554,14 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// dedicated pool when the API key resolves to a Team+
 			// project with HasDedicatedDB=true (Team-tier M2.5).
 			queryEngine := query.NewQueryEngine(pool).WithPoolResolver(poolResolver)
+			// Customer SQL (/sql, /rpc) runs on the project's own
+			// `<schema>_func` login when configured — the step-4 security
+			// remediation. Typed REST (/{table}) and SDK DDL keep their
+			// current pools (moved in later steps). nil / not-configured /
+			// flag-off → the SDK paths stay on the pool, unchanged.
+			if sdkLogin != nil && sdkLogin.Configured() {
+				queryEngine = queryEngine.WithTenantLogin(sdkTenantLogin{resolver: sdkLogin})
+			}
 			publisher := realtime.NewEventPublisher(nil, hub)
 
 			r.Post("/sql", query.HandleSQL(queryEngine))

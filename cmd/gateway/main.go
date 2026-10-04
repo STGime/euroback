@@ -41,6 +41,8 @@ import (
 	"github.com/eurobase/euroback/internal/sovereignty"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/tenantconn"
+	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
@@ -119,6 +121,39 @@ func main() {
 		slog.Info("developer database connection pool established")
 	} else {
 		slog.Warn("DATABASE_URL_DEVELOPER not set — platform routes will run on the gateway pool and will fail on tenant DDL until the developer role is configured")
+	}
+
+	// Per-project login for SDK customer SQL (/v1/db/sql + RPC) — the
+	// step-4 security remediation: customer SQL runs as the project's own
+	// `<schema>_func` role through the gateway PgBouncer pooler, never the
+	// shared gateway pool (where a role reset in customer SQL could pivot
+	// between tenant schemas). Off unless SDK_FUNC_LOGIN=1 so the
+	// connection budget and tenant-table ownership can be verified before
+	// the flip; requires FUNC_PASSWORD_SECRET (≥32 bytes), the gateway
+	// pooler URL, and DATABASE_URL_DEVELOPER (Team routing lookups).
+	var sdkLoginResolver *tenantconn.Resolver
+	if os.Getenv("SDK_FUNC_LOGIN") == "1" {
+		funcSecret := os.Getenv("FUNC_PASSWORD_SECRET")
+		switch {
+		case len(funcSecret) < tenantlogin.MinSecretLen:
+			slog.Error("SDK_FUNC_LOGIN=1 needs FUNC_PASSWORD_SECRET", "min_bytes", tenantlogin.MinSecretLen)
+			os.Exit(1)
+		case os.Getenv("GATEWAY_DB_POOLER_URL") == "":
+			slog.Error("SDK_FUNC_LOGIN=1 needs GATEWAY_DB_POOLER_URL (the gateway PgBouncer tenant alias)")
+			os.Exit(1)
+		case developerPool == nil:
+			slog.Error("SDK_FUNC_LOGIN=1 needs DATABASE_URL_DEVELOPER for Team-tier routing lookups")
+			os.Exit(1)
+		}
+		base, perr := pgx.ParseConfig(os.Getenv("GATEWAY_DB_POOLER_URL"))
+		if perr != nil {
+			slog.Error("invalid GATEWAY_DB_POOLER_URL", "error", perr)
+			os.Exit(1)
+		}
+		sdkLoginResolver = tenantconn.NewResolver(base, []byte(funcSecret), developerPool, "eurobase-gateway")
+		slog.Info("SDK customer SQL runs on per-project logins via the gateway pooler", "pooler_host", base.Host)
+	} else {
+		slog.Warn("SDK_FUNC_LOGIN not set — SDK customer SQL (/v1/db/sql, RPC) runs on the shared gateway pool")
 	}
 
 	// Tenant migrations executor (#190). Runs each migration under a
@@ -709,7 +744,7 @@ func main() {
 	// above — see internal/upgrade for the state machine flow.
 	upgradeSvc := upgrade.NewService(developerPool, riverInsertOnly)
 
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, sdkLoginResolver, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
