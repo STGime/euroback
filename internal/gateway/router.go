@@ -603,6 +603,18 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					"platform_resend_verification": {ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow},
 					"signin_fail":                  {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
 					"signin_fail_record":           {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
+					// Per-source-IP send ceilings (F3), in addition to the
+					// per-email limits above. Keyed on the client IP (see
+					// below) — collapses to the LB IP until the ingress XFF
+					// fix, so generous for now.
+					"platform_forgot_ip":              {ratelimit.ForgotPasswordIPLimit, ratelimit.ForgotPasswordIPWindow},
+					"platform_resend_verification_ip": {ratelimit.ResendVerifyIPLimit, ratelimit.ResendVerifyIPWindow},
+				}
+				// For *_ip actions, key on the client IP rather than the
+				// email the handler passed (auth can't import ratelimit —
+				// it imports auth — so the IP is resolved here).
+				if strings.HasSuffix(action, "_ip") {
+					identifier = ratelimit.ClientIP(r)
 				}
 				cfg, ok := limits[action]
 				if !ok {

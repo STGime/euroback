@@ -298,6 +298,13 @@ func HandleForgotPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		if email != "" && ratelimit.CheckAuthRate(rl, w, r.Context(), "forgot_password", email, ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow) {
 			return
 		}
+		// ...and a per-source-IP send ceiling, so spreading across many
+		// emails can't drive unbounded reset emails (F3). Collapses to a
+		// per-project product-wide ceiling until the ingress XFF fix.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "forgot_password_ip", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), ratelimit.ForgotPasswordIPLimit, ratelimit.ForgotPasswordIPWindow) {
+			return
+		}
 
 		// Load project name for email template.
 		var projectName string
@@ -437,6 +444,11 @@ func HandleRequestMagicLink(svc *AuthService, limiter ...*ratelimit.RateLimiter)
 		if email != "" && ratelimit.CheckAuthRate(rl, w, r.Context(), "magic_link", email, ratelimit.MagicLinkLimit, ratelimit.MagicLinkWindow) {
 			return
 		}
+		// Per-source-IP send ceiling (F3) — see HandleForgotPassword.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "magic_link_ip", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), ratelimit.MagicLinkIPLimit, ratelimit.MagicLinkIPWindow) {
+			return
+		}
 
 		// Load project name for email template.
 		var projectName string
@@ -522,6 +534,11 @@ func HandleResendVerification(svc *AuthService, limiter ...*ratelimit.RateLimite
 		// Rate limit: 1 per email per 5 min.
 		email := strings.ToLower(strings.TrimSpace(req.Email))
 		if email != "" && ratelimit.CheckAuthRate(rl, w, r.Context(), "resend_verify", email, ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow) {
+			return
+		}
+		// Per-source-IP send ceiling (F3) — see HandleForgotPassword.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "resend_verify_ip", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), ratelimit.ResendVerifyIPLimit, ratelimit.ResendVerifyIPWindow) {
 			return
 		}
 
@@ -783,6 +800,13 @@ func HandleSendPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) htt
 
 		// Rate limit: 3 per phone per 15 min.
 		if ratelimit.CheckAuthRate(rl, w, r.Context(), "phone_otp", req.Phone, ratelimit.PhoneOTPLimit, ratelimit.PhoneOTPWindow) {
+			return
+		}
+		// Per-source-IP send ceiling (F3). SMS costs real money, so this
+		// bounds total sends from one source even if a caller rotates
+		// phone numbers. Tighter than the email endpoints; see auth.go.
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "phone_otp_ip", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), ratelimit.PhoneOTPIPLimit, ratelimit.PhoneOTPIPWindow) {
 			return
 		}
 

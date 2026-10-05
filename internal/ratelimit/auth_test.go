@@ -117,3 +117,33 @@ func TestClientIP_RemoteAddr(t *testing.T) {
 		t.Fatalf("expected 5.6.7.8, got %s", ip)
 	}
 }
+
+// F3: the per-source-IP send ceiling (an "<action>_ip" key) is independent
+// of the per-email counter, so spreading a sending endpoint's requests
+// across many unique emails — which never trips the per-email cap — still
+// hits the IP ceiling. Keyed per project+IP like signup.
+func TestAuthRate_IPCeilingBoundsEmailSpread(t *testing.T) {
+	rl := setupAuthTestLimiter(t)
+	defer rl.Close()
+
+	proj := "proj_" + time.Now().Format("150405.000")
+	ip := "203.0.113.7"
+	const limit = 3
+
+	// `limit` requests from the same IP (each a different email in the real
+	// handler; the IP key doesn't include the email) are allowed...
+	for i := 0; i < limit; i++ {
+		w := httptest.NewRecorder()
+		if CheckAuthRateForProject(rl, w, t.Context(), "forgot_password_ip", proj, ip, limit, time.Minute) {
+			t.Fatalf("request %d within the IP ceiling should be allowed", i+1)
+		}
+	}
+	// ...the next one is blocked, regardless of email.
+	w := httptest.NewRecorder()
+	if !CheckAuthRateForProject(rl, w, t.Context(), "forgot_password_ip", proj, ip, limit, time.Minute) {
+		t.Fatal("IP ceiling should block once exceeded even with a fresh email")
+	}
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("want 429, got %d", w.Code)
+	}
+}

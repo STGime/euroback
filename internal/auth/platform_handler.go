@@ -316,9 +316,15 @@ func HandlePlatformForgotPassword(svc *PlatformAuthService, rateFn ...AuthRateLi
 			return
 		}
 
-		// Rate limit: 3 per email per 15 min.
+		// Rate limit: 3 per email per 15 min, plus a per-source-IP send
+		// ceiling so spreading across many emails can't drive unbounded
+		// reset emails (F3). The _ip action keys on the client IP in the
+		// rate closure (auth can't import ratelimit).
 		email := strings.ToLower(strings.TrimSpace(req.Email))
 		if email != "" && check != nil && check(w, r, "platform_forgot", email) {
+			return
+		}
+		if check != nil && check(w, r, "platform_forgot_ip", "") {
 			return
 		}
 
@@ -413,6 +419,10 @@ func HandlePlatformResendVerification(svc *PlatformAuthService, rateFn ...AuthRa
 		// than forgot-password, so it gets its own tighter budget.
 		email := strings.ToLower(strings.TrimSpace(req.Email))
 		if email != "" && check != nil && check(w, r, "platform_resend_verification", email) {
+			return
+		}
+		// Per-source-IP send ceiling (F3) — see HandlePlatformForgotPassword.
+		if check != nil && check(w, r, "platform_resend_verification_ip", "") {
 			return
 		}
 
