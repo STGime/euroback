@@ -153,6 +153,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// Mollie config); the project still provisions.
 	if billingSvc != nil {
 		tenantSvc.SetBetaGrantRecorder(billingSvc)
+		// DeleteProject cancels the project's Mollie subscription before
+		// the project row (and its FK-cascaded subscription row) is
+		// dropped — so deleting a project genuinely stops billing and
+		// never orphans a live subscription.
+		tenantSvc.SetSubscriptionCanceller(billingSvc.CancelSubscriptionForProject)
 		// Wire the reverse direction so the billing webhook's
 		// payment-first-project-creation branch can call back into
 		// tenant.CreateProject once Mollie confirms first payment
@@ -192,6 +197,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	// deleted_at, so soft-deleted rows from prior failed provisioning
 	// alone will block the delete.
 	tenantSvc.SetProviderRegistry(providerRegistry)
+
+	// Let DeleteProject tear down the project's S3 bucket (deprovision_tenant
+	// drops the schema, not storage). Best-effort inside DeleteProject.
+	if s3Client != nil {
+		tenantSvc.SetBucketDeleter(s3Client.DeleteBucket)
+	}
 
 	// Cipher for the direct-DATABASE_URL surface (M4). Reuses the
 	// vault master key already required by the vault package.

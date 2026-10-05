@@ -22,9 +22,17 @@
 					</p>
 				</div>
 
-				<h3 class="text-lg font-semibold text-gray-900 mt-6">Danger zone</h3>
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Billing &amp; subscription</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					At the bottom of the settings page is the <strong>danger zone</strong> where you can permanently delete the project. This removes all data, files, users, and configuration. This action cannot be undone.
+					A project's plan and subscription are managed on the <strong>Billing</strong> page (Project &rarr; Billing). To stop paying for a Pro project without deleting it, use <strong>Cancel subscription</strong> there &mdash; by default it cancels at the end of the current billing period, so you keep Pro until the period you've already paid for runs out, then the project drops to Free. No new charges are made after you cancel.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Danger zone &mdash; deleting a project</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					At the bottom of the Settings page is the <strong>danger zone</strong>, where the project owner (or an org admin) can <strong>permanently delete</strong> the project. You confirm by typing the project's slug. This action cannot be undone.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Deleting a project removes <strong>everything</strong>: the database and all its tables and rows, all stored files, end users, API keys, webhooks, and configuration &mdash; and, for a Pro project, it <strong>cancels the subscription so no further charges are made</strong>. You don't need to cancel billing separately first; deleting the project does it for you. There is no recovery and no export after deletion, so export anything you need (see Compliance &rarr; Export) beforehand.
 				</p>
 			</div>
 
