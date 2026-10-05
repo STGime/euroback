@@ -62,12 +62,21 @@ const (
 const (
 	ForgotPasswordIPLimit  = 60
 	ForgotPasswordIPWindow = 1 * time.Hour
-	MagicLinkIPLimit       = 60
-	MagicLinkIPWindow      = 1 * time.Hour
-	ResendVerifyIPLimit    = 60
-	ResendVerifyIPWindow   = 1 * time.Hour
-	PhoneOTPIPLimit        = 30
-	PhoneOTPIPWindow       = 1 * time.Hour
+	// Magic link is a PRIMARY LOGIN path (every passwordless sign-in is one
+	// send), not a rare recovery flow like the others. While the IP
+	// collapses to the LB (pre-ingress-fix) this ceiling is product-wide,
+	// so a low value would both throttle legitimate logins AND let one
+	// actor exhaust the shared counter and lock out magic-link login for a
+	// whole project for the window. It is therefore set high — an abuse
+	// ceiling against a runaway mail-bomb, not a login throttle. The
+	// ingress XFF fix makes it per-user, at which point drop it to a tight
+	// per-user number (e.g. 3/15min) like the recovery flows.
+	MagicLinkIPLimit     = 300
+	MagicLinkIPWindow    = 1 * time.Hour
+	ResendVerifyIPLimit  = 60
+	ResendVerifyIPWindow = 1 * time.Hour
+	PhoneOTPIPLimit      = 30
+	PhoneOTPIPWindow     = 1 * time.Hour
 )
 
 // CheckAuthRate checks the rate limit for an auth action and writes a 429
