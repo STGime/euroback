@@ -66,6 +66,8 @@ const INTERNAL_TABLES = new Set([
   'vault_secrets',
   'storage_objects',
   'storage_shared_prefixes',
+  'user_passkey_credentials',
+  'webauthn_challenges',
 ]);
 
 /** Whether queryTable must refuse this read: an internal table, directly
