@@ -238,6 +238,10 @@ func markLoginChallengeUsed(ctx context.Context, tx pgx.Tx, schema, id string, e
 	if _, err := uuid.Parse(id); err != nil {
 		return false, auth.ErrPasskeyChallengeInvalid
 	}
+	// Opportunistic sweep: login markers are written on every sign-in, so
+	// GC expired rows here too (not only on register-begin) — otherwise a
+	// login-heavy project with rare new enrollments grows this table.
+	_, _ = tx.Exec(ctx, `DELETE FROM `+quoteIdent(schema)+`.webauthn_challenges WHERE expires_at < now() - interval '1 minute'`)
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO `+quoteIdent(schema)+`.webauthn_challenges (id, purpose, session_data, expires_at)
 		 VALUES ($1::uuid, 'login', '{}'::jsonb, $2) ON CONFLICT (id) DO NOTHING`,
