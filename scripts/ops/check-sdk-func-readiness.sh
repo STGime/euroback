@@ -10,8 +10,9 @@
 #      application table, or customer SQL fails with permission denied.
 #
 # "Application table" = relkind 'r'/'p' excluding the platform-managed system
-# tables — identical to migration 000136's converge_tenant_ownership and
-# internal/query/func_readiness.go (keep the three in sync). Prints every
+# tables — the same set as internal/query/func_readiness.go's
+# tenantSystemTables (keep the two in sync; migration 000136's v_system_tables
+# is a historical subset). Prints every
 # offending (schema, table) and exits non-zero if any exist (target: 0).
 #
 # Runs a one-off Job in-cluster (the prod DB is only reachable there) as the
@@ -58,7 +59,8 @@ spec:
                    AND c.relkind IN ('r','p')
                    AND r.rolname = 'eurobase_gateway'
                    AND c.relname <> ALL (ARRAY['users','user_identities','refresh_tokens',
-                       'email_tokens','storage_objects','storage_shared_prefixes','vault_secrets'])
+                       'email_tokens','storage_objects','storage_shared_prefixes','vault_secrets',
+                       'user_passkey_credentials','webauthn_challenges'])
                  ORDER BY 1;
                 -- A provisioned schema with no _func role would 503 at connect
                 -- after the flip — surface it rather than silently skip it.
@@ -75,7 +77,8 @@ spec:
                  WHERE n.nspname IN (SELECT schema_name FROM public.projects WHERE schema_name IS NOT NULL)
                    AND c.relkind IN ('r','p')
                    AND c.relname <> ALL (ARRAY['users','user_identities','refresh_tokens',
-                       'email_tokens','storage_objects','storage_shared_prefixes','vault_secrets'])
+                       'email_tokens','storage_objects','storage_shared_prefixes','vault_secrets',
+                       'user_passkey_credentials','webauthn_challenges'])
                    AND NOT (
                        has_table_privilege(fr.oid, c.oid, 'SELECT')
                    AND has_table_privilege(fr.oid, c.oid, 'INSERT')

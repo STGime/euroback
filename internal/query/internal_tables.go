@@ -19,6 +19,9 @@ var internalTenantTables = map[string]bool{
 	"vault_secrets":           true,
 	"storage_objects":         true,
 	"storage_shared_prefixes": true,
+	// #630: end-user passkeys — managed via the auth API, never the data API.
+	"user_passkey_credentials": true,
+	"webauthn_challenges":      true,
 }
 
 // IsInternalTenantTable reports whether table is one of the platform's own

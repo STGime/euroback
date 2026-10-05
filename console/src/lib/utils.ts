@@ -100,5 +100,7 @@ export const INTERNAL_TABLES: ReadonlySet<string> = new Set([
 	'email_tokens',
 	'vault_secrets',
 	'storage_objects',
-	'storage_shared_prefixes'
+	'storage_shared_prefixes',
+	'user_passkey_credentials',
+	'webauthn_challenges'
 ]);

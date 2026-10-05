@@ -332,6 +332,37 @@ BEGIN
         v_schema_name
     );
 
+    -- #630: end-user passkeys (same as provision_tenant / migration 000137).
+    EXECUTE format(
+        'CREATE TABLE %I.user_passkey_credentials (
+            id                UUID        PRIMARY KEY DEFAULT public.uuid_generate_v4(),
+            user_id           UUID        NOT NULL REFERENCES %I.users(id) ON DELETE CASCADE,
+            credential_id     BYTEA       NOT NULL UNIQUE,
+            public_key        BYTEA       NOT NULL,
+            attestation_type  TEXT,
+            transports        TEXT[],
+            aaguid            BYTEA,
+            sign_count        BIGINT      NOT NULL DEFAULT 0,
+            nickname          TEXT,
+            created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_used_at      TIMESTAMPTZ
+        )',
+        v_schema_name, v_schema_name
+    );
+    EXECUTE format('CREATE INDEX idx_user_passkey_credentials_user_id ON %I.user_passkey_credentials(user_id)', v_schema_name);
+    EXECUTE format(
+        'CREATE TABLE %I.webauthn_challenges (
+            id           UUID        PRIMARY KEY DEFAULT public.uuid_generate_v4(),
+            user_id      UUID        REFERENCES %I.users(id) ON DELETE CASCADE,
+            purpose      TEXT        NOT NULL CHECK (purpose IN (''register'', ''login'')),
+            session_data JSONB       NOT NULL,
+            expires_at   TIMESTAMPTZ NOT NULL,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+        )',
+        v_schema_name, v_schema_name
+    );
+    EXECUTE format('CREATE INDEX idx_webauthn_challenges_expires ON %I.webauthn_challenges(expires_at)', v_schema_name);
+
     -- Enable RLS everywhere. Note we do NOT `FORCE ROW LEVEL
     -- SECURITY` — the owner (eurobase_owner) is intentionally
     -- allowed to bypass RLS for DDL and admin work via the M4
@@ -348,6 +379,8 @@ BEGIN
     EXECUTE format('CREATE INDEX idx_storage_objects_key_c ON %I.storage_objects (key COLLATE "C")', v_schema_name);
     EXECUTE format('ALTER TABLE %I.todos ENABLE ROW LEVEL SECURITY', v_schema_name);
     EXECUTE format('ALTER TABLE %I.vault_secrets ENABLE ROW LEVEL SECURITY', v_schema_name);
+    EXECUTE format('ALTER TABLE %I.user_passkey_credentials ENABLE ROW LEVEL SECURITY', v_schema_name);
+    EXECUTE format('ALTER TABLE %I.webauthn_challenges ENABLE ROW LEVEL SECURITY', v_schema_name);
 
     -- Policy shape is identical to shared cluster (migration
     -- 000063 + 000055/000164 sensitive-table tightening).
@@ -422,6 +455,33 @@ BEGIN
         'CREATE POLICY vault_secrets_policy ON %I.vault_secrets
          USING (public.is_internal_auth_path())
          WITH CHECK (public.is_internal_auth_path())',
+        v_schema_name
+    );
+    -- #630: a user SELECT/DELETEs only their own passkeys; INSERT/UPDATE is
+    -- service-role only (auth service sets user_id); challenges service-only.
+    EXECUTE format(
+        'CREATE POLICY passkey_select ON %I.user_passkey_credentials FOR SELECT
+         USING (public.is_service_role() OR user_id = public.current_end_user_id())',
+        v_schema_name
+    );
+    EXECUTE format(
+        'CREATE POLICY passkey_insert ON %I.user_passkey_credentials FOR INSERT
+         WITH CHECK (public.is_service_role())',
+        v_schema_name
+    );
+    EXECUTE format(
+        'CREATE POLICY passkey_update ON %I.user_passkey_credentials FOR UPDATE
+         USING (public.is_service_role()) WITH CHECK (public.is_service_role())',
+        v_schema_name
+    );
+    EXECUTE format(
+        'CREATE POLICY passkey_delete ON %I.user_passkey_credentials FOR DELETE
+         USING (public.is_service_role() OR user_id = public.current_end_user_id())',
+        v_schema_name
+    );
+    EXECUTE format(
+        'CREATE POLICY webauthn_challenges_policy ON %I.webauthn_challenges FOR ALL
+         USING (public.is_service_role()) WITH CHECK (public.is_service_role())',
         v_schema_name
     );
 
