@@ -66,6 +66,10 @@
 	let emailVerificationUrl = $state('');
 	let passwordResetUrl = $state('');
 	let magicLinkUrl = $state('');
+	// #630: end-user passkeys (per-project WebAuthn relying party).
+	let passkeyEnabled = $state(false);
+	let passkeyRpId = $state('');
+	let passkeyOrigins = $state('');
 	let googleEnabled = $state(false);
 	let googleClientId = $state('');
 	let googleClientSecret = $state('');
@@ -446,6 +450,16 @@
 			passwordResetUrl = projectCtx.project?.auth_config?.password_reset_url ?? '';
 			magicLinkUrl = projectCtx.project?.auth_config?.magic_link_url ?? '';
 
+			// Read straight from the stored auth_config (not `cfg`, whose
+			// loadConfig() whitelist drops passkeys) — same source as the
+			// email-URL / oauth fields above/below. Hydrating from `cfg`
+			// would always see undefined and then wipe passkeys on the next
+			// unrelated save (full-replace PATCH).
+			const passkeyCfg = projectCtx.project?.auth_config?.passkeys;
+			passkeyEnabled = passkeyCfg?.enabled ?? false;
+			passkeyRpId = passkeyCfg?.rp_id ?? '';
+			passkeyOrigins = (passkeyCfg?.origins ?? []).join('\n');
+
 			const oauthCfg = projectCtx.project?.auth_config?.oauth_providers;
 			secretStatusUnknown = Object.values(oauthCfg ?? {}).some((p) => p?.secret_status === 'unknown');
 			if (oauthCfg?.google) {
@@ -658,6 +672,13 @@
 				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean),
 				cors_origins: corsOrigins.split('\n').map(u => u.trim()).filter(Boolean)
 			};
+			// #630: passkeys. Send the block when the toggle is on or there's
+			// leftover config; the backend validates (origin host must be
+			// rp_id or a subdomain) and 400s an enabled-but-incomplete config.
+			const pkOrigins = passkeyOrigins.split('\n').map(o => o.trim()).filter(Boolean);
+			if (passkeyEnabled || passkeyRpId.trim() || pkOrigins.length) {
+				config.passkeys = { enabled: passkeyEnabled, rp_id: passkeyRpId.trim(), origins: pkOrigins };
+			}
 			// #260 email-flow URLs. Trimmed; empty string sent as `undefined`
 			// so the backend receives "field absent" and stores NULL — matches
 			// the "no default configured" resolver branch on the backend.
@@ -1057,12 +1078,37 @@
 						{/if}
 					</div>
 
-					<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
-						<div>
-							<p class="text-sm font-medium text-gray-900">Passkeys</p>
-							<p class="text-xs text-gray-500">Passwordless auth with WebAuthn</p>
+					<!-- Passkeys (#630) -->
+					<div class="rounded-lg border border-gray-200 px-4 py-3">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium text-gray-900">Passkeys</p>
+								<p class="text-xs text-gray-500">Passwordless sign-in with WebAuthn</p>
+							</div>
+							<button
+								type="button"
+								role="switch"
+								aria-checked={passkeyEnabled}
+								onclick={() => passkeyEnabled = !passkeyEnabled}
+								class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {passkeyEnabled ? 'bg-eurobase-600' : 'bg-gray-200'}"
+							>
+								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {passkeyEnabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+							</button>
 						</div>
-						<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
+						{#if passkeyEnabled}
+							<div class="mt-3 space-y-3">
+								<div>
+									<label for="passkey-rp-id" class="block text-xs font-medium text-gray-700">Relying Party ID (your app's domain)</label>
+									<input id="passkey-rp-id" type="text" autocomplete="off" data-1p-ignore data-lpignore="true" bind:value={passkeyRpId} placeholder="app.example.com" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors" />
+									<p class="mt-1 text-[11px] text-gray-500">The registrable domain where your app runs (e.g. <code>app.example.com</code>, or <code>localhost</code> for local dev). Passkeys are bound to this &mdash; changing it later invalidates every enrolled passkey.</p>
+								</div>
+								<div>
+									<label for="passkey-origins" class="block text-xs font-medium text-gray-700">Allowed origins (one per line)</label>
+									<textarea id="passkey-origins" rows="2" bind:value={passkeyOrigins} placeholder="https://app.example.com" class="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors font-mono"></textarea>
+									<p class="mt-1 text-[11px] text-gray-500">Each origin's host must equal the Relying Party ID or be a subdomain of it.</p>
+								</div>
+							</div>
+						{/if}
 					</div>
 
 					<!-- Google OAuth -->

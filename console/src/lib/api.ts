@@ -30,6 +30,15 @@ export interface OAuthProviderConfig {
 	tenant_id?: string;
 }
 
+/** End-user passkey (WebAuthn) config (#630). */
+export interface PasskeyConfig {
+	enabled: boolean;
+	/** The WebAuthn relying-party id — the registrable domain of the tenant app. */
+	rp_id?: string;
+	/** Allowed ceremony origins (scheme://host[:port]); each host must be rp_id or a subdomain. */
+	origins?: string[];
+}
+
 export interface AuthConfig {
 	providers: Record<string, ProviderConfig>;
 	oauth_providers?: Record<string, OAuthProviderConfig>;
@@ -45,6 +54,10 @@ export interface AuthConfig {
 	 * zero-means-default on the backend (RateLimits.EffectiveRateLimits
 	 * merge), so the client can send 0 OR omit a field to reset that knob. */
 	rate_limits?: RateLimits;
+	/** End-user passkeys (#630). When enabled, `rp_id` is the registrable
+	 * domain of the tenant app and `origins` the allowed ceremony origins
+	 * (each must be rp_id or a subdomain of it). */
+	passkeys?: PasskeyConfig;
 	/** URL the verification email links to (#258, part of #257). Must
 	 * be a member of `redirect_urls` above or the backend rejects
 	 * PATCH. The tenant's page reads the `?token=...` query param and
