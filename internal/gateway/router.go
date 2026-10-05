@@ -1542,10 +1542,23 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/phone/send-otp", enduser.HandleSendPhoneOTP(endUserAuthSvc, limiter))
 			r.Post("/phone/verify", enduser.HandleVerifyPhoneOTP(endUserAuthSvc, limiter))
 
+			// #630: passkey sign-in (public key only; discoverable login
+			// keyed to the project's own JWT secret). Rate-limited per
+			// project+IP like the other public auth endpoints.
+			r.Post("/passkey/login/begin", enduser.HandlePasskeyLoginBegin(endUserAuthSvc, limiter))
+			r.Post("/passkey/login/finish", enduser.HandlePasskeyLoginFinish(endUserAuthSvc, limiter))
+
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {
 				r.Use(endUserMw.Handler)
 				r.Get("/user", enduser.HandleGetUser(endUserAuthSvc))
+				// #630: passkey management — a valid end-user access token
+				// (short-lived) gates enrol/list/delete, so a stolen
+				// long-lived session can't silently enrol an attacker key.
+				r.Post("/passkey/register/begin", enduser.HandlePasskeyRegisterBegin(endUserAuthSvc))
+				r.Post("/passkey/register/finish", enduser.HandlePasskeyRegisterFinish(endUserAuthSvc))
+				r.Get("/passkey", enduser.HandleListPasskeys(endUserAuthSvc))
+				r.Delete("/passkey/{id}", enduser.HandleDeletePasskey(endUserAuthSvc))
 				// DSAR self-serve: end-user exports their own data.
 				r.Post("/me/export", compliance.HandleSelfServeExport(pool, s3Client, auditSvc))
 				r.Get("/me/export/{exportId}", compliance.HandleSelfServeExportStatus(pool, s3Client, auditSvc))

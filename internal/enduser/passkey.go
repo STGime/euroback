@@ -540,6 +540,46 @@ func (s *AuthService) FinishPasskeyLogin(ctx context.Context, schema string, con
 	return out, nil
 }
 
+// CompletePasskeyLogin verifies a discoverable assertion and mints an
+// end-user session (access + refresh token), the same shape SignIn returns.
+// The challenge is verified against the PROJECT's own jwtSecret (per-project
+// isolation), and the project's email-confirmation requirement is honoured
+// exactly as in SignIn.
+func (s *AuthService) CompletePasskeyLogin(ctx context.Context, schema, jwtSecret, projectID string, config tenant.AuthConfig, challengeID string, credentialJSON []byte) (*AuthResponse, error) {
+	pu, err := s.FinishPasskeyLogin(ctx, schema, config, []byte(jwtSecret), challengeID, credentialJSON)
+	if err != nil {
+		return nil, err
+	}
+	if config.RequireEmailConfirmation {
+		var confirmedAt *time.Time
+		if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT email_confirmed_at FROM `+quoteIdent(schema)+`.users WHERE id = $1::uuid`, pu.ID).Scan(&confirmedAt)
+		}); err != nil {
+			return nil, auth.ErrPasskeyVerificationFailed
+		}
+		if confirmedAt == nil {
+			return nil, fmt.Errorf("email_not_confirmed")
+		}
+	}
+	_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET last_sign_in_at = now() WHERE id = $1::uuid`, pu.ID)
+		return e
+	})
+	user, err := s.GetUser(ctx, schema, pu.ID)
+	if err != nil {
+		return nil, err
+	}
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, config.SessionDurationSeconds())
+	if err != nil {
+		return nil, err
+	}
+	refreshToken, err := s.createRefreshToken(ctx, schema, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &AuthResponse{AccessToken: accessToken, TokenType: "bearer", ExpiresIn: expiresIn, RefreshToken: refreshToken, User: *user}, nil
+}
+
 // ListPasskeys returns an authenticated end user's enrolled passkeys.
 func (s *AuthService) ListPasskeys(ctx context.Context, schema, userID string) ([]auth.PasskeyInfo, error) {
 	var out []auth.PasskeyInfo
