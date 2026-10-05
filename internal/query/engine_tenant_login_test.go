@@ -3,6 +3,9 @@ package query
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -111,5 +114,17 @@ func TestExecuteSQLWithOpts_PlatformPathSkipsLogin(t *testing.T) {
 	_, _, _ = e.ExecuteSQLWithOpts(context.Background(), "tenant_abc", "SELECT 1", 10, ExecOptions{ReadOnly: false, SDKPath: false})
 	if fl.calls != 0 {
 		t.Fatalf("platform path used the tenant login (%d calls)", fl.calls)
+	}
+}
+
+// handleQueryError must map ErrTenantLoginUnavailable to 503 for the typed-
+// REST data API (parity with /v1/db/sql and RPC), not a generic 500.
+func TestHandleQueryError_LoginUnavailable503(t *testing.T) {
+	w := httptest.NewRecorder()
+	if !handleQueryError(w, fmt.Errorf("wrap: %w", ErrTenantLoginUnavailable)) {
+		t.Fatal("handleQueryError did not handle ErrTenantLoginUnavailable")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
 	}
 }
