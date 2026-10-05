@@ -117,11 +117,13 @@ var sqlPathDeniedColumns = map[string]bool{
 // (documented): `SELECT id, email FROM users` via raw /sql under the
 // public key is now refused — use the REST path for that.
 var sqlPathDeniedTables = map[string]bool{
-	"users":           true,
-	"refresh_tokens":  true,
-	"email_tokens":    true,
-	"vault_secrets":   true,
-	"storage_objects": true, // #697: uploaded_by / metadata of shared rows (use /v1/storage)
+	"users":                    true,
+	"refresh_tokens":           true,
+	"email_tokens":             true,
+	"vault_secrets":            true,
+	"storage_objects":          true, // #697: uploaded_by / metadata of shared rows (use /v1/storage)
+	"user_passkey_credentials": true, // #630: managed via the auth API, not raw SQL
+	"webauthn_challenges":      true,
 }
 
 // serviceKeyExempt reports whether the caller may see sensitive
