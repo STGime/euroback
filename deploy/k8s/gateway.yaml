@@ -146,13 +146,18 @@ spec:
             # the credential, pooler→RDB is TLS).
             - name: GATEWAY_DB_POOLER_URL
               value: postgres://pgbouncer-gateway.eurobase.svc.cluster.local:6432/eurobase_tenant?sslmode=disable
-            # SDK_FUNC_LOGIN is deliberately NOT set yet (default off): the
-            # code ships first so the connection budget and tenant-table
-            # ownership (step 1 inventory) can be verified, then this is set
-            # to "1" to flip SDK customer SQL onto per-project logins.
-            # Requires FUNC_PASSWORD_SECRET (eurobase-secrets) + the URL
-            # above + DATABASE_URL_DEVELOPER; the gateway fails startup if
-            # set without them.
+            # ON (2026-10-05): SDK customer SQL (/v1/db/sql + RPC) runs as the
+            # project's own <schema>_func role. Pre-flip readiness verified on
+            # prod (no gateway-owned tenant tables; _func has DML everywhere —
+            # scripts/ops/check-sdk-func-readiness.sh). Requires
+            # FUNC_PASSWORD_SECRET + GATEWAY_DB_POOLER_URL + DATABASE_URL_DEVELOPER
+            # (all present); the gateway fails startup if set without them.
+            # NOTE: this is global — Team projects route via the un-pooled,
+            # connect-per-request dedicated path (bounded by DedicatedFuncConnLimit
+            # 12); a pooled dedicated path is #485. Rollback: remove this var,
+            # redeploy (SDK SQL returns to the shared gateway pool).
+            - name: SDK_FUNC_LOGIN
+              value: "1"
       imagePullSecrets:
         - name: scw-registry
 ---
