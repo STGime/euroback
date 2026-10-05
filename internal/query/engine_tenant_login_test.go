@@ -57,6 +57,43 @@ func TestExecuteSQLWithOpts_LoginUnavailable(t *testing.T) {
 	}
 }
 
+// The data API (typed REST / RPC) runs through WithTenantTx, which must
+// route to the per-project login for SDK traffic (step 5). The nil pool
+// would panic if it fell through, so reaching the fake proves routing.
+func TestWithTenantTx_RoutesToTenantLogin(t *testing.T) {
+	fl := &fakeLogin{}
+	e := NewQueryEngine(nil).WithTenantLogin(fl)
+
+	if err := e.WithTenantTx(context.Background(), "tenant_abc", func(tx pgx.Tx) error { return nil }); err != nil {
+		t.Fatalf("WithTenantTx: %v", err)
+	}
+	if fl.calls != 1 || fl.schema != "tenant_abc" {
+		t.Fatalf("login runner calls=%d schema=%q, want 1 / tenant_abc", fl.calls, fl.schema)
+	}
+	if fl.readOnly {
+		t.Fatalf("data-API tx must be read-write")
+	}
+}
+
+// Console/platform traffic (DeveloperRole) must NOT use the tenant login —
+// it runs as migrator for DDL, and a dedicated instance has no migrator role.
+// With a nil pool the pool path fails/panics, proving the login was skipped.
+func TestWithTenantTx_DeveloperRoleSkipsLogin(t *testing.T) {
+	fl := &fakeLogin{}
+	e := NewQueryEngine(nil).WithTenantLogin(fl)
+
+	defer func() {
+		_ = recover()
+		if fl.calls != 0 {
+			t.Fatalf("developer-role path used the tenant login (%d calls)", fl.calls)
+		}
+	}()
+	_ = e.WithTenantTx(WithDeveloperRole(context.Background()), "tenant_abc", func(tx pgx.Tx) error { return nil })
+	if fl.calls != 0 {
+		t.Fatalf("developer-role path used the tenant login (%d calls)", fl.calls)
+	}
+}
+
 // The platform (console) SQL path (SDKPath=false) must NOT use the tenant
 // login — it runs developer-authored SQL as the developer pool / migrator.
 // With a nil pool the attempt to acquire a connection fails, proving the
