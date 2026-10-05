@@ -1543,9 +1543,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/phone/verify", enduser.HandleVerifyPhoneOTP(endUserAuthSvc, limiter))
 
 			// #630: passkey sign-in (public key only; discoverable login
-			// keyed to the project's own JWT secret).
-			r.Post("/passkey/login/begin", enduser.HandlePasskeyLoginBegin(endUserAuthSvc))
-			r.Post("/passkey/login/finish", enduser.HandlePasskeyLoginFinish(endUserAuthSvc))
+			// keyed to the project's own JWT secret). Rate-limited per
+			// project+IP like the other public auth endpoints.
+			r.Post("/passkey/login/begin", enduser.HandlePasskeyLoginBegin(endUserAuthSvc, limiter))
+			r.Post("/passkey/login/finish", enduser.HandlePasskeyLoginFinish(endUserAuthSvc, limiter))
 
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {

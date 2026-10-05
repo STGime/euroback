@@ -19,9 +19,27 @@ import (
 	"net/http"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
 )
+
+// passkeyRegisterMaxBody matches the console's cap (internal/auth) — a
+// WebAuthn attestation response can be several KB (TPM / x5c chains), so
+// 16KB can trip legitimate enrolment on some authenticators.
+const passkeyRegisterMaxBody = 64 << 10
+
+// passkeyLoginRateLimit applies the per-project per-source-IP sign-in ceiling
+// (shared knob with signup/signin) to the public passkey login endpoints —
+// they're unauthenticated and login/finish opens a DB tx, so they get the
+// same throttle every sibling auth endpoint has. Returns true if blocked
+// (response written). Nil limiter = fail open (dev / Redis down).
+func passkeyLoginRateLimit(limiter *ratelimit.RateLimiter, w http.ResponseWriter, r *http.Request, pc *auth.ProjectContext, config tenant.AuthConfig) bool {
+	rlCfg := config.EffectiveRateLimits()
+	return ratelimit.CheckAuthRateForProject(limiter, w, r.Context(), "passkey_login", pc.ProjectID,
+		ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops),
+		rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes)
+}
 
 // writePasskeyError maps a ceremony error to an HTTP status without leaking
 // which step failed (the detail is logged, not returned).
@@ -47,6 +65,10 @@ func writePasskeyError(w http.ResponseWriter, err error) {
 }
 
 // authedPasskeyCtx pulls the project + authenticated end user from context.
+// NOTE: EndUserMiddleware is OPTIONAL (it passes anonymously when no
+// Authorization header is present), so THIS check — not the middleware — is
+// the auth gate for the manage endpoints: no end-user claims → 401. Any new
+// manage handler MUST call this (or otherwise require claims).
 func authedPasskeyCtx(w http.ResponseWriter, r *http.Request) (pc *auth.ProjectContext, claims *auth.EndUserClaims, config tenant.AuthConfig, ok bool) {
 	pc, got := auth.ProjectFromContext(r.Context())
 	if !got || pc == nil {
@@ -90,7 +112,7 @@ func HandlePasskeyRegisterFinish(svc *AuthService) http.HandlerFunc {
 			Credential  json.RawMessage `json:"credential"`
 			Nickname    string          `json:"nickname"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil || req.ChallengeID == "" || len(req.Credential) == 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, passkeyRegisterMaxBody)).Decode(&req); err != nil || req.ChallengeID == "" || len(req.Credential) == 0 {
 			writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
 			return
 		}
@@ -105,7 +127,7 @@ func HandlePasskeyRegisterFinish(svc *AuthService) http.HandlerFunc {
 }
 
 // HandlePasskeyLoginBegin — POST /v1/auth/passkey/login/begin (public key only).
-func HandlePasskeyLoginBegin(svc *AuthService) http.HandlerFunc {
+func HandlePasskeyLoginBegin(svc *AuthService, limiter *ratelimit.RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok || pc == nil {
@@ -113,6 +135,9 @@ func HandlePasskeyLoginBegin(svc *AuthService) http.HandlerFunc {
 			return
 		}
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
+		if passkeyLoginRateLimit(limiter, w, r, pc, config) {
+			return
+		}
 		ch, err := svc.BeginPasskeyLogin(r.Context(), config, []byte(pc.JWTSecret))
 		if err != nil {
 			writePasskeyError(w, err)
@@ -123,7 +148,7 @@ func HandlePasskeyLoginBegin(svc *AuthService) http.HandlerFunc {
 }
 
 // HandlePasskeyLoginFinish — POST /v1/auth/passkey/login/finish → session.
-func HandlePasskeyLoginFinish(svc *AuthService) http.HandlerFunc {
+func HandlePasskeyLoginFinish(svc *AuthService, limiter *ratelimit.RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
 		if !ok || pc == nil {
@@ -131,6 +156,9 @@ func HandlePasskeyLoginFinish(svc *AuthService) http.HandlerFunc {
 			return
 		}
 		config := tenant.ParseAuthConfig(pc.AuthConfig)
+		if passkeyLoginRateLimit(limiter, w, r, pc, config) {
+			return
+		}
 		var req struct {
 			ChallengeID string          `json:"challenge_id"`
 			Credential  json.RawMessage `json:"credential"`

@@ -45,7 +45,7 @@ func TestPasskeyLoginBegin(t *testing.T) {
 	pc := &auth.ProjectContext{ProjectID: "prj", SchemaName: "tenant_x", JWTSecret: "project-secret", AuthConfig: json.RawMessage(passkeyEnabledCfg)}
 	req = req.WithContext(auth.ContextWithProject(req.Context(), pc))
 	w := httptest.NewRecorder()
-	HandlePasskeyLoginBegin(svc).ServeHTTP(w, req)
+	HandlePasskeyLoginBegin(svc, nil).ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("enabled: want 200, got %d (%s)", w.Code, w.Body.String())
 	}
@@ -59,7 +59,7 @@ func TestPasskeyLoginBegin(t *testing.T) {
 	pc2 := &auth.ProjectContext{ProjectID: "prj", SchemaName: "tenant_x", JWTSecret: "s", AuthConfig: json.RawMessage(`{"providers":{"email_password":{"enabled":true}}}`)}
 	req2 = req2.WithContext(auth.ContextWithProject(req2.Context(), pc2))
 	w2 := httptest.NewRecorder()
-	HandlePasskeyLoginBegin(svc).ServeHTTP(w2, req2)
+	HandlePasskeyLoginBegin(svc, nil).ServeHTTP(w2, req2)
 	if w2.Code != http.StatusBadRequest {
 		t.Fatalf("disabled: want 400, got %d (%s)", w2.Code, w2.Body.String())
 	}
