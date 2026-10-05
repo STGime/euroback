@@ -243,6 +243,71 @@ func (s *Service) CancelSubscription(ctx context.Context, userID, subscriptionID
 	}, nil
 }
 
+// CancelSubscriptionForProject cancels a project's live subscription as
+// part of project deletion. Unlike CancelSubscription it is keyed by project
+// (the delete path has no subscription id), takes no user context (the
+// delete was already authorized), stops future charges by canceling the
+// Mollie subscription, and does NOT refund — deleting a project the customer
+// has moved off is not a mid-period downgrade.
+//
+// Returns nil (no-op) when billing is disabled, the project has no
+// subscription, or it is already closed. Returns an error ONLY when a live
+// Mollie subscription could not be canceled — DeleteProject treats that as
+// fatal and aborts, so it never drops the project (and the FK-cascaded
+// subscription row) while billing is still live.
+func (s *Service) CancelSubscriptionForProject(ctx context.Context, projectID string) error {
+	if !s.enabled {
+		return nil
+	}
+	var (
+		subID        string
+		status       string
+		mollieSubID  *string
+		mollieCustID *string
+	)
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, status, mollie_subscription_id, mollie_customer_id
+		   FROM public.subscriptions
+		  WHERE project_id = $1
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		projectID,
+	).Scan(&subID, &status, &mollieSubID, &mollieCustID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // nothing to cancel
+	}
+	if err != nil {
+		return fmt.Errorf("load subscription for project %s: %w", projectID, err)
+	}
+	switch status {
+	case "canceled", "expired":
+		return nil // already closed
+	}
+
+	// Cancel in Mollie so no further charges hit the mandate. ErrNotFound
+	// = already gone on Mollie's side, which is fine.
+	if mollieSubID != nil && mollieCustID != nil && *mollieSubID != "" && *mollieCustID != "" {
+		if _, cerr := s.client.CancelSubscription(ctx, *mollieCustID, *mollieSubID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+			return fmt.Errorf("cancel mollie subscription %s: %w", *mollieSubID, cerr)
+		}
+	}
+
+	// Mark the local row canceled. It is about to be FK-cascade-deleted
+	// with the project, but flipping it first keeps state consistent if the
+	// delete is retried or aborts after this point.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE public.subscriptions
+		    SET status = 'canceled', canceled_at = COALESCE(canceled_at, now())
+		  WHERE id = $1`,
+		subID,
+	); err != nil {
+		return fmt.Errorf("mark subscription canceled: %w", err)
+	}
+	slog.Info("billing: subscription canceled for project deletion",
+		"project_id", projectID, "subscription_id", subID)
+	return nil
+}
+
 // ErrSubscriptionNotFound is returned when the (subscription_id,
 // owner_id) pair doesn't match. Not-found and not-owned are
 // deliberately indistinguishable (info-disclosure guard, matches

@@ -110,6 +110,32 @@ type TenantService struct {
 	// the shared cluster's copy (#689). Error = can't tell right now.
 	// Nil = every project's vault is on the shared cluster (dev/tests).
 	vaultCtx func(ctx context.Context, projectID string) (context.Context, error)
+	// subscriptionCanceller cancels a project's billing subscription at
+	// the START of DeleteProject. The subscriptions FK is ON DELETE
+	// CASCADE, so deleting the project row drops the row holding the
+	// Mollie subscription id — orphaning a live subscription (charges keep
+	// running) with no handle left to cancel it. Fail-closed: DeleteProject
+	// aborts if this errors, before anything is torn down. Optional
+	// (dev/tests without billing); nil = skip.
+	subscriptionCanceller func(ctx context.Context, projectID string) error
+	// bucketDeleter deletes a project's S3 bucket and its objects during
+	// DeleteProject — deprovision_tenant drops the schema but not storage,
+	// so without this a "permanent delete" leaves customer files in S3.
+	// Best-effort (logged on failure, like the provider teardown); nil =
+	// skip.
+	bucketDeleter func(ctx context.Context, bucket string) error
+}
+
+// SetSubscriptionCanceller wires how DeleteProject cancels a project's
+// billing subscription before dropping the project (so no further charges
+// occur and the Mollie handle isn't lost to the FK cascade).
+func (s *TenantService) SetSubscriptionCanceller(fn func(ctx context.Context, projectID string) error) {
+	s.subscriptionCanceller = fn
+}
+
+// SetBucketDeleter wires how DeleteProject tears down a project's S3 bucket.
+func (s *TenantService) SetBucketDeleter(fn func(ctx context.Context, bucket string) error) {
+	s.bucketDeleter = fn
 }
 
 // SetVaultRouting sets how vault reads for a project outside its own
@@ -1228,6 +1254,29 @@ func (s *TenantService) listProjectsByIDs(ctx context.Context, ids []string) ([]
 func (s *TenantService) DeleteProject(ctx context.Context, projectID string) error {
 	repo := dbprovider.NewRepo(s.pool)
 
+	// 0. Cancel billing BEFORE anything is torn down. The subscriptions FK
+	// is ON DELETE CASCADE on the project, so the DELETE FROM projects at
+	// the end drops the row that holds the Mollie subscription id — which
+	// would orphan a live subscription (charges keep running) with no
+	// handle left to cancel it. Fail-closed: if we can't cancel, abort the
+	// whole delete now, while nothing has been destroyed, so the operator
+	// can retry. No-op when billing is off or there's no live subscription.
+	if s.subscriptionCanceller != nil {
+		if err := s.subscriptionCanceller(ctx, projectID); err != nil {
+			return fmt.Errorf("cancel subscription before delete: %w", err)
+		}
+	}
+
+	// Read the S3 bucket name now, before the project row (which holds it)
+	// is deleted, so we can tear the bucket down below.
+	var s3Bucket string
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(s3_bucket, '') FROM projects WHERE id = $1`, projectID).Scan(&s3Bucket); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("project not found")
+		}
+		return fmt.Errorf("load project for delete: %w", err)
+	}
+
 	// 1. Enumerate ALL project_databases rows (live + soft-deleted).
 	rows, err := repo.ListAllByProject(ctx, projectID)
 	if err != nil {
@@ -1294,6 +1343,22 @@ func (s *TenantService) DeleteProject(ctx context.Context, projectID string) err
 	if _, err := s.pool.Exec(ctx, `SELECT deprovision_tenant($1::uuid)`, projectID); err != nil {
 		slog.Error("deprovision_tenant failed", "error", err, "project_id", projectID)
 		return fmt.Errorf("deprovision tenant: %w", err)
+	}
+
+	// 4b. Delete the project's S3 bucket and all its objects. The schema
+	// (DB data) is gone; storage would otherwise persist after a
+	// "permanent delete" — a data-residue / GDPR gap. Best-effort with a
+	// loud log (same posture as the provider teardown above): a leaked
+	// bucket is recoverable by ops, and we don't want to strand a project
+	// half-deleted on a transient S3 error. The bucket name is logged for
+	// manual cleanup if it fails.
+	if s.bucketDeleter != nil && s3Bucket != "" {
+		if err := s.bucketDeleter(ctx, s3Bucket); err != nil {
+			slog.Error("project delete: S3 bucket teardown failed — bucket may be orphaned, clean up manually",
+				"project_id", projectID, "bucket", s3Bucket, "error", err)
+		} else {
+			slog.Info("project delete: S3 bucket removed", "project_id", projectID, "bucket", s3Bucket)
+		}
 	}
 
 	// 5. Delete the project row (cascades to api_keys, webhooks,
