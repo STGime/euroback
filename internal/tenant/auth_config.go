@@ -83,6 +83,23 @@ type AuthConfig struct {
 	EmailVerificationURL string `json:"email_verification_url,omitempty"`
 	PasswordResetURL     string `json:"password_reset_url,omitempty"`
 	MagicLinkURL         string `json:"magic_link_url,omitempty"`
+
+	// Passkeys is the per-project WebAuthn (passkey) config (#630). nil or
+	// disabled = off. When enabled, RPID is the relying-party id — the
+	// registrable domain of the TENANT'S app (e.g. "app.example.com", or
+	// "localhost" for dev) — and Origins the full origins allowed to run
+	// ceremonies (e.g. "https://app.example.com"); every origin's host must
+	// equal RPID or be a subdomain of it. A passkey is cryptographically
+	// bound to RPID at creation, so changing RPID orphans every enrolled
+	// end-user credential — treat it as permanent.
+	Passkeys *PasskeyConfig `json:"passkeys,omitempty"`
+}
+
+// PasskeyConfig is the per-project WebAuthn relying-party config (#630).
+type PasskeyConfig struct {
+	Enabled bool     `json:"enabled"`
+	RPID    string   `json:"rp_id,omitempty"`
+	Origins []string `json:"origins,omitempty"`
 }
 
 // RateLimits is the per-project overrides surface for the Rate Limits page
@@ -477,6 +494,30 @@ func (c *AuthConfig) Validate() error {
 		}
 	}
 
+	// #630: passkey (WebAuthn) relying-party config. RPID is the tenant
+	// app's registrable domain; every origin must be that host or a
+	// subdomain of it (the browser binds credentials to the rp_id).
+	if c.Passkeys != nil && c.Passkeys.Enabled {
+		if c.Passkeys.RPID == "" {
+			return fmt.Errorf("passkeys.rp_id is required when passkeys are enabled")
+		}
+		if len(c.Passkeys.Origins) == 0 {
+			return fmt.Errorf("passkeys.origins must list at least one origin when passkeys are enabled")
+		}
+		for _, raw := range c.Passkeys.Origins {
+			u, err := url.Parse(raw)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				return fmt.Errorf("invalid passkey origin: %s (use scheme://host[:port])", raw)
+			}
+			if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+				return fmt.Errorf("passkey origin must not include a path, query, or fragment: %s", raw)
+			}
+			if host := u.Hostname(); host != c.Passkeys.RPID && !strings.HasSuffix(host, "."+c.Passkeys.RPID) {
+				return fmt.Errorf("passkey origin %s must be rp_id %q or a subdomain of it", raw, c.Passkeys.RPID)
+			}
+		}
+	}
+
 	hasEnabled := false
 	for _, p := range c.Providers {
 		if p.Enabled {
@@ -637,6 +678,12 @@ func (c *AuthConfig) IsEmailPasswordEnabled() bool {
 func (c *AuthConfig) IsMagicLinkEnabled() bool {
 	p, ok := c.Providers["magic_link"]
 	return ok && p.Enabled
+}
+
+// IsPasskeyEnabled reports whether end-user passkeys are on AND usable
+// (a relying-party id + at least one origin configured). #630.
+func (c *AuthConfig) IsPasskeyEnabled() bool {
+	return c.Passkeys != nil && c.Passkeys.Enabled && c.Passkeys.RPID != "" && len(c.Passkeys.Origins) > 0
 }
 
 // IsPhoneAuthEnabled returns whether the phone provider is enabled.

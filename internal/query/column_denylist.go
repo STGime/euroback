@@ -55,6 +55,8 @@ var sensitiveColumns = map[string]map[string]bool{
 	// #697: shared-folder rows are readable by others under RLS; who
 	// uploaded what (end-user ids) and custom metadata aren't theirs.
 	"storage_objects": {"uploaded_by": true, "metadata": true},
+	// #630: the WebAuthn ceremony challenge is transient server state.
+	"webauthn_challenges": {"session_data": true},
 }
 
 // SensitiveSystemColumns reports the credential columns of a per-tenant

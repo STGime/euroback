@@ -28,14 +28,14 @@ const (
 
 // GDPRExportResponse is the Article 15 subject access request response.
 type GDPRExportResponse struct {
-	ExportVersion string                            `json:"export_version"`
-	ExportedAt    time.Time                         `json:"exported_at"`
-	ProjectID     string                            `json:"project_id"`
-	User          GDPRUserProfile                   `json:"user"`
-	Identities    []GDPRIdentity                    `json:"identities"`
-	StorageObjects []GDPRStorageObject              `json:"storage_objects"`
-	RefreshTokens []GDPRRefreshToken                `json:"refresh_tokens"`
-	UserData      map[string][]map[string]any       `json:"user_data"`
+	ExportVersion  string                      `json:"export_version"`
+	ExportedAt     time.Time                   `json:"exported_at"`
+	ProjectID      string                      `json:"project_id"`
+	User           GDPRUserProfile             `json:"user"`
+	Identities     []GDPRIdentity              `json:"identities"`
+	StorageObjects []GDPRStorageObject         `json:"storage_objects"`
+	RefreshTokens  []GDPRRefreshToken          `json:"refresh_tokens"`
+	UserData       map[string][]map[string]any `json:"user_data"`
 }
 
 // GDPRUserProfile is the user profile section of the export (no password hash).
@@ -65,11 +65,11 @@ type GDPRIdentity struct {
 
 // GDPRStorageObject is file metadata (not file contents).
 type GDPRStorageObject struct {
-	Key         string     `json:"key"`
-	ContentType *string    `json:"content_type"`
-	SizeBytes   *int64     `json:"size_bytes"`
+	Key         string         `json:"key"`
+	ContentType *string        `json:"content_type"`
+	SizeBytes   *int64         `json:"size_bytes"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	CreatedAt   time.Time      `json:"created_at"`
 }
 
 // GDPRRefreshToken is token metadata (not the hash).
@@ -301,6 +301,9 @@ var gdprPlatformTables = map[string]bool{
 	"users": true, "refresh_tokens": true, "storage_objects": true,
 	"email_tokens": true, "user_identities": true, "vault_secrets": true,
 	"storage_shared_prefixes": true,
+	// #630: passkey tables are platform-managed (the generic owner-column
+	// scan would otherwise pick them up via user_id).
+	"user_passkey_credentials": true, "webauthn_challenges": true,
 }
 
 // ownerColumns are column names that link a row to an end-user.

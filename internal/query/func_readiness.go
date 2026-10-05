@@ -28,6 +28,7 @@ import (
 var tenantSystemTables = []string{
 	"users", "user_identities", "refresh_tokens", "email_tokens",
 	"storage_objects", "storage_shared_prefixes", "vault_secrets",
+	"user_passkey_credentials", "webauthn_challenges",
 }
 
 // sqlGatewayOwnedAppTables lists application tables in a schema ($1) still

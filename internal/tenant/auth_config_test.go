@@ -61,3 +61,48 @@ func TestIsRedirectURLAllowed_RootAllowedHostAcceptsAnyPath(t *testing.T) {
 		}
 	}
 }
+
+// #630: passkey (WebAuthn) relying-party config validation + IsPasskeyEnabled.
+func TestPasskeyConfigValidation(t *testing.T) {
+	// IsPasskeyEnabled: needs enabled + rp_id + >=1 origin.
+	cases := []struct {
+		name string
+		pk   *PasskeyConfig
+		want bool
+	}{
+		{"nil", nil, false},
+		{"disabled", &PasskeyConfig{Enabled: false, RPID: "app.example.com", Origins: []string{"https://app.example.com"}}, false},
+		{"no rp_id", &PasskeyConfig{Enabled: true, Origins: []string{"https://app.example.com"}}, false},
+		{"no origins", &PasskeyConfig{Enabled: true, RPID: "app.example.com"}, false},
+		{"ok", &PasskeyConfig{Enabled: true, RPID: "app.example.com", Origins: []string{"https://app.example.com"}}, true},
+	}
+	for _, tc := range cases {
+		c := &AuthConfig{Passkeys: tc.pk}
+		if got := c.IsPasskeyEnabled(); got != tc.want {
+			t.Errorf("%s: IsPasskeyEnabled = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// Validate: origin host must be rp_id or a subdomain of it, no path.
+	valCases := []struct {
+		name    string
+		pk      *PasskeyConfig
+		wantErr bool
+	}{
+		{"exact host", &PasskeyConfig{Enabled: true, RPID: "example.com", Origins: []string{"https://example.com"}}, false},
+		{"subdomain", &PasskeyConfig{Enabled: true, RPID: "example.com", Origins: []string{"https://app.example.com"}}, false},
+		{"localhost dev", &PasskeyConfig{Enabled: true, RPID: "localhost", Origins: []string{"http://localhost:3000"}}, false},
+		{"foreign host", &PasskeyConfig{Enabled: true, RPID: "example.com", Origins: []string{"https://attacker.com"}}, true},
+		{"suffix-not-subdomain", &PasskeyConfig{Enabled: true, RPID: "example.com", Origins: []string{"https://notexample.com"}}, true},
+		{"origin with path", &PasskeyConfig{Enabled: true, RPID: "example.com", Origins: []string{"https://example.com/cb"}}, true},
+		{"enabled no rp_id", &PasskeyConfig{Enabled: true, Origins: []string{"https://example.com"}}, true},
+	}
+	for _, tc := range valCases {
+		c := DefaultAuthConfig() // email_password enabled → passes the rest
+		c.Passkeys = tc.pk
+		err := c.Validate()
+		if (err != nil) != tc.wantErr {
+			t.Errorf("%s: Validate err = %v, wantErr %v", tc.name, err, tc.wantErr)
+		}
+	}
+}
