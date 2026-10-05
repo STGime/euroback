@@ -536,6 +536,13 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 // handleQueryError writes the appropriate HTTP error response for a query engine error.
 // Returns true if it handled the error, false if the caller should use a generic 500.
 func handleQueryError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, ErrTenantLoginUnavailable) {
+		// The project's per-project login couldn't be opened (not
+		// configured, or a Team project's dedicated DB not serving): 503,
+		// never a fall-through to a shared login. Matches /v1/db/sql + RPC.
+		jsonError(w, "the project's database is not available right now", http.StatusServiceUnavailable)
+		return true
+	}
 	if errors.Is(err, ErrPlatformManagedTable) || errors.Is(err, ErrInternalTable) {
 		jsonError(w, err.Error(), http.StatusForbidden)
 		return true

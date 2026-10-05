@@ -146,6 +146,18 @@ func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
 // SET LOCAL ROLE eurobase_migrator on the dedicated pool would fail
 // with 42704 role-does-not-exist.
 func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn func(tx pgx.Tx) error) error {
+	// SDK data-API customer code (RLS policies, triggers, defaults, and the
+	// row read/write itself) runs on the project's own `<schema>_func` login
+	// when one is configured — the step-5 remediation. Console/platform
+	// traffic (DeveloperRole) keeps the pool path: it runs as migrator for
+	// DDL, and a dedicated instance has no eurobase_migrator role. search_path
+	// (schema, public), RLS identity and no statement_timeout match the pool
+	// path below exactly.
+	if e.login != nil && !DeveloperRoleFromContext(ctx) {
+		return e.login.Run(ctx, schemaName, false, e.sdkSetup(schemaName, true, ""), func(ctx context.Context, tx pgx.Tx) error {
+			return fn(tx)
+		})
+	}
 	pool, routed := e.pickPool(ctx)
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -746,22 +758,15 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 
 	slog.Debug("executing function call", "sql", sql, "args_count", len(paramValues))
 
-	// RPC bodies are customer-defined code — run them on the project's own
-	// `<schema>_func` login when one is configured (same rationale as
-	// /v1/db/sql). RPC keeps `public` on the search_path, matching
-	// WithTenantTx. The existence check above stays on the pool: it reads
-	// only metadata, not customer code.
+	// RPC bodies are customer-defined code — WithTenantTx runs them on the
+	// project's own `<schema>_func` login when one is configured (step 4/5),
+	// else the pool. No statement_timeout (WithTenantTx sets none), so the
+	// flag flip doesn't start capping long-running RPCs. The existence check
+	// above stays on the pool: it reads only metadata, not customer code.
 	var result interface{}
-	scan := func(ctx context.Context, tx pgx.Tx) error {
+	err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, sql, paramValues...).Scan(&result)
-	}
-	if e.login != nil {
-		// No statement_timeout: WithTenantTx (the pool path) set none, so
-		// flipping SDK_FUNC_LOGIN must not start capping long-running RPCs.
-		err = e.login.Run(ctx, schemaName, false, e.sdkSetup(schemaName, true, ""), scan)
-	} else {
-		err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error { return scan(ctx, tx) })
-	}
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
