@@ -343,6 +343,7 @@ BEGIN
             transports        TEXT[],
             aaguid            BYTEA,
             sign_count        BIGINT      NOT NULL DEFAULT 0,
+            flags             SMALLINT    NOT NULL DEFAULT 0,
             nickname          TEXT,
             created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
             last_used_at      TIMESTAMPTZ
