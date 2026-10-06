@@ -77,6 +77,22 @@ await eb.auth.resetPassword(token, newPassword)
 // Resend the verification email:
 await eb.auth.resendVerification('user@example.com')
 
+// Passkeys — passwordless sign-in with WebAuthn (Face ID / Touch ID /
+// security key). Enable them in the console (Auth → Passkeys) with a
+// Relying Party ID that matches your app's domain. Browser-only.
+if (eb.auth.passkeysSupported()) {
+  // Passwordless sign-in: the browser lists the user's passkeys for this
+  // site and they pick one. On success, a session is set (like signIn()).
+  const { data, error } = await eb.auth.signInWithPasskey()
+
+  // Enrol a passkey on the signed-in user's account:
+  await eb.auth.registerPasskey('My laptop')
+
+  // Manage enrolled passkeys:
+  const { data: passkeys } = await eb.auth.listPasskeys()
+  await eb.auth.deletePasskey(passkeys![0].id)
+}
+
 // Get current user (from server)
 const { data: user } = await eb.auth.getUser()
 
