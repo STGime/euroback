@@ -53,4 +53,6 @@ export type {
   AuthStateChangeCallback,
   ExportRequest,
   ExportStatus,
+  Passkey,
 } from './auth'
+export { passkeysSupported, passkeyErrorMessage } from './webauthn'

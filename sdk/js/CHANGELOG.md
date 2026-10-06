@@ -4,6 +4,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## Unreleased
 
+### Added — end-user passkeys (passwordless sign-in, #630)
+
+`auth` gains WebAuthn passkey support — the same credential type as the console's login, now for your app's end users:
+
+- `auth.signInWithPasskey()` — passwordless sign-in. No email needed: the browser lists the passkeys registered for your site and the user picks one (discoverable credential). On success it establishes a session exactly like `signIn()` (sets the session, emits `SIGNED_IN`).
+- `auth.registerPasskey(nickname?)` — enrol a passkey on the **currently signed-in** user (requires a session, so a stolen session can't silently add an attacker credential).
+- `auth.listPasskeys()` / `auth.deletePasskey(id)` — manage enrolled passkeys. Returns `Passkey` rows (`id`, `nickname`, `created_at`, `last_used_at`, `backed_up`).
+- `auth.passkeysSupported()` — gate your UI; always `false` in Node / SSR.
+- Named exports `passkeysSupported` and `passkeyErrorMessage` for building a custom flow against the raw ceremony.
+
+Each method runs the full two-step ceremony (fetch options → `navigator.credentials.*` → post the result); browser cancellation / timeout surfaces as a friendly `error` string, never a throw. Passkeys must be enabled for the project (console → Auth → Passkeys) with a Relying Party ID matching your app's domain. Requires gateway #630 (endpoints under `/v1/auth/passkey/*`).
+
 ### Added — `ExportRequest.complete`
 
 The type of `auth.exportMyData()` / `getMyExport()` results declares `complete` (the gateway already returns it): `false` when the archive is missing something. Gateway change (#665): for end users, `error` is now a generic message and the response no longer carries `warnings` or `s3_key` (never declared in this type) — the app's developer sees the details in the console.

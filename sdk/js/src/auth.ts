@@ -4,6 +4,7 @@
 
 import type { HttpClient, EurobaseConfig } from './http'
 import { httpClient } from './http'
+import { passkeysSupported, createPasskey, getPasskeyAssertion, passkeyErrorMessage } from './webauthn'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -112,6 +113,21 @@ export interface ExportRequest {
   started_at?: string
   completed_at?: string
   created_at: string
+}
+
+/** A passkey (WebAuthn credential) enrolled on the signed-in user's
+ *  account. Returned by `registerPasskey()` and `listPasskeys()`. */
+export interface Passkey {
+  id: string
+  /** User-chosen label, or null if none was given at enrolment. */
+  nickname: string | null
+  created_at: string
+  /** Last time this passkey was used to sign in; null if never. */
+  last_used_at: string | null
+  /** The authenticator reports the credential as synced across the user's
+   *  devices (iCloud Keychain, Google Password Manager, 1Password, …),
+   *  vs. bound to a single device. */
+  backed_up: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +338,128 @@ export class AuthClient {
     if (options?.emailRedirectTo !== undefined) body.email_redirect_to = options.emailRedirectTo
     const result = await this.http.post('/v1/auth/resend-verification', body)
     if (result.error) {
+      return { error: result.error }
+    }
+    return { error: null }
+  }
+
+  // ── Passkeys (#630) ──
+
+  /**
+   * True when this browser can run a passkey ceremony at all (WebAuthn +
+   * `navigator.credentials` present). Always false in Node / SSR. Use it
+   * to decide whether to show a "Sign in with a passkey" button.
+   */
+  passkeysSupported(): boolean {
+    return passkeysSupported()
+  }
+
+  /**
+   * Enrol a passkey on the **currently signed-in** user's account
+   * (register ceremony). Requires an active session — a passkey can only
+   * be added by the account's own holder, so a stolen long-lived session
+   * can't silently enrol an attacker credential.
+   *
+   * Runs the whole two-step ceremony: fetches options from the gateway,
+   * calls `navigator.credentials.create()` (the browser prompts for Face
+   * ID / Touch ID / security key), then posts the attestation back.
+   *
+   * Passkeys must be enabled for the project (console → Auth → Passkeys)
+   * or this returns an error. Browser cancellation / timeout surfaces as
+   * a friendly `error` string, not a throw.
+   *
+   * @param nickname Optional label shown in the user's passkey list.
+   * @example
+   * if (eb.auth.passkeysSupported()) {
+   *   const { data, error } = await eb.auth.registerPasskey('MacBook')
+   * }
+   */
+  async registerPasskey(nickname?: string): Promise<{ data: Passkey | null; error: string | null }> {
+    if (!passkeysSupported()) {
+      return { data: null, error: 'passkeys are not supported in this environment' }
+    }
+    const begin = await this.http.post('/v1/auth/passkey/register/begin', {})
+    if (begin?.error) {
+      return { data: null, error: begin.error }
+    }
+    let credential: Record<string, unknown>
+    try {
+      credential = await createPasskey(begin.options)
+    } catch (err) {
+      return { data: null, error: passkeyErrorMessage(err) }
+    }
+    const finish = await this.http.post('/v1/auth/passkey/register/finish', {
+      challenge_id: begin.challenge_id,
+      credential,
+      nickname: nickname ?? '',
+    })
+    if (finish?.error) {
+      return { data: null, error: finish.error }
+    }
+    return { data: finish as Passkey, error: null }
+  }
+
+  /**
+   * Sign in with a passkey — passwordless, no email needed (discoverable
+   * credential / resident key). The browser lists the passkeys registered
+   * for this site and the user picks one; on success a session is
+   * established exactly like `signIn()` (sets the session, emits
+   * `SIGNED_IN`).
+   *
+   * Passkeys must be enabled for the project. Browser cancellation /
+   * timeout surfaces as a friendly `error` string, not a throw.
+   *
+   * @example
+   * const { data, error } = await eb.auth.signInWithPasskey()
+   * if (data) { // signed in }
+   */
+  async signInWithPasskey(): Promise<{ data: AuthSession | null; error: string | null }> {
+    if (!passkeysSupported()) {
+      return { data: null, error: 'passkeys are not supported in this environment' }
+    }
+    const begin = await this.http.post('/v1/auth/passkey/login/begin', {})
+    if (begin?.error) {
+      return { data: null, error: begin.error }
+    }
+    let credential: Record<string, unknown>
+    try {
+      credential = await getPasskeyAssertion(begin.options)
+    } catch (err) {
+      return { data: null, error: passkeyErrorMessage(err) }
+    }
+    const result = await this.http.post('/v1/auth/passkey/login/finish', {
+      challenge_id: begin.challenge_id,
+      credential,
+    })
+    if (result?.error) {
+      return { data: null, error: result.error }
+    }
+    this.setSession(result)
+    this.emit('SIGNED_IN', result)
+    return { data: result, error: null }
+  }
+
+  /**
+   * List the passkeys enrolled on the signed-in user's account. Requires
+   * an active session.
+   */
+  async listPasskeys(): Promise<{ data: Passkey[] | null; error: string | null }> {
+    const result = await this.http.get('/v1/auth/passkey')
+    if (result?.error) {
+      return { data: null, error: result.error }
+    }
+    return { data: (result?.passkeys ?? []) as Passkey[], error: null }
+  }
+
+  /**
+   * Delete one of the signed-in user's passkeys by id (from
+   * `listPasskeys()`). Requires an active session. Deleting the last
+   * passkey is allowed — make sure the user still has another way to sign
+   * in (password / magic link) before relying on this.
+   */
+  async deletePasskey(id: string): Promise<{ error: string | null }> {
+    const result = await this.http.del(`/v1/auth/passkey/${encodeURIComponent(id)}`)
+    if (result?.error) {
       return { error: result.error }
     }
     return { error: null }
