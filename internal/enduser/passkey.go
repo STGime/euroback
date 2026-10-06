@@ -112,7 +112,7 @@ func userHandle(userID string) ([]byte, error) {
 
 // ── tenant-schema store (run inside an asService tx) ────────────────────
 
-const passkeyCols = `id::text, credential_id, public_key, attestation_type, transports, aaguid, sign_count, nickname, created_at, last_used_at`
+const passkeyCols = `id::text, credential_id, public_key, attestation_type, transports, aaguid, sign_count, flags, nickname, created_at, last_used_at`
 
 type storedCred struct {
 	info auth.PasskeyInfo
@@ -123,12 +123,17 @@ func scanCred(row pgx.Row) (storedCred, error) {
 	var sc storedCred
 	var transports []string
 	var signCount int64
+	var flags int16
 	if err := row.Scan(&sc.info.ID, &sc.cred.ID, &sc.cred.PublicKey, &sc.cred.AttestationType,
-		&transports, &sc.cred.Authenticator.AAGUID, &signCount,
+		&transports, &sc.cred.Authenticator.AAGUID, &signCount, &flags,
 		&sc.info.Nickname, &sc.info.CreatedAt, &sc.info.LastUsedAt); err != nil {
 		return sc, err
 	}
 	sc.cred.Authenticator.SignCount = uint32(signCount)
+	// Authenticator-data flags as last seen; BackupState → the "synced vs
+	// device-bound" signal surfaced as PasskeyInfo.backed_up (#762).
+	sc.cred.Flags = webauthn.NewCredentialFlags(protocol.AuthenticatorFlags(byte(flags)))
+	sc.info.BackedUp = sc.cred.Flags.BackupState
 	for _, t := range transports {
 		sc.cred.Transport = append(sc.cred.Transport, protocol.AuthenticatorTransport(t))
 	}
@@ -169,11 +174,11 @@ func insertCred(ctx context.Context, tx pgx.Tx, schema, userID string, cred *web
 	}
 	sc, err := scanCred(tx.QueryRow(ctx,
 		`INSERT INTO `+quoteIdent(schema)+`.user_passkey_credentials
-		   (user_id, credential_id, public_key, attestation_type, transports, aaguid, sign_count, nickname)
-		 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
+		   (user_id, credential_id, public_key, attestation_type, transports, aaguid, sign_count, flags, nickname)
+		 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING `+passkeyCols,
 		userID, cred.ID, cred.PublicKey, cred.AttestationType, transports, aaguid,
-		int64(cred.Authenticator.SignCount), nickname))
+		int64(cred.Authenticator.SignCount), int16(cred.Flags.ProtocolValue()), nickname))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -184,11 +189,11 @@ func insertCred(ctx context.Context, tx pgx.Tx, schema, userID string, cred *web
 	return &sc.info, nil
 }
 
-func recordUse(ctx context.Context, tx pgx.Tx, schema string, credentialID []byte, signCount uint32) error {
+func recordUse(ctx context.Context, tx pgx.Tx, schema string, credentialID []byte, signCount uint32, flags protocol.AuthenticatorFlags) error {
 	_, err := tx.Exec(ctx,
 		`UPDATE `+quoteIdent(schema)+`.user_passkey_credentials
-		    SET sign_count = $2, last_used_at = now() WHERE credential_id = $1`,
-		credentialID, int64(signCount))
+		    SET sign_count = $2, flags = $3, last_used_at = now() WHERE credential_id = $1`,
+		credentialID, int64(signCount), int16(flags))
 	return err
 }
 
@@ -516,7 +521,7 @@ func (s *AuthService) FinishPasskeyLogin(ctx context.Context, schema string, con
 		if !fresh {
 			return auth.ErrPasskeyChallengeInvalid
 		}
-		if err := recordUse(ctx, tx, schema, cred.ID, cred.Authenticator.SignCount); err != nil {
+		if err := recordUse(ctx, tx, schema, cred.ID, cred.Authenticator.SignCount, cred.Flags.ProtocolValue()); err != nil {
 			return err
 		}
 		// Load the user's email + ensure the account is usable.

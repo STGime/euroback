@@ -13,6 +13,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -138,6 +139,11 @@ func TestPasskeyStore_DB(t *testing.T) {
 	svc := &AuthService{pool: pool}
 	cred := &webauthn.Credential{ID: []byte("cred-rawid-1"), PublicKey: []byte("cose-key")}
 	cred.Transport = append(cred.Transport, "internal")
+	// A synced (backed-up) credential: flags must round-trip so
+	// PasskeyInfo.backed_up reflects reality (#762). Build via
+	// NewCredentialFlags so Flags.raw (what ProtocolValue persists) is set —
+	// mirrors how the ceremony library produces a real credential.
+	cred.Flags = webauthn.NewCredentialFlags(protocol.FlagBackupEligible | protocol.FlagBackupState)
 
 	// insert → list → recordUse
 	if err := svc.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
@@ -151,7 +157,10 @@ func TestPasskeyStore_DB(t *testing.T) {
 		if len(got) != 1 || string(got[0].cred.ID) != "cred-rawid-1" {
 			t.Fatalf("list = %+v", got)
 		}
-		return recordUse(ctx, tx, schema, cred.ID, 5)
+		if !got[0].info.BackedUp {
+			t.Fatalf("backed_up should round-trip true, got %+v", got[0].info)
+		}
+		return recordUse(ctx, tx, schema, cred.ID, 5, cred.Flags.ProtocolValue())
 	}); err != nil {
 		t.Fatalf("insert/list/recordUse: %v", err)
 	}
