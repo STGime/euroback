@@ -31,7 +31,7 @@
 				</div>
 
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Each tab shows a preview of the generated files with copy and download buttons. For the IDE tabs, drop the file into your project root and your AI assistant has full context about your Eurobase project. Every tab except Generic has a button that creates a <a href="/docs/account" class="text-eurobase-600 hover:text-eurobase-700 font-medium">project token</a> for that tool and fills it into the config.
+					Each tab shows a preview of the generated files with copy and download buttons. For the IDE tabs, drop the file into your project root and your AI assistant has full context about your Eurobase project. Every tab except Generic has a button that creates a <a href="/docs/account" class="text-eurobase-600 hover:text-eurobase-700 font-medium">project token</a> for that tool and, in the IDE tabs, fills it into the config; in Lovable you paste it into the connector yourself.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900">Building a Lovable app on Eurobase</h3>
