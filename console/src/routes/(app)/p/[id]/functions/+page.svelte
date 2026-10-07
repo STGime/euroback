@@ -5,7 +5,7 @@
 	import { api, type EdgeFunction, type EdgeFunctionLog, type TableSchema, type FunctionTrigger, type EdgeFunctionVersion, type FunctionMetrics } from '$lib/api.js';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	let functions: EdgeFunction[] = $state([]);
 	let loading = $state(true);

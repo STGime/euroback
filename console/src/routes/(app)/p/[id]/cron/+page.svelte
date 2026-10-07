@@ -4,7 +4,7 @@
 	import { api, type CronJob, type CronJobRun, type DBFunction, type TableSchema } from '$lib/api.js';
 	import { onMount } from 'svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	let jobs: CronJob[] = $state([]);
 	let loading = $state(true);

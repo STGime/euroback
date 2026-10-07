@@ -5,7 +5,7 @@
 	import RestoreConfirmModal from '../RestoreConfirmModal.svelte';
 	import RestoreProgressPanel from '../RestoreProgressPanel.svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let project = $state<Project | null>(null);
 	let backups = $state<BackupSnapshot[]>([]);
 	let quota = $state<RestoreQuota | null>(null);

@@ -5,7 +5,7 @@
 	import { getContext } from 'svelte';
 	import { api, type ProjectUsage } from '$lib/api.js';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let ctx: { project: import('$lib/api.js').Project | null } = getContext('projectId');
 	let project = $derived(ctx.project);
 

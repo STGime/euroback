@@ -10,7 +10,7 @@
 	import RenameTableModal from './RenameTableModal.svelte';
 	import ColumnEditModal from './ColumnEditModal.svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	// ---- Schema state ----
 	let tables: TableSchema[] = $state([]);
