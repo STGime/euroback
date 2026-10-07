@@ -1,17 +1,9 @@
-# Public, server-rendered surfaces (docs, pricing, legal) are crawlable.
-# App routes are a client-only SPA behind login: nothing to index there.
+# Public, server-rendered surfaces (signup, docs, pricing, legal) are crawlable.
+# App routes (/login, the client-only SPA) are kept out of search with an
+# `X-Robots-Tag: noindex` header (src/hooks.server.ts), NOT with Disallow:
+# a Disallowed URL can't be crawled, so Google never sees the noindex and
+# indexes the bare URL anyway.
 User-agent: *
-Disallow: /projects
-Disallow: /p/
-Disallow: /account
-Disallow: /organizations
-Disallow: /admin
-Disallow: /billing
-Disallow: /onboarding
-Disallow: /login
-Disallow: /invite
-Disallow: /reset-password
-Disallow: /verify-email
 Allow: /
 
 Sitemap: https://console.eurobase.app/sitemap.xml
