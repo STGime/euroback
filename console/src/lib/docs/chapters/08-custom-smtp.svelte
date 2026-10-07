@@ -3,6 +3,12 @@
 			<p class="text-sm italic text-gray-500 mb-4">LexVault grows past the platform email cap. Alex's signups start hitting the 2-emails-per-hour ceiling. He plugs in the firm's own SMTP provider and the ceiling disappears.</p>
 
 			<div class="space-y-4">
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+					<p class="text-xs text-amber-800 leading-relaxed">
+						<strong>Pro plan or higher required.</strong> Custom SMTP is available on <strong>Pro and above</strong>. On Free, the SMTP tab can't save or test a sender (the API answers <code class="bg-white border border-amber-200 rounded px-1">403 plan_required</code>), and auth emails go out through the platform sender.
+					</p>
+				</div>
+
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Every Eurobase project starts on the shared platform email sender (Scaleway TEM, EU-sovereign, but capped per project). When you outgrow that cap, or want emails to come from your own domain with your own sender reputation, you can bring your own SMTP provider.
 				</p>
@@ -13,7 +19,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900">Where to find it</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					In the console: <strong>Auth &rarr; SMTP</strong> tab. Only project admins can configure this &mdash; members with the "developer" or "viewer" role can't see the credentials. Custom SMTP is part of the <strong>Pro</strong> plan and up; on Free, auth emails go out through Eurobase's sender (a sender saved earlier is kept but not used; after upgrading, run a test send to use it again).
+					In the console: <strong>Auth &rarr; SMTP</strong> tab. Only project admins can configure this &mdash; members with the "developer" or "viewer" role can't see the credentials. If a project drops back to Free, a sender saved earlier is kept but not used, and auth emails go out through Eurobase's sender; after upgrading again, run a test send to use it again.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What you'll need from your provider</h3>
@@ -62,7 +68,7 @@
 					Once the sender is in use, <strong>Auth &rarr; Email log</strong> shows every auth email and whether your server took it, with the same explanations when it didn't.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					<strong>If you were already verified and a test starts failing,</strong> the project keeps using the last-known-good config until either a successful retest or a config change. A transient blip from your provider doesn't silently regress your project to the platform sender behind your back.
+					<strong>If you were already verified and a test starts failing,</strong> the project keeps using the last-known-good config until either a successful retest or a config change. Two things do switch it back to the platform sender until you run a new test send: the project leaving the Pro plan, and a saved sender that no longer meets the rules above (a public host, a submission port, STARTTLS or TLS, a login) &mdash; fix its settings, then run a new test send. A transient blip from your provider doesn't silently regress your project to the platform sender behind your back.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Sovereignty advisory</h3>
