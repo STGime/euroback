@@ -68,7 +68,7 @@
 					Once the sender is in use, <strong>Auth &rarr; Email log</strong> shows every auth email and whether your server took it, with the same explanations when it didn't.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					<strong>If you were already verified and a test starts failing,</strong> the project keeps using the last-known-good config until either a successful retest or a config change. A transient blip from your provider doesn't silently regress your project to the platform sender behind your back.
+					<strong>If you were already verified and a test starts failing,</strong> the project keeps using the last-known-good config until either a successful retest or a config change. Two things do switch it back to the platform sender until you run a new test send: the project leaving the Pro plan, and a saved sender that no longer meets the rules above (submission port, STARTTLS or TLS, a login). A transient blip from your provider doesn't silently regress your project to the platform sender behind your back.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Sovereignty advisory</h3>

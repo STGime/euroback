@@ -31,7 +31,7 @@
 				</div>
 
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Each tab shows a preview of the generated files with copy and download buttons. Drop the file into your project root and your AI assistant has full context about your Eurobase project. The MCP sections have a button that creates a <a href="/docs/account" class="text-eurobase-600 hover:text-eurobase-700 font-medium">project token</a> for that tool and fills it into the config.
+					Each tab shows a preview of the generated files with copy and download buttons. For the IDE tabs, drop the file into your project root and your AI assistant has full context about your Eurobase project. Every tab except Generic has a button that creates a <a href="/docs/account" class="text-eurobase-600 hover:text-eurobase-700 font-medium">project token</a> for that tool and fills it into the config.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900">Building a Lovable app on Eurobase</h3>
@@ -63,11 +63,11 @@ VITE_EUROBASE_PUBLIC_KEY=eb_pk_...</pre>
 						</div>
 						<div>
 							<p class="text-sm font-semibold text-gray-900">5. Allow your app's URLs</p>
-							<p class="text-sm text-gray-700 mt-1">Paste the Lovable editor URL (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">lovable.dev/projects/&hellip;</code>), the published URL and any custom domain, then click <strong>Add to allowed URLs</strong>. The console adds the preview and published origins to <strong>Allowed CORS origins</strong> and the sign-in pages (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/verify</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/reset-password</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/magic</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/auth/callback</code>) to <strong>Allowed redirect URLs</strong>. Wildcards like <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">*.lovable.app</code> aren't accepted, since anyone can publish there. Needs the admin role.</p>
+							<p class="text-sm text-gray-700 mt-1">Paste the Lovable editor URL (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">lovable.dev/projects/&hellip;</code>), the published URL and any custom domain, then click <strong>Add to allowed URLs</strong>. The console adds every origin &mdash; both preview addresses (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">&lt;id&gt;.lovableproject.com</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">id-preview--&lt;id&gt;.lovable.app</code>), the published app and its <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">preview--</code> address, and your custom domain &mdash; to <strong>Allowed CORS origins</strong>, and each origin plus its sign-in pages (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/verify</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/reset-password</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/magic</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/auth/callback</code>) to <strong>Allowed redirect URLs</strong>. Wildcards like <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">*.lovable.app</code> aren't accepted, since anyone can publish there. Needs the admin role.</p>
 						</div>
 						<div>
 							<p class="text-sm font-semibold text-gray-900">6. Start building</p>
-							<p class="text-sm text-gray-700 mt-1">Copy the first prompt, which tells Lovable to use the skill and Eurobase instead of Lovable Cloud, and add what to build.</p>
+							<p class="text-sm text-gray-700 mt-1">Copy the first prompt, which tells Lovable to use the skill and Eurobase instead of Lovable Cloud, add your public key if it isn't filled in, and add what to build.</p>
 						</div>
 					</div>
 				</div>
