@@ -10,7 +10,7 @@
 	import CancelSubscriptionModal from '$lib/CancelSubscriptionModal.svelte';
 	import BillingTestModeBanner from '$lib/BillingTestModeBanner.svelte';
 
-	let projectId = $derived($page.params.id as string);
+	let projectId = $derived($page.params.id!);
 
 	let project: Project | null = $state(null);
 	let subscription: ProjectSubscription | null = $state(null);

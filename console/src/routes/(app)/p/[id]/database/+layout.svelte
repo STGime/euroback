@@ -5,7 +5,7 @@
 
 	let { children } = $props();
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let currentPath = $derived($page.url.pathname);
 
 	let activeTab = $derived(

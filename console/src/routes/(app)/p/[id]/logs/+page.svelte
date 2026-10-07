@@ -4,7 +4,7 @@
 	import { api, type RequestLog, type LogStats, type LogsResponse } from '$lib/api.js';
 
 	const projectCtx = getContext<{ id: string; project: import('$lib/api.js').Project | null }>('projectId');
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let plan = $derived(projectCtx.project?.plan ?? 'free');
 	let isFreePlan = $derived(plan === 'free');
 

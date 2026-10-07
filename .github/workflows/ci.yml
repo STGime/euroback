@@ -132,12 +132,13 @@ jobs:
           PUBLIC_API_URL: https://api.eurobase.app
           PUBLIC_BUILD_SHA: ${{ github.sha }}
 
-      # svelte-check disabled — too many strict TS warnings from route params.
-      # TODO: fix string|undefined params across console pages, then re-enable.
-      # - name: Lint
-      #   run: |
-      #     cd console
-      #     npm run check --if-present
+      - name: Type check
+        run: |
+          cd console
+          npm run check -- --threshold error
+        env:
+          PUBLIC_API_URL: https://api.eurobase.app
+          PUBLIC_BUILD_SHA: ${{ github.sha }}
 
   # -------------------------------------------------------------------------
   # Functions runner (Deno) tests — sandbox isolation + ctx.vault.get path

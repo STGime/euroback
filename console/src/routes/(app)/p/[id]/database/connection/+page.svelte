@@ -3,7 +3,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { api, APIError, type ConnectionInfo, type ConnectionState, type Project } from '$lib/api.js';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let project = $state<Project | null>(null);
 	let conn = $state<ConnectionInfo | null>(null);
 	// `role` is what the user *requested*; `conn.role` is what the URL
