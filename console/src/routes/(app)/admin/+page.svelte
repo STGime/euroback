@@ -586,6 +586,9 @@
 			<a href="/admin/upgrades" class="text-blue-600 hover:underline">
 				Team-tier upgrades →
 			</a>
+			<a href="/admin/sql" class="text-blue-600 hover:underline">
+				SQL log →
+			</a>
 		</nav>
 	</header>
 

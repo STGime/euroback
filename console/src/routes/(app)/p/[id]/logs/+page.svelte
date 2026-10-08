@@ -2,6 +2,7 @@
 	import { onMount, getContext } from 'svelte';
 	import { page } from '$app/stores';
 	import { api, type RequestLog, type LogStats, type LogsResponse } from '$lib/api.js';
+	import LogsTabs from '$lib/components/LogsTabs.svelte';
 
 	const projectCtx = getContext<{ id: string; project: import('$lib/api.js').Project | null }>('projectId');
 	let projectId = $derived($page.params.id);
@@ -195,6 +196,8 @@
 		return lines.join('\n');
 	}
 </script>
+
+<LogsTabs projectId={projectId ?? ''} active="requests" />
 
 <!-- Stats cards -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">

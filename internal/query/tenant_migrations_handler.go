@@ -3,10 +3,13 @@ package query
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/sqllog"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -77,7 +80,19 @@ func HandleTenantMigrations(exec *MigrationExecutor, readPool *pgxpool.Pool) htt
 
 		actorID, actorEmail := audit.ActorFromContext(req.Context())
 
+		logEntry := sqllog.FromRequest(req, sqllog.SourceMigration)
+		start := time.Now()
 		applied, err := exec.Apply(req.Context(), projectID, schemaName, body.Version, body.Name, body.SQL)
+		logEntry.DurationMs = sqllog.Ms(time.Since(start))
+		switch {
+		case err != nil:
+			logEntry.Outcome, logEntry.Detail = sqllog.OutcomeError, fmt.Sprintf("migration %d (%s): %s", body.Version, body.Name, err)
+		case !applied:
+			logEntry.Outcome, logEntry.Detail = sqllog.OutcomeOK, fmt.Sprintf("migration %d (%s): already applied, not run", body.Version, body.Name)
+		default:
+			logEntry.Outcome, logEntry.Detail = sqllog.OutcomeOK, fmt.Sprintf("migration %d (%s)", body.Version, body.Name)
+		}
+		sqllog.FromContext(req.Context()).Record(req.Context(), projectID, body.SQL, logEntry)
 		if err != nil {
 			status := http.StatusBadRequest
 			if errors.Is(err, ErrMigrationChecksumMismatch) {

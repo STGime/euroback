@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/sqllog"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1042,11 +1043,20 @@ func handleCreateFunction(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// SQL log: the function as written (the platform builds the same
+		// statement, schema-qualified).
+		logText := fmt.Sprintf("CREATE OR REPLACE FUNCTION %s() RETURNS %s LANGUAGE %s AS $$ %s $$", req.Name, req.Returns, req.Language, req.Body)
+		logEntry := sqllog.FromRequest(r, sqllog.SourceFunction)
+		start := time.Now()
 		if err := CreateFunction(r.Context(), pool, schemaName, req); err != nil {
 			slog.Error("create function failed", "error", err, "schema", schemaName, "function", req.Name)
+			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqllog.OutcomeError, err.Error(), sqllog.Ms(time.Since(start))
+			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		logEntry.Outcome, logEntry.DurationMs = sqllog.OutcomeOK, sqllog.Ms(time.Since(start))
+		sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
 
 		logSchemaChange(pool, r, projectID, "create_function", req.Name, nil, map[string]any{
 			"language": req.Language,
@@ -1302,11 +1312,25 @@ func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// SQL log: the policy as written (expressions are customer SQL).
+		logText := fmt.Sprintf("CREATE POLICY %s ON %s FOR %s", body.Name, tableName, body.Command)
+		if body.Using != "" {
+			logText += " USING (" + body.Using + ")"
+		}
+		if body.WithCheck != "" {
+			logText += " WITH CHECK (" + body.WithCheck + ")"
+		}
+		logEntry := sqllog.FromRequest(r, sqllog.SourcePolicy)
+		start := time.Now()
 		if err := CreateCustomPolicy(r.Context(), pool, schemaName, tableName, body.Name, body.Command, body.Using, body.WithCheck); err != nil {
 			slog.Error("create policy failed", "error", err)
+			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqllog.OutcomeError, err.Error(), sqllog.Ms(time.Since(start))
+			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		logEntry.Outcome, logEntry.DurationMs = sqllog.OutcomeOK, sqllog.Ms(time.Since(start))
+		sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
 
 		logSchemaChange(pool, r, projectID, "create_policy", tableName, nil, map[string]any{"policy": body.Name, "command": body.Command})
 		jsonResponse(w, map[string]any{"status": "ok", "policy": body.Name}, http.StatusCreated)

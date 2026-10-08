@@ -32,6 +32,7 @@ on:
       - migrations/000136_converge_tenant_ownership.up.sql
       - internal/query/converge_ownership_test.go
       - internal/email/delivery_log*.go
+      - internal/sqllog/**
   workflow_dispatch:
 
 permissions:
@@ -102,6 +103,15 @@ jobs:
           EMAIL_LOG_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           EMAIL_LOG_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/email/ -run 'TestEmailLog_ProductionRoles'
+
+      # The SQL log (000139): the gateway may only insert, the developer
+      # pool lists and cleans up.
+      - name: SQL log under the production roles
+        env:
+          SQL_LOG_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+          SQL_LOG_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
+          SQL_LOG_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
+        run: go test -count=1 -v ./internal/sqllog/ -run 'TestSQLLog_ProductionRoles'
 
       # Tenant-table ownership convergence (000136): reassigns to _ddl.
       - name: Converge tenant ownership (000136)

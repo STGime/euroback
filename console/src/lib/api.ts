@@ -153,6 +153,35 @@ export interface EmailLogEntry {
 	detail?: string;
 }
 
+/** One SQL statement sent through the platform
+ * (GET /platform/projects/{id}/sql-log, admin): the console SQL editor,
+ * MCP / CLI with a token, function bodies, custom policies, migrations. */
+export interface SqlLogEntry {
+	id: number;
+	project_id?: string;
+	created_at: string;
+	actor_id?: string;
+	actor_email?: string;
+	pat_id?: string;
+	via: 'console' | 'token';
+	source: 'sql' | 'sql_transaction' | 'function' | 'policy' | 'migration';
+	statement: string;
+	statement_len: number;
+	sha256: string;
+	read_only: boolean;
+	outcome: 'ok' | 'error' | 'refused';
+	detail?: string;
+	duration_ms?: number;
+	row_count?: number;
+	ip?: string;
+}
+
+export interface SqlLogResponse {
+	entries: SqlLogEntry[];
+	retention_days: number;
+	next_before?: number;
+}
+
 /** Payload for PUT /platform/projects/{id}/email-sender. Empty password
  * on an existing sender keeps the stored sealed bytes — the operator
  * can edit other fields without re-typing the secret. */
@@ -1264,6 +1293,14 @@ export class EurobaseAPI {
 	}
 
 	/** The project's auth email log, newest first. */
+	async getSqlLog(projectId: string, opts: { outcome?: string; before?: number; limit?: number } = {}): Promise<SqlLogResponse> {
+		const q = new URLSearchParams();
+		if (opts.outcome) q.set('outcome', opts.outcome);
+		if (opts.before) q.set('before', String(opts.before));
+		q.set('limit', String(opts.limit ?? 100));
+		return this.fetch<SqlLogResponse>(`/platform/projects/${projectId}/sql-log?${q}`);
+	}
+
 	async getEmailLog(projectId: string, limit = 100): Promise<{ entries: EmailLogEntry[]; retention_days: number }> {
 		return this.fetch<{ entries: EmailLogEntry[]; retention_days: number }>(`/platform/projects/${projectId}/email-log?limit=${limit}`);
 	}
@@ -2444,6 +2481,14 @@ export class EurobaseAPI {
 	// ---- Superadmin ----
 
 	/** List every project across every tenant. Superadmin only. */
+	async adminSqlLog(opts: { outcome?: string; before?: number; limit?: number } = {}): Promise<SqlLogResponse> {
+		const q = new URLSearchParams();
+		if (opts.outcome) q.set('outcome', opts.outcome);
+		if (opts.before) q.set('before', String(opts.before));
+		q.set('limit', String(opts.limit ?? 100));
+		return this.fetch<SqlLogResponse>(`/platform/admin/sql-log?${q}`);
+	}
+
 	async adminListAllProjects(): Promise<{ projects: AdminProject[]; total: number }> {
 		return this.fetch<{ projects: AdminProject[]; total: number }>('/platform/admin/projects');
 	}

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/eurobase/euroback/internal/sqllog"
 )
 
 // auditDDLFromSQL inspects the SQL the runner just executed for any DDL
@@ -113,6 +115,30 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 			return
 		}
 
+		// Every statement goes into the SQL log (one row each), including
+		// a request the checks below refuse: the refused statement with
+		// the reason, the others as not run.
+		sl := sqllog.FromContext(r.Context())
+		logEntry := sqllog.FromRequest(r, sqllog.SourceSQLTransaction)
+		logEntry.ReadOnly = req.ReadOnly
+		logProject := ProjectIDFromContext(r.Context())
+		logStmt := func(i int, outcome, detail string, dur, rows *int) {
+			e := logEntry
+			e.Outcome, e.Detail, e.DurationMs, e.RowCount = outcome, detail, dur, rows
+			sl.Record(r.Context(), logProject, req.Statements[i], e)
+		}
+		refuseAt := func(at int, msg string) {
+			for i := range req.Statements {
+				switch {
+				case i == at:
+					logStmt(i, sqllog.OutcomeRefused, msg, nil, nil)
+				default:
+					logStmt(i, sqllog.OutcomeRefused, fmt.Sprintf("not run: statement %d was refused", at+1), nil, nil)
+				}
+			}
+			jsonError(w, fmt.Sprintf("statement %d: %s", at+1, msg), http.StatusBadRequest)
+		}
+
 		// Same rationale as the single-statement handler: run the
 		// cross-schema validator on the platform path too, so a
 		// migrator-owned qualified reference to public.* or another
@@ -127,18 +153,18 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 		platformOpts := CrossSchemaOptions{AllowedPublicNames: PlatformSQLPublicAllowlist}
 		for i, stmt := range req.Statements {
 			if err := ValidateNoCrossSchemaRefsOpts(stmt, schema, platformOpts); err != nil {
-				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
+				refuseAt(i, err.Error())
 				return
 			}
 			// Same catalog guard as the single-statement path — a
 			// multi-statement migration must not be a way around it.
 			if err := ValidateNoCatalogRefs(stmt); err != nil {
-				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
+				refuseAt(i, err.Error())
 				return
 			}
 			// No role / session / privilege management on this path.
 			if err := ValidateNoPrivilegeStatements(stmt); err != nil {
-				jsonError(w, fmt.Sprintf("statement %d: %s", i+1, err.Error()), http.StatusBadRequest)
+				refuseAt(i, err.Error())
 				return
 			}
 		}
@@ -148,8 +174,30 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 		elapsed := time.Since(start)
 		if err != nil {
 			slog.Error("sql transaction failed", "error", err, "schema", schema, "completed", len(results), "total", len(req.Statements))
+			// The whole transaction rolled back. len(results) statements
+			// ran before the one that failed.
+			failed := len(results)
+			for i := range req.Statements {
+				switch {
+				case i < failed:
+					logStmt(i, sqllog.OutcomeError, fmt.Sprintf("rolled back: statement %d failed", failed+1), sqllog.Ms(time.Duration(results[i].ExecutionTimeMs*float64(time.Millisecond))), nil)
+				case i == failed:
+					logStmt(i, sqllog.OutcomeError, err.Error(), nil, nil)
+				default:
+					logStmt(i, sqllog.OutcomeError, fmt.Sprintf("not run: statement %d failed", failed+1), nil, nil)
+				}
+			}
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+
+		for i := range req.Statements {
+			var dur, rows *int
+			if i < len(results) {
+				dur = sqllog.Ms(time.Duration(results[i].ExecutionTimeMs * float64(time.Millisecond)))
+				rows = sqllog.Int(int(results[i].RowCount))
+			}
+			logStmt(i, sqllog.OutcomeOK, "", dur, rows)
 		}
 
 		// Closes #120 for the multi-statement path. Each statement
@@ -179,6 +227,25 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
+		}
+
+		// Platform path (console, MCP, CLI): every statement goes into the
+		// SQL log, including the ones the checks below refuse.
+		logSQL := func(outcome, detail string, dur, rows *int) {}
+		if !forceReadOnly {
+			sl := sqllog.FromContext(r.Context())
+			entry := sqllog.FromRequest(r, sqllog.SourceSQL)
+			entry.ReadOnly = req.ReadOnly
+			projectID := ProjectIDFromContext(r.Context())
+			logSQL = func(outcome, detail string, dur, rows *int) {
+				e := entry
+				e.Outcome, e.Detail, e.DurationMs, e.RowCount = outcome, detail, dur, rows
+				sl.Record(r.Context(), projectID, req.SQL, e)
+			}
+		}
+		refuse := func(msg string) {
+			logSQL(sqllog.OutcomeRefused, msg, nil, nil)
+			jsonError(w, msg, http.StatusBadRequest)
 		}
 
 		// Effective read-only: the SDK path (forceReadOnly=true) is
@@ -215,7 +282,7 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		if err := ValidateNoCrossSchemaRefsOpts(req.SQL, schema, CrossSchemaOptions{
 			AllowedPublicNames: allowlist,
 		}); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			refuse(err.Error())
 			return
 		}
 
@@ -228,13 +295,13 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		// it via developer → migrator → gateway). Cross-tenant
 		// disclosure — see ValidateNoCatalogRefs.
 		if err := ValidateNoCatalogRefs(req.SQL); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			refuse(err.Error())
 			return
 		}
 
 		// Both paths: no role / session / privilege management.
 		if err := ValidateNoPrivilegeStatements(req.SQL); err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			refuse(err.Error())
 			return
 		}
 
@@ -242,7 +309,7 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 			// SDK: validate SELECT-only. Platform path allows writes
 			// against the caller's own tenant schema.
 			if err := ValidateSelectOnly(req.SQL); err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
+				refuse(err.Error())
 				return
 			}
 			// SDK: block reads of sensitive system-table columns
@@ -253,7 +320,7 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 			// output scan below covers SELECT *. Service key is exempt
 			// inside the guard.
 			if err := guardSDKSQLInput(r.Context(), req.SQL); err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
+				refuse(err.Error())
 				return
 			}
 			// Table-level guard: refuse any reference to a system table.
@@ -261,7 +328,7 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 			// row_to_json(u), bare `SELECT u`, composite casts) that the
 			// column-name scans can't see. SDK path only; service exempt.
 			if err := guardSDKSQLTables(r.Context(), req.SQL); err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
+				refuse(err.Error())
 				return
 			}
 		}
@@ -271,11 +338,9 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		// drops the rest. Reject such input here so callers cannot mistake
 		// a partial run for success.
 		if HasMultipleStatements(req.SQL) {
-			jsonError(w,
-				"input contains multiple SQL statements; this endpoint accepts a single statement. "+
-					"Use POST /platform/projects/{id}/data/sql/transaction with a JSON body "+
-					`{"statements": ["...", "..."]}`+" to run a multi-statement migration in one transaction.",
-				http.StatusBadRequest)
+			refuse("input contains multiple SQL statements; this endpoint accepts a single statement. " +
+				"Use POST /platform/projects/{id}/data/sql/transaction with a JSON body " +
+				`{"statements": ["...", "..."]}` + " to run a multi-statement migration in one transaction.")
 			return
 		}
 
@@ -299,6 +364,7 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 
 		if err != nil {
 			slog.Error("sql execution failed", "error", err, "schema", schema)
+			logSQL(sqllog.OutcomeError, err.Error(), sqllog.Ms(elapsed), nil)
 			// The project's per-project login couldn't be opened (not
 			// configured, or a Team project's dedicated DB not serving):
 			// 503, never a fall-through to a shared login.
@@ -350,6 +416,7 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 			ExecutionTimeMs: float64(elapsed.Microseconds()) / 1000.0,
 		}
 
+		logSQL(sqllog.OutcomeOK, "", sqllog.Ms(elapsed), sqllog.Int(len(rows)))
 		slog.Debug("sql query complete", "schema", schema, "rows", len(rows), "ms", resp.ExecutionTimeMs)
 		jsonResponse(w, resp, http.StatusOK)
 	}
