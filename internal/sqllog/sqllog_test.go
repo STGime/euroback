@@ -117,9 +117,9 @@ func TestRefusalAlert_FiresOncePerWindowEvenWhenDropped(t *testing.T) {
 	w := &fakeWriter{}
 	l := NewWithWriter(w)
 	fired := make(chan int, 4)
-	l.OnRefusals = func(projectID, actorEmail string, count int) {
-		if projectID != "p1" || actorEmail != "a@b.c" {
-			t.Errorf("hook got %q %q", projectID, actorEmail)
+	l.OnRefusals = func(projectID string, count int) {
+		if projectID != "p1" {
+			t.Errorf("hook got %q", projectID)
 		}
 		fired <- count
 	}
@@ -153,9 +153,60 @@ func TestFromRequest_ViaAndCaller(t *testing.T) {
 	if e.Via != ViaConsole || e.PATID != "" || e.ActorEmail != "dev@example.com" || e.IP != "203.0.113.7" || e.Source != SourceSQL {
 		t.Errorf("console entry = %+v", e)
 	}
+	// The IP is the trusted hop's view, not a client-chosen header value.
+	r2 := httptest.NewRequest("POST", "/x", nil)
+	r2.RemoteAddr = "10.0.0.5:4444"
+	r2.Header.Set("X-Forwarded-For", "1.2.3.4, 198.51.100.9")
+	if ip := FromRequest(r2, SourceSQL).IP; ip != "198.51.100.9" {
+		t.Errorf("IP = %q, want the right-most (trusted) hop", ip)
+	}
+	// A malformed actor id is dropped (stored as NULL), not written.
+	ctx = audit.WithActor(r.Context(), "dev-user", "dev@example.com")
+	if e := FromRequest(r.WithContext(ctx), SourceSQL); e.ActorID != "" {
+		t.Errorf("non-UUID actor id kept: %q", e.ActorID)
+	}
 	ctx = audit.WithActorToken(ctx, "22222222-2222-2222-2222-222222222222")
 	e = FromRequest(r.WithContext(ctx), SourceSQLTransaction)
 	if e.Via != ViaToken || e.PATID != "22222222-2222-2222-2222-222222222222" {
 		t.Errorf("token entry = %+v", e)
+	}
+}
+
+func TestRecordBatch_OneInsertAndNotRunIsNoRefusal(t *testing.T) {
+	w := &fakeWriter{}
+	l := NewWithWriter(w)
+	fired := 0
+	l.OnRefusals = func(string, int) { fired++ }
+	items := make([]Item, 40)
+	for i := range items {
+		items[i] = Item{Statement: "SELECT 1", Entry: Entry{Via: ViaConsole, Source: SourceSQLTransaction, Outcome: OutcomeNotRun}}
+	}
+	items[3].Entry.Outcome = OutcomeRefused
+	l.RecordBatch(context.Background(), "p1", items)
+	if w.count() != 1 {
+		t.Fatalf("want one INSERT for the batch, got %d", w.count())
+	}
+	if got := len(w.rows[0]); got != 15*len(items) {
+		t.Errorf("want %d args, got %d", 15*len(items), got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if fired != 0 {
+		t.Error("one refused statement plus not-run siblings must not trigger the alert")
+	}
+}
+
+func TestRecordBatch_PartialBudget(t *testing.T) {
+	w := &fakeWriter{}
+	l := NewWithWriter(w)
+	items := make([]Item, logBurst+20)
+	for i := range items {
+		items[i] = Item{Statement: "SELECT 1", Entry: Entry{Via: ViaConsole, Source: SourceSQLTransaction, Outcome: OutcomeOK}}
+	}
+	l.RecordBatch(context.Background(), "p1", items)
+	if w.count() != 1 {
+		t.Fatalf("want one INSERT, got %d", w.count())
+	}
+	if n := len(w.rows[0]) / 15; n < logBurst || n > logBurst+5 {
+		t.Errorf("wrote %d entries, want about the burst (%d)", n, logBurst)
 	}
 }

@@ -18,7 +18,7 @@ func listOptions(r *http.Request) (ListOptions, bool) {
 	q := r.URL.Query()
 	o := ListOptions{Outcome: q.Get("outcome")}
 	switch o.Outcome {
-	case "", OutcomeOK, OutcomeError, OutcomeRefused:
+	case "", OutcomeOK, OutcomeError, OutcomeRefused, OutcomeNotRun:
 	default:
 		return o, false
 	}
@@ -53,7 +53,7 @@ func HandleProjectLog(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		o, ok := listOptions(r)
 		if !ok {
-			writeError(w, "outcome must be ok, error or refused", http.StatusBadRequest)
+			writeError(w, "outcome must be ok, error, refused or not_run", http.StatusBadRequest)
 			return
 		}
 		projectID := chi.URLParam(r, "id")
@@ -73,7 +73,7 @@ func HandleAdminLog(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		o, ok := listOptions(r)
 		if !ok {
-			writeError(w, "outcome must be ok, error or refused", http.StatusBadRequest)
+			writeError(w, "outcome must be ok, error, refused or not_run", http.StatusBadRequest)
 			return
 		}
 		entries, err := ListAll(r.Context(), pool, o)
@@ -88,20 +88,20 @@ func HandleAdminLog(pool *pgxpool.Pool) http.HandlerFunc {
 
 // DiscordRefusalAlert returns an OnRefusals hook that posts to a Discord
 // webhook. An empty URL returns nil (no alert; the warning is still logged).
-func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID, actorEmail string, count int) {
+func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID string, count int) {
 	if webhookURL == "" {
 		return nil
 	}
-	return func(projectID, actorEmail string, count int) {
+	return func(projectID string, count int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		desc := fmt.Sprintf("Project `%s` had **%d** SQL statements refused by the platform's checks within %s.\nLast by: `%s`",
-			projectID, count, RefusalAlertWindow, actorEmail)
+		desc := fmt.Sprintf("Project `%s` had **%d** SQL statements refused by the platform's checks within %s. Details: SQL log in /admin.",
+			projectID, count, RefusalAlertWindow)
 		body, _ := json.Marshal(map[string]any{
 			"embeds": []map[string]any{{
 				"title":       "⚠️ Refused SQL statements",
 				"description": desc,
-				"url":         consoleURL + "/admin",
+				"url":         consoleURL + "/admin/sql",
 				"color":       0xf59e0b, // amber-500
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
 			}},

@@ -1005,6 +1005,22 @@ type StatementResult struct {
 	ExecutionTimeMs float64                  `json:"execution_time_ms"`
 }
 
+// StatementError is the failure of one statement in ExecuteSQLTransaction.
+// Index is the statement's position in the input (as in StatementResult);
+// the message is "statement <index>: <cause>".
+type StatementError struct {
+	Index int
+	Err   error
+	msg   string
+}
+
+func (e *StatementError) Error() string { return e.msg }
+func (e *StatementError) Unwrap() error { return e.Err }
+
+func statementError(i int, err error) error {
+	return &StatementError{Index: i, Err: err, msg: fmt.Sprintf("statement %d: %v", i, err)}
+}
+
 // ExecuteSQLTransaction runs a slice of statements inside a single
 // transaction. Each statement is sent on its own as a parameterless
 // Exec/Query so the extended-protocol "first statement only" trap is
@@ -1065,7 +1081,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 		// Reject embedded multi-statement strings inside a single array
 		// element — that's the same pgx pitfall, just one level down.
 		if HasMultipleStatements(stmt) {
-			return results, fmt.Errorf("statement %d contains multiple statements; pass each as its own array element", i)
+			return results, &StatementError{Index: i, msg: fmt.Sprintf("statement %d contains multiple statements; pass each as its own array element", i)}
 		}
 
 		start := time.Now()
@@ -1075,11 +1091,11 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 		if isSelect {
 			wrapped := fmt.Sprintf("SELECT * FROM (%s) AS _eurobase_q LIMIT %d", stmt, maxRows)
 			if err := pinStringParsing(ctx, tx); err != nil {
-				return results, fmt.Errorf("statement %d: %w", i, err)
+				return results, statementError(i, err)
 			}
 			rows, err := tx.Query(ctx, wrapped)
 			if err != nil {
-				return results, fmt.Errorf("statement %d: %w", i, err)
+				return results, statementError(i, err)
 			}
 			fieldDescs := rows.FieldDescriptions()
 			columns := make([]string, len(fieldDescs))
@@ -1089,7 +1105,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 			scanned, err := scanRows(rows)
 			rows.Close()
 			if err != nil {
-				return results, fmt.Errorf("statement %d: %w", i, err)
+				return results, statementError(i, err)
 			}
 			results = append(results, StatementResult{
 				Index:           i,
@@ -1104,7 +1120,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 
 		tag, err := execCustomerStatement(ctx, tx, stmt)
 		if err != nil {
-			return results, fmt.Errorf("statement %d: %w", i, err)
+			return results, statementError(i, err)
 		}
 		results = append(results, StatementResult{
 			Index:           i,

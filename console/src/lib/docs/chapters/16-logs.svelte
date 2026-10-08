@@ -35,8 +35,9 @@
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Ran</strong> &mdash; with the row count and duration.</li>
-					<li><strong>Failed</strong> &mdash; the database rejected it; the error is shown. In a multi-statement request, the other statements are listed as rolled back or not run.</li>
+					<li><strong>Failed</strong> &mdash; the database rejected it; the error is shown. In a multi-statement request, the statements before it are listed as failed too (rolled back).</li>
 					<li><strong>Refused</strong> &mdash; the platform's checks stopped it before it reached the database, with the reason.</li>
+					<li><strong>Not run</strong> &mdash; in a multi-statement request, skipped because another statement was refused or failed.</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Click an entry for the full statement (the first 8&nbsp;KB are stored, with its length and SHA-256). Statements can contain your data, so SQL history is visible to <strong>project admins</strong> only and kept for <strong>30 days</strong>. SQL your app runs through the SDK isn't listed here.

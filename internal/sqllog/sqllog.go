@@ -14,8 +14,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +23,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/clientip"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/time/rate"
@@ -48,6 +50,9 @@ const (
 	OutcomeOK      = "ok"
 	OutcomeError   = "error"   // the database rejected it
 	OutcomeRefused = "refused" // the platform's checks refused it before it ran
+	// In a multi-statement request: not executed because another statement
+	// was refused or failed. Not counted as a refusal.
+	OutcomeNotRun = "not_run"
 )
 
 // Retention is how long entries are kept.
@@ -102,7 +107,7 @@ type Logger struct {
 
 	// OnRefusals is called (in its own goroutine) when a project reaches
 	// RefusalAlertThreshold refused statements inside RefusalAlertWindow.
-	OnRefusals func(projectID, actorEmail string, count int)
+	OnRefusals func(projectID string, count int)
 
 	mu       sync.Mutex
 	limiters map[string]*rate.Limiter
@@ -164,47 +169,73 @@ func FromRequest(r *http.Request, source string) Entry {
 	if pat != "" {
 		via = ViaToken
 	}
-	ip := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(ip); err == nil {
-		ip = host
-	}
-	return Entry{ActorID: actorID, ActorEmail: actorEmail, PATID: pat, Via: via, Source: source, IP: ip}
+	// The same trusted-hop rule as the platform auth routes: not a client-
+	// supplied forwarding header.
+	ip := clientip.FromRequestDefault(r)
+	return Entry{ActorID: validUUID(actorID), ActorEmail: actorEmail, PATID: validUUID(pat), Via: via, Source: source, IP: ip}
+}
+
+// Item is one statement and its entry, for RecordBatch.
+type Item struct {
+	Statement string
+	Entry     Entry
 }
 
 // Record writes one entry for a statement, best effort: a request never
 // fails or waits long because of its log line.
 func (l *Logger) Record(ctx context.Context, projectID, statement string, e Entry) {
-	if l == nil || projectID == "" {
+	l.RecordBatch(ctx, projectID, []Item{{Statement: statement, Entry: e}})
+}
+
+// RecordBatch writes the entries of one request in a single INSERT (a
+// multi-statement request is one round trip, not one per statement).
+// Entries past the project's write budget are dropped; refusals are
+// counted for the alert before that.
+func (l *Logger) RecordBatch(ctx context.Context, projectID string, items []Item) {
+	if l == nil || projectID == "" || len(items) == 0 {
 		return
 	}
-	if e.Outcome == OutcomeRefused {
-		l.countRefusal(projectID, e.ActorEmail)
+	for _, it := range items {
+		if it.Entry.Outcome == OutcomeRefused {
+			l.countRefusal(projectID)
+		}
 	}
-	if !l.allow(projectID) {
+	items = items[:l.allowN(projectID, len(items))]
+	if len(items) == 0 {
 		return
 	}
-	sum := sha256.Sum256([]byte(statement))
-	// Postgres text can't hold NUL; escape it so such a statement is still
-	// logged (the hash and length are of the original).
-	stored := strings.ReplaceAll(statement, "\x00", `\0`)
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-	defer cancel()
-	_, err := l.pool.Exec(ctx,
-		`INSERT INTO public.platform_sql_log
+	const cols = 15
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO public.platform_sql_log
 		   (project_id, actor_id, actor_email, pat_id, via, source, statement, statement_len, sha256,
-		    read_only, outcome, detail, duration_ms, row_count, ip)
-		 VALUES ($1, NULLIF($2, '')::uuid, NULLIF($3, ''), NULLIF($4, '')::uuid, $5, $6, $7, $8, $9,
-		         $10, $11, NULLIF($12, ''), $13, $14, NULLIF($15, ''))`,
-		projectID, e.ActorID, truncate(e.ActorEmail, 300), e.PATID, e.Via, e.Source,
-		truncate(stored, MaxStatementLen), len(statement), hex.EncodeToString(sum[:]),
-		e.ReadOnly, e.Outcome, truncate(e.Detail, maxDetailLen), e.DurationMs, e.RowCount, truncate(e.IP, 90))
-	if err != nil {
-		slog.Warn("sql log write failed", "project_id", projectID, "error", err)
+		    read_only, outcome, detail, duration_ms, row_count, ip) VALUES `)
+	args := make([]any, 0, cols*len(items))
+	for i, it := range items {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		n := i * cols
+		fmt.Fprintf(&sb, "($%d, NULLIF($%d, '')::uuid, NULLIF($%d, ''), NULLIF($%d, '')::uuid, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NULLIF($%d, ''), $%d, $%d, NULLIF($%d, ''))",
+			n+1, n+2, n+3, n+4, n+5, n+6, n+7, n+8, n+9, n+10, n+11, n+12, n+13, n+14, n+15)
+		e := it.Entry
+		sum := sha256.Sum256([]byte(it.Statement))
+		// Postgres text can't hold NUL; escape it so such a statement is
+		// still logged (the hash and length are of the original).
+		stored := strings.ReplaceAll(it.Statement, "\x00", `\0`)
+		args = append(args, projectID, validUUID(e.ActorID), truncate(e.ActorEmail, 300), validUUID(e.PATID), e.Via, e.Source,
+			truncate(stored, MaxStatementLen), len(it.Statement), hex.EncodeToString(sum[:]),
+			e.ReadOnly, e.Outcome, truncate(e.Detail, maxDetailLen), e.DurationMs, e.RowCount, truncate(e.IP, 90))
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if _, err := l.pool.Exec(ctx, sb.String(), args...); err != nil {
+		slog.Warn("sql log write failed", "project_id", projectID, "entries", len(items), "error", err)
 	}
 }
 
-// allow spends one entry of the project's write budget.
-func (l *Logger) allow(projectID string) bool {
+// allowN spends up to n entries of the project's write budget and returns
+// how many may be written.
+func (l *Logger) allowN(projectID string, n int) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	lim, ok := l.limiters[projectID]
@@ -212,20 +243,21 @@ func (l *Logger) allow(projectID string) bool {
 		lim = rate.NewLimiter(rate.Limit(logRatePerSecond), logBurst)
 		l.limiters[projectID] = lim
 	}
-	if lim.Allow() {
-		return true
+	allowed := 0
+	for allowed < n && lim.Allow() {
+		allowed++
 	}
-	if time.Since(l.dropped[projectID]) > time.Minute {
+	if allowed < n && time.Since(l.dropped[projectID]) > time.Minute {
 		l.dropped[projectID] = time.Now()
-		slog.Warn("sql log: write budget exceeded, dropping entries", "project_id", projectID)
+		slog.Warn("sql log: write budget exceeded, dropping entries", "project_id", projectID, "dropped", n-allowed)
 	}
-	return false
+	return allowed
 }
 
 // countRefusal tracks refused statements per project and calls OnRefusals
 // once per window when the threshold is reached. Counted before the write
 // budget, so dropped entries still count.
-func (l *Logger) countRefusal(projectID, actorEmail string) {
+func (l *Logger) countRefusal(projectID string) {
 	l.mu.Lock()
 	w := l.refusals[projectID]
 	now := time.Now()
@@ -244,7 +276,7 @@ func (l *Logger) countRefusal(projectID, actorEmail string) {
 	if fire {
 		slog.Warn("sql log: many refused statements", "project_id", projectID, "count", count, "window", RefusalAlertWindow.String())
 		if hook != nil {
-			go hook(projectID, actorEmail, count)
+			go hook(projectID, count)
 		}
 	}
 }
@@ -275,14 +307,30 @@ func list(ctx context.Context, pool *pgxpool.Pool, projectID string, o ListOptio
 	if o.Limit <= 0 || o.Limit > 500 {
 		o.Limit = 100
 	}
-	rows, err := pool.Query(ctx,
-		`SELECT `+listColumns+`
-		 FROM public.platform_sql_log
-		 WHERE ($1 = '' OR project_id = NULLIF($1, '')::uuid)
-		   AND ($2 = '' OR outcome = $2)
-		   AND ($3 = 0 OR id < $3)
-		 ORDER BY id DESC
-		 LIMIT $4`, projectID, o.Outcome, o.BeforeID, o.Limit)
+	// Built per filter (no "$1 = '' OR …"), so each shape uses its index:
+	// (project_id, id DESC), or the partial refused index across projects.
+	var where []string
+	var args []any
+	add := func(cond string, v any) {
+		args = append(args, v)
+		where = append(where, fmt.Sprintf(cond, len(args)))
+	}
+	if projectID != "" {
+		add("project_id = $%d", projectID)
+	}
+	if o.Outcome != "" {
+		add("outcome = $%d", o.Outcome)
+	}
+	if o.BeforeID > 0 {
+		add("id < $%d", o.BeforeID)
+	}
+	q := `SELECT ` + listColumns + ` FROM public.platform_sql_log`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	args = append(args, o.Limit)
+	q += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +397,15 @@ func Ms(d time.Duration) *int {
 
 // Int returns a pointer, for Entry.RowCount.
 func Int(n int) *int { return &n }
+
+// validUUID returns s if it's a UUID, else "" (stored as NULL) — a
+// malformed id must not make the whole insert fail.
+func validUUID(s string) string {
+	if _, err := uuid.Parse(s); err != nil {
+		return ""
+	}
+	return s
+}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {

@@ -16,6 +16,8 @@
 	let copiedId = $state<number | null>(null);
 
 	const pageSize = 100;
+	// Only the latest request may update the list (filter / project changes).
+	let requestSeq = 0;
 
 	const SOURCE_TEXT: Record<SqlLogEntry['source'], string> = {
 		sql: 'SQL editor',
@@ -26,7 +28,7 @@
 	};
 
 	async function load(reset: boolean) {
-		const pid = projectId;
+		const seq = ++requestSeq;
 		if (reset) {
 			loading = true;
 			entries = [];
@@ -36,16 +38,19 @@
 		}
 		error = null;
 		try {
-			const resp = await api.getSqlLog(pid, { outcome, before: reset ? undefined : nextBefore, limit: pageSize });
-			if (pid !== projectId) return;
+			const resp = await api.getSqlLog(projectId, { outcome, before: reset ? undefined : nextBefore, limit: pageSize });
+			if (seq !== requestSeq) return;
 			entries = reset ? resp.entries : [...entries, ...resp.entries];
 			retentionDays = resp.retention_days;
 			nextBefore = resp.entries.length === pageSize ? resp.next_before : undefined;
 		} catch (e) {
+			if (seq !== requestSeq) return;
 			error = e instanceof Error ? e.message : 'Failed to load the SQL history';
 		} finally {
-			loading = false;
-			loadingMore = false;
+			if (seq === requestSeq) {
+				loading = false;
+				loadingMore = false;
+			}
 		}
 	}
 
@@ -80,9 +85,10 @@
 	const outcomeClass: Record<SqlLogEntry['outcome'], string> = {
 		ok: 'bg-green-50 text-green-700 ring-green-600/20',
 		error: 'bg-red-50 text-red-700 ring-red-600/20',
-		refused: 'bg-amber-50 text-amber-800 ring-amber-600/20'
+		refused: 'bg-amber-50 text-amber-800 ring-amber-600/20',
+		not_run: 'bg-gray-50 text-gray-600 ring-gray-500/20'
 	};
-	const outcomeText: Record<SqlLogEntry['outcome'], string> = { ok: 'Ran', error: 'Failed', refused: 'Refused' };
+	const outcomeText: Record<SqlLogEntry['outcome'], string> = { ok: 'Ran', error: 'Failed', refused: 'Refused', not_run: 'Not run' };
 </script>
 
 <LogsTabs {projectId} active="sql" />
@@ -100,6 +106,7 @@
 			<option value="ok">Ran</option>
 			<option value="error">Failed</option>
 			<option value="refused">Refused</option>
+			<option value="not_run">Not run</option>
 		</select>
 	</label>
 </div>

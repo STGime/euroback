@@ -115,27 +115,31 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 			return
 		}
 
-		// Every statement goes into the SQL log (one row each), including
-		// a request the checks below refuse: the refused statement with
-		// the reason, the others as not run.
+		// Every statement goes into the SQL log (one row each, one INSERT per
+		// request), including a request the checks below refuse.
 		sl := sqllog.FromContext(r.Context())
 		logEntry := sqllog.FromRequest(r, sqllog.SourceSQLTransaction)
 		logEntry.ReadOnly = req.ReadOnly
 		logProject := ProjectIDFromContext(r.Context())
-		logStmt := func(i int, outcome, detail string, dur, rows *int) {
+		logAll := func(entryFor func(i int) sqllog.Entry) {
+			items := make([]sqllog.Item, len(req.Statements))
+			for i, stmt := range req.Statements {
+				items[i] = sqllog.Item{Statement: stmt, Entry: entryFor(i)}
+			}
+			sl.RecordBatch(r.Context(), logProject, items)
+		}
+		with := func(outcome, detail string, dur, rows *int) sqllog.Entry {
 			e := logEntry
 			e.Outcome, e.Detail, e.DurationMs, e.RowCount = outcome, detail, dur, rows
-			sl.Record(r.Context(), logProject, req.Statements[i], e)
+			return e
 		}
 		refuseAt := func(at int, msg string) {
-			for i := range req.Statements {
-				switch {
-				case i == at:
-					logStmt(i, sqllog.OutcomeRefused, msg, nil, nil)
-				default:
-					logStmt(i, sqllog.OutcomeRefused, fmt.Sprintf("not run: statement %d was refused", at+1), nil, nil)
+			logAll(func(i int) sqllog.Entry {
+				if i == at {
+					return with(sqllog.OutcomeRefused, msg, nil, nil)
 				}
-			}
+				return with(sqllog.OutcomeNotRun, fmt.Sprintf("statement %d was refused", at+1), nil, nil)
+			})
 			jsonError(w, fmt.Sprintf("statement %d: %s", at+1, msg), http.StatusBadRequest)
 		}
 
@@ -174,31 +178,14 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 		elapsed := time.Since(start)
 		if err != nil {
 			slog.Error("sql transaction failed", "error", err, "schema", schema, "completed", len(results), "total", len(req.Statements))
-			// The whole transaction rolled back. len(results) statements
-			// ran before the one that failed.
-			failed := len(results)
-			for i := range req.Statements {
-				switch {
-				case i < failed:
-					logStmt(i, sqllog.OutcomeError, fmt.Sprintf("rolled back: statement %d failed", failed+1), sqllog.Ms(time.Duration(results[i].ExecutionTimeMs*float64(time.Millisecond))), nil)
-				case i == failed:
-					logStmt(i, sqllog.OutcomeError, err.Error(), nil, nil)
-				default:
-					logStmt(i, sqllog.OutcomeError, fmt.Sprintf("not run: statement %d failed", failed+1), nil, nil)
-				}
-			}
+			ran := resultsByIndex(results)
+			logAll(func(i int) sqllog.Entry { return with(txLogOutcome(i, ran, err)) })
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		for i := range req.Statements {
-			var dur, rows *int
-			if i < len(results) {
-				dur = sqllog.Ms(time.Duration(results[i].ExecutionTimeMs * float64(time.Millisecond)))
-				rows = sqllog.Int(int(results[i].RowCount))
-			}
-			logStmt(i, sqllog.OutcomeOK, "", dur, rows)
-		}
+		ran := resultsByIndex(results)
+		logAll(func(i int) sqllog.Entry { return with(txLogOutcome(i, ran, nil)) })
 
 		// Closes #120 for the multi-statement path. Each statement
 		// committed successfully (the whole tx did), so audit any DDL
@@ -420,4 +407,55 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 		slog.Debug("sql query complete", "schema", schema, "rows", len(rows), "ms", resp.ExecutionTimeMs)
 		jsonResponse(w, resp, http.StatusOK)
 	}
+}
+
+// txLogOutcome is the SQL log outcome of input statement i of a
+// transaction, given the statements that ran and the error (nil = the
+// transaction committed). On error the whole transaction rolled back: a
+// StatementError names the failing input position; any other error (setup,
+// commit) applies to every statement.
+func txLogOutcome(i int, ran ranStatements, err error) (outcome, detail string, dur, rows *int) {
+	if err == nil {
+		return sqllog.OutcomeOK, "", ran.duration(i), ran.rows(i)
+	}
+	var stmtErr *StatementError
+	if !errors.As(err, &stmtErr) {
+		return sqllog.OutcomeError, "transaction not committed: " + err.Error(), ran.duration(i), nil
+	}
+	switch {
+	case i == stmtErr.Index:
+		return sqllog.OutcomeError, err.Error(), nil, nil
+	case i < stmtErr.Index:
+		return sqllog.OutcomeError, fmt.Sprintf("rolled back: statement %d failed", stmtErr.Index+1), ran.duration(i), nil
+	default:
+		return sqllog.OutcomeNotRun, fmt.Sprintf("statement %d failed", stmtErr.Index+1), nil, nil
+	}
+}
+
+// ranStatements maps ExecuteSQLTransaction results by input position
+// (blank input elements have none).
+type ranStatements map[int]StatementResult
+
+func resultsByIndex(results []StatementResult) ranStatements {
+	m := make(ranStatements, len(results))
+	for _, r := range results {
+		m[r.Index] = r
+	}
+	return m
+}
+
+func (m ranStatements) duration(i int) *int {
+	r, ok := m[i]
+	if !ok {
+		return nil
+	}
+	return sqllog.Ms(time.Duration(r.ExecutionTimeMs * float64(time.Millisecond)))
+}
+
+func (m ranStatements) rows(i int) *int {
+	r, ok := m[i]
+	if !ok {
+		return nil
+	}
+	return sqllog.Int(int(r.RowCount))
 }

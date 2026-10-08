@@ -29,20 +29,24 @@ CREATE TABLE IF NOT EXISTS public.platform_sql_log (
     statement_len INTEGER NOT NULL,
     sha256        TEXT NOT NULL CHECK (length(sha256) = 64),
     read_only     BOOLEAN NOT NULL DEFAULT false,
-    outcome       TEXT NOT NULL CHECK (outcome IN ('ok', 'error', 'refused')),
+    -- not_run: in a multi-statement request, not executed because another
+    -- statement was refused or failed.
+    outcome       TEXT NOT NULL CHECK (outcome IN ('ok', 'error', 'refused', 'not_run')),
     detail        TEXT CHECK (length(detail) <= 600),
     duration_ms   INTEGER,
     row_count     INTEGER,
     ip            TEXT CHECK (length(ip) <= 100)
 );
 
-CREATE INDEX IF NOT EXISTS ix_platform_sql_log_project_time
-    ON public.platform_sql_log (project_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS ix_platform_sql_log_time
-    ON public.platform_sql_log (created_at);
+-- Listings are newest first by id (keyset pagination on id).
+CREATE INDEX IF NOT EXISTS ix_platform_sql_log_project_id
+    ON public.platform_sql_log (project_id, id DESC);
 -- Platform-wide view of refused statements (superadmin).
 CREATE INDEX IF NOT EXISTS ix_platform_sql_log_refused
-    ON public.platform_sql_log (created_at DESC) WHERE outcome = 'refused';
+    ON public.platform_sql_log (id DESC) WHERE outcome = 'refused';
+-- Retention cleanup.
+CREATE INDEX IF NOT EXISTS ix_platform_sql_log_time
+    ON public.platform_sql_log (created_at);
 
 -- Default privileges (000037) give the gateway full DML and SELECT on the
 -- sequence; it only writes.

@@ -12,8 +12,11 @@
 	let expandedId = $state<number | null>(null);
 
 	const pageSize = 100;
+	// Only the latest request may update the list (filter / project changes).
+	let requestSeq = 0;
 
 	async function load(reset: boolean) {
+		const seq = ++requestSeq;
 		if (reset) {
 			loading = true;
 			entries = [];
@@ -24,13 +27,17 @@
 		error = null;
 		try {
 			const resp = await api.adminSqlLog({ outcome, before: reset ? undefined : nextBefore, limit: pageSize });
+			if (seq !== requestSeq) return;
 			entries = reset ? resp.entries : [...entries, ...resp.entries];
 			nextBefore = resp.entries.length === pageSize ? resp.next_before : undefined;
 		} catch (e) {
+			if (seq !== requestSeq) return;
 			error = e instanceof Error ? e.message : 'Failed to load the SQL log';
 		} finally {
-			loading = false;
-			loadingMore = false;
+			if (seq === requestSeq) {
+				loading = false;
+				loadingMore = false;
+			}
 		}
 	}
 
@@ -61,6 +68,7 @@
 				<option value="refused">Refused</option>
 				<option value="error">Failed</option>
 				<option value="ok">Ran</option>
+				<option value="not_run">Not run</option>
 				<option value="">All</option>
 			</select>
 		</label>

@@ -169,7 +169,7 @@ export interface SqlLogEntry {
 	statement_len: number;
 	sha256: string;
 	read_only: boolean;
-	outcome: 'ok' | 'error' | 'refused';
+	outcome: 'ok' | 'error' | 'refused' | 'not_run';
 	detail?: string;
 	duration_ms?: number;
 	row_count?: number;
