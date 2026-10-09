@@ -43,6 +43,7 @@ const (
 	SourceFunction       = "function"        // POST …/schema/functions (the generated CREATE FUNCTION)
 	SourcePolicy         = "policy"          // custom RLS policy (the generated CREATE POLICY)
 	SourceMigration      = "migration"       // POST …/migrations (the migration body)
+	SourceCron           = "cron"            // SQL of a cron job: saved, or a console test run
 )
 
 // Outcomes.
@@ -98,6 +99,9 @@ type Entry struct {
 	DurationMs   *int      `json:"duration_ms,omitempty"`
 	RowCount     *int      `json:"row_count,omitempty"`
 	IP           string    `json:"ip,omitempty"`
+	// Set when the project was deleted: the statement text and detail were
+	// cleared then (000140); the rest of the entry is kept.
+	ProjectDeletedAt *time.Time `json:"project_deleted_at,omitempty"`
 }
 
 // Logger writes entries. It holds the gateway's runtime pool, which may
@@ -290,7 +294,7 @@ type ListOptions struct {
 
 const listColumns = `id, project_id, created_at, COALESCE(actor_id::text, ''), COALESCE(actor_email, ''),
 	COALESCE(pat_id::text, ''), via, source, statement, statement_len, sha256, read_only, outcome,
-	COALESCE(detail, ''), duration_ms, row_count, COALESCE(ip, '')`
+	COALESCE(detail, ''), duration_ms, row_count, COALESCE(ip, ''), project_deleted_at`
 
 // List returns a project's entries, newest first. Developer pool (the
 // runtime role can't read the table).
@@ -339,7 +343,7 @@ func list(ctx context.Context, pool *pgxpool.Pool, projectID string, o ListOptio
 	for rows.Next() {
 		var e Entry
 		if err := rows.Scan(&e.ID, &e.ProjectID, &e.CreatedAt, &e.ActorID, &e.ActorEmail, &e.PATID, &e.Via, &e.Source,
-			&e.Statement, &e.StatementLen, &e.SHA256, &e.ReadOnly, &e.Outcome, &e.Detail, &e.DurationMs, &e.RowCount, &e.IP); err != nil {
+			&e.Statement, &e.StatementLen, &e.SHA256, &e.ReadOnly, &e.Outcome, &e.Detail, &e.DurationMs, &e.RowCount, &e.IP, &e.ProjectDeletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -347,8 +351,24 @@ func list(ctx context.Context, pool *pgxpool.Pool, projectID string, o ListOptio
 	return out, rows.Err()
 }
 
-// Cleanup deletes entries older than Retention, in batches. Developer pool.
+// Cleanup deletes entries older than Retention, in batches, and scrubs
+// entries of projects that no longer exist (written by a request still in
+// flight while the project was deleted, after the delete trigger ran).
+// Developer pool.
 func Cleanup(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	// Late entries are minutes old; a day back keeps the check small. A
+	// failure here is logged and doesn't hold up the retention delete.
+	scrubCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	_, err := pool.Exec(scrubCtx,
+		`UPDATE public.platform_sql_log l
+		    SET statement = '', detail = NULL, ip = NULL, project_deleted_at = now()
+		  WHERE l.project_deleted_at IS NULL
+		    AND l.created_at > now() - interval '1 day'
+		    AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = l.project_id)`)
+	cancel()
+	if err != nil {
+		slog.Error("sql log: scrub entries of deleted projects failed", "error", err)
+	}
 	var total int64
 	for {
 		batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -516,7 +517,12 @@ func (s *CronService) validateSQLActionFor(ctx context.Context, projectID, actio
 	if err != nil {
 		return errors.New("could not validate the sql action; try again")
 	}
-	return validateCronSQLAction(action, schema)
+	// Only the SQL checks themselves are refusals; a failed lookup above
+	// isn't the developer's SQL.
+	if err := validateCronSQLAction(action, schema); err != nil {
+		return &query.RefusedError{Err: err}
+	}
+	return nil
 }
 
 // projectSchema returns the project's tenant schema name.

@@ -422,13 +422,17 @@ func txLogOutcome(i int, ran ranStatements, err error) (outcome, detail string, 
 	if !errors.As(err, &stmtErr) {
 		return sqllog.OutcomeError, "transaction not committed: " + err.Error(), ran.duration(i), nil
 	}
+	what := "failed"
+	if IsRefused(stmtErr) {
+		what = "was refused"
+	}
 	switch {
 	case i == stmtErr.Index:
-		return sqllog.OutcomeError, err.Error(), nil, nil
+		return sqlLogOutcome(stmtErr), err.Error(), nil, nil
 	case i < stmtErr.Index:
-		return sqllog.OutcomeError, fmt.Sprintf("rolled back: statement %d failed", stmtErr.Index+1), ran.duration(i), nil
+		return sqllog.OutcomeError, fmt.Sprintf("rolled back: statement %d %s", stmtErr.Index+1, what), ran.duration(i), nil
 	default:
-		return sqllog.OutcomeNotRun, fmt.Sprintf("statement %d failed", stmtErr.Index+1), nil, nil
+		return sqllog.OutcomeNotRun, fmt.Sprintf("statement %d %s", stmtErr.Index+1, what), nil, nil
 	}
 }
 

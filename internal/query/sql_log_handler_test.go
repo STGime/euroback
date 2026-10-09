@@ -131,8 +131,37 @@ func TestTxLogOutcome(t *testing.T) {
 	if _, _, _, rows := txLogOutcome(2, ran, nil); rows == nil || *rows != 7 {
 		t.Error("row count should come from the matching result, not the slice position")
 	}
+	// An element with several statements is refused by the engine's check.
+	multi := &StatementError{Index: 1, Err: refusedf("statement 1 contains multiple statements"), msg: "statement 1 contains multiple statements"}
+	if o, _, _, _ := txLogOutcome(1, ran, multi); o != sqllog.OutcomeRefused {
+		t.Errorf("multi-statement element: outcome %q, want refused", o)
+	}
+	if o, d, _, _ := txLogOutcome(2, ran, multi); o != sqllog.OutcomeNotRun || d != "statement 2 was refused" {
+		t.Errorf("after a refused element: %q %q", o, d)
+	}
 	// The message is unchanged for callers.
 	if stmtErr.Error() != `statement 3: relation "nope" does not exist` {
 		t.Errorf("StatementError message = %q", stmtErr.Error())
+	}
+}
+
+// The platform's own checks on function and policy SQL are "refused" (the
+// SQL log tells them apart from database errors); messages are unchanged.
+func TestDDLValidation_IsRefused(t *testing.T) {
+	ctx := context.Background()
+	err := CreateFunction(ctx, nil, "tenant_probe", CreateFunctionRequest{Name: "f", Body: "SELECT 1", Language: "python"})
+	if !IsRefused(err) || err.Error() != `unsupported language "python"; use 'sql' or 'plpgsql'` {
+		t.Errorf("CreateFunction: %v (refused=%v)", err, IsRefused(err))
+	}
+	err = CreateFunction(ctx, nil, "tenant_probe", CreateFunctionRequest{Name: "bad name;", Body: "SELECT 1", Language: "sql"})
+	if !IsRefused(err) {
+		t.Errorf("CreateFunction bad identifier: %v not refused", err)
+	}
+	err = CreateCustomPolicy(ctx, nil, "tenant_probe", "todos", "bad name;", "SELECT", "true", "")
+	if !IsRefused(err) {
+		t.Errorf("CreateCustomPolicy: %v not refused", err)
+	}
+	if IsRefused(errors.New("permission denied")) {
+		t.Error("a plain error must not count as refused")
 	}
 }

@@ -96,12 +96,17 @@
 					{#each entries as e (e.id)}
 						<tr class="cursor-pointer align-top hover:bg-gray-50" onclick={() => (expandedId = expandedId === e.id ? null : e.id)}>
 							<td class="whitespace-nowrap px-4 py-3 text-xs text-gray-500">{new Date(e.created_at).toLocaleString()}</td>
-							<td class="px-4 py-3 font-mono text-xs text-gray-600">{e.project_id?.slice(0, 8)}</td>
+							<td class="px-4 py-3 font-mono text-xs text-gray-600">
+								{e.project_id?.slice(0, 8)}
+								{#if e.project_deleted_at}<div class="font-sans text-red-600">deleted</div>{/if}
+							</td>
 							<td class="px-4 py-3 text-xs">
 								<div class="text-gray-900">{e.actor_email || '—'}</div>
 								<div class="text-gray-400">{e.via}{e.ip ? ` · ${e.ip}` : ''}</div>
 							</td>
-							<td class="px-4 py-3 font-mono text-xs text-gray-800 break-all">{oneLine(e.statement)}</td>
+							<td class="px-4 py-3 font-mono text-xs text-gray-800 break-all">
+								{#if e.project_deleted_at}<span class="font-sans italic text-gray-400">text removed when the project was deleted</span>{:else}{oneLine(e.statement)}{/if}
+							</td>
 							<td class="px-4 py-3 text-xs text-gray-600">{e.outcome}{e.detail ? `: ${e.detail.slice(0, 100)}` : ''}</td>
 						</tr>
 						{#if expandedId === e.id}
@@ -111,7 +116,11 @@
 										Project <span class="font-mono">{e.project_id}</span> · {e.source} · {e.statement_len} characters · SHA-256
 										<span class="font-mono">{e.sha256}</span>{#if e.pat_id} · token <span class="font-mono">{e.pat_id}</span>{/if}
 									</p>
-									<pre class="max-h-80 overflow-auto rounded-lg border border-gray-200 bg-white p-3 font-mono text-xs text-gray-800 whitespace-pre-wrap">{e.statement}</pre>
+									{#if e.project_deleted_at}
+										<p class="text-xs italic text-gray-500">Statement text, detail and IP were removed when the project was deleted ({new Date(e.project_deleted_at).toLocaleString()}).</p>
+									{:else}
+										<pre class="max-h-80 overflow-auto rounded-lg border border-gray-200 bg-white p-3 font-mono text-xs text-gray-800 whitespace-pre-wrap">{e.statement}</pre>
+									{/if}
 									{#if e.detail}<p class="mt-2 text-xs text-red-700">{e.detail}</p>{/if}
 								</td>
 							</tr>

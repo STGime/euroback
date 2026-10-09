@@ -1109,10 +1109,10 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 		return perr
 	}
 	if platformHelperFunctions[req.Name] {
-		return fmt.Errorf("function name %q is reserved by the platform", req.Name)
+		return refusedf("function name %q is reserved by the platform", req.Name)
 	}
 	if err := validateIdentifier(req.Name, "function"); err != nil {
-		return err
+		return refused(err)
 	}
 
 	lang := strings.ToLower(strings.TrimSpace(req.Language))
@@ -1120,7 +1120,7 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 		lang = "plpgsql"
 	}
 	if !allowedFunctionLanguages[lang] {
-		return fmt.Errorf("unsupported language %q; use 'sql' or 'plpgsql'", req.Language)
+		return refusedf("unsupported language %q; use 'sql' or 'plpgsql'", req.Language)
 	}
 
 	returns := strings.ToLower(strings.TrimSpace(req.Returns))
@@ -1128,16 +1128,16 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 		returns = "void"
 	}
 	if !allowedReturnTypes[returns] {
-		return fmt.Errorf("unsupported return type %q", req.Returns)
+		return refusedf("unsupported return type %q", req.Returns)
 	}
 
 	if strings.TrimSpace(req.Body) == "" {
-		return fmt.Errorf("function body cannot be empty")
+		return refusedf("function body cannot be empty")
 	}
 
 	// Reject dollar-quoting in body to prevent escaping out of the $$ block.
 	if strings.Contains(req.Body, "$$") {
-		return fmt.Errorf("function body cannot contain '$$'")
+		return refusedf("function body cannot contain '$$'")
 	}
 
 	createSQL := fmt.Sprintf(
@@ -1484,13 +1484,13 @@ func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tab
 	qt := qualifiedTable(schemaName, tableName)
 
 	if !validIdentRe.MatchString(policyName) {
-		return fmt.Errorf("invalid policy name (use letters, digits, underscores)")
+		return refusedf("invalid policy name (use letters, digits, underscores)")
 	}
 
 	validCmds := map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true, "ALL": true}
 	command = strings.ToUpper(command)
 	if !validCmds[command] {
-		return fmt.Errorf("command must be SELECT, INSERT, UPDATE, DELETE, or ALL")
+		return refusedf("command must be SELECT, INSERT, UPDATE, DELETE, or ALL")
 	}
 
 	sql := fmt.Sprintf("CREATE POLICY %s ON %s FOR %s", quoteIdent(policyName), qt, command)

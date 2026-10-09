@@ -1050,7 +1050,7 @@ func handleCreateFunction(pool *pgxpool.Pool) http.HandlerFunc {
 		start := time.Now()
 		if err := CreateFunction(r.Context(), pool, schemaName, req); err != nil {
 			slog.Error("create function failed", "error", err, "schema", schemaName, "function", req.Name)
-			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqllog.OutcomeError, err.Error(), sqllog.Ms(time.Since(start))
+			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqlLogOutcome(err), err.Error(), sqllog.Ms(time.Since(start))
 			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1324,7 +1324,7 @@ func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
 		start := time.Now()
 		if err := CreateCustomPolicy(r.Context(), pool, schemaName, tableName, body.Name, body.Command, body.Using, body.WithCheck); err != nil {
 			slog.Error("create policy failed", "error", err)
-			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqllog.OutcomeError, err.Error(), sqllog.Ms(time.Since(start))
+			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqlLogOutcome(err), err.Error(), sqllog.Ms(time.Since(start))
 			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return

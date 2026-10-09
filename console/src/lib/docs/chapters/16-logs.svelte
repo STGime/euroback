@@ -31,7 +31,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">SQL history</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					<strong>Logs &rarr; SQL history</strong> lists every SQL statement sent to the project through the platform: the SQL editor, the multi-statement endpoint, the MCP server and the CLI (anything using a personal access token), plus function bodies, custom RLS policies and migrations. Each entry shows who sent it, whether it came from a console session or a token, the statement, and the result:
+					<strong>Logs &rarr; SQL history</strong> lists every SQL statement sent to the project through the platform: the SQL editor, the multi-statement endpoint, the MCP server and the CLI (anything using a personal access token), plus function bodies, custom RLS policies, migrations and the SQL of cron jobs (when saved or test-run). Each entry shows who sent it, whether it came from a console session or a token, the statement, and the result:
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Ran</strong> &mdash; with the row count and duration.</li>
@@ -40,7 +40,7 @@
 					<li><strong>Not run</strong> &mdash; in a multi-statement request, skipped because another statement was refused or failed.</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Click an entry for the full statement (the first 8&nbsp;KB are stored, with its length and SHA-256). Statements can contain your data, so SQL history is visible to <strong>project admins</strong> only and kept for <strong>30 days</strong>. SQL your app runs through the SDK isn't listed here.
+					Click an entry for the full statement (the first 8&nbsp;KB are stored, with its length and SHA-256). Statements can contain your data, so SQL history is visible to <strong>project admins</strong> only and kept for <strong>30 days</strong>. SQL your app runs through the SDK isn't listed here. When a project is deleted, its entries' statement text, error detail and IP address are removed; who sent what, when and with what result is kept until the 30 days are up.
 				</p>
 			</div>
 

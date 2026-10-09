@@ -49,6 +49,8 @@ func TestSQLLog_ProductionRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		// No FK any more (000140): entries outlive the project.
+		_, _ = admin.Exec(context.Background(), `DELETE FROM public.platform_sql_log WHERE project_id = $1`, projectID)
 		_, _ = admin.Exec(context.Background(), `DELETE FROM projects WHERE id = $1`, projectID)
 		_, _ = admin.Exec(context.Background(), `DELETE FROM platform_users WHERE id = $1`, projectID)
 	})
@@ -130,5 +132,44 @@ func TestSQLLog_ProductionRoles(t *testing.T) {
 	}
 	if len(entries) != 2 {
 		t.Errorf("after cleanup: %+v", entries)
+	}
+
+	// Deleting the project (as the gateway does) keeps the entries but
+	// clears their text and detail (000140) — the gateway itself can't
+	// update the log; the trigger does it.
+	l.Record(ctx, projectID, "SELECT secret_literal", Entry{Via: ViaConsole, Source: SourceCron, Outcome: OutcomeRefused, Detail: "names a table"})
+	if _, err := gw.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID); err != nil {
+		t.Fatalf("gateway deleting the project: %v", err)
+	}
+	kept, err := List(ctx, dev, projectID, ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 3 {
+		t.Fatalf("after project delete: want 3 entries kept, got %d", len(kept))
+	}
+	for _, e := range kept {
+		if e.Statement != "" || e.Detail != "" || e.ProjectDeletedAt == nil || len(e.SHA256) != 64 || e.Outcome == "" {
+			t.Errorf("after project delete: %+v", e)
+		}
+	}
+	if kept[0].Source != SourceCron {
+		t.Errorf("cron entry: %+v", kept[0])
+	}
+	for _, e := range kept {
+		if e.IP != "" {
+			t.Errorf("IP kept after project delete: %+v", e)
+		}
+	}
+
+	// An entry written after the delete (a request still in flight) is
+	// scrubbed by the cleanup.
+	l.Record(ctx, projectID, "SELECT late", Entry{Via: ViaConsole, Source: SourceSQL, Outcome: OutcomeOK, IP: "203.0.113.9"})
+	if _, err := Cleanup(ctx, dev); err != nil {
+		t.Fatal(err)
+	}
+	after, err := List(ctx, dev, projectID, ListOptions{Limit: 1})
+	if err != nil || len(after) != 1 || after[0].Statement != "" || after[0].IP != "" || after[0].ProjectDeletedAt == nil {
+		t.Errorf("late entry after cleanup: %v %+v", err, after)
 	}
 }

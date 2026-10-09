@@ -164,7 +164,7 @@ export interface SqlLogEntry {
 	actor_email?: string;
 	pat_id?: string;
 	via: 'console' | 'token';
-	source: 'sql' | 'sql_transaction' | 'function' | 'policy' | 'migration';
+	source: 'sql' | 'sql_transaction' | 'function' | 'policy' | 'migration' | 'cron';
 	statement: string;
 	statement_len: number;
 	sha256: string;
@@ -174,6 +174,8 @@ export interface SqlLogEntry {
 	duration_ms?: number;
 	row_count?: number;
 	ip?: string;
+	/** Set when the project was deleted; statement and detail were cleared then. */
+	project_deleted_at?: string;
 }
 
 export interface SqlLogResponse {
