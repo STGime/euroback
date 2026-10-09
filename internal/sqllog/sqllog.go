@@ -356,15 +356,18 @@ func list(ctx context.Context, pool *pgxpool.Pool, projectID string, o ListOptio
 // flight while the project was deleted, after the delete trigger ran).
 // Developer pool.
 func Cleanup(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	// Late entries are minutes old; a day back keeps the check small. A
+	// failure here is logged and doesn't hold up the retention delete.
 	scrubCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	_, err := pool.Exec(scrubCtx,
 		`UPDATE public.platform_sql_log l
 		    SET statement = '', detail = NULL, ip = NULL, project_deleted_at = now()
 		  WHERE l.project_deleted_at IS NULL
+		    AND l.created_at > now() - interval '1 day'
 		    AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = l.project_id)`)
 	cancel()
 	if err != nil {
-		return 0, fmt.Errorf("scrub entries of deleted projects: %w", err)
+		slog.Error("sql log: scrub entries of deleted projects failed", "error", err)
 	}
 	var total int64
 	for {
