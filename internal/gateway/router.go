@@ -137,6 +137,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		} else if ensurer != nil {
 			tenantSvc.SetFuncLoginEnsurer(ensurer)
 		}
+		// Persistent DDL login (step 6): the same for `<schema>_ddl`.
+		if tenantlogin.PersistentDDLLogin() {
+			ddlEnsurer, err := tenantlogin.NewDDLEnsurer(developerPool, pool.Config().ConnConfig.Database, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
+			if err != nil {
+				slog.Error("tenant DDL logins misconfigured; new projects wait for the worker", "error", err)
+			} else if ddlEnsurer != nil {
+				tenantSvc.SetDDLLoginEnsurer(ddlEnsurer)
+			}
+		}
 	}
 
 	// Audit service — shared across all route groups that need to log actions.

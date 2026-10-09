@@ -104,8 +104,10 @@ func DedicatedSubject(databaseID, schema string) string {
 // FuncPassword(secret, schema) (RFC 5802 / 7677). The salt is derived
 // from the secret, so the result is deterministic.
 func ScramVerifier(secret []byte, schema string) (string, error) {
-	password := FuncPassword(secret, schema)
-	salt := hmacSHA256(secret, "funcsalt:"+schema)[:16]
+	return scramVerifier(FuncPassword(secret, schema), hmacSHA256(secret, "funcsalt:"+schema)[:16])
+}
+
+func scramVerifier(password string, salt []byte) (string, error) {
 	salted, err := pbkdf2.Key(sha256.New, password, salt, scramIterations, 32)
 	if err != nil {
 		return "", fmt.Errorf("pbkdf2: %w", err)
@@ -185,11 +187,18 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 	if !schemaRe.MatchString(schema) {
 		return fmt.Errorf("invalid tenant schema %q", schema)
 	}
-	role := FuncRole(schema)
 	verifier, err := ScramVerifier(secret, subject)
 	if err != nil {
 		return err
 	}
+	return ensureLogin(ctx, pool, database, FuncRole(schema), verifier, connLimit, asMigrator, nil)
+}
+
+// ensureLogin gives role LOGIN with the verifier and connection limit,
+// clears its role-level settings and makes sure it can CONNECT. extra, if
+// set, runs in the same transaction after the role exists (as migrator
+// when asMigrator).
+func ensureLogin(ctx context.Context, pool *pgxpool.Pool, database, role, verifier string, connLimit int, asMigrator bool, extra func(context.Context, pgx.Tx) error) error {
 
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -213,7 +222,7 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 		return fmt.Errorf("check role: %w", err)
 	}
 	if !exists {
-		return nil // project without a function role (e.g. mid-provisioning)
+		return nil // project without the role yet (e.g. mid-provisioning)
 	}
 	// The verifier is [A-Za-z0-9+/=:$-] only — safe inside the literal.
 	// CONNECTION LIMIT caps what a tenant can do with its own login if it
@@ -254,6 +263,11 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 				return fmt.Errorf("role %s on %s: %w", role, database, ErrNoConnect)
 			}
 			return fmt.Errorf("role %s has no CONNECT on %s and eurobase_migrator could not grant it", role, database)
+		}
+	}
+	if extra != nil {
+		if err := extra(ctx, tx); err != nil {
+			return err
 		}
 	}
 	return tx.Commit(ctx)

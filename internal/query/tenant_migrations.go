@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -169,6 +170,21 @@ type MigrationExecutor struct {
 	adminPool      *pgxpool.Pool
 	baseConnConfig *pgx.ConnConfig
 	passwordSecret []byte
+	// ensureLogin, when set, means the `_ddl` login is persistent (see
+	// WithPersistentLogin): Apply ensures it instead of promoting and
+	// demoting around each run.
+	ensureLogin func(ctx context.Context, schema string) error
+}
+
+// WithPersistentLogin switches the executor to the persistent `_ddl` login
+// (DDL_PERSISTENT_LOGIN, kept by the worker's tenantlogin.DDLEnsurer):
+// ensure applies the login settings for one schema — idempotent, so a
+// tenant the worker hasn't reached yet still works.
+func (e *MigrationExecutor) WithPersistentLogin(ensure func(ctx context.Context, schema string) error) *MigrationExecutor {
+	if e != nil {
+		e.ensureLogin = ensure
+	}
+	return e
 }
 
 // NewMigrationExecutor builds an executor. Returns a disabled executor
@@ -305,35 +321,53 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	ddlRole := tenantDDLRole(schemaName)
 	password := e.ddlRolePassword(schemaName)
 
-	// Promote the per-tenant role to LOGIN with the derived password, run
-	// the migration, then demote it back to NOLOGIN. Keeping the role
-	// NOLOGIN except during an active apply means a leaked DDL_PASSWORD_SECRET
-	// (or a derived password that leaked into the DB log via the ALTER ROLE
-	// statement) can't be used to log in outside the brief apply window.
+	// Without a persistent login: promote the per-tenant role to LOGIN with
+	// the derived password, run the migration, then demote it back to
+	// NOLOGIN, so the login exists only during an apply. With a persistent
+	// login (WithPersistentLogin) the worker keeps it — see below.
 	cfg := e.baseConnConfig.Copy()
 	cfg.User = ddlRole
 	cfg.Password = password
 
 	var conn *pgx.Conn
-	// One retry covers the race where a concurrent apply for the same tenant
-	// demoted the role to NOLOGIN between our promote and connect.
-	for attempt := 0; attempt < 2; attempt++ {
-		if err = e.setRoleLogin(ctx, ddlRole, password, true); err != nil {
-			return false, err
-		}
+	if e.ensureLogin != nil {
+		// Persistent login (DDL_PERSISTENT_LOGIN): the worker keeps the
+		// role loginable, so just connect. Only when the login is refused
+		// (a tenant the worker hasn't reached yet, or a password the
+		// tenant changed) apply its settings and retry once — never on
+		// every run, and never switch the login off: that would break the
+		// project's other connections.
 		conn, err = pgx.ConnectConfig(ctx, cfg)
-		if err == nil {
-			break
+		if err != nil && isLoginRefused(err) {
+			if ensureErr := e.ensureLogin(ctx, schemaName); ensureErr != nil {
+				return false, fmt.Errorf("ensure %s login: %w", ddlRole, ensureErr)
+			}
+			conn, err = pgx.ConnectConfig(ctx, cfg)
 		}
-		if attempt == 1 {
+		if err != nil {
 			return false, fmt.Errorf("connect as %s: %w", ddlRole, err)
 		}
+	} else {
+		// One retry covers the race where a concurrent apply for the same tenant
+		// demoted the role to NOLOGIN between our promote and connect.
+		for attempt := 0; attempt < 2; attempt++ {
+			if err = e.setRoleLogin(ctx, ddlRole, password, true); err != nil {
+				return false, err
+			}
+			conn, err = pgx.ConnectConfig(ctx, cfg)
+			if err == nil {
+				break
+			}
+			if attempt == 1 {
+				return false, fmt.Errorf("connect as %s: %w", ddlRole, err)
+			}
+		}
+		// Demote back to NOLOGIN on the way out (best-effort; uses the parent
+		// ctx so a cancelled request still attempts the lockdown).
+		defer func() {
+			_ = e.setRoleLogin(context.WithoutCancel(ctx), ddlRole, "", false)
+		}()
 	}
-	// Demote back to NOLOGIN on the way out (best-effort; uses the parent
-	// ctx so a cancelled request still attempts the lockdown).
-	defer func() {
-		_ = e.setRoleLogin(context.WithoutCancel(ctx), ddlRole, "", false)
-	}()
 	defer conn.Close(ctx)
 
 	tx, err := conn.Begin(ctx)
@@ -503,4 +537,12 @@ func stripSQLLiterals(sql string) string {
 
 func isAlnumByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// isLoginRefused reports a server refusal of the login itself — wrong
+// password (28P01) or a role that may not log in (28000) — as opposed to
+// a network or capacity error.
+func isLoginRefused(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "28P01" || pgErr.Code == "28000")
 }
