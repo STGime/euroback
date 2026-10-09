@@ -9,19 +9,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// converge_tenant_functions (migration 000141), step 6c for functions:
+// converge_tenant_functions (migration 000141), step 6c: runtime-neutral
+// convergence. Reassigns to <schema>_ddl ONLY objects whose behaviour does
+// not depend on their owner — plain (invoker) functions/procedures,
+// security_invoker views, and standalone types. SECURITY DEFINER functions
+// and owner-run views are LEFT migrator-owned (they run as their owner, so
+// reassigning could change RLS semantics; handled per-object / by step 6d).
 //
-//   - grants <schema>_ddl the in-schema superset (system-table DML, public
-//     helper EXECUTE) FIRST;
-//
-//   - reassigns migrator-owned functions/views/types to _ddl ONLY when their
-//     body stays inside their own schema + public helpers;
-//
-//   - leaves anything that reaches a platform table / another tenant / a
-//     privileged catalog migrator-owned (never silently broken).
-//
-//     CONVERGE_TEST_ADMIN_URL=postgres://postgres@localhost:5432/eurobase \
-//     go test ./internal/query/ -run ConvergeTenantFunctions
+//	CONVERGE_TEST_ADMIN_URL=postgres://postgres@localhost:5432/eurobase \
+//	go test ./internal/query/ -run ConvergeTenantFunctions
 func TestConvergeTenantFunctions(t *testing.T) {
 	adminURL := os.Getenv("CONVERGE_TEST_ADMIN_URL")
 	if adminURL == "" {
@@ -69,82 +65,89 @@ func TestConvergeTenantFunctions(t *testing.T) {
 			t.Fatalf("%s\n  -> %v", sql, err)
 		}
 	}
-	// Everything a developer would create via the console runs as migrator.
+	// Everything a developer creates via the console runs as migrator.
 	q(`SET ROLE eurobase_migrator`)
-	// An app table owned by _ddl (as a real one would be after 000136).
 	q(fmt.Sprintf(`CREATE TABLE %s.notes (id int PRIMARY KEY, body text)`, schema))
 	q(fmt.Sprintf(`ALTER TABLE %s.notes OWNER TO %q`, schema, schema+"_ddl"))
-	// (a) benign SECURITY DEFINER fn touching its own table.
-	q(fmt.Sprintf(`CREATE FUNCTION %s.note_count() RETURNS bigint LANGUAGE sql SECURITY DEFINER
-		SET search_path = %s, public AS 'SELECT count(*) FROM notes'`, schema, schema))
-	// (b) benign SECURITY DEFINER fn touching a SYSTEM table (users).
-	q(fmt.Sprintf(`CREATE FUNCTION %s.user_count() RETURNS bigint LANGUAGE sql SECURITY DEFINER
-		SET search_path = %s, public AS 'SELECT count(*) FROM users'`, schema, schema))
-	// (c) benign plain (non-definer) fn.
+	// Reassign candidates (runtime-neutral):
+	//   plain fn, plain fn naming a platform table (still neutral), a trigger
+	//   fn (plain), a procedure, a security_invoker view, a composite type.
 	q(fmt.Sprintf(`CREATE FUNCTION %s.plain_helper() RETURNS int LANGUAGE sql AS 'SELECT 1'`, schema))
-	// (d) probe: references a platform table.
-	q(fmt.Sprintf(`CREATE FUNCTION %s.read_platform() RETURNS bigint LANGUAGE sql SECURITY DEFINER
+	q(fmt.Sprintf(`CREATE FUNCTION %s.plain_platform() RETURNS bigint LANGUAGE sql
 		AS 'SELECT count(*) FROM public.platform_users'`, schema))
-	// (e) probe: references pg_stat_activity.
-	q(fmt.Sprintf(`CREATE FUNCTION %s.peek() RETURNS bigint LANGUAGE sql SECURITY DEFINER
-		AS 'SELECT count(*) FROM pg_stat_activity'`, schema))
-	// (f) probe: references another tenant schema.
-	q(fmt.Sprintf(`CREATE FUNCTION %s.cross_tenant() RETURNS text LANGUAGE plpgsql SECURITY DEFINER
-		AS $$ BEGIN RETURN 'tenant_00000000_0000_0000_0000_000000000000.secrets'; END $$`, schema))
+	q(fmt.Sprintf(`CREATE FUNCTION %s.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`, schema))
+	q(fmt.Sprintf(`CREATE PROCEDURE %s.do_nothing() LANGUAGE sql AS 'SELECT 1'`, schema))
+	q(fmt.Sprintf(`CREATE VIEW %s.notes_invoker WITH (security_invoker=true) AS SELECT * FROM %s.notes`, schema, schema))
+	q(fmt.Sprintf(`CREATE TYPE %s.pair AS (a int, b int)`, schema))
+	// Left migrator-owned:
+	//   a SECURITY DEFINER fn, and an owner-run (default) view.
+	q(fmt.Sprintf(`CREATE FUNCTION %s.definer_fn() RETURNS bigint LANGUAGE sql SECURITY DEFINER
+		SET search_path = %s, public AS 'SELECT count(*) FROM notes'`, schema, schema))
+	q(fmt.Sprintf(`CREATE VIEW %s.notes_owner AS SELECT * FROM %s.notes`, schema, schema))
 	q(`RESET ROLE`)
 
-	// Converge.
 	if _, err := pool.Exec(ctx, `SELECT public.converge_tenant_functions($1)`, schema); err != nil {
 		t.Fatalf("converge_tenant_functions: %v", err)
 	}
 
-	ownerOf := func(fn string) string {
-		var owner string
+	fnOwner := func(name string) string {
+		var o string
 		if err := pool.QueryRow(ctx,
 			`SELECT pg_get_userbyid(p.proowner) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-			 WHERE n.nspname=$1 AND p.proname=$2`, schema, fn).Scan(&owner); err != nil {
-			t.Fatalf("owner of %s: %v", fn, err)
+			 WHERE n.nspname=$1 AND p.proname=$2`, schema, name).Scan(&o); err != nil {
+			t.Fatalf("owner of fn %s: %v", name, err)
 		}
-		return owner
+		return o
+	}
+	relOwner := func(name string) string {
+		var o string
+		if err := pool.QueryRow(ctx,
+			`SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+			 WHERE n.nspname=$1 AND c.relname=$2`, schema, name).Scan(&o); err != nil {
+			t.Fatalf("owner of rel %s: %v", name, err)
+		}
+		return o
+	}
+	typeOwner := func(name string) string {
+		var o string
+		if err := pool.QueryRow(ctx,
+			`SELECT pg_get_userbyid(t.typowner) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+			 WHERE n.nspname=$1 AND t.typname=$2`, schema, name).Scan(&o); err != nil {
+			t.Fatalf("owner of type %s: %v", name, err)
+		}
+		return o
 	}
 	ddl := schema + "_ddl"
-	// Benign ones reassigned.
-	for _, fn := range []string{"note_count", "user_count", "plain_helper"} {
-		if o := ownerOf(fn); o != ddl {
-			t.Errorf("%s owner = %s, want %s (should have been reassigned)", fn, o, ddl)
+
+	// Reassigned (runtime-neutral).
+	for _, fn := range []string{"plain_helper", "plain_platform", "touch", "do_nothing"} {
+		if o := fnOwner(fn); o != ddl {
+			t.Errorf("%s owner = %s, want %s (plain → reassigned)", fn, o, ddl)
 		}
 	}
-	// Probe-class left migrator-owned.
-	for _, fn := range []string{"read_platform", "peek", "cross_tenant"} {
-		if o := ownerOf(fn); o != "eurobase_migrator" {
-			t.Errorf("%s owner = %s, want eurobase_migrator (must NOT be reassigned)", fn, o)
-		}
+	if o := relOwner("notes_invoker"); o != ddl {
+		t.Errorf("notes_invoker view owner = %s, want %s (security_invoker → reassigned)", o, ddl)
 	}
-	// Platform helpers untouched.
-	if o := ownerOf("auth_uid"); o != "eurobase_migrator" {
+	if o := typeOwner("pair"); o != ddl {
+		t.Errorf("type pair owner = %s, want %s", o, ddl)
+	}
+
+	// Left migrator-owned (owner-dependent behaviour).
+	if o := fnOwner("definer_fn"); o != "eurobase_migrator" {
+		t.Errorf("definer_fn owner = %s, want eurobase_migrator (SECURITY DEFINER must NOT be reassigned)", o)
+	}
+	if o := relOwner("notes_owner"); o != "eurobase_migrator" {
+		t.Errorf("notes_owner view owner = %s, want eurobase_migrator (owner-run view must NOT be reassigned)", o)
+	}
+	if o := fnOwner("auth_uid"); o != "eurobase_migrator" {
 		t.Errorf("auth_uid owner = %s, want eurobase_migrator", o)
 	}
 
-	// The reassigned SECURITY DEFINER functions still RUN (as _ddl): the one
-	// touching its own table and the one touching a system table. If _ddl
-	// lacked the grant, these would raise permission denied.
-	var n int64
-	if err := pool.QueryRow(ctx, fmt.Sprintf(`SELECT %s.note_count()`, schema)).Scan(&n); err != nil {
-		t.Errorf("note_count() after reassign: %v", err)
+	// Idempotent: a second run changes nothing and does not error.
+	if _, err := pool.Exec(ctx, `SELECT public.converge_tenant_functions($1)`, schema); err != nil {
+		t.Fatalf("second converge: %v", err)
 	}
-	if err := pool.QueryRow(ctx, fmt.Sprintf(`SELECT %s.user_count()`, schema)).Scan(&n); err != nil {
-		t.Errorf("user_count() after reassign (runs as _ddl; needs the system-table grant): %v", err)
-	}
-
-	// _ddl got the superset: DML on a system table.
-	for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
-		var ok bool
-		if err := pool.QueryRow(ctx,
-			`SELECT has_table_privilege($1, ($2||'.users')::regclass, $3)`, ddl, schema, priv).Scan(&ok); err != nil {
-			t.Fatal(err)
-		}
-		if !ok {
-			t.Errorf("_ddl missing %s on users after converge", priv)
-		}
+	if o := fnOwner("plain_helper"); o != ddl {
+		t.Errorf("after re-run, plain_helper owner = %s", o)
 	}
 }
