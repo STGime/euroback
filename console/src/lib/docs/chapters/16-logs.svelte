@@ -40,7 +40,7 @@
 					<li><strong>Not run</strong> &mdash; in a multi-statement request, skipped because another statement was refused or failed.</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Click an entry for the full statement (the first 8&nbsp;KB are stored, with its length and SHA-256). Statements can contain your data, so SQL history is visible to <strong>project admins</strong> only and kept for <strong>30 days</strong>. SQL your app runs through the SDK isn't listed here. When a project is deleted, its entries' statement text is removed; who sent what, when and with what result is kept until the 30 days are up.
+					Click an entry for the full statement (the first 8&nbsp;KB are stored, with its length and SHA-256). Statements can contain your data, so SQL history is visible to <strong>project admins</strong> only and kept for <strong>30 days</strong>. SQL your app runs through the SDK isn't listed here. When a project is deleted, its entries' statement text, error detail and IP address are removed; who sent what, when and with what result is kept until the 30 days are up.
 				</p>
 			</div>
 

@@ -1,9 +1,11 @@
 -- 000140_platform_sql_log_keep_on_delete.up.sql
 --
--- 1. Deleting a project no longer deletes its SQL log entries. The text
---    (and error detail) is cleared — it can contain the project's data —
---    but who sent what kind of statement, when, its hash and the outcome
---    stay until the normal 30-day cleanup. Projects are deleted by
+-- 1. Deleting a project no longer deletes its SQL log entries. The text,
+--    error detail and IP are cleared — the text can contain the project's
+--    data — but who sent what kind of statement, when, its hash and the
+--    outcome stay until the normal 30-day cleanup. An entry written by a
+--    request still in flight during the delete is scrubbed by the hourly
+--    cleanup (developer pool, hence its column UPDATE grant). Projects are deleted by
 --    DeleteProject and, with their owner, by account deletion (cascade);
 --    a trigger covers both.
 -- 2. New source 'cron': SQL saved in cron jobs and console test runs.
@@ -33,7 +35,7 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
     UPDATE public.platform_sql_log
-       SET statement = '', detail = NULL, project_deleted_at = now()
+       SET statement = '', detail = NULL, ip = NULL, project_deleted_at = now()
      WHERE project_id = OLD.id
        AND project_deleted_at IS NULL;
     RETURN OLD;
@@ -46,3 +48,5 @@ DROP TRIGGER IF EXISTS platform_sql_log_scrub_on_project_delete ON public.projec
 CREATE TRIGGER platform_sql_log_scrub_on_project_delete
     AFTER DELETE ON public.projects
     FOR EACH ROW EXECUTE FUNCTION public.platform_sql_log_scrub_deleted_project();
+
+GRANT UPDATE (statement, detail, ip, project_deleted_at) ON public.platform_sql_log TO eurobase_developer;

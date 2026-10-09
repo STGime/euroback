@@ -116,7 +116,11 @@
 										Project <span class="font-mono">{e.project_id}</span> · {e.source} · {e.statement_len} characters · SHA-256
 										<span class="font-mono">{e.sha256}</span>{#if e.pat_id} · token <span class="font-mono">{e.pat_id}</span>{/if}
 									</p>
-									<pre class="max-h-80 overflow-auto rounded-lg border border-gray-200 bg-white p-3 font-mono text-xs text-gray-800 whitespace-pre-wrap">{e.statement}</pre>
+									{#if e.project_deleted_at}
+										<p class="text-xs italic text-gray-500">Statement text, detail and IP were removed when the project was deleted ({new Date(e.project_deleted_at).toLocaleString()}).</p>
+									{:else}
+										<pre class="max-h-80 overflow-auto rounded-lg border border-gray-200 bg-white p-3 font-mono text-xs text-gray-800 whitespace-pre-wrap">{e.statement}</pre>
+									{/if}
 									{#if e.detail}<p class="mt-2 text-xs text-red-700">{e.detail}</p>{/if}
 								</td>
 							</tr>

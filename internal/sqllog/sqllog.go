@@ -351,8 +351,21 @@ func list(ctx context.Context, pool *pgxpool.Pool, projectID string, o ListOptio
 	return out, rows.Err()
 }
 
-// Cleanup deletes entries older than Retention, in batches. Developer pool.
+// Cleanup deletes entries older than Retention, in batches, and scrubs
+// entries of projects that no longer exist (written by a request still in
+// flight while the project was deleted, after the delete trigger ran).
+// Developer pool.
 func Cleanup(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	scrubCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	_, err := pool.Exec(scrubCtx,
+		`UPDATE public.platform_sql_log l
+		    SET statement = '', detail = NULL, ip = NULL, project_deleted_at = now()
+		  WHERE l.project_deleted_at IS NULL
+		    AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = l.project_id)`)
+	cancel()
+	if err != nil {
+		return 0, fmt.Errorf("scrub entries of deleted projects: %w", err)
+	}
 	var total int64
 	for {
 		batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

@@ -83,7 +83,8 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 		}
 
 		if err := req.Validate(); err != nil {
-			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeRefused, err.Error(), nil)
+			// A form error (name, schedule, timezone), not a check on the SQL.
+			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeError, err.Error(), nil)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -136,7 +137,7 @@ func handleUpdate(svc *CronService) http.HandlerFunc {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.Action != nil {
+		if req.Action != nil || req.ActionType != nil {
 			logCronSQL(r, projectID, job.ActionType, job.Action, sqllog.OutcomeOK, "saved as cron job "+job.Name, nil)
 		}
 
@@ -418,11 +419,17 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 		res, err := dry.DryRun(r.Context(), projectID, schema, req.ActionType, strings.TrimSpace(req.Action), runAs)
 		switch {
 		case err == nil:
-			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeOK, "test run (rolled back)", sqllog.Ms(time.Since(start)))
+			e := sqllog.FromRequest(r, sqllog.SourceCron)
+			if res != nil && res.RowsAffected != nil {
+				e.RowCount = sqllog.Int(int(*res.RowsAffected))
+			}
+			logCronSQLEntry(r, projectID, req.ActionType, req.Action, e, sqllog.OutcomeOK, "test run (rolled back)", sqllog.Ms(time.Since(start)))
 		case isDryRunValidationErr(err) && !errors.Is(err, errTenantConnect):
 			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeRefused, "test run: "+err.Error(), nil)
 		default:
-			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeError, "test run: "+err.Error(), sqllog.Ms(time.Since(start)))
+			// The same text the caller gets below: driver / network errors
+			// can name internal hosts.
+			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeError, "test run: "+dryRunPublicError(err), sqllog.Ms(time.Since(start)))
 		}
 		if err != nil {
 			// Validation errors and database errors (permission denied,
@@ -458,12 +465,28 @@ func isDryRunValidationErr(err error) bool {
 // logCronSQL records the SQL of a "sql" cron job (saved or test run) in
 // the SQL log. Other action types carry no SQL text.
 func logCronSQL(r *http.Request, projectID, actionType, sql, outcome, detail string, dur *int) {
+	logCronSQLEntry(r, projectID, actionType, sql, sqllog.FromRequest(r, sqllog.SourceCron), outcome, detail, dur)
+}
+
+func logCronSQLEntry(r *http.Request, projectID, actionType, sql string, e sqllog.Entry, outcome, detail string, dur *int) {
 	if actionType != "sql" || strings.TrimSpace(sql) == "" {
 		return
 	}
-	e := sqllog.FromRequest(r, sqllog.SourceCron)
 	e.Outcome, e.Detail, e.DurationMs = outcome, detail, dur
 	sqllog.FromContext(r.Context()).Record(r.Context(), projectID, sql, e)
+}
+
+// dryRunPublicError is the error text a test run's caller may see (and
+// the SQL log stores): validation, database and the platform's own
+// not-ready errors as they are; anything else (network, driver — may
+// name internal hosts) as a generic message.
+func dryRunPublicError(err error) string {
+	var pgErr *pgconn.PgError
+	if isDryRunValidationErr(err) || errors.As(err, &pgErr) ||
+		errors.Is(err, errTenantDBNotReady) || errors.Is(err, errTenantConnect) || errors.Is(err, errTenantRouting) {
+		return err.Error()
+	}
+	return "the test run could not be completed; try again"
 }
 
 // cronLogOutcome: refused by the SQL checks, or another failure.

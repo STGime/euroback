@@ -194,7 +194,7 @@ func (s *CronService) Create(ctx context.Context, projectID string, req CreateCr
 	}
 	if req.ActionType == "sql" {
 		if err := s.validateSQLActionFor(ctx, projectID, req.Action); err != nil {
-			return nil, &query.RefusedError{Err: err}
+			return nil, err
 		}
 	}
 	if req.ActionType == "rpc" {
@@ -285,7 +285,7 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 			switch actionType {
 			case "sql":
 				if err := s.validateSQLActionFor(ctx, projectID, action); err != nil {
-					return nil, &query.RefusedError{Err: err}
+					return nil, err
 				}
 			case "rpc":
 				if err := validateCronRPCName(action); err != nil {
@@ -517,7 +517,12 @@ func (s *CronService) validateSQLActionFor(ctx context.Context, projectID, actio
 	if err != nil {
 		return errors.New("could not validate the sql action; try again")
 	}
-	return validateCronSQLAction(action, schema)
+	// Only the SQL checks themselves are refusals; a failed lookup above
+	// isn't the developer's SQL.
+	if err := validateCronSQLAction(action, schema); err != nil {
+		return &query.RefusedError{Err: err}
+	}
+	return nil
 }
 
 // projectSchema returns the project's tenant schema name.

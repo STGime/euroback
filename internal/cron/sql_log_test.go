@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -36,9 +37,10 @@ func cronReq(t *testing.T, body any, w *captureLog) *http.Request {
 	return r.WithContext(sqllog.WithContext(ctx, sqllog.NewWithWriter(w)))
 }
 
-// A cron job whose request the checks refuse still lands in the SQL log
-// (source cron, outcome refused); a non-SQL job doesn't.
-func TestCronCreate_RefusedSQLIsLogged(t *testing.T) {
+// A cron job whose request is rejected still lands in the SQL log (source
+// cron; a form error is "error", not a refusal of the SQL); a non-SQL job
+// doesn't.
+func TestCronCreate_RejectedSQLIsLogged(t *testing.T) {
 	w := &captureLog{}
 	rr := httptest.NewRecorder()
 	handleCreate(nil).ServeHTTP(rr, cronReq(t, map[string]any{
@@ -50,7 +52,7 @@ func TestCronCreate_RefusedSQLIsLogged(t *testing.T) {
 	if len(w.rows) != 1 {
 		t.Fatalf("want 1 log row, got %d", len(w.rows))
 	}
-	if w.rows[0][5] != sqllog.SourceCron || w.rows[0][6] != "DELETE FROM todos" || w.rows[0][10] != sqllog.OutcomeRefused {
+	if w.rows[0][5] != sqllog.SourceCron || w.rows[0][6] != "DELETE FROM todos" || w.rows[0][10] != sqllog.OutcomeError {
 		t.Errorf("row = source %v statement %v outcome %v", w.rows[0][5], w.rows[0][6], w.rows[0][10])
 	}
 
@@ -60,5 +62,14 @@ func TestCronCreate_RefusedSQLIsLogged(t *testing.T) {
 	}, w2))
 	if len(w2.rows) != 0 {
 		t.Errorf("a function job has no SQL to log, got %d rows", len(w2.rows))
+	}
+}
+
+func TestDryRunPublicError_HidesDriverErrors(t *testing.T) {
+	if got := dryRunPublicError(errors.New("dial tcp 10.1.2.3:5432: connection refused")); got != "the test run could not be completed; try again" {
+		t.Errorf("driver error leaked: %q", got)
+	}
+	if got := dryRunPublicError(&pgconn.PgError{Code: "42P01", Message: `relation "x" does not exist`}); got == "the test run could not be completed; try again" {
+		t.Error("a database error should be shown as is")
 	}
 }

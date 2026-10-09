@@ -1,3 +1,4 @@
+REVOKE UPDATE ON public.platform_sql_log FROM eurobase_developer;
 DROP TRIGGER IF EXISTS platform_sql_log_scrub_on_project_delete ON public.projects;
 DROP FUNCTION IF EXISTS public.platform_sql_log_scrub_deleted_project();
 
