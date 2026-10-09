@@ -14,10 +14,10 @@
 #                      they run as once reassigned (migrator → _ddl) — review.
 #   FOREIGN_OBJECT   — owned by eurobase_developer or eurobase_gateway: needs a
 #                      Scaleway REASSIGN (migrator can't act for those owners).
-#   SYSTEM_TRIGGER /  — a customer trigger or RLS policy on a platform-managed
-#   SYSTEM_POLICY      system table (users, tokens, storage_objects,
-#                      vault_secrets, passkeys): can't be reassigned (the table
-#                      stays migrator-owned); flag for manual handling.
+#   SYSTEM_TRIGGER /  — a CUSTOMER-ADDED trigger or RLS policy on a
+#   SYSTEM_POLICY      platform-managed system table (the platform's own
+#                      policies are excluded by name): can't be reassigned
+#                      (the table stays migrator-owned); flag for manual review.
 #   MISSING_DDL_ROLE — a provisioned schema with no `_ddl` role.
 #
 # The platform helpers auth_uid/auth_role/auth_email are excluded (they stay
@@ -136,6 +136,16 @@ spec:
                    AND c.relname = ANY (ARRAY['users','user_identities','refresh_tokens',
                        'email_tokens','storage_objects','storage_shared_prefixes','vault_secrets',
                        'user_passkey_credentials','webauthn_challenges'])
+                   -- Exclude the platform's OWN system-table policies (created by
+                   -- provision_tenant / the system-table migrations); only a
+                   -- customer-added policy on a system table is a finding.
+                   AND pol.polname <> ALL (ARRAY[
+                       'email_tokens_policy','refresh_tokens_policy','user_identities_policy',
+                       'vault_secrets_policy','webauthn_challenges_policy','user_self_access',
+                       'storage_read','storage_insert','storage_update','storage_delete',
+                       'storage_owner_access','shared_prefixes_read','shared_prefixes_write',
+                       'passkey_select','passkey_insert','passkey_update','passkey_delete',
+                       'tenant_isolation_users','tenant_isolation_storage'])
                  ORDER BY 1;
                 -- Provisioned schema with no _ddl role.
                 SELECT 'MISSING_DDL_ROLE ' || schema_name
