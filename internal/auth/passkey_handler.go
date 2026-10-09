@@ -55,6 +55,8 @@ func writePasskeyError(w http.ResponseWriter, err error) {
 		writeJSONErrorCode(w, err.Error(), "passkey_challenge_invalid", http.StatusBadRequest)
 	case errors.Is(err, ErrEmailNotVerified):
 		writeJSONErrorCode(w, "Please verify your email before signing in — check your inbox for the confirmation link.", "email_not_verified", http.StatusForbidden)
+	case errors.Is(err, ErrAccountSuspended):
+		writeJSONErrorCode(w, "This account has been suspended.", "account_suspended", http.StatusForbidden)
 	case errors.Is(err, ErrPasskeyNotFound):
 		writeJSONError(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, ErrPasskeyAlreadyRegistered):

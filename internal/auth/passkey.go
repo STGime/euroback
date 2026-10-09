@@ -739,7 +739,7 @@ func (s *PlatformAuthService) completePasskeySession(ctx context.Context, ident 
 	if s.pool != nil {
 		_, _ = s.pool.Exec(ctx, `UPDATE platform_users SET last_sign_in_at = now() WHERE id = $1`, ident.User.ID)
 	}
-	token, expiresIn, err := s.generatePlatformJWT(ident.User.ID, ident.User.Email, ident.IsSuperadmin, LoginViaPasskey, "")
+	token, expiresIn, err := s.generatePlatformJWT(ctx, ident.User.ID, ident.User.Email, ident.IsSuperadmin, LoginViaPasskey, "")
 	if err != nil {
 		return nil, err
 	}

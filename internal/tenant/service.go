@@ -424,6 +424,11 @@ func (s *TenantService) SetBetaGrantRecorder(r BetaGrantRecorder) {
 // with a code the console can map to a "join the waitlist" prompt.
 var ErrTeamBetaRequired = errors.New("team plan requires closed-beta access")
 
+// ErrAccountSuspended is returned when a suspended platform user tries to
+// create a project (defence-in-depth: sign-in is already refused, but an
+// existing JWT stays valid until it expires).
+var ErrAccountSuspended = errors.New("this account has been suspended")
+
 // ErrLegalTeamBetaRequired is the M2b analog: caller asked for
 // plan=legal_team but doesn't have legal_team_beta_access. Separate
 // flag from Team so ops can hand them out independently.
@@ -448,6 +453,16 @@ var ErrLegalTeamBetaRequired = errors.New("legal team plan requires closed-beta 
 //     so the console's /billing screen shows the "Team (closed beta)"
 //     status instead of "no active subscription."
 func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email string, req CreateProjectRequest) (*Project, error) {
+	// A suspended account can't create a project (closes the re-plant gap
+	// even on a still-valid session). Fail closed on a lookup error.
+	var suspended bool
+	if err := s.pool.QueryRow(ctx, `SELECT suspended_at IS NOT NULL FROM platform_users WHERE id = $1`, platformUserID).Scan(&suspended); err != nil {
+		return nil, fmt.Errorf("check account status: %w", err)
+	}
+	if suspended {
+		return nil, ErrAccountSuspended
+	}
+
 	slug := req.Slug
 	if slug == "" {
 		slug = slugify(req.Name)

@@ -658,7 +658,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if _, err := env.shared.Exec(ctx, `INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, env.projectID, viewer); err != nil {
 			return fmt.Errorf("add viewer: %w", err)
 		}
-		jwt, _, err := env.platformAuth.IssuePlatformJWT(viewer, email, false)
+		jwt, _, err := env.platformAuth.IssuePlatformJWT(context.Background(), viewer, email, false)
 		if err != nil {
 			return err
 		}
@@ -763,7 +763,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			if _, err = env.shared.Exec(ctx, `INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3)`, env.projectID, uid, role); err != nil {
 				return
 			}
-			if jwt, _, err = env.platformAuth.IssuePlatformJWT(uid, email, false); err != nil {
+			if jwt, _, err = env.platformAuth.IssuePlatformJWT(context.Background(), uid, email, false); err != nil {
 				return
 			}
 			res, cerr := pats.Create(ctx, auth.CreateInput{Claims: ownerSession, Name: "parity-" + role, ProjectID: env.projectID, Role: role})
@@ -1891,7 +1891,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		// A session SSO-signed-in to that org still auto-attaches to it
 		// (then the project is removed again: the Free limit is 2).
-		ssoJWT, _, err := env.platformAuth.IssuePlatformJWTForSSO(env.ownerUser, env.ownerEmail, false, orgID)
+		ssoJWT, _, err := env.platformAuth.IssuePlatformJWTForSSO(context.Background(), env.ownerUser, env.ownerEmail, false, orgID)
 		if err != nil {
 			return err
 		}
@@ -2557,7 +2557,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	t.Setenv("VAULT_ENCRYPTION_KEY", keyB64)
 	t.Setenv("TEAM_TIER_ROUTING", "1")
 	platformSvc := auth.NewPlatformAuthService(gw, randHexT(t, 32))
-	jwt, _, err := platformSvc.IssuePlatformJWT(ownerUser, ownerEmail, false)
+	jwt, _, err := platformSvc.IssuePlatformJWT(context.Background(), ownerUser, ownerEmail, false)
 	if err != nil {
 		t.Fatal(err)
 	}

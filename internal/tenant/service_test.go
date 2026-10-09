@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -77,7 +78,7 @@ func cleanupProject(t *testing.T, pool *pgxpool.Pool, projectID string) {
 
 // insertTestPlatformUser creates a platform_users row with the given email
 // and returns its UUID. Pair with cleanupProject to remove it after the test.
-// The index on platform_users.email is partial (WHERE email != ''), so
+// The index on platform_users.email is partial (WHERE email != ”), so
 // ON CONFLICT doesn't match; delete any leftover row first instead.
 func insertTestPlatformUser(t *testing.T, pool *pgxpool.Pool, email string) string {
 	t.Helper()
@@ -312,4 +313,35 @@ func TestCreateProject_EnsuresFuncLogin(t *testing.T) {
 	if len(rec.schemas) != 1 || rec.schemas[0] != project.SchemaName {
 		t.Fatalf("EnsureOne calls = %v, want [%s]", rec.schemas, project.SchemaName)
 	}
+}
+
+// TestCreateProject_SuspendedRefused: a suspended platform user cannot
+// create a project, even with a valid session (ErrAccountSuspended); an
+// unsuspended user can.
+func TestCreateProject_SuspendedRefused(t *testing.T) {
+	pool := setupTestDB(t)
+	defer pool.Close()
+	ctx := context.Background()
+	svc := &TenantService{pool: pool}
+
+	uid := insertTestPlatformUser(t, pool, "suspend-create@test.eurobase.local")
+	req := CreateProjectRequest{Name: "Suspended Proj", Slug: "suspended-proj", Region: "fr-par", Plan: "free"}
+
+	// Suspend → refused.
+	if _, err := pool.Exec(ctx, `UPDATE platform_users SET suspended_at = now() WHERE id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateProject(ctx, uid, "suspend-create@test.eurobase.local", req); !errors.Is(err, ErrAccountSuspended) {
+		t.Fatalf("CreateProject while suspended: want ErrAccountSuspended, got %v", err)
+	}
+
+	// Unsuspend → allowed.
+	if _, err := pool.Exec(ctx, `UPDATE platform_users SET suspended_at = NULL WHERE id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	project, err := svc.CreateProject(ctx, uid, "suspend-create@test.eurobase.local", req)
+	if err != nil {
+		t.Fatalf("CreateProject after unsuspend: %v", err)
+	}
+	t.Cleanup(func() { cleanupProject(t, pool, project.ID) })
 }

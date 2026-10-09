@@ -354,3 +354,54 @@ func TestDeleteAccount_DeletesSoloOrg(t *testing.T) {
 		t.Errorf("solo org row should have been deleted alongside the user")
 	}
 }
+
+// TestIssuePlatformJWT_SuspendedRefused: the single chokepoint every login
+// path mints through refuses a suspended account; unsuspending restores it.
+func TestIssuePlatformJWT_SuspendedRefused(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("DATABASE_URL not set; skipping suspension integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("cannot connect: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("cannot ping: %v", err)
+	}
+	svc := NewPlatformAuthService(pool, "test-jwt-secret-please-ignore")
+
+	email := "suspend-jwt@test.eurobase.local"
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email = $1`, email)
+	var uid string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO platform_users (email, password_hash, email_confirmed_at)
+		 VALUES ($1, 'x', now()) RETURNING id::text`, email).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM platform_users WHERE id = $1`, uid) })
+
+	// Active: a token mints.
+	if _, _, err := svc.IssuePlatformJWT(ctx, uid, email, false); err != nil {
+		t.Fatalf("IssuePlatformJWT while active: %v", err)
+	}
+	// Suspended: refused (all login paths go through generatePlatformJWT).
+	if _, err := pool.Exec(ctx, `UPDATE platform_users SET suspended_at = now() WHERE id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.IssuePlatformJWT(ctx, uid, email, false); !errors.Is(err, ErrAccountSuspended) {
+		t.Fatalf("IssuePlatformJWT while suspended: want ErrAccountSuspended, got %v", err)
+	}
+	if _, _, err := svc.IssuePlatformJWTForSSO(ctx, uid, email, false, "org-x"); !errors.Is(err, ErrAccountSuspended) {
+		t.Fatalf("SSO issue while suspended: want ErrAccountSuspended, got %v", err)
+	}
+	// Unsuspended: mints again.
+	if _, err := pool.Exec(ctx, `UPDATE platform_users SET suspended_at = NULL WHERE id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.IssuePlatformJWT(ctx, uid, email, false); err != nil {
+		t.Fatalf("IssuePlatformJWT after unsuspend: %v", err)
+	}
+}

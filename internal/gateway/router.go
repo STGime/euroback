@@ -917,6 +917,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Get("/broadcast/audience", tenant.AdminListBroadcastAudience(pool))
 			// Team-tier closed-beta grants (M2, issue #308).
 			r.Get("/team-beta", tenant.AdminListTeamBetaUsers(pool))
+			r.Post("/users/{id}/suspend", tenant.AdminSuspendUser(pool))
+			r.Delete("/users/{id}/suspend", tenant.AdminUnsuspendUser(pool))
 			r.Post("/team-beta/{id}", tenant.AdminGrantTeamBeta(pool))
 			r.Delete("/team-beta/{id}", tenant.AdminRevokeTeamBeta(pool))
 			// Legal-Team-tier closed-beta grants (M2b).
