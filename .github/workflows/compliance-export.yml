@@ -32,6 +32,7 @@ on:
       - migrations/000136_converge_tenant_ownership.up.sql
       - internal/query/converge_ownership_test.go
       - internal/email/delivery_log*.go
+      - internal/tenantlogin/**
       - internal/sqllog/**
   workflow_dispatch:
 
@@ -112,6 +113,14 @@ jobs:
           SQL_LOG_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           SQL_LOG_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/sqllog/ -run 'TestSQLLog_ProductionRoles'
+
+      # Persistent per-tenant DDL logins: what SQL running as a tenant's
+      # _ddl role can and can't reach, under the production roles.
+      - name: Tenant DDL login
+        env:
+          DDL_LOGIN_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+          DDL_LOGIN_TEST_DEV_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
+        run: go test -count=1 -v ./internal/tenantlogin/ -run 'TestDDLLoginIntegration'
 
       # Tenant-table ownership convergence (000136): reassigns to _ddl.
       - name: Converge tenant ownership (000136)

@@ -395,6 +395,45 @@ func main() {
 		}()
 	}
 
+	// Persistent `<schema>_ddl` logins (step 6 of per-project SQL logins):
+	// with DDL_PERSISTENT_LOGIN=1 (set it on the gateway too) every
+	// shared-cluster tenant's DDL role stays loginable with its derived
+	// password, a connection limit and access to its own schema, so the
+	// gateway can run platform SQL as the project's own role. Off by
+	// default: tenant migrations then keep switching the login per run.
+	if tenantlogin.PersistentDDLLogin() {
+		ddlCfg, err := pgx.ParseConfig(databaseURL)
+		if err != nil {
+			slog.Error("DDL_PERSISTENT_LOGIN: parse DATABASE_URL", "error", err)
+			os.Exit(1)
+		}
+		ddlEnsurer, err := tenantlogin.NewDDLEnsurer(developerPool, ddlCfg.Database, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
+		if err != nil || ddlEnsurer == nil {
+			slog.Error("DDL_PERSISTENT_LOGIN set but the DDL login keeper can't start (DDL_PASSWORD_SECRET?)", "error", err)
+			os.Exit(1)
+		}
+		go func() {
+			run := func() {
+				if n, err := ddlEnsurer.EnsureAll(ctx); err != nil {
+					slog.Error("tenant DDL logins: some roles failed", "ensured", n, "error", err)
+				} else {
+					slog.Info("tenant DDL logins ensured", "roles", n)
+				}
+			}
+			run()
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					run()
+				}
+			}
+		}()
+	}
+
 	// Publish the runner pooler's tenant userlist (#653): SCRAM verifiers
 	// derived here, so the pooler pod — reachable from tenant code — needs
 	// neither FUNC_PASSWORD_SECRET nor a database URL. Every 5 s (a new

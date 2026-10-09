@@ -65,3 +65,29 @@ func TestScramVerifierShapeAndDeterminism(t *testing.T) {
 		t.Fatal("different schemas must get different verifiers")
 	}
 }
+
+func TestDDLCredentials(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	pw := DDLPassword(secret, "tenant_abc")
+	if pw == FuncPassword(secret, "tenant_abc") {
+		t.Fatal("DDL and function passwords must differ")
+	}
+	v1, err := DDLScramVerifier(secret, "tenant_abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, _ := DDLScramVerifier(secret, "tenant_abc")
+	fv, _ := ScramVerifier(secret, "tenant_abc")
+	if v1 != v2 || v1 == fv || !regexp.MustCompile(`^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$`).MatchString(v1) {
+		t.Errorf("verifier: %q (func %q)", v1, fv)
+	}
+	if DDLRole("tenant_abc") != "tenant_abc_ddl" {
+		t.Error("DDLRole")
+	}
+	if _, err := NewDDLEnsurer(nil, "eurobase", []byte("short")); err == nil {
+		t.Error("short secret accepted")
+	}
+	if e, err := NewDDLEnsurer(nil, "eurobase", nil); e != nil || err != nil {
+		t.Error("empty secret should mean off (nil, nil)")
+	}
+}

@@ -104,6 +104,9 @@ type TenantService struct {
 	// fallback any more). Optional; the worker's periodic pass catches
 	// up within minutes when nil or when this call fails.
 	funcLogins FuncLoginEnsurer
+	// ddlLogins does the same for the `<schema>_ddl` role when its login
+	// is persistent (DDL_PERSISTENT_LOGIN). Optional, like funcLogins.
+	ddlLogins FuncLoginEnsurer
 	// vaultCtx puts the project's vault database on ctx for reads made
 	// outside a project-scoped request (project listings, org change,
 	// settings responses) — a Team project's dedicated database, never
@@ -152,6 +155,12 @@ type FuncLoginEnsurer interface {
 // SetFuncLoginEnsurer wires the per-tenant function login setup.
 func (s *TenantService) SetFuncLoginEnsurer(e FuncLoginEnsurer) {
 	s.funcLogins = e
+}
+
+// SetDDLLoginEnsurer wires the per-tenant DDL login setup
+// (*tenantlogin.DDLEnsurer; only with a persistent DDL login).
+func (s *TenantService) SetDDLLoginEnsurer(e FuncLoginEnsurer) {
+	s.ddlLogins = e
 }
 
 // NewTenantService creates a new TenantService backed by the given connection pool.
@@ -726,6 +735,12 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		// EnsureOne bounds itself (15 s, lock_timeout 3 s).
 		if err := s.funcLogins.EnsureOne(context.WithoutCancel(ctx), schemaName); err != nil {
 			slog.Error("tenant function login not set at provisioning; worker will retry",
+				"error", err, "project_id", projectID, "schema", schemaName)
+		}
+	}
+	if status == "active" && !skipPlatformSchema && s.ddlLogins != nil {
+		if err := s.ddlLogins.EnsureOne(context.WithoutCancel(ctx), schemaName); err != nil {
+			slog.Error("tenant DDL login not set at provisioning; worker will retry",
 				"error", err, "project_id", projectID, "schema", schemaName)
 		}
 	}

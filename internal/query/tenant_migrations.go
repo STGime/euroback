@@ -169,6 +169,21 @@ type MigrationExecutor struct {
 	adminPool      *pgxpool.Pool
 	baseConnConfig *pgx.ConnConfig
 	passwordSecret []byte
+	// ensureLogin, when set, means the `_ddl` login is persistent (see
+	// WithPersistentLogin): Apply ensures it instead of promoting and
+	// demoting around each run.
+	ensureLogin func(ctx context.Context, schema string) error
+}
+
+// WithPersistentLogin switches the executor to the persistent `_ddl` login
+// (DDL_PERSISTENT_LOGIN, kept by the worker's tenantlogin.DDLEnsurer):
+// ensure applies the login settings for one schema — idempotent, so a
+// tenant the worker hasn't reached yet still works.
+func (e *MigrationExecutor) WithPersistentLogin(ensure func(ctx context.Context, schema string) error) *MigrationExecutor {
+	if e != nil {
+		e.ensureLogin = ensure
+	}
+	return e
 }
 
 // NewMigrationExecutor builds an executor. Returns a disabled executor
@@ -315,25 +330,38 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	cfg.Password = password
 
 	var conn *pgx.Conn
-	// One retry covers the race where a concurrent apply for the same tenant
-	// demoted the role to NOLOGIN between our promote and connect.
-	for attempt := 0; attempt < 2; attempt++ {
-		if err = e.setRoleLogin(ctx, ddlRole, password, true); err != nil {
-			return false, err
+	if e.ensureLogin != nil {
+		// Persistent login (DDL_PERSISTENT_LOGIN): the worker keeps the
+		// role loginable. Apply its settings now (a new tenant may not
+		// have had a pass yet) and never switch the login off — that
+		// would break other connections of the project.
+		if err = e.ensureLogin(ctx, schemaName); err != nil {
+			return false, fmt.Errorf("ensure %s login: %w", ddlRole, err)
 		}
-		conn, err = pgx.ConnectConfig(ctx, cfg)
-		if err == nil {
-			break
-		}
-		if attempt == 1 {
+		if conn, err = pgx.ConnectConfig(ctx, cfg); err != nil {
 			return false, fmt.Errorf("connect as %s: %w", ddlRole, err)
 		}
+	} else {
+		// One retry covers the race where a concurrent apply for the same tenant
+		// demoted the role to NOLOGIN between our promote and connect.
+		for attempt := 0; attempt < 2; attempt++ {
+			if err = e.setRoleLogin(ctx, ddlRole, password, true); err != nil {
+				return false, err
+			}
+			conn, err = pgx.ConnectConfig(ctx, cfg)
+			if err == nil {
+				break
+			}
+			if attempt == 1 {
+				return false, fmt.Errorf("connect as %s: %w", ddlRole, err)
+			}
+		}
+		// Demote back to NOLOGIN on the way out (best-effort; uses the parent
+		// ctx so a cancelled request still attempts the lockdown).
+		defer func() {
+			_ = e.setRoleLogin(context.WithoutCancel(ctx), ddlRole, "", false)
+		}()
 	}
-	// Demote back to NOLOGIN on the way out (best-effort; uses the parent
-	// ctx so a cancelled request still attempts the lockdown).
-	defer func() {
-		_ = e.setRoleLogin(context.WithoutCancel(ctx), ddlRole, "", false)
-	}()
 	defer conn.Close(ctx)
 
 	tx, err := conn.Begin(ctx)
