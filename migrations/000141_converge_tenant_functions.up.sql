@@ -50,8 +50,10 @@ BEGIN
 
     -- 1. PLAIN functions/procedures/aggregates (prosecdef = false) -> _ddl.
     --    ALTER ROUTINE covers functions, procedures and aggregates. The
-    --    platform RLS helpers are SECURITY DEFINER, so they are skipped here
-    --    by the prosecdef filter (belt-and-braces: exclude by name too).
+    --    platform RLS helpers auth_uid/auth_role/auth_email are plain SQL
+    --    (not SECURITY DEFINER), so they would otherwise match; the explicit
+    --    name exclusion keeps them migrator-owned (conservative — they are
+    --    runtime-neutral too, but platform-provided).
     FOR v_rel IN
         SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS args
         FROM pg_proc p
@@ -87,7 +89,8 @@ BEGIN
         JOIN pg_roles r ON r.oid = c.relowner
         WHERE n.nspname = p_schema AND c.relkind = 'v' AND r.rolname = 'eurobase_migrator'
           AND EXISTS (SELECT 1 FROM unnest(COALESCE(c.reloptions, '{}')) o
-                      WHERE lower(o) IN ('security_invoker=true', 'security_invoker=on', 'security_invoker=1'))
+                      WHERE lower(o) IN ('security_invoker=true', 'security_invoker=on', 'security_invoker=1',
+                                         'security_invoker=yes', 'security_invoker=t', 'security_invoker=y'))
     LOOP
         BEGIN
             EXECUTE format('ALTER VIEW %I.%I OWNER TO %I', p_schema, v_rel.relname, v_ddl_role);

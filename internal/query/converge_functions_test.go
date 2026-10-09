@@ -79,6 +79,8 @@ func TestConvergeTenantFunctions(t *testing.T) {
 	q(fmt.Sprintf(`CREATE PROCEDURE %s.do_nothing() LANGUAGE sql AS 'SELECT 1'`, schema))
 	q(fmt.Sprintf(`CREATE VIEW %s.notes_invoker WITH (security_invoker=true) AS SELECT * FROM %s.notes`, schema, schema))
 	q(fmt.Sprintf(`CREATE TYPE %s.pair AS (a int, b int)`, schema))
+	q(fmt.Sprintf(`CREATE TYPE %s.color AS ENUM ('r','g','b')`, schema))
+	q(fmt.Sprintf(`CREATE DOMAIN %s.pos AS int CHECK (VALUE > 0)`, schema))
 	// Left migrator-owned:
 	//   a SECURITY DEFINER fn, and an owner-run (default) view.
 	q(fmt.Sprintf(`CREATE FUNCTION %s.definer_fn() RETURNS bigint LANGUAGE sql SECURITY DEFINER
@@ -128,8 +130,10 @@ func TestConvergeTenantFunctions(t *testing.T) {
 	if o := relOwner("notes_invoker"); o != ddl {
 		t.Errorf("notes_invoker view owner = %s, want %s (security_invoker → reassigned)", o, ddl)
 	}
-	if o := typeOwner("pair"); o != ddl {
-		t.Errorf("type pair owner = %s, want %s", o, ddl)
+	for _, ty := range []string{"pair", "color", "pos"} {
+		if o := typeOwner(ty); o != ddl {
+			t.Errorf("type %s owner = %s, want %s", ty, o, ddl)
+		}
 	}
 
 	// Left migrator-owned (owner-dependent behaviour).
