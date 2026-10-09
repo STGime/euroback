@@ -39,6 +39,7 @@ import (
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/sovereignty"
+	"github.com/eurobase/euroback/internal/sqllog"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/tenantconn"
@@ -316,6 +317,8 @@ func main() {
 	emailService.WithDeliveryLog(email.NewDeliveryLog(pool))
 	if developerPool != nil {
 		gateway.StartEmailLogCleanup(ctx, developerPool)
+		// SQL log (000139): 30-day retention, same pattern.
+		sqllog.StartCleanup(ctx, developerPool)
 	}
 	// Outbound SMTP blocked by the hosting provider: custom-SMTP connect
 	// timeouts are explained as that, and the console shows a notice.

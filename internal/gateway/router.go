@@ -31,6 +31,7 @@ import (
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/eurobase/euroback/internal/sms"
 	"github.com/eurobase/euroback/internal/sovereignty"
+	"github.com/eurobase/euroback/internal/sqllog"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/tenantconn"
@@ -140,6 +141,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 	// Audit service — shared across all route groups that need to log actions.
 	auditSvc := audit.NewService(pool)
+	// SQL log (000139): statements sent via the console, the MCP server or
+	// the CLI, plus function bodies, custom policies and migrations. Written
+	// on the runtime pool (INSERT only); read on the developer pool.
+	sqlLog := sqllog.New(pool)
+	if sqlLog != nil {
+		consoleURL := os.Getenv("CONSOLE_URL")
+		if consoleURL == "" {
+			consoleURL = "https://console.eurobase.app"
+		}
+		sqlLog.OnRefusals = sqllog.DiscordRefusalAlert(os.Getenv("DISCORD_ALERTS_WEBHOOK"), consoleURL)
+	}
 	// Superadmin passkey bypasses of an org's sso_required are audited
 	// wherever they're checked (tenant.ClaimsSatisfySSOFor).
 	tenant.SetSSOBypassAuditor(auditSvc)
@@ -880,6 +892,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			})
 
 			r.Get("/projects", tenant.AdminListAllProjects(pool))
+			if developerPool != nil {
+				r.Get("/sql-log", sqllog.HandleAdminLog(developerPool))
+			}
 			r.Get("/allowlist", tenant.AdminListAllowlist(pool))
 			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))
 			r.Delete("/allowlist/{email}", tenant.AdminRemoveAllowlist(pool))
@@ -977,6 +992,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					ctx := audit.WithContext(r.Context(), auditSvc)
+					ctx = sqllog.WithContext(ctx, sqlLog)
 					if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
 						ctx = audit.WithActor(ctx, claims.Subject, claims.Email)
 						ctx = audit.WithActorToken(ctx, claims.PATID)
@@ -991,6 +1007,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			//   Settings/API keys/vault/invites → admin
 			//   Delete project / change roles → owner
 			r.With(tenant.RequireMinRole("viewer")).Get("/logs", HandleLogs(pool))
+			// SQL log (000139): admin only — entries carry statement text,
+			// which can contain the project's data.
+			if developerPool != nil {
+				r.With(tenant.RequireMinRole("admin")).Get("/sql-log", sqllog.HandleProjectLog(developerPool))
+			}
 			// PlatformTenantContext (#679): the catalog reads go to a Team
 			// project's dedicated DB (or 503); projects / schema_changes
 			// lookups stay on the platform DB via `pool`.

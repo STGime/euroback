@@ -376,6 +376,13 @@ func WithActorToken(ctx context.Context, patID string) context.Context {
 	return context.WithValue(ctx, patCtxKey{}, patID)
 }
 
+// ActorTokenFromContext returns the personal access token ID recorded by
+// WithActorToken, or "" for a console session.
+func ActorTokenFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(patCtxKey{}).(string)
+	return id
+}
+
 // ActorFromContext retrieves the actor ID and email from the context.
 // Returns empty strings if not set.
 func ActorFromContext(ctx context.Context) (id, email string) {
