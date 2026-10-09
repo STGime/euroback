@@ -77,24 +77,8 @@ func EnsureDDLLogin(ctx context.Context, adminPool *pgxpool.Pool, database strin
 
 func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	r := pgx.Identifier{role}.Sanitize()
-	sc := pgx.Identifier{schema}.Sanitize()
-	stmts := []string{
-		"GRANT USAGE ON SCHEMA public TO " + r,
-		// Objects in the tenant schema owned by eurobase_migrator (system
-		// tables, objects created before the role owned new ones). Grants on
-		// objects the role owns are no-ops.
-		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO %s", sc, r),
-		fmt.Sprintf("GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %s TO %s", sc, r),
-		fmt.Sprintf("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %s TO %s", sc, r),
-		// And future ones the migrator creates there.
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s", sc, r),
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO %s", sc, r),
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT EXECUTE ON FUNCTIONS TO %s", sc, r),
-	}
-	for _, q := range stmts {
-		if _, err := tx.Exec(ctx, q); err != nil {
-			return fmt.Errorf("grant %s access: %w", role, err)
-		}
+	if _, err := tx.Exec(ctx, "GRANT USAGE ON SCHEMA public TO "+r); err != nil {
+		return fmt.Errorf("grant %s public usage: %w", role, err)
 	}
 	// A GRANT on a Scaleway-owned object by a non-owner is a WARNING, not an
 	// error: verify the one that matters for name resolution.
@@ -104,6 +88,75 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	}
 	if !publicUsage {
 		return fmt.Errorf("role %s has no USAGE on schema public and eurobase_migrator could not grant it (needs USAGE … WITH GRANT OPTION from the bootstrap owner)", role)
+	}
+
+	// Per object, the same privileges provision_tenant gives `_func`:
+	// tables DML, sequences USAGE + SELECT, functions EXECUTE. Only objects
+	// whose owner the migrator can act for (a GRANT on anything else is an
+	// error, e.g. legacy developer-owned tables), and only where the role
+	// lacks the privilege, so passes don't rewrite the catalog.
+	rows, err := tx.Query(ctx, `
+		SELECT 'TABLE', c.oid::regclass::text, pg_has_role(current_user, c.relowner, 'USAGE')
+		  FROM pg_class c
+		 WHERE c.relnamespace = $1::regnamespace
+		   AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+		   AND NOT (has_table_privilege($2, c.oid, 'SELECT') AND has_table_privilege($2, c.oid, 'INSERT')
+		        AND has_table_privilege($2, c.oid, 'UPDATE') AND has_table_privilege($2, c.oid, 'DELETE'))
+		UNION ALL
+		SELECT 'SEQUENCE', c.oid::regclass::text, pg_has_role(current_user, c.relowner, 'USAGE')
+		  FROM pg_class c
+		 WHERE c.relnamespace = $1::regnamespace AND c.relkind = 'S'
+		   AND NOT (has_sequence_privilege($2, c.oid, 'USAGE') AND has_sequence_privilege($2, c.oid, 'SELECT'))
+		UNION ALL
+		SELECT 'ROUTINE', p.oid::regprocedure::text, pg_has_role(current_user, p.proowner, 'USAGE')
+		  FROM pg_proc p
+		 WHERE p.pronamespace = $1::regnamespace AND p.prokind IN ('f', 'p')
+		   AND NOT has_function_privilege($2, p.oid, 'EXECUTE')`, schema, role)
+	if err != nil {
+		return fmt.Errorf("list %s objects: %w", schema, err)
+	}
+	type object struct{ kind, name string }
+	var grantable []object
+	skipped := 0
+	for rows.Next() {
+		var o object
+		var canGrant bool
+		if err := rows.Scan(&o.kind, &o.name, &canGrant); err != nil {
+			rows.Close()
+			return err
+		}
+		if canGrant {
+			grantable = append(grantable, o)
+		} else {
+			skipped++
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	privs := map[string]string{"TABLE": "SELECT, INSERT, UPDATE, DELETE", "SEQUENCE": "USAGE, SELECT", "ROUTINE": "EXECUTE"}
+	for _, o := range grantable {
+		// o.name is a regclass / regprocedure rendering: already quoted.
+		if _, err := tx.Exec(ctx, fmt.Sprintf("GRANT %s ON %s %s TO %s", privs[o.kind], o.kind, o.name, r)); err != nil {
+			return fmt.Errorf("grant %s on %s: %w", role, o.name, err)
+		}
+	}
+	if skipped > 0 {
+		slog.Warn("tenantlogin: objects the DDL role can't be granted access to (owner outside eurobase_migrator's reach)",
+			"schema", schema, "count", skipped)
+	}
+
+	// Future objects the migrator creates there (as provision_tenant does
+	// for `_func`).
+	sc := pgx.Identifier{schema}.Sanitize()
+	for _, q := range []string{
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s", sc, r),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT USAGE, SELECT ON SEQUENCES TO %s", sc, r),
+	} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			return fmt.Errorf("default privileges for %s: %w", role, err)
+		}
 	}
 	return nil
 }
@@ -145,14 +198,34 @@ func (e *DDLEnsurer) EnsureOne(ctx context.Context, schema string) error {
 // between full passes, every one at least once per FullPassInterval (which
 // also undoes a password a tenant set on its own role).
 func (e *DDLEnsurer) EnsureAll(ctx context.Context) (int, error) {
+	// Each role's live state too: a login switched off (e.g. by a gateway
+	// running without the flag) or a changed limit is repaired on this
+	// pass, not only at the next full one.
 	rows, err := e.adminPool.Query(ctx,
-		`SELECT n.nspname FROM pg_namespace n WHERE n.nspname ~ '^tenant_[0-9a-f_]+$' ORDER BY 1`)
+		`SELECT n.nspname, COALESCE(r.rolcanlogin AND r.rolconnlimit = $1, false)
+		   FROM pg_namespace n
+		   LEFT JOIN pg_roles r ON r.rolname = n.nspname || '_ddl'
+		  WHERE n.nspname ~ '^tenant_[0-9a-f_]+$'
+		  ORDER BY 1`, DDLConnLimit)
 	if err != nil {
 		return 0, fmt.Errorf("list tenant schemas: %w", err)
 	}
-	schemas, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return 0, fmt.Errorf("scan tenant schemas: %w", err)
+	type state struct {
+		schema string
+		ok     bool
+	}
+	var schemas []state
+	for rows.Next() {
+		var st state
+		if err := rows.Scan(&st.schema, &st.ok); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan tenant schemas: %w", err)
+		}
+		schemas = append(schemas, st)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
 
 	e.mu.Lock()
@@ -164,22 +237,22 @@ func (e *DDLEnsurer) EnsureAll(ctx context.Context) (int, error) {
 
 	var firstErr error
 	done := 0
-	for _, s := range schemas {
+	for _, st := range schemas {
 		e.mu.Lock()
-		skip := e.ensured[s]
+		skip := e.ensured[st.schema] && st.ok
 		e.mu.Unlock()
 		if skip {
 			continue
 		}
-		if err := e.EnsureOne(ctx, s); err != nil {
-			slog.Error("tenantlogin: ensure DDL role login failed", "schema", s, "error", err)
+		if err := e.EnsureOne(ctx, st.schema); err != nil {
+			slog.Error("tenantlogin: ensure DDL role login failed", "schema", st.schema, "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
 		e.mu.Lock()
-		e.ensured[s] = true
+		e.ensured[st.schema] = true
 		e.mu.Unlock()
 		done++
 	}

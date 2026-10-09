@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -40,8 +43,15 @@ func TestDDLLoginIntegration(t *testing.T) {
 	}
 	defer dev.Close()
 
-	schemaA := provisionTestTenant(t, admin)
-	schemaB := provisionTestTenant(t, admin)
+	projectA, schemaA := provisionTestTenant(t, admin)
+	_, schemaB := provisionTestTenant(t, admin)
+
+	// A legacy object owned outside eurobase_migrator's reach: the keeper
+	// must skip it, not fail the tenant.
+	if _, err := admin.Exec(ctx, fmt.Sprintf(`SET ROLE eurobase_developer; CREATE TABLE %s.dev_owned (id int); RESET ROLE`,
+		pgx.Identifier{schemaA}.Sanitize())); err != nil {
+		t.Fatalf("create developer-owned table: %v", err)
+	}
 
 	secret := []byte(strings.Repeat("d", 32))
 	database := dev.Config().ConnConfig.Database
@@ -94,8 +104,10 @@ func TestDDLLoginIntegration(t *testing.T) {
 		"ALTER ROLE CURRENT_USER CONNECTION LIMIT -1",
 		fmt.Sprintf("ALTER TABLE %s.users ADD COLUMN planted int", a),
 	} {
-		if _, err := conn.Exec(ctx, q); err == nil {
-			t.Errorf("refused %q: it ran", q)
+		_, err := conn.Exec(ctx, q)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Errorf("refused %q: want permission denied (42501), got %v", q, err)
 		}
 	}
 
@@ -122,6 +134,20 @@ func TestDDLLoginIntegration(t *testing.T) {
 		t.Errorf("role settings not reset: %v", settings)
 	}
 
+	// Tenant migrations through the persistent login: they connect as the
+	// role, run, and leave the login on.
+	exec := query.NewMigrationExecutor(dev, devURL, secret).WithPersistentLogin(func(ctx context.Context, schema string) error {
+		return EnsureDDLLogin(ctx, dev, database, secret, schema)
+	})
+	applied, err := exec.Apply(ctx, projectA, schemaA, 1, "init", "CREATE TABLE migrated (id int PRIMARY KEY)")
+	if err != nil || !applied {
+		t.Fatalf("Apply with persistent login: applied=%v err=%v", applied, err)
+	}
+	var canLogin bool
+	if err := admin.QueryRow(ctx, `SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, role).Scan(&canLogin); err != nil || !canLogin {
+		t.Errorf("login switched off after a migration: %v %v", canLogin, err)
+	}
+
 	// The keeper never touched tenant B's role.
 	var bLogin bool
 	if err := admin.QueryRow(ctx, `SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, DDLRole(schemaB)).Scan(&bLogin); err != nil {
@@ -133,15 +159,16 @@ func TestDDLLoginIntegration(t *testing.T) {
 }
 
 // provisionTestTenant creates a project and runs provision_tenant as the
-// admin; returns its schema. Cleaned up after the test (roles included —
-// deprovision_tenant drops the schema only).
-func provisionTestTenant(t *testing.T, admin *pgxpool.Pool) string {
+// admin; returns the project id and its schema (provision_tenant names it
+// from the project id). Cleaned up after the test, roles included —
+// deprovision_tenant drops the schema only.
+func provisionTestTenant(t *testing.T, admin *pgxpool.Pool) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	buf := make([]byte, 6)
 	_, _ = rand.Read(buf)
 	suffix := hex.EncodeToString(buf)
-	schema := "tenant_dd1e_" + suffix // matches ^tenant_[0-9a-f_]+$
+	schema := "tenant_dd1e_" + suffix // placeholder; provision_tenant sets the real name
 	var ownerID, projectID string
 	if err := admin.QueryRow(ctx, `INSERT INTO platform_users (email) VALUES ($1) RETURNING id`, "ddl-"+suffix+"@test.eurobase.local").Scan(&ownerID); err != nil {
 		t.Fatal(err)
@@ -157,8 +184,11 @@ func provisionTestTenant(t *testing.T, admin *pgxpool.Pool) string {
 		_, _ = admin.Exec(c, `SELECT deprovision_tenant($1)`, projectID)
 		_, _ = admin.Exec(c, `DELETE FROM projects WHERE id = $1`, projectID)
 		_, _ = admin.Exec(c, `DELETE FROM platform_users WHERE id = $1`, ownerID)
-		_, _ = admin.Exec(c, fmt.Sprintf(`DROP ROLE IF EXISTS %s`, pgx.Identifier{FuncRole(schema)}.Sanitize()))
-		_, _ = admin.Exec(c, fmt.Sprintf(`DROP ROLE IF EXISTS %s`, pgx.Identifier{DDLRole(schema)}.Sanitize()))
+		for _, r := range []string{FuncRole(schema), DDLRole(schema)} {
+			id := pgx.Identifier{r}.Sanitize()
+			_, _ = admin.Exec(c, "DROP OWNED BY "+id) // grants on the database / public
+			_, _ = admin.Exec(c, "DROP ROLE IF EXISTS "+id)
+		}
 	})
 	if _, err := admin.Exec(ctx, `SELECT provision_tenant($1, 'DDL login', 'free')`, projectID); err != nil {
 		t.Fatal(err)
@@ -166,5 +196,5 @@ func provisionTestTenant(t *testing.T, admin *pgxpool.Pool) string {
 	if err := admin.QueryRow(ctx, `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schema); err != nil {
 		t.Fatal(err)
 	}
-	return schema
+	return projectID, schema
 }

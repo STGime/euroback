@@ -401,17 +401,20 @@ func main() {
 	// password, a connection limit and access to its own schema, so the
 	// gateway can run platform SQL as the project's own role. Off by
 	// default: tenant migrations then keep switching the login per run.
+	// A misconfiguration here is logged and the keeper skipped (the gateway
+	// does the same): the worker's other jobs must keep running.
+	var ddlEnsurer *tenantlogin.DDLEnsurer
 	if tenantlogin.PersistentDDLLogin() {
 		ddlCfg, err := pgx.ParseConfig(databaseURL)
-		if err != nil {
-			slog.Error("DDL_PERSISTENT_LOGIN: parse DATABASE_URL", "error", err)
-			os.Exit(1)
+		if err == nil {
+			ddlEnsurer, err = tenantlogin.NewDDLEnsurer(developerPool, ddlCfg.Database, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
 		}
-		ddlEnsurer, err := tenantlogin.NewDDLEnsurer(developerPool, ddlCfg.Database, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
 		if err != nil || ddlEnsurer == nil {
-			slog.Error("DDL_PERSISTENT_LOGIN set but the DDL login keeper can't start (DDL_PASSWORD_SECRET?)", "error", err)
-			os.Exit(1)
+			slog.Error("DDL_PERSISTENT_LOGIN is set but the DDL login keeper can't start (DDL_PASSWORD_SECRET, developer pool?) — skipping it", "error", err)
+			ddlEnsurer = nil
 		}
+	}
+	if ddlEnsurer != nil {
 		go func() {
 			run := func() {
 				if n, err := ddlEnsurer.EnsureAll(ctx); err != nil {

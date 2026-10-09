@@ -170,18 +170,18 @@ func main() {
 		// worker keeps instead of switching it on and off per run. Must be
 		// set on the worker too.
 		if tenantlogin.PersistentDDLLogin() {
+			var ddlEnsurer *tenantlogin.DDLEnsurer
 			dbCfg, err := pgx.ParseConfig(databaseURL)
-			if err != nil {
-				slog.Error("DDL_PERSISTENT_LOGIN: parse DATABASE_URL", "error", err)
-				os.Exit(1)
+			if err == nil {
+				ddlEnsurer, err = tenantlogin.NewDDLEnsurer(developerPool, dbCfg.Database, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
 			}
-			ddlEnsurer, err := tenantlogin.NewDDLEnsurer(developerPool, dbCfg.Database, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
 			if err != nil || ddlEnsurer == nil {
-				slog.Error("DDL_PERSISTENT_LOGIN set but the DDL login keeper can't start", "error", err)
-				os.Exit(1)
+				// Same as the worker: log and keep the per-run login.
+				slog.Error("DDL_PERSISTENT_LOGIN is set but the DDL login can't be set up — tenant migrations keep switching it per run", "error", err)
+			} else {
+				migrationExec.WithPersistentLogin(ddlEnsurer.EnsureOne)
+				slog.Info("tenant DDL roles use persistent logins")
 			}
-			migrationExec.WithPersistentLogin(ddlEnsurer.EnsureOne)
-			slog.Info("tenant DDL roles use persistent logins")
 		}
 	} else {
 		slog.Warn("DDL_PASSWORD_SECRET not set — tenant migrations endpoint will return 503 until configured")
