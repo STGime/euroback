@@ -65,3 +65,6 @@ test_*.sh
 test_report_*.md
 scripts/discord/node_modules/
 node_modules/
+
+# Incident / ops scripts with hard-coded targets — never commit (public repo)
+/scripts/ops/incident-*.sh
