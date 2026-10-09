@@ -96,12 +96,17 @@
 					{#each entries as e (e.id)}
 						<tr class="cursor-pointer align-top hover:bg-gray-50" onclick={() => (expandedId = expandedId === e.id ? null : e.id)}>
 							<td class="whitespace-nowrap px-4 py-3 text-xs text-gray-500">{new Date(e.created_at).toLocaleString()}</td>
-							<td class="px-4 py-3 font-mono text-xs text-gray-600">{e.project_id?.slice(0, 8)}</td>
+							<td class="px-4 py-3 font-mono text-xs text-gray-600">
+								{e.project_id?.slice(0, 8)}
+								{#if e.project_deleted_at}<div class="font-sans text-red-600">deleted</div>{/if}
+							</td>
 							<td class="px-4 py-3 text-xs">
 								<div class="text-gray-900">{e.actor_email || '—'}</div>
 								<div class="text-gray-400">{e.via}{e.ip ? ` · ${e.ip}` : ''}</div>
 							</td>
-							<td class="px-4 py-3 font-mono text-xs text-gray-800 break-all">{oneLine(e.statement)}</td>
+							<td class="px-4 py-3 font-mono text-xs text-gray-800 break-all">
+								{#if e.project_deleted_at}<span class="font-sans italic text-gray-400">text removed when the project was deleted</span>{:else}{oneLine(e.statement)}{/if}
+							</td>
 							<td class="px-4 py-3 text-xs text-gray-600">{e.outcome}{e.detail ? `: ${e.detail.slice(0, 100)}` : ''}</td>
 						</tr>
 						{#if expandedId === e.id}

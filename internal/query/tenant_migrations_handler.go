@@ -86,7 +86,7 @@ func HandleTenantMigrations(exec *MigrationExecutor, readPool *pgxpool.Pool) htt
 		logEntry.DurationMs = sqllog.Ms(time.Since(start))
 		switch {
 		case err != nil:
-			logEntry.Outcome, logEntry.Detail = sqllog.OutcomeError, fmt.Sprintf("migration %d (%s): %s", body.Version, body.Name, err)
+			logEntry.Outcome, logEntry.Detail = sqlLogOutcome(err), fmt.Sprintf("migration %d (%s): %s", body.Version, body.Name, err)
 		case !applied:
 			logEntry.Outcome, logEntry.Detail = sqllog.OutcomeOK, fmt.Sprintf("migration %d (%s): already applied, not run", body.Version, body.Name)
 		default:

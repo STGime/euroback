@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -193,7 +194,7 @@ func (s *CronService) Create(ctx context.Context, projectID string, req CreateCr
 	}
 	if req.ActionType == "sql" {
 		if err := s.validateSQLActionFor(ctx, projectID, req.Action); err != nil {
-			return nil, err
+			return nil, &query.RefusedError{Err: err}
 		}
 	}
 	if req.ActionType == "rpc" {
@@ -284,7 +285,7 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 			switch actionType {
 			case "sql":
 				if err := s.validateSQLActionFor(ctx, projectID, action); err != nil {
-					return nil, err
+					return nil, &query.RefusedError{Err: err}
 				}
 			case "rpc":
 				if err := validateCronRPCName(action); err != nil {

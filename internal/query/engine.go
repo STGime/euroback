@@ -1081,7 +1081,8 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 		// Reject embedded multi-statement strings inside a single array
 		// element — that's the same pgx pitfall, just one level down.
 		if HasMultipleStatements(stmt) {
-			return results, &StatementError{Index: i, msg: fmt.Sprintf("statement %d contains multiple statements; pass each as its own array element", i)}
+			msg := fmt.Sprintf("statement %d contains multiple statements; pass each as its own array element", i)
+			return results, &StatementError{Index: i, Err: refusedf("%s", msg), msg: msg}
 		}
 
 		start := time.Now()

@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/query"
+	"github.com/eurobase/euroback/internal/sqllog"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -80,6 +83,7 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 		}
 
 		if err := req.Validate(); err != nil {
+			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeRefused, err.Error(), nil)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -91,6 +95,7 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 
 		job, err := svc.Create(r.Context(), projectID, req)
 		if err != nil {
+			logCronSQL(r, projectID, req.ActionType, req.Action, cronLogOutcome(err), err.Error(), nil)
 			if errors.Is(err, ErrNameAlreadyExists) {
 				jsonError(w, err.Error(), http.StatusConflict)
 				return
@@ -99,6 +104,7 @@ func handleCreate(svc *CronService) http.HandlerFunc {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		logCronSQL(r, projectID, job.ActionType, job.Action, sqllog.OutcomeOK, "saved as cron job "+job.Name, nil)
 
 		jsonResponse(w, job, http.StatusCreated)
 	}
@@ -121,9 +127,17 @@ func handleUpdate(svc *CronService) http.HandlerFunc {
 				jsonError(w, "cron job not found", http.StatusNotFound)
 				return
 			}
+			// Only the new SQL is known here (the job's stored type isn't
+			// on the request), so log it when the request carries SQL.
+			if req.Action != nil && (req.ActionType == nil || *req.ActionType == "sql") && query.IsRefused(err) {
+				logCronSQL(r, projectID, "sql", *req.Action, sqllog.OutcomeRefused, err.Error(), nil)
+			}
 			slog.Error("update cron job failed", "error", err, "project_id", projectID, "job_id", jobID)
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if req.Action != nil {
+			logCronSQL(r, projectID, job.ActionType, job.Action, sqllog.OutcomeOK, "saved as cron job "+job.Name, nil)
 		}
 
 		jsonResponse(w, job, http.StatusOK)
@@ -400,7 +414,16 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 			jsonError(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+		start := time.Now()
 		res, err := dry.DryRun(r.Context(), projectID, schema, req.ActionType, strings.TrimSpace(req.Action), runAs)
+		switch {
+		case err == nil:
+			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeOK, "test run (rolled back)", sqllog.Ms(time.Since(start)))
+		case isDryRunValidationErr(err) && !errors.Is(err, errTenantConnect):
+			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeRefused, "test run: "+err.Error(), nil)
+		default:
+			logCronSQL(r, projectID, req.ActionType, req.Action, sqllog.OutcomeError, "test run: "+err.Error(), sqllog.Ms(time.Since(start)))
+		}
 		if err != nil {
 			// Validation errors and database errors (permission denied,
 			// syntax, statement timeout, …) are the caller's to see;
@@ -430,4 +453,23 @@ func handleTest(svc *CronService, dry *Executor) http.HandlerFunc {
 func isDryRunValidationErr(err error) bool {
 	var v *dryRunInputError
 	return errors.As(err, &v) || errors.Is(err, errTenantConnect)
+}
+
+// logCronSQL records the SQL of a "sql" cron job (saved or test run) in
+// the SQL log. Other action types carry no SQL text.
+func logCronSQL(r *http.Request, projectID, actionType, sql, outcome, detail string, dur *int) {
+	if actionType != "sql" || strings.TrimSpace(sql) == "" {
+		return
+	}
+	e := sqllog.FromRequest(r, sqllog.SourceCron)
+	e.Outcome, e.Detail, e.DurationMs = outcome, detail, dur
+	sqllog.FromContext(r.Context()).Record(r.Context(), projectID, sql, e)
+}
+
+// cronLogOutcome: refused by the SQL checks, or another failure.
+func cronLogOutcome(err error) string {
+	if query.IsRefused(err) {
+		return sqllog.OutcomeRefused
+	}
+	return sqllog.OutcomeError
 }

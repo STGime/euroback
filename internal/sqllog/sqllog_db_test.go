@@ -131,4 +131,27 @@ func TestSQLLog_ProductionRoles(t *testing.T) {
 	if len(entries) != 2 {
 		t.Errorf("after cleanup: %+v", entries)
 	}
+
+	// Deleting the project (as the gateway does) keeps the entries but
+	// clears their text and detail (000140) — the gateway itself can't
+	// update the log; the trigger does it.
+	l.Record(ctx, projectID, "SELECT secret_literal", Entry{Via: ViaConsole, Source: SourceCron, Outcome: OutcomeRefused, Detail: "names a table"})
+	if _, err := gw.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID); err != nil {
+		t.Fatalf("gateway deleting the project: %v", err)
+	}
+	kept, err := List(ctx, dev, projectID, ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 3 {
+		t.Fatalf("after project delete: want 3 entries kept, got %d", len(kept))
+	}
+	for _, e := range kept {
+		if e.Statement != "" || e.Detail != "" || e.ProjectDeletedAt == nil || len(e.SHA256) != 64 || e.Outcome == "" {
+			t.Errorf("after project delete: %+v", e)
+		}
+	}
+	if kept[0].Source != SourceCron {
+		t.Errorf("cron entry: %+v", kept[0])
+	}
 }

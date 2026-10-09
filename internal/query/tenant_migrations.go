@@ -299,7 +299,7 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 		return false, errors.New("invalid schema name")
 	}
 	if err := ValidateTenantMigrationSQL(sqlText); err != nil {
-		return false, err
+		return false, refused(err)
 	}
 	checksum := MigrationChecksum(sqlText)
 	ddlRole := tenantDDLRole(schemaName)

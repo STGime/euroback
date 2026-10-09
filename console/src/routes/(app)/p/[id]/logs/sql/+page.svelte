@@ -24,7 +24,8 @@
 		sql_transaction: 'Transaction',
 		function: 'Function',
 		policy: 'Policy',
-		migration: 'Migration'
+		migration: 'Migration',
+		cron: 'Cron job'
 	};
 
 	async function load(reset: boolean) {
