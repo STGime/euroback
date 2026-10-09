@@ -31,6 +31,8 @@ on:
       - internal/auth/apikey_middleware.go
       - migrations/000136_converge_tenant_ownership.up.sql
       - internal/query/converge_ownership_test.go
+      - migrations/000141_converge_tenant_functions.up.sql
+      - internal/query/converge_functions_test.go
       - internal/email/delivery_log*.go
       - internal/tenantlogin/**
       - internal/sqllog/**
@@ -126,7 +128,7 @@ jobs:
       - name: Converge tenant ownership (000136)
         env:
           CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
-        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership'
+        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions'
 
       # End-user passkey store SQL against a provisioned tenant (#630).
       - name: End-user passkey store (000137)
