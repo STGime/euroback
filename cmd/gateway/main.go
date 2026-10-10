@@ -787,7 +787,7 @@ func main() {
 	// above — see internal/upgrade for the state machine flow.
 	upgradeSvc := upgrade.NewService(developerPool, riverInsertOnly)
 
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, sdkLoginResolver, platformDDLRunner, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, sdkLoginResolver, gateway.PlatformDDLLogin(platformDDLRunner), devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
