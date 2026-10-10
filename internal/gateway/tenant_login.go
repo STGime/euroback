@@ -68,3 +68,22 @@ func (s sdkTenantLogin) Run(ctx context.Context, schema string, readOnly bool, s
 	}
 	return err
 }
+
+// ddlTenantLogin wraps the platform `_ddl` runner (step 6d) so a
+// connection/login failure becomes query.ErrTenantLoginUnavailable (→ 503)
+// in the console SQL handlers, matching the SDK `_func` path's contract.
+type ddlTenantLogin struct {
+	inner query.TenantLoginRunner
+}
+
+func (d ddlTenantLogin) Run(ctx context.Context, schema string, readOnly bool, setup, fn func(context.Context, pgx.Tx) error) error {
+	err := d.inner.Run(ctx, schema, readOnly, setup, fn)
+	switch {
+	case errors.Is(err, tenantconn.ErrNotReady),
+		errors.Is(err, tenantconn.ErrRouting),
+		errors.Is(err, tenantconn.ErrConnect),
+		errors.Is(err, tenantconn.ErrNotConfigured):
+		return fmt.Errorf("%w: %v", query.ErrTenantLoginUnavailable, err)
+	}
+	return err
+}

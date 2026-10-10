@@ -163,6 +163,14 @@ func main() {
 	// connection AS that role runs the SQL — so a malicious body can reach
 	// exactly one tenant. Disabled (endpoint 503) when DDL_PASSWORD_SECRET
 	// is unset; never falls back to a privileged pool. See migration 000063.
+	// Platform `_ddl` login runner (step 6d, behind PLATFORM_DDL_LOGIN):
+	// console/MCP SQL on the shared cluster runs as the tenant's own `_ddl`
+	// login instead of eurobase_migrator. Nil keeps the migrator path.
+	var platformDDLRunner *tenantconn.DDLRunner
+	if os.Getenv("PLATFORM_DDL_LOGIN") == "1" && !tenantlogin.PersistentDDLLogin() {
+		slog.Warn("PLATFORM_DDL_LOGIN=1 is ignored unless DDL_PERSISTENT_LOGIN=1 is also set — console SQL stays on eurobase_migrator")
+	}
+
 	migrationExec := query.NewMigrationExecutor(developerPool, databaseURL, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
 	if migrationExec.Enabled() {
 		slog.Info("tenant migrations enabled")
@@ -181,6 +189,21 @@ func main() {
 			} else {
 				migrationExec.WithPersistentLogin(ddlEnsurer.EnsureOne)
 				slog.Info("tenant DDL roles use persistent logins")
+
+				// Step 6d: route console/MCP SQL onto the `_ddl` login too.
+				// Off unless PLATFORM_DDL_LOGIN=1 (ships dark). Uses a direct
+				// (non-pooler) connection as the `_ddl` role, deriving the
+				// password from DDL_PASSWORD_SECRET like migrations.
+				if os.Getenv("PLATFORM_DDL_LOGIN") == "1" {
+					if base, perr := pgx.ParseConfig(databaseURL); perr != nil {
+						slog.Error("PLATFORM_DDL_LOGIN set but DATABASE_URL won't parse — console SQL stays on migrator", "error", perr)
+					} else {
+						platformDDLRunner = tenantconn.NewDDLRunner(base, []byte(os.Getenv("DDL_PASSWORD_SECRET")), ddlEnsurer.EnsureOne)
+						if platformDDLRunner != nil {
+							slog.Info("console/MCP SQL runs on per-project _ddl logins (PLATFORM_DDL_LOGIN)")
+						}
+					}
+				}
 			}
 		}
 	} else {
@@ -764,7 +787,7 @@ func main() {
 	// above — see internal/upgrade for the state machine flow.
 	upgradeSvc := upgrade.NewService(developerPool, riverInsertOnly)
 
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, sdkLoginResolver, devMode)
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, sdkLoginResolver, platformDDLRunner, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
