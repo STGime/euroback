@@ -158,6 +158,51 @@
 						<p class="mt-1.5 leading-relaxed"><strong>Fix</strong>: add a SELECT policy that permits the authenticated user to read the row they just wrote &mdash; usually the same predicate as the INSERT policy. If your INSERT policy is <code class="bg-red-100 rounded px-1">WITH CHECK (user_id = auth_uid())</code>, add <code class="bg-red-100 rounded px-1">FOR SELECT USING (user_id = auth_uid())</code>. The Table Editor bypasses this because it runs through the elevated <code class="bg-red-100 rounded px-1">is_service_role()</code> branch, which is why the same insert succeeds there and fails from the SDK.</p>
 					</div>
 				</div>
+
+				<h3 id="security-definer" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Why no SECURITY DEFINER, and what to do instead</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Eurobase rejects <code class="bg-gray-100 border border-gray-200 rounded px-1">SECURITY DEFINER</code> in the SQL editor, migrations, scheduled jobs and edge-function SQL. A definer function runs with the privileges of the role that owns it, not the caller's. In your project that owner is a platform role, so a definer function would step around both your project's isolation and your row-level security &mdash; for every caller, forever. Functions are <code class="bg-gray-100 border border-gray-200 rounded px-1">SECURITY INVOKER</code> by default: they run as the caller, and your RLS policies decide what they may touch. The usual reasons for reaching for a definer function each have a direct replacement:
+				</p>
+				<div class="space-y-3">
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">"Trusted code must see rows the end user can't" &rarr; admit the service role in the policy</p>
+						<p class="mt-1 text-[11px] text-gray-500">Calls with the secret key, edge functions called without a signed-in user, and scheduled jobs set to run as the service role all pass <code>is_service_role()</code>. End users still see only their own rows.</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-0.5">
+							<div>CREATE POLICY "own or service" ON bookings FOR ALL</div>
+							<div>&nbsp;&nbsp;USING (is_service_role() OR user_id = auth_uid())</div>
+							<div>&nbsp;&nbsp;WITH CHECK (is_service_role() OR user_id = auth_uid());</div>
+						</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">"A nightly job must clean up across all users" &rarr; a scheduled job with <em>Run as service role</em></p>
+						<p class="mt-1 text-[11px] text-gray-500">Example: a retention job that deletes bookings older than two years, whoever made them. Create it under <a href="/docs/cron" class="text-eurobase-600 hover:underline cursor-pointer">Scheduled Jobs</a> with <strong>Run as service role</strong> switched on (the default for new jobs), and let the service role read <em>and</em> delete the rows. A <code>DELETE &hellip; WHERE</code> also needs a SELECT policy that admits the service role: with only a DELETE policy, the job succeeds and silently deletes nothing.</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-1">
+							<div class="text-gray-500">-- once, in the SQL editor or a migration (or use the "own or service" policy above)</div>
+							<div>CREATE POLICY "service housekeeping" ON bookings FOR ALL USING (is_service_role());</div>
+							<div class="mt-1.5 text-gray-500">-- the job's SQL, e.g. daily at 03:00</div>
+							<div>DELETE FROM bookings WHERE ends_at &lt; now() - interval '2 years';</div>
+						</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">"A reusable function called from the SDK" &rarr; a plain (invoker) function</p>
+						<p class="mt-1 text-[11px] text-gray-500">It runs as whoever calls it, so an end user gets their own rows and the service role gets all of them &mdash; the same policies apply as for a direct query.</p>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-0.5">
+							<div>CREATE OR REPLACE FUNCTION upcoming_bookings() RETURNS SETOF bookings</div>
+							<div>&nbsp;&nbsp;LANGUAGE sql STABLE AS $$</div>
+							<div>&nbsp;&nbsp;&nbsp;&nbsp;SELECT * FROM bookings WHERE starts_at &gt; now() ORDER BY starts_at</div>
+							<div>&nbsp;&nbsp;$$;</div>
+							<div class="mt-1.5 text-gray-500">// from the SDK</div>
+							<div>const {'{'} data {'}'} = await eb.db.rpc('upcoming_bookings')</div>
+						</div>
+					</div>
+
+					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+						<p class="text-xs font-semibold text-gray-700">"An end user's action must change other users' rows" &rarr; a narrow policy, or your server</p>
+						<p class="mt-1 text-[11px] text-gray-500">Write a policy that allows exactly that change (for example, members of the same team may update the team's rows). If it can't be expressed as a policy, do it on your own server with the secret key after checking the request there. An edge function called with the user's session acts as that user, so it can't do more than the user can.</p>
+					</div>
+				</div>
 			</div>
 
 			<div class="mt-6 text-right">
