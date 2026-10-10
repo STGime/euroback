@@ -72,6 +72,19 @@ func (s sdkTenantLogin) Run(ctx context.Context, schema string, readOnly bool, s
 // ddlTenantLogin wraps the platform `_ddl` runner (step 6d) so a
 // connection/login failure becomes query.ErrTenantLoginUnavailable (→ 503)
 // in the console SQL handlers, matching the SDK `_func` path's contract.
+// PlatformDDLLogin returns r as the router's platformDDLLogin argument, or an
+// untyped nil when there is no runner. Passing a nil *tenantconn.DDLRunner
+// straight into the query.TenantLoginRunner parameter makes a non-nil
+// interface: NewRouter then attaches it and every console SQL / Table Editor
+// request panics on the nil runner (500 for all shared-cluster projects while
+// PLATFORM_DDL_LOGIN was meant to be off).
+func PlatformDDLLogin(r *tenantconn.DDLRunner) query.TenantLoginRunner {
+	if r == nil {
+		return nil
+	}
+	return r
+}
+
 type ddlTenantLogin struct {
 	inner query.TenantLoginRunner
 }
