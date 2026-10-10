@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // fakeLogin records how the engine invokes a TenantLoginRunner. It never
@@ -127,4 +128,62 @@ func TestHandleQueryError_LoginUnavailable503(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
 	}
+}
+
+// Step 6d: console/platform traffic (DeveloperRole) on the shared cluster
+// routes to the `_ddl` login when one is attached — not the (nil) pool. SDK
+// traffic and dedicated (routed) traffic do NOT use it.
+func TestConsoleSQL_RoutesToDDLLogin(t *testing.T) {
+	ctx := WithDeveloperRole(context.Background()) // platform/console path
+
+	// SQL editor (non-SDK) → ddlLogin.
+	fl := &fakeLogin{}
+	e := NewQueryEngine(nil).WithDDLLogin(fl)
+	if _, _, err := e.ExecuteSQLWithOpts(ctx, "tenant_abc", "SELECT 1", 10, ExecOptions{SDKPath: false}); err != nil {
+		t.Fatalf("ExecuteSQLWithOpts (console): %v", err)
+	}
+	if fl.calls != 1 || fl.schema != "tenant_abc" {
+		t.Fatalf("console SQL editor: ddl login calls=%d schema=%q, want 1 / tenant_abc", fl.calls, fl.schema)
+	}
+
+	// Transaction endpoint → ddlLogin.
+	fl2 := &fakeLogin{}
+	e2 := NewQueryEngine(nil).WithDDLLogin(fl2)
+	if _, err := e2.ExecuteSQLTransaction(ctx, "tenant_abc", []string{"SELECT 1"}, 10, true); err != nil {
+		t.Fatalf("ExecuteSQLTransaction (console): %v", err)
+	}
+	if fl2.calls != 1 || !fl2.readOnly {
+		t.Fatalf("console transaction: ddl login calls=%d readOnly=%v, want 1 / true", fl2.calls, fl2.readOnly)
+	}
+
+	// Typed REST / WithTenantTx → ddlLogin.
+	fl3 := &fakeLogin{}
+	e3 := NewQueryEngine(nil).WithDDLLogin(fl3)
+	if err := e3.WithTenantTx(ctx, "tenant_abc", func(tx pgx.Tx) error { return nil }); err != nil {
+		t.Fatalf("WithTenantTx (console): %v", err)
+	}
+	if fl3.calls != 1 {
+		t.Fatalf("WithTenantTx: ddl login calls=%d, want 1", fl3.calls)
+	}
+
+	// Without the developer-role flag (SDK-shaped ctx), the ddl login is NOT
+	// used — would fall through to the nil pool and panic, so recover.
+	func() {
+		defer func() { _ = recover() }()
+		fl4 := &fakeLogin{}
+		e4 := NewQueryEngine(nil).WithDDLLogin(fl4)
+		_, _, _ = e4.ExecuteSQLWithOpts(context.Background(), "tenant_abc", "SELECT 1", 10, ExecOptions{SDKPath: false})
+		if fl4.calls != 0 {
+			t.Fatalf("non-developer-role ctx must not use the ddl login (calls=%d)", fl4.calls)
+		}
+	}()
+
+	// Dedicated (routed) traffic does NOT use the ddl login.
+	fl5 := &fakeLogin{}
+	dedicatedPool := &pgxpool.Pool{} // non-nil sentinel; resolver returns it
+	e5 := NewQueryEngine(nil).WithDDLLogin(fl5).WithPoolResolver(func(context.Context) *pgxpool.Pool { return dedicatedPool })
+	if e5.useDDLLogin(ctx) {
+		t.Fatal("dedicated (routed) traffic must not use the _ddl login")
+	}
+	_ = fl5
 }

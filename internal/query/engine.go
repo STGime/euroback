@@ -58,6 +58,10 @@ type QueryEngine struct {
 	pool     *pgxpool.Pool
 	resolver PoolResolver
 	login    TenantLoginRunner
+	// ddlLogin, when set (PLATFORM_DDL_LOGIN), runs console/platform SQL on
+	// the tenant's own `<schema>_ddl` login on the shared cluster instead of
+	// SET LOCAL ROLE eurobase_migrator. Dedicated (Team) traffic is unaffected.
+	ddlLogin TenantLoginRunner
 }
 
 // NewQueryEngine creates a new QueryEngine backed by the given connection pool.
@@ -81,6 +85,26 @@ func (e *QueryEngine) WithPoolResolver(r PoolResolver) *QueryEngine {
 func (e *QueryEngine) WithTenantLogin(r TenantLoginRunner) *QueryEngine {
 	e.login = r
 	return e
+}
+
+// WithDDLLogin attaches the platform `_ddl` login runner (step 6d, behind
+// PLATFORM_DDL_LOGIN). Nil keeps the SET-LOCAL-ROLE-migrator path.
+func (e *QueryEngine) WithDDLLogin(r TenantLoginRunner) *QueryEngine {
+	e.ddlLogin = r
+	return e
+}
+
+// dedicated reports whether the request routes to a dedicated (Team)
+// instance — i.e. the pool resolver returns a pool. The `_ddl` login only
+// serves the shared cluster, so it is skipped when this is true.
+func (e *QueryEngine) dedicated(ctx context.Context) bool {
+	return e.resolver != nil && e.resolver(ctx) != nil
+}
+
+// useDDLLogin reports whether shared-cluster console/platform traffic should
+// run on the `_ddl` login instead of SET LOCAL ROLE eurobase_migrator.
+func (e *QueryEngine) useDDLLogin(ctx context.Context) bool {
+	return e.ddlLogin != nil && DeveloperRoleFromContext(ctx) && !e.dedicated(ctx)
 }
 
 // resolvePool returns the dedicated-instance pool if the resolver
@@ -155,6 +179,15 @@ func (e *QueryEngine) WithTenantTx(ctx context.Context, schemaName string, fn fu
 	// path below exactly.
 	if e.login != nil && !DeveloperRoleFromContext(ctx) {
 		return e.login.Run(ctx, schemaName, false, e.sdkSetup(schemaName, true, ""), func(ctx context.Context, tx pgx.Tx) error {
+			return fn(tx)
+		})
+	}
+	// Console/platform traffic on the shared cluster: run as the tenant's
+	// own `_ddl` login (service identity) instead of SET LOCAL ROLE
+	// eurobase_migrator, when PLATFORM_DDL_LOGIN is on. Same setup as the
+	// pool path (search_path schema+public, service RLS context).
+	if e.useDDLLogin(ctx) {
+		return e.ddlLogin.Run(ctx, schemaName, false, e.sdkSetup(schemaName, true, ""), func(ctx context.Context, tx pgx.Tx) error {
 			return fn(tx)
 		})
 	}
@@ -829,6 +862,22 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 		return columns, results, nil
 	}
 
+	// Platform SQL editor on the shared cluster → the tenant's `_ddl` login
+	// (service identity, search_path schema+public) instead of migrator.
+	if !opts.SDKPath && e.useDDLLogin(ctx) {
+		var columns []string
+		var results []map[string]interface{}
+		err := e.ddlLogin.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, true, ""), func(ctx context.Context, tx pgx.Tx) error {
+			var ferr error
+			columns, results, ferr = runCustomerSQL(ctx, tx, rawSQL, maxRows)
+			return ferr
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return columns, results, nil
+	}
+
 	pool, routed := e.pickPool(ctx)
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -1026,50 +1075,11 @@ func statementError(i int, err error) error {
 // Exec/Query so the extended-protocol "first statement only" trap is
 // avoided. If any statement fails the whole transaction is rolled back
 // and the error is returned alongside the results gathered so far.
-func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName string, statements []string, maxRows int, readOnly ...bool) ([]StatementResult, error) {
-	if maxRows <= 0 || maxRows > 1000 {
-		maxRows = 1000
-	}
-	isReadOnly := len(readOnly) > 0 && readOnly[0]
-
-	pool, routed := e.pickPool(ctx)
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("acquire connection: %w", err)
-	}
-	// Customer SQL: reset session state before the connection goes back
-	// to the shared pool (runs after the deferred tx rollback below).
-	defer releaseClean(conn, pool)
-
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	if err := applyDeveloperRole(ctx, tx, routed); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
-		return nil, fmt.Errorf("set search_path: %w", err)
-	}
-	if err := e.applyRLSContext(ctx, tx); err != nil {
-		return nil, err
-	}
-	// Closes part of #165. When the caller passes read_only=true
-	// (the MCP server's default), wrap the whole transaction in
-	// SET TRANSACTION READ ONLY so any embedded write raises
-	// SQLSTATE 25006 and rolls everything back.
-	if isReadOnly {
-		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
-			return nil, fmt.Errorf("set transaction read only: %w", err)
-		}
-	}
-	// Each individual statement still gets a per-statement timeout.
-	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {
-		return nil, fmt.Errorf("set statement_timeout: %w", err)
-	}
-
+// runTxStatements runs each statement of a multi-statement transaction on an
+// already-open tx (search_path / RLS / timeouts set by the caller) and
+// returns the per-statement results, or a StatementError on the first
+// failure. Shared by the pool path and the `_ddl` login path.
+func (e *QueryEngine) runTxStatements(ctx context.Context, tx pgx.Tx, statements []string, maxRows int) ([]StatementResult, error) {
 	results := make([]StatementResult, 0, len(statements))
 	for i, raw := range statements {
 		stmt := strings.TrimSpace(raw)
@@ -1131,6 +1141,81 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 		})
 	}
 
+	return results, nil
+}
+
+func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName string, statements []string, maxRows int, readOnly ...bool) ([]StatementResult, error) {
+	if maxRows <= 0 || maxRows > 1000 {
+		maxRows = 1000
+	}
+	isReadOnly := len(readOnly) > 0 && readOnly[0]
+
+	// Console/MCP multi-statement SQL on the shared cluster → the tenant's
+	// `_ddl` login (step 6d). The runner opens the tx (read-only honoured via
+	// tx options); setup sets search_path + service RLS + per-statement
+	// timeout, then the statements run and the runner commits.
+	if e.useDDLLogin(ctx) {
+		var results []StatementResult
+		setup := func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+				return fmt.Errorf("set search_path: %w", err)
+			}
+			if err := e.applyRLSContext(ctx, tx); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {
+				return fmt.Errorf("set statement_timeout: %w", err)
+			}
+			return nil
+		}
+		err := e.ddlLogin.Run(ctx, schemaName, isReadOnly, setup, func(ctx context.Context, tx pgx.Tx) error {
+			var ferr error
+			results, ferr = e.runTxStatements(ctx, tx, statements, maxRows)
+			return ferr
+		})
+		if err != nil {
+			return results, err
+		}
+		return results, nil
+	}
+
+	pool, routed := e.pickPool(ctx)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	// Customer SQL: reset session state before the connection goes back
+	// to the shared pool (runs after the deferred tx rollback below).
+	defer releaseClean(conn, pool)
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if err := applyDeveloperRole(ctx, tx, routed); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+		return nil, fmt.Errorf("set search_path: %w", err)
+	}
+	if err := e.applyRLSContext(ctx, tx); err != nil {
+		return nil, err
+	}
+	if isReadOnly {
+		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+			return nil, fmt.Errorf("set transaction read only: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10s'"); err != nil {
+		return nil, fmt.Errorf("set statement_timeout: %w", err)
+	}
+
+	results, err := e.runTxStatements(ctx, tx, statements, maxRows)
+	if err != nil {
+		return results, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return results, fmt.Errorf("commit: %w", err)
 	}

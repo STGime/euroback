@@ -62,7 +62,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, upgradeSvc *upgrade.Service, sdkLogin *tenantconn.Resolver, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, upgradeSvc *upgrade.Service, sdkLogin *tenantconn.Resolver, platformDDLLogin query.TenantLoginRunner, devMode ...bool) chi.Router {
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -1424,6 +1424,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// so a nil here means "not a Team project" — never "fall
 				// back to shared").
 				queryEngine := query.NewQueryEngine(developerPool).WithPoolResolver(query.TenantPoolFromContext)
+				// Step 6d: run shared-cluster console/MCP SQL as the tenant's
+				// `_ddl` login when configured (nil → migrator path).
+				if platformDDLLogin != nil {
+					queryEngine = queryEngine.WithDDLLogin(platformDDLLogin)
+				}
 				publisher := realtime.NewEventPublisher(nil, hub)
 
 				// Reads → viewer; mutations + SQL exec → developer

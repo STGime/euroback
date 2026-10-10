@@ -2614,7 +2614,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		// login seam is covered by engine_tenant_login_test.go; the real
 		// `<schema>_func` execution path is the functions runner's (below)
 		// and the step-3 prod pooler smoke test.
-		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil, nil)
+		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil, nil, nil)
 	if cfg.deno != "" {
 		gatewaySrv := httptest.NewServer(router)
 		t.Cleanup(gatewaySrv.Close)
