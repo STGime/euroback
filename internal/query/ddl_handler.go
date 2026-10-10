@@ -407,7 +407,7 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 		var warning string
 		if req.DisableRLS {
 			qt := qualifiedTable(schemaName, req.Name)
-			err := runDDL(r.Context(), pool, func(tx pgx.Tx) error {
+			err := runDDL(r.Context(), pool, schemaName, func(tx pgx.Tx) error {
 				_, err := tx.Exec(r.Context(), fmt.Sprintf("ALTER TABLE %s DISABLE ROW LEVEL SECURITY", qt))
 				return err
 			})
@@ -1217,7 +1217,7 @@ func handleToggleRLS(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		sql := fmt.Sprintf("ALTER TABLE %s %s ROW LEVEL SECURITY", qt, action)
-		err = runDDL(r.Context(), pool, func(tx pgx.Tx) error {
+		err = runDDL(r.Context(), pool, schemaName, func(tx pgx.Tx) error {
 			_, err := tx.Exec(r.Context(), sql)
 			return err
 		})

@@ -31,8 +31,25 @@ import (
 //
 // Free/Pro / any request without the stashed pool: falls back to
 // the shared `pool` argument, exactly the pre-PR-D behaviour.
-func runDDL(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
+func runDDL(ctx context.Context, pool *pgxpool.Pool, schemaName string, fn func(tx pgx.Tx) error) error {
 	routed := TenantPoolFromContext(ctx) != nil
+
+	// Step 6d: on the shared cluster, run console/MCP schema DDL as the
+	// tenant's own `<schema>_ddl` login instead of SET LOCAL ROLE
+	// eurobase_migrator, when the runner is configured (PLATFORM_DDL_LOGIN).
+	// Not for dedicated (Team) traffic — that keeps the owner pool.
+	if ddl := DDLLoginFromContext(ctx); ddl != nil && DeveloperRoleFromContext(ctx) && !routed {
+		setup := func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
+				return fmt.Errorf("set search_path: %w", err)
+			}
+			return applyRLSContextTx(ctx, tx)
+		}
+		return ddl.Run(ctx, schemaName, false, setup, func(ctx context.Context, tx pgx.Tx) error {
+			return fn(tx)
+		})
+	}
+
 	pool, err := tenantDDLPool(ctx, pool)
 	if err != nil {
 		return err
@@ -237,7 +254,7 @@ func CreateTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName 
 
 	createSQL := fmt.Sprintf("CREATE TABLE %s (\n  %s\n)", qt, strings.Join(colDefs, ",\n  "))
 
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, createSQL); err != nil {
 			return fmt.Errorf("create table: %w", err)
 		}
@@ -317,7 +334,7 @@ func DropTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName st
 
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("DROP TABLE %s", qt)
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("drop table: %w", err)
 		}
@@ -359,7 +376,7 @@ func AddColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName st
 	}
 
 	sql := strings.Join(parts, " ")
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("add column: %w", err)
 		}
@@ -390,7 +407,7 @@ func DropColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, 
 
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", qt, quoteIdent(columnName))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("drop column: %w", err)
 		}
@@ -436,7 +453,7 @@ func RenameTable(ctx context.Context, pool *pgxpool.Pool, schemaName, oldName, n
 		return fmt.Errorf("table %s already exists", newName)
 	}
 
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		qt := qualifiedTable(schemaName, oldName)
 		renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", qt, quoteIdent(newName))
 		if _, err := tx.Exec(ctx, renameSQL); err != nil {
@@ -488,7 +505,7 @@ func RenameColumn(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName
 
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", qt, quoteIdent(oldCol), quoteIdent(newCol))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("rename column: %w", err)
 		}
@@ -522,7 +539,7 @@ func AlterColumnType(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s",
 		qt, quoteIdent(col), strings.ToUpper(newType), quoteIdent(col), strings.ToUpper(newType))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("alter column type: %w", err)
 		}
@@ -556,7 +573,7 @@ func AlterColumnNullable(ctx context.Context, pool *pgxpool.Pool, schemaName, ta
 		action = "DROP NOT NULL"
 	}
 	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s", qt, quoteIdent(col), action)
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("alter column nullable: %w", err)
 		}
@@ -620,7 +637,7 @@ func AddForeignKey(ctx context.Context, pool *pgxpool.Pool, schemaName, tableNam
 		quoteIdent(schemaName), quoteIdent(fk.ReferencedTable), quoteIdent(fk.ReferencedColumn),
 		onDelete,
 	)
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("add foreign key: %w", err)
 		}
@@ -643,7 +660,7 @@ func DropConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, tableNa
 
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", qt, quoteIdent(constraintName))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("drop constraint: %w", err)
 		}
@@ -673,7 +690,7 @@ func AddUniqueConstraint(ctx context.Context, pool *pgxpool.Pool, schemaName, ta
 	qt := qualifiedTable(schemaName, tableName)
 	constraintName := fmt.Sprintf("uq_%s_%s", tableName, column)
 	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s)", qt, quoteIdent(constraintName), quoteIdent(column))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("add unique constraint: %w", err)
 		}
@@ -707,7 +724,7 @@ func CreateIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName,
 		uniqueKw = "UNIQUE "
 	}
 	sql := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)", uniqueKw, quoteIdent(indexName), qt, quoteIdent(column))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("create index: %w", err)
 		}
@@ -722,7 +739,7 @@ func DropIndex(ctx context.Context, pool *pgxpool.Pool, schemaName, indexName st
 		return perr
 	}
 	sql := fmt.Sprintf("DROP INDEX %s.%s", quoteIdent(schemaName), quoteIdent(indexName))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("drop index: %w", err)
 		}
@@ -964,7 +981,7 @@ func CreateTrigger(ctx context.Context, pool *pgxpool.Pool, schemaName string, r
 		quoteIdent(schemaName), quoteIdent(req.FunctionName))
 
 	stmt := b.String()
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("create trigger: %w", err)
 		}
@@ -987,7 +1004,7 @@ func DropTrigger(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName,
 	}
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("DROP TRIGGER %s ON %s", quoteIdent(triggerName), qt)
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("drop trigger: %w", err)
 		}
@@ -1149,7 +1166,7 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 	// Set search_path to the tenant schema so unqualified table references
 	// in the function body (e.g. "SELECT * FROM categories") resolve
 	// correctly. Use a transaction so the search_path resets automatically.
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
 			return fmt.Errorf("set search_path: %w", err)
 		}
@@ -1174,7 +1191,7 @@ func DropFunction(ctx context.Context, pool *pgxpool.Pool, schemaName, funcName 
 	}
 
 	sql := fmt.Sprintf("DROP FUNCTION IF EXISTS %s.%s()", quoteIdent(schemaName), quoteIdent(funcName))
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("drop function: %w", err)
 		}
@@ -1212,7 +1229,7 @@ func AlterColumnDefault(ctx context.Context, pool *pgxpool.Pool, schemaName, tab
 		}
 		sql = fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", qt, quoteIdent(col), *defaultVal)
 	}
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("alter column default: %w", err)
 		}
@@ -1449,7 +1466,7 @@ func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tabl
 		return fmt.Errorf("unknown policy preset: %s", preset)
 	}
 
-	if err := runDDL(ctx, pool, func(tx pgx.Tx) error {
+	if err := runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		// Tenant-local search_path so auth_uid() / auth_role() resolve in
 		// the tenant schema. SET LOCAL auto-resets on commit.
 		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
@@ -1501,7 +1518,7 @@ func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tab
 		sql += fmt.Sprintf(" WITH CHECK (%s)", withCheckExpr)
 	}
 
-	if err := runDDL(ctx, pool, func(tx pgx.Tx) error {
+	if err := runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		// Tenant-local search_path so auth_uid() / auth_role() resolve.
 		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s, public", quoteIdent(schemaName))); err != nil {
 			return fmt.Errorf("set search_path: %w", err)
@@ -1525,7 +1542,7 @@ func DropPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, 
 	}
 	qt := qualifiedTable(schemaName, tableName)
 	sql := fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", quoteIdent(policyName), qt)
-	return runDDL(ctx, pool, func(tx pgx.Tx) error {
+	return runDDL(ctx, pool, schemaName, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("drop policy: %w", err)
 		}

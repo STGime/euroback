@@ -63,6 +63,13 @@ import (
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
 func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, upgradeSvc *upgrade.Service, sdkLogin *tenantconn.Resolver, platformDDLLogin query.TenantLoginRunner, devMode ...bool) chi.Router {
+	// Wrap the platform `_ddl` runner once with the 503-mapping adapter, kept
+	// nil-safe (a nil runner stays a nil interface — the console-500 lesson).
+	var ddlLogin query.TenantLoginRunner
+	if platformDDLLogin != nil {
+		ddlLogin = ddlTenantLogin{platformDDLLogin}
+	}
+
 	// Local dev fallback: if no developer pool is provided, reuse the
 	// gateway pool. The engine will still try `SET LOCAL ROLE
 	// eurobase_migrator` and fail with a clear error, which is the
@@ -1046,8 +1053,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// also sets WithDeveloperRole, so withDeveloperRole
 			// becomes redundant but kept for defence-in-depth if the
 			// context middleware ever gets reordered.
-			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole).Mount("/schema/tables", query.HandleDDL(developerPool))
-			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole).Mount("/schema/functions", query.HandleFunctions(developerPool))
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole, attachDDLLogin(ddlLogin)).Mount("/schema/tables", query.HandleDDL(developerPool))
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver), withDeveloperRole, attachDDLLogin(ddlLogin)).Mount("/schema/functions", query.HandleFunctions(developerPool))
 			// Tenant-level versioned migrations (#190). Platform auth +
 			// developer role; each migration runs under a per-tenant LOGIN
 			// role the gateway connects as (see MigrationExecutor), so a
@@ -1426,8 +1433,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				queryEngine := query.NewQueryEngine(developerPool).WithPoolResolver(query.TenantPoolFromContext)
 				// Step 6d: run shared-cluster console/MCP SQL as the tenant's
 				// `_ddl` login when configured (nil → migrator path).
-				if platformDDLLogin != nil {
-					queryEngine = queryEngine.WithDDLLogin(ddlTenantLogin{platformDDLLogin})
+				if ddlLogin != nil {
+					queryEngine = queryEngine.WithDDLLogin(ddlLogin)
 				}
 				publisher := realtime.NewEventPublisher(nil, hub)
 
@@ -1656,6 +1663,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Route("/schema/tables", func(r chi.Router) {
 				r.Use(requireSecretKeyForDDL)
 				r.Use(sdkDDLAdapter(ownerPoolFor, enableSDKRouting))
+				r.Use(attachDDLLogin(ddlLogin))
 				r.Mount("/", query.HandleDDL(developerPool))
 			})
 
@@ -1860,6 +1868,17 @@ func superadminMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 // applyDeveloperRole). Apply to platform-authenticated DDL routes that
 // don't already go through tenant.PlatformTenantContext (which sets the
 // same flag).
+// attachDDLLogin puts the platform `_ddl` runner on the request context so
+// runDDL routes schema DDL to the tenant's `_ddl` login (step 6d). Nil runner
+// → no-op (ContextWithDDLLogin ignores nil), so the migrator path is kept.
+func attachDDLLogin(r query.TenantLoginRunner) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(query.ContextWithDDLLogin(req.Context(), r)))
+		})
+	}
+}
+
 func withDeveloperRole(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r.WithContext(query.WithDeveloperRole(r.Context())))
