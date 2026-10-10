@@ -298,6 +298,10 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		project, err := svc.CreateProject(r.Context(), claims.Subject, claims.Email, req)
 		if err != nil {
 			slog.Error("failed to create project", "error", err, "user_id", claims.Subject)
+			if errors.Is(err, ErrAccountSuspended) {
+				http.Error(w, `{"error":"this account has been suspended","code":"account_suspended"}`, http.StatusForbidden)
+				return
+			}
 			if errors.Is(err, ErrTeamBetaRequired) {
 				http.Error(w, `{"error":"team plan requires closed-beta access","code":"team_beta_required"}`, http.StatusForbidden)
 				return

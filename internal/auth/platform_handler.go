@@ -118,6 +118,15 @@ func HandlePlatformSignIn(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 				})
 				return
 			}
+			if errors.Is(err, ErrAccountSuspended) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error":   "account_suspended",
+					"message": "This account has been suspended. Contact support if you believe this is a mistake.",
+				})
+				return
+			}
 			// Internal failures (DB errors from the user / passkey
 			// lookups, challenge storage) must not leak driver text to
 			// an unauthenticated caller, and aren't credential failures.

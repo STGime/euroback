@@ -29,6 +29,9 @@ on:
       - internal/tenant/superadmin_sso*.go
       - internal/auth/superadmin_bypass.go
       - internal/auth/apikey_middleware.go
+      - internal/auth/platform_auth.go
+      - migrations/000142_platform_user_suspended.up.sql
+      - internal/tenant/user_suspension_admin_handlers.go
       - migrations/000136_converge_tenant_ownership.up.sql
       - internal/query/converge_ownership_test.go
       - migrations/000141_converge_tenant_functions.up.sql
@@ -97,6 +100,14 @@ jobs:
           APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           PAT_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs|TestSuperadminBypassVerify'
+
+      - name: Account suspension (sign-in + project-create gates)
+        env:
+          DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+        run: |
+          go test -count=1 -v ./internal/auth/ -run 'TestIssuePlatformJWT_SuspendedRefused|TestSignIn_SuspendedNoEnumeration'
+          go test -count=1 -v ./internal/tenant/ -run 'TestCreateProject_SuspendedRefused'
+
 
       # The auth email log (000135): the gateway may only insert, the
       # developer pool lists and cleans up.

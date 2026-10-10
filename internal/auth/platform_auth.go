@@ -35,6 +35,10 @@ type PlatformEmailer interface {
 // rather than showing a generic "invalid credentials" message.
 var ErrEmailNotVerified = errors.New("email not verified")
 
+// ErrAccountSuspended is returned when a suspended platform user tries to
+// sign in (any login path) or create a project.
+var ErrAccountSuspended = errors.New("this account has been suspended")
+
 // DripEnqueuer is an optional hook the gateway wires up in main.go to
 // enqueue the onboarding drip series when a signup succeeds. Runs
 // inside the same tx as the platform_users insert so a signup that
@@ -380,7 +384,7 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 
 	// Dev fallback (no email service): auto-confirmed above, so log in.
 	// New signups are never superadmin; that flag is granted out-of-band.
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, false, LoginViaPassword, "")
+	token, expiresIn, err := s.generatePlatformJWT(ctx, user.ID, user.Email, false, LoginViaPassword, "")
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +521,7 @@ func (s *PlatformAuthService) SignIn(ctx context.Context, email, password string
 
 	slog.Info("platform user signed in", "user_id", user.ID, "email", user.Email, "is_superadmin", isSuperadmin)
 
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin, LoginViaPassword, "")
+	token, expiresIn, err := s.generatePlatformJWT(ctx, user.ID, user.Email, isSuperadmin, LoginViaPassword, "")
 	if err != nil {
 		return nil, err
 	}
@@ -574,7 +578,7 @@ func (s *PlatformAuthService) VerifyEmail(ctx context.Context, rawToken string) 
 		}
 	}
 
-	token, expiresIn, err := s.generatePlatformJWT(user.ID, user.Email, isSuperadmin, LoginViaPassword, "")
+	token, expiresIn, err := s.generatePlatformJWT(ctx, user.ID, user.Email, isSuperadmin, LoginViaPassword, "")
 	if err != nil {
 		return nil, err
 	}
@@ -621,8 +625,8 @@ func (s *PlatformAuthService) ResendVerification(ctx context.Context, email stri
 // Kept for API stability + the SSO handler's existing test seams.
 // login_via=password is implicit; downstream org sso_required
 // enforcement will refuse this session for orgs that require SSO.
-func (s *PlatformAuthService) IssuePlatformJWT(userID, email string, isSuperadmin bool) (string, int, error) {
-	return s.generatePlatformJWT(userID, email, isSuperadmin, LoginViaPassword, "")
+func (s *PlatformAuthService) IssuePlatformJWT(ctx context.Context, userID, email string, isSuperadmin bool) (string, int, error) {
+	return s.generatePlatformJWT(ctx, userID, email, isSuperadmin, LoginViaPassword, "")
 }
 
 // IssuePlatformJWTForSSO mints a JWT with login_via='sso' and
@@ -631,8 +635,8 @@ func (s *PlatformAuthService) IssuePlatformJWT(userID, email string, isSuperadmi
 // that org's OIDC handshake from a password login. Being SSO-backed
 // for org A doesn't grant SSO-satisfied access to org B — see
 // SessionSatisfiesSSOFor.
-func (s *PlatformAuthService) IssuePlatformJWTForSSO(userID, email string, isSuperadmin bool, ssoOrgID string) (string, int, error) {
-	return s.generatePlatformJWT(userID, email, isSuperadmin, LoginViaSSO, ssoOrgID)
+func (s *PlatformAuthService) IssuePlatformJWTForSSO(ctx context.Context, userID, email string, isSuperadmin bool, ssoOrgID string) (string, int, error) {
+	return s.generatePlatformJWT(ctx, userID, email, isSuperadmin, LoginViaSSO, ssoOrgID)
 }
 
 // generatePlatformJWT creates an HS256 JWT for a platform user. The
@@ -645,7 +649,23 @@ func (s *PlatformAuthService) IssuePlatformJWTForSSO(userID, email string, isSup
 // org-owned access site — otherwise password login would be
 // interchangeable with SSO login for a member, defeating the
 // enforcement contract the customer is buying.
-func (s *PlatformAuthService) generatePlatformJWT(userID, email string, isSuperadmin bool, loginVia, ssoOrgID string) (string, int, error) {
+func (s *PlatformAuthService) generatePlatformJWT(ctx context.Context, userID, email string, isSuperadmin bool, loginVia, ssoOrgID string) (string, int, error) {
+	// Account suspension is enforced at the single point every login path
+	// mints a session through, so no path can hand a suspended account a
+	// token. Fail closed: a lookup error denies the session. (A nil pool
+	// means there is no user store at all — only the unit tests that mint a
+	// token without a DB; prod always has the pool, and SignIn's own lookup
+	// would fail first otherwise.)
+	if s.pool != nil {
+		var suspended bool
+		if err := s.pool.QueryRow(ctx, `SELECT suspended_at IS NOT NULL FROM platform_users WHERE id = $1`, userID).Scan(&suspended); err != nil {
+			return "", 0, fmt.Errorf("check account status: %w", err)
+		}
+		if suspended {
+			return "", 0, ErrAccountSuspended
+		}
+	}
+
 	expiresIn := 24 * 3600 // 24 hours
 	now := time.Now()
 

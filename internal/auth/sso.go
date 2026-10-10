@@ -79,11 +79,11 @@ type SSOConfig struct {
 // SSOHandler wires the two OIDC endpoints. Constructed once at
 // gateway startup.
 type SSOHandler struct {
-	pool        *pgxpool.Pool
-	authSvc     *PlatformAuthService
-	orgs        OrgsForSSO
-	oidcClient  *oidc.Client
-	cfg         SSOConfig
+	pool       *pgxpool.Pool
+	authSvc    *PlatformAuthService
+	orgs       OrgsForSSO
+	oidcClient *oidc.Client
+	cfg        SSOConfig
 }
 
 // NewSSOHandler constructs the handler. The oidc.Client can be
@@ -318,7 +318,7 @@ func (h *SSOHandler) HandleSSOCallback() http.HandlerFunc {
 		// organizations.sso_required (migration 000121) can accept
 		// this session for the org that was actually authed
 		// against — and only that org.
-		accessToken, expiresIn, err := h.authSvc.IssuePlatformJWTForSSO(userID, accountEmail, isSuperadmin, claims.OrgID)
+		accessToken, expiresIn, err := h.authSvc.IssuePlatformJWTForSSO(r.Context(), userID, accountEmail, isSuperadmin, claims.OrgID)
 		if err != nil {
 			slog.Error("sso callback: JWT issue", "error", err)
 			h.redirectWithError(w, r, "token_issue_failed", "could not issue session token")

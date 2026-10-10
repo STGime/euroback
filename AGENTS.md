@@ -93,6 +93,9 @@ Shared login roles are created via the Scaleway console before their migrations 
 ## Auth
 - Custom auth in Go (email/password, magic links, OAuth). Anon key for public client access; service key for server-side only — never in client code.
 
+## Account suspension
+- `platform_users.suspended_at` (000142) suspends a platform account: **every login path refuses to mint a session** (the check is in `generatePlatformJWT`, the single chokepoint for password / passkey / SSO / magic-link) and **`CreateProject` refuses** (defence-in-depth — an existing JWT stays valid < 24 h). It does NOT touch the user's projects, tokens or data. Superadmin only: `POST`/`DELETE /platform/admin/users/{id}/suspend`; can't suspend yourself or another superadmin. Audited (`user.suspended` / `user.unsuspended`).
+
 ## Build & Deploy
 - **New code never starts before migrations.** CI applies Deployment manifests pinned to the currently-running image (`apply_pinned`); new images arrive only via `kubectl set image` after migrations run. Any new Deployment manifest must be applied through `apply_pinned`, and each Deployment must be defined in exactly one manifest.
 - Push to `main` triggers CI/CD (GitHub Actions). **Don't run deploy scripts manually — commit and push.**

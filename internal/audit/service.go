@@ -48,6 +48,8 @@ const (
 	// so they can create Team-tier projects during the closed beta.
 	ActionTeamBetaGranted = "team_beta.granted"
 	ActionTeamBetaRevoked = "team_beta.revoked"
+	ActionUserSuspended   = "user.suspended"
+	ActionUserUnsuspended = "user.unsuspended"
 
 	// ActionUserDeleted is emitted when a superadmin deletes a
 	// platform user + all of their projects via
