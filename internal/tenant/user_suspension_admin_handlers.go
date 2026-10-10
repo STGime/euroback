@@ -25,8 +25,8 @@ func AdminSuspendUser(pool *pgxpool.Pool) http.HandlerFunc {
 			Reason string `json:"reason"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if len(body.Reason) > 500 {
-			body.Reason = body.Reason[:500]
+		if r := []rune(body.Reason); len(r) > 500 { // rune-safe: the CHECK is length() (chars)
+			body.Reason = string(r[:500])
 		}
 		actor := actorUserID(r)
 

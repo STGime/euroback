@@ -8,8 +8,8 @@
 --
 -- suspended_by references the superadmin who suspended; NULL for an ops /
 -- migration action. No grant changes: eurobase_gateway and eurobase_developer
--- already hold table-level SELECT on platform_users (and gateway has DML via
--- default privileges). No explicit BEGIN/COMMIT: golang-migrate wraps the file.
+-- already hold table-level SELECT on platform_users (and gateway has blanket
+-- table DML from 000037). No explicit BEGIN/COMMIT: golang-migrate wraps the file.
 
 ALTER TABLE public.platform_users
     ADD COLUMN IF NOT EXISTS suspended_at     TIMESTAMPTZ,
