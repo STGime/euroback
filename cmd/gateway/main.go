@@ -167,6 +167,9 @@ func main() {
 	// console/MCP SQL on the shared cluster runs as the tenant's own `_ddl`
 	// login instead of eurobase_migrator. Nil keeps the migrator path.
 	var platformDDLRunner *tenantconn.DDLRunner
+	if os.Getenv("PLATFORM_DDL_LOGIN") == "1" && !tenantlogin.PersistentDDLLogin() {
+		slog.Warn("PLATFORM_DDL_LOGIN=1 is ignored unless DDL_PERSISTENT_LOGIN=1 is also set — console SQL stays on eurobase_migrator")
+	}
 
 	migrationExec := query.NewMigrationExecutor(developerPool, databaseURL, []byte(os.Getenv("DDL_PASSWORD_SECRET")))
 	if migrationExec.Enabled() {

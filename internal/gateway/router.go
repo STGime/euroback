@@ -1427,7 +1427,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// Step 6d: run shared-cluster console/MCP SQL as the tenant's
 				// `_ddl` login when configured (nil → migrator path).
 				if platformDDLLogin != nil {
-					queryEngine = queryEngine.WithDDLLogin(platformDDLLogin)
+					queryEngine = queryEngine.WithDDLLogin(ddlTenantLogin{platformDDLLogin})
 				}
 				publisher := realtime.NewEventPublisher(nil, hub)
 

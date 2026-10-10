@@ -867,7 +867,7 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	if !opts.SDKPath && e.useDDLLogin(ctx) {
 		var columns []string
 		var results []map[string]interface{}
-		err := e.ddlLogin.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, true, ""), func(ctx context.Context, tx pgx.Tx) error {
+		err := e.ddlLogin.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, true, "10s"), func(ctx context.Context, tx pgx.Tx) error {
 			var ferr error
 			columns, results, ferr = runCustomerSQL(ctx, tx, rawSQL, maxRows)
 			return ferr

@@ -167,23 +167,21 @@ func TestConsoleSQL_RoutesToDDLLogin(t *testing.T) {
 	}
 
 	// Without the developer-role flag (SDK-shaped ctx), the ddl login is NOT
-	// used — would fall through to the nil pool and panic, so recover.
-	func() {
-		defer func() { _ = recover() }()
-		fl4 := &fakeLogin{}
-		e4 := NewQueryEngine(nil).WithDDLLogin(fl4)
-		_, _, _ = e4.ExecuteSQLWithOpts(context.Background(), "tenant_abc", "SELECT 1", 10, ExecOptions{SDKPath: false})
-		if fl4.calls != 0 {
-			t.Fatalf("non-developer-role ctx must not use the ddl login (calls=%d)", fl4.calls)
-		}
-	}()
+	// used — useDDLLogin is false (so the engine falls through to the pool).
+	e4 := NewQueryEngine(nil).WithDDLLogin(&fakeLogin{})
+	if e4.useDDLLogin(context.Background()) {
+		t.Fatal("non-developer-role ctx must not use the _ddl login")
+	}
 
 	// Dedicated (routed) traffic does NOT use the ddl login.
-	fl5 := &fakeLogin{}
 	dedicatedPool := &pgxpool.Pool{} // non-nil sentinel; resolver returns it
-	e5 := NewQueryEngine(nil).WithDDLLogin(fl5).WithPoolResolver(func(context.Context) *pgxpool.Pool { return dedicatedPool })
+	e5 := NewQueryEngine(nil).WithDDLLogin(&fakeLogin{}).WithPoolResolver(func(context.Context) *pgxpool.Pool { return dedicatedPool })
 	if e5.useDDLLogin(ctx) {
 		t.Fatal("dedicated (routed) traffic must not use the _ddl login")
 	}
-	_ = fl5
+
+	// And with no runner attached, useDDLLogin is false even on the console ctx.
+	if NewQueryEngine(nil).useDDLLogin(ctx) {
+		t.Fatal("no ddl runner → must not use the _ddl login (stays on migrator)")
+	}
 }
