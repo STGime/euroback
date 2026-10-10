@@ -127,6 +127,13 @@ func (e *QueryEngine) resolvePool(ctx context.Context) *pgxpool.Pool {
 // role='anon'. Must be called on an open transaction BEFORE any tenant-
 // schema query so policies see the right values.
 func (e *QueryEngine) applyRLSContext(ctx context.Context, tx pgx.Tx) error {
+	return applyRLSContextTx(ctx, tx)
+}
+
+// applyRLSContextTx sets the per-request RLS identity GUCs (service / anon /
+// authenticated end user) on an open tx. Package-level so runDDL (step 6d)
+// can use it too.
+func applyRLSContextTx(ctx context.Context, tx pgx.Tx) error {
 	keyType := KeyTypeFromContext(ctx)
 	endUserID := EndUserIDFromContext(ctx)
 
