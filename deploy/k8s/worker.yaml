@@ -48,6 +48,15 @@ spec:
             - secretRef:
                 name: eurobase-secrets
           env:
+            # Step 6e: the worker keeps every tenant's `<schema>_ddl` role
+            # loginable (password from DDL_PASSWORD_SECRET), with the same
+            # privileges `_func` has — including DML on the platform-managed
+            # system tables and USAGE on public. tenantlogin.DDLEnsurer runs
+            # at startup + every 5 min. Enable on the WORKER FIRST; the
+            # gateway's DDL_PERSISTENT_LOGIN / PLATFORM_DDL_LOGIN come after,
+            # in separate changes. Does NOT move console SQL onto `_ddl`.
+            - name: DDL_PERSISTENT_LOGIN
+              value: "1"
             # #653: publish the runner pooler's tenant userlist here.
             - name: PGB_USERLIST_SECRET
               value: pgbouncer-tenant-userlist
