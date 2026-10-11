@@ -158,6 +158,17 @@ spec:
             # redeploy (SDK SQL returns to the shared gateway pool).
             - name: SDK_FUNC_LOGIN
               value: "1"
+            # Step 6e (gateway half, worker-first ordering): tenant MIGRATIONS
+            # connect with the persistent `<schema>_ddl` login (kept by the
+            # worker's DDLEnsurer, enabled first) instead of toggling the login
+            # per run. Does NOT move console/MCP/schema-DDL SQL onto `_ddl` —
+            # that needs PLATFORM_DDL_LOGIN (deliberately still absent here;
+            # cmd/gateway logs "ignored" if PLATFORM_DDL_LOGIN is set without
+            # this). Requires DDL_PASSWORD_SECRET + DATABASE_URL_DEVELOPER
+            # (present). Rollback: remove this var and redeploy; existing
+            # logins remain (worker keeps them) — see the private notes.
+            - name: DDL_PERSISTENT_LOGIN
+              value: "1"
       imagePullSecrets:
         - name: scw-registry
 ---
