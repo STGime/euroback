@@ -33,6 +33,26 @@ func TenantPoolFromContext(ctx context.Context) *pgxpool.Pool {
 	return p
 }
 
+type ddlLoginKey struct{}
+
+// ContextWithDDLLogin stashes the platform `_ddl` login runner (step 6d) so
+// runDDL can run schema DDL as the tenant's own `_ddl` role on the shared
+// cluster. Only call this with a NON-nil runner — a typed-nil interface would
+// defeat the nil check (the console-500 hotfix lesson). A nil runner leaves
+// the context unchanged, so DDLLoginFromContext returns a true nil.
+func ContextWithDDLLogin(ctx context.Context, r TenantLoginRunner) context.Context {
+	if r == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ddlLoginKey{}, r)
+}
+
+// DDLLoginFromContext returns the `_ddl` runner, or nil.
+func DDLLoginFromContext(ctx context.Context) TenantLoginRunner {
+	r, _ := ctx.Value(ddlLoginKey{}).(TenantLoginRunner)
+	return r
+}
+
 // schemaContextKey is a type-safe key for the tenant schema in request context.
 type schemaContextKey struct{}
 

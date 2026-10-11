@@ -185,3 +185,29 @@ func TestConsoleSQL_RoutesToDDLLogin(t *testing.T) {
 		t.Fatal("no ddl runner → must not use the _ddl login (stays on migrator)")
 	}
 }
+
+// runDDL routes schema DDL to the `_ddl` login when one is on the context
+// (shared cluster, developer role) — never touching the (nil) pool. Absent a
+// runner, it would take the migrator pool path (and panic on the nil pool),
+// which proves the routing is gated on the context value.
+func TestRunDDL_RoutesToDDLLogin(t *testing.T) {
+	fl := &fakeLogin{}
+	ctx := ContextWithDDLLogin(WithDeveloperRole(context.Background()), fl)
+	called := false
+	if err := runDDL(ctx, nil, "tenant_abc", func(tx pgx.Tx) error { called = true; return nil }); err != nil {
+		t.Fatalf("runDDL via ddl login: %v", err)
+	}
+	if fl.calls != 1 || fl.schema != "tenant_abc" {
+		t.Fatalf("ddl login calls=%d schema=%q, want 1 / tenant_abc", fl.calls, fl.schema)
+	}
+	_ = called // fakeLogin doesn't invoke fn; we only assert routing
+
+	// No runner on the context → nil interface → does NOT route (would use
+	// the nil pool). ContextWithDDLLogin(nil) is a no-op.
+	if DDLLoginFromContext(context.Background()) != nil {
+		t.Fatal("no ddl login on a bare context")
+	}
+	if DDLLoginFromContext(ContextWithDDLLogin(context.Background(), nil)) != nil {
+		t.Fatal("ContextWithDDLLogin(nil) must stay a nil interface (console-500 lesson)")
+	}
+}
