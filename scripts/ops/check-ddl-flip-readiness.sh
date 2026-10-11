@@ -66,6 +66,22 @@ spec:
                   ('storage_objects'),('storage_shared_prefixes'),('vault_secrets'),
                   ('user_passkey_credentials'),('webauthn_challenges');
 
+                -- Shared-cluster tenants only. A Team/dedicated project (a
+                -- live project_databases row) routes console SQL to its
+                -- dedicated instance owner, NOT a `_ddl` login — a stale
+                -- shared-cluster schema it may have left behind is never
+                -- served by the flip, so it must not block it.
+                CREATE TEMP TABLE _schemas ON COMMIT DROP AS
+                  SELECT p.schema_name FROM public.projects p
+                   WHERE p.schema_name IS NOT NULL
+                     AND NOT EXISTS (SELECT 1 FROM public.project_databases pd
+                                      WHERE pd.project_id = p.id AND pd.state = 'active');
+
+                -- NOTE: the C classifier below assumes the system-table
+                -- policies are PERMISSIVE (as provision_tenant creates them).
+                -- A hand-made RESTRICTIVE policy is not modelled; none exist
+                -- on prod system tables (verified 2026-10-11).
+
                 -- A: migrator-owned APPLICATION tables (non-system) still in a
                 --    tenant schema. These flip from owner-bypass to RLS-subject
                 --    under _ddl. 6c convergence should have reassigned them to
@@ -74,7 +90,7 @@ spec:
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
                   JOIN pg_roles r ON r.oid = c.relowner
-                 WHERE n.nspname IN (SELECT schema_name FROM public.projects WHERE schema_name IS NOT NULL)
+                 WHERE n.nspname IN (SELECT schema_name FROM _schemas)
                    AND c.relkind IN ('r','p')
                    AND r.rolname = 'eurobase_migrator'
                    AND c.relname NOT IN (SELECT name FROM _systab)
@@ -87,7 +103,7 @@ spec:
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
                   JOIN pg_roles r ON r.oid = c.relowner
-                 WHERE n.nspname IN (SELECT schema_name FROM public.projects WHERE schema_name IS NOT NULL)
+                 WHERE n.nspname IN (SELECT schema_name FROM _schemas)
                    AND c.relkind IN ('r','p')
                    AND r.rolname IN ('eurobase_gateway','eurobase_developer')
                  ORDER BY 1;
@@ -109,10 +125,11 @@ spec:
                 SELECT 'C_POLICY_NO_SERVICE ' || schemaname || '.' || tablename || ' ' || policyname
                   FROM pg_policies p
                   JOIN _systab s ON s.name = p.tablename
-                 WHERE p.schemaname IN (SELECT schema_name FROM public.projects WHERE schema_name IS NOT NULL)
+                 WHERE p.schemaname IN (SELECT schema_name FROM _schemas)
                    AND position('is_service_role()' in coalesce(p.qual,''))       = 0
                    AND position('is_service_role()' in coalesce(p.with_check,'')) = 0
                    AND btrim(coalesce(p.qual,'')) <> 'true'
+                   AND btrim(coalesce(p.with_check,'')) <> 'true'  -- INSERT-only admit-all
                    AND NOT (p.tablename IN ('refresh_tokens','email_tokens','vault_secrets')
                             AND (position('is_internal_auth_path()' in coalesce(p.qual,'')) > 0
                                  OR position('is_internal_auth_path()' in coalesce(p.with_check,'')) > 0))
@@ -122,7 +139,7 @@ spec:
                 -- policies. Counted separately so they never keep the check red.
                 SELECT 'INFO_AUTH_DENY ' || schemaname || '.' || tablename || ' ' || policyname
                   FROM pg_policies p
-                 WHERE p.schemaname IN (SELECT schema_name FROM public.projects WHERE schema_name IS NOT NULL)
+                 WHERE p.schemaname IN (SELECT schema_name FROM _schemas)
                    AND p.tablename IN ('refresh_tokens','email_tokens','vault_secrets')
                    AND (position('is_internal_auth_path()' in coalesce(p.qual,'')) > 0
                         OR position('is_internal_auth_path()' in coalesce(p.with_check,'')) > 0)
@@ -134,7 +151,7 @@ spec:
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
                   JOIN _systab s ON s.name = c.relname
-                 WHERE n.nspname IN (SELECT schema_name FROM public.projects WHERE schema_name IS NOT NULL)
+                 WHERE n.nspname IN (SELECT schema_name FROM _schemas)
                    AND c.relkind = 'r' AND c.relrowsecurity
                    AND NOT EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.polrelid = c.oid)
                  ORDER BY 1;
@@ -149,7 +166,7 @@ spec:
                       ('EXECUTE is_service_role', has_function_privilege(p.schema_name || '_ddl', 'public.is_service_role()', 'EXECUTE')),
                       ('EXECUTE current_end_user_id', has_function_privilege(p.schema_name || '_ddl', 'public.current_end_user_id()', 'EXECUTE'))
                   ) AS g(grant_missing, present)
-                 WHERE p.schema_name IS NOT NULL
+                 WHERE p.schema_name IN (SELECT schema_name FROM _schemas)
                    AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = p.schema_name || '_ddl')
                    AND NOT g.present
                  ORDER BY 1;
@@ -164,7 +181,7 @@ spec:
                   FROM public.projects p
                   JOIN _systab s ON true
                   CROSS JOIN LATERAL (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) AS perms(perm)
-                 WHERE p.schema_name IS NOT NULL
+                 WHERE p.schema_name IN (SELECT schema_name FROM _schemas)
                    AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = p.schema_name || '_ddl')
                    AND to_regclass(p.schema_name || '.' || s.name) IS NOT NULL
                    AND NOT has_table_privilege(p.schema_name || '_ddl', p.schema_name || '.' || s.name, perm)

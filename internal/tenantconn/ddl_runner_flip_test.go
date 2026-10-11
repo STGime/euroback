@@ -91,9 +91,10 @@ func TestDDLRunner_ServiceRoleReachesSystemTables(t *testing.T) {
 	}
 
 	// Seed one row in the system table (as the owner, bypassing RLS), and an
-	// app table OWNED BY `_ddl` with RLS enabled + the standard service-OR-
-	// owner policy. The app table is what the console creates and 6c
-	// convergence reassigns to `_ddl`.
+	// app table OWNED BY `_ddl` with RLS enabled + a service-role policy —
+	// the state 6c convergence leaves an app table in (owned by `_ddl`). The
+	// seed statements run as the admin role; `ALTER … OWNER TO <ddl>` sets the
+	// ownership the test depends on, so the creating role is immaterial.
 	q := func(sql string) {
 		t.Helper()
 		if _, err := admin.Exec(ctx, sql); err != nil {
@@ -101,14 +102,12 @@ func TestDDLRunner_ServiceRoleReachesSystemTables(t *testing.T) {
 		}
 	}
 	q(`INSERT INTO "` + schema + `".users (email) VALUES ('seed@test.eurobase.local')`)
-	q(`SET ROLE eurobase_migrator`)
 	q(`CREATE TABLE "` + schema + `".widgets (id int PRIMARY KEY, note text)`)
 	q(`ALTER TABLE "` + schema + `".widgets OWNER TO "` + ddlRole + `"`)
 	q(`ALTER TABLE "` + schema + `".widgets ENABLE ROW LEVEL SECURITY`)
 	q(`CREATE POLICY widgets_pol ON "` + schema + `".widgets FOR ALL
 	     USING (public.is_service_role()) WITH CHECK (public.is_service_role())`)
 	q(`INSERT INTO "` + schema + `".widgets (id, note) VALUES (1, 'owned-by-ddl')`)
-	q(`RESET ROLE`)
 
 	// The real runner, built exactly as cmd/gateway does: base = the gateway
 	// DSN (user/password overridden per run to the `_ddl` role).
@@ -180,8 +179,8 @@ func TestDDLRunner_ServiceRoleReachesSystemTables(t *testing.T) {
 		t.Fatal("SECURITY: _ddl login read public.platform_users across tenants")
 	}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code != "42501" {
-		t.Logf("cross-tenant read denied with %s (want 42501 permission denied, other deny acceptable)", pgErr.Code)
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("cross-tenant read must be denied with 42501 permission denied, got: %v", err)
 	}
 
 	// ── negative: WITHOUT service, the system table filters to zero rows
