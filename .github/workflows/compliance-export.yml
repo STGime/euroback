@@ -38,6 +38,7 @@ on:
       - internal/query/converge_functions_test.go
       - internal/email/delivery_log*.go
       - internal/tenantlogin/**
+      - internal/tenantconn/**
       - internal/sqllog/**
   workflow_dispatch:
 
@@ -134,6 +135,16 @@ jobs:
           DDL_LOGIN_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           DDL_LOGIN_TEST_DEV_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/tenantlogin/ -run 'TestDDLLoginIntegration'
+
+      # Step 6e proof: console/MCP SQL through the real tenantconn.DDLRunner
+      # on a project's `_ddl` login reaches its system + app tables (service
+      # branch), stays contained cross-tenant, and is genuinely RLS-subject
+      # on the system tables without the service GUC.
+      - name: Platform DDL login flip proof (6e)
+        env:
+          DDL_LOGIN_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+          DDL_LOGIN_TEST_DEV_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
+        run: go test -count=1 -v ./internal/tenantconn/ -run 'TestDDLRunner_ServiceRoleReachesSystemTables'
 
       # Tenant-table ownership convergence (000136): reassigns to _ddl.
       - name: Converge tenant ownership (000136)
