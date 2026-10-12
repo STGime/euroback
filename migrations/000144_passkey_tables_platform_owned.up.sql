@@ -8,14 +8,19 @@
 -- can read/write rows under RLS but cannot ALTER/DROP the table). This makes
 -- the passkey tables consistent: platform-owned, not `_ddl`-owned.
 --
--- Flip-neutral: their RLS policies gate on `is_service_role()` (not the #164
--- `is_internal_auth_path()` lock) and they hold public keys, not secrets, so
--- console/SDK access is unchanged. End-user passkey auth runs on the developer
--- pool (the tables are revoked from eurobase_gateway), which keeps full access
--- as the owner / via INHERIT. `_ddl` loses implicit (owner) access to them and
+-- Flip-neutral: these tables hold public keys, not secrets, and their RLS
+-- policies gate on `is_service_role()` (not the #164 `is_internal_auth_path()`
+-- lock). End-user passkey auth is the SDK path and runs as the service role on
+-- the gateway runtime pool; the gateway's access is via EXPLICIT grants (000137),
+-- which survive `ALTER TABLE … OWNER TO` unchanged, and the gateway is a
+-- non-owner both before (owner `_ddl`) and after (owner migrator) — so RLS
+-- enforcement for SDK traffic is identical. The tables are also in the
+-- internal/hidden table lists (managed via the auth API, not raw SQL), so no
+-- console/SDK SQL path reads or writes them regardless of owner. `_ddl` simply
 -- regains explicit DML + REFERENCES on the worker keeper's next pass
--- (DDLEnsurer.grantDDLAccess, ≤5 min) — the same pattern storage_shared_prefixes
--- already relies on.
+-- (DDLEnsurer.grantDDLAccess), the same pattern storage_shared_prefixes relies
+-- on. The ~204 ALTER OWNER statements run in golang-migrate's single tx (brief
+-- catalog locks on commit, same profile as 000136/000143).
 --
 -- Two changes: (1) add the passkey tables to `v_system_tables`, so convergence
 -- stops moving them and future provisioning treats them as system tables;
