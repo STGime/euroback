@@ -59,17 +59,9 @@ func (r *DDLRunner) Run(ctx context.Context, schema string, readOnly bool, setup
 	cfg.User = tenantlogin.DDLRole(schema)
 	cfg.Password = tenantlogin.DDLPassword(r.secret, schema)
 
-	conn, err := pgx.ConnectConfig(cctx, cfg)
-	if err != nil && isLoginRefused(err) && r.ensure != nil {
-		if ensureErr := r.ensure(cctx, schema); ensureErr != nil {
-			slog.Error("tenantconn: ensure ddl login", "schema", schema, "error", ensureErr)
-			return ErrConnect
-		}
-		conn, err = pgx.ConnectConfig(cctx, cfg)
-	}
+	conn, err := r.connect(cctx, cfg, schema)
 	if err != nil {
-		slog.Error("tenantconn: connect as ddl role", "role", cfg.User, "error", err)
-		return ErrConnect
+		return err
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -101,8 +93,63 @@ func (r *DDLRunner) Run(ctx context.Context, schema string, readOnly bool, setup
 	return tx.Commit(cctx)
 }
 
+// ddlConnectRetries / ddlConnectBackoff bound the retry on a momentarily
+// saturated role (53300). Each consumer connection is short-lived, so a slot
+// usually frees within a few hundred ms; the whole retry stays inside the
+// run budget.
+const (
+	ddlConnectRetries = 4
+	ddlConnectBackoff = 100 * time.Millisecond
+)
+
+// connect opens the `_ddl` connection, recovering from the two expected
+// transient failures:
+//   - a refused login (28P01/28000) — the worker keeper hasn't reached this
+//     tenant yet, or the tenant changed its own password: apply the login
+//     once (ensure) and retry;
+//   - "too many connections for role" (53300) — DDLConnLimit momentarily
+//     saturated by concurrent console/MCP activity: brief bounded backoff.
+//
+// Everything is bounded by ctx (the run budget). A still-failing connect
+// returns ErrConnect (→ 503 at the handler), never a panic or a silent
+// fall-through.
+func (r *DDLRunner) connect(ctx context.Context, cfg *pgx.ConnConfig, schema string) (*pgx.Conn, error) {
+	ensured := false
+	for attempt := 0; ; attempt++ {
+		conn, err := pgx.ConnectConfig(ctx, cfg)
+		if err == nil {
+			return conn, nil
+		}
+		switch {
+		case isLoginRefused(err) && r.ensure != nil && !ensured:
+			ensured = true
+			if ensureErr := r.ensure(ctx, schema); ensureErr != nil {
+				slog.Error("tenantconn: ensure ddl login", "schema", schema, "error", ensureErr)
+				return nil, ErrConnect
+			}
+			// retry the connect immediately
+		case isTooManyConnections(err) && attempt < ddlConnectRetries:
+			select {
+			case <-ctx.Done():
+				slog.Error("tenantconn: connect as ddl role timed out while role saturated", "role", cfg.User)
+				return nil, ErrConnect
+			case <-time.After(ddlConnectBackoff):
+			}
+		default:
+			slog.Error("tenantconn: connect as ddl role", "role", cfg.User, "error", err)
+			return nil, ErrConnect
+		}
+	}
+}
+
 // isLoginRefused: wrong password (28P01) or role may not log in (28000).
 func isLoginRefused(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && (pgErr.Code == "28P01" || pgErr.Code == "28000")
+}
+
+// isTooManyConnections: the role hit its CONNECTION LIMIT (53300).
+func isTooManyConnections(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "53300"
 }

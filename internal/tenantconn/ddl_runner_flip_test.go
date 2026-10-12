@@ -165,6 +165,15 @@ func TestDDLRunner_ServiceRoleReachesSystemTables(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("read of _ddl-owned widgets returned %d rows, want 1", n)
 		}
+		// A FOREIGN KEY to the migrator-owned system table `users` — the
+		// canonical RLS pattern. Adding it needs the REFERENCES privilege on
+		// users, which `_ddl` (a non-owner) only has because grantDDLAccess
+		// grants it. Before that grant this CREATE failed with 42501; it is
+		// the exact real-user break the adversarial review caught.
+		if _, err := tx.Exec(ctx,
+			`CREATE TABLE fk_probe (id int PRIMARY KEY, uid uuid REFERENCES users(id) ON DELETE CASCADE)`); err != nil {
+			t.Fatalf("CREATE TABLE with FK to system table users failed as _ddl (REFERENCES grant missing?): %v", err)
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("positive run: %v", err)

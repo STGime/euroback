@@ -29,10 +29,12 @@ import (
 )
 
 // DDLConnLimit is the per-tenant connection limit on `<schema>_ddl`. Its
-// consumers are short-lived direct connections from the gateway (console
-// and MCP SQL, schema changes, migrations), capped per gateway pod as
-// well; this bounds what one tenant can hold if it learns its password.
-const DDLConnLimit = 4
+// consumers are short-lived direct connections from the gateway (console and
+// MCP SQL, schema changes, migrations); this also bounds what one tenant can
+// hold if it learns its password. 8 (was 4) gives headroom for a parallel
+// MCP agent / several console tabs on one project without hitting 53300
+// "too many connections for role" (the runner also retries that briefly).
+const DDLConnLimit = 8
 
 // PersistentDDLLogin reports whether DDL_PERSISTENT_LOGIN is on. Off: the
 // worker leaves `_ddl` alone and tenant migrations switch its login on and
@@ -58,9 +60,10 @@ func DDLScramVerifier(secret []byte, schema string) (string, error) {
 // credentials (LOGIN, DDLConnLimit, verifier, settings reset, CONNECT) and
 // keeps its access in its own schema: USAGE on public (name resolution of
 // the RLS helpers), and the same table / sequence / function privileges
-// the tenant's `_func` role has — including the platform-managed system
-// tables, which `_ddl` can read and write (subject to their RLS) but not
-// alter. Runs as eurobase_migrator through adminPool (the developer pool).
+// the tenant's `_func` role has (plus REFERENCES on real tables, so DDL run
+// as `_ddl` can add a FK to a migrator-owned system table) — including the
+// platform-managed system tables, which `_ddl` can read and write (subject to
+// their RLS) but not alter. Runs as eurobase_migrator via adminPool.
 func EnsureDDLLogin(ctx context.Context, adminPool *pgxpool.Pool, database string, secret []byte, schema string) error {
 	if !schemaRe.MatchString(schema) {
 		return fmt.Errorf("invalid tenant schema %q", schema)
@@ -91,37 +94,48 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	}
 
 	// Per object, the same privileges provision_tenant gives `_func`:
-	// tables DML, sequences USAGE + SELECT, functions EXECUTE. Only objects
-	// whose owner the migrator can act for (a GRANT on anything else is an
-	// error, e.g. legacy developer-owned tables), and only where the role
-	// lacks the privilege, so passes don't rewrite the catalog.
+	// tables DML, sequences USAGE + SELECT, functions EXECUTE — PLUS
+	// REFERENCES on real tables (r/p), so a developer running DDL as `_ddl`
+	// can add a FOREIGN KEY to a migrator-owned system table (e.g. the
+	// canonical `user_id uuid REFERENCES users(id)` RLS pattern). REFERENCES
+	// is a table privilege only; views/mat-views/foreign tables (v/m/f) get
+	// DML but not REFERENCES (GRANT would be meaningless / can error). The
+	// per-object priv string is computed in SQL so the GRANT keyword stays
+	// TABLE for all relkinds. Only objects whose owner the migrator can act
+	// for (a GRANT on anything else errors, e.g. legacy developer-owned
+	// tables), and only where the role lacks a privilege, so a steady-state
+	// pass rewrites nothing.
 	rows, err := tx.Query(ctx, `
-		SELECT 'TABLE', c.oid::regclass::text, pg_has_role(current_user, c.relowner, 'USAGE')
+		SELECT 'TABLE', c.oid::regclass::text, pg_has_role(current_user, c.relowner, 'USAGE'),
+		       CASE WHEN c.relkind IN ('r', 'p')
+		            THEN 'SELECT, INSERT, UPDATE, DELETE, REFERENCES'
+		            ELSE 'SELECT, INSERT, UPDATE, DELETE' END
 		  FROM pg_class c
 		 WHERE c.relnamespace = $1::regnamespace
 		   AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 		   AND NOT (has_table_privilege($2, c.oid, 'SELECT') AND has_table_privilege($2, c.oid, 'INSERT')
-		        AND has_table_privilege($2, c.oid, 'UPDATE') AND has_table_privilege($2, c.oid, 'DELETE'))
+		        AND has_table_privilege($2, c.oid, 'UPDATE') AND has_table_privilege($2, c.oid, 'DELETE')
+		        AND (c.relkind NOT IN ('r', 'p') OR has_table_privilege($2, c.oid, 'REFERENCES')))
 		UNION ALL
-		SELECT 'SEQUENCE', c.oid::regclass::text, pg_has_role(current_user, c.relowner, 'USAGE')
+		SELECT 'SEQUENCE', c.oid::regclass::text, pg_has_role(current_user, c.relowner, 'USAGE'), 'USAGE, SELECT'
 		  FROM pg_class c
 		 WHERE c.relnamespace = $1::regnamespace AND c.relkind = 'S'
 		   AND NOT (has_sequence_privilege($2, c.oid, 'USAGE') AND has_sequence_privilege($2, c.oid, 'SELECT'))
 		UNION ALL
-		SELECT 'ROUTINE', p.oid::regprocedure::text, pg_has_role(current_user, p.proowner, 'USAGE')
+		SELECT 'ROUTINE', p.oid::regprocedure::text, pg_has_role(current_user, p.proowner, 'USAGE'), 'EXECUTE'
 		  FROM pg_proc p
 		 WHERE p.pronamespace = $1::regnamespace AND p.prokind IN ('f', 'p')
 		   AND NOT has_function_privilege($2, p.oid, 'EXECUTE')`, schema, role)
 	if err != nil {
 		return fmt.Errorf("list %s objects: %w", schema, err)
 	}
-	type object struct{ kind, name string }
+	type object struct{ kind, name, priv string }
 	var grantable []object
 	skipped := 0
 	for rows.Next() {
 		var o object
 		var canGrant bool
-		if err := rows.Scan(&o.kind, &o.name, &canGrant); err != nil {
+		if err := rows.Scan(&o.kind, &o.name, &canGrant, &o.priv); err != nil {
 			rows.Close()
 			return err
 		}
@@ -135,10 +149,9 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	privs := map[string]string{"TABLE": "SELECT, INSERT, UPDATE, DELETE", "SEQUENCE": "USAGE, SELECT", "ROUTINE": "EXECUTE"}
 	for _, o := range grantable {
 		// o.name is a regclass / regprocedure rendering: already quoted.
-		if _, err := tx.Exec(ctx, fmt.Sprintf("GRANT %s ON %s %s TO %s", privs[o.kind], o.kind, o.name, r)); err != nil {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("GRANT %s ON %s %s TO %s", o.priv, o.kind, o.name, r)); err != nil {
 			return fmt.Errorf("grant %s on %s: %w", role, o.name, err)
 		}
 	}
@@ -151,7 +164,7 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	// for `_func`).
 	sc := pgx.Identifier{schema}.Sanitize()
 	for _, q := range []string{
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s", sc, r),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON TABLES TO %s", sc, r),
 		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE eurobase_migrator IN SCHEMA %s GRANT USAGE, SELECT ON SEQUENCES TO %s", sc, r),
 	} {
 		if _, err := tx.Exec(ctx, q); err != nil {
