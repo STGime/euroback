@@ -24,10 +24,9 @@ import (
 // against prod — keep the SQL in sync.
 
 // tenantSystemTables is the platform-managed set excluded from "application
-// table". It is the current full set; converge_tenant_ownership's
-// v_system_tables (migration 000136) is a historical subset (it predates the
-// passkey tables) — that migration is one-shot and never re-run, so the
-// divergence is harmless.
+// table". converge_tenant_ownership's v_system_tables matches this set as of
+// migration 000144 (which added the passkey tables and restored them to the
+// migrator); keep the two in sync when adding a system table.
 var tenantSystemTables = []string{
 	"users", "user_identities", "refresh_tokens", "email_tokens",
 	"storage_objects", "storage_shared_prefixes", "vault_secrets",
