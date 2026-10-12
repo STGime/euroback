@@ -73,6 +73,9 @@ func TestConvergeTenantOwnership(t *testing.T) {
 	}
 	mustExec(fmt.Sprintf(`SET ROLE eurobase_migrator; CREATE TABLE %s.t_migrator (id serial primary key, n text); RESET ROLE`, schema))
 	mustExec(fmt.Sprintf(`SET ROLE eurobase_gateway; CREATE TABLE %s.t_gateway (id int primary key); RESET ROLE`, schema))
+	// Simulate the #784 drift: an end-user passkey system table owned by _ddl.
+	// Converge must restore it to the migrator (step 2).
+	mustExec(fmt.Sprintf(`ALTER TABLE %s.user_passkey_credentials OWNER TO %s_ddl`, schema, schema))
 
 	if _, err := pool.Exec(ctx, `SELECT converge_tenant_ownership($1)`, schema); err != nil {
 		t.Fatalf("converge_tenant_ownership: %v", err)
@@ -99,8 +102,9 @@ func TestConvergeTenantOwnership(t *testing.T) {
 	if got := owner("t_gateway"); got != "eurobase_gateway" {
 		t.Errorf("t_gateway owned by %s, want eurobase_gateway (not reassigned in step 1)", got)
 	}
-	// system tables stay migrator-owned.
-	for _, sys := range []string{"users", "storage_shared_prefixes"} {
+	// system tables stay migrator-owned — including the passkey table we forced
+	// to _ddl above, which step 2 must have restored (#784).
+	for _, sys := range []string{"users", "storage_shared_prefixes", "user_passkey_credentials", "webauthn_challenges"} {
 		if got := owner(sys); got != "eurobase_migrator" {
 			t.Errorf("%s owned by %s, want eurobase_migrator", sys, got)
 		}
