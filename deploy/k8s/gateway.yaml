@@ -169,6 +169,13 @@ spec:
             # logins remain (worker keeps them) — see the private notes.
             - name: DDL_PERSISTENT_LOGIN
               value: "1"
+            # Step 6e flip: console/MCP/transaction/schema-DDL SQL runs on each
+            # project's own <schema>_ddl login instead of eurobase_migrator.
+            # Requires DDL_PERSISTENT_LOGIN (above) + the worker keeper. The
+            # #164 credential-table guard now applies to console/MCP SQL.
+            # Rollback: remove this var and redeploy.
+            - name: PLATFORM_DDL_LOGIN
+              value: "1"
       imagePullSecrets:
         - name: scw-registry
 ---
