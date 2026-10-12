@@ -8,11 +8,19 @@
 -- between convergence runs (000136, 000141). Once PLATFORM_DDL_LOGIN is on,
 -- that path runs as `<schema>_ddl`, which can only ALTER/DROP objects it
 -- owns — so any still-migrator-owned table would be un-editable by its
--- developer. CI applies this migration BEFORE the new gateway image (with
--- the flag) starts, so every such object is reassigned to `_ddl` first; the
--- only residual is the sub-second window where an old gateway pod (still
--- running as migrator) creates a table while draining, backstopped by 6d's
--- just-in-time reassignment.
+-- developer. This backfill converges the accumulated set.
+--
+-- ORDERING, honestly: the flip is driven by the PLATFORM_DDL_LOGIN *env var*,
+-- and the flag-honoring code already ships in the running image. CI applies
+-- the gateway env change (rolling flagged pods) in "Apply K8s manifests",
+-- which runs BEFORE "Run database migrations" — so the flip does NOT strictly
+-- follow this backfill; it races it for the duration of the migrate job.
+-- During that window a developer's ALTER/DROP of a table created-as-migrator
+-- since the last convergence can transiently fail with "must be owner"
+-- (reads / writes / CREATE are unaffected). It is NOT a sub-second window.
+-- The window is closed by running the convergence ops sweep immediately AFTER
+-- the deploy completes (and it self-heals on any later convergence); post-flip
+-- new tables are created as `_ddl`, so nothing new accumulates.
 --
 -- This only RE-RUNS the existing, already-deployed, reviewed convergence
 -- functions (000136 converge_tenant_ownership, 000141 converge_tenant_functions).
