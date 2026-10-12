@@ -171,16 +171,18 @@ spec:
                    AND NOT g.present
                  ORDER BY 1;
 
-                -- E: a _ddl role missing SELECT/INSERT/UPDATE/DELETE on one of
-                --    its system tables -> the console's writes to that table
-                --    fail under _ddl. These are granted by DDLEnsurer once
+                -- E: a _ddl role missing SELECT/INSERT/UPDATE/DELETE/REFERENCES
+                --    on one of its system tables -> the console's writes, or a
+                --    developer's FOREIGN KEY to that table (e.g. the canonical
+                --    user_id REFERENCES users(id) pattern), fail under _ddl.
+                --    These are granted by DDLEnsurer once
                 --    DDL_PERSISTENT_LOGIN is on the WORKER. If this lists rows,
                 --    the worker flag has not taken effect for that tenant yet.
                 --    Want: none (AFTER the worker flag).
                 SELECT 'E_DDL_MISSING_DML ' || (p.schema_name || '_ddl') || ' ' || p.schema_name || '.' || s.name || ' ' || perm
                   FROM public.projects p
                   JOIN _systab s ON true
-                  CROSS JOIN LATERAL (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) AS perms(perm)
+                  CROSS JOIN LATERAL (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('REFERENCES')) AS perms(perm)
                  WHERE p.schema_name IN (SELECT schema_name FROM _schemas)
                    AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = p.schema_name || '_ddl')
                    AND to_regclass(p.schema_name || '.' || s.name) IS NOT NULL
