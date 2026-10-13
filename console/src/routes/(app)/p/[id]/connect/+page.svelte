@@ -104,7 +104,7 @@
 
 	// ── Bolt tab ── same browser-safe public env as Lovable (Vite vars).
 	let boltEnv = $derived(lovableEnv);
-	let boltPrompt = $derived(info ? `This app uses Eurobase as its backend — NOT Bolt Database or Supabase. Do not add a Bolt/Supabase database, auth or edge functions. Talk to Eurobase from the browser with the @eurobase/sdk package (it is not supabase-js); follow the Eurobase SDK reference I added. Put these in .env: VITE_EUROBASE_URL=${info.api_url}, VITE_EUROBASE_PROJECT_ID=${info.project_id}, VITE_EUROBASE_PUBLIC_KEY=${publicKey || 'eb_pk_…'}. Build …` : '');
+	let boltPrompt = $derived(info ? `This app already has a backend: Eurobase. Do NOT create or connect a Bolt Cloud, Bolt Database or Supabase backend, and never add VITE_SUPABASE_* variables — I will not use them. For anything to do with data, tables, auth, users, or file storage, use ONLY the @eurobase/sdk package (it is NOT supabase-js) and the "Eurobase" MCP connector; follow the Eurobase SDK reference in Project Knowledge. If I ask you to list or change tables, do it through the Eurobase MCP connector — never Bolt's own database. The backend already exists in .env: VITE_EUROBASE_URL=${info.api_url}, VITE_EUROBASE_PROJECT_ID=${info.project_id}, VITE_EUROBASE_PUBLIC_KEY=${publicKey || 'eb_pk_…'}. Now build …` : '');
 
 	// The URLs typed in, as origins; invalid entries reported.
 	let lovableOrigins = $derived.by(() => {
@@ -458,8 +458,20 @@
 					<div class="rounded-xl border border-amber-200 bg-amber-50 p-5 shadow-sm">
 						<p class="text-sm font-semibold text-gray-900">1. Stop Bolt from creating its own backend</p>
 						<p class="mt-1 text-xs text-gray-700">
-							Don't connect <strong>Bolt Database</strong> or the <strong>Supabase</strong> integration (Bolt's <strong>Integrations</strong>/<strong>Settings</strong>).
-							Otherwise the first "add a login" or "add a database" prompt puts your users and data on Bolt's own backend instead of Eurobase.
+							Bolt offers two backends of its own — <strong>Bolt Database</strong> and <strong>Supabase</strong>. Don't connect either:
+						</p>
+						<ul class="mt-1 list-disc space-y-1 pl-5 text-xs text-gray-700">
+							<li><strong>Bolt Database</strong> gets added when you <em>ask the model</em> for a login or a table — so when it offers to "add a database", <strong>decline</strong> and point it at Eurobase instead.</li>
+							<li><strong>Supabase</strong> lives under the gear&nbsp;(⚙) menu → <strong>All project settings → Applications → Database (Supabase)</strong>. Leave its <strong>Connect</strong> button alone.</li>
+							<li>The <strong>Database</strong> (🛢) tab shows a "Power up your backend with Bolt Database" screen with <strong>Ask Bolt to create a database</strong> / <strong>Connect to Supabase</strong> buttons. <strong>Ignore the whole tab</strong> — its services (auth, server functions, user management, file storage) are exactly what Eurobase gives you here.</li>
+						</ul>
+						<p class="mt-2 text-xs text-gray-500">
+							All three only appear once you're inside a project — the bolt.new home screen has none of them.
+						</p>
+						<p class="mt-2 rounded-lg bg-amber-100/70 px-3 py-2 text-xs text-amber-900">
+							<strong>Watch out:</strong> even asking Bolt something generic like "list tables in the db" makes it reach for <em>its own</em> backend — it will silently provision <strong>Bolt Cloud</strong> (a Supabase database) and add <code class="font-mono">VITE_SUPABASE_*</code> to your <code class="font-mono">.env</code>.
+							So <strong>send the step 6 prompt first</strong> (it tells Bolt not to), and when you mean Eurobase, say "<strong>Eurobase</strong>" or "the Eurobase MCP" — never a bare "db".
+							If it already happened: ask Bolt to remove the Bolt Database dependency from <code class="font-mono">package.json</code> and the <code class="font-mono">VITE_SUPABASE_*</code> lines from <code class="font-mono">.env</code>, then <strong>Settings → Applications → Disconnect</strong> next to Supabase (and turn off the cloud under its <strong>Cloud settings</strong>). Afterwards check your three <code class="font-mono">VITE_EUROBASE_*</code> lines are still in <code class="font-mono">.env</code> — Bolt may strip them too while the app has no code yet; paste them back if so.
 						</p>
 					</div>
 
@@ -469,6 +481,14 @@
 							<div>
 								<p class="text-sm font-semibold text-gray-900">2. Environment (.env in the Bolt project)</p>
 								<p class="text-xs text-gray-500">
+									In the <strong>Code</strong> (<code class="font-mono">&lt;/&gt;</code>) view, open the <strong>Files</strong> panel, right-click in the empty space and choose <strong>New file…</strong>.
+									Name it <code class="font-mono">.env</code> and keep it at the <strong>project root</strong> (next to <code class="font-mono">package.json</code> — <em>not</em> inside <code class="font-mono">src/</code>).
+									Copy the lines below and paste them in. (Or just ask Bolt to "create a <code class="font-mono">.env</code> with these values".)
+								</p>
+								<p class="mt-1 text-xs text-gray-500">
+									A Vite app reads <code class="font-mono">VITE_</code> vars from there — these three are safe to ship (the public key is meant for the browser). Don't put them in Bolt's own <strong>Environment variables / Secrets</strong> store (that belongs to Bolt Database).
+								</p>
+								<p class="mt-1 text-xs text-gray-500">
 									Only the <strong>public</strong> key goes into Bolt{#if publicKey} — it's filled in below{:else if publicKeyPrefix} — yours starts with <code class="font-mono">{publicKeyPrefix}</code>{/if}.
 									{#if !publicKey}It appears here in full once the key has been used (or copy it from when the project was created); otherwise regenerate the keys in <a href="/p/{projectId}/settings" class="text-eurobase-700 hover:underline">Settings</a> (apps using the old key stop working).{/if}
 									Never put a secret key (<code class="font-mono">eb_sk_…</code>) into Bolt.
@@ -489,7 +509,9 @@
 								<p class="text-sm font-semibold text-gray-900">3. The Eurobase SDK reference</p>
 								<p class="text-xs text-gray-500">
 									Teaches Bolt the Eurobase SDK (it's not supabase-js), row-level security, file privacy and where secrets belong.
-									Add it as a file in your Bolt project (e.g. <code class="font-mono">docs/eurobase-sdk.md</code>) so Bolt reads it, or paste it into your first prompt.
+									Paste it into Bolt's <strong>Project Knowledge</strong> (gear&nbsp;⚙ → <strong>All project settings → Knowledge</strong>) — a standing instruction store Bolt keeps in context even after the chat is cleared.
+									That box already has Bolt's default template instructions (Tailwind, Lucide, the <code class="font-mono">@/</code> alias) — <strong>keep them</strong> and <strong>append</strong> this reference below (a blank line and an <code class="font-mono">## Eurobase backend</code> heading keeps it tidy), then click <strong>Save prompt</strong>.
+									The <code class="font-mono">.bolt/prompt</code> file does the same job if you'd rather keep it in the file tree. Don't drop it in <code class="font-mono">src/</code> (that ships in your app and Bolt won't read it as guidance); a loose file elsewhere only helps if you point Bolt at it.
 								</p>
 							</div>
 							<div class="flex gap-2 shrink-0">
@@ -513,18 +535,20 @@
 					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
 						<p class="text-sm font-semibold text-gray-900">4. Connect the Eurobase MCP server</p>
 						<p class="mt-1 text-xs text-gray-600">
-							In Bolt, add a <strong>custom MCP server</strong> from its integrations settings. Lets Bolt inspect and create tables here instead of guessing.
-							The connection is personal to you and never part of your published app.
+							In Bolt, go to gear&nbsp;⚙ → <strong>All project settings → Connectors (MCP) → Custom MCP server</strong> and add it with the URL and token below.
+							Lets Bolt inspect and create tables here instead of guessing. The connection is personal to you and never part of your published app.
 						</p>
-						<dl class="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
-							<div><dt class="text-gray-500">Server name</dt><dd class="font-mono text-gray-900">Eurobase</dd></div>
+						<dl class="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+							<div><dt class="text-gray-500">Name</dt><dd class="font-mono text-gray-900">Eurobase</dd></div>
 							<div>
-								<dt class="text-gray-500">Server URL</dt>
+								<dt class="text-gray-500">URL</dt>
 								<dd class="flex items-center gap-2 font-mono text-gray-900">{info.mcp_url}
 									<button onclick={() => copyToClipboard(info?.mcp_url ?? '', 'bolt-mcp')} class="text-eurobase-700 hover:underline cursor-pointer">{copiedField === 'bolt-mcp' ? 'Copied!' : 'Copy'}</button>
 								</dd>
 							</div>
-							<div><dt class="text-gray-500">Authentication</dt><dd class="text-gray-900">Bearer token: a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a></dd></div>
+							<div><dt class="text-gray-500">Transport Type</dt><dd class="font-mono text-gray-900">HTTP</dd></div>
+							<div><dt class="text-gray-500">Authentication</dt><dd class="font-mono text-gray-900">API Key</dd></div>
+							<div class="sm:col-span-2"><dt class="text-gray-500">API Key</dt><dd class="text-gray-900">a <strong>Developer</strong> Personal Access Token for this project (create it with the button below) — paste it into the <strong>API Key</strong> field. Leave "Automatically enable for new projects" off.</dd></div>
 						</dl>
 						<p class="mt-2 text-[11px] text-amber-800">
 							Use a <strong>Developer</strong> token for this project, so Bolt can create and change tables here — and nothing in your other projects.
@@ -551,7 +575,7 @@
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">6. Start building</p>
-								<p class="text-xs text-gray-500">A first prompt that sets the ground rules — add your public key and what to build.</p>
+								<p class="text-xs text-gray-500">Send this as your <strong>very first message</strong> — before asking for any data, tables or login, so Bolt never auto-creates its own backend. Finish the "Now build …" line with what you want.</p>
 							</div>
 							<button
 								onclick={() => copyToClipboard(boltPrompt, 'bolt-prompt')}
