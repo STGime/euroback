@@ -98,7 +98,7 @@ Where Customer Data includes personal data, you act as **controller** and we act
 
 ## 8. Service levels and support
 
-We provide best-effort availability and email support at **contact@eurobase.app**. A formal Service Level Agreement and target uptime for higher tiers will be published at **/legal/sla** as those tiers launch. Planned maintenance is announced in advance via the console. Emergency security patches may be deployed without prior notice (see our incident handling at **/legal/security**).
+Our **Service Level Agreement** at **/legal/sla** sets out our availability, backup, and support commitments and is incorporated into these Terms by reference. In summary: paid tiers (Pro and above) carry a **99.5% monthly availability target** for the Eurobase API, underpinned by Scaleway's EU infrastructure SLAs; the Free tier is best-effort. The managed database is backed up automatically approximately every 24 hours at the infrastructure level (worst-case data loss ≈ 24 hours); customer-controlled backups, point-in-time recovery, and self-serve restore are a Team-tier feature. Support is by email at **contact@eurobase.app** (priority response on paid tiers). Planned maintenance is announced in advance via the console. Emergency security patches may be deployed without prior notice (see our incident handling at **/legal/security**).
 
 ## 9. Suspension and termination
 
@@ -106,7 +106,9 @@ You may close your account at any time via the console. We may suspend or termin
 
 On termination by either party we keep your Customer Data available for export for **30 days**, after which it is irreversibly deleted from production systems and within 90 days from backups. We will delete sooner on your written request, subject to legal retention requirements (e.g. accounting records).
 
-**Beta window.** During the current public beta, we may reset, downgrade, or migrate any Project as part of platform preparation for general availability. We will give at least 14 days' notice before a reset that affects your Customer Data, and export tooling will remain available throughout that window. Nothing in the Service during beta is a commitment to preserve Customer Data indefinitely; the general-availability launch may require a fresh Project.
+**If we cease operations.** If Eurobase ceases business operations, we will keep the Service and your Customer Data **online and exportable for at least 90 days** from the date we announce cessation, with notice to Project owners by email and export tooling available throughout, before any deletion. See the SLA at **/legal/sla** (§6).
+
+**Closed-beta tiers.** Free and Pro are generally available. Team and Legal Team are in **closed beta**: while a Project is on a beta tier we may reset, downgrade, or migrate it as part of platform preparation for general availability. We will give at least 14 days' notice before a reset that affects your Customer Data, and export tooling will remain available throughout that window. Participation in a closed-beta tier is not a commitment to preserve its Customer Data indefinitely; general-availability launch of that tier may require migration.
 
 ## 10. Intellectual property
 

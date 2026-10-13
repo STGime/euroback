@@ -44,6 +44,7 @@ export const chapters: DocChapter[] = [
 	{"id": "orgs-sso", "num": 27, "label": "27. Organizations & SSO (OIDC)", "title": "27. Organizations & SSO (Team & Legal Team)", "description": "Alex hires Bea. She needs her own login for LexVault's projects — no shared passwords, no forwarded API keys.", "file": "27-orgs-sso.svelte"},
 	{"id": "legal-tech", "num": 28, "label": "28. German legal-tech retention (Legal Team)", "title": "28. German legal-tech retention (Legal Team)", "description": "Per-prefix WORM policies and row/object-scoped retention holds for tenants subject to §50 BRAO, §257 HGB, or §147 AO.", "file": "28-legal-tech.svelte"},
 	{"id": "next", "num": 29, "label": "What's Next", "title": "What's Next", "description": "Alex has a fully configured backend. Time to build LexVault's frontend.", "file": "29-next.svelte"},
+	{"id": "migrating-from-supabase", "num": 30, "label": "30. Migrating from Supabase (FAQ)", "title": "30. Migrating from Supabase (FAQ)", "description": "Common questions from teams moving an existing Supabase project to Eurobase — what ports cleanly, what needs a rewrite, and where we're honest about the differences.", "file": "30-migrating-from-supabase.svelte"},
 ];
 
 export const chapterById: Record<string, DocChapter> = Object.fromEntries(chapters.map((c) => [c.id, c]));
