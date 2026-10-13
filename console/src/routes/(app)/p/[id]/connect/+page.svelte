@@ -513,7 +513,7 @@
 					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
 						<p class="text-sm font-semibold text-gray-900">4. Connect the Eurobase MCP server</p>
 						<p class="mt-1 text-xs text-gray-600">
-							In Bolt: <strong>Settings → MCP → Add a custom MCP server</strong>. Lets Bolt inspect and create tables here instead of guessing.
+							In Bolt, add a <strong>custom MCP server</strong> from its integrations settings. Lets Bolt inspect and create tables here instead of guessing.
 							The connection is personal to you and never part of your published app.
 						</p>
 						<dl class="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
