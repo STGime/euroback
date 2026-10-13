@@ -9,13 +9,13 @@
 	// A token created here is shown until Done or until leaving the page.
 	onDestroy(forgetProjectToken);
 
-	type IdeTab = 'claude' | 'lovable' | 'codex' | 'cursor' | 'windsurf' | 'generic';
+	type IdeTab = 'claude' | 'lovable' | 'bolt' | 'codex' | 'cursor' | 'windsurf' | 'generic';
 	const STORAGE_KEY = 'eurobase:connect-tab';
 
 	function loadSavedTab(): IdeTab {
 		if (browser) {
 			const saved = localStorage.getItem(STORAGE_KEY);
-			if (saved === 'claude' || saved === 'lovable' || saved === 'codex' || saved === 'cursor' || saved === 'windsurf' || saved === 'generic') return saved;
+			if (saved === 'claude' || saved === 'lovable' || saved === 'bolt' || saved === 'codex' || saved === 'cursor' || saved === 'windsurf' || saved === 'generic') return saved;
 		}
 		return 'claude';
 	}
@@ -83,7 +83,7 @@
 			publicKey = '';
 			keyPrefixFor = projectId ?? '';
 		}
-		if ((activeTab === 'lovable' || activeTab === 'generic') && projectId && keyFetchFor !== projectId) {
+		if ((activeTab === 'lovable' || activeTab === 'bolt' || activeTab === 'generic') && projectId && keyFetchFor !== projectId) {
 			const pid = projectId;
 			keyFetchFor = pid;
 			api.listAPIKeys(pid)
@@ -101,6 +101,10 @@
 
 	let lovableEnv = $derived(info ? `VITE_EUROBASE_URL=${info.api_url}\nVITE_EUROBASE_PROJECT_ID=${info.project_id}\nVITE_EUROBASE_PUBLIC_KEY=${publicKey || "eb_pk_…  # your project's public key"}` : '');
 	let lovablePrompt = $derived(info ? `Use the /eurobase skill. This app uses Eurobase as its backend, not Lovable Cloud or Supabase. Put these in .env: VITE_EUROBASE_URL=${info.api_url}, VITE_EUROBASE_PROJECT_ID=${info.project_id}, VITE_EUROBASE_PUBLIC_KEY=${publicKey || 'eb_pk_…'}. Build …` : '');
+
+	// ── Bolt tab ── same browser-safe public env as Lovable (Vite vars).
+	let boltEnv = $derived(lovableEnv);
+	let boltPrompt = $derived(info ? `This app uses Eurobase as its backend — NOT Bolt Database or Supabase. Do not add a Bolt/Supabase database, auth or edge functions. Talk to Eurobase from the browser with the @eurobase/sdk package (it is not supabase-js); follow the Eurobase SDK reference I added. Put these in .env: VITE_EUROBASE_URL=${info.api_url}, VITE_EUROBASE_PROJECT_ID=${info.project_id}, VITE_EUROBASE_PUBLIC_KEY=${publicKey || 'eb_pk_…'}. Build …` : '');
 
 	// The URLs typed in, as origins; invalid entries reported.
 	let lovableOrigins = $derived.by(() => {
@@ -206,6 +210,7 @@
 				{#each [
 					{ id: 'claude', label: 'Claude Code' },
 					{ id: 'lovable', label: 'Lovable' },
+					{ id: 'bolt', label: 'Bolt' },
 					{ id: 'codex', label: 'Codex' },
 					{ id: 'cursor', label: 'Cursor' },
 					{ id: 'windsurf', label: 'Windsurf' },
@@ -439,6 +444,121 @@
 							>{copiedField === 'lovable-prompt' ? 'Copied!' : 'Copy'}</button>
 						</div>
 						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 whitespace-pre-wrap">{lovablePrompt}</pre>
+					</div>
+				</div>
+			{:else if activeTab === 'bolt'}
+				<div class="space-y-4">
+					<p class="text-sm text-gray-600">
+						Build your Bolt (bolt.new) app on this project instead of Bolt Database / Supabase. Your app talks to Eurobase directly
+						from the browser with <code class="rounded bg-gray-100 px-1 text-xs">@eurobase/sdk</code>; the SDK reference teaches Bolt how,
+						and the MCP server lets it see and create your tables.
+					</p>
+
+					<!-- 1. Don't let Bolt add its own backend -->
+					<div class="rounded-xl border border-amber-200 bg-amber-50 p-5 shadow-sm">
+						<p class="text-sm font-semibold text-gray-900">1. Stop Bolt from creating its own backend</p>
+						<p class="mt-1 text-xs text-gray-700">
+							Don't connect <strong>Bolt Database</strong> or the <strong>Supabase</strong> integration (Bolt's <strong>Integrations</strong>/<strong>Settings</strong>).
+							Otherwise the first "add a login" or "add a database" prompt puts your users and data on Bolt's own backend instead of Eurobase.
+						</p>
+					</div>
+
+					<!-- 2. .env -->
+					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">2. Environment (.env in the Bolt project)</p>
+								<p class="text-xs text-gray-500">
+									Only the <strong>public</strong> key goes into Bolt{#if publicKey} — it's filled in below{:else if publicKeyPrefix} — yours starts with <code class="font-mono">{publicKeyPrefix}</code>{/if}.
+									{#if !publicKey}It appears here in full once the key has been used (or copy it from when the project was created); otherwise regenerate the keys in <a href="/p/{projectId}/settings" class="text-eurobase-700 hover:underline">Settings</a> (apps using the old key stop working).{/if}
+									Never put a secret key (<code class="font-mono">eb_sk_…</code>) into Bolt.
+								</p>
+							</div>
+							<button
+								onclick={() => copyToClipboard(boltEnv, 'bolt-env')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>{copiedField === 'bolt-env' ? 'Copied!' : 'Copy'}</button>
+						</div>
+						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto">{boltEnv}</pre>
+					</div>
+
+					<!-- 3. SDK reference -->
+					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">3. The Eurobase SDK reference</p>
+								<p class="text-xs text-gray-500">
+									Teaches Bolt the Eurobase SDK (it's not supabase-js), row-level security, file privacy and where secrets belong.
+									Add it as a file in your Bolt project (e.g. <code class="font-mono">docs/eurobase-sdk.md</code>) so Bolt reads it, or paste it into your first prompt.
+								</p>
+							</div>
+							<div class="flex gap-2 shrink-0">
+								<button
+									onclick={() => copyToClipboard(lovableSdkReference, 'bolt-skill')}
+									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+								>{copiedField === 'bolt-skill' ? 'Copied!' : 'Copy'}</button>
+								<button
+									onclick={() => downloadFile('eurobase-sdk.md', lovableSdkReference)}
+									class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
+								>Download</button>
+							</div>
+						</div>
+						<details class="text-xs text-gray-600">
+							<summary class="cursor-pointer">Preview SDK reference</summary>
+							<pre class="mt-2 rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 overflow-x-auto max-h-80 overflow-y-auto">{lovableSdkReference}</pre>
+						</details>
+					</div>
+
+					<!-- 4. MCP -->
+					<div class="rounded-xl border border-eurobase-200 bg-eurobase-50/30 p-5 shadow-sm">
+						<p class="text-sm font-semibold text-gray-900">4. Connect the Eurobase MCP server</p>
+						<p class="mt-1 text-xs text-gray-600">
+							In Bolt: <strong>Settings → MCP → Add a custom MCP server</strong>. Lets Bolt inspect and create tables here instead of guessing.
+							The connection is personal to you and never part of your published app.
+						</p>
+						<dl class="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
+							<div><dt class="text-gray-500">Server name</dt><dd class="font-mono text-gray-900">Eurobase</dd></div>
+							<div>
+								<dt class="text-gray-500">Server URL</dt>
+								<dd class="flex items-center gap-2 font-mono text-gray-900">{info.mcp_url}
+									<button onclick={() => copyToClipboard(info?.mcp_url ?? '', 'bolt-mcp')} class="text-eurobase-700 hover:underline cursor-pointer">{copiedField === 'bolt-mcp' ? 'Copied!' : 'Copy'}</button>
+								</dd>
+							</div>
+							<div><dt class="text-gray-500">Authentication</dt><dd class="text-gray-900">Bearer token: a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a></dd></div>
+						</dl>
+						<p class="mt-2 text-[11px] text-amber-800">
+							Use a <strong>Developer</strong> token for this project, so Bolt can create and change tables here — and nothing in your other projects.
+						</p>
+						<ProjectTokenButton projectId={projectId ?? ''} projectName={info.project_name} defaultRole="developer" tokenName="bolt" />
+					</div>
+
+					<!-- 5. Allowed URLs -->
+					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+						<p class="text-sm font-semibold text-gray-900">5. Allow your Bolt app's URLs</p>
+						<p class="mt-1 text-xs text-gray-500">
+							The browser only reaches Eurobase from approved origins, and sign-in emails and OAuth only return to approved URLs.
+							Add your app's origin to <strong>Allowed CORS origins</strong> and its sign-in pages
+							(<code class="font-mono">/verify</code>, <code class="font-mono">/reset-password</code>, <code class="font-mono">/magic</code>, <code class="font-mono">/auth/callback</code>)
+							to <strong>Allowed redirect URLs</strong> in <a href="/p/{projectId}/auth" class="text-eurobase-700 hover:underline">Auth</a>.
+							Add the URL where your app actually runs for users — your <strong>deployed</strong> site (e.g. a Netlify domain or your custom domain).
+							Bolt's in-editor preview runs on a temporary WebContainer URL that changes between sessions, so deploy first, then allow that stable URL.
+						</p>
+						<p class="mt-2 text-[11px] text-gray-400">Needs the admin role on this project. Remove entries in Auth when you no longer use them — also after renaming or unpublishing the app, since someone else could later take the old address.</p>
+					</div>
+
+					<!-- 6. First prompt -->
+					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+						<div class="flex items-center justify-between mb-3">
+							<div>
+								<p class="text-sm font-semibold text-gray-900">6. Start building</p>
+								<p class="text-xs text-gray-500">A first prompt that sets the ground rules — add your public key and what to build.</p>
+							</div>
+							<button
+								onclick={() => copyToClipboard(boltPrompt, 'bolt-prompt')}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
+							>{copiedField === 'bolt-prompt' ? 'Copied!' : 'Copy'}</button>
+						</div>
+						<pre class="rounded-lg bg-gray-50 border border-gray-100 p-4 text-xs font-mono text-gray-700 whitespace-pre-wrap">{boltPrompt}</pre>
 					</div>
 				</div>
 			{:else if activeTab === 'codex'}
