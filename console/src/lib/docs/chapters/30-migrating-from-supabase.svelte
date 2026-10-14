@@ -4,7 +4,7 @@
 
 			<div class="space-y-4">
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Eurobase is close to Supabase in shape — Postgres, Row-Level Security, an SDK with a familiar API, EU storage with signed URLs — but it is not a drop-in replacement. The <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase migrate supabase</code> CLI automates most of a move (run its <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">assess</code> command first for a report of what transfers and what needs changes). The answers below are deliberately straight about the gaps.
+					Eurobase is close to Supabase in shape — Postgres, Row-Level Security, an SDK with a familiar API, EU storage with signed URLs — but it is not a drop-in replacement. A migration CLI (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase import supabase</code>) automates most of a move, starting with an <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">assess</code> step that reports what transfers cleanly and what needs changes. It's rolling out now — <a href="mailto:contact@eurobase.app" class="cursor-pointer text-eurobase-700 hover:underline">get in touch</a> and we'll run an assessment against your project. The answers below are deliberately straight about the gaps.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-2">Migrating in</h3>
