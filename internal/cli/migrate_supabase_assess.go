@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -64,7 +66,10 @@ type report struct {
 }
 
 func importSupabaseAssessCmd() *cobra.Command {
-	var outputPath string
+	var (
+		outputPath   string
+		functionsDir string
+	)
 	cmd := &cobra.Command{
 		Use:   "assess",
 		Short: "Read-only compat report against a Supabase project",
@@ -72,9 +77,15 @@ func importSupabaseAssessCmd() *cobra.Command {
 report. Read-only — nothing is written to either Supabase or Eurobase.
 
 Env vars:
-  SUPABASE_DB_URL      postgres:// URL of the Supabase project (required)
-  SUPABASE_SERVICE_KEY the service-role key (required for storage + functions
-                       enumeration; DB-only assess works without it)
+  SUPABASE_DB_URL  postgres:// URL of the Supabase project (required).
+                   Tables, RLS policies, auth users, storage buckets and
+                   Postgres extensions are all read from here — no
+                   service-role key needed.
+
+Edge functions live in your repo, not the database. Point --functions-dir
+at your local Supabase project's functions folder (default
+./supabase/functions) to grade them; if it's absent, that section is
+skipped with a note.
 
 The report grades every item:
   ✅ can migrate  — a later phase handles it automatically
@@ -89,11 +100,6 @@ rerun doesn't overwrite the previous report. Pass --output to override
 			if dbURL == "" {
 				return fmt.Errorf("SUPABASE_DB_URL is required (postgres:// URL of the Supabase project)")
 			}
-			// Service key is optional here — DB assessment works
-			// without it. We warn if missing (the report will be
-			// incomplete) but don't hard-fail. Storage / function
-			// enumeration lives behind the service key.
-			serviceKey := os.Getenv("SUPABASE_SERVICE_KEY")
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 			defer cancel()
@@ -122,21 +128,16 @@ rerun doesn't overwrite the previous report. Pass --output to override
 			if err := assessExtensions(ctx, conn, r); err != nil {
 				return fmt.Errorf("enumerate extensions: %w", err)
 			}
-			// Storage + functions live outside the Postgres schema on
-			// Supabase; they need the service key + the Supabase REST
-			// API. If we don't have the key, mark the sections as
-			// "skipped" instead of pretending they're clean.
-			if serviceKey == "" {
-				r.storage = []item{{name: "(skipped — SUPABASE_SERVICE_KEY not set)", grade: gradeWarn, note: "storage enumeration requires the service-role key"}}
-				r.functions = []item{{name: "(skipped — SUPABASE_SERVICE_KEY not set)", grade: gradeWarn, note: "edge-functions enumeration requires the service-role key"}}
-			} else {
-				// Storage / functions REST enumeration lands in a
-				// follow-up commit. For the first shipped version,
-				// mark them as "needs review — manual check for
-				// now" so the tenant knows they exist but the CLI
-				// isn't yet automating this half.
-				r.storage = []item{{name: "(automation pending)", grade: gradeWarn, note: "run the Supabase dashboard's storage tab and copy the bucket list into your migration plan by hand for this run"}}
-				r.functions = []item{{name: "(automation pending)", grade: gradeWarn, note: "run `supabase functions list` in your Supabase project and note each function name for #272"}}
+			// Storage buckets live in the Postgres `storage` schema, so
+			// we read them over the same connection — no service key.
+			if err := assessStorage(ctx, conn, r); err != nil {
+				return fmt.Errorf("enumerate storage buckets: %w", err)
+			}
+			// Edge functions live in the tenant's repo (./supabase/
+			// functions/<name>/index.ts), not the database — graded by
+			// running the same translator the `functions` step uses.
+			if err := assessFunctions(r, functionsDir); err != nil {
+				return fmt.Errorf("enumerate edge functions: %w", err)
 			}
 
 			// Hoist all blockers into the summary section.
@@ -180,6 +181,7 @@ rerun doesn't overwrite the previous report. Pass --output to override
 		},
 	}
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Report output path (default ./supabase-migration-report-<UTC-timestamp>.md; use '-' for stdout)")
+	cmd.Flags().StringVar(&functionsDir, "functions-dir", "./supabase/functions", "Local Supabase edge-functions directory to grade (skipped if absent)")
 	return cmd
 }
 
@@ -470,11 +472,11 @@ func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
 	// out-of-the-box. Warn so the tenant knows to redesign around
 	// the gap.
 	warns := map[string]string{
-		"pgaudit":    "Postgres audit logging — Eurobase's audit_log covers admin actions but does not replay pgaudit output",
-		"pg_tle":     "trusted-language extensions framework — not available; move any TLE-installed extensions to app code",
-		"pgmq":       "Postgres message queue — reproduce with an application queue or edge-function poller",
-		"pg_repack":  "online table rewriter — not needed on Eurobase (managed vacuum), but check any dependent scripts",
-		"postgis":    "PostGIS is not enabled by default — contact support if you rely on it; migration is feasible but manual",
+		"pgaudit":   "Postgres audit logging — Eurobase's audit_log covers admin actions but does not replay pgaudit output",
+		"pg_tle":    "trusted-language extensions framework — not available; move any TLE-installed extensions to app code",
+		"pgmq":      "Postgres message queue — reproduce with an application queue or edge-function poller",
+		"pg_repack": "online table rewriter — not needed on Eurobase (managed vacuum), but check any dependent scripts",
+		"postgis":   "PostGIS is not enabled by default — contact support if you rely on it; migration is feasible but manual",
 	}
 	for rows.Next() {
 		var ext string
@@ -505,6 +507,150 @@ func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
 		})
 	}
 	return rows.Err()
+}
+
+// assessStorage enumerates the project's storage buckets from the
+// Postgres `storage` schema (same read-only source the `storage` step
+// uses — no service-role key). One item per bucket with its visibility,
+// object count and total size; a multi-bucket project gets a ⚠ because
+// Eurobase runs one bucket per project today (migrates as a
+// prefix-per-bucket plan, see the `storage` step). If the storage schema
+// isn't present/readable the section is skipped with a note rather than
+// failing the whole run.
+func assessStorage(ctx context.Context, conn *pgx.Conn, r *report) error {
+	buckets, err := listSupabaseBuckets(ctx, conn)
+	if err != nil {
+		if isMissingObjectError(err) {
+			r.storage = append(r.storage, item{
+				name:  "storage.buckets",
+				grade: gradeWarn,
+				note:  "storage schema not accessible — skipped (present on any Supabase project with Storage enabled)",
+			})
+			return nil
+		}
+		return err
+	}
+	if len(buckets) == 0 {
+		return nil // writeSection renders "(none found)"
+	}
+	// Object counts + sizes are a best-effort enrichment: if
+	// storage.objects can't be read we still list the buckets.
+	if totals, err := storageObjectTotals(ctx, conn); err == nil {
+		byName := make(map[string]int, len(buckets))
+		for i, b := range buckets {
+			byName[b.name] = i
+		}
+		for name, t := range totals {
+			if idx, ok := byName[name]; ok {
+				buckets[idx].objectCount = t.count
+				buckets[idx].totalBytes = t.bytes
+			}
+		}
+	} else if !isMissingObjectError(err) {
+		return err
+	}
+	for _, b := range buckets {
+		visibility := "private"
+		if b.public {
+			visibility = "public"
+		}
+		note := fmt.Sprintf("%s · %s objects · %s", visibility, formatCount(b.objectCount), formatBytes(b.totalBytes))
+		if b.objectCount > 0 && b.totalBytes == 0 {
+			// Older Supabase schemas don't populate metadata->>'size';
+			// the object count is accurate, the byte total isn't — say
+			// so rather than let a tenant read "0 B" as "empty".
+			note += " (size unknown — metadata->>'size' not populated on this project; objects still copy)"
+		}
+		if b.public {
+			note += " — public buckets map to Eurobase's public shared-prefix mechanism; review after migrating"
+		}
+		r.storage = append(r.storage, item{
+			name:  fmt.Sprintf("bucket: %s", b.name),
+			grade: gradeOK,
+			note:  note,
+		})
+	}
+	if len(buckets) > 1 {
+		r.storage = append(r.storage, item{
+			name:  fmt.Sprintf("%d buckets total", len(buckets)),
+			grade: gradeWarn,
+			note:  "Eurobase currently runs one bucket per project; a multi-bucket layout migrates as a prefix-per-bucket plan (see `eurobase import supabase storage`)",
+		})
+	}
+	return nil
+}
+
+// assessFunctions grades the edge functions in the tenant's local
+// Supabase project directory. Functions aren't in Postgres — they live
+// in ./supabase/functions/<name>/ — so we run each through the same
+// TranslateFunction the `functions` step uses and report whether it
+// ports cleanly, ports with warnings, or needs a manual rewrite first.
+// A missing directory is a skip-with-note, not an error (a tenant may be
+// assessing before checking out their functions).
+func assessFunctions(r *report, functionsDir string) error {
+	info, err := os.Stat(functionsDir)
+	if err != nil {
+		// Only "not found" is a skip-with-note — a real stat failure
+		// (e.g. a permission error on an existing path) must surface
+		// rather than being disguised as "point --functions-dir somewhere".
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	if err != nil || !info.IsDir() {
+		r.functions = append(r.functions, item{
+			name:  "(skipped — no local functions directory)",
+			grade: gradeWarn,
+			note:  fmt.Sprintf("edge functions live in your repo, not the database; point --functions-dir at your Supabase functions folder (looked in %s) to grade them", functionsDir),
+		})
+		return nil
+	}
+	entries, err := os.ReadDir(functionsDir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// Supabase convention: a leading `_` is a shared module, not a
+		// deployable function; dotfiles (.git, .DS_Store) aren't either.
+		if strings.HasPrefix(e.Name(), "_") || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		entryFile := resolveEntrypoint(filepath.Join(functionsDir, e.Name()))
+		source, err := os.ReadFile(filepath.Join(functionsDir, e.Name(), entryFile))
+		if err != nil {
+			r.functions = append(r.functions, item{
+				name:  fmt.Sprintf("function: %s", e.Name()),
+				grade: gradeWarn,
+				note:  fmt.Sprintf("no readable %s — non-standard entry point, review by hand", entryFile),
+			})
+			continue
+		}
+		res := TranslateFunction(string(source))
+		switch {
+		case res.Unsupported:
+			r.functions = append(r.functions, item{
+				name:  fmt.Sprintf("function: %s", e.Name()),
+				grade: gradeWarn,
+				note:  fmt.Sprintf("needs a manual rewrite before deploy — %s", res.UnsupportedReason),
+			})
+		case len(res.Warnings) > 0:
+			r.functions = append(r.functions, item{
+				name:  fmt.Sprintf("function: %s", e.Name()),
+				grade: gradeWarn,
+				note:  fmt.Sprintf("ports with %d warning(s) to review (e.g. remote imports or dynamic env access)", len(res.Warnings)),
+			})
+		default:
+			r.functions = append(r.functions, item{
+				name:  fmt.Sprintf("function: %s", e.Name()),
+				grade: gradeOK,
+				note:  "ports cleanly to Eurobase's runner contract",
+			})
+		}
+	}
+	return nil
 }
 
 // ── report writer ────────────────────────────────────────────────────
@@ -650,8 +796,8 @@ func isFallbackWorthy(err error) bool {
 	}
 	switch pgErr.Code {
 	case "42501", // insufficient_privilege
-		"42883",   // undefined_function (e.g. pg_get_expr signature diff)
-		"42P01":   // undefined_table
+		"42883", // undefined_function (e.g. pg_get_expr signature diff)
+		"42P01": // undefined_table
 		return true
 	}
 	return false
@@ -668,8 +814,8 @@ func isMissingObjectError(err error) bool {
 	}
 	switch pgErr.Code {
 	case "3F000", // schema not found
-		"42P01",   // undefined_table
-		"42501":   // insufficient_privilege (safe to treat as "missing" for reporting purposes)
+		"42P01", // undefined_table
+		"42501": // insufficient_privilege (safe to treat as "missing" for reporting purposes)
 		return true
 	}
 	return false

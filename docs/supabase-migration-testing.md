@@ -1,8 +1,10 @@
 # Supabase → Eurobase Migration — Test Plan
 
 Umbrella: [#267]. Sub-issues: [#268] assess, [#269] schema, [#270] data,
-[#271] storage, [#272] functions. All merged; **not** yet end-to-end
-validated against a real Supabase project.
+[#271] storage, [#272] functions. All merged. `assess` now enumerates
+storage buckets (from the Postgres `storage` schema) and grades local
+edge functions (via the `functions` translator) — no longer stubbed.
+**Not** yet end-to-end validated against a real Supabase project.
 
 Purpose of this document: turn the CLI into a beta feature we're
 willing to point tenants at. Nothing here is user-facing — it's the
@@ -23,8 +25,10 @@ runbook for the person doing the smoke test.
   - `SUPABASE_DB_URL` — the Postgres connection string (Session pooler
     URL, NOT the direct connection which requires a static IP).
   - `SUPABASE_SERVICE_KEY` — the `service_role` key from the API tab.
-    Only `assess` uses it (storage + functions enumeration) and only
-    read-only.
+    `assess` does **not** need it (it reads storage buckets over the
+    Postgres connection and grades edge functions from your local
+    `./supabase/functions` tree). Later steps that write to Eurobase use
+    it.
 
 If you have nothing suitable, spin up a fresh Supabase project and
 seed it with:
@@ -68,8 +72,11 @@ land where.
 
 ```bash
 export SUPABASE_DB_URL='postgresql://…'
-export SUPABASE_SERVICE_KEY='eyJ…'
-eurobase import supabase assess
+# assess needs no service key. To grade edge functions, point
+# --functions-dir at your local Supabase functions folder (default
+# ./supabase/functions); run `supabase functions download <name>` first,
+# or omit it and the Edge functions section is skipped with a note.
+eurobase import supabase assess --functions-dir ./supabase/functions
 ```
 
 ### 2.1 Assertions
@@ -84,8 +91,14 @@ eurobase import supabase assess
       `***`, not the real value.
 - [ ] Every table you seeded appears with a row count.
 - [ ] Auth users section shows the count of email + OAuth accounts.
-- [ ] Storage section shows every bucket with `public/private`.
-- [ ] Functions section shows every edge function.
+- [ ] Storage section shows every bucket with `public/private`, an
+      object count and total size; a multi-bucket project gets a ⚠
+      noting Eurobase's one-bucket-per-project model.
+- [ ] Functions section grades every local edge function: plain ones
+      ✅ "ports cleanly", ones importing `@supabase/supabase-js` in the
+      handler ⚠ "needs a manual rewrite", remote-import/dynamic-env ones
+      ⚠ "ports with N warning(s)". With no `--functions-dir` present it's
+      a single ⚠ skip note.
 - [ ] If you seeded a policy that reads `auth.jwt() -> 'app_metadata'`,
       it's graded ⚠ with a "needs review" note.
 - [ ] If you have `pg_graphql` or another blocklisted extension
