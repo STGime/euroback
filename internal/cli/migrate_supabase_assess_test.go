@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -149,11 +151,11 @@ func TestFormatCount(t *testing.T) {
 
 func TestFormatBytes(t *testing.T) {
 	cases := map[int64]string{
-		0:                    "0 B",
-		512:                  "512 B",
-		1024:                 "1.0 KB",
-		1_500_000:            "1.4 MB",
-		1_073_741_824:        "1.00 GB",
+		0:             "0 B",
+		512:           "512 B",
+		1024:          "1.0 KB",
+		1_500_000:     "1.4 MB",
+		1_073_741_824: "1.00 GB",
 	}
 	for n, want := range cases {
 		if got := formatBytes(n); got != want {
@@ -224,18 +226,18 @@ func TestWriteReport_ShapeAndOrdering(t *testing.T) {
 // can't inject structural Markdown into the report.
 func TestMdEscape(t *testing.T) {
 	cases := map[string]string{
-		"orders":                    "orders",
-		"table with `backticks`":    `table with \` + "`" + `backticks\` + "`",
-		"**bold_stuff**":            `\*\*bold\_stuff\*\*`,
-		"[link](/path)":             `\[link\](/path)`,
-		"<script>":                  `\<script\>`,
-		"a|b|c":                     `a\|b\|c`,
-		"line1\nline2":              "line1↩line2",
-		"line1\rline2":              "line1↩line2",
-		"backslash\\path":           `backslash\\path`,
-		"":                          "",
-		"has\x00null":               "hasnull", // control chars dropped
-		"has\ttab":                  "has\ttab", // tab preserved
+		"orders":                 "orders",
+		"table with `backticks`": `table with \` + "`" + `backticks\` + "`",
+		"**bold_stuff**":         `\*\*bold\_stuff\*\*`,
+		"[link](/path)":          `\[link\](/path)`,
+		"<script>":               `\<script\>`,
+		"a|b|c":                  `a\|b\|c`,
+		"line1\nline2":           "line1↩line2",
+		"line1\rline2":           "line1↩line2",
+		"backslash\\path":        `backslash\\path`,
+		"":                       "",
+		"has\x00null":            "hasnull",  // control chars dropped
+		"has\ttab":               "has\ttab", // tab preserved
 	}
 	for in, want := range cases {
 		if got := mdEscape(in); got != want {
@@ -316,5 +318,73 @@ func TestWriteReport_NoBlockersHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "No blockers") {
 		t.Errorf("no-blockers happy-path summary missing")
+	}
+}
+
+// #272: assessFunctions is filesystem-based (edge functions live in the
+// tenant's repo, not Postgres), so unlike the DB enumerators it gets
+// real coverage — a temp ./functions tree with one function of each
+// grade, a shared module, a dotfile, and a no-index.ts dir.
+func TestAssessFunctions_GradesLocalTree(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		sub := filepath.Join(dir, name)
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, "index.ts"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Clean: plain Deno.serve handler, no remote imports / dynamic env.
+	write("hello", "Deno.serve((req) => new Response(\"hi\"))\n")
+	// Warning: a remote https import the tenant should eyeball.
+	write("with-import", "import { z } from 'https://deno.land/x/zod/mod.ts'\nDeno.serve((req) => new Response(\"ok\"))\n")
+	// Unsupported: in-handler Supabase SDK client → needs manual rewrite.
+	write("sdk", "import { createClient } from '@supabase/supabase-js'\nDeno.serve((req) => { const c = createClient(SUPABASE_URL, KEY); return new Response(\"x\") })\n")
+	// A shared module (leading underscore) is skipped, not graded.
+	write("_shared", "export const x = 1\n")
+	// A dir with no index.ts is flagged for a manual look.
+	if err := os.MkdirAll(filepath.Join(dir, "weird"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &report{}
+	if err := assessFunctions(r, dir); err != nil {
+		t.Fatalf("assessFunctions: %v", err)
+	}
+
+	grades := map[string]string{}
+	for _, it := range r.functions {
+		grades[it.name] = it.grade
+	}
+	if g := grades["function: hello"]; g != gradeOK {
+		t.Errorf("hello: want %q, got %q", gradeOK, g)
+	}
+	if g := grades["function: with-import"]; g != gradeWarn {
+		t.Errorf("with-import: want %q, got %q", gradeWarn, g)
+	}
+	if g := grades["function: sdk"]; g != gradeWarn {
+		t.Errorf("sdk (unsupported): want %q, got %q", gradeWarn, g)
+	}
+	if g := grades["function: weird"]; g != gradeWarn {
+		t.Errorf("weird (no index.ts): want %q, got %q", gradeWarn, g)
+	}
+	if _, ok := grades["function: _shared"]; ok {
+		t.Errorf("_shared should be skipped, not graded")
+	}
+}
+
+func TestAssessFunctions_MissingDirIsSkipNotError(t *testing.T) {
+	r := &report{}
+	if err := assessFunctions(r, filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
+		t.Fatalf("missing dir should not error: %v", err)
+	}
+	if len(r.functions) != 1 || r.functions[0].grade != gradeWarn {
+		t.Fatalf("want one skip ⚠ item, got %+v", r.functions)
+	}
+	if !strings.Contains(r.functions[0].note, "--functions-dir") {
+		t.Errorf("skip note should guide the user to --functions-dir, got %q", r.functions[0].note)
 	}
 }
