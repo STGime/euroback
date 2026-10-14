@@ -355,23 +355,26 @@ func TestAssessFunctions_GradesLocalTree(t *testing.T) {
 		t.Fatalf("assessFunctions: %v", err)
 	}
 
-	grades := map[string]string{}
+	byName := map[string]item{}
 	for _, it := range r.functions {
-		grades[it.name] = it.grade
+		byName[it.name] = it
 	}
-	if g := grades["function: hello"]; g != gradeOK {
-		t.Errorf("hello: want %q, got %q", gradeOK, g)
+	// Grade AND note are asserted: the Unsupported and generic-warnings
+	// branches both emit ⚠, so only the note distinguishes them — a grade-
+	// only check would pass even if the two branches were swapped.
+	if it := byName["function: hello"]; it.grade != gradeOK || !strings.Contains(it.note, "ports cleanly") {
+		t.Errorf("hello: want ✅ ports-cleanly, got %q / %q", it.grade, it.note)
 	}
-	if g := grades["function: with-import"]; g != gradeWarn {
-		t.Errorf("with-import: want %q, got %q", gradeWarn, g)
+	if it := byName["function: with-import"]; it.grade != gradeWarn || !strings.Contains(it.note, "warning(s)") {
+		t.Errorf("with-import: want ⚠ warnings branch, got %q / %q", it.grade, it.note)
 	}
-	if g := grades["function: sdk"]; g != gradeWarn {
-		t.Errorf("sdk (unsupported): want %q, got %q", gradeWarn, g)
+	if it := byName["function: sdk"]; it.grade != gradeWarn || !strings.Contains(it.note, "manual rewrite") {
+		t.Errorf("sdk: want ⚠ unsupported/manual-rewrite branch, got %q / %q", it.grade, it.note)
 	}
-	if g := grades["function: weird"]; g != gradeWarn {
-		t.Errorf("weird (no index.ts): want %q, got %q", gradeWarn, g)
+	if it := byName["function: weird"]; it.grade != gradeWarn || !strings.Contains(it.note, "entry point") {
+		t.Errorf("weird (no index.ts): want ⚠ entry-point note, got %q / %q", it.grade, it.note)
 	}
-	if _, ok := grades["function: _shared"]; ok {
+	if _, ok := byName["function: _shared"]; ok {
 		t.Errorf("_shared should be skipped, not graded")
 	}
 }

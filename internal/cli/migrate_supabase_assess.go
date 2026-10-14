@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -554,6 +555,12 @@ func assessStorage(ctx context.Context, conn *pgx.Conn, r *report) error {
 			visibility = "public"
 		}
 		note := fmt.Sprintf("%s · %s objects · %s", visibility, formatCount(b.objectCount), formatBytes(b.totalBytes))
+		if b.objectCount > 0 && b.totalBytes == 0 {
+			// Older Supabase schemas don't populate metadata->>'size';
+			// the object count is accurate, the byte total isn't — say
+			// so rather than let a tenant read "0 B" as "empty".
+			note += " (size unknown — metadata->>'size' not populated on this project; objects still copy)"
+		}
 		if b.public {
 			note += " — public buckets map to Eurobase's public shared-prefix mechanism; review after migrating"
 		}
@@ -582,6 +589,14 @@ func assessStorage(ctx context.Context, conn *pgx.Conn, r *report) error {
 // assessing before checking out their functions).
 func assessFunctions(r *report, functionsDir string) error {
 	info, err := os.Stat(functionsDir)
+	if err != nil {
+		// Only "not found" is a skip-with-note — a real stat failure
+		// (e.g. a permission error on an existing path) must surface
+		// rather than being disguised as "point --functions-dir somewhere".
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
 	if err != nil || !info.IsDir() {
 		r.functions = append(r.functions, item{
 			name:  "(skipped — no local functions directory)",
