@@ -22,6 +22,7 @@ import { marked } from 'marked';
 import dpaSource from '../../../docs/legal/v2/dpa.md?raw';
 import termsSource from '../../../docs/legal/v2/terms.md?raw';
 import privacySource from '../../../docs/legal/v2/privacy.md?raw';
+import slaSource from '../../../docs/legal/v2/sla.md?raw';
 
 // LEGAL_VERSION mirrors the click-through consent version tracked
 // against legal_acceptances (login/+page.svelte line 26 pins the
@@ -55,16 +56,17 @@ const PLACEHOLDERS: Record<string, string> = {
 	CONTACT_EMAIL: 'dpo@eurobase.app',
 };
 
-type LegalDoc = 'dpa' | 'terms' | 'privacy';
+type LegalDoc = 'dpa' | 'terms' | 'privacy' | 'sla';
 
 const DOC_META: Record<LegalDoc, { source: string; title: string }> = {
 	dpa: { source: dpaSource, title: 'Data Processing Agreement' },
 	terms: { source: termsSource, title: 'Terms of Service' },
 	privacy: { source: privacySource, title: 'Privacy Policy' },
+	sla: { source: slaSource, title: 'Service Level Agreement' },
 };
 
 export function isLegalDoc(slug: string): slug is LegalDoc {
-	return slug === 'dpa' || slug === 'terms' || slug === 'privacy';
+	return slug === 'dpa' || slug === 'terms' || slug === 'privacy' || slug === 'sla';
 }
 
 // stripReviewerNotes removes the leading HTML comment block that

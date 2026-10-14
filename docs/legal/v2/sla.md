@@ -6,13 +6,10 @@ REVIEWER NOTES — read before publication (v2)
      available (out of beta), so this publishes that SLA. Team / Legal
      Team remain in closed beta and are covered only by best-effort
      until they formalise.
-  2. Uptime figure is deliberately conservative: 99.5% monthly, i.e.
-     the standalone tier of Scaleway's Managed Database SLA (standalone
-     99.5%; HA primary+standby 99.95%). Raising this to 99.9% requires
-     confirming the shared cluster's configuration supports it first —
-     do NOT advertise a higher number without that confirmation. See
-     the private operational notes, not this public file, for current
-     infrastructure state.
+  2. Uptime figure is deliberately conservative: 99.5% monthly, which
+     sits inside Scaleway's published Managed Database SLA range
+     (standalone 99.5%; HA primary+standby 99.95%). Do NOT advertise a
+     higher number without confirming it operationally first.
   3. NO financial service credits are offered yet (remediation is
      best-effort). This is intentional for the first SLA; credits can
      be introduced later, mirroring Scaleway's model (10/25/50%).
@@ -20,12 +17,12 @@ REVIEWER NOTES — read before publication (v2)
   4. Backups: Scaleway takes automatic daily (~24h) backups of the
      managed database at the infrastructure level on every tier, so
      worst-case data loss is ~24h. These are NOT customer-controlled on
-     Free/Pro — no self-serve restore, PITR, or downloadable backup on
-     the shared cluster. Self-serve backups/PITR/restore are a Team-tier
-     (dedicated instance) feature. Keep this honest.
+     Free/Pro. Self-serve restore from daily backups is a Team-tier
+     (dedicated instance) feature. Keep this honest and do not publish
+     a finer recovery-point guarantee than we can operationally meet.
   5. §6 (cessation of operations, 90-day online + export window) is a
      real continuity commitment — confirm it is consistent with the
-     ISMS business-continuity handover (isms.md §7) before publication.
+     ISMS business-continuity handover before publication.
   6. Entity strings (Eurobase OÜ, Ahtri 12, Tallinn) mirror the rest of
      the v2 set.
 -->
@@ -40,13 +37,13 @@ All Service infrastructure runs in the European Union (France) on Scaleway. No U
 
 ## 1. Scope
 
-- This SLA's **availability target and support commitment apply to paid tiers — Pro and above**, for Projects in good standing (account not suspended, invoices paid).
+- This SLA's **availability target and priority support apply to the Pro tier**, for Projects in good standing (account not suspended, invoices paid).
 - The **Free tier** is provided on a **best-effort** basis with no availability target.
-- **Team and Legal Team** are in closed beta; while in beta they are covered by best-effort support and by this SLA's backup and continuity sections, but not yet by the availability target or any formal credit scheme.
+- **Team and Legal Team** are in closed beta; while in beta they are covered by best-effort support and by this SLA's backup and continuity sections, but not yet by the availability target or any formal credit scheme. They will come under the availability target as they reach general availability.
 
 ## 2. Availability commitment
 
-We target **99.5% monthly availability** of the Eurobase API (authentication, database, storage, and edge-function request handling) for paid tiers.
+We target **99.5% monthly availability** of the Eurobase API (authentication, database, storage, and edge-function request handling) for the Pro tier.
 
 - "**Available**" means the API accepts and correctly serves requests for a Project. A month is a calendar month (UTC).
 - Availability is measured at our platform edge and excludes the time attributable to the exclusions in §5.
@@ -61,13 +58,13 @@ The Service is built on Scaleway's EU infrastructure, which carries its own publ
 | Managed Database (PostgreSQL) | 99.95% High-Availability (primary + standby) / 99.5% standalone |
 | Object Storage (Multi-AZ Standard) | 99.9% |
 
-Our availability target reflects the standalone-database figure; we do not promise more availability than our underlying providers guarantee.
+We set our availability target conservatively within these figures; we do not promise more availability than our underlying providers guarantee.
 
 ## 4. Backups and recovery
 
 - **Automatic daily backups (all tiers).** Scaleway takes automatic backups of the managed database approximately **every 24 hours** at the infrastructure level. In a worst-case recovery, this means **up to ~24 hours of data could be lost** (recovery point objective ≈ 24h). These backups are operated by us/Scaleway for disaster recovery; they are **not customer-controlled** on Free or Pro.
-- **No self-serve restore, point-in-time recovery, or downloadable backup on Free/Pro** (shared infrastructure).
-- **Team / Legal Team** Projects run on a **dedicated** EU Postgres instance with managed **daily backups**, **point-in-time recovery**, and **self-serve restore** (Team: 7-day retention; Legal Team: 30-day), one included restore per month.
+- **No self-serve restore or downloadable backup on Free/Pro** (shared infrastructure).
+- **Team / Legal Team** Projects run on a **dedicated** EU Postgres instance with managed **daily backups** and **self-serve restore** from those backups (Team: 7-day retention; Legal Team: 30-day), one included restore per month.
 - **Data portability on every tier.** You can export your schema, all table data, and a manifest of your storage objects at any time from the console or API (see /legal/privacy, Article 20). This is how you hold your own copy; it is independent of our disaster-recovery backups.
 
 ## 5. Exclusions
@@ -82,7 +79,7 @@ The availability target does not apply to unavailability caused by:
 
 ## 6. Business continuity and cessation of operations
 
-- **Key-person continuity.** Our information-security management system documents a business-continuity handover plan to keep the Service running on founder incapacitation (see /legal/security).
+- **Key-person continuity.** Our information-security management system documents a business-continuity handover plan to keep the Service running on founder incapacitation. We publish a summary of our security practices on request.
 - **If Eurobase ceases business operations**, we commit to keeping the **Service and your Customer Data online and exportable for at least 90 days** from the date we announce cessation, before any deletion. We will notify Project owners by email and keep export tooling available throughout that window so you can retrieve your data and migrate.
 
 This is in addition to the account-termination export window in the Terms (§9).

@@ -17,6 +17,7 @@
 		<a href="/legal/dpa" class="text-eurobase-600 hover:text-eurobase-700 underline">Data Processing Agreement</a>
 		<a href="/legal/terms" class="text-eurobase-600 hover:text-eurobase-700 underline">Terms of Service</a>
 		<a href="/legal/privacy" class="text-eurobase-600 hover:text-eurobase-700 underline">Privacy Policy</a>
+		<a href="/legal/sla" class="text-eurobase-600 hover:text-eurobase-700 underline">Service Level Agreement</a>
 		<a href="/legal/sub-processors" class="text-eurobase-600 hover:text-eurobase-700 underline">Sub-processors</a>
 	</nav>
 

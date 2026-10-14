@@ -21,7 +21,7 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can I run a trial alongside my current setup?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. Pro includes up to 10 projects, so you can stand up a test project next to your live backend and trial the migration before switching anything.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. Your account can have up to 10 projects on Pro, so you can stand up a test project next to your live backend and trial the migration before switching anything.</p>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Database &amp; auth differences</h3>
@@ -55,12 +55,12 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">What backups and uptime do I get?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">The managed database is backed up automatically about every 24 hours at the infrastructure level on every tier (worst-case data loss ≈ 24 hours). Customer-controlled backups, point-in-time recovery, and self-serve restore are a Team-tier feature (dedicated EU database). Paid tiers carry a 99.5% monthly availability target — see the <a href="/legal/sla" class="text-eurobase-700 hover:underline">SLA</a> for the full detail.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">The managed database is backed up automatically about every 24 hours at the infrastructure level on every tier (worst-case data loss ≈ 24 hours). Customer-controlled backups and self-serve restore are a Team-tier feature (dedicated EU database). Pro carries a 99.5% monthly availability target — see the <a href="/legal/sla" class="cursor-pointer text-eurobase-700 hover:underline">SLA</a> for the full detail.</p>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Do you provide a DPA and a sub-processor list?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes — an auto-generated DPA report per project, and a published, EU-only sub-processor list (Scaleway for compute/database/storage/email in France, Mollie for payments, GatewayAPI for SMS). See the <a href="/docs/compliance" class="text-eurobase-700 hover:underline">Compliance</a> chapter.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes — an auto-generated DPA report per project, and a published, EU-only sub-processor list (Scaleway for compute/database/storage/email in France, Mollie for payments, GatewayAPI for SMS). See the <a href="/docs/compliance" class="cursor-pointer text-eurobase-700 hover:underline">Compliance</a> chapter.</p>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
@@ -74,7 +74,7 @@
 							<path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418" />
 						</svg>
 						<p class="text-sm text-eurobase-800">
-							Everything runs in the EU on Scaleway (France) — database, storage, and custom Go auth services. No AWS, GCP, Azure, or any US CLOUD Act-subject provider touches your data. That EU-sovereignty guarantee is the main reason most teams make this move.
+							Everything runs in the EU on Scaleway (France) — database, storage, and custom Go auth services — end to end, under EU jurisdiction. That data-sovereignty guarantee is the main reason most teams make this move.
 						</p>
 					</div>
 				</div>
