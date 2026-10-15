@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { scopeFromProfile, sqlReadOnly, explain } from '../dist/api-client.js';
+import { scopeFromProfile, sqlReadOnly, explain, ApiError } from '../dist/api-client.js';
 import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey, readsInternalTable } from '../dist/query.js';
 import { scopeNote, createMcpServer, TOOL_ANNOTATIONS } from '../dist/server.js';
 
@@ -148,13 +148,51 @@ test('tool annotations', () => {
     assert.deepEqual(tools[name].annotations, TOOL_ANNOTATIONS[name], name);
   }
   for (const r of ['listTables', 'queryTable', 'downloadFile', 'listProjects']) assert.equal(tools[r].annotations.readOnlyHint, true, r);
-  for (const w of ['runSQL', 'runSQLTransaction', 'invokeFunction', 'setSecret']) {
+  for (const r of ['listFunctions', 'getFunction', 'listFunctionVersions']) assert.equal(tools[r].annotations.readOnlyHint, true, r);
+  for (const w of ['runSQL', 'runSQLTransaction', 'invokeFunction', 'setSecret', 'deployFunction', 'rollbackFunction', 'deleteFunction']) {
     assert.equal(tools[w].annotations.readOnlyHint, false, w);
     assert.equal(tools[w].annotations.destructiveHint, true, w);
   }
   // Secrets and end users' data always need the user's OK.
-  for (const p of ['getSecret', 'listUsers', 'getSignedUrl']) assert.equal(tools[p].annotations.readOnlyHint, false, p);
+  for (const p of ['getSecret', 'listUsers', 'getSignedUrl', 'getFunctionLogs']) assert.equal(tools[p].annotations.readOnlyHint, false, p);
   // No stale entries: the table and the registered tools match.
   assert.deepEqual(Object.keys(TOOL_ANNOTATIONS).sort(), names.sort());
   assert.equal(tools.runSQL.title, 'Run SQL');
+});
+
+// deployFunction creates a missing function and updates an existing one
+// (#75), keeping verify_jwt unless the caller sets it.
+test('deployFunction: create or update', async () => {
+  const fake = (exists, getErr) => {
+    const calls = [];
+    const client = {
+      scope: { scoped: true, projectId: P, role: 'developer' },
+      get: async (path) => { calls.push(['GET', path]); if (getErr) throw getErr; if (!exists) throw new ApiError('not found', 404); return { name: 'hello' }; },
+      put: async (path, body) => { calls.push(['PUT', path, body]); return { name: 'hello', version: 2 }; },
+      post: async (path, body) => { calls.push(['POST', path, body]); return { name: 'hello', version: 1 }; },
+    };
+    return { client, calls };
+  };
+  const run = async (client, args) => {
+    const tool = createMcpServer(() => client)._registeredTools.deployFunction;
+    const res = await tool.handler({ projectId: P, functionName: 'hello', code: 'export default () => new Response()', ...args }, {});
+    return JSON.parse(res.content[0].text);
+  };
+  const base = `/platform/projects/${P}/functions`;
+
+  let f = fake(false);
+  assert.equal((await run(f.client, {})).action, 'created');
+  assert.deepEqual(f.calls[1], ['POST', base, { name: 'hello', code: 'export default () => new Response()', verify_jwt: true }]);
+
+  f = fake(true);
+  assert.equal((await run(f.client, {})).action, 'updated');
+  assert.deepEqual(f.calls[1], ['PUT', `${base}/hello`, { code: 'export default () => new Response()' }]); // verify_jwt kept
+  f = fake(true);
+  await run(f.client, { verifyJwt: false });
+  assert.equal(f.calls[1][2].verify_jwt, false);
+
+  // Anything but a 404 (no access, server error) is not "missing": no create.
+  f = fake(false, new ApiError('forbidden', 403));
+  await assert.rejects(run(f.client, {}), /forbidden/);
+  assert.equal(f.calls.length, 1);
 });
