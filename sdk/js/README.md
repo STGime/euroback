@@ -35,9 +35,9 @@ The SDK takes a project **API key**. Which one depends on where the code runs:
 |---|---|
 | Browser or mobile app code | the public key (`eb_pk_…`) |
 | Your own server | the secret key (`eb_sk_…`) — never ship it in client code |
-| CLI, MCP server, CI or scripts that manage the project | a personal access token (`eb_ptk_…`) — **not** with this SDK |
+| CLI, MCP server, CI or scripts that manage the project | a personal access token (`eb_ptk_…`, or a legacy `eb_pat_…`) — **not** with this SDK |
 
-Personal access tokens act as you, the developer, on the platform API (schema, settings, deploys). The SDK talks only to your app's API, which doesn't accept them. Create them in the console under Account → Personal Access Tokens and use them with the [Eurobase CLI](https://github.com/STGime/homebrew-tap) or the MCP server.
+Personal access tokens act as you, the developer, on the platform API (schema, settings, deploys). The SDK talks only to your project's app API (`/v1/*`), which doesn't accept them. Create them in the console under Account → Personal Access Tokens and use them with the [Eurobase CLI](https://github.com/STGime/homebrew-tap) or the MCP server.
 
 ## Authentication
 
@@ -262,7 +262,7 @@ await eb.db.schema.createTable('announcements', {
 
 ### RLS presets
 
-Under every preset except `full_access`, the **secret key (`ebsk_`) bypasses the row filter** via `public.is_service_role()` — your server-side backend can read/write the table regardless of the end-user check. The **public key (`ebpk_`)** gets whatever the preset name implies.
+Under every preset except `full_access`, the **secret key (`eb_sk_`) bypasses the row filter** via `public.is_service_role()` — your server-side backend can read/write the table regardless of the end-user check. The **public key (`eb_pk_`)** gets whatever the preset name implies.
 
 | Preset | Public-key SELECT | Public-key INSERT/UPDATE/DELETE | Secret-key access |
 |---|---|---|---|

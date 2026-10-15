@@ -20,8 +20,8 @@ export interface ColumnDefinition {
 
 /**
  * RLS policy preset applied to the table on creation. Under every
- * preset except 'full_access', the secret (ebsk_) key bypasses the
- * row filter via public.is_service_role(); the public (ebpk_) key
+ * preset except 'full_access', the secret (eb_sk_) key bypasses the
+ * row filter via public.is_service_role(); the public (eb_pk_) key
  * gets whatever the preset name implies.
  *
  * - 'owner_access'                — anon: denied; end-user: owner-only; secret: all
