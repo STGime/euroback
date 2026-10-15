@@ -14,6 +14,30 @@
 					<div class="mt-1 text-gray-500"># macOS manual download only: xattr -d com.apple.quarantine ./eurobase (not notarized; brew installs unaffected)</div>
 				</div>
 
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Without Homebrew (CI, agents, Linux servers), download the binary for your platform (macOS or Linux, amd64 or arm64):
+				</p>
+				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400 space-y-0.5">
+					<div>VER=0.4.0  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
+					<div>OS=$(uname -s | tr '[:upper:]' '[:lower:]')</div>
+					<div>ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')</div>
+					<div>BASE=https://github.com/STGime/homebrew-tap/releases/download/cli-v$&#123;VER&#125;</div>
+					<div>TGZ=eurobase_$&#123;VER&#125;_$&#123;OS&#125;_$&#123;ARCH&#125;.tar.gz</div>
+					<div>curl -fsSLO "$BASE/$TGZ" &amp;&amp; curl -fsSLO "$BASE/eurobase_$&#123;VER&#125;_checksums.txt"</div>
+					<div>grep " $TGZ\$" eurobase_$&#123;VER&#125;_checksums.txt | shasum -a 256 -c -</div>
+					<div>tar xzf "$TGZ" &amp;&amp; sudo mv eurobase /usr/local/bin/  <span class="text-gray-500"># or anywhere on your PATH</span></div>
+					<div>eurobase version</div>
+				</div>
+
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">
+					<svg class="h-5 w-5 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+					<p class="text-sm text-amber-800">
+						<strong>The Eurobase CLI is not on npm.</strong> The npm package named <code class="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-mono">eurobase</code> is an unrelated product from another publisher. It describes itself as the official Eurobase CLI, but it isn't ours and doesn't work with your Eurobase projects. Don't install it or run <code class="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-mono">npx eurobase</code>, and never give it a Eurobase token. Install only from Homebrew (<code class="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-mono">stgime/tap/eurobase</code>) or the releases at <code class="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-mono">github.com/STGime/homebrew-tap</code>. If you set up a coding agent, tell it the same. (Our only npm package is the app SDK, <code class="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-mono">@eurobase/sdk</code>.)
+					</p>
+				</div>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Getting started</h3>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400 space-y-0.5">
 					<div class="text-gray-500"># Log in to your account</div>
