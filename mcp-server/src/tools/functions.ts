@@ -40,7 +40,7 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'getFunction',
-    'Get an edge function: its code, version, status, whether it requires a signed-in user (verify_jwt) and the names of its environment variables (values are never shown).',
+    'Get an edge function: its code, version, status, whether it requires a signed-in user (verify_jwt) and the names of its environment variables (values are never shown). The code is left out (code_withheld) for a Read-only token.',
     {
       projectId: z.string().uuid().describe('The project UUID'),
       functionName: z.string().describe('The function name'),
@@ -107,7 +107,7 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'getFunctionLogs',
-    'Recent invocations of an edge function, newest first: status, duration, error and the lines it logged.',
+    'Recent invocations of an edge function, newest first: status, duration, error and the lines it logged. Needs Developer access.',
     {
       projectId: z.string().uuid().describe('The project UUID'),
       functionName: z.string().describe('The function name'),
@@ -119,7 +119,7 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'listFunctionVersions',
-    'List the earlier versions of an edge function (version number, code, date), for rollbackFunction.',
+    'List the earlier versions of an edge function (version number, code, date), for rollbackFunction. Needs Developer access.',
     {
       projectId: z.string().uuid().describe('The project UUID'),
       functionName: z.string().describe('The function name'),

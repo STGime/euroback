@@ -3342,6 +3342,8 @@ export interface EdgeFunction {
 	env_vars?: Record<string, string>;
 	/** Set instead of env_vars when the caller may not see the values (below Developer). */
 	env_var_names?: string[];
+	/** Set when the code is left out for the caller (below Developer). */
+	code_withheld?: boolean;
 	status: string;
 	version: number;
 	created_at: string;

@@ -27,7 +27,7 @@ func TestWithholdEnvValues(t *testing.T) {
 	}
 }
 
-func TestEnvValuesForRole(t *testing.T) {
+func TestRedactForRole(t *testing.T) {
 	for _, tc := range []struct {
 		role       string
 		wantValues bool
@@ -38,14 +38,17 @@ func TestEnvValuesForRole(t *testing.T) {
 		{"admin", true},
 		{"owner", true},
 	} {
-		fn := &EdgeFunction{EnvVars: map[string]string{"K": "secret"}}
+		fn := &EdgeFunction{Code: "export default () => 1", EnvVars: map[string]string{"K": "secret"}}
 		ctx := context.Background()
 		if tc.role != "" {
 			ctx = tenant.WithRole(ctx, tc.role)
 		}
-		envValuesForRole(ctx, fn)
+		redactForRole(ctx, fn)
 		if got := fn.EnvVars["K"] == "secret"; got != tc.wantValues {
 			t.Errorf("role %q: values shown = %v, want %v", tc.role, got, tc.wantValues)
+		}
+		if gotCode := fn.Code != ""; gotCode != tc.wantValues || fn.CodeWithheld == tc.wantValues {
+			t.Errorf("role %q: code shown = %v (withheld flag %v), want shown %v", tc.role, gotCode, fn.CodeWithheld, tc.wantValues)
 		}
 		if tc.wantValues && fn.EnvVarNames != nil {
 			t.Errorf("role %q: names set alongside values: %v", tc.role, fn.EnvVarNames)

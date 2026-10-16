@@ -69,20 +69,23 @@ func HandleGet(svc *Service) http.HandlerFunc {
 			writeGetError(w, projectID, name, err)
 			return
 		}
-		envValuesForRole(r.Context(), fn)
+		redactForRole(r.Context(), fn)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(fn)
 	}
 }
 
-// envValuesForRole keeps env var values only for developer+ callers; no
-// role on the context counts as below (fails closed). Deliberately
-// stricter than RequireMinRole, which lets a role-less dev-mode request
-// through: in dev mode this shows names only.
-func envValuesForRole(ctx context.Context, fn *EdgeFunction) {
+// redactForRole keeps a function's code and env var values only for
+// developer+ callers (those who can change them); below that the response
+// has the env var names and code_withheld. No role on the context counts
+// as below (fails closed). Deliberately stricter than RequireMinRole, which
+// lets a role-less dev-mode request through: in dev mode this redacts.
+func redactForRole(ctx context.Context, fn *EdgeFunction) {
 	if !tenant.HasMinRole(ctx, "developer") {
 		withholdEnvValues(fn)
+		fn.Code = ""
+		fn.CodeWithheld = true
 	}
 }
 

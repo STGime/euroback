@@ -1336,17 +1336,20 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			fnSvc := functions.NewService(pool, vaultSvc)
 			fnTrigSvc := functions.NewTriggerService(pool)
 			r.Route("/functions", func(r chi.Router) {
-				// Reads → viewer; mutations → developer (closes #50).
+				// Reads → viewer; mutations → developer (closes #50). A function's
+				// code, versions and invocation logs are developer+ too: they can
+				// carry what the function handles (HandleGet withholds the code
+				// and env var values below developer).
 				r.With(tenant.RequireMinRole("viewer")).Get("/", functions.HandleList(fnSvc))
 				r.With(tenant.RequireMinRole("developer")).Post("/", functions.HandleCreate(fnSvc, limitsSvc))
 				r.With(tenant.RequireMinRole("viewer")).Get("/{name}", functions.HandleGet(fnSvc))
 				r.With(tenant.RequireMinRole("developer")).Put("/{name}", functions.HandleUpdate(fnSvc))
 				r.With(tenant.RequireMinRole("developer")).Delete("/{name}", functions.HandleDelete(fnSvc))
-				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/logs", functions.HandleLogs(fnSvc))
+				r.With(tenant.RequireMinRole("developer")).Get("/{name}/logs", functions.HandleLogs(fnSvc))
 				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/triggers", functions.HandleListTriggers(fnSvc, fnTrigSvc))
 				r.With(tenant.RequireMinRole("developer")).Post("/{name}/triggers", functions.HandleCreateTrigger(fnSvc, fnTrigSvc))
 				r.With(tenant.RequireMinRole("developer")).Delete("/{name}/triggers/{triggerId}", functions.HandleDeleteTrigger(fnTrigSvc))
-				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/versions", functions.HandleListVersions(fnSvc))
+				r.With(tenant.RequireMinRole("developer")).Get("/{name}/versions", functions.HandleListVersions(fnSvc))
 				r.With(tenant.RequireMinRole("developer")).Post("/{name}/rollback", functions.HandleRollback(fnSvc))
 				r.With(tenant.RequireMinRole("viewer")).Get("/{name}/metrics", functions.HandleMetrics(fnSvc))
 				// Console Test (#712): invoke through the public invoke path
