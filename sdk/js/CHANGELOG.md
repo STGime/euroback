@@ -2,6 +2,18 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.1 — 2026-10-16
+
+### Fixed — refresh loop with long sessions (#804)
+
+With a session duration above ~24.8 days (e.g. 30 days, `expires_in` = 2,592,000), the refresh timer's delay exceeded `setTimeout`'s 32-bit maximum (2,147,483,647 ms). Browsers and Node then fire it almost at once, so the SDK refreshed the token in an endless loop. The timer is now capped at the maximum and re-armed until the refresh is due (60 s before expiry).
+
+### Fixed — refresh timing after a reload
+
+A session restored from storage scheduled its refresh `expires_in` seconds after the reload, as if the token were new — so after a reload late in a token's life, the refresh came after the token had expired. Sessions now carry `expires_at` (Unix seconds, set by the SDK when it receives the session), and a restored session refreshes on time. Sessions stored by older SDKs use the access token's `exp`.
+
+No gateway change needed.
+
 ## 0.9.0 — 2026-10-06
 
 ### Added — end-user passkeys (passwordless sign-in, #630)

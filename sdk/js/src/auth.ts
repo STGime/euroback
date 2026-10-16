@@ -10,6 +10,9 @@ import { passkeysSupported, createPasskey, getPasskeyAssertion, passkeyErrorMess
 // Types
 // ---------------------------------------------------------------------------
 
+/** setTimeout's largest delay (2^31 - 1 ms, about 24.8 days). */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1
+
 /**
  * Read the claims of a JWT without verifying it (the gateway verifies every
  * request; this only fills the client-side session). Returns null for
@@ -47,6 +50,12 @@ export interface AuthSession {
   access_token: string
   token_type: string
   expires_in: number
+  /**
+   * When the access token expires, in Unix seconds (client clock). Set by
+   * the SDK when it receives the session, so a session restored from
+   * storage refreshes on time.
+   */
+  expires_at?: number
   refresh_token: string
   user: AuthUser
 }
@@ -615,7 +624,7 @@ export class AuthClient {
 
   // ── Internal ──
 
-  private setSession(session: AuthSession) {
+  private setSession(session: AuthSession, restored = false) {
     // An OAuth callback (and a session stored by SDK ≤ 0.8.0 after one)
     // has no user yet: take id / email from the access token's claims
     // (`sub`, `email`) so getSession().user.id is usable right away (#720).
@@ -639,10 +648,23 @@ export class AuthClient {
         }
       }
     }
+    // A session from the server counts expires_in from now; a restored
+    // one keeps its stored expiry (older SDKs didn't store it: use the
+    // token's exp). Counting from now keeps a fresh session independent
+    // of the client's clock.
+    let expiresAt = restored ? session.expires_at : undefined
+    if (restored && typeof expiresAt !== 'number') {
+      const exp = decodeJwtClaims(session.access_token)?.exp
+      if (typeof exp === 'number') expiresAt = exp
+    }
+    if (typeof expiresAt !== 'number') {
+      expiresAt = Math.floor(Date.now() / 1000) + (Number(session.expires_in) || 3600)
+    }
+    session = { ...session, expires_at: expiresAt }
     this.session = session
     this.http.setAccessToken(session.access_token)
     this.persistSession(session)
-    this.scheduleRefresh(session.expires_in)
+    this.scheduleRefresh(expiresAt)
   }
 
   private clearSession() {
@@ -655,15 +677,22 @@ export class AuthClient {
     }
   }
 
-  private scheduleRefresh(expiresIn: number) {
+  private scheduleRefresh(expiresAt: number) {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer)
+      this.refreshTimer = null
     }
-    // Refresh 60 seconds before expiry.
-    const refreshIn = Math.max((expiresIn - 60) * 1000, 5000)
+    // Refresh 60 seconds before expiry (at least 5 s from now).
+    const delay = Math.max(expiresAt * 1000 - 60_000 - Date.now(), 5000)
+    // setTimeout stores the delay as a 32-bit int: anything longer
+    // (sessions over ~24.8 days) would fire at once and refresh in a
+    // loop (#804). Wait the maximum and check again instead.
+    const capped = delay > MAX_TIMEOUT_MS
     this.refreshTimer = setTimeout(() => {
-      this.refreshSession()
-    }, refreshIn)
+      this.refreshTimer = null
+      if (capped) this.scheduleRefresh(expiresAt)
+      else this.refreshSession()
+    }, capped ? MAX_TIMEOUT_MS : delay)
     // In Node the pending refresh must not keep the process alive — a
     // script that signs in would otherwise hang until the token nears
     // expiry (~1 h). Browsers return a number here, so this is a no-op.
@@ -706,7 +735,7 @@ export class AuthClient {
         const raw = localStorage.getItem(this.storageKey)
         if (raw) {
           const session = JSON.parse(raw) as AuthSession
-          this.setSession(session)
+          this.setSession(session, true)
         }
       }
     } catch {
