@@ -123,6 +123,12 @@ spec:
   # direct platform-lookup connections. RUNNER_TENANT_CONN_CAP (client
   # connections to the pooler per pod) no longer counts here.
   maxReplicas: 6
+  # CPU only. With a memory target the HPA could only scale up: an idle
+  # runner holds 130–200 Mi (V8 rarely returns heap to the OS), so after
+  # one spike the average for fewer pods stays above target and it never
+  # scales back down — each extra replica reserves 256 Mi on a small
+  # node and starved deploy rollouts of room. The 1 Gi limit per pod
+  # still bounds a runaway function.
   metrics:
     - type: Resource
       resource:
@@ -130,9 +136,3 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
