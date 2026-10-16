@@ -180,9 +180,9 @@ export class AuthClient {
     if (result.error) {
       return { data: null, error: result.error }
     }
-    this.setSession(result)
-    this.emit('SIGNED_IN', result)
-    return { data: result, error: null }
+    const session = this.setSession(result)
+    this.emit('SIGNED_IN', session)
+    return { data: session, error: null }
   }
 
   /** Sign in an existing end-user with email + password. */
@@ -191,9 +191,9 @@ export class AuthClient {
     if (result.error) {
       return { data: null, error: result.error }
     }
-    this.setSession(result)
-    this.emit('SIGNED_IN', result)
-    return { data: result, error: null }
+    const session = this.setSession(result)
+    this.emit('SIGNED_IN', session)
+    return { data: session, error: null }
   }
 
   /** Sign out the current user. */
@@ -221,9 +221,9 @@ export class AuthClient {
       this.emit('SIGNED_OUT', null)
       return { data: null, error: result.error }
     }
-    this.setSession(result)
-    this.emit('TOKEN_REFRESHED', result)
-    return { data: result, error: null }
+    const session = this.setSession(result)
+    this.emit('TOKEN_REFRESHED', session)
+    return { data: session, error: null }
   }
 
   /**
@@ -255,9 +255,9 @@ export class AuthClient {
     if (result.error) {
       return { data: null, error: result.error }
     }
-    this.setSession(result)
-    this.emit('SIGNED_IN', result)
-    return { data: result, error: null }
+    const session = this.setSession(result)
+    this.emit('SIGNED_IN', session)
+    return { data: session, error: null }
   }
 
   /**
@@ -443,9 +443,9 @@ export class AuthClient {
     if (result?.error) {
       return { data: null, error: result.error }
     }
-    this.setSession(result)
-    this.emit('SIGNED_IN', result)
-    return { data: result, error: null }
+    const session = this.setSession(result)
+    this.emit('SIGNED_IN', session)
+    return { data: session, error: null }
   }
 
   /**
@@ -624,7 +624,7 @@ export class AuthClient {
 
   // ── Internal ──
 
-  private setSession(session: AuthSession, restored = false) {
+  private setSession(session: AuthSession, restored = false): AuthSession {
     // An OAuth callback (and a session stored by SDK ≤ 0.8.0 after one)
     // has no user yet: take id / email from the access token's claims
     // (`sub`, `email`) so getSession().user.id is usable right away (#720).
@@ -665,6 +665,7 @@ export class AuthClient {
     this.http.setAccessToken(session.access_token)
     this.persistSession(session)
     this.scheduleRefresh(expiresAt)
+    return session
   }
 
   private clearSession() {

@@ -12,6 +12,8 @@ With a session duration above ~24.8 days (e.g. 30 days, `expires_in` = 2,592,000
 
 A session restored from storage scheduled its refresh `expires_in` seconds after the reload, as if the token were new — so after a reload late in a token's life, the refresh came after the token had expired. Sessions now carry `expires_at` (Unix seconds, set by the SDK when it receives the session), and a restored session refreshes on time. Sessions stored by older SDKs use the access token's `exp`.
 
+`signIn`, `signUp`, `refreshSession`, `signInWithMagicLink` and `signInWithPasskey` now return (and emit with `SIGNED_IN` / `TOKEN_REFRESHED`) the session as the SDK stores it — the same object as `getSession()`, including `expires_at`.
+
 No gateway change needed.
 
 ## 0.9.0 — 2026-10-06

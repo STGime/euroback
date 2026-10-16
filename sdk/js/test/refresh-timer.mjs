@@ -16,7 +16,7 @@ const nowS = () => Math.floor(Date.now() / 1000)
 // Record timers instead of running them.
 let timers = []
 const fire = (t) => { timers = timers.filter((x) => x !== t); t.fn() }
-globalThis.setTimeout = (fn, ms) => { const t = { fn, ms, unref() {} }; timers.push(t); return t }
+globalThis.setTimeout = (fn, ms) => { const t = { fn, ms, unrefed: false, unref() { t.unrefed = true } }; timers.push(t); return t }
 globalThis.clearTimeout = (t) => { timers = timers.filter((x) => x !== t) }
 
 const store = new Map()
@@ -51,16 +51,21 @@ const client = () => createClient({ url: 'https://example.eurobase.app', apiKey:
   timers = []; store.clear(); refreshCalls = 0
   nextSession = session(30 * 86400)
   const eb = client()
-  const { error } = await eb.auth.signIn({ email: 'a@example.com', password: 'pw' })
+  const { data, error } = await eb.auth.signIn({ email: 'a@example.com', password: 'pw' })
   assert.equal(error, null)
+  near(data.expires_at * 1000, Date.now() + 30 * 86400 * 1000, 'returned session has expires_at')
   assert.equal(timers.length, 1)
   assert.equal(timers[0].ms, MAX, 'capped at setTimeout max')
   fire(timers[0])
   assert.equal(refreshCalls, 0, 'no refresh when the capped timer fires early')
   assert.equal(timers.length, 1, 're-armed')
   assert.ok(timers[0].ms <= MAX && timers[0].ms > 0)
+  assert.ok(timers[0].unrefed, 're-armed timer is unref()ed (no Node hang)')
   const stored = JSON.parse(store.get('eurobase_auth_session'))
   near(stored.expires_at * 1000, Date.now() + 30 * 86400 * 1000, 'expires_at stored')
+  await eb.auth.signOut()
+  assert.equal(timers.length, 0, 'signOut cancels the pending capped timer')
+  assert.equal(store.get('eurobase_auth_session'), undefined, 'signOut removes the stored session')
 }
 
 // 2. A 1-hour session: refresh 60 s before expiry, and it does refresh.
