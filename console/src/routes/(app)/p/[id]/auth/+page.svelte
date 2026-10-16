@@ -117,11 +117,11 @@
 	// explicit value (the project owner has "chosen" once they touch
 	// the page). A future "Reset to defaults" button could clear the
 	// override; out of scope for #229.
-	let rlEmailsPerHour = $state('');
-	let rlSmsPerHour = $state('');
-	let rlTokenRefresh = $state('');
-	let rlTokenVerify = $state('');
-	let rlSignupSignin = $state('');
+	let rlEmailsPerHour = $state<string | number | null>('');
+	let rlSmsPerHour = $state<string | number | null>('');
+	let rlTokenRefresh = $state<string | number | null>('');
+	let rlTokenVerify = $state<string | number | null>('');
+	let rlSignupSignin = $state<string | number | null>('');
 	let rlTrustProxy = $state<boolean>(DEFAULT_RATE_LIMITS.trust_proxy);
 	// `rlTrustProxyTouched` distinguishes "the user clicked the toggle
 	// this session" from "the toggle reflects the saved value". Numeric
@@ -366,8 +366,12 @@
 		rlTrustProxyTouched = false;
 	}
 
-	function parseIntOrUndef(s: string): number | undefined {
-		const t = s.trim();
+	// The fields are <input type="number">: hydrate writes a string, but
+	// once edited Svelte binds a number (or null when cleared) — #805.
+	function parseIntOrUndef(v: string | number | null | undefined): number | undefined {
+		if (v === null || v === undefined) return undefined;
+		if (typeof v === 'number') return Number.isInteger(v) && v >= 0 ? v : undefined;
+		const t = v.trim();
 		if (!t) return undefined;
 		const n = parseInt(t, 10);
 		if (Number.isNaN(n) || n < 0) return undefined;
@@ -1752,8 +1756,8 @@
 							Number of <code class="text-[11px] bg-gray-100 px-1 rounded">/v1/auth/refresh</code> calls allowed in a 5-minute interval per IP address. Higher because legitimate SDK clients refresh proactively.
 							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.token_refresh_per_5min_per_ip}.</span>
 						</p>
-						{#if rlTokenRefresh}
-							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenRefresh, 10) * 12} requests/hour</p>
+						{#if parseIntOrUndef(rlTokenRefresh)}
+							<p class="mt-0.5 text-[11px] text-gray-400">≈ {(parseIntOrUndef(rlTokenRefresh) ?? 0) * 12} requests/hour</p>
 						{/if}
 					</div>
 					<div class="flex items-center gap-2 shrink-0">
@@ -1778,8 +1782,8 @@
 							Number of OTP, magic-link, and email-verify attempts allowed in a 5-minute interval per IP. Throttles brute-force against 6-digit phone OTPs.
 							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.token_verification_per_5min_per_ip}.</span>
 						</p>
-						{#if rlTokenVerify}
-							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlTokenVerify, 10) * 12} requests/hour</p>
+						{#if parseIntOrUndef(rlTokenVerify)}
+							<p class="mt-0.5 text-[11px] text-gray-400">≈ {(parseIntOrUndef(rlTokenVerify) ?? 0) * 12} requests/hour</p>
 						{/if}
 					</div>
 					<div class="flex items-center gap-2 shrink-0">
@@ -1804,8 +1808,8 @@
 							Combined volume cap on signup and signin requests per IP, per 5 minutes. The per-account brute-force counter (signin failures by email) is a separate axis at platform defaults.
 							<span class="block mt-0.5 text-gray-400">Max {MAX_RATE_LIMITS.signup_signin_per_5min_per_ip} — keeps a single IP from bot-farming mass account creation.</span>
 						</p>
-						{#if rlSignupSignin}
-							<p class="mt-0.5 text-[11px] text-gray-400">≈ {parseInt(rlSignupSignin, 10) * 12} requests/hour</p>
+						{#if parseIntOrUndef(rlSignupSignin)}
+							<p class="mt-0.5 text-[11px] text-gray-400">≈ {(parseIntOrUndef(rlSignupSignin) ?? 0) * 12} requests/hour</p>
 						{/if}
 					</div>
 					<div class="flex items-center gap-2 shrink-0">
