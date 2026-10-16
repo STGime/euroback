@@ -3340,6 +3340,8 @@ export interface EdgeFunction {
 	code?: string;
 	verify_jwt: boolean;
 	env_vars?: Record<string, string>;
+	/** Set instead of env_vars when the caller may not see the values (below Developer). */
+	env_var_names?: string[];
 	status: string;
 	version: number;
 	created_at: string;

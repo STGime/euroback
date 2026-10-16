@@ -21,6 +21,9 @@ type EdgeFunction struct {
 	Code      string    `json:"code,omitempty"`
 	VerifyJWT bool      `json:"verify_jwt"`
 	EnvVars   map[string]string `json:"env_vars,omitempty"`
+	// EnvVarNames lists the env vars' names when their values are withheld
+	// from the caller (see HandleGet).
+	EnvVarNames []string `json:"env_var_names,omitempty"`
 	Status    string    `json:"status"`
 	Version   int       `json:"version"`
 	CreatedAt time.Time `json:"created_at"`

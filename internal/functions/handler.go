@@ -1,13 +1,16 @@
 package functions
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 
 	"github.com/eurobase/euroback/internal/plans"
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 )
@@ -66,10 +69,39 @@ func HandleGet(svc *Service) http.HandlerFunc {
 			writeGetError(w, projectID, name, err)
 			return
 		}
+		envValuesForRole(r.Context(), fn)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(fn)
 	}
+}
+
+// envValuesForRole keeps env var values only for developer+ callers; no
+// role on the context counts as below (fails closed). Deliberately
+// stricter than RequireMinRole, which lets a role-less dev-mode request
+// through: in dev mode this shows names only.
+func envValuesForRole(ctx context.Context, fn *EdgeFunction) {
+	if !tenant.HasMinRole(ctx, "developer") {
+		withholdEnvValues(fn)
+	}
+}
+
+// withholdEnvValues replaces a function's env var values (its secrets) with
+// their names. Values are for those who can change the function
+// (developer+); a read-only caller sees which variables exist, not what
+// they hold.
+func withholdEnvValues(fn *EdgeFunction) {
+	if len(fn.EnvVars) == 0 {
+		fn.EnvVars = nil
+		return
+	}
+	names := make([]string, 0, len(fn.EnvVars))
+	for k := range fn.EnvVars {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	fn.EnvVarNames = names
+	fn.EnvVars = nil
 }
 
 // HandleCreate creates a new edge function with plan limit enforcement.
