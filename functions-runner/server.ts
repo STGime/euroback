@@ -24,6 +24,7 @@ import { RouteCache, type TenantDbRow, TenantDbNotReady, type TenantRoute } from
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
 import { onWorkerError } from "./worker_errors.ts";
+import { buildResponseBody } from "./response.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner's own login
 // (`eurobase_function_runner`) has no grants on any tenant schema and,
@@ -567,7 +568,7 @@ async function runUserHandlerInWorker(opts: {
 
     const respondResponse = (serialized: SerializedResponse) => {
       cleanup();
-      if (serialized.body.byteLength > RESPONSE_SIZE_LIMIT) {
+      if ((serialized.body?.byteLength ?? 0) > RESPONSE_SIZE_LIMIT) {
         const tooLarge = jsonResponse({
           error: "Response too large",
           limit: `${RESPONSE_SIZE_LIMIT / 1024 / 1024}MB`,
@@ -577,14 +578,25 @@ async function runUserHandlerInWorker(opts: {
         resolve(tooLarge);
         return;
       }
-      const headers = new Headers();
-      for (const [k, v] of serialized.headers) headers.set(k, v);
-      headers.set("X-Request-ID", requestId);
-      attachLogsHeader(headers);
-      resolve(new Response(serialized.body, {
-        status: serialized.status,
-        headers,
-      }));
+      const built = buildResponseBody(serialized.status, serialized.body);
+      if (!built.ok) {
+        const invalid = jsonResponse({ error: built.error, requestId }, 500);
+        attachLogsHeader(invalid.headers);
+        resolve(invalid);
+        return;
+      }
+      try {
+        const headers = new Headers();
+        for (const [k, v] of serialized.headers) headers.set(k, v);
+        headers.set("X-Request-ID", requestId);
+        attachLogsHeader(headers);
+        resolve(new Response(built.body, { status: built.status, headers }));
+      } catch (err) {
+        // Never leave the request unanswered (e.g. a header Deno refuses).
+        const failed = jsonResponse({ error: `invalid function response: ${err instanceof Error ? err.message : String(err)}`, requestId }, 500);
+        attachLogsHeader(failed.headers);
+        resolve(failed);
+      }
     };
 
     timeoutTimer = setTimeout(() => {
