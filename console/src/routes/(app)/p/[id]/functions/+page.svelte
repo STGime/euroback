@@ -121,6 +121,8 @@
 
 	// Environment variables state
 	let showEnvVars = $state(false);
+	// Read-only members get the names only; values need Developer access.
+	let envNamesOnly = $state<string[] | null>(null);
 	let envPairs = $state<Array<{ key: string; value: string }>>([]);
 	let savingEnv = $state(false);
 	let envMasked = $state(true);
@@ -211,6 +213,7 @@
 
 			// Load env vars into pairs
 			const ev = full.env_vars || {};
+			envNamesOnly = full.env_var_names ?? null;
 			envPairs = Object.entries(ev).map(([key, value]) => ({ key, value }));
 			if (envPairs.length === 0) envPairs = [{ key: '', value: '' }];
 
@@ -721,7 +724,14 @@ module.exports = async (req, ctx) => {
 								<span class="text-[10px] text-gray-400 ml-1">({envPairs.filter(p => p.key.trim()).length})</span>
 							</button>
 
-							{#if showEnvVars}
+							{#if showEnvVars && envNamesOnly}
+								<div class="mt-2 space-y-1.5">
+									{#each envNamesOnly as envName}
+										<div class="rounded border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs font-mono text-gray-700">{envName}</div>
+									{/each}
+									<p class="text-xs text-gray-500">Values are shown to members with Developer access or higher.</p>
+								</div>
+							{:else if showEnvVars}
 								<div class="mt-2 space-y-1.5">
 									{#each envPairs as pair, i}
 										<div class="flex items-center gap-2">
