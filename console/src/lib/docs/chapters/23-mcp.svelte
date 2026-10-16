@@ -28,7 +28,7 @@
 						<div><strong>Auth</strong> &mdash; list end-users registered in a project</div>
 						<div><strong>Storage</strong> &mdash; list files, generate signed download URLs</div>
 						<div><strong>Vault</strong> &mdash; list, get, and set encrypted secrets</div>
-						<div><strong>Functions</strong> &mdash; list and invoke edge functions</div>
+						<div><strong>Functions</strong> &mdash; list, read, deploy (create or update), invoke, roll back and delete edge functions; read their logs</div>
 					</div>
 				</div>
 

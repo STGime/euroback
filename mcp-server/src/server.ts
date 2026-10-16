@@ -23,7 +23,7 @@ Available operations:
 - **Auth**: List end-users registered in a project
 - **Storage**: List files, read files (downloadFile), generate signed download URLs
 - **Vault**: List, get, and set encrypted secrets
-- **Functions**: List and invoke edge functions
+- **Functions**: List, read, deploy (create or update), invoke, roll back and delete edge functions; read their logs
 - **Status**: Health check the API
 
 All data is stored on EU infrastructure (Scaleway, France). No CLOUD Act exposure.
@@ -79,6 +79,8 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   listFiles: { title: 'List files', readOnlyHint: true, openWorldHint: false },
   downloadFile: { title: 'Read file', readOnlyHint: true, openWorldHint: false },
   listFunctions: { title: 'List functions', readOnlyHint: true, openWorldHint: false },
+  getFunction: { title: 'Get function', readOnlyHint: true, openWorldHint: false },
+  listFunctionVersions: { title: 'List function versions', readOnlyHint: true, openWorldHint: false },
   listSecrets: { title: 'List secrets', readOnlyHint: true, openWorldHint: false },
   // Deliberately NOT readOnlyHint: clients auto-approve read-only tools, and
   // a decrypted secret (or end users' personal data) must never reach the
@@ -86,6 +88,8 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   // table data asked for it.
   getSecret: { title: 'Reveal secret', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   listUsers: { title: 'List end users', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Function logs carry whatever the code logged — often end users' data.
+  getFunctionLogs: { title: 'Read function logs', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   healthCheck: { title: 'Health check', readOnlyHint: true, openWorldHint: false },
   // Writes.
   createTable: { title: 'Create table', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -96,6 +100,10 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   runSQL: { title: 'Run SQL', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   runSQLTransaction: { title: 'Run SQL transaction', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   invokeFunction: { title: 'Invoke function', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  // Replaces live code (and with verifyJwt false makes it public).
+  deployFunction: { title: 'Deploy function', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  rollbackFunction: { title: 'Roll back function', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  deleteFunction: { title: 'Delete function', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
 };
 
 /** What this connection's token may do, for the model. */
@@ -103,6 +111,6 @@ export function scopeNote(scope: TokenScope): string {
   if (!scope.scoped) {
     return 'This token can access all of the user\'s Eurobase projects (a legacy token); SQL through it is read-only. Suggest creating a project token (console → Account → Personal Access Tokens): one project, with the access it needs.';
   }
-  const access = { viewer: 'read-only (tables, rows, files; no SQL, no changes)', developer: 'developer (read, write, SQL, create and change tables, invoke functions)', admin: 'admin (developer access plus secrets, end users and API keys)' }[scope.role ?? 'viewer'];
+  const access = { viewer: 'read-only (tables, rows, files; no SQL, no changes)', developer: 'developer (read, write, SQL, create and change tables, deploy and invoke functions)', admin: 'admin (developer access plus secrets, end users and API keys)' }[scope.role ?? 'viewer'];
   return `This token works for one project only: ${scope.projectId}, with ${access} access. Other projects are not reachable with it.`;
 }
