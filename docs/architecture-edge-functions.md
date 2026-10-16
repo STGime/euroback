@@ -576,8 +576,8 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: functions
-  minReplicas: 2
-  maxReplicas: 10
+  minReplicas: 1
+  maxReplicas: 6
   metrics:
     - type: Resource
       resource:
@@ -585,13 +585,9 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
 ```
+
+CPU only: an idle runner holds 130–200 Mi (V8 rarely returns heap), so a memory target could scale the runner up but never back down. The live values are in `deploy/k8s/functions.yaml`.
 
 ### 5.2 Scaling Model
 
