@@ -24,6 +24,7 @@ import { RouteCache, type TenantDbRow, TenantDbNotReady, type TenantRoute } from
 import { createSignedUrl, deleteObject, uploadObject } from "./storage.ts";
 import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
 import { onWorkerError } from "./worker_errors.ts";
+import { buildResponseBody } from "./response.ts";
 
 // Closes GHSA-7428-mvpp-rhr7 layer 1: the runner's own login
 // (`eurobase_function_runner`) has no grants on any tenant schema and,
@@ -52,6 +53,12 @@ globalThis.addEventListener("unhandledrejection", (e) => {
     // Anything else is a runner bug: log loudly with a stable prefix to alert on.
     console.error(`[runner] BUG unhandled rejection: ${r?.message ?? String(e.reason)}`, (e.reason as Error)?.stack ?? "");
   }
+});
+// Same for an uncaught exception (e.g. thrown in an event listener): log it
+// and keep serving, instead of exiting the process.
+globalThis.addEventListener("error", (e) => {
+  e.preventDefault();
+  console.error(`[runner] BUG uncaught error: ${e.message}`, (e.error as Error)?.stack ?? "");
 });
 const PORT = parseInt(Deno.env.get("PORT") ?? "8000");
 const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50");
@@ -567,7 +574,15 @@ async function runUserHandlerInWorker(opts: {
 
     const respondResponse = (serialized: SerializedResponse) => {
       cleanup();
-      if (serialized.body.byteLength > RESPONSE_SIZE_LIMIT) {
+      // The worker shares its global with tenant code, so check the shape.
+      if (!serialized || typeof serialized !== "object" || !Array.isArray(serialized.headers) ||
+          (serialized.body != null && !(serialized.body instanceof Uint8Array))) {
+        const malformed = jsonResponse({ error: "invalid function response", requestId }, 500);
+        attachLogsHeader(malformed.headers);
+        resolve(malformed);
+        return;
+      }
+      if ((serialized.body?.byteLength ?? 0) > RESPONSE_SIZE_LIMIT) {
         const tooLarge = jsonResponse({
           error: "Response too large",
           limit: `${RESPONSE_SIZE_LIMIT / 1024 / 1024}MB`,
@@ -577,14 +592,25 @@ async function runUserHandlerInWorker(opts: {
         resolve(tooLarge);
         return;
       }
-      const headers = new Headers();
-      for (const [k, v] of serialized.headers) headers.set(k, v);
-      headers.set("X-Request-ID", requestId);
-      attachLogsHeader(headers);
-      resolve(new Response(serialized.body, {
-        status: serialized.status,
-        headers,
-      }));
+      const built = buildResponseBody(serialized.status, serialized.body);
+      if (!built.ok) {
+        const invalid = jsonResponse({ error: built.error, requestId }, 500);
+        attachLogsHeader(invalid.headers);
+        resolve(invalid);
+        return;
+      }
+      try {
+        const headers = new Headers();
+        for (const [k, v] of serialized.headers) headers.set(k, v);
+        headers.set("X-Request-ID", requestId);
+        attachLogsHeader(headers);
+        resolve(new Response(built.body, { status: built.status, headers }));
+      } catch (err) {
+        // Never leave the request unanswered (e.g. a header Deno refuses).
+        const failed = jsonResponse({ error: `invalid function response: ${err instanceof Error ? err.message : String(err)}`, requestId }, 500);
+        attachLogsHeader(failed.headers);
+        resolve(failed);
+      }
     };
 
     timeoutTimer = setTimeout(() => {
@@ -597,117 +623,124 @@ async function runUserHandlerInWorker(opts: {
     });
 
     worker.addEventListener("message", (event: MessageEvent) => {
-      if (settled) return;
-      const msg = event.data as WorkerToParent;
-      if (!msg || typeof msg.type !== "string") return;
-      switch (msg.type) {
-        case "loaded": {
-          const invokeMsg: ParentToWorker = {
-            type: "invoke",
-            request: serializedRequest,
-            env: fn.env_vars,
-            user,
-            requestId,
-            timeoutMs,
-          };
-          worker.postMessage(invokeMsg);
-          break;
-        }
-        case "result":
-          respondResponse(msg.response);
-          break;
-        case "error":
-          respondError(500, msg.message);
-          break;
-        case "log":
-          if (msg.level === "ERROR") logCapture.error(msg.msg, msg.data as Record<string, unknown> | undefined);
-          else if (msg.level === "WARN") logCapture.warn(msg.msg, msg.data as Record<string, unknown> | undefined);
-          else logCapture.info(msg.msg, msg.data as Record<string, unknown> | undefined);
-          break;
-        case "db.sql.call": {
-          // Run the query under the per-tenant role and post the
-          // result back. Errors are reported as `error` strings so the
-          // worker's RPC layer can rebuild an Error.
-          runDBSql(msg.query, msg.params)
-            .then((rows) => {
-              if (settled) return;
-              const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };
-              worker.postMessage(reply);
-            })
-            .catch((err) => {
-              if (settled) return;
-              const text = err instanceof Error ? err.message : String(err);
-              const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, error: text };
-              worker.postMessage(reply);
-            });
-          break;
-        }
-        case "vault.get.call": {
-          // Closes #79: read the encrypted blob via the SECURITY DEFINER
-          // helper public.vault_get_for_runner (migration 000049,
-          // key_version added in 000061) and decrypt locally with the
-          // key for the version the secret was sealed with (#201).
-          // Missing secret → null; platform-side failures (no key,
-          // lookup/decrypt failure) → error, which the worker's RPC
-          // layer surfaces to user code as a thrown Error so "secret
-          // missing" and "vault broken" are distinguishable.
-          // A Team project's vault is on its dedicated instance (#676):
-          // read it there through <schema>.runner_vault_get as the
-          // project's own function role.
-          vaultLookup()
-            .then((lookup) => resolveVaultSecret(db, projectId, schemaName, msg.name, lookup))
-            .catch((err) => ({ error: `vault unavailable: ${err instanceof Error ? err.message : String(err)}` }))
-            .then((result) => {
-              if (settled) return;
-              if ("error" in result) {
-                logCapture.warn(`vault.get(${JSON.stringify(msg.name)}) failed: ${result.error}`);
-                const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null, error: result.error };
+      // Anything this listener throws would be uncaught in the runner: answer
+      // the invocation with a 500 instead.
+      try {
+        if (settled) return;
+        const msg = event.data as WorkerToParent;
+        if (!msg || typeof msg.type !== "string") return;
+        switch (msg.type) {
+          case "loaded": {
+            const invokeMsg: ParentToWorker = {
+              type: "invoke",
+              request: serializedRequest,
+              env: fn.env_vars,
+              user,
+              requestId,
+              timeoutMs,
+            };
+            worker.postMessage(invokeMsg);
+            break;
+          }
+          case "result":
+            respondResponse(msg.response);
+            break;
+          case "error":
+            respondError(500, msg.message);
+            break;
+          case "log":
+            if (msg.level === "ERROR") logCapture.error(msg.msg, msg.data as Record<string, unknown> | undefined);
+            else if (msg.level === "WARN") logCapture.warn(msg.msg, msg.data as Record<string, unknown> | undefined);
+            else logCapture.info(msg.msg, msg.data as Record<string, unknown> | undefined);
+            break;
+          case "db.sql.call": {
+            // Run the query under the per-tenant role and post the
+            // result back. Errors are reported as `error` strings so the
+            // worker's RPC layer can rebuild an Error.
+            runDBSql(msg.query, msg.params)
+              .then((rows) => {
+                if (settled) return;
+                const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };
                 worker.postMessage(reply);
-                return;
-              }
-              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: result.value };
-              worker.postMessage(reply);
-            })
-            .catch((err) => {
+              })
+              .catch((err) => {
+                if (settled) return;
+                const text = err instanceof Error ? err.message : String(err);
+                const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, error: text };
+                worker.postMessage(reply);
+              });
+            break;
+          }
+          case "vault.get.call": {
+            // Closes #79: read the encrypted blob via the SECURITY DEFINER
+            // helper public.vault_get_for_runner (migration 000049,
+            // key_version added in 000061) and decrypt locally with the
+            // key for the version the secret was sealed with (#201).
+            // Missing secret → null; platform-side failures (no key,
+            // lookup/decrypt failure) → error, which the worker's RPC
+            // layer surfaces to user code as a thrown Error so "secret
+            // missing" and "vault broken" are distinguishable.
+            // A Team project's vault is on its dedicated instance (#676):
+            // read it there through <schema>.runner_vault_get as the
+            // project's own function role.
+            vaultLookup()
+              .then((lookup) => resolveVaultSecret(db, projectId, schemaName, msg.name, lookup))
+              .catch((err) => ({ error: `vault unavailable: ${err instanceof Error ? err.message : String(err)}` }))
+              .then((result) => {
+                if (settled) return;
+                if ("error" in result) {
+                  logCapture.warn(`vault.get(${JSON.stringify(msg.name)}) failed: ${result.error}`);
+                  const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null, error: result.error };
+                  worker.postMessage(reply);
+                  return;
+                }
+                const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: result.value };
+                worker.postMessage(reply);
+              })
+              .catch((err) => {
+                if (settled) return;
+                console.error(`[fn:${projectId}] vault.get failed`, err);
+                const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null, error: "vault unavailable: internal error" };
+                worker.postMessage(reply);
+              });
+            break;
+          }
+          case "storage.upload.call": {
+            // Closes #85. POST the bytes to the gateway's HMAC-protected
+            // /internal/functions/storage/upload. Errors come back as
+            // `{ error: string }` so the worker's RPC layer rejects the
+            // user-side Promise; success delivers `{ key, size }`.
+            uploadObject(storageCtx, msg.key, msg.body, msg.contentType ?? "application/octet-stream")
+              .then((result) => {
+                if (settled) return;
+                const reply: ParentToWorker = { type: "storage.upload.result", id: msg.id, ...result };
+                worker.postMessage(reply);
+              });
+            break;
+          }
+          case "storage.signed_url.call": {
+            createSignedUrl(storageCtx, msg.key, msg.operation, {
+              expiresIn: msg.expiresIn,
+              contentType: msg.contentType,
+            }).then((result) => {
               if (settled) return;
-              console.error(`[fn:${projectId}] vault.get failed`, err);
-              const reply: ParentToWorker = { type: "vault.get.result", id: msg.id, value: null, error: "vault unavailable: internal error" };
+              const reply: ParentToWorker = { type: "storage.signed_url.result", id: msg.id, ...result };
               worker.postMessage(reply);
             });
-          break;
-        }
-        case "storage.upload.call": {
-          // Closes #85. POST the bytes to the gateway's HMAC-protected
-          // /internal/functions/storage/upload. Errors come back as
-          // `{ error: string }` so the worker's RPC layer rejects the
-          // user-side Promise; success delivers `{ key, size }`.
-          uploadObject(storageCtx, msg.key, msg.body, msg.contentType ?? "application/octet-stream")
-            .then((result) => {
+            break;
+          }
+          case "storage.delete.call": {
+            deleteObject(storageCtx, msg.key).then((result) => {
               if (settled) return;
-              const reply: ParentToWorker = { type: "storage.upload.result", id: msg.id, ...result };
+              const reply: ParentToWorker = { type: "storage.delete.result", id: msg.id, ...result };
               worker.postMessage(reply);
             });
-          break;
+            break;
+          }
         }
-        case "storage.signed_url.call": {
-          createSignedUrl(storageCtx, msg.key, msg.operation, {
-            expiresIn: msg.expiresIn,
-            contentType: msg.contentType,
-          }).then((result) => {
-            if (settled) return;
-            const reply: ParentToWorker = { type: "storage.signed_url.result", id: msg.id, ...result };
-            worker.postMessage(reply);
-          });
-          break;
-        }
-        case "storage.delete.call": {
-          deleteObject(storageCtx, msg.key).then((result) => {
-            if (settled) return;
-            const reply: ParentToWorker = { type: "storage.delete.result", id: msg.id, ...result };
-            worker.postMessage(reply);
-          });
-          break;
-        }
+          } catch (err) {
+        console.error(`[runner] BUG message handling failed: ${err instanceof Error ? err.message : String(err)}`, (err as Error)?.stack ?? "");
+        respondError(500, "internal error while handling the function's response");
       }
     });
 

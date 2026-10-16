@@ -42,8 +42,8 @@ export function createLogCapture(projectId: string, limit: number): LogCapture {
   function capture(level: "INFO" | "WARN" | "ERROR", msg: string, data?: Record<string, unknown>) {
     if (truncated) return;
 
-    const entry: CapturedLogLine = { level, msg, ts: new Date().toISOString() };
-    if (data !== undefined) entry.data = data;
+    const entry: CapturedLogLine = { level, msg: String(msg), ts: new Date().toISOString() };
+    if (data !== undefined) entry.data = safeData(data);
     const entryBytes = new TextEncoder().encode(JSON.stringify(entry)).length;
 
     if (totalBytes + entryBytes > limit) {
@@ -61,7 +61,7 @@ export function createLogCapture(projectId: string, limit: number): LogCapture {
     // Mirror to pod stdout so kubectl remains a debugging surface for
     // platform ops. Same prefixed shape the pre-#492 runner used so any
     // log-scraping tooling continues to work.
-    const stdoutLine = `[fn:${projectId}] ${level}: ${msg}${data ? " " + JSON.stringify(data) : ""}`;
+    const stdoutLine = `[fn:${projectId}] ${level}: ${entry.msg}${entry.data ? " " + JSON.stringify(entry.data) : ""}`;
     if (level === "ERROR") console.error(stdoutLine);
     else if (level === "WARN") console.warn(stdoutLine);
     else console.log(stdoutLine);
@@ -90,4 +90,29 @@ export function encodeLogLinesHeader(lines: CapturedLogLine[]): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary);
+}
+
+/**
+ * Log data as JSON-safe values: ctx.log.* takes whatever the function
+ * passes, and JSON.stringify throws on a BigInt or a circular object.
+ * BigInts become strings, repeated objects "[Circular]"; anything else
+ * that can't be serialized becomes a note.
+ */
+export function safeData(data: unknown): Record<string, unknown> {
+  try {
+    const seen = new WeakSet<object>();
+    const json = JSON.stringify(data, (_k, v) => {
+      if (typeof v === "bigint") return v.toString();
+      if (v && typeof v === "object") {
+        if (seen.has(v)) return "[Circular]";
+        seen.add(v);
+      }
+      return v;
+    });
+    const parsed = json === undefined ? undefined : JSON.parse(json);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    return { value: parsed };
+  } catch (err) {
+    return { unserializable: err instanceof Error ? err.message : String(err) };
+  }
 }
