@@ -24,6 +24,8 @@ type EdgeFunction struct {
 	// EnvVarNames lists the env vars' names when their values are withheld
 	// from the caller (see HandleGet).
 	EnvVarNames []string `json:"env_var_names,omitempty"`
+	// CodeWithheld is set when Code is left out for the caller (see HandleGet).
+	CodeWithheld bool `json:"code_withheld,omitempty"`
 	Status    string    `json:"status"`
 	Version   int       `json:"version"`
 	CreatedAt time.Time `json:"created_at"`

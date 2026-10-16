@@ -2,7 +2,7 @@
 	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { getContext } from 'svelte';
-	import { api, type EdgeFunction, type EdgeFunctionLog, type TableSchema, type FunctionTrigger, type EdgeFunctionVersion, type FunctionMetrics } from '$lib/api.js';
+	import { api, APIError, type EdgeFunction, type EdgeFunctionLog, type TableSchema, type FunctionTrigger, type EdgeFunctionVersion, type FunctionMetrics } from '$lib/api.js';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 
 	let projectId = $derived($page.params.id);
@@ -225,7 +225,8 @@
 	}
 
 	async function saveFunction() {
-		if (!selectedFn) return;
+		// Never save over code this page wasn't given.
+		if (!selectedFn || selectedFn.code_withheld) return;
 		saving = true;
 		try {
 			const updated = await api.updateEdgeFunction(projectId, selectedFn.name, {
@@ -332,7 +333,9 @@ module.exports = async (req, ctx) => {
 		try {
 			logs = await api.getEdgeFunctionLogs(projectId, selectedFn.name);
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to load logs';
+			error = err instanceof APIError && err.status === 403
+				? 'Function logs are shown to members with Developer access or higher.'
+				: err instanceof Error ? err.message : 'Failed to load logs';
 		}
 	}
 
@@ -453,7 +456,9 @@ module.exports = async (req, ctx) => {
 		try {
 			versions = await api.listFunctionVersions(projectId, selectedFn.name);
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to load versions';
+			error = err instanceof APIError && err.status === 403
+				? 'Function versions are shown to members with Developer access or higher.'
+				: err instanceof Error ? err.message : 'Failed to load versions';
 		} finally {
 			loadingVersions = false;
 		}
@@ -635,7 +640,7 @@ module.exports = async (req, ctx) => {
 								>Delete</button>
 								<button
 									onclick={saveFunction}
-									disabled={saving}
+									disabled={saving || selectedFn.code_withheld}
 									class="cursor-pointer rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 disabled:opacity-50"
 								>{saving ? 'Saving...' : 'Save & Deploy'}</button>
 							</div>
@@ -773,6 +778,11 @@ module.exports = async (req, ctx) => {
 						</div>
 
 						<!-- Code editor -->
+						{#if selectedFn.code_withheld}
+							<div class="h-[400px] flex items-center justify-center bg-gray-50 px-6 text-center">
+								<p class="text-sm text-gray-500">This function's code is shown to members with Developer access or higher.</p>
+							</div>
+						{:else}
 						<div class="h-[400px]">
 							<CodeEditor
 								bind:this={codeEditor}
@@ -781,6 +791,7 @@ module.exports = async (req, ctx) => {
 								placeholder="// Write your function code here..."
 							/>
 						</div>
+						{/if}
 
 						<!-- Context reference -->
 						<div class="border-t border-gray-200 px-4 py-3 bg-gray-50">

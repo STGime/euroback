@@ -12,7 +12,7 @@
 					Eurobase has four roles, ordered from least to most permissions:
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>Viewer</strong> &mdash; read-only access to data, logs, and compliance reports (edge functions' environment variables show their names only; values need Developer)</li>
+					<li><strong>Viewer</strong> &mdash; read-only access to data, logs, and compliance reports (for edge functions: the list, settings, triggers, metrics and environment variable names; their code, versions, invocation logs and variable values need Developer)</li>
 					<li><strong>Developer</strong> &mdash; viewer + can edit data, manage schema (create/drop tables, columns), and manage edge functions</li>
 					<li><strong>Admin</strong> &mdash; developer + can change project settings, regenerate API keys, manage vault secrets, and invite or remove members</li>
 					<li><strong>Owner</strong> &mdash; admin + can delete the project and change other members' roles. Every project has exactly one owner (the creator).</li>
