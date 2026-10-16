@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { scopeFromProfile, sqlReadOnly, explain, ApiError } from '../dist/api-client.js';
 import { buildQueryString, storageKeyPath, downloadKind, pathSegment, isExportArchiveKey, readsInternalTable } from '../dist/query.js';
 import { scopeNote, createMcpServer, TOOL_ANNOTATIONS } from '../dist/server.js';
+import { redactFunction } from '../dist/tools/functions.js';
 
 const P = '0b1e5d6a-0000-4000-8000-000000000001';
 
@@ -173,6 +174,8 @@ test('deployFunction: create or update', async () => {
     };
     return { client, calls };
   };
+  // `handler` is the field name in @modelcontextprotocol/sdk ~1.29 (older
+  // 1.x called it `callback`): an SDK upgrade that renames it fails here.
   const run = async (client, args) => {
     const tool = createMcpServer(() => client)._registeredTools.deployFunction;
     const res = await tool.handler({ projectId: P, functionName: 'hello', code: 'export default () => new Response()', ...args }, {});
@@ -191,8 +194,34 @@ test('deployFunction: create or update', async () => {
   await run(f.client, { verifyJwt: false });
   assert.equal(f.calls[1][2].verify_jwt, false);
 
+  // Lost a create race (400 duplicate): updates instead.
+  f = fake(false);
+  f.client.post = async (path, body) => { f.calls.push(['POST', path, body]); throw new ApiError('API POST failed (400): duplicate key value violates unique constraint', 400); };
+  assert.equal((await run(f.client, {})).action, 'updated');
+  assert.equal(f.calls.at(-1)[0], 'PUT');
+
   // Anything but a 404 (no access, server error) is not "missing": no create.
   f = fake(false, new ApiError('forbidden', 403));
   await assert.rejects(run(f.client, {}), /forbidden/);
   assert.equal(f.calls.length, 1);
+});
+
+// Env var values are function secrets: only their names reach the model.
+test('function env vars are redacted', async () => {
+  const secretFn = { name: 'hello', code: 'x', env_vars: { STRIPE_KEY: 'sk_live_SECRET', API_URL: 'https://x' } };
+  assert.deepEqual(redactFunction(secretFn), { name: 'hello', code: 'x', env_var_names: ['API_URL', 'STRIPE_KEY'] });
+  assert.deepEqual(redactFunction({ name: 'a' }), { name: 'a' });
+  const client = {
+    scope: { scoped: true, projectId: P, role: 'developer' },
+    get: async () => secretFn,
+    put: async () => secretFn,
+    post: async () => secretFn,
+  };
+  const tools = createMcpServer(() => client)._registeredTools;
+  const args = { projectId: P, functionName: 'hello', code: 'x', version: 1 };
+  for (const name of ['getFunction', 'deployFunction', 'rollbackFunction']) {
+    const text = (await tools[name].handler(args, {})).content[0].text;
+    assert.ok(!text.includes('sk_live_SECRET'), `${name} leaks an env var value`);
+    assert.match(text, /STRIPE_KEY/, name);
+  }
 });

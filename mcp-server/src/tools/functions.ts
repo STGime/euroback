@@ -8,6 +8,25 @@ const fnPath = (projectId: string, name: string) =>
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
 
+/**
+ * A function's env vars are its secrets (decrypted by the gateway, given to
+ * the code as ctx.env): never hand their values to the model — only the
+ * names. Revealing a secret needs an approved tool (getSecret), and these
+ * function tools are auto-approvable.
+ */
+export function redactFunction(fn: unknown): unknown {
+  if (!fn || typeof fn !== 'object' || Array.isArray(fn)) return fn;
+  const { env_vars, ...rest } = fn as Record<string, unknown>;
+  if (env_vars && typeof env_vars === 'object') {
+    return { ...rest, env_var_names: Object.keys(env_vars as Record<string, unknown>).sort() };
+  }
+  return rest;
+}
+
+/** The create lost a race with another create of the same name. */
+const isDuplicate = (err: unknown) =>
+  err instanceof ApiError && err.status === 400 && /duplicate key|already exists/i.test(err.message);
+
 export function registerFunctionTools(server: McpServer, getClient: () => ApiClient) {
   server.tool(
     'listFunctions',
@@ -21,12 +40,12 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'getFunction',
-    'Get an edge function: its code, version, status and whether it requires a signed-in user (verify_jwt).',
+    'Get an edge function: its code, version, status, whether it requires a signed-in user (verify_jwt) and the names of its environment variables (values are never shown).',
     {
       projectId: z.string().uuid().describe('The project UUID'),
       functionName: z.string().describe('The function name'),
     },
-    async ({ projectId, functionName }) => json(await getClient().get(fnPath(projectId, functionName)))
+    async ({ projectId, functionName }) => json(redactFunction(await getClient().get(fnPath(projectId, functionName))))
   );
 
   // Create-or-update in one tool (#75), like the CLI's `functions deploy`:
@@ -55,23 +74,30 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
         if (!(err instanceof ApiError && err.status === 404)) throw err;
         exists = false;
       }
-      if (exists) {
+      const update = async () => {
         const body: Record<string, unknown> = { code };
         if (verifyJwt !== undefined) body.verify_jwt = verifyJwt;
-        return json({ action: 'updated', function: await client.put(path, body) });
+        return json({ action: 'updated', function: redactFunction(await client.put(path, body)) });
+      };
+      if (exists) return update();
+      try {
+        const created = await client.post(`/platform/projects/${projectId}/functions`, {
+          name: functionName,
+          code,
+          verify_jwt: verifyJwt ?? true,
+        });
+        return json({ action: 'created', function: redactFunction(created) });
+      } catch (err) {
+        // Created by someone else between our GET and POST: update instead.
+        if (isDuplicate(err)) return update();
+        throw err;
       }
-      const created = await client.post(`/platform/projects/${projectId}/functions`, {
-        name: functionName,
-        code,
-        verify_jwt: verifyJwt ?? true,
-      });
-      return json({ action: 'created', function: created });
     }
   );
 
   server.tool(
     'deleteFunction',
-    'Delete an edge function and its versions. Needs Developer access.',
+    'Delete an edge function together with its versions, triggers and invocation logs. Needs Developer access.',
     {
       projectId: z.string().uuid().describe('The project UUID'),
       functionName: z.string().describe('The function name'),
@@ -85,7 +111,7 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
     {
       projectId: z.string().uuid().describe('The project UUID'),
       functionName: z.string().describe('The function name'),
-      limit: z.number().int().positive().max(200).optional().describe('How many invocations (default 50, max 200)'),
+      limit: z.number().int().positive().max(100).optional().describe('How many invocations (default 50, max 100)'),
     },
     async ({ projectId, functionName, limit }) =>
       json(await getClient().get(`${fnPath(projectId, functionName)}/logs?limit=${limit ?? 50}`))
@@ -110,7 +136,7 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
       version: z.number().int().positive().describe('The version number to restore'),
     },
     async ({ projectId, functionName, version }) =>
-      json(await getClient().post(`${fnPath(projectId, functionName)}/rollback`, { version }))
+      json(redactFunction(await getClient().post(`${fnPath(projectId, functionName)}/rollback`, { version })))
   );
 
   server.tool(
