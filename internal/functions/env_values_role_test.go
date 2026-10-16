@@ -36,6 +36,7 @@ func TestEnvValuesForRole(t *testing.T) {
 		{"viewer", false},
 		{"developer", true},
 		{"admin", true},
+		{"owner", true},
 	} {
 		fn := &EdgeFunction{EnvVars: map[string]string{"K": "secret"}}
 		ctx := context.Background()
@@ -45,6 +46,9 @@ func TestEnvValuesForRole(t *testing.T) {
 		envValuesForRole(ctx, fn)
 		if got := fn.EnvVars["K"] == "secret"; got != tc.wantValues {
 			t.Errorf("role %q: values shown = %v, want %v", tc.role, got, tc.wantValues)
+		}
+		if tc.wantValues && fn.EnvVarNames != nil {
+			t.Errorf("role %q: names set alongside values: %v", tc.role, fn.EnvVarNames)
 		}
 	}
 }

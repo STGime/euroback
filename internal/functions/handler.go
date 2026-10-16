@@ -77,7 +77,9 @@ func HandleGet(svc *Service) http.HandlerFunc {
 }
 
 // envValuesForRole keeps env var values only for developer+ callers; no
-// role on the context counts as below (fails closed).
+// role on the context counts as below (fails closed). Deliberately
+// stricter than RequireMinRole, which lets a role-less dev-mode request
+// through: in dev mode this shows names only.
 func envValuesForRole(ctx context.Context, fn *EdgeFunction) {
 	if !tenant.HasMinRole(ctx, "developer") {
 		withholdEnvValues(fn)

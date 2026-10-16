@@ -721,7 +721,7 @@ module.exports = async (req, ctx) => {
 									<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
 								</svg>
 								<span class="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Environment Variables</span>
-								<span class="text-[10px] text-gray-400 ml-1">({envPairs.filter(p => p.key.trim()).length})</span>
+								<span class="text-[10px] text-gray-400 ml-1">({envNamesOnly ? envNamesOnly.length : envPairs.filter(p => p.key.trim()).length})</span>
 							</button>
 
 							{#if showEnvVars && envNamesOnly}
