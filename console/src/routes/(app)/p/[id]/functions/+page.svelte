@@ -619,21 +619,25 @@ module.exports = async (req, ctx) => {
 									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showMetrics ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
 									aria-pressed={showMetrics}
 								>Metrics</button>
+								{#if !selectedFn.code_withheld}
 								<button
 									onclick={loadVersions}
 									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showVersions ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
 									aria-pressed={showVersions}
 								>Versions</button>
+								{/if}
 								<button
 									onclick={() => { showTest = !showTest; testResult = null; testError = null; }}
 									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showTest ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
 									aria-pressed={showTest}
 								>Test</button>
+								{#if !selectedFn.code_withheld}
 								<button
 									onclick={loadLogs}
 									class="cursor-pointer rounded-md border px-3 py-1.5 text-xs font-medium transition-colors {showLogs ? 'border-eurobase-500 bg-eurobase-50 text-eurobase-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}"
 									aria-pressed={showLogs}
 								>Logs</button>
+								{/if}
 								<button
 									onclick={() => { showDeleteConfirm = selectedFn?.name ?? null; }}
 									class="cursor-pointer rounded-md border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"
@@ -649,12 +653,12 @@ module.exports = async (req, ctx) => {
 						<!-- Settings bar -->
 						<div class="flex items-center gap-4 border-b border-gray-100 px-4 py-2 bg-gray-50 text-xs">
 							<label class="flex items-center gap-1.5 text-gray-700">
-								<input type="checkbox" bind:checked={editorVerifyJWT} class="rounded border-gray-300" />
+								<input type="checkbox" bind:checked={editorVerifyJWT} disabled={selectedFn.code_withheld} class="rounded border-gray-300" />
 								Require JWT
 							</label>
 							<label class="flex items-center gap-1.5 text-gray-700">
 								Status:
-								<select bind:value={editorStatus} class="rounded border-gray-300 bg-white px-2 py-0.5 text-xs">
+								<select bind:value={editorStatus} disabled={selectedFn.code_withheld} class="rounded border-gray-300 bg-white px-2 py-0.5 text-xs">
 									<option value="active">Active</option>
 									<option value="disabled">Disabled</option>
 								</select>
