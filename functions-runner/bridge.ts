@@ -26,7 +26,8 @@ export interface SerializedRequest {
 export interface SerializedResponse {
   status: number;
   headers: [string, string][];
-  body: Uint8Array;
+  // null for a body-less response (e.g. 204).
+  body: Uint8Array | null;
 }
 
 // Parent → Worker messages.

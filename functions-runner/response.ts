@@ -5,9 +5,8 @@
  * 205, 304: "Response with null body status cannot have body", even for
  * an empty body) and for a status outside 200–599 (RangeError). It runs in
  * the worker's message listener, so a throw there left the request without
- * an answer and surfaced as an uncaught error in the runner — shared by
- * every tenant. A function returning 204 is normal; an invalid status is
- * the function's mistake and becomes a 500 for that one request.
+ * an answer. A function returning 204 is normal; an invalid status is the
+ * function's mistake and becomes a 500 for that one request.
  */
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 

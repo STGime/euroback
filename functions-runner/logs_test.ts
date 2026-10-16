@@ -4,7 +4,7 @@
 // decodeFunctionLogsHeader) expects: base64(JSON.stringify(lines)).
 
 import { assertEquals, assert } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { createLogCapture, encodeLogLinesHeader } from "./logs.ts";
+import { createLogCapture, encodeLogLinesHeader, safeData } from "./logs.ts";
 
 Deno.test("captures info/warn/error with data payload preserved", () => {
   const cap = createLogCapture("proj_1", 10_000);
@@ -62,4 +62,24 @@ Deno.test("encodeLogLinesHeader round-trips through base64+JSON", () => {
 Deno.test("encodeLogLinesHeader returns empty string for no lines", () => {
   // Caller should skip setting the header entirely when this returns "".
   assertEquals(encodeLogLinesHeader([]), "");
+});
+
+// ctx.log.* data the function passes may not be JSON-serializable; the
+// capture must keep working instead of throwing.
+Deno.test("log data with a BigInt or a cycle is captured, not thrown", () => {
+  const cap = createLogCapture("p", 10_000);
+  const cyclic: Record<string, unknown> = { a: 1 };
+  cyclic.self = cyclic;
+  cap.info("big", { n: 1n });
+  cap.warn("cycle", cyclic);
+  const [big, cycle] = cap.getLines();
+  assertEquals(big.data, { n: "1" });
+  assertEquals(cycle.data, { a: 1, self: "[Circular]" });
+});
+
+Deno.test("safeData", () => {
+  assertEquals(safeData({ x: [1, 2] }), { x: [1, 2] });
+  assertEquals(safeData("text" as unknown), { value: "text" });
+  const throwing = { toJSON() { throw new Error("nope"); } };
+  assertEquals(safeData(throwing), { unserializable: "nope" });
 });
