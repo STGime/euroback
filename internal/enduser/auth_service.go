@@ -209,12 +209,12 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 	q := fmt.Sprintf(
 		`INSERT INTO %s.users (email, password_hash, metadata, email_confirmed_at)
 		 VALUES ($1, $2, $3, %s)
-		 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
+		 RETURNING id, email, display_name, avatar_url, metadata, email_confirmed_at, created_at, updated_at`,
 		quoteIdent(schemaName), emailConfirmedExpr,
 	)
 	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, email, string(hash), string(metadataJSON)).
-			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
@@ -234,6 +234,13 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 		if err := s.emailService.SendVerificationEmail(ctx, projectID, "", schemaName, user.ID, user.EmailString(), verifyRedirectURL); err != nil {
 			slog.Error("failed to send verification email", "error", err, "user_id", user.ID)
 		}
+	}
+
+	// Email confirmation required (#806): no session until the address
+	// is confirmed — SignIn and RefreshToken refuse this user until then,
+	// so tokens issued here would be the only way past that check.
+	if config.RequireEmailConfirmation {
+		return &AuthResponse{User: user, ConfirmationRequired: true}, nil
 	}
 
 	sessionDurationSecs := config.SessionDurationSeconds()
@@ -271,14 +278,14 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 	var bannedAt *time.Time
 
 	q := fmt.Sprintf(
-		`SELECT id, email, display_name, avatar_url, metadata, password_hash, banned_at, created_at, updated_at
+		`SELECT id, email, display_name, avatar_url, metadata, password_hash, banned_at, email_confirmed_at, created_at, updated_at
 		 FROM %s.users
 		 WHERE email = $1 AND password_hash IS NOT NULL`,
 		quoteIdent(schemaName),
 	)
 	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, email).
-			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &passwordHash, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &passwordHash, &bannedAt, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
 	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -296,16 +303,10 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 		return nil, fmt.Errorf("invalid email or password")
 	}
 
-	// Sign-in guard: block unverified users when email confirmation is required.
-	if config.RequireEmailConfirmation {
-		var emailConfirmedAt *time.Time
-		confirmQ := fmt.Sprintf(`SELECT email_confirmed_at FROM %s.users WHERE id = $1`, quoteIdent(schemaName))
-		_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, confirmQ, user.ID).Scan(&emailConfirmedAt)
-		})
-		if emailConfirmedAt == nil {
-			return nil, fmt.Errorf("email_not_confirmed")
-		}
+	// Sign-in guard: block unverified users when email confirmation is
+	// required. Only reached with the correct password (#806).
+	if emailConfirmationPending(config.RequireEmailConfirmation, true, user.EmailConfirmedAt) {
+		return nil, ErrEmailNotConfirmed
 	}
 
 	// Update last_sign_in_at.
@@ -391,15 +392,22 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 	// Look up user.
 	var user User
 	var metadataJSON []byte
+	var hasPassword bool
 	userQ := fmt.Sprintf(
-		`SELECT id, email, display_name, avatar_url, metadata, created_at, updated_at
+		`SELECT id, email, display_name, avatar_url, metadata, email_confirmed_at, password_hash IS NOT NULL, created_at, updated_at
 		 FROM %s.users WHERE id = $1`,
 		quoteIdent(schemaName),
 	)
 	err = tx.QueryRow(ctx, userQ, userID).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &hasPassword, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("query user: %w", err)
+	}
+	// Same rule as SignIn (#806): a password user whose email isn't
+	// confirmed gets no new tokens (the deferred rollback keeps the old
+	// refresh token as it was).
+	if emailConfirmationPending(config.RequireEmailConfirmation, hasPassword, user.EmailConfirmedAt) {
+		return nil, ErrEmailNotConfirmed
 	}
 	_ = json.Unmarshal(metadataJSON, &user.Metadata)
 
@@ -456,13 +464,13 @@ func (s *AuthService) GetUser(ctx context.Context, schemaName, userID string) (*
 	var user User
 	var metadataJSON []byte
 	q := fmt.Sprintf(
-		`SELECT id, email, display_name, avatar_url, metadata, created_at, updated_at
+		`SELECT id, email, display_name, avatar_url, metadata, email_confirmed_at, created_at, updated_at
 		 FROM %s.users WHERE id = $1`,
 		quoteIdent(schemaName),
 	)
 	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, userID).
-			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
 	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -614,7 +622,8 @@ func (s *AuthService) ResetPassword(ctx context.Context, schemaName, rawToken, n
 	}
 
 	// Update password + revoke all refresh tokens in a single service-role tx.
-	updateQ := fmt.Sprintf(`UPDATE %s.users SET password_hash = $1, updated_at = now() WHERE id = $2`, quoteIdent(schemaName))
+	// Following the emailed reset link proves the address: confirm it too.
+	updateQ := fmt.Sprintf(`UPDATE %s.users SET password_hash = $1, email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $2`, quoteIdent(schemaName))
 	revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schemaName))
 	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, updateQ, string(hash), userID); err != nil {
@@ -752,6 +761,12 @@ func (s *AuthService) SignInWithMagicLink(ctx context.Context, schemaName, jwtSe
 		return err
 	})
 
+	if emailConfirmedAt == nil {
+		now := time.Now()
+		emailConfirmedAt = &now
+	}
+	user.EmailConfirmedAt = emailConfirmedAt
+
 	slog.Info("end-user signed in via magic link", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 
 	sessionDurationSecs := config.SessionDurationSeconds()
@@ -830,25 +845,25 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 	txErr := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		// Try to find user via user_identities table (supports multiple linked providers).
 		findIdentityQ := fmt.Sprintf(
-			`SELECT u.id, u.email, u.display_name, u.avatar_url, u.metadata, u.banned_at, u.created_at, u.updated_at
+			`SELECT u.id, u.email, u.display_name, u.avatar_url, u.metadata, u.banned_at, u.email_confirmed_at, u.created_at, u.updated_at
 			 FROM %s.user_identities i
 			 JOIN %s.users u ON u.id = i.user_id
 			 WHERE i.provider = $1 AND i.provider_user_id = $2`,
 			quoteIdent(schemaName), quoteIdent(schemaName),
 		)
 		err := tx.QueryRow(ctx, findIdentityQ, providerName, userInfo.ProviderID).
-			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
 
 		if err == pgx.ErrNoRows {
 			// Fallback: check legacy provider columns on users table.
 			findLegacyQ := fmt.Sprintf(
-				`SELECT id, email, display_name, avatar_url, metadata, banned_at, created_at, updated_at
+				`SELECT id, email, display_name, avatar_url, metadata, banned_at, email_confirmed_at, created_at, updated_at
 				 FROM %s.users
 				 WHERE provider = $1 AND provider_user_id = $2`,
 				quoteIdent(schemaName),
 			)
 			err = tx.QueryRow(ctx, findLegacyQ, providerName, userInfo.ProviderID).
-				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt)
+				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
 		}
 
 		if err == pgx.ErrNoRows {
@@ -892,11 +907,11 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 			insertQ := fmt.Sprintf(
 				`INSERT INTO %s.users (email, display_name, avatar_url, provider, provider_user_id, email_confirmed_at, metadata)
 				 VALUES ($1, $2, $3, $4, $5, now(), '{}'::jsonb)
-				 RETURNING id, email, display_name, avatar_url, metadata, created_at, updated_at`,
+				 RETURNING id, email, display_name, avatar_url, metadata, email_confirmed_at, created_at, updated_at`,
 				quoteIdent(schemaName),
 			)
 			err = tx.QueryRow(ctx, insertQ, emailLower, displayName, avatarURL, providerName, userInfo.ProviderID).
-				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.CreatedAt, &user.UpdatedAt)
+				Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
 			if err != nil {
 				return fmt.Errorf("create oauth user: %w", err)
 			}
@@ -1084,10 +1099,11 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 	var user User
 	var metadataJSON []byte
 	var bannedAt *time.Time
+	var hasPassword bool
 	updateQ := fmt.Sprintf(
 		`UPDATE %s.users SET phone_confirmed_at = COALESCE(phone_confirmed_at, now()), last_sign_in_at = now(), updated_at = now()
 		 WHERE id = $1
-		 RETURNING id, email, phone, display_name, avatar_url, metadata, banned_at, created_at, updated_at`,
+		 RETURNING id, email, phone, display_name, avatar_url, metadata, banned_at, email_confirmed_at, password_hash IS NOT NULL, created_at, updated_at`,
 		quoteIdent(schemaName),
 	)
 	upsertIdentityQ := fmt.Sprintf(
@@ -1098,12 +1114,17 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 	)
 	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		if e := tx.QueryRow(ctx, updateQ, userID).
-			Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.CreatedAt, &user.UpdatedAt); e != nil {
+			Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.EmailConfirmedAt, &hasPassword, &user.CreatedAt, &user.UpdatedAt); e != nil {
 			return fmt.Errorf("load phone user: %w", e)
 		}
 		_ = json.Unmarshal(metadataJSON, &user.Metadata)
 		if bannedAt != nil {
 			return nil
+		}
+		// Same rule as SignIn / RefreshToken (#806); rolls back the
+		// phone confirmation + last_sign_in_at above.
+		if emailConfirmationPending(config.RequireEmailConfirmation, hasPassword, user.EmailConfirmedAt) {
+			return ErrEmailNotConfirmed
 		}
 		_, _ = tx.Exec(ctx, upsertIdentityQ, user.ID, phone)
 		return nil

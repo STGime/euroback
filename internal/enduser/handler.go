@@ -139,19 +139,22 @@ func HandleSignIn(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		}
 
 		resp, err := svc.SignIn(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req)
+		if errors.Is(err, ErrEmailNotConfirmed) {
+			// #806: only reached with the correct password, so it tells
+			// the caller nothing a successful sign-in wouldn't — and
+			// sign-up already answers "email already registered". #53
+			// had collapsed this into the 401 below, which left users
+			// believing their password was wrong. Not a failed attempt.
+			writeJSON(w, map[string]string{"error": ErrEmailNotConfirmed.Error()}, http.StatusForbidden)
+			return
+		}
 		if err != nil {
 			slog.Warn("end-user signin failed", "error", err, "project_id", pc.ProjectID)
 			// Record the failure for rate limiting.
 			if email != "" {
 				ratelimit.RecordSigninFailure(rl, r.Context(), email)
 			}
-			// Closes #53: previously a correct password against an
-			// unverified account returned 403 email_not_confirmed,
-			// which lets an attacker probe both account existence AND
-			// password correctness. We now collapse both rejection
-			// reasons into the same 401. Verification reminders should
-			// be delivered out-of-band (TODO: send a hint email when we
-			// know the account exists but is unverified).
+			// A wrong password and an unknown email answer alike.
 			writeJSON(w, map[string]string{"error": "invalid email or password"}, http.StatusUnauthorized)
 			return
 		}
@@ -195,6 +198,10 @@ func HandleRefresh(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Han
 		resp, err := svc.RefreshToken(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req.RefreshToken)
 		if err != nil {
 			slog.Warn("token refresh failed", "error", err, "project_id", pc.ProjectID)
+			if errors.Is(err, ErrEmailNotConfirmed) {
+				writeJSON(w, map[string]string{"error": ErrEmailNotConfirmed.Error()}, http.StatusForbidden)
+				return
+			}
 			writeJSON(w, map[string]string{"error": "invalid or expired refresh token"}, http.StatusUnauthorized)
 			return
 		}
@@ -879,6 +886,10 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		resp, err := svc.VerifyPhoneOTP(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req.Phone, req.Code)
 		if err != nil {
 			slog.Warn("verify phone otp failed", "error", err)
+			if errors.Is(err, ErrEmailNotConfirmed) {
+				writeJSON(w, map[string]string{"error": ErrEmailNotConfirmed.Error()}, http.StatusForbidden)
+				return
+			}
 			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}

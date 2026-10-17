@@ -57,8 +57,8 @@ func writePasskeyError(w http.ResponseWriter, err error) {
 		writeJSON(w, map[string]string{"error": "passkey not found"}, http.StatusNotFound)
 	case errors.Is(err, auth.ErrPasskeyNicknameInvalid):
 		writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
-	case err != nil && err.Error() == "email_not_confirmed":
-		writeJSON(w, map[string]string{"error": "email not confirmed"}, http.StatusForbidden)
+	case errors.Is(err, ErrEmailNotConfirmed):
+		writeJSON(w, map[string]string{"error": ErrEmailNotConfirmed.Error()}, http.StatusForbidden)
 	default:
 		writeJSON(w, map[string]string{"error": "internal server error"}, http.StatusInternalServerError)
 	}

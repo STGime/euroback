@@ -101,6 +101,17 @@
 &lt;/html&gt;</pre>
 				</div>
 
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Before the user confirms</h4>
+				<ul class="mt-1 text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Sign-up returns no session.</strong> The response has the new <code class="bg-gray-100 border border-gray-200 rounded px-1">user</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">confirmation_required: true</code>, without tokens. In the SDK, <code class="bg-gray-100 border border-gray-200 rounded px-1">signUp()</code> returns <code class="bg-gray-100 border border-gray-200 rounded px-1">data: null</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">confirmationRequired: true</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">user</code>: show a "check your inbox" screen.</li>
+					<li><strong>Sign-in with the correct password</strong> answers <code class="bg-gray-100 border border-gray-200 rounded px-1">403 {'{'}"error": "email_not_confirmed"{'}'}</code> (SDK: <code class="bg-gray-100 border border-gray-200 rounded px-1">error === EMAIL_NOT_CONFIRMED</code>). Offer <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.resendVerification(email)</code>. A wrong password still answers <code class="bg-gray-100 border border-gray-200 rounded px-1">401 invalid email or password</code>, whether or not the account is confirmed.</li>
+					<li><strong>Refresh</strong> answers the same 403 for a user who isn't confirmed (for example a session issued before this rule).</li>
+					<li><strong>Reading the status:</strong> user objects carry <code class="bg-gray-100 border border-gray-200 rounded px-1">email_confirmed_at</code> (null until confirmed) &mdash; in <code class="bg-gray-100 border border-gray-200 rounded px-1">getUser()</code>, the sign-in response and the console's Users page.</li>
+					<li>Users who sign in with OAuth or a magic link count as confirmed (the link or the provider proves the address), and so does a completed password reset. Users you create in the console are confirmed. Phone sign-in and passkeys follow the same rule as a password sign-in for users who have a password.</li>
+					<li><strong>Turning the setting on later:</strong> existing password users who never confirmed are refused at their next sign-in or token refresh, which signs them out. Confirm them first: <strong>Users &rarr; (user) &rarr; Mark confirmed</strong>, or the users API with <code class="bg-gray-100 border border-gray-200 rounded px-1">{'{'}"email_confirmed": true{'}'}</code>.</li>
+					<li>Apps must use <code class="bg-gray-100 border border-gray-200 rounded px-1">@eurobase/sdk</code> 0.10.0 or later with this setting: older versions treat the sign-up response as a session.</li>
+				</ul>
+
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Password reset page</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Same shape, but you collect a new password from the user first, then call <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.resetPassword(token, newPassword)</code>. Trigger the email with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.forgotPassword(email)</code>.

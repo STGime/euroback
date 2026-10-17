@@ -1776,7 +1776,7 @@ export class EurobaseAPI {
 		});
 	}
 
-	async updateEndUser(projectId: string, userId: string, data: { email?: string; display_name?: string; metadata?: Record<string, any> }): Promise<EndUser> {
+	async updateEndUser(projectId: string, userId: string, data: { email?: string; display_name?: string; metadata?: Record<string, any>; email_confirmed?: boolean }): Promise<EndUser> {
 		return this.fetch<EndUser>(`/platform/projects/${projectId}/users/${userId}`, {
 			method: 'PATCH',
 			body: JSON.stringify(data)
@@ -2993,6 +2993,8 @@ export interface EndUser {
 	metadata: Record<string, any>;
 	banned_at: string | null;
 	last_sign_in_at: string | null;
+	/** null while the email is unconfirmed (#806); absent from older gateways */
+	email_confirmed_at?: string | null;
 	created_at: string;
 }
 

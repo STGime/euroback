@@ -107,7 +107,7 @@ func TestPasskeyStore_DB(t *testing.T) {
 	if err != nil {
 		t.Skipf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close) // first, so it runs after the cleanup below
 
 	// Provision a tenant + one user.
 	var schema, userID string

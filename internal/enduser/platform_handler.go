@@ -31,7 +31,9 @@ type PlatformUser struct {
 	Metadata     map[string]interface{} `json:"metadata"`
 	BannedAt     *time.Time             `json:"banned_at"`
 	LastSignInAt *time.Time             `json:"last_sign_in_at"`
-	CreatedAt    time.Time              `json:"created_at"`
+	// EmailConfirmedAt is null until the user confirms their email (#806).
+	EmailConfirmedAt *time.Time `json:"email_confirmed_at"`
+	CreatedAt        time.Time  `json:"created_at"`
 }
 
 type createUserRequest struct {
@@ -44,6 +46,9 @@ type updateUserRequest struct {
 	Email       *string                `json:"email,omitempty"`
 	DisplayName *string                `json:"display_name,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	// EmailConfirmed marks the email confirmed (true; keeps an existing
+	// date) or unconfirmed (false) — #806.
+	EmailConfirmed *bool `json:"email_confirmed,omitempty"`
 }
 
 type resetPasswordRequest struct {
@@ -105,7 +110,7 @@ func scanUser(rows interface{ Scan(dest ...interface{}) error }) (PlatformUser, 
 	var u PlatformUser
 	var metadataJSON []byte
 	var providersArr []string
-	if err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.CreatedAt, &providersArr); err != nil {
+	if err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.EmailConfirmedAt, &u.CreatedAt, &providersArr); err != nil {
 		return u, err
 	}
 	if metadataJSON != nil {
@@ -161,7 +166,7 @@ func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc
 		var args []interface{}
 
 		userCols := fmt.Sprintf(
-			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.created_at,
+			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.email_confirmed_at, u.created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -231,7 +236,7 @@ func handleGetUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 		userID := chi.URLParam(r, "userId")
 		qs := quoteIdent(schema)
 		userCols := fmt.Sprintf(
-			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.created_at,
+			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.email_confirmed_at, u.created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -295,7 +300,7 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		q := fmt.Sprintf(
 			`INSERT INTO %s.users (email, password_hash, metadata, email_confirmed_at)
 			 VALUES ($1, $2, $3, now())
-			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at, ARRAY[]::text[]`,
+			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at, ARRAY[]::text[]`,
 			qs,
 		)
 		var u PlatformUser
@@ -357,6 +362,13 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 			args = append(args, email)
 			argIdx++
 		}
+		if req.EmailConfirmed != nil {
+			if *req.EmailConfirmed {
+				setClauses = append(setClauses, "email_confirmed_at = COALESCE(email_confirmed_at, now())")
+			} else {
+				setClauses = append(setClauses, "email_confirmed_at = NULL")
+			}
+		}
 		if req.DisplayName != nil {
 			setClauses = append(setClauses, fmt.Sprintf("display_name = $%d", argIdx))
 			args = append(args, *req.DisplayName)
@@ -369,14 +381,14 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 			argIdx++
 		}
 
-		if len(args) == 0 {
+		if len(setClauses) == 1 { // only updated_at
 			http.Error(w, `{"error":"no fields to update"}`, http.StatusBadRequest)
 			return
 		}
 
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
-			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -491,7 +503,7 @@ func handleSuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFu
 		userID := chi.URLParam(r, "userId")
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
-			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -533,7 +545,7 @@ func handleUnsuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.Handler
 		userID := chi.URLParam(r, "userId")
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
-			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)

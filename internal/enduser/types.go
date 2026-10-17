@@ -1,6 +1,24 @@
 package enduser
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrEmailNotConfirmed is returned by sign-in, refresh and passkey sign-in
+// when the project requires email confirmation and the user hasn't
+// confirmed yet (#806). Sign-in only returns it after the correct
+// password; handlers answer 403 {"error":"email_not_confirmed"}.
+var ErrEmailNotConfirmed = errors.New("email_not_confirmed")
+
+// emailConfirmationPending is the one rule every session-issuing path
+// applies (#806): with confirmation required, a user who has a password
+// and hasn't confirmed their email gets no session. Users without a
+// password (OAuth, magic link, phone, passkey-only) are confirmed by how
+// they sign in, or have no email to confirm.
+func emailConfirmationPending(requireConfirmation, hasPassword bool, confirmedAt *time.Time) bool {
+	return requireConfirmation && hasPassword && confirmedAt == nil
+}
 
 // SignUpRequest is the JSON body for end-user sign-up.
 type SignUpRequest struct {
@@ -29,12 +47,15 @@ type RefreshRequest struct {
 }
 
 // AuthResponse is returned after successful sign-up, sign-in, or refresh.
+// A sign-up that must confirm its email first carries only User and
+// ConfirmationRequired — no tokens (#806).
 type AuthResponse struct {
-	AccessToken  string `json:"access_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
-	RefreshToken string `json:"refresh_token"`
-	User         User   `json:"user"`
+	AccessToken          string `json:"access_token,omitempty"`
+	TokenType            string `json:"token_type,omitempty"`
+	ExpiresIn            int    `json:"expires_in,omitempty"`
+	RefreshToken         string `json:"refresh_token,omitempty"`
+	User                 User   `json:"user"`
+	ConfirmationRequired bool   `json:"confirmation_required,omitempty"`
 }
 
 // User represents an end-user in a tenant schema.
@@ -45,8 +66,11 @@ type User struct {
 	DisplayName *string                `json:"display_name,omitempty"`
 	AvatarURL   *string                `json:"avatar_url,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
+	// EmailConfirmedAt is null until the user confirms their email
+	// (always set for OAuth, magic-link and admin-created users).
+	EmailConfirmedAt *time.Time `json:"email_confirmed_at"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 // EmailString returns the email as a plain string, or empty if nil.

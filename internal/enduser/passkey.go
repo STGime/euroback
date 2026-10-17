@@ -557,13 +557,14 @@ func (s *AuthService) CompletePasskeyLogin(ctx context.Context, schema, jwtSecre
 	}
 	if config.RequireEmailConfirmation {
 		var confirmedAt *time.Time
+		var hasPassword bool
 		if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT email_confirmed_at FROM `+quoteIdent(schema)+`.users WHERE id = $1::uuid`, pu.ID).Scan(&confirmedAt)
+			return tx.QueryRow(ctx, `SELECT email_confirmed_at, password_hash IS NOT NULL FROM `+quoteIdent(schema)+`.users WHERE id = $1::uuid`, pu.ID).Scan(&confirmedAt, &hasPassword)
 		}); err != nil {
 			return nil, auth.ErrPasskeyVerificationFailed
 		}
-		if confirmedAt == nil {
-			return nil, fmt.Errorf("email_not_confirmed")
+		if emailConfirmationPending(true, hasPassword, confirmedAt) {
+			return nil, ErrEmailNotConfirmed
 		}
 	}
 	_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {

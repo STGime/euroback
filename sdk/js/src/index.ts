@@ -25,7 +25,7 @@ export type {
   Subscription,
   RealtimeEventType,
 } from './realtime'
-export { AuthClient } from './auth'
+export { AuthClient, EMAIL_NOT_CONFIRMED } from './auth'
 export { FunctionsClient } from './functions'
 export type {
   FunctionInvokeOptions,
@@ -48,6 +48,7 @@ export type {
   AuthUser,
   AuthSession,
   SignUpCredentials,
+  SignUpResult,
   SignInCredentials,
   AuthEvent,
   AuthStateChangeCallback,

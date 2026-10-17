@@ -2,6 +2,18 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.10.0 — 2026-10-17
+
+### Changed — email confirmation: no session before the user confirms (#806)
+
+With **Require email confirmation** on, the gateway no longer issues a session at sign-up, and refuses sign-in and refresh until the user has confirmed their email:
+
+- `signUp()` returns `data: null`, `confirmationRequired: true` and `user` (the new `SignUpResult` type) instead of signing the user in. Nothing is stored and no refresh is scheduled. Show a "check your inbox" screen. Without the setting, `signUp()` signs in as before (`confirmationRequired: false`).
+- `signIn()` with the correct password returns `error: 'email_not_confirmed'` (exported as `EMAIL_NOT_CONFIRMED`) instead of "invalid email or password", so you can offer `resendVerification(email)`. A wrong password still returns "invalid email or password". `signInWithPasskey()` and `refreshSession()` return the same error for an unconfirmed user.
+- `AuthUser.email_confirmed_at` — when the user confirmed their email, or `null`.
+
+Requires the gateway change from #806. With an older gateway, `signUp()` behaves as in 0.9.x. **Upgrade before relying on the new gateway behaviour:** SDK 0.9.x and older treat the token-less sign-up response as a session (calls then fail with 401), so apps on projects with email confirmation on should move to 0.10.0.
+
 ## 0.9.1 — 2026-10-16
 
 ### Fixed — refresh loop with long sessions (#804)
