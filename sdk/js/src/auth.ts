@@ -42,8 +42,35 @@ export interface AuthUser {
   display_name?: string
   avatar_url?: string
   metadata?: Record<string, any>
+  /**
+   * When the user confirmed their email (ISO timestamp), or null while
+   * unconfirmed. Requires gateway #806; absent from older gateways.
+   */
+  email_confirmed_at?: string | null
   created_at: string
   updated_at: string
+}
+
+/**
+ * Error string returned by `signIn`, `signInWithPasskey` and
+ * `refreshSession` when the project requires email confirmation and the
+ * user hasn't confirmed yet (`signIn` only after the correct password).
+ * Offer `resendVerification(email)`.
+ */
+export const EMAIL_NOT_CONFIRMED = 'email_not_confirmed'
+
+/** Result of `signUp`. */
+export interface SignUpResult {
+  /** The session — null when the user must confirm their email first. */
+  data: AuthSession | null
+  error: string | null
+  /** The new user, also when there's no session yet. */
+  user?: AuthUser
+  /**
+   * True when the project requires email confirmation: a verification
+   * email was sent, and the user can sign in after confirming.
+   */
+  confirmationRequired?: boolean
 }
 
 export interface AuthSession {
@@ -165,9 +192,11 @@ export class AuthClient {
    * email is sent to the tenant-configured URL (or the
    * `emailRedirectTo` override). Your app must have a route at that
    * URL that reads the `token` query param and calls
-   * `eb.auth.verifyEmail(token)` to confirm the address.
+   * `eb.auth.verifyEmail(token)` to confirm the address. In that case
+   * there is no session yet: `data` is null, `confirmationRequired` is
+   * true and `user` is the new user (gateway #806).
    */
-  async signUp(credentials: SignUpCredentials): Promise<{ data: AuthSession | null; error: string | null }> {
+  async signUp(credentials: SignUpCredentials): Promise<SignUpResult> {
     // Map camelCase → snake_case for the wire format so the SDK
     // reads idiomatic JS but the backend keeps its existing schema.
     const body: Record<string, any> = {
@@ -180,9 +209,12 @@ export class AuthClient {
     if (result.error) {
       return { data: null, error: result.error }
     }
+    if (result.confirmation_required || !result.access_token) {
+      return { data: null, error: null, user: result.user, confirmationRequired: true }
+    }
     const session = this.setSession(result)
     this.emit('SIGNED_IN', session)
-    return { data: session, error: null }
+    return { data: session, error: null, user: session.user, confirmationRequired: false }
   }
 
   /** Sign in an existing end-user with email + password. */

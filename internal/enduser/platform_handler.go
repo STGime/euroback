@@ -31,7 +31,9 @@ type PlatformUser struct {
 	Metadata     map[string]interface{} `json:"metadata"`
 	BannedAt     *time.Time             `json:"banned_at"`
 	LastSignInAt *time.Time             `json:"last_sign_in_at"`
-	CreatedAt    time.Time              `json:"created_at"`
+	// EmailConfirmedAt is null until the user confirms their email (#806).
+	EmailConfirmedAt *time.Time `json:"email_confirmed_at"`
+	CreatedAt        time.Time  `json:"created_at"`
 }
 
 type createUserRequest struct {
@@ -105,7 +107,7 @@ func scanUser(rows interface{ Scan(dest ...interface{}) error }) (PlatformUser, 
 	var u PlatformUser
 	var metadataJSON []byte
 	var providersArr []string
-	if err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.CreatedAt, &providersArr); err != nil {
+	if err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.EmailConfirmedAt, &u.CreatedAt, &providersArr); err != nil {
 		return u, err
 	}
 	if metadataJSON != nil {
@@ -161,7 +163,7 @@ func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc
 		var args []interface{}
 
 		userCols := fmt.Sprintf(
-			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.created_at,
+			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.email_confirmed_at, u.created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -231,7 +233,7 @@ func handleGetUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 		userID := chi.URLParam(r, "userId")
 		qs := quoteIdent(schema)
 		userCols := fmt.Sprintf(
-			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.created_at,
+			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.email_confirmed_at, u.created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -295,7 +297,7 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		q := fmt.Sprintf(
 			`INSERT INTO %s.users (email, password_hash, metadata, email_confirmed_at)
 			 VALUES ($1, $2, $3, now())
-			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at, ARRAY[]::text[]`,
+			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at, ARRAY[]::text[]`,
 			qs,
 		)
 		var u PlatformUser
@@ -376,7 +378,7 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
-			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -491,7 +493,7 @@ func handleSuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFu
 		userID := chi.URLParam(r, "userId")
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
-			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)
@@ -533,7 +535,7 @@ func handleUnsuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.Handler
 		userID := chi.URLParam(r, "userId")
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
-			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, created_at,
+			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
 			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
 			qs,
 		)

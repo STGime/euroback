@@ -432,6 +432,9 @@
 								{:else}
 									<span class="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">Active</span>
 								{/if}
+								{#if user.email && user.email_confirmed_at === null}
+									<span class="ml-1 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800" title="This user hasn't confirmed their email address yet">Unconfirmed</span>
+								{/if}
 							</td>
 							<td class="px-3 py-2.5 text-xs text-gray-500">{formatDateTime(user.last_sign_in_at)}</td>
 							<td class="px-3 py-2.5 text-xs text-gray-500">{formatDate(user.created_at)}</td>
@@ -541,6 +544,10 @@
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Status</dt>
 													<dd>{user.banned_at ? `Suspended since ${formatDateTime(user.banned_at)}` : 'Active'}</dd>
+												</div>
+												<div class="flex gap-2">
+													<dt class="text-gray-400 w-24 shrink-0">Email</dt>
+													<dd class="text-gray-900">{!user.email ? '—' : user.email_confirmed_at ? `Confirmed ${formatDateTime(user.email_confirmed_at)}` : user.email_confirmed_at === null ? 'Not confirmed yet' : '—'}</dd>
 												</div>
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Last Sign In</dt>

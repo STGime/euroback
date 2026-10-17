@@ -40,6 +40,7 @@ on:
       - internal/tenantlogin/**
       - internal/tenantconn/**
       - internal/sqllog/**
+      - internal/enduser/**
   workflow_dispatch:
 
 permissions:
@@ -152,11 +153,12 @@ jobs:
           CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
         run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions'
 
-      # End-user passkey store SQL against a provisioned tenant (#630).
-      - name: End-user passkey store (000137)
+      # End-user passkey store SQL against a provisioned tenant (#630), and
+      # the email-confirmation rule across sign-up / sign-in / refresh (#806).
+      - name: End-user auth against a provisioned tenant (000137, #806)
         env:
           ENDUSER_PASSKEY_TEST_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
-        run: go test -count=1 -v ./internal/enduser/ -run 'TestPasskeyStore_DB'
+        run: go test -count=1 -v ./internal/enduser/ -run 'TestPasskeyStore_DB|TestEmailConfirmation_DB'
 
       # The org invitation service runs on the developer pool in
       # production: run its test as that role too (a missing grant fails).

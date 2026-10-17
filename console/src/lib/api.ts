@@ -2993,6 +2993,8 @@ export interface EndUser {
 	metadata: Record<string, any>;
 	banned_at: string | null;
 	last_sign_in_at: string | null;
+	/** null while the email is unconfirmed (#806); absent from older gateways */
+	email_confirmed_at?: string | null;
 	created_at: string;
 }
 

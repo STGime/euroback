@@ -563,7 +563,7 @@ func (s *AuthService) CompletePasskeyLogin(ctx context.Context, schema, jwtSecre
 			return nil, auth.ErrPasskeyVerificationFailed
 		}
 		if confirmedAt == nil {
-			return nil, fmt.Errorf("email_not_confirmed")
+			return nil, ErrEmailNotConfirmed
 		}
 	}
 	_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {

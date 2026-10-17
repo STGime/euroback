@@ -71,13 +71,24 @@ await eb.auth.signInWithMagicLink(token)
 // Email confirmation & password reset (requires per-project redirect
 // URLs configured on auth_config — see docs). The `emailRedirectTo`
 // option is optional; when omitted, the project default is used.
-await eb.auth.signUp({
+const signUp = await eb.auth.signUp({
   email: 'user@example.com',
   password: 'securepassword',
   emailRedirectTo: 'https://myapp.com/verify',
 })
+if (signUp.confirmationRequired) {
+  // No session yet — show "check your inbox".
+}
 // On your /verify page — after reading the token from ?token=...:
 await eb.auth.verifyEmail(token)
+
+// Signing in before confirming (correct password):
+import { EMAIL_NOT_CONFIRMED } from '@eurobase/sdk'
+const { error } = await eb.auth.signIn({ email, password })
+if (error === EMAIL_NOT_CONFIRMED) {
+  await eb.auth.resendVerification(email) // offer to resend
+}
+// user.email_confirmed_at is null until confirmed.
 
 // Forgot / reset password:
 await eb.auth.forgotPassword('user@example.com', {
