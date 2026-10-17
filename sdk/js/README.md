@@ -98,7 +98,8 @@ await eb.auth.forgotPassword('user@example.com', {
 await eb.auth.resetPassword(token, newPassword)
 
 // Change the password while signed in (needs the current one; other
-// sessions are signed out):
+// sessions end when their access token expires). Next SDK release —
+// until then: POST /v1/auth/user/password {current_password, new_password}.
 await eb.auth.updatePassword({ currentPassword, newPassword })
 
 // Resend the verification email:
