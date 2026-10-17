@@ -144,7 +144,7 @@
 
 				<h4 class="text-sm font-semibold text-gray-700 mt-4">Viewing, editing and exporting a function</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Click a function under <strong>Cron &amp; RPC &rarr; Functions</strong> to see its full <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">CREATE OR REPLACE FUNCTION</code> statement. <strong>Open in SQL editor</strong> puts it in a new editor tab: change it there and run it to update the function in place &mdash; nothing needs to be dropped. Functions you created with SQL show up here too, with their arguments.
+					Click a function under <strong>Cron &amp; RPC &rarr; Functions</strong> to see its full <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">CREATE OR REPLACE FUNCTION</code> statement. <strong>Open in SQL editor</strong> puts it in a new editor tab: change it there and run it to update the function in place &mdash; nothing needs to be dropped. Functions you created with SQL show up here too, with their arguments. One exception: a function marked <em>security definer</em> can't be recreated as one from your SQL (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">SECURITY DEFINER</code> isn't accepted), so ask support before changing it.
 				</p>
 				<ul class="mt-1 text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>CLI:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase functions get &lt;name&gt; &gt; &lt;name&gt;.sql</code> saves the definition; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--args "team_id uuid"</code> picks one of several functions with the same name.</li>

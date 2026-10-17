@@ -988,7 +988,7 @@ func HandleFunctions(pool *pgxpool.Pool) chi.Router {
 	r.Use(requireTenantPool)
 	r.Get("/", handleListFunctions(pool))
 	r.Get("/triggers", handleListTriggerFunctions(pool))
-	r.Get("/{funcName}", handleGetFunction(pool))
+	r.Get("/{funcName}", handleGetFunction(pool)) // a function named "triggers" is shadowed by the route above
 	r.Post("/", handleCreateFunction(pool))
 	r.Delete("/{funcName}", handleDropFunction(pool))
 	return r
