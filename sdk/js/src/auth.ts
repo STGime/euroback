@@ -336,25 +336,10 @@ export class AuthClient {
   }
 
   /**
-   * Complete a password reset using a token from a reset email.
-   * Call this from the page you configured as `password_reset_url`
-   * (or `emailRedirectTo`), after reading the `token` query
-   * parameter and collecting the user's new password.
-   *
-   * @example
-   * ```ts
-   * const params = new URL(location.href).searchParams
-   * const token = params.get('token')
-   * if (token) {
-   *   const { error } = await eb.auth.resetPassword(token, newPassword)
-   * }
-   * ```
-   */
-  /**
    * Change the signed-in user's password (#808). Needs the current
-   * password. Every other session of the user is signed out (their refresh
-   * tokens are revoked); this client gets a fresh session and emits
-   * `TOKEN_REFRESHED`. Users without a password (magic link, OAuth) set
+   * password. All of the user's refresh tokens are revoked, so other
+   * sessions end once their current access token expires; this client gets
+   * a fresh session and emits `TOKEN_REFRESHED`. Users without a password (magic link, OAuth) set
    * one with `forgotPassword()` / `resetPassword()` instead.
    * Requires gateway #808.
    */
@@ -374,6 +359,21 @@ export class AuthClient {
     return { data: session, error: null }
   }
 
+  /**
+   * Complete a password reset using a token from a reset email.
+   * Call this from the page you configured as `password_reset_url`
+   * (or `emailRedirectTo`), after reading the `token` query
+   * parameter and collecting the user's new password.
+   *
+   * @example
+   * ```ts
+   * const params = new URL(location.href).searchParams
+   * const token = params.get('token')
+   * if (token) {
+   *   const { error } = await eb.auth.resetPassword(token, newPassword)
+   * }
+   * ```
+   */
   async resetPassword(token: string, newPassword: string): Promise<{ error: string | null }> {
     // Backend handler at /v1/auth/reset-password expects the field
     // literally named `password` (not `new_password`). The SDK

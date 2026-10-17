@@ -51,6 +51,7 @@ res = await eb.auth.updatePassword({ currentPassword: 'old-password-1', newPassw
 assert.equal(res.error, null)
 assert.ok(lastReq.url.endsWith('/v1/auth/user/password'))
 assert.deepEqual(lastReq.body, { current_password: 'old-password-1', new_password: 'new-password-2' })
+assert.equal(lastReq.auth, 'Bearer t1', 'sent with the current access token')
 assert.equal(res.data.access_token, 't2')
 assert.equal(eb.auth.getSession().refresh_token, 'rt-t2')
 assert.equal(JSON.parse(store.get('eurobase_auth_session')).access_token, 't2')

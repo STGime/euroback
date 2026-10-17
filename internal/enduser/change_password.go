@@ -36,8 +36,8 @@ var (
 
 // ChangePassword lets a signed-in user replace their password, given the
 // current one (#808). Every refresh token of the user is revoked — other
-// devices are signed out when their access token expires — and the
-// caller gets a fresh session so it stays signed in.
+// devices are signed out when their current access token expires — and
+// the caller gets a fresh session so it stays signed in.
 func (s *AuthService) ChangePassword(ctx context.Context, schemaName, jwtSecret, projectID string, config tenant.AuthConfig, userID string, req ChangePasswordRequest) (*AuthResponse, error) {
 	if !config.IsEmailPasswordEnabled() {
 		return nil, fmt.Errorf("email/password authentication is disabled")
@@ -93,9 +93,20 @@ func (s *AuthService) ChangePassword(ctx context.Context, schemaName, jwtSecret,
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
+	// Mint the new session up front so it commits with the password: a
+	// failure can't leave the password changed and every session revoked
+	// without the caller getting a new one.
+	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, config.SessionDurationSeconds())
+	if err != nil {
+		return nil, err
+	}
+	refreshToken, err := generateRandomHex(32)
+	if err != nil {
+		return nil, err
+	}
 
-	// Write only if the hash is still the one we checked against, and
-	// revoke every refresh token in the same transaction.
+	// Write only if the hash is still the one we checked against; revoke
+	// every refresh token and store the new one in the same transaction.
 	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE `+qs+`.users SET password_hash = $1, updated_at = now() WHERE id = $2 AND password_hash = $3`,
@@ -110,21 +121,17 @@ func (s *AuthService) ChangePassword(ctx context.Context, schemaName, jwtSecret,
 			`UPDATE `+qs+`.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, userID); err != nil {
 			return fmt.Errorf("revoke refresh tokens: %w", err)
 		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO `+qs+`.refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, now() + interval '30 days')`,
+			userID, hashSHA256(refreshToken)); err != nil {
+			return fmt.Errorf("insert refresh token: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	slog.Info("end-user changed password", "schema", schemaName, "user_id", userID)
-
-	accessToken, expiresIn, err := generateAccessToken(user.ID, user.EmailString(), projectID, jwtSecret, config.SessionDurationSeconds())
-	if err != nil {
-		return nil, err
-	}
-	refreshToken, err := s.createRefreshToken(ctx, schemaName, user.ID)
-	if err != nil {
-		return nil, err
-	}
 	return &AuthResponse{AccessToken: accessToken, TokenType: "bearer", ExpiresIn: expiresIn, RefreshToken: refreshToken, User: user}, nil
 }
 
@@ -156,22 +163,30 @@ func HandleChangePassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 			return
 		}
 
-		// Same per-account brute-force counter as sign-in: a stolen
-		// session mustn't be a way to guess the password faster.
-		email := strings.ToLower(strings.TrimSpace(claims.Email))
-		if email != "" && ratelimit.CheckSigninFailRate(rl, w, r.Context(), email) {
+		config := tenant.ParseAuthConfig(pc.AuthConfig)
+
+		// Per project + IP, the sign-in knob (same IP source as sign-in).
+		rlCfg := config.EffectiveRateLimits()
+		if ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "change_password", pc.ProjectID, ratelimit.ClientIPForProject(r, *rlCfg.TrustProxy, *rlCfg.TrustedProxyHops), rlCfg.SignupSigninPer5MinPerIP, ratelimit.FiveMinutes) {
+			return
+		}
+		// And the per-account brute-force counter sign-in uses: a stolen
+		// session mustn't be a way to guess the password faster. Keyed by
+		// email (shared with sign-in), else by user id.
+		failKey := strings.ToLower(strings.TrimSpace(claims.Email))
+		if failKey == "" {
+			failKey = "user:" + claims.UserID
+		}
+		if ratelimit.CheckSigninFailRate(rl, w, r.Context(), failKey) {
 			return
 		}
 
-		config := tenant.ParseAuthConfig(pc.AuthConfig)
 		resp, err := svc.ChangePassword(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, claims.UserID, req)
 		switch {
 		case err == nil:
 			writeJSON(w, resp, http.StatusOK)
 		case errors.Is(err, ErrWrongCurrentPassword):
-			if email != "" {
-				ratelimit.RecordSigninFailure(rl, r.Context(), email)
-			}
+			ratelimit.RecordSigninFailure(rl, r.Context(), failKey)
 			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		case errors.Is(err, ErrEmailNotConfirmed):
 			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusForbidden)

@@ -115,6 +115,20 @@ func TestChangePassword_DB(t *testing.T) {
 		t.Fatal("the old password must no longer work")
 	}
 
+	// "Require email confirmation" on and the user unconfirmed: 403.
+	if _, err := pool.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET email_confirmed_at = NULL WHERE id = $1`, up.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	confirmRaw := []byte(`{"providers": {"email_password": {"enabled": true}}, "password_min_length": 10, "session_duration": "1h", "require_email_confirmation": true, "redirect_urls": ["https://app.example.com/v"], "email_verification_url": "https://app.example.com/v"}`)
+	pc.AuthConfig = confirmRaw
+	if code, out := change(up.User.ID, newPw, "another-password-3"); code != http.StatusForbidden || out["error"] != ErrEmailNotConfirmed.Error() {
+		t.Fatalf("unconfirmed: %d %v", code, out)
+	}
+	pc.AuthConfig = raw
+	if _, err := pool.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET email_confirmed_at = now() WHERE id = $1`, up.User.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	// A user without a password, and a suspended user.
 	var noPwID string
 	if err := pool.QueryRow(ctx, `INSERT INTO `+quoteIdent(schema)+`.users (email, email_confirmed_at) VALUES ('magic@example.com', now()) RETURNING id::text`).Scan(&noPwID); err != nil {
