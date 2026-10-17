@@ -162,7 +162,7 @@ jobs:
       - name: End-user auth against a provisioned tenant (000137, #806)
         env:
           ENDUSER_PASSKEY_TEST_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
-        run: go test -count=1 -v ./internal/enduser/ -run 'TestPasskeyStore_DB|TestEmailConfirmation_DB|TestPlatformUsersImport_DB'
+        run: go test -count=1 -v ./internal/enduser/ -run 'TestPasskeyStore_DB|TestEmailConfirmation_DB|TestPlatformUsersImport_DB|TestChangePassword_DB'
 
       # The org invitation service runs on the developer pool in
       # production: run its test as that role too (a missing grant fails).

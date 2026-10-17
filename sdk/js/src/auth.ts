@@ -350,6 +350,30 @@ export class AuthClient {
    * }
    * ```
    */
+  /**
+   * Change the signed-in user's password (#808). Needs the current
+   * password. Every other session of the user is signed out (their refresh
+   * tokens are revoked); this client gets a fresh session and emits
+   * `TOKEN_REFRESHED`. Users without a password (magic link, OAuth) set
+   * one with `forgotPassword()` / `resetPassword()` instead.
+   * Requires gateway #808.
+   */
+  async updatePassword(params: { currentPassword: string; newPassword: string }): Promise<{ data: AuthSession | null; error: string | null }> {
+    if (!this.session) {
+      return { data: null, error: 'not signed in' }
+    }
+    const result = await this.http.post('/v1/auth/user/password', {
+      current_password: params.currentPassword,
+      new_password: params.newPassword,
+    })
+    if (result.error) {
+      return { data: null, error: result.error }
+    }
+    const session = this.setSession(result)
+    this.emit('TOKEN_REFRESHED', session)
+    return { data: session, error: null }
+  }
+
   async resetPassword(token: string, newPassword: string): Promise<{ error: string | null }> {
     // Backend handler at /v1/auth/reset-password expects the field
     // literally named `password` (not `new_password`). The SDK

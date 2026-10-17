@@ -2,6 +2,12 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.11.0 — 2026-10-17
+
+### Added — change the password while signed in (#808)
+
+`auth.updatePassword({ currentPassword, newPassword })` replaces the signed-in user's password. The current password is required (a wrong one counts towards the account's sign-in attempt limit). Every other session of the user is signed out — their refresh tokens are revoked — and this client gets a fresh session (`TOKEN_REFRESHED`). Users without a password (magic link, OAuth) set one with `forgotPassword()` / `resetPassword()`. Requires the gateway change from #808 (`POST /v1/auth/user/password`).
+
 ## 0.10.0 — 2026-10-17
 
 ### Changed — email confirmation: no session before the user confirms (#806)

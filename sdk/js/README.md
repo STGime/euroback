@@ -97,6 +97,10 @@ await eb.auth.forgotPassword('user@example.com', {
 // On your /reset page:
 await eb.auth.resetPassword(token, newPassword)
 
+// Change the password while signed in (needs the current one; other
+// sessions are signed out):
+await eb.auth.updatePassword({ currentPassword, newPassword })
+
 // Resend the verification email:
 await eb.auth.resendVerification('user@example.com')
 
