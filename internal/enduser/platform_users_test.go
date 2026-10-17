@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/eurobase/euroback/internal/query"
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
@@ -141,12 +142,16 @@ func TestPlatformUsersImport_DB(t *testing.T) {
 	}
 	var gotHash string
 	var confirmed bool
-	_ = pool.QueryRow(ctx, `SELECT password_hash, email_confirmed_at IS NOT NULL FROM `+quoteIdent(schema)+`.users WHERE id=$1`, keepID).Scan(&gotHash, &confirmed)
+	if err := pool.QueryRow(ctx, `SELECT password_hash, email_confirmed_at IS NOT NULL FROM `+quoteIdent(schema)+`.users WHERE id=$1`, keepID).Scan(&gotHash, &confirmed); err != nil {
+		t.Fatal(err)
+	}
 	if bcrypt.CompareHashAndPassword([]byte(gotHash), []byte("supabase-pw-1")) != nil || !confirmed {
 		t.Fatalf("imported hash / confirmation: %q %v", gotHash, confirmed)
 	}
 	var unconfirmed bool
-	_ = pool.QueryRow(ctx, `SELECT email_confirmed_at IS NULL FROM `+quoteIdent(schema)+`.users WHERE email='member5@example.com'`).Scan(&unconfirmed)
+	if err := pool.QueryRow(ctx, `SELECT email_confirmed_at IS NULL FROM `+quoteIdent(schema)+`.users WHERE email='member5@example.com'`).Scan(&unconfirmed); err != nil {
+		t.Fatal(err)
+	}
 	if !unconfirmed {
 		t.Fatal("email_confirmed:false not applied in batch")
 	}
@@ -156,6 +161,44 @@ func TestPlatformUsersImport_DB(t *testing.T) {
 	_ = json.Unmarshal(body, &br)
 	if code != http.StatusOK || br.Created != 0 || br.Exists != 4 {
 		t.Fatalf("re-run must be idempotent: %d %+v", code, br)
+	}
+
+	// An id that belongs to another user: "exists", and that user is untouched.
+	hash13, _ := bcrypt.GenerateFromPassword([]byte("x"), 13)
+	dupID := uuid.NewString()
+	b2, _ := json.Marshal(map[string]any{"users": []map[string]any{
+		{"email": "newcomer@example.com", "id": ann.ID},              // 0 exists (id taken)
+		{"email": "a1@example.com", "id": dupID},                     // 1 created
+		{"email": "a2@example.com", "id": dupID},                     // 2 invalid: same id in request
+		{"email": "a3@example.com", "password_hash": string(hash13)}, // 3 invalid: cost above the cap
+		{"email": "bad address@example.com"},                         // 4 invalid: whitespace
+		{"email": "x@example.com\r\nBcc: y@example.com"},             // 5 invalid: control characters
+	}})
+	code, body = call(handleBatchCreateUsers(pool, nil), http.MethodPost, "/batch", string(b2))
+	var br2 batchResponse
+	_ = json.Unmarshal(body, &br2)
+	want2 := []string{"exists", "created", "invalid", "invalid", "invalid", "invalid"}
+	if code != http.StatusOK || len(br2.Results) != len(want2) {
+		t.Fatalf("batch 2: %d %s", code, body)
+	}
+	for i, st := range want2 {
+		if br2.Results[i].Status != st {
+			t.Fatalf("batch 2 results[%d] = %+v, want %s", i, br2.Results[i], st)
+		}
+	}
+	var annEmail string
+	if err := pool.QueryRow(ctx, `SELECT email FROM `+quoteIdent(schema)+`.users WHERE id=$1`, ann.ID).Scan(&annEmail); err != nil || annEmail != "ann@example.com" {
+		t.Fatalf("an id collision must not touch the existing user: %q %v", annEmail, err)
+	}
+
+	// Sign-in won't evaluate a hash above the cost cap (whatever put it there).
+	if _, err := pool.Exec(ctx, `INSERT INTO `+quoteIdent(schema)+`.users (email, password_hash, email_confirmed_at) VALUES ('costly@example.com', $1, now())`, string(hash13)); err != nil {
+		t.Fatal(err)
+	}
+	svc := &AuthService{pool: pool}
+	cfg := tenant.ParseAuthConfig([]byte(`{"providers": {"email_password": {"enabled": true}}, "password_min_length": 8, "session_duration": "1h"}`))
+	if _, err := svc.SignIn(ctx, schema, "test-jwt-secret-0123456789abcdef0123456789", pid, cfg, SignInRequest{Email: "costly@example.com", Password: "x"}); err == nil || err.Error() != "invalid email or password" {
+		t.Fatalf("over-cost hash must be refused without comparing: %v", err)
 	}
 
 	// Limits.
@@ -169,5 +212,31 @@ func TestPlatformUsersImport_DB(t *testing.T) {
 	b, _ = json.Marshal(map[string]any{"users": tooMany})
 	if code, _ := call(handleBatchCreateUsers(pool, nil), http.MethodPost, "/batch", string(b)); code != http.StatusBadRequest {
 		t.Fatalf("batch over the cap: %d", code)
+	}
+	big := `{"users":[{"email":"big@example.com","metadata":{"pad":"` + strings.Repeat("x", 5<<20) + `"}}]}`
+	if code, _ := call(handleBatchCreateUsers(pool, nil), http.MethodPost, "/batch", big); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("body over 4 MiB: %d, want 413", code)
+	}
+}
+
+func TestIsValidEmail(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"ann@example.com":                         true,
+		"ann.o'neil+x@sub.example.eu":             true,
+		"zoë@example.com":                         true,
+		"ann@example":                             false,
+		"@example.com":                            false,
+		"ann@@example.com":                        false,
+		"a@b@example.com":                         false,
+		"ann @example.com":                        false,
+		"ann@example.com\r\nBcc: x":               false,
+		"ann\t@example.com":                       false,
+		"ann@.example.com":                        false,
+		"ann@example.com.":                        false,
+		strings.Repeat("a", 250) + "@example.com": false,
+	} {
+		if got := isValidEmail(addr); got != want {
+			t.Errorf("isValidEmail(%q) = %v, want %v", addr, got, want)
+		}
 	}
 }

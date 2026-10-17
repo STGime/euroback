@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/eurobase/euroback/internal/compliance"
 	edb "github.com/eurobase/euroback/internal/db"
@@ -146,13 +147,21 @@ func scanUser(rows interface{ Scan(dest ...interface{}) error }) (PlatformUser, 
 	return u, nil
 }
 
+// isValidEmail is a shape check, not RFC 5322: one @, a non-empty local
+// part, a dotted domain, at most 254 bytes, and no whitespace or control
+// characters (the address ends up in email headers).
 func isValidEmail(email string) bool {
-	parts := strings.SplitN(email, "@", 2)
-	if len(parts) != 2 {
+	if len(email) > 254 || strings.Count(email, "@") != 1 {
 		return false
 	}
-	local, domain := parts[0], parts[1]
-	return local != "" && domain != "" && strings.Contains(domain, ".")
+	for _, r := range email {
+		if r <= ' ' || r == 0x7f || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	local, domain, _ := strings.Cut(email, "@")
+	return local != "" && domain != "" && strings.Contains(domain, ".") &&
+		!strings.HasPrefix(domain, ".") && !strings.HasSuffix(domain, ".")
 }
 
 func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {

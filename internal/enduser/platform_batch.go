@@ -3,6 +3,7 @@ package enduser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -68,8 +69,12 @@ func validateBatchUser(u *batchUser) string {
 		return "plain passwords aren't accepted in a batch: send password_hash (bcrypt), leave it out, or use POST /users"
 	}
 	if u.PasswordHash != "" {
-		if _, err := bcrypt.Cost([]byte(u.PasswordHash)); err != nil {
+		cost, err := bcrypt.Cost([]byte(u.PasswordHash))
+		if err != nil {
 			return "password_hash must be a bcrypt hash"
+		}
+		if cost > maxPasswordHashCost {
+			return fmt.Sprintf("password_hash cost must be at most %d", maxPasswordHashCost)
 		}
 	}
 	if u.ID != "" {
@@ -97,6 +102,11 @@ func handleBatchCreateUsers(pool *pgxpool.Pool, resolver PoolResolver) http.Hand
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 		var req batchRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				writeJSON(w, map[string]string{"error": "request body over 4 MiB: split the import into smaller batches"}, http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}

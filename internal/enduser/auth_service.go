@@ -162,7 +162,7 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 	if email == "" {
 		return nil, fmt.Errorf("email is required")
 	}
-	if parts := strings.SplitN(email, "@", 2); len(parts) != 2 || parts[0] == "" || parts[1] == "" || !strings.Contains(parts[1], ".") {
+	if !isValidEmail(email) {
 		return nil, fmt.Errorf("invalid email address")
 	}
 	if len(req.Password) < config.PasswordMinLength {
@@ -299,6 +299,10 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 		return nil, fmt.Errorf("account suspended")
 	}
 
+	if cost, err := bcrypt.Cost([]byte(passwordHash)); err != nil || cost > maxPasswordHashCost {
+		slog.Warn("end-user password hash not usable", "schema", schemaName, "user_id", user.ID)
+		return nil, fmt.Errorf("invalid email or password")
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
 		return nil, fmt.Errorf("invalid email or password")
 	}

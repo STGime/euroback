@@ -11,6 +11,11 @@ import (
 // password; handlers answer 403 {"error":"email_not_confirmed"}.
 var ErrEmailNotConfirmed = errors.New("email_not_confirmed")
 
+// maxPasswordHashCost is the highest bcrypt cost a stored end-user hash
+// may have — the platform hashes at 12, Supabase at 10. Imports refuse
+// higher ones, and sign-in won't evaluate them.
+const maxPasswordHashCost = 12
+
 // emailConfirmationPending is the one rule every session-issuing path
 // applies (#806): with confirmation required, a user who has a password
 // and hasn't confirmed their email gets no session. Users without a

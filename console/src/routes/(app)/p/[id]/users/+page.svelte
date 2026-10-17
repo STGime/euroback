@@ -646,7 +646,7 @@
 					<label for="user-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
 					<input id="user-password" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')} bind:value={createPassword} placeholder="Optional — at least 8 characters"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
-					<p class="mt-1 text-xs text-gray-400">Must be at least 8 characters. The user can change it after signing in.</p>
+					<p class="mt-1 text-xs text-gray-400">Optional, 8–72 characters. Without one, the user signs in with a magic link or sets a password through a password reset.</p>
 				</div>
 				<div>
 					<label for="user-metadata" class="block text-sm font-medium text-gray-700 mb-1">Metadata <span class="text-gray-400 font-normal">(optional)</span></label>
