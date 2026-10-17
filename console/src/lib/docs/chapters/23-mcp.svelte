@@ -24,7 +24,7 @@
 				<div class="rounded-xl border border-gray-200 bg-white overflow-hidden">
 					<div class="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-700">
 						<div><strong>Projects</strong> &mdash; list and inspect your Eurobase projects</div>
-						<div><strong>Database</strong> &mdash; list tables, describe schema, run SQL, create tables</div>
+						<div><strong>Database</strong> &mdash; list tables, describe schema, run SQL, create tables; list database (RPC) functions and read their definitions</div>
 						<div><strong>Auth</strong> &mdash; list end-users registered in a project</div>
 						<div><strong>Storage</strong> &mdash; list files, generate signed download URLs</div>
 						<div><strong>Vault</strong> &mdash; list, get, and set encrypted secrets</div>

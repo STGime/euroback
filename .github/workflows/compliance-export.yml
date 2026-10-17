@@ -36,6 +36,9 @@ on:
       - internal/query/converge_ownership_test.go
       - migrations/000141_converge_tenant_functions.up.sql
       - internal/query/converge_functions_test.go
+      - internal/query/ddl.go
+      - internal/query/ddl_handler.go
+      - internal/query/function_definition_test.go
       - internal/email/delivery_log*.go
       - internal/tenantlogin/**
       - internal/tenantconn/**
@@ -151,7 +154,7 @@ jobs:
       - name: Converge tenant ownership (000136)
         env:
           CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
-        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions'
+        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions|TestGetFunctions_DB'
 
       # End-user passkey store SQL against a provisioned tenant (#630), and
       # the email-confirmation rule across sign-up / sign-in / refresh (#806),

@@ -1017,6 +1017,14 @@ type DBFunction struct {
 	Name       string `json:"name"`
 	Language   string `json:"language"`
 	ReturnType string `json:"return_type"`
+	// Arguments are the identity arguments (e.g. "team_id uuid"); they
+	// tell overloads apart (#820).
+	Arguments string `json:"arguments"`
+	// Security is "invoker" or "definer".
+	Security string `json:"security"`
+	// Definition is the full CREATE OR REPLACE FUNCTION statement —
+	// only from GetFunctions, not the list.
+	Definition string `json:"definition,omitempty"`
 }
 
 // ListFunctions returns user-authored RPC-callable functions in the
@@ -1054,10 +1062,37 @@ func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) (
 	if perr != nil {
 		return nil, perr
 	}
-	rows, err := pool.Query(ctx,
-		`SELECT p.proname,
+	rows, err := pool.Query(ctx, `SELECT `+functionColumns+`, ''`+functionFromWhere+` ORDER BY p.proname, 4`, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("list functions: %w", err)
+	}
+	defer rows.Close()
+
+	funcs := make([]DBFunction, 0)
+	for rows.Next() {
+		var f DBFunction
+		if err := rows.Scan(&f.Name, &f.Language, &f.ReturnType, &f.Arguments, &f.Security, &f.Definition); err != nil {
+			return nil, fmt.Errorf("scan function: %w", err)
+		}
+		funcs = append(funcs, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return funcs, nil
+}
+
+// functionColumns / functionFromWhere are shared by ListFunctions and
+// GetFunctions so both see exactly the same set of functions: SQL and
+// PL/pgSQL in the project's own schema, minus platform helpers, trigger
+// functions and extension members. $1 is the schema.
+const functionColumns = `p.proname,
 		        l.lanname,
-		        pg_get_function_result(p.oid)
+		        pg_get_function_result(p.oid),
+		        pg_get_function_identity_arguments(p.oid),
+		        CASE WHEN p.prosecdef THEN 'definer' ELSE 'invoker' END`
+
+const functionFromWhere = `
 		   FROM pg_proc p
 		   JOIN pg_namespace n ON n.oid = p.pronamespace
 		   JOIN pg_language  l ON l.oid = p.prolang
@@ -1071,25 +1106,33 @@ func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) (
 		           WHERE d.classid    = 'pg_proc'::regclass
 		             AND d.objid      = p.oid
 		             AND d.refclassid = 'pg_extension'::regclass
-		    )
-		  ORDER BY p.proname`, schemaName)
+		    )`
+
+// GetFunctions returns every function called name in the schema (one per
+// overload) with its definition (#820). The definition is read by the
+// platform with pg_get_functiondef — customer SQL can't reach the
+// catalog — and only for the functions ListFunctions shows.
+func GetFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName, name string) ([]DBFunction, error) {
+	pool, perr := tenantDDLPool(ctx, pool)
+	if perr != nil {
+		return nil, perr
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT `+functionColumns+`, pg_get_functiondef(p.oid)`+functionFromWhere+` AND p.proname = $2 ORDER BY 4`,
+		schemaName, name)
 	if err != nil {
-		return nil, fmt.Errorf("list functions: %w", err)
+		return nil, fmt.Errorf("get function: %w", err)
 	}
 	defer rows.Close()
-
 	funcs := make([]DBFunction, 0)
 	for rows.Next() {
 		var f DBFunction
-		if err := rows.Scan(&f.Name, &f.Language, &f.ReturnType); err != nil {
+		if err := rows.Scan(&f.Name, &f.Language, &f.ReturnType, &f.Arguments, &f.Security, &f.Definition); err != nil {
 			return nil, fmt.Errorf("scan function: %w", err)
 		}
 		funcs = append(funcs, f)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return funcs, nil
+	return funcs, rows.Err()
 }
 
 // CreateFunctionRequest describes a zero-arg function to create.

@@ -32,6 +32,34 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
     }
   );
 
+  // Database (RPC) functions (#820) — not edge functions (see listFunctions).
+  // Their source can't be read with SQL (system catalogs are refused), so
+  // the platform returns it.
+  server.tool(
+    'listDbFunctions',
+    'List the database (RPC) functions in a project: name, arguments, language, return type, security (invoker/definer). These are Postgres functions called with eb.db.rpc(), not edge functions.',
+    { projectId: z.string().uuid().describe('The project UUID') },
+    async ({ projectId }) => {
+      const data = await getClient().get(`/platform/projects/${projectId}/schema/functions`);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'getDbFunction',
+    'Get a database (RPC) function\'s definition: the full CREATE OR REPLACE FUNCTION statement. To change it, edit that statement and run it with runSQL. If several functions share the name, pass args (the arguments from listDbFunctions). Needs Developer access.',
+    {
+      projectId: z.string().uuid().describe('The project UUID'),
+      functionName: z.string().describe('The function name'),
+      args: z.string().optional().describe('Argument list of the overload, e.g. "team_id uuid" ("" for no arguments)'),
+    },
+    async ({ projectId, functionName, args }) => {
+      const qs = args !== undefined ? `?args=${encodeURIComponent(args)}` : '';
+      const data = await getClient().get(`/platform/projects/${projectId}/schema/functions/${pathSegment(functionName)}${qs}`);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
   // SQL writes (#702): a project-scoped token sends statements as asked and
   // the gateway allows or refuses them by the token's role (Read-only →
   // refused, Developer → allowed). Legacy account-wide tokens stay

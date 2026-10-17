@@ -142,6 +142,20 @@
 					</table>
 				</div>
 
+				<h4 class="text-sm font-semibold text-gray-700 mt-4">Viewing, editing and exporting a function</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Click a function under <strong>Cron &amp; RPC &rarr; Functions</strong> to see its full <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">CREATE OR REPLACE FUNCTION</code> statement. <strong>Open in SQL editor</strong> puts it in a new editor tab: change it there and run it to update the function in place &mdash; nothing needs to be dropped. Functions you created with SQL show up here too, with their arguments.
+				</p>
+				<ul class="mt-1 text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>CLI:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase functions get &lt;name&gt; &gt; &lt;name&gt;.sql</code> saves the definition; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--args "team_id uuid"</code> picks one of several functions with the same name.</li>
+					<li><strong>API:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /platform/projects/$PROJECT_ID/schema/functions/&lt;name&gt;?args=&hellip;</code> (Developer role) returns the function with its <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">definition</code>; without <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">args</code>, a name with several overloads answers 409 with the candidates.</li>
+					<li><strong>MCP:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">listDbFunctions</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">getDbFunction</code>.</li>
+					<li><strong>All at once:</strong> a full project export (Compliance &rarr; Export) includes <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">schema/schema.sql</code> with every function.</li>
+				</ul>
+				<p class="mt-2 text-sm text-gray-700 leading-relaxed">
+					Reading <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">pg_proc</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">pg_get_functiondef()</code> or <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">information_schema</code> from your own SQL is refused (the system catalogs aren't scoped to your project), so these are the ways to get a definition.
+				</p>
+
 				<h4 class="text-sm font-semibold text-gray-700 mt-4">Calling functions from the SDK</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Functions with a return type (not void) can be called from your app. The return value is sent back as JSON.

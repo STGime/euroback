@@ -3,6 +3,7 @@
 	import { page } from '$app/stores';
 	import { api, type CronJob, type CronJobRun, type DBFunction, type TableSchema } from '$lib/api.js';
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 
 	let projectId = $derived($page.params.id);
 
@@ -66,6 +67,49 @@
 			deleteFuncConfirm = null;
 			availableFunctions = await api.listFunctions(projectId);
 		} catch { /* ignore */ }
+	}
+
+	// Function definitions (#820): click a row to see its source.
+	let openFnKey: string | null = $state(null);
+	let openFnDef: string | null = $state(null);
+	let openFnError: string | null = $state(null);
+	let openFnCopied = $state(false);
+	const fnKey = (fn: DBFunction) => `${fn.name}(${fn.arguments ?? ''})`;
+
+	async function toggleFunctionDefinition(fn: DBFunction) {
+		const key = fnKey(fn);
+		if (openFnKey === key) {
+			openFnKey = null;
+			return;
+		}
+		openFnKey = key;
+		openFnDef = null;
+		openFnError = null;
+		openFnCopied = false;
+		if (!projectId) return;
+		try {
+			const full = await api.getFunction(projectId, fn.name, fn.arguments);
+			if (openFnKey === key) openFnDef = full.definition ?? '';
+		} catch (err) {
+			if (openFnKey === key) openFnError = err instanceof Error ? err.message : 'Failed to load the definition';
+		}
+	}
+
+	async function copyFunctionDefinition() {
+		if (!openFnDef) return;
+		try {
+			await navigator.clipboard.writeText(openFnDef);
+			openFnCopied = true;
+			setTimeout(() => (openFnCopied = false), 2000);
+		} catch { /* ignore */ }
+	}
+
+	function openFunctionInSqlEditor(fn: DBFunction) {
+		if (!openFnDef || !projectId) return;
+		try {
+			sessionStorage.setItem(`eurobase_sql_prefill_${projectId}`, JSON.stringify({ name: fn.name, sql: openFnDef }));
+		} catch { /* ignore */ }
+		goto(`/p/${projectId}/database/sql`);
 	}
 
 	// RPC function picker
@@ -583,17 +627,21 @@
 			{#each availableFunctions as fn}
 				<div class="rounded-xl border border-gray-200 bg-white px-5 py-4">
 					<div class="flex items-center justify-between">
-						<div>
-							<div class="flex items-center gap-2">
-								<span class="font-medium text-sm text-gray-900 font-mono">{fn.name}()</span>
+						<button type="button" class="cursor-pointer text-left min-w-0" onclick={() => toggleFunctionDefinition(fn)} title="Show the definition">
+							<span class="flex items-center gap-2 flex-wrap">
+								<span class="font-medium text-sm text-gray-900 font-mono">{fn.name}({fn.arguments ?? ''})</span>
 								<span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-gray-500">{fn.language}</span>
 								<span class="rounded bg-eurobase-50 px-1.5 py-0.5 text-[10px] font-medium text-eurobase-600">returns {fn.return_type}</span>
-							</div>
-							<p class="mt-1 text-xs text-gray-400">
+								{#if fn.security === 'definer'}
+									<span class="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700" title="Runs with its owner's privileges">security definer</span>
+								{/if}
+								<svg class="h-3.5 w-3.5 text-gray-400 transition-transform {openFnKey === fnKey(fn) ? 'rotate-180' : ''}" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
+							</span>
+							<span class="mt-1 block text-xs text-gray-400">
 								SDK: <code class="bg-gray-100 rounded px-1">eb.db.rpc('{fn.name}')</code>
 								&middot; Cron: select as RPC action
-							</p>
-						</div>
+							</span>
+						</button>
 						<div class="flex items-center gap-2">
 							<button
 								type="button"
@@ -605,6 +653,22 @@
 							</button>
 						</div>
 					</div>
+					{#if openFnKey === fnKey(fn)}
+						<div class="mt-3 border-t border-gray-100 pt-3">
+							{#if openFnError}
+								<p class="text-xs text-red-600">{openFnError}</p>
+							{:else if openFnDef === null}
+								<p class="text-xs text-gray-400">Loading definition…</p>
+							{:else}
+								<pre class="max-h-96 overflow-auto rounded-lg bg-gray-900 p-3 text-xs font-mono text-green-400">{openFnDef}</pre>
+								<div class="mt-2 flex items-center gap-3 text-xs">
+									<button type="button" class="cursor-pointer font-medium text-eurobase-700 hover:underline" onclick={copyFunctionDefinition}>{openFnCopied ? 'Copied!' : 'Copy'}</button>
+									<button type="button" class="cursor-pointer font-medium text-eurobase-700 hover:underline" onclick={() => openFunctionInSqlEditor(fn)}>Open in SQL editor</button>
+									<span class="text-gray-400">To change it, edit the statement and run it there.</span>
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{/each}
 		</div>

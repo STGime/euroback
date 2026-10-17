@@ -45,7 +45,19 @@
 		loadSchema();
 		loadState();
 		loadHistory();
-		if (tabs.length === 0) {
+		// "Open in SQL editor" from Cron & RPC → Functions (#820) leaves a
+		// statement here; open it in a new tab.
+		let prefill: { name: string; sql: string } | null = null;
+		try {
+			const raw = sessionStorage.getItem(`eurobase_sql_prefill_${projectId}`);
+			if (raw) {
+				sessionStorage.removeItem(`eurobase_sql_prefill_${projectId}`);
+				prefill = JSON.parse(raw);
+			}
+		} catch {}
+		if (prefill?.sql) {
+			addTab(prefill.name, prefill.sql);
+		} else if (tabs.length === 0) {
 			addTab();
 		}
 	});
@@ -110,13 +122,13 @@
 		} catch {}
 	}
 
-	function addTab() {
+	function addTab(name?: string, sql = '') {
 		const id = crypto.randomUUID();
 		const num = tabs.length + 1;
 		const tab: QueryTab = {
 			id,
-			name: `Query ${num}`,
-			sql: '',
+			name: name || `Query ${num}`,
+			sql,
 			columns: [],
 			rows: [],
 			rowCount: 0,
@@ -375,7 +387,7 @@
 				<button
 					type="button"
 					class="cursor-pointer rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
-					onclick={addTab}
+					onclick={() => addTab()}
 					title="New query (Ctrl+N)"
 				>
 					<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
