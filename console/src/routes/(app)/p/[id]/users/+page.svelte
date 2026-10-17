@@ -88,7 +88,7 @@
 	let totalPages = $derived(Math.ceil(total / pageSize));
 
 	async function handleCreate() {
-		if (!createEmail.trim() || !createPassword) return;
+		if (!createEmail.trim() || (createPassword && createPassword.length < 8)) return;
 		creating = true;
 		createError = null;
 		try {
@@ -104,7 +104,8 @@
 			}
 			await api.createEndUser(projectId, {
 				email: createEmail.trim(),
-				password: createPassword,
+				// #807: optional — without one the user signs in by magic link or a reset.
+				...(createPassword ? { password: createPassword } : {}),
 				metadata
 			});
 			showCreate = false;
@@ -643,7 +644,7 @@
 				</div>
 				<div>
 					<label for="user-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
-					<input id="user-password" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')} bind:value={createPassword} placeholder="Minimum 8 characters"
+					<input id="user-password" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" readonly onfocus={(e) => e.currentTarget.removeAttribute('readonly')} bind:value={createPassword} placeholder="Optional — at least 8 characters"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
 					<p class="mt-1 text-xs text-gray-400">Must be at least 8 characters. The user can change it after signing in.</p>
 				</div>
@@ -656,7 +657,7 @@
 			</div>
 			<div class="flex items-center justify-end gap-3 border-t border-gray-200 px-6 py-4">
 				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showCreate = false)}>Cancel</button>
-				<button type="button" class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50" disabled={!createEmail.trim() || createPassword.length < 8 || creating} onclick={handleCreate}>
+				<button type="button" class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50" disabled={!createEmail.trim() || (createPassword.length > 0 && createPassword.length < 8) || creating} onclick={handleCreate}>
 					{creating ? 'Creating...' : 'Create User'}
 				</button>
 			</div>

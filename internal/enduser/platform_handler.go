@@ -37,9 +37,27 @@ type PlatformUser struct {
 }
 
 type createUserRequest struct {
-	Email    string                 `json:"email"`
-	Password string                 `json:"password"`
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	Email string `json:"email"`
+	// Password is optional (#807): without one the user signs in by magic
+	// link, OAuth or a password reset.
+	Password    string                 `json:"password,omitempty"`
+	DisplayName *string                `json:"display_name,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	// EmailConfirmed defaults to true: the developer vouches for the address.
+	EmailConfirmed *bool `json:"email_confirmed,omitempty"`
+}
+
+// adminPasswordError checks a password an admin sets (create, reset):
+// 8 characters minimum, and at most bcrypt's 72 bytes — longer ones made
+// GenerateFromPassword fail with a 500.
+func adminPasswordError(pw string) string {
+	switch {
+	case len(pw) < 8:
+		return "password must be at least 8 characters"
+	case len(pw) > 72:
+		return "password must be at most 72 bytes"
+	}
+	return ""
 }
 
 type updateUserRequest struct {
@@ -77,6 +95,7 @@ func PlatformRoutes(pool *pgxpool.Pool, resolver PoolResolver, limiter *ratelimi
 	r := chi.NewRouter()
 	r.Get("/", handleListUsers(pool, resolver))
 	r.Post("/", handleCreateUser(pool, resolver))
+	r.Post("/batch", handleBatchCreateUsers(pool, resolver))
 	r.Get("/{userId}", handleGetUser(pool, resolver))
 	r.Patch("/{userId}", handleUpdateUser(pool, resolver))
 	r.Delete("/{userId}", handleDeleteUser(pool, resolver))
@@ -146,6 +165,9 @@ func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc
 
 		// Search filter.
 		search := strings.TrimSpace(r.URL.Query().Get("search"))
+		// email= is an exact, case-insensitive match (stored lower-case),
+		// unlike search's substring match (#807).
+		exactEmail := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("email")))
 
 		// Pagination.
 		limit := 50
@@ -171,7 +193,11 @@ func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc
 			qs,
 		)
 
-		if search != "" {
+		if exactEmail != "" {
+			countQ = fmt.Sprintf(`SELECT count(*) FROM %s.users WHERE email = $1`, qs)
+			listQ = fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.email = $1 ORDER BY u.created_at DESC LIMIT $2 OFFSET $3`, userCols, qs)
+			args = []interface{}{exactEmail, limit, offset}
+		} else if search != "" {
 			// Match email / display_name / id. The id::text cast lets
 			// operators paste a UUID from an audit row or a support
 			// ticket and find the user without needing to type the
@@ -192,7 +218,7 @@ func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc
 		var total int
 		users := []PlatformUser{}
 		if err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
-			if search != "" {
+			if len(args) == 3 { // filtered: $1 is the filter
 				if e := tx.QueryRow(ctx, countQ, args[0]).Scan(&total); e != nil {
 					return fmt.Errorf("count users: %w", e)
 				}
@@ -279,17 +305,22 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 			http.Error(w, `{"error":"invalid email address"}`, http.StatusBadRequest)
 			return
 		}
-		if len(req.Password) < 8 {
-			http.Error(w, `{"error":"password must be at least 8 characters"}`, http.StatusBadRequest)
-			return
+		var passwordHash *string
+		if req.Password != "" {
+			if msg := adminPasswordError(req.Password); msg != "" {
+				writeJSON(w, map[string]string{"error": msg}, http.StatusBadRequest)
+				return
+			}
+			hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
+			if err != nil {
+				slog.Error("hash password failed", "error", err)
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				return
+			}
+			h := string(hash)
+			passwordHash = &h
 		}
-
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
-		if err != nil {
-			slog.Error("hash password failed", "error", err)
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-			return
-		}
+		confirmed := req.EmailConfirmed == nil || *req.EmailConfirmed
 
 		metadataJSON, _ := json.Marshal(req.Metadata)
 		if req.Metadata == nil {
@@ -298,15 +329,15 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 
 		qs := quoteIdent(schema)
 		q := fmt.Sprintf(
-			`INSERT INTO %s.users (email, password_hash, metadata, email_confirmed_at)
-			 VALUES ($1, $2, $3, now())
+			`INSERT INTO %s.users (email, password_hash, display_name, metadata, email_confirmed_at)
+			 VALUES ($1, $2, $3, $4, CASE WHEN $5::bool THEN now() END)
 			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at, ARRAY[]::text[]`,
 			qs,
 		)
 		var u PlatformUser
-		err = edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
+		err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			var e error
-			u, e = scanUser(tx.QueryRow(ctx, q, email, string(hash), string(metadataJSON)))
+			u, e = scanUser(tx.QueryRow(ctx, q, email, passwordHash, req.DisplayName, string(metadataJSON), confirmed))
 			return e
 		})
 		if err != nil {
@@ -586,8 +617,8 @@ func handleResetPassword(pool *pgxpool.Pool, resolver PoolResolver) http.Handler
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		if len(req.Password) < 8 {
-			http.Error(w, `{"error":"password must be at least 8 characters"}`, http.StatusBadRequest)
+		if msg := adminPasswordError(req.Password); msg != "" {
+			writeJSON(w, map[string]string{"error": msg}, http.StatusBadRequest)
 			return
 		}
 
