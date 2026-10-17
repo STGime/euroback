@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ func FunctionsCmd() *cobra.Command {
 		Short:   "Manage RPC functions",
 	}
 	cmd.AddCommand(functionsListCmd())
+	cmd.AddCommand(functionsGetCmd())
 	cmd.AddCommand(functionsCreateCmd())
 	cmd.AddCommand(functionsDeleteCmd())
 	return cmd
@@ -45,9 +47,11 @@ func functionsListCmd() *cobra.Command {
 			}
 
 			var functions []struct {
-				Name     string `json:"name"`
-				Language string `json:"language"`
-				Returns  string `json:"return_type"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+				Language  string `json:"language"`
+				Returns   string `json:"return_type"`
+				Security  string `json:"security"`
 			}
 			if err := json.Unmarshal(data, &functions); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
@@ -59,15 +63,71 @@ func functionsListCmd() *cobra.Command {
 				return nil
 			}
 
-			headers := []string{"Name", "Language", "Returns"}
+			headers := []string{"Name", "Arguments", "Language", "Returns", "Security"}
 			var rows [][]string
 			for _, f := range functions {
-				rows = append(rows, []string{f.Name, f.Language, f.Returns})
+				rows = append(rows, []string{f.Name, f.Arguments, f.Language, f.Returns, f.Security})
 			}
 			PrintTable(headers, rows)
 			return nil
 		},
 	}
+}
+
+// functionsGetCmd prints a function's definition (#820): the full
+// CREATE OR REPLACE FUNCTION statement, ready to edit or save to a file.
+func functionsGetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get <name>",
+		Short: "Print a database function's definition",
+		Long: "Print the CREATE OR REPLACE FUNCTION statement of a database function.\n" +
+			"With several functions of that name, pick one with --args (the Arguments column of `functions list`).\n" +
+			"Save it with: eurobase functions get <name> > <name>.sql",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+
+			path := "/platform/projects/" + cfg.ActiveProject + "/schema/functions/" + url.PathEscape(args[0])
+			if cmd.Flags().Changed("args") {
+				fnArgs, _ := cmd.Flags().GetString("args")
+				path += "?args=" + url.QueryEscape(fnArgs)
+			}
+			data, err := client.Get(path)
+			if err != nil {
+				return err
+			}
+
+			var fn struct {
+				Name       string `json:"name"`
+				Arguments  string `json:"arguments"`
+				Language   string `json:"language"`
+				Returns    string `json:"return_type"`
+				Security   string `json:"security"`
+				Definition string `json:"definition"`
+			}
+			if err := json.Unmarshal(data, &fn); err != nil {
+				return fmt.Errorf("parsing response: %w", err)
+			}
+			if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+				PrintJSON(fn)
+				return nil
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), fn.Definition)
+			return nil
+		},
+	}
+	cmd.Flags().String("args", "", `argument list of the overload to show, e.g. "team_id uuid"`)
+	return cmd
 }
 
 func functionsCreateCmd() *cobra.Command {

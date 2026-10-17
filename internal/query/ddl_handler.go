@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
@@ -987,6 +988,7 @@ func HandleFunctions(pool *pgxpool.Pool) chi.Router {
 	r.Use(requireTenantPool)
 	r.Get("/", handleListFunctions(pool))
 	r.Get("/triggers", handleListTriggerFunctions(pool))
+	r.Get("/{funcName}", handleGetFunction(pool)) // a function named "triggers" is shadowed by the route above
 	r.Post("/", handleCreateFunction(pool))
 	r.Delete("/{funcName}", handleDropFunction(pool))
 	return r
@@ -1069,6 +1071,70 @@ func handleCreateFunction(pool *pgxpool.Pool) http.HandlerFunc {
 			"function": req.Name,
 		}, http.StatusCreated)
 	}
+}
+
+// handleGetFunction answers GET …/schema/functions/{name}[?args=…] with
+// the function and its definition (#820). Overloads: ?args= picks one by
+// its identity arguments (as the list shows them); without it, a name
+// with several overloads is a 409 listing them.
+func handleGetFunction(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
+		funcName := chi.URLParam(r, "funcName")
+		if projectID == "" || funcName == "" {
+			jsonError(w, "project ID and function name are required", http.StatusBadRequest)
+			return
+		}
+
+		var schemaName string
+		if err := pool.QueryRow(r.Context(),
+			`SELECT schema_name FROM projects WHERE id = $1`, projectID,
+		).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
+
+		funcs, err := GetFunctions(r.Context(), pool, schemaName, funcName)
+		if err != nil {
+			slog.Error("get function failed", "error", err, "schema", schemaName, "function", funcName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if args, ok := r.URL.Query()["args"]; ok {
+			want := normalizeFunctionArgs(args[0])
+			kept := funcs[:0]
+			for _, f := range funcs {
+				if normalizeFunctionArgs(f.Arguments) == want {
+					kept = append(kept, f)
+				}
+			}
+			funcs = kept
+		}
+		switch len(funcs) {
+		case 0:
+			jsonError(w, "function not found", http.StatusNotFound)
+		case 1:
+			jsonResponse(w, funcs[0], http.StatusOK)
+		default:
+			candidates := make([]map[string]string, len(funcs))
+			for i, f := range funcs {
+				candidates[i] = map[string]string{"arguments": f.Arguments}
+			}
+			jsonResponse(w, map[string]any{
+				"error":      "several functions have this name: pass ?args= with one of the argument lists",
+				"candidates": candidates,
+			}, http.StatusConflict)
+		}
+	}
+}
+
+// normalizeFunctionArgs makes "a int, b text" and "a int,b  text" equal.
+func normalizeFunctionArgs(s string) string {
+	parts := strings.Split(s, ",")
+	for i, p := range parts {
+		parts[i] = strings.Join(strings.Fields(p), " ")
+	}
+	return strings.Join(parts, ",")
 }
 
 func handleDropFunction(pool *pgxpool.Pool) http.HandlerFunc {

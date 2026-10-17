@@ -42,6 +42,11 @@
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">How do I see the source of a database function?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Click it under Cron &amp; RPC &rarr; Functions, or run <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase functions get &lt;name&gt;</code>. You get the full <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">CREATE OR REPLACE FUNCTION</code> statement; edit and run it in the SQL editor to change the function. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">pg_get_functiondef()</code> and other system-catalog queries are refused in your own SQL. See <a href="/docs/cron" class="cursor-pointer text-eurobase-700 hover:underline">Cron &amp; RPC</a>.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can I send auth emails (reset, magic link) to my own site, with my own templates and sender?</p>
 					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Redirect URLs to your own app are fully configurable (allow-listed, same idea as Supabase's site URL). Custom email templates are available on Pro. A custom SMTP sender is a Pro feature we're finalising — validate your provider in a test project before relying on it.</p>
 				</div>

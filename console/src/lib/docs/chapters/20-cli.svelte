@@ -111,7 +111,8 @@
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Cron & RPC Functions</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">cron list</td><td class="px-3 py-1 text-gray-500">List scheduled jobs</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">cron logs &lt;id&gt;</td><td class="px-3 py-1 text-gray-500">Show run history</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">functions list</td><td class="px-3 py-1 text-gray-500">List RPC functions (Postgres)</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">functions list</td><td class="px-3 py-1 text-gray-500">List RPC functions (Postgres) with their arguments</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">functions get &lt;name&gt; [--args "…"]</td><td class="px-3 py-1 text-gray-500">Print the function's CREATE OR REPLACE statement (next CLI release)</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">functions create &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Create from file</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">functions delete &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Drop function</td></tr>
 

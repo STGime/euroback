@@ -1850,6 +1850,12 @@ export class EurobaseAPI {
 		return this.fetch<DBFunction[]>(`/platform/projects/${projectId}/schema/functions`);
 	}
 
+	/** A database function with its definition (#820). Pass args to pick one of several overloads. */
+	async getFunction(projectId: string, name: string, args?: string): Promise<DBFunction> {
+		const qs = args !== undefined ? `?args=${encodeURIComponent(args)}` : '';
+		return this.fetch<DBFunction>(`/platform/projects/${projectId}/schema/functions/${encodeURIComponent(name)}${qs}`);
+	}
+
 	async createFunction(projectId: string, data: { name: string; body: string; returns?: string; language?: string }): Promise<{ status: string }> {
 		return this.fetch(`/platform/projects/${projectId}/schema/functions`, {
 			method: 'POST',
@@ -3007,6 +3013,11 @@ export interface DBFunction {
 	name: string;
 	language: string;
 	return_type: string;
+	/** identity arguments, e.g. "team_id uuid" (#820); absent from older gateways */
+	arguments?: string;
+	security?: 'invoker' | 'definer';
+	/** full CREATE OR REPLACE FUNCTION statement — only from getFunction */
+	definition?: string;
 }
 
 export interface CronJobRun {
