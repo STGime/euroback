@@ -1769,7 +1769,7 @@ export class EurobaseAPI {
 		return this.fetch<EndUserList>(`/platform/projects/${projectId}/users${qs ? `?${qs}` : ''}`);
 	}
 
-	async createEndUser(projectId: string, data: { email: string; password: string; metadata?: Record<string, any> }): Promise<EndUser> {
+	async createEndUser(projectId: string, data: { email: string; password?: string; display_name?: string; metadata?: Record<string, any>; email_confirmed?: boolean }): Promise<EndUser> {
 		return this.fetch<EndUser>(`/platform/projects/${projectId}/users`, {
 			method: 'POST',
 			body: JSON.stringify(data)
