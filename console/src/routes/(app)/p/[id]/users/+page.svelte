@@ -169,6 +169,16 @@
 		}
 	}
 
+	// #806: for users who can't receive the verification email, or who
+	// existed before "Require email confirmation" was turned on.
+	async function handleMarkConfirmed(user: EndUser) {
+		if (!projectId) return;
+		try {
+			await api.updateEndUser(projectId, user.id, { email_confirmed: true });
+			await loadUsers();
+		} catch { /* ignore */ }
+	}
+
 	async function handleToggleSuspend(user: EndUser) {
 		try {
 			if (user.banned_at) {
@@ -547,7 +557,12 @@
 												</div>
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Email</dt>
-													<dd class="text-gray-900">{!user.email ? '—' : user.email_confirmed_at ? `Confirmed ${formatDateTime(user.email_confirmed_at)}` : user.email_confirmed_at === null ? 'Not confirmed yet' : '—'}</dd>
+													<dd class="text-gray-900">
+														{!user.email ? '—' : user.email_confirmed_at ? `Confirmed ${formatDateTime(user.email_confirmed_at)}` : user.email_confirmed_at === null ? 'Not confirmed yet' : '—'}
+														{#if user.email && user.email_confirmed_at === null}
+															<button onclick={() => handleMarkConfirmed(user)} class="ml-2 cursor-pointer text-xs font-medium text-eurobase-700 hover:underline">Mark confirmed</button>
+														{/if}
+													</dd>
 												</div>
 												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Last Sign In</dt>

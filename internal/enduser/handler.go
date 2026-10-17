@@ -886,6 +886,10 @@ func HandleVerifyPhoneOTP(svc *AuthService, limiter ...*ratelimit.RateLimiter) h
 		resp, err := svc.VerifyPhoneOTP(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req.Phone, req.Code)
 		if err != nil {
 			slog.Warn("verify phone otp failed", "error", err)
+			if errors.Is(err, ErrEmailNotConfirmed) {
+				writeJSON(w, map[string]string{"error": ErrEmailNotConfirmed.Error()}, http.StatusForbidden)
+				return
+			}
 			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}

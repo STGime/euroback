@@ -11,6 +11,15 @@ import (
 // password; handlers answer 403 {"error":"email_not_confirmed"}.
 var ErrEmailNotConfirmed = errors.New("email_not_confirmed")
 
+// emailConfirmationPending is the one rule every session-issuing path
+// applies (#806): with confirmation required, a user who has a password
+// and hasn't confirmed their email gets no session. Users without a
+// password (OAuth, magic link, phone, passkey-only) are confirmed by how
+// they sign in, or have no email to confirm.
+func emailConfirmationPending(requireConfirmation, hasPassword bool, confirmedAt *time.Time) bool {
+	return requireConfirmation && hasPassword && confirmedAt == nil
+}
+
 // SignUpRequest is the JSON body for end-user sign-up.
 type SignUpRequest struct {
 	Email    string                 `json:"email"`

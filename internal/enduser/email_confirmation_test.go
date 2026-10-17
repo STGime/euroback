@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -128,10 +131,33 @@ func TestEmailConfirmation_DB(t *testing.T) {
 		t.Fatalf("refresh (unconfirmed) = %v, want ErrEmailNotConfirmed", err)
 	}
 
-	// Confirm → everything works and the user object says so.
-	if _, err := pool.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET email_confirmed_at = now() WHERE id = $1`, resp.User.ID); err != nil {
-		t.Fatal(err)
+	// Confirm through the console's admin PATCH ("Mark confirmed").
+	patch := func(body string) PlatformUser {
+		r := httptest.NewRequest(http.MethodPatch, "/"+resp.User.ID, bytes.NewBufferString(body))
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("userId", resp.User.ID)
+		c := context.WithValue(r.Context(), chi.RouteCtxKey, rctx)
+		c = query.ContextWithSchema(c, schema)
+		w := httptest.NewRecorder()
+		handleUpdateUser(pool, nil)(w, r.WithContext(c))
+		if w.Code != http.StatusOK {
+			t.Fatalf("PATCH %s: %d %s", body, w.Code, w.Body.String())
+		}
+		var u PlatformUser
+		_ = json.Unmarshal(w.Body.Bytes(), &u)
+		return u
 	}
+	first := patch(`{"email_confirmed": true}`).EmailConfirmedAt
+	if first == nil {
+		t.Fatal("mark confirmed: no date")
+	}
+	if again := patch(`{"email_confirmed": true}`).EmailConfirmedAt; again == nil || !again.Equal(*first) {
+		t.Fatalf("confirming again must keep the date: %v vs %v", again, first)
+	}
+	if u := patch(`{"email_confirmed": false}`); u.EmailConfirmedAt != nil {
+		t.Fatalf("mark unconfirmed: %+v", u)
+	}
+	patch(`{"email_confirmed": true}`)
 	in, err := svc.SignIn(ctx, schema, jwtSecret, pid, confirmCfg, SignInRequest{Email: email, Password: password})
 	if err != nil || in.AccessToken == "" || in.User.EmailConfirmedAt == nil {
 		t.Fatalf("signin after confirm: %+v, %v", in, err)
@@ -150,5 +176,23 @@ func TestEmailConfirmation_DB(t *testing.T) {
 	open, err := svc.SignUp(ctx, schema, jwtSecret, pid, openCfg, SignUpRequest{Email: "other@example.com", Password: password})
 	if err != nil || open.ConfirmationRequired || open.AccessToken == "" || open.User.EmailConfirmedAt == nil {
 		t.Fatalf("signup without confirmation: %+v, %v", open, err)
+	}
+}
+
+func TestEmailConfirmationPending(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		require, password bool
+		confirmed         *time.Time
+		want              bool
+	}{
+		{true, true, nil, true},   // unconfirmed password user
+		{true, true, &now, false}, // confirmed
+		{true, false, nil, false}, // OAuth / magic link / phone / passkey-only
+		{false, true, nil, false}, // setting off
+	} {
+		if got := emailConfirmationPending(c.require, c.password, c.confirmed); got != c.want {
+			t.Errorf("emailConfirmationPending(%v, %v, %v) = %v, want %v", c.require, c.password, c.confirmed != nil, got, c.want)
+		}
 	}
 }

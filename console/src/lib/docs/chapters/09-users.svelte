@@ -14,6 +14,7 @@
 					<li><strong>Phone-only users</strong> &mdash; users who sign up via SMS OTP appear with their phone number instead of email</li>
 					<li><strong>Create user</strong> &mdash; manually add a user with email and password</li>
 					<li><strong>Edit user</strong> &mdash; update email, display name, or metadata</li>
+					<li><strong>Mark confirmed</strong> &mdash; confirm a user's email address by hand (for users who existed before you turned on email confirmation, or can't receive the email)</li>
 					<li><strong>Suspend / reactivate</strong> &mdash; temporarily block a user from signing in (revokes all refresh tokens)</li>
 					<li><strong>Delete user</strong> &mdash; permanently remove a user account</li>
 					<li><strong>Reset password</strong> &mdash; set a new password for a user directly (revokes all refresh tokens)</li>

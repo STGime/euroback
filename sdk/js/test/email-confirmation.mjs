@@ -54,4 +54,12 @@ assert.equal(open.data.access_token, 'a.b.c')
 assert.equal(open.user.email_confirmed_at, '2026-10-17T00:00:00Z')
 assert.deepEqual(events, ['SIGNED_IN'])
 
+// Refresh refused for an unconfirmed user: signed out with that error.
+next = { status: 403, body: { error: 'email_not_confirmed' } }
+const ref = await eb.auth.refreshSession()
+assert.equal(ref.error, EMAIL_NOT_CONFIRMED)
+assert.equal(eb.auth.getSession(), null, 'session cleared')
+assert.equal(store.size, 0, 'stored session removed')
+assert.equal(events.at(-1), 'SIGNED_OUT')
+
 console.log('email-confirmation: ok')

@@ -46,6 +46,9 @@ type updateUserRequest struct {
 	Email       *string                `json:"email,omitempty"`
 	DisplayName *string                `json:"display_name,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	// EmailConfirmed marks the email confirmed (true; keeps an existing
+	// date) or unconfirmed (false) — #806.
+	EmailConfirmed *bool `json:"email_confirmed,omitempty"`
 }
 
 type resetPasswordRequest struct {
@@ -359,6 +362,13 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 			args = append(args, email)
 			argIdx++
 		}
+		if req.EmailConfirmed != nil {
+			if *req.EmailConfirmed {
+				setClauses = append(setClauses, "email_confirmed_at = COALESCE(email_confirmed_at, now())")
+			} else {
+				setClauses = append(setClauses, "email_confirmed_at = NULL")
+			}
+		}
 		if req.DisplayName != nil {
 			setClauses = append(setClauses, fmt.Sprintf("display_name = $%d", argIdx))
 			args = append(args, *req.DisplayName)
@@ -371,7 +381,7 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 			argIdx++
 		}
 
-		if len(args) == 0 {
+		if len(setClauses) == 1 { // only updated_at
 			http.Error(w, `{"error":"no fields to update"}`, http.StatusBadRequest)
 			return
 		}

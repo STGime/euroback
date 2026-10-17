@@ -12,7 +12,7 @@ With **Require email confirmation** on, the gateway no longer issues a session a
 - `signIn()` with the correct password returns `error: 'email_not_confirmed'` (exported as `EMAIL_NOT_CONFIRMED`) instead of "invalid email or password", so you can offer `resendVerification(email)`. A wrong password still returns "invalid email or password". `signInWithPasskey()` and `refreshSession()` return the same error for an unconfirmed user.
 - `AuthUser.email_confirmed_at` — when the user confirmed their email, or `null`.
 
-Requires the gateway change from #806. With an older gateway, `signUp()` behaves as in 0.9.x.
+Requires the gateway change from #806. With an older gateway, `signUp()` behaves as in 0.9.x. **Upgrade before relying on the new gateway behaviour:** SDK 0.9.x and older treat the token-less sign-up response as a session (calls then fail with 401), so apps on projects with email confirmation on should move to 0.10.0.
 
 ## 0.9.1 — 2026-10-16
 

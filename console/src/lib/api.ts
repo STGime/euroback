@@ -1776,7 +1776,7 @@ export class EurobaseAPI {
 		});
 	}
 
-	async updateEndUser(projectId: string, userId: string, data: { email?: string; display_name?: string; metadata?: Record<string, any> }): Promise<EndUser> {
+	async updateEndUser(projectId: string, userId: string, data: { email?: string; display_name?: string; metadata?: Record<string, any>; email_confirmed?: boolean }): Promise<EndUser> {
 		return this.fetch<EndUser>(`/platform/projects/${projectId}/users/${userId}`, {
 			method: 'PATCH',
 			body: JSON.stringify(data)

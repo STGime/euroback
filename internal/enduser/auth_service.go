@@ -305,7 +305,7 @@ func (s *AuthService) SignIn(ctx context.Context, schemaName, jwtSecret string, 
 
 	// Sign-in guard: block unverified users when email confirmation is
 	// required. Only reached with the correct password (#806).
-	if config.RequireEmailConfirmation && user.EmailConfirmedAt == nil {
+	if emailConfirmationPending(config.RequireEmailConfirmation, true, user.EmailConfirmedAt) {
 		return nil, ErrEmailNotConfirmed
 	}
 
@@ -406,7 +406,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 	// Same rule as SignIn (#806): a password user whose email isn't
 	// confirmed gets no new tokens (the deferred rollback keeps the old
 	// refresh token as it was).
-	if config.RequireEmailConfirmation && hasPassword && user.EmailConfirmedAt == nil {
+	if emailConfirmationPending(config.RequireEmailConfirmation, hasPassword, user.EmailConfirmedAt) {
 		return nil, ErrEmailNotConfirmed
 	}
 	_ = json.Unmarshal(metadataJSON, &user.Metadata)
@@ -622,7 +622,8 @@ func (s *AuthService) ResetPassword(ctx context.Context, schemaName, rawToken, n
 	}
 
 	// Update password + revoke all refresh tokens in a single service-role tx.
-	updateQ := fmt.Sprintf(`UPDATE %s.users SET password_hash = $1, updated_at = now() WHERE id = $2`, quoteIdent(schemaName))
+	// Following the emailed reset link proves the address: confirm it too.
+	updateQ := fmt.Sprintf(`UPDATE %s.users SET password_hash = $1, email_confirmed_at = COALESCE(email_confirmed_at, now()), updated_at = now() WHERE id = $2`, quoteIdent(schemaName))
 	revokeQ := fmt.Sprintf(`UPDATE %s.refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, quoteIdent(schemaName))
 	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, updateQ, string(hash), userID); err != nil {
@@ -1098,10 +1099,11 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 	var user User
 	var metadataJSON []byte
 	var bannedAt *time.Time
+	var hasPassword bool
 	updateQ := fmt.Sprintf(
 		`UPDATE %s.users SET phone_confirmed_at = COALESCE(phone_confirmed_at, now()), last_sign_in_at = now(), updated_at = now()
 		 WHERE id = $1
-		 RETURNING id, email, phone, display_name, avatar_url, metadata, banned_at, email_confirmed_at, created_at, updated_at`,
+		 RETURNING id, email, phone, display_name, avatar_url, metadata, banned_at, email_confirmed_at, password_hash IS NOT NULL, created_at, updated_at`,
 		quoteIdent(schemaName),
 	)
 	upsertIdentityQ := fmt.Sprintf(
@@ -1112,12 +1114,17 @@ func (s *AuthService) VerifyPhoneOTP(ctx context.Context, schemaName, jwtSecret,
 	)
 	err = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		if e := tx.QueryRow(ctx, updateQ, userID).
-			Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt); e != nil {
+			Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.EmailConfirmedAt, &hasPassword, &user.CreatedAt, &user.UpdatedAt); e != nil {
 			return fmt.Errorf("load phone user: %w", e)
 		}
 		_ = json.Unmarshal(metadataJSON, &user.Metadata)
 		if bannedAt != nil {
 			return nil
+		}
+		// Same rule as SignIn / RefreshToken (#806); rolls back the
+		// phone confirmation + last_sign_in_at above.
+		if emailConfirmationPending(config.RequireEmailConfirmation, hasPassword, user.EmailConfirmedAt) {
+			return ErrEmailNotConfirmed
 		}
 		_, _ = tx.Exec(ctx, upsertIdentityQ, user.ID, phone)
 		return nil
