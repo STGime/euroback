@@ -1599,6 +1599,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Group(func(r chi.Router) {
 				r.Use(endUserMw.Handler)
 				r.Get("/user", enduser.HandleGetUser(endUserAuthSvc))
+				// #808: change the password while signed in (current + new).
+				r.Post("/user/password", enduser.HandleChangePassword(endUserAuthSvc, limiter))
 				// #630: passkey management — a valid end-user access token
 				// (short-lived) gates enrol/list/delete, so a stolen
 				// long-lived session can't silently enrol an attacker key.

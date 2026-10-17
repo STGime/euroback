@@ -336,6 +336,30 @@ export class AuthClient {
   }
 
   /**
+   * Change the signed-in user's password (#808). Needs the current
+   * password. All of the user's refresh tokens are revoked, so other
+   * sessions end once their current access token expires; this client gets
+   * a fresh session and emits `TOKEN_REFRESHED`. Users without a password (magic link, OAuth) set
+   * one with `forgotPassword()` / `resetPassword()` instead.
+   * Requires gateway #808.
+   */
+  async updatePassword(params: { currentPassword: string; newPassword: string }): Promise<{ data: AuthSession | null; error: string | null }> {
+    if (!this.session) {
+      return { data: null, error: 'not signed in' }
+    }
+    const result = await this.http.post('/v1/auth/user/password', {
+      current_password: params.currentPassword,
+      new_password: params.newPassword,
+    })
+    if (result.error) {
+      return { data: null, error: result.error }
+    }
+    const session = this.setSession(result)
+    this.emit('TOKEN_REFRESHED', session)
+    return { data: session, error: null }
+  }
+
+  /**
    * Complete a password reset using a token from a reset email.
    * Call this from the page you configured as `password_reset_url`
    * (or `emailRedirectTo`), after reading the `token` query

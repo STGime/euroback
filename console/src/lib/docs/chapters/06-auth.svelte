@@ -117,6 +117,11 @@
 					Same shape, but you collect a new password from the user first, then call <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.resetPassword(token, newPassword)</code>. Trigger the email with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.forgotPassword(email)</code>.
 				</p>
 
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Changing the password while signed in</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					A signed-in user changes their password with <code class="bg-gray-100 border border-gray-200 rounded px-1">POST /v1/auth/user/password</code> and their access token, sending <code class="bg-gray-100 border border-gray-200 rounded px-1">current_password</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">new_password</code>; the response is a fresh session. The SDK helper <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.updatePassword({'{'} currentPassword, newPassword {'}'})</code> comes with the next SDK release. The current password is required, and wrong guesses count towards the account's sign-in attempt limit. Their refresh tokens are revoked, so other sessions end once their current access token expires; the current one gets a fresh session. Users who sign in without a password (magic link, OAuth) set one through a password reset.
+				</p>
+
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Magic link page</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Same shape. Trigger with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.requestMagicLink(email)</code>; complete with <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.signInWithMagicLink(token)</code>. On success the user is signed in and you can redirect to your app's home page. The email only goes to an address that already has an account (see <em>Magic Links</em> below).
