@@ -5,7 +5,7 @@
 	import LogsTabs from '$lib/components/LogsTabs.svelte';
 
 	const projectCtx = getContext<{ id: string; project: import('$lib/api.js').Project | null }>('projectId');
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let plan = $derived(projectCtx.project?.plan ?? 'free');
 	let isFreePlan = $derived(plan === 'free');
 
