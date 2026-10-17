@@ -1,6 +1,7 @@
 package query
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -135,12 +136,25 @@ func checkPrivilegeStatement(st []privWord) error {
 			}
 		case "definer":
 			if kw(i-1) == "security" {
-				return privErr("SECURITY DEFINER")
+				return errors.New(SecurityDefinerRejection)
 			}
 		}
 	}
 	return nil
 }
+
+// SecurityDefinerDocsURL documents why SECURITY DEFINER is refused and
+// what to use instead (#661).
+const SecurityDefinerDocsURL = "https://console.eurobase.app/docs/rls#security-definer"
+
+// SecurityDefinerRejection is the error for SECURITY DEFINER on every SQL
+// surface (SQL editor, SDK, cron, tenant migrations; the functions runner
+// mirrors it in sql_guard.ts): why it's refused and what works instead,
+// rather than a bare "not allowed" (#661).
+const SecurityDefinerRejection = "SECURITY DEFINER is not allowed: a definer function runs with the privileges of the role that owns it, not the caller's, and here that is a platform role, so it would bypass your project's isolation and row-level security. " +
+	"Use SECURITY INVOKER (the default) and let RLS decide; policies can admit trusted callers with is_service_role(). " +
+	"For work that must reach every user's rows, run it as the service role: a cron job with \"Run as service role\", an edge function called without a user session, or the service key on your server. " +
+	"See " + SecurityDefinerDocsURL
 
 func privErr(what string) error {
 	return fmt.Errorf("%s is not allowed here: role, session and privilege management is handled by the platform", what)

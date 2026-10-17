@@ -76,7 +76,7 @@ CREATE POLICY listings_owner ON listings
 					<li>References to other schemas (<code class="bg-gray-100 rounded px-1">public.*</code>, <code class="bg-gray-100 rounded px-1">pg_catalog</code>, other tenants). Exception: the RLS helpers <code class="bg-gray-100 rounded px-1">public.is_service_role()</code>, <code class="bg-gray-100 rounded px-1">public.current_end_user_id()</code>, and <code class="bg-gray-100 rounded px-1">public.uuid_generate_v4()</code>.</li>
 					<li><code class="bg-gray-100 rounded px-1">GRANT</code>/<code class="bg-gray-100 rounded px-1">REVOKE</code>, <code class="bg-gray-100 rounded px-1">SET ROLE</code>/<code class="bg-gray-100 rounded px-1">search_path</code> — access control belongs to the platform.</li>
 					<li>Transaction control (<code class="bg-gray-100 rounded px-1">COMMIT</code>, <code class="bg-gray-100 rounded px-1">BEGIN</code>) — your file already runs in a transaction.</li>
-					<li><code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code> functions, <code class="bg-gray-100 rounded px-1">CREATE EXTENSION</code>, <code class="bg-gray-100 rounded px-1">COPY</code>.</li>
+					<li><code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code> functions (<a href="/docs/rls#security-definer" class="text-eurobase-600 hover:underline cursor-pointer">why, and what to use instead</a>), <code class="bg-gray-100 rounded px-1">CREATE EXTENSION</code>, <code class="bg-gray-100 rounded px-1">COPY</code>.</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Plain <code class="bg-gray-100 rounded px-1">LANGUAGE plpgsql</code> functions and triggers are fine. Bulk data loads belong in the SDK/REST data path, not migrations.
