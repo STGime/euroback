@@ -131,6 +131,12 @@ func TestEmailConfirmation_DB(t *testing.T) {
 		t.Fatalf("refresh (unconfirmed) = %v, want ErrEmailNotConfirmed", err)
 	}
 
+	// An unknown token is ErrInvalidRefreshToken (401), not an internal
+	// error (#814).
+	if _, err := svc.RefreshToken(ctx, schema, jwtSecret, pid, confirmCfg, "not-a-token"); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Fatalf("refresh (unknown token) = %v, want ErrInvalidRefreshToken", err)
+	}
+
 	// Confirm through the console's admin PATCH ("Mark confirmed").
 	patch := func(body string) PlatformUser {
 		r := httptest.NewRequest(http.MethodPatch, "/"+resp.User.ID, bytes.NewBufferString(body))

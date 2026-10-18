@@ -13,6 +13,64 @@ import { passkeysSupported, createPasskey, getPasskeyAssertion, passkeyErrorMess
 /** setTimeout's largest delay (2^31 - 1 ms, about 24.8 days). */
 const MAX_TIMEOUT_MS = 2 ** 31 - 1
 
+/** First retry after a failed refresh; doubles up to REFRESH_RETRY_MAX_MS. */
+const REFRESH_RETRY_MIN_MS = 5_000
+const REFRESH_RETRY_MAX_MS = 60_000
+
+/** A refresh request that takes longer is aborted (and retried). */
+const REFRESH_TIMEOUT_MS = 20_000
+
+/**
+ * How long a tab waits for another tab's refresh before refreshing itself.
+ * Longer than REFRESH_TIMEOUT_MS, so a slow refresh in one tab doesn't
+ * make another refresh with the token being rotated.
+ */
+const REFRESH_LOCK_WAIT_MS = 30_000
+
+/**
+ * signOut() stores this briefly before removing the session, so the app's
+ * other tabs see a sign-out in their `storage` event. A plain removal only
+ * means a refresh was rejected, which a tab that is refreshing itself can
+ * still recover from.
+ */
+const SIGNED_OUT_MARKER = '{"signed_out":true}'
+
+/**
+ * Statuses from /v1/auth/refresh that end the session: the token is
+ * unknown, revoked or expired (401), the request is malformed (400), or the
+ * user must confirm their email first (403). Anything else — no response,
+ * 429, 5xx, maintenance — is temporary: keep the session and retry (#814).
+ */
+function endsSession(status: unknown): boolean {
+  return status === 400 || status === 401 || status === 403
+}
+
+/** True for a server response (or stored value) that is a usable session. */
+function isSession(value: unknown): value is AuthSession {
+  const v = value as Partial<AuthSession> | null
+  return !!v && typeof v === 'object'
+    && typeof v.access_token === 'string' && v.access_token !== ''
+    && typeof v.refresh_token === 'string' && v.refresh_token !== ''
+}
+
+/** When the session's access token was issued (its `iat`), or null. */
+function issuedAt(session: AuthSession): number | null {
+  const iat = decodeJwtClaims(session.access_token)?.iat
+  return typeof iat === 'number' ? iat : null
+}
+
+/** Error returned when a sign-in response isn't a session. */
+const INVALID_SESSION_RESPONSE = 'invalid session in server response'
+
+function setTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+  const t = setTimeout(fn, ms)
+  // In Node a pending refresh must not keep the process alive — a script
+  // that signs in would otherwise hang until the token nears expiry
+  // (~1 h). Browsers return a number here, so this is a no-op.
+  ;(t as { unref?: () => void }).unref?.()
+  return t
+}
+
 /**
  * Read the claims of a JWT without verifying it (the gateway verifies every
  * request; this only fills the client-side session). Returns null for
@@ -177,11 +235,23 @@ export class AuthClient {
   private listeners: AuthStateChangeCallback[] = []
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private storageKey = 'eurobase_auth_session'
+  /**
+   * Bumped on every session change (set, clear, adopted from another tab).
+   * A refresh whose response arrives after a change drops its result, so a
+   * sign-out during a refresh stays signed out (#814).
+   */
+  private generation = 0
+  /** The refresh in flight, shared by concurrent callers of the same session. */
+  private refreshing: Promise<{ data: AuthSession | null; error: string | null }> | null = null
+  private refreshingGeneration = -1
+  /** Failed refresh attempts in a row (temporary errors only). */
+  private refreshAttempts = 0
 
   constructor(config: EurobaseConfig, http: HttpClient) {
     this.http = http
     this.config = config
     this.restoreSession()
+    this.listenToOtherTabs()
   }
 
   /**
@@ -209,8 +279,11 @@ export class AuthClient {
     if (result.error) {
       return { data: null, error: result.error }
     }
-    if (result.confirmation_required || !result.access_token) {
+    if (result.confirmation_required || (!result.access_token && result.user)) {
       return { data: null, error: null, user: result.user, confirmationRequired: true }
+    }
+    if (!isSession(result)) {
+      return { data: null, error: INVALID_SESSION_RESPONSE }
     }
     const session = this.setSession(result)
     this.emit('SIGNED_IN', session)
@@ -223,39 +296,109 @@ export class AuthClient {
     if (result.error) {
       return { data: null, error: result.error }
     }
+    if (!isSession(result)) {
+      return { data: null, error: INVALID_SESSION_RESPONSE }
+    }
     const session = this.setSession(result)
     this.emit('SIGNED_IN', session)
     return { data: session, error: null }
   }
 
-  /** Sign out the current user. */
+  /**
+   * Sign out the current user. The session is cleared at once (also in
+   * the app's other tabs); then the refresh token is revoked on the server.
+   */
   async signOut(): Promise<{ error: string | null }> {
-    if (this.session) {
-      await this.http.post('/v1/auth/signout', {
-        refresh_token: this.session.refresh_token,
-      })
-    }
-    this.clearSession()
+    const refreshToken = this.session?.refresh_token
+    this.clearSession(true)
     this.emit('SIGNED_OUT', null)
+    if (refreshToken) {
+      // keepalive: a SIGNED_OUT listener that navigates away must not
+      // cancel the revoke.
+      await this.http.post('/v1/auth/signout', { refresh_token: refreshToken }, { keepalive: true })
+    }
     return { error: null }
   }
 
-  /** Refresh the current session using the refresh token. */
+  /**
+   * Refresh the current session using the refresh token.
+   *
+   * The session ends (`SIGNED_OUT`) only when the server rejects the
+   * refresh token (400 / 401 / 403, e.g. revoked, expired, or
+   * `email_not_confirmed`). On a network error, a rate limit or a server
+   * error the session is kept, the error is returned, and the SDK retries
+   * on its own with backoff — the first retries before the access token
+   * expires (#814).
+   *
+   * Calls made while a refresh is running share it. In a browser, tabs
+   * of the same app share the session: only one refreshes at a time, and
+   * the others take the session it stores.
+   */
   async refreshSession(): Promise<{ data: AuthSession | null; error: string | null }> {
+    if (!this.refreshing || this.refreshingGeneration !== this.generation) {
+      const run = this.runRefresh().finally(() => {
+        if (this.refreshing === run) this.refreshing = null
+      })
+      this.refreshing = run
+      this.refreshingGeneration = this.generation
+    }
+    return this.refreshing
+  }
+
+  private async runRefresh(): Promise<{ data: AuthSession | null; error: string | null }> {
     if (!this.session?.refresh_token) {
       return { data: null, error: 'no refresh token' }
     }
-    const result = await this.http.post('/v1/auth/refresh', {
-      refresh_token: this.session.refresh_token,
+    return this.withRefreshLock(async () => {
+      // Another tab may have refreshed while this one waited for the lock
+      // (or missed its storage event): take its session instead of using a
+      // refresh token that the server has already rotated.
+      if (this.adoptStoredSession()) {
+        this.refreshAttempts = 0
+        return { data: this.session, error: null }
+      }
+      if (!this.session?.refresh_token) {
+        return { data: null, error: 'no refresh token' }
+      }
+      const generation = this.generation
+      const result = await this.http.post('/v1/auth/refresh', {
+        refresh_token: this.session.refresh_token,
+      }, { timeoutMs: REFRESH_TIMEOUT_MS })
+
+      if (generation !== this.generation) {
+        // The session changed during the request (sign-out, sign-in,
+        // another tab). Keep that change; drop this result, and revoke
+        // the token the server just issued for it.
+        if (isSession(result) && result.refresh_token !== this.session?.refresh_token) {
+          void this.http.post('/v1/auth/signout', { refresh_token: result.refresh_token })
+        }
+        return this.session
+          ? { data: this.session, error: null }
+          : { data: null, error: 'signed out' }
+      }
+
+      if (result.error && endsSession(result.status)) {
+        // Rejected — unless another tab rotated the token meanwhile.
+        if (this.adoptStoredSession()) {
+          this.refreshAttempts = 0
+          return { data: this.session, error: null }
+        }
+        this.refreshAttempts = 0
+        this.clearSession()
+        this.emit('SIGNED_OUT', null)
+        return { data: null, error: result.error }
+      }
+
+      if (result.error || !isSession(result)) {
+        this.scheduleRetry()
+        return { data: null, error: result.error || INVALID_SESSION_RESPONSE }
+      }
+
+      this.refreshAttempts = 0
+      const session = this.setSession(result)
+      this.emit('TOKEN_REFRESHED', session)
+      return { data: session, error: null }
     })
-    if (result.error) {
-      this.clearSession()
-      this.emit('SIGNED_OUT', null)
-      return { data: null, error: result.error }
-    }
-    const session = this.setSession(result)
-    this.emit('TOKEN_REFRESHED', session)
-    return { data: session, error: null }
   }
 
   /**
@@ -286,6 +429,9 @@ export class AuthClient {
     const result = await this.http.post('/v1/auth/signin-magic-link', { token })
     if (result.error) {
       return { data: null, error: result.error }
+    }
+    if (!isSession(result)) {
+      return { data: null, error: INVALID_SESSION_RESPONSE }
     }
     const session = this.setSession(result)
     this.emit('SIGNED_IN', session)
@@ -353,6 +499,9 @@ export class AuthClient {
     })
     if (result.error) {
       return { data: null, error: result.error }
+    }
+    if (!isSession(result)) {
+      return { data: null, error: INVALID_SESSION_RESPONSE }
     }
     const session = this.setSession(result)
     this.emit('TOKEN_REFRESHED', session)
@@ -499,6 +648,9 @@ export class AuthClient {
     if (result?.error) {
       return { data: null, error: result.error }
     }
+    if (!isSession(result)) {
+      return { data: null, error: INVALID_SESSION_RESPONSE }
+    }
     const session = this.setSession(result)
     this.emit('SIGNED_IN', session)
     return { data: session, error: null }
@@ -610,7 +762,11 @@ export class AuthClient {
     }
     if (this.session && result?.id && result.id === this.session.user?.id) {
       this.session = { ...this.session, user: result as AuthUser }
-      this.persistSession(this.session)
+      // Only while storage still holds this session: never write an older
+      // session over one another tab stored meanwhile.
+      if (this.readStoredSession()?.refresh_token === this.session.refresh_token) {
+        this.persistSession(this.session)
+      }
     }
     return { data: result, error: null }
   }
@@ -717,6 +873,7 @@ export class AuthClient {
       expiresAt = Math.floor(Date.now() / 1000) + (Number(session.expires_in) || 3600)
     }
     session = { ...session, expires_at: expiresAt }
+    this.generation++
     this.session = session
     this.http.setAccessToken(session.access_token)
     this.persistSession(session)
@@ -724,9 +881,13 @@ export class AuthClient {
     return session
   }
 
-  private clearSession() {
+  /** `signedOut`: an explicit sign-out, which the other tabs follow. */
+  private clearSession(signedOut = false) {
+    this.generation++
+    this.refreshAttempts = 0
     this.session = null
     this.http.setAccessToken(null)
+    if (signedOut) this.markSignedOut()
     this.removePersistedSession()
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer)
@@ -739,21 +900,157 @@ export class AuthClient {
       clearTimeout(this.refreshTimer)
       this.refreshTimer = null
     }
-    // Refresh 60 seconds before expiry (at least 5 s from now).
-    const delay = Math.max(expiresAt * 1000 - 60_000 - Date.now(), 5000)
+    // Refresh 60 seconds before expiry (at least 5 s from now). In a
+    // browser without Web Locks, up to 10 s of jitter keeps tabs that
+    // restored the same session from refreshing at the same moment.
+    const jitter = typeof window !== 'undefined' && !webLocks() ? Math.random() * 10_000 : 0
+    const delay = Math.max(expiresAt * 1000 - 60_000 - jitter - Date.now(), 5000)
     // setTimeout stores the delay as a 32-bit int: anything longer
     // (sessions over ~24.8 days) would fire at once and refresh in a
     // loop (#804). Wait the maximum and check again instead.
     const capped = delay > MAX_TIMEOUT_MS
-    this.refreshTimer = setTimeout(() => {
+    this.refreshTimer = setTimer(() => {
       this.refreshTimer = null
       if (capped) this.scheduleRefresh(expiresAt)
-      else this.refreshSession()
+      else void this.refreshSession()
     }, capped ? MAX_TIMEOUT_MS : delay)
-    // In Node the pending refresh must not keep the process alive — a
-    // script that signs in would otherwise hang until the token nears
-    // expiry (~1 h). Browsers return a number here, so this is a no-op.
-    ;(this.refreshTimer as { unref?: () => void }).unref?.()
+  }
+
+  /**
+   * After a temporary refresh failure: try again with backoff (5 s,
+   * 10 s, … up to 60 s). While the access token is still valid, the next
+   * try comes before it expires.
+   */
+  private scheduleRetry() {
+    if (!this.session) return
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer)
+      this.refreshTimer = null
+    }
+    this.refreshAttempts++
+    let delay = Math.min(REFRESH_RETRY_MIN_MS * 2 ** (this.refreshAttempts - 1), REFRESH_RETRY_MAX_MS)
+    const untilExpiry = (this.session.expires_at ?? 0) * 1000 - Date.now()
+    if (untilExpiry > 0) {
+      delay = Math.max(Math.min(delay, untilExpiry - 1000), 1000)
+    }
+    this.refreshTimer = setTimer(() => {
+      this.refreshTimer = null
+      void this.refreshSession()
+    }, delay)
+  }
+
+  /**
+   * Run a refresh while holding a lock shared by the app's tabs (Web
+   * Locks), so only one tab uses the refresh token at a time — the server
+   * rotates it, and a second tab using the old one would be rejected.
+   * Without Web Locks (Node, older browsers), or if the lock isn't granted
+   * within REFRESH_LOCK_WAIT_MS, the refresh runs without it.
+   */
+  private async withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+    const locks = webLocks()
+    if (!locks) return fn()
+    let started = false
+    const run = () => {
+      started = true
+      return fn()
+    }
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const waitTimer = controller ? setTimer(() => controller.abort(), REFRESH_LOCK_WAIT_MS) : null
+    try {
+      return await locks.request(`${this.storageKey}:refresh`, controller ? { signal: controller.signal } : {}, run)
+    } catch (err) {
+      if (started) throw err
+      return fn()
+    } finally {
+      if (waitTimer) clearTimeout(waitTimer)
+    }
+  }
+
+  /**
+   * Keep this tab's session in step with the app's other tabs: a session
+   * another tab stored (refreshed, or a new sign-in) is taken over, and a
+   * removed one signs this tab out too.
+   */
+  private listenToOtherTabs() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+    window.addEventListener('storage', (event: StorageEvent) => {
+      // key null = the other tab called localStorage.clear().
+      if (event.key !== null && event.key !== this.storageKey) return
+      if (!this.session) {
+        this.adoptStoredSession()
+        return
+      }
+      // Signed out in another tab: follow.
+      if (event.newValue === SIGNED_OUT_MARKER) {
+        this.clearSession()
+        this.emit('SIGNED_OUT', null)
+        return
+      }
+      if (this.adoptStoredSession()) return
+      // Removed (another tab's refresh was rejected): follow too, unless
+      // this tab is refreshing — then its own result decides (it may hold
+      // a token that tab didn't have yet).
+      if (this.readStoredRaw() === null && !this.refreshing) {
+        this.clearSession()
+        this.emit('SIGNED_OUT', null)
+      }
+    })
+    // Back online after temporary refresh failures: retry now.
+    window.addEventListener('online', () => {
+      if (this.session && this.refreshAttempts > 0) void this.refreshSession()
+    })
+  }
+
+  /**
+   * If storage holds a different valid session than this tab (another tab
+   * refreshed or signed in), take it over and return true.
+   */
+  private adoptStoredSession(): boolean {
+    const stored = this.readStoredSession()
+    if (!stored) return false
+    const previous = this.session
+    if (previous && stored.refresh_token === previous.refresh_token) return false
+    // Never go back to an older session of the same user (e.g. a stale
+    // write after this tab refreshed): compare when the tokens were issued.
+    if (previous && stored.user?.id === previous.user?.id) {
+      const storedAt = issuedAt(stored)
+      const currentAt = issuedAt(previous)
+      if (storedAt !== null && currentAt !== null && storedAt < currentAt) return false
+    }
+    const session = this.setSession(stored, true)
+    const sameUser = !!previous && previous.user?.id === session.user?.id
+    this.emit(sameUser ? 'TOKEN_REFRESHED' : 'SIGNED_IN', session)
+    return true
+  }
+
+  private readStoredSession(): AuthSession | null {
+    try {
+      if (typeof localStorage === 'undefined') return null
+      const raw = localStorage.getItem(this.storageKey)
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      return isSession(parsed) ? parsed : null
+    } catch {
+      return null
+    }
+  }
+
+  private readStoredRaw(): string | null {
+    try {
+      return typeof localStorage !== 'undefined' ? localStorage.getItem(this.storageKey) : null
+    } catch {
+      return null
+    }
+  }
+
+  private markSignedOut() {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(this.storageKey, SIGNED_OUT_MARKER)
+      }
+    } catch {
+      // localStorage not available
+    }
   }
 
   private emit(event: AuthEvent, session: AuthSession | null) {
@@ -787,16 +1084,13 @@ export class AuthClient {
   }
 
   private restoreSession() {
-    try {
-      if (typeof localStorage !== 'undefined') {
-        const raw = localStorage.getItem(this.storageKey)
-        if (raw) {
-          const session = JSON.parse(raw) as AuthSession
-          this.setSession(session, true)
-        }
-      }
-    } catch {
-      // Ignore parse errors
-    }
+    const session = this.readStoredSession()
+    if (session) this.setSession(session, true)
   }
+}
+
+/** The Web Locks API, when the runtime has it (modern browsers). */
+function webLocks(): { request: (name: string, options: object, fn: () => Promise<any>) => Promise<any> } | null {
+  const locks = typeof navigator !== 'undefined' ? (navigator as any).locks : undefined
+  return locks && typeof locks.request === 'function' ? locks : null
 }

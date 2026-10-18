@@ -202,6 +202,9 @@ eb.auth.onAuthStateChange((event, session) => {'{'}\
 // Sign out
 await eb.auth.signOut()</pre>
 				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-3">
+					The SDK refreshes the session before the access token expires. The session ends (<code class="bg-gray-100 border border-gray-200 rounded px-1">SIGNED_OUT</code>) only when the server rejects the refresh token: it was revoked or expired, or the user must confirm their email first. If the network is down or the server has a temporary problem, the session is kept and the SDK retries with backoff. Browser tabs of the same app share one session: one tab refreshes, the others use the session it stores, and signing out in one tab signs out all of them. Requires an SDK release newer than 0.10.0.
+				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Magic Links (passwordless)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">

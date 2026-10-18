@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -58,7 +60,10 @@ func ResolveAPIKey(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*Pro
 	).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType,
 		&pc.Plan, &pc.AuthConfig, &pc.MaintenanceMode, &pdID)
 	if err != nil {
-		return nil, errInvalidAPIKey
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errInvalidAPIKey
+		}
+		return nil, fmt.Errorf("resolve api key: %w", err)
 	}
 	if pdID != nil {
 		pc.ProjectDatabaseID = pdID
@@ -71,8 +76,8 @@ var errInvalidAPIKey = errors.New("invalid API key")
 
 // ErrInvalidAPIKey is returned by ResolveAPIKey when the key is
 // unknown or the project is inactive. Callers can compare against
-// this to distinguish "bad key" from transient DB errors (though
-// today the lookup always returns this on any failure).
+// this to distinguish "bad key" from transient DB errors (returned
+// wrapped, not as ErrInvalidAPIKey).
 var ErrInvalidAPIKey = errInvalidAPIKey
 
 // Handler is the chi-compatible middleware func.
@@ -110,6 +115,16 @@ func (m *APIKeyMiddleware) Handler(next http.Handler) http.Handler {
 		).Scan(&pc.ProjectID, &pc.SchemaName, &pc.Slug, &pc.JWTSecret, &pc.KeyType,
 			&pc.Plan, &pc.AuthConfig, &pc.MaintenanceMode, &pdID)
 		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				// A database problem is not a bad key: answer 503 so
+				// clients retry. The SDK ends a session on a 401 from
+				// /v1/auth/refresh (#814).
+				slog.Error("API key lookup failed", "error", err, "prefix", safePrefix(apiKey))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":"service temporarily unavailable, try again"}`))
+				return
+			}
 			slog.Warn("invalid API key", "error", err, "prefix", safePrefix(apiKey))
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 			return

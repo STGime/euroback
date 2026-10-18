@@ -141,6 +141,8 @@ await eb.auth.signOut()
 
 Sessions are automatically persisted to `localStorage` (in browsers) and refreshed before expiry.
 
+A session ends only when the server rejects the refresh token (revoked, expired, or `email_not_confirmed`). If a refresh fails because the network is down or the server has a temporary problem, the session is kept and the SDK retries with backoff. Browser tabs of the same app share the session: one tab refreshes, the others use the session it stores, and signing out in one tab signs out all of them.
+
 ### Self-Serve Data Export (GDPR Article 15 / 20)
 
 Let signed-in end-users export their own data as a zip — rows from every table that references them, plus their auth record. Useful for "Download my data" buttons in privacy / settings pages.
