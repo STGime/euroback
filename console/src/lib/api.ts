@@ -144,7 +144,7 @@ export interface ProjectEmailSender {
 export interface EmailLogEntry {
 	id: number;
 	created_at: string;
-	flow: 'verification' | 'password_reset' | 'magic_link';
+	flow: 'verification' | 'password_reset' | 'magic_link' | 'password_changed';
 	recipient: string;
 	outcome: 'sent' | 'skipped' | 'failed';
 	reason?: string;

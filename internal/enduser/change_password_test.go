@@ -56,6 +56,8 @@ func TestChangePassword_DB(t *testing.T) {
 	raw := []byte(`{"providers": {"email_password": {"enabled": true}}, "password_min_length": 10, "session_duration": "1h"}`)
 	cfg := tenant.ParseAuthConfig(raw)
 	svc := &AuthService{pool: pool}
+	var notified []string
+	svc.passwordChangedHook = func(projectID, userEmail string) { notified = append(notified, projectID+" "+userEmail) }
 
 	const email, oldPw, newPw = "member@example.com", "old-password-1", "new-password-2"
 	up, err := svc.SignUp(ctx, schema, jwtSecret, pid, cfg, SignUpRequest{Email: email, Password: oldPw})
@@ -90,9 +92,15 @@ func TestChangePassword_DB(t *testing.T) {
 		t.Fatalf("over 72 bytes: %d", code)
 	}
 
+	if len(notified) != 0 {
+		t.Fatalf("no notice for failed changes: %v", notified)
+	}
 	code, out := change(up.User.ID, oldPw, newPw)
 	if code != http.StatusOK || out["access_token"] == nil || out["refresh_token"] == nil {
 		t.Fatalf("change: %d %v", code, out)
+	}
+	if len(notified) != 1 || notified[0] != pid+" "+email {
+		t.Fatalf("password changed notice (#822): %v", notified)
 	}
 	newRefresh, _ := out["refresh_token"].(string)
 
