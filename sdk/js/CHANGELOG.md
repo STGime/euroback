@@ -4,6 +4,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## Unreleased
 
+### Fixed — session robustness (#814)
+
+- **Temporary errors no longer sign the user out.** A refresh that fails with no response (offline, network error), a rate limit (429) or a server error (5xx, maintenance) keeps the session and retries with backoff (5 s, doubling up to 60 s; while the access token is valid, the next try comes before it expires; immediately when the browser comes back online). Only a rejected refresh token (400 / 401 / 403 — revoked, expired, `email_not_confirmed`) ends the session. A reload while offline keeps the user signed in. `refreshSession()` still returns the error.
+- **Sign-out during a refresh stays signed out.** `signOut()` now clears the session (and emits `SIGNED_OUT`) before it calls the server; a refresh response that arrives afterwards is dropped, and the token it carried is revoked.
+- **Unreadable responses are errors, not crashes.** A response body that fails to parse is now an `error` result instead of a rejected promise (from the refresh timer that was an unhandled rejection, which ends a Node process by default). A response without `access_token` / `refresh_token` is never stored as the session: sign-in methods return an error, a refresh is retried.
+- **Browser tabs share the session.** Tabs listen for `storage` events: a session another tab stored (refreshed, or a new sign-in) is taken over (`TOKEN_REFRESHED` / `SIGNED_IN`), and a sign-out in one tab signs out the others. Before refreshing, a tab takes a newer stored session instead of using a rotated refresh token; refreshes run under a Web Locks lock so only one tab refreshes at a time (without Web Locks, refresh times get up to 10 s of jitter). A refresh rejected because another tab rotated the token takes that tab's session instead of signing out.
+- Concurrent `refreshSession()` calls share one request.
+- Error results from the HTTP client now carry `status` (the HTTP status) when a response arrived.
+
+Gateway: `/v1/auth/refresh` now answers 500 (not 401) when the gateway itself fails, so a database problem no longer looks like a revoked token; a deleted user's token still gets 401. Older SDKs sign out on any refresh error either way.
+
 ### Added — change the password while signed in (#808)
 
 `auth.updatePassword({ currentPassword, newPassword })` replaces the signed-in user's password. The current password is required (a wrong one counts towards the account's sign-in attempt limit). Every refresh token of the user is revoked, so their other sessions end once their current access token expires; this client gets a fresh session (`TOKEN_REFRESHED`). Users without a password (magic link, OAuth) set one with `forgotPassword()` / `resetPassword()`. Requires the gateway change from #808 (`POST /v1/auth/user/password`).

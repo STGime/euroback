@@ -197,16 +197,32 @@ func HandleRefresh(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Han
 
 		resp, err := svc.RefreshToken(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req.RefreshToken)
 		if err != nil {
-			slog.Warn("token refresh failed", "error", err, "project_id", pc.ProjectID)
-			if errors.Is(err, ErrEmailNotConfirmed) {
-				writeJSON(w, map[string]string{"error": ErrEmailNotConfirmed.Error()}, http.StatusForbidden)
-				return
+			status, msg := refreshErrorResponse(err)
+			if status >= 500 {
+				slog.Error("token refresh failed", "error", err, "project_id", pc.ProjectID)
+			} else {
+				slog.Warn("token refresh failed", "error", err, "project_id", pc.ProjectID)
 			}
-			writeJSON(w, map[string]string{"error": "invalid or expired refresh token"}, http.StatusUnauthorized)
+			writeJSON(w, map[string]string{"error": msg}, status)
 			return
 		}
 
 		writeJSON(w, resp, http.StatusOK)
+	}
+}
+
+// refreshErrorResponse maps a RefreshToken error to its HTTP answer. Only
+// a bad token (401) and an unconfirmed email (403) say "this session is
+// over"; the SDK keeps the session and retries on a 5xx (#814), so an
+// internal failure must not look like a bad token.
+func refreshErrorResponse(err error) (int, string) {
+	switch {
+	case errors.Is(err, ErrEmailNotConfirmed):
+		return http.StatusForbidden, ErrEmailNotConfirmed.Error()
+	case errors.Is(err, ErrInvalidRefreshToken):
+		return http.StatusUnauthorized, ErrInvalidRefreshToken.Error()
+	default:
+		return http.StatusInternalServerError, "token refresh failed, try again"
 	}
 }
 

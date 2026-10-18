@@ -392,7 +392,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 	err = tx.QueryRow(ctx, q, tokenHash).Scan(&userID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("invalid or expired refresh token")
+			return nil, ErrInvalidRefreshToken
 		}
 		return nil, fmt.Errorf("revoke old token: %w", err)
 	}
@@ -409,6 +409,10 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 	err = tx.QueryRow(ctx, userQ, userID).
 		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &hasPassword, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			// The user was deleted: the session is over.
+			return nil, ErrInvalidRefreshToken
+		}
 		return nil, fmt.Errorf("query user: %w", err)
 	}
 	// Same rule as SignIn (#806): a password user whose email isn't

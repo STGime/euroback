@@ -59,6 +59,11 @@ export function httpClient(config: EurobaseConfig): HttpClient {
     return h
   }
 
+  /**
+   * Error results carry `status`: the HTTP status of an error response.
+   * It is absent when no response arrived (network error, offline) or a
+   * success body couldn't be read.
+   */
   async function handleResponse(res: Response): Promise<any> {
     if (res.status === 204) {
       return { error: null }
@@ -67,17 +72,20 @@ export function httpClient(config: EurobaseConfig): HttpClient {
     const contentType = res.headers.get('content-type') || ''
     if (!contentType.includes('application/json')) {
       if (!res.ok) {
-        return { error: `HTTP ${res.status}: ${res.statusText}` }
+        return { error: `HTTP ${res.status}: ${res.statusText}`, status: res.status }
       }
       return { error: null }
     }
 
-    const data = await res.json()
-
     if (!res.ok) {
+      // An error page with a JSON content type but a broken body still
+      // reports its status.
+      const data = await res.json().catch(() => null)
       const errorMessage = data?.error || `HTTP ${res.status}: ${res.statusText}`
-      return { error: errorMessage }
+      return { error: errorMessage, status: res.status }
     }
+
+    const data = await res.json()
 
     return data
   }
@@ -97,7 +105,9 @@ export function httpClient(config: EurobaseConfig): HttpClient {
           method: 'GET',
           headers: headers(),
         })
-        return handleResponse(res)
+        // `await` here, so a body that fails to parse lands in the catch
+        // below instead of rejecting the caller (#814).
+        return await handleResponse(res)
       } catch (err) {
         return { error: (err as Error).message }
       }
@@ -110,7 +120,9 @@ export function httpClient(config: EurobaseConfig): HttpClient {
           headers: headers('application/json'),
           body: body !== undefined ? JSON.stringify(body) : undefined,
         })
-        return handleResponse(res)
+        // `await` here, so a body that fails to parse lands in the catch
+        // below instead of rejecting the caller (#814).
+        return await handleResponse(res)
       } catch (err) {
         return { error: (err as Error).message }
       }
@@ -123,7 +135,9 @@ export function httpClient(config: EurobaseConfig): HttpClient {
           headers: headers('application/json'),
           body: body !== undefined ? JSON.stringify(body) : undefined,
         })
-        return handleResponse(res)
+        // `await` here, so a body that fails to parse lands in the catch
+        // below instead of rejecting the caller (#814).
+        return await handleResponse(res)
       } catch (err) {
         return { error: (err as Error).message }
       }
@@ -135,7 +149,9 @@ export function httpClient(config: EurobaseConfig): HttpClient {
           method: 'DELETE',
           headers: headers(),
         })
-        return handleResponse(res)
+        // `await` here, so a body that fails to parse lands in the catch
+        // below instead of rejecting the caller (#814).
+        return await handleResponse(res)
       } catch (err) {
         return { error: (err as Error).message }
       }
@@ -156,7 +172,9 @@ export function httpClient(config: EurobaseConfig): HttpClient {
           headers: h,
           body: formData,
         })
-        return handleResponse(res)
+        // `await` here, so a body that fails to parse lands in the catch
+        // below instead of rejecting the caller (#814).
+        return await handleResponse(res)
       } catch (err) {
         return { error: (err as Error).message }
       }

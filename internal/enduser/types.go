@@ -11,6 +11,13 @@ import (
 // password; handlers answer 403 {"error":"email_not_confirmed"}.
 var ErrEmailNotConfirmed = errors.New("email_not_confirmed")
 
+// ErrInvalidRefreshToken is returned by RefreshToken when the token is
+// unknown, revoked or expired — the only refresh failure answered with 401.
+// The SDK signs the user out on 400/401/403 and keeps the session (and
+// retries) on anything else (#814), so the gateway's own failures
+// (database down, …) must not be reported as 401.
+var ErrInvalidRefreshToken = errors.New("invalid or expired refresh token")
+
 // maxPasswordHashCost is the highest bcrypt cost a stored end-user hash
 // may have — the platform hashes at 12, Supabase at 10. Imports refuse
 // higher ones, and sign-in won't evaluate them.
