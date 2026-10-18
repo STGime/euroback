@@ -45,16 +45,16 @@
 						<strong>Token refresh rate</strong> &mdash; how many <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/refresh</code> calls per 5 min per IP. Higher than the others because legitimate SDK clients refresh proactively. <span class="text-gray-500">Default: 150 per 5 min (~ 1800/hour).</span>
 					</li>
 					<li>
-						<strong>Token verification rate</strong> &mdash; how many OTP / magic-link verify calls per 5 min per IP. <span class="text-gray-500">Default: 30 per 5 min.</span>
+						<strong>Token verification rate</strong> &mdash; how many phone-OTP, magic-link sign-in, password-reset and email-verification calls per 5 min per IP. <span class="text-gray-500">Default: 30 per 5 min.</span>
 					</li>
 					<li>
-						<strong>Auth emails</strong> &mdash; there's no hourly cap per project on the platform sender today (the "emails per hour" setting isn't enforced, so the console doesn't show it). Per address: 3 magic links and 3 password-reset emails per 15 minutes, one verification resend per 5 minutes.
+						<strong>Auth emails</strong> &mdash; there's no hourly cap per project on the platform sender today (the "emails per hour" setting isn't enforced, so the console doesn't show it). Per address: 3 magic links and 3 password-reset emails per 15 minutes, one verification resend per 5 minutes. Per client IP (so per project for now): 60 password-reset and 60 verification emails an hour, 300 magic-link requests an hour.
 					</li>
 					<li>
-						<strong>SMS per hour</strong> &mdash; cap on outbound auth SMS (phone OTP) per rolling hour. <span class="text-gray-500">Default: 30/hour.</span>
+						<strong>SMS per hour</strong> &mdash; cap on outbound auth SMS (phone OTP) per rolling hour. <span class="text-gray-500">Default: 30/hour; an override can be at most 10.</span>
 					</li>
 					<li>
-						<strong>IP Address Forwarding (Trust Proxy)</strong> &mdash; when on, the rate limiter takes the client IP from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">X-Forwarded-For</code> instead of the connection. <strong>Leave it off for now:</strong> on Eurobase's own domains it doesn't change how the limits count yet (see the note above). <span class="text-gray-500">Default: off.</span>
+						<strong>IP Address Forwarding (Trust Proxy)</strong> &mdash; when on, the rate limiter takes the client IP from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">X-Forwarded-For</code> instead of the connection. <strong>Leave it off for now:</strong> it doesn't change how the limits count yet (see the note above). <span class="text-gray-500">Default: off.</span>
 					</li>
 				</ul>
 

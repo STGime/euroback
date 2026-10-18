@@ -90,7 +90,7 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Is there an hourly limit on auth emails with the built-in sender?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">No hourly cap per project. Per address: 3 magic links and 3 password-reset emails per 15 minutes, and one verification resend per 5 minutes. Magic-link requests are also limited to 300 an hour (per client IP, so per project for now, as above).</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">No hourly cap on the number of emails sent. Per address: 3 magic links and 3 password-reset emails per 15 minutes, and one verification resend per 5 minutes. Per client IP (so per project for now, as above): 60 password-reset and 60 verification emails an hour, and 300 magic-link requests an hour. For a migration day, magic links (300/h) go further than mass password resets (60/h).</p>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Reliability, backups &amp; leaving</h3>

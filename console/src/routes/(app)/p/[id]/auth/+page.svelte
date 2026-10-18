@@ -1849,7 +1849,7 @@
 							When <strong>off</strong> (default), the limiter keys on the TCP peer — safe under any header forgery, but in deployments behind one shared ingress the counter collapses to a per-project total.
 						</p>
 						<p class="mt-0.5 text-xs text-amber-700">
-							Leave it off for now: on Eurobase's own domains, turning it on doesn't change how the limits count yet.
+							Leave it off for now: turning it on doesn't change how the limits count yet.
 						</p>
 						<p class="mt-1 text-[11px] text-gray-500">
 							Eurobase ships <strong>off</strong> by default: it's safe under any XFF chain configuration. The trusted-hop-count hardening
