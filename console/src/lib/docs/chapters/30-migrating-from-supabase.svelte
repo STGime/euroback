@@ -11,7 +11,7 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can I import my existing users without password resets?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. We use bcrypt in the same format as Supabase, so password hashes import as-is and your users keep their passwords. The importer preserves user UUIDs (so RLS keeps working), email-confirmed status, metadata, and OAuth identities.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. We use bcrypt in the same format as Supabase, so password hashes import as-is and your users keep their passwords. The importer preserves user UUIDs (so RLS keeps working), email-confirmed status, metadata, and OAuth identities. Without the CLI, the users API's batch import takes the same bcrypt hashes and ids (see below).</p>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
@@ -54,6 +54,43 @@
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Private storage with signed URLs?</p>
 					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes — a private per-project EU bucket with signed download URLs. Access differs from Supabase's <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">storage.foldername()</code> policies: files are owned per end-user automatically, with a separate mechanism for developer-shared folders (authenticated or public). SDK signed-URL expiry caps at 1 hour, so long playback sessions re-issue the URL.</p>
+				</div>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Auth from your server</h3>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">Can I create or import users from my server, e.g. with their email already confirmed?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes, with the users API and a <strong>project token with the Admin role</strong> (not the secret key &mdash; there's no <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/v1/auth/admin</code>). <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /platform/projects/&lt;id&gt;/users</code> creates one user; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST …/users/batch</code> imports up to 500 per request. The password is optional (users then sign in by magic link or set one with a password reset), <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email_confirmed</code> defaults to true, and a batch can carry bcrypt <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">password_hash</code>es and keep existing user ids. Re-running an import is safe. See <a href="/docs/users" class="cursor-pointer text-eurobase-700 hover:underline">Managing End Users</a>.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">Can I fetch, list, change and delete users from my server?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes, the same API: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET …/users?email=</code> (exact) or <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">?search=</code>, a list with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">last_sign_in_at</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email_confirmed_at</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">PATCH …/users/&lt;id&gt;</code> to change the email, name, metadata or confirmation, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">DELETE</code>, suspend and reset password.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">Can I verify access tokens on my server without a network call?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Not yet. Tokens are signed with a per-project secret that stays on the platform, so check a token with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /v1/auth/user</code> (it also tells you whether the user still exists). Asymmetric signing with a JWKS endpoint, for local verification, is planned.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">With email confirmation on, users who haven't confirmed get "invalid email or password". Why?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">That changed: signing in with the right password before confirming now answers <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">403 email_not_confirmed</code> (SDK: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">EMAIL_NOT_CONFIRMED</code>), so you can offer <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">resendVerification(email)</code>. Sign-up returns no session until the user confirms. Whether a user has confirmed is in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email_confirmed_at</code>. Use <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">@eurobase/sdk</code> 0.10.0 or later with this setting.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">Can a signed-in user change their password?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /v1/auth/user/password</code> with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">current_password</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">new_password</code> and the user's access token. Their other sessions end once their current access token expires, and the response is a fresh session. An SDK helper (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">updatePassword</code>) comes with the next SDK release.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">Are the auth rate limits per user IP or per project?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">They're counted per client IP, but the platform doesn't see each client's own IP yet, so today they act as a <strong>total per project</strong>. For a launch or a migration day, raise sign-ups / sign-ins to 30 and token verifications (which include magic-link sign-ins) to 150 per 5 minutes under Auth &rarr; Rate Limits. Per-IP counting will follow; see <a href="/docs/rate-limits" class="cursor-pointer text-eurobase-700 hover:underline">Rate Limits</a>.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">Is there an hourly limit on auth emails with the built-in sender?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">No hourly cap per project. Per address: 3 magic links and 3 password-reset emails per 15 minutes, and one verification resend per 5 minutes. Magic-link requests are also limited to 300 an hour (per client IP, so per project for now, as above).</p>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Reliability, backups &amp; leaving</h3>
