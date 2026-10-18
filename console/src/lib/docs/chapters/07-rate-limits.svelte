@@ -24,12 +24,19 @@
 					Every Eurobase project gets a sane platform-wide default. You only need to touch this page if you want to tighten or loosen a specific knob.
 				</p>
 
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+					<p class="text-sm font-semibold text-amber-900">Today the limits count per project</p>
+					<p class="mt-1 text-sm text-amber-800 leading-relaxed">
+						The limits below are counted per client IP, but the platform doesn't see each client's own IP yet. Until it does, every request to your project counts against one shared budget, so "per IP" currently means <strong>a total across all your users</strong>. For a launch, a migration day or anything else where many users sign in at once, set <strong>sign-up / sign-in to 30</strong> and <strong>token verification to 150</strong> per 5 minutes (the maximums). Per-IP counting will follow, and this page will say so.
+					</p>
+				</div>
+
 				<h3 class="text-lg font-semibold text-gray-900">Where to find it</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					In the console: <strong>Auth &rarr; Rate Limits</strong> tab. The page mirrors the same five knobs Supabase users will recognise, plus an "IP Address Forwarding" toggle for projects behind a CDN.
+					In the console: <strong>Auth &rarr; Rate Limits</strong> tab. The page shows the knobs below, plus an "IP Address Forwarding" toggle.
 				</p>
 
-				<h3 class="text-lg font-semibold text-gray-900 mt-6">The six knobs</h3>
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">The knobs</h3>
 				<ul class="text-sm text-gray-700 space-y-2 ml-4 list-disc">
 					<li>
 						<strong>Signup / sign-in rate</strong> &mdash; how many <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/signup</code> + <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/signin</code> requests per 5-minute window per IP. <span class="text-gray-500">Default: 8 per 5 min.</span>
@@ -41,13 +48,13 @@
 						<strong>Token verification rate</strong> &mdash; how many OTP / magic-link verify calls per 5 min per IP. <span class="text-gray-500">Default: 30 per 5 min.</span>
 					</li>
 					<li>
-						<strong>Emails per hour</strong> &mdash; cap on outbound auth emails (verification, password reset, magic link) the project sends through the platform sender per rolling hour. <span class="text-gray-500">Default: 2/hour.</span> When you bring your own SMTP (next chapter), sends through your provider are not counted against this cap.
+						<strong>Auth emails</strong> &mdash; there's no hourly cap per project on the platform sender today (the "emails per hour" setting isn't enforced, so the console doesn't show it). Per address: 3 magic links and 3 password-reset emails per 15 minutes, one verification resend per 5 minutes.
 					</li>
 					<li>
 						<strong>SMS per hour</strong> &mdash; cap on outbound auth SMS (phone OTP) per rolling hour. <span class="text-gray-500">Default: 30/hour.</span>
 					</li>
 					<li>
-						<strong>IP Address Forwarding (Trust Proxy)</strong> &mdash; when on, the rate limiter uses the leftmost <code class="bg-gray-100 border border-gray-200 rounded px-1">X-Forwarded-For</code> entry as the client IP instead of the TCP peer. Turn this on if your app sits behind a CDN or reverse proxy that you control; leave it off otherwise. <span class="text-gray-500">Default: off.</span>
+						<strong>IP Address Forwarding (Trust Proxy)</strong> &mdash; when on, the rate limiter takes the client IP from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">X-Forwarded-For</code> instead of the connection. <strong>Leave it off for now:</strong> on Eurobase's own domains it doesn't change how the limits count yet (see the note above). <span class="text-gray-500">Default: off.</span>
 					</li>
 				</ul>
 
@@ -62,13 +69,13 @@
 				<ol class="text-sm text-gray-700 space-y-2 ml-4 list-decimal">
 					<li>Open <strong>Auth &rarr; Rate Limits</strong>.</li>
 					<li>For each knob, leave blank to keep the platform default, or enter your value. The placeholder text shows what the default is.</li>
-					<li>(Optional) Toggle <strong>IP Address Forwarding</strong> if your app is behind a CDN/proxy. Only do this if you know your edge stack rewrites <code class="bg-gray-100 border border-gray-200 rounded px-1">X-Forwarded-For</code> &mdash; otherwise an attacker can spoof the IP and dodge the limit.</li>
+					<li>For a launch or migration day, set sign-up / sign-in to 30 and token verification to 150 (see the note above).</li>
 					<li>Hit <strong>Save changes</strong>. The new limits apply within a few seconds &mdash; no redeploy needed.</li>
 				</ol>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What an over-quota response looks like</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					When a project exceeds a per-IP rate, the SDK receives <strong>HTTP 429 Too Many Requests</strong> with a <code class="bg-gray-100 border border-gray-200 rounded px-1">Retry-After</code> header naming the number of seconds the client should wait. Your app can surface a friendly message; the limit window slides, so retrying after the indicated delay succeeds.
+					When a request goes over a limit, the SDK receives <strong>HTTP 429 Too Many Requests</strong> with a <code class="bg-gray-100 border border-gray-200 rounded px-1">Retry-After</code> header naming the number of seconds the client should wait. Your app can surface a friendly message; the limit window slides, so retrying after the indicated delay succeeds.
 				</p>
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-3">

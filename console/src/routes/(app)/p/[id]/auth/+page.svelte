@@ -1695,6 +1695,10 @@
 				</p>
 			</div>
 
+			<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+				<strong>Today these limits count per project.</strong> They're keyed per client IP, but the platform doesn't see each client's own IP yet, so "per IP" currently means a total across all your users. For a launch or a migration day, set sign-up / sign-in to <strong>30</strong> and token verification to <strong>150</strong>. Per-IP counting will follow.
+			</div>
+
 			<!-- BYO-SMTP interaction. The one thing custom SMTP actually
 			     bypasses is the platform email-delivery ceiling (currently
 			     hidden pending #235). Everything shown below is per-IP
@@ -1843,6 +1847,9 @@
 						</p>
 						<p class="mt-0.5 text-xs text-gray-500">
 							When <strong>off</strong> (default), the limiter keys on the TCP peer — safe under any header forgery, but in deployments behind one shared ingress the counter collapses to a per-project total.
+						</p>
+						<p class="mt-0.5 text-xs text-amber-700">
+							Leave it off for now: on Eurobase's own domains, turning it on doesn't change how the limits count yet.
 						</p>
 						<p class="mt-1 text-[11px] text-gray-500">
 							Eurobase ships <strong>off</strong> by default: it's safe under any XFF chain configuration. The trusted-hop-count hardening
