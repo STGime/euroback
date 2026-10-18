@@ -37,8 +37,9 @@ globalThis.localStorage = {
   removeItem: (k) => store.delete(k),
 }
 
+let iatClock = nowS()
 const session = (rt, expiresIn = 3600, user = 'u1') => ({
-  access_token: jwt({ sub: user, exp: nowS() + expiresIn, n: rt }),
+  access_token: jwt({ sub: user, iat: ++iatClock, exp: nowS() + expiresIn, n: rt }),
   token_type: 'bearer', expires_in: expiresIn, refresh_token: rt,
   user: { id: user, email: `${user}@example.com`, created_at: '', updated_at: '' },
 })
@@ -55,7 +56,7 @@ const calls = []
 globalThis.fetch = async (url, init) => {
   const path = new URL(String(url)).pathname
   const body = init?.body ? JSON.parse(init.body) : undefined
-  calls.push({ path, body })
+  calls.push({ path, body, keepalive: init?.keepalive, signal: init?.signal })
   return route(path, body)
 }
 
@@ -168,6 +169,7 @@ for (const status of [400, 401, 403]) {
   const [a, b] = await Promise.all([eb.auth.refreshSession(), eb.auth.refreshSession()])
   assert.equal(refreshCalls(), 1)
   assert.equal(a.data.refresh_token, 'rt2')
+  assert.ok(calls.find((c) => c.path === '/v1/auth/refresh').signal, 'refresh has a timeout')
   assert.equal(b.data.refresh_token, 'rt2')
 }
 
@@ -194,6 +196,7 @@ for (const status of [400, 401, 403]) {
   assert.deepEqual(seen, ['SIGNED_OUT'], 'no TOKEN_REFRESHED after sign-out')
   const signouts = calls.filter((c) => c.path === '/v1/auth/signout').map((c) => c.body.refresh_token)
   assert.deepEqual(signouts.sort(), ['rt1', 'rt2'], 'the token issued after sign-out is revoked too')
+  assert.equal(calls.find((c) => c.path === '/v1/auth/signout' && c.body.refresh_token === 'rt1').keepalive, true, 'signout survives navigation')
   assert.equal(timers.length, 0)
 }
 
@@ -299,6 +302,93 @@ function broadcastFrom(writer) {
   const { data } = await b.eb.auth.refreshSession()
   assert.equal(data.refresh_token, 'rt2')
   assert.equal(JSON.parse(store.get(KEY)).refresh_token, 'rt2', 'stored session kept for all tabs')
+}
+
+// An older session written to storage (a stale write) is not adopted.
+{
+  reset(); tabs.length = 0
+  const old = session('rt1')
+  store.set(KEY, JSON.stringify(session('rt2')))
+  const b = tab()
+  store.set(KEY, JSON.stringify(old))
+  broadcastFrom(null)
+  assert.equal(b.eb.auth.getSession().refresh_token, 'rt2', 'kept the newer session')
+}
+
+// Another tab's rejected refresh removes the session while this tab is
+// refreshing: this tab's own result decides.
+{
+  reset(); tabs.length = 0
+  store.set(KEY, JSON.stringify(session('rt1')))
+  const a = tab()
+  const seenA = events(a.eb)
+  let release
+  route = () => new Promise((r) => { release = () => r(json(200, session('rt2'))) })
+  const pending = a.eb.auth.refreshSession()
+  await tick()
+  store.delete(KEY) // tab B: its refresh with rt1 got 401
+  broadcastFrom(null)
+  assert.equal(a.eb.auth.getSession()?.refresh_token, 'rt1', 'not signed out mid-refresh')
+  release()
+  const { data } = await pending
+  assert.equal(data.refresh_token, 'rt2')
+  assert.equal(JSON.parse(store.get(KEY)).refresh_token, 'rt2', 'stored for the other tabs')
+  assert.deepEqual(seenA, ['TOKEN_REFRESHED'])
+}
+
+// An explicit sign-out in another tab is followed even mid-refresh, and
+// leaves storage empty.
+{
+  reset(); tabs.length = 0
+  store.set(KEY, JSON.stringify(session('rt1')))
+  const a = tab(), b = tab()
+  let release
+  route = (path) => path === '/v1/auth/refresh'
+    ? new Promise((r) => { release = () => r(json(200, session('rt2'))) })
+    : json(200, { status: 'ok' })
+  const pending = a.eb.auth.refreshSession()
+  await tick()
+  // Tab B signs out: writes the marker, then removes it.
+  const writes = []
+  const realSet = localStorage.setItem
+  localStorage.setItem = (k, v) => { writes.push(v); realSet(k, v) }
+  await b.eb.auth.signOut()
+  localStorage.setItem = realSet
+  assert.equal(store.get(KEY), undefined, 'storage empty after sign-out')
+  a.dispatch('storage', { key: KEY, newValue: writes.at(-1) })
+  a.dispatch('storage', { key: KEY, newValue: null })
+  assert.equal(a.eb.auth.getSession(), null, 'tab A signed out')
+  release()
+  await pending
+  await tick()
+  assert.equal(a.eb.auth.getSession(), null, 'still signed out')
+  assert.equal(store.get(KEY), undefined)
+  assert.ok(calls.some((c) => c.path === '/v1/auth/signout' && c.body.refresh_token === 'rt2'), 'dropped token revoked')
+}
+
+// Signed out and in again during a refresh: the dropped token is revoked too.
+{
+  reset()
+  const eb = await signedIn('rt1')
+  let release
+  route = (path) => {
+    if (path === '/v1/auth/refresh') return new Promise((r) => { release = () => r(json(200, session('rt2'))) })
+    if (path === '/v1/auth/signin') return json(200, session('rt9'))
+    return json(200, { status: 'ok' })
+  }
+  const pending = eb.auth.refreshSession()
+  await tick()
+  await eb.auth.signOut()
+  await eb.auth.signIn({ email: 'u1@example.com', password: 'pw' })
+  release()
+  await pending
+  await tick()
+  assert.equal(eb.auth.getSession().refresh_token, 'rt9')
+  assert.ok(calls.some((c) => c.path === '/v1/auth/signout' && c.body.refresh_token === 'rt2'), 'dropped token revoked')
+  // A refresh asked for after the new sign-in runs for the new session.
+  route = () => json(200, session('rt10'))
+  const { data } = await eb.auth.refreshSession()
+  assert.equal(data.refresh_token, 'rt10')
 }
 
 // Web Locks: two tabs refresh at once — one request, both end on rt2.

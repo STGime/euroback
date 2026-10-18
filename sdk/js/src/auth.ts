@@ -17,8 +17,23 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1
 const REFRESH_RETRY_MIN_MS = 5_000
 const REFRESH_RETRY_MAX_MS = 60_000
 
-/** How long a tab waits for another tab's refresh before refreshing itself. */
-const REFRESH_LOCK_WAIT_MS = 10_000
+/** A refresh request that takes longer is aborted (and retried). */
+const REFRESH_TIMEOUT_MS = 20_000
+
+/**
+ * How long a tab waits for another tab's refresh before refreshing itself.
+ * Longer than REFRESH_TIMEOUT_MS, so a slow refresh in one tab doesn't
+ * make another refresh with the token being rotated.
+ */
+const REFRESH_LOCK_WAIT_MS = 30_000
+
+/**
+ * signOut() stores this briefly before removing the session, so the app's
+ * other tabs see a sign-out in their `storage` event. A plain removal only
+ * means a refresh was rejected, which a tab that is refreshing itself can
+ * still recover from.
+ */
+const SIGNED_OUT_MARKER = '{"signed_out":true}'
 
 /**
  * Statuses from /v1/auth/refresh that end the session: the token is
@@ -36,6 +51,12 @@ function isSession(value: unknown): value is AuthSession {
   return !!v && typeof v === 'object'
     && typeof v.access_token === 'string' && v.access_token !== ''
     && typeof v.refresh_token === 'string' && v.refresh_token !== ''
+}
+
+/** When the session's access token was issued (its `iat`), or null. */
+function issuedAt(session: AuthSession): number | null {
+  const iat = decodeJwtClaims(session.access_token)?.iat
+  return typeof iat === 'number' ? iat : null
 }
 
 /** Error returned when a sign-in response isn't a session. */
@@ -220,8 +241,9 @@ export class AuthClient {
    * sign-out during a refresh stays signed out (#814).
    */
   private generation = 0
-  /** The refresh in flight, shared by concurrent callers. */
+  /** The refresh in flight, shared by concurrent callers of the same session. */
   private refreshing: Promise<{ data: AuthSession | null; error: string | null }> | null = null
+  private refreshingGeneration = -1
   /** Failed refresh attempts in a row (temporary errors only). */
   private refreshAttempts = 0
 
@@ -257,8 +279,11 @@ export class AuthClient {
     if (result.error) {
       return { data: null, error: result.error }
     }
-    if (result.confirmation_required || !result.access_token) {
+    if (result.confirmation_required || (!result.access_token && result.user)) {
       return { data: null, error: null, user: result.user, confirmationRequired: true }
+    }
+    if (!isSession(result)) {
+      return { data: null, error: INVALID_SESSION_RESPONSE }
     }
     const session = this.setSession(result)
     this.emit('SIGNED_IN', session)
@@ -285,10 +310,12 @@ export class AuthClient {
    */
   async signOut(): Promise<{ error: string | null }> {
     const refreshToken = this.session?.refresh_token
-    this.clearSession()
+    this.clearSession(true)
     this.emit('SIGNED_OUT', null)
     if (refreshToken) {
-      await this.http.post('/v1/auth/signout', { refresh_token: refreshToken })
+      // keepalive: a SIGNED_OUT listener that navigates away must not
+      // cancel the revoke.
+      await this.http.post('/v1/auth/signout', { refresh_token: refreshToken }, { keepalive: true })
     }
     return { error: null }
   }
@@ -308,10 +335,12 @@ export class AuthClient {
    * the others take the session it stores.
    */
   async refreshSession(): Promise<{ data: AuthSession | null; error: string | null }> {
-    if (!this.refreshing) {
-      this.refreshing = this.runRefresh().finally(() => {
-        this.refreshing = null
+    if (!this.refreshing || this.refreshingGeneration !== this.generation) {
+      const run = this.runRefresh().finally(() => {
+        if (this.refreshing === run) this.refreshing = null
       })
+      this.refreshing = run
+      this.refreshingGeneration = this.generation
     }
     return this.refreshing
   }
@@ -334,13 +363,13 @@ export class AuthClient {
       const generation = this.generation
       const result = await this.http.post('/v1/auth/refresh', {
         refresh_token: this.session.refresh_token,
-      })
+      }, { timeoutMs: REFRESH_TIMEOUT_MS })
 
       if (generation !== this.generation) {
         // The session changed during the request (sign-out, sign-in,
-        // another tab). Keep that change; drop this result.
-        if (!this.session && isSession(result)) {
-          // Signed out: revoke the token the server just issued.
+        // another tab). Keep that change; drop this result, and revoke
+        // the token the server just issued for it.
+        if (isSession(result) && result.refresh_token !== this.session?.refresh_token) {
           void this.http.post('/v1/auth/signout', { refresh_token: result.refresh_token })
         }
         return this.session
@@ -733,7 +762,11 @@ export class AuthClient {
     }
     if (this.session && result?.id && result.id === this.session.user?.id) {
       this.session = { ...this.session, user: result as AuthUser }
-      this.persistSession(this.session)
+      // Only while storage still holds this session: never write an older
+      // session over one another tab stored meanwhile.
+      if (this.readStoredSession()?.refresh_token === this.session.refresh_token) {
+        this.persistSession(this.session)
+      }
     }
     return { data: result, error: null }
   }
@@ -848,11 +881,13 @@ export class AuthClient {
     return session
   }
 
-  private clearSession() {
+  /** `signedOut`: an explicit sign-out, which the other tabs follow. */
+  private clearSession(signedOut = false) {
     this.generation++
     this.refreshAttempts = 0
     this.session = null
     this.http.setAccessToken(null)
+    if (signedOut) this.markSignedOut()
     this.removePersistedSession()
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer)
@@ -919,14 +954,15 @@ export class AuthClient {
       started = true
       return fn()
     }
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const waitTimer = controller ? setTimer(() => controller.abort(), REFRESH_LOCK_WAIT_MS) : null
     try {
-      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(REFRESH_LOCK_WAIT_MS)
-        : undefined
-      return await locks.request(`${this.storageKey}:refresh`, signal ? { signal } : {}, run)
+      return await locks.request(`${this.storageKey}:refresh`, controller ? { signal: controller.signal } : {}, run)
     } catch (err) {
       if (started) throw err
       return fn()
+    } finally {
+      if (waitTimer) clearTimeout(waitTimer)
     }
   }
 
@@ -940,8 +976,21 @@ export class AuthClient {
     window.addEventListener('storage', (event: StorageEvent) => {
       // key null = the other tab called localStorage.clear().
       if (event.key !== null && event.key !== this.storageKey) return
+      if (!this.session) {
+        this.adoptStoredSession()
+        return
+      }
+      // Signed out in another tab: follow.
+      if (event.newValue === SIGNED_OUT_MARKER) {
+        this.clearSession()
+        this.emit('SIGNED_OUT', null)
+        return
+      }
       if (this.adoptStoredSession()) return
-      if (this.session && !this.storedValuePresent()) {
+      // Removed (another tab's refresh was rejected): follow too, unless
+      // this tab is refreshing — then its own result decides (it may hold
+      // a token that tab didn't have yet).
+      if (this.readStoredRaw() === null && !this.refreshing) {
         this.clearSession()
         this.emit('SIGNED_OUT', null)
       }
@@ -961,6 +1010,13 @@ export class AuthClient {
     if (!stored) return false
     const previous = this.session
     if (previous && stored.refresh_token === previous.refresh_token) return false
+    // Never go back to an older session of the same user (e.g. a stale
+    // write after this tab refreshed): compare when the tokens were issued.
+    if (previous && stored.user?.id === previous.user?.id) {
+      const storedAt = issuedAt(stored)
+      const currentAt = issuedAt(previous)
+      if (storedAt !== null && currentAt !== null && storedAt < currentAt) return false
+    }
     const session = this.setSession(stored, true)
     const sameUser = !!previous && previous.user?.id === session.user?.id
     this.emit(sameUser ? 'TOKEN_REFRESHED' : 'SIGNED_IN', session)
@@ -979,11 +1035,21 @@ export class AuthClient {
     }
   }
 
-  private storedValuePresent(): boolean {
+  private readStoredRaw(): string | null {
     try {
-      return typeof localStorage !== 'undefined' && localStorage.getItem(this.storageKey) !== null
+      return typeof localStorage !== 'undefined' ? localStorage.getItem(this.storageKey) : null
     } catch {
-      return false
+      return null
+    }
+  }
+
+  private markSignedOut() {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(this.storageKey, SIGNED_OUT_MARKER)
+      }
+    } catch {
+      // localStorage not available
     }
   }
 

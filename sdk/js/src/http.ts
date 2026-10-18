@@ -18,9 +18,17 @@ export interface EurobaseConfig {
  */
 export type QueryParams = Record<string, string> | Array<[string, string]>
 
+/** Per-request options (internal). */
+export interface RequestOptions {
+  /** Abort the request after this many milliseconds (an error result). */
+  timeoutMs?: number
+  /** Let the request finish even if the page navigates away. */
+  keepalive?: boolean
+}
+
 export interface HttpClient {
   get(path: string, params?: QueryParams): Promise<any>
-  post(path: string, body?: any): Promise<any>
+  post(path: string, body?: any, options?: RequestOptions): Promise<any>
   patch(path: string, body?: any): Promise<any>
   del(path: string): Promise<any>
   postForm(path: string, formData: FormData): Promise<any>
@@ -113,13 +121,18 @@ export function httpClient(config: EurobaseConfig): HttpClient {
       }
     },
 
-    async post(path: string, body?: any): Promise<any> {
+    async post(path: string, body?: any, options?: RequestOptions): Promise<any> {
       try {
-        const res = await fetch(buildUrl(path), {
+        const init: RequestInit = {
           method: 'POST',
           headers: headers('application/json'),
           body: body !== undefined ? JSON.stringify(body) : undefined,
-        })
+        }
+        if (options?.keepalive) init.keepalive = true
+        if (options?.timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+          init.signal = AbortSignal.timeout(options.timeoutMs)
+        }
+        const res = await fetch(buildUrl(path), init)
         // `await` here, so a body that fails to parse lands in the catch
         // below instead of rejecting the caller (#814).
         return await handleResponse(res)
