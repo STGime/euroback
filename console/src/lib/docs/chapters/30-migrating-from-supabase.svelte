@@ -84,13 +84,13 @@
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
-					<p class="text-sm font-semibold text-gray-900">Are the auth rate limits per user IP or per project?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">They're counted per client IP, but the platform doesn't see each client's own IP yet, so today they act as a <strong>total per project</strong>. For a launch or a migration day, raise sign-ups / sign-ins to 30 and token verifications (which include magic-link sign-ins) to 150 per 5 minutes under Auth &rarr; Rate Limits. Per-IP counting will follow; see <a href="/docs/rate-limits" class="cursor-pointer text-eurobase-700 hover:underline">Rate Limits</a>.</p>
+					<p class="text-sm font-semibold text-gray-900">What rate limits should I set for a launch or migration day?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">When many users sign up or sign in at once, raise sign-ups / sign-ins to 30 and token verifications (which include magic-link sign-ins) to 150 per 5 minutes under Auth &rarr; Rate Limits beforehand. See <a href="/docs/rate-limits" class="cursor-pointer text-eurobase-700 hover:underline">Rate Limits</a>.</p>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Is there an hourly limit on auth emails with the built-in sender?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">No hourly cap on the number of emails sent. Per address: 3 magic links and 3 password-reset emails per 15 minutes, and one verification resend per 5 minutes. Per client IP (so per project for now, as above): 60 password-reset and 60 verification emails an hour, and 300 magic-link requests an hour. For a migration day, magic links (300/h) go further than mass password resets (60/h).</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">No hourly cap on the number of emails sent. Per address: 3 magic links and 3 password-reset emails per 15 minutes, and one verification resend per 5 minutes. Per client IP: 60 password-reset and 60 verification emails an hour, and 300 magic-link requests an hour. For a migration day, magic links (300/h) go further than mass password resets (60/h).</p>
 				</div>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Reliability, backups &amp; leaving</h3>

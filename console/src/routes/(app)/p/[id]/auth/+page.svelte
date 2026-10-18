@@ -1696,7 +1696,7 @@
 			</div>
 
 			<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-				<strong>Today these limits count per project.</strong> They're keyed per client IP, but the platform doesn't see each client's own IP yet, so "per IP" currently means a total across all your users. For a launch or a migration day, set sign-up / sign-in to <strong>30</strong> and token verification to <strong>150</strong>. Per-IP counting will follow.
+				<strong>Launch or migration day?</strong> When many users sign up or sign in at once, set sign-up / sign-in to <strong>30</strong> and token verification to <strong>150</strong> (the maximums) beforehand.
 			</div>
 
 			<!-- BYO-SMTP interaction. The one thing custom SMTP actually
@@ -1846,17 +1846,10 @@
 							When <strong>on</strong>, the limiter picks the <code class="text-[11px] bg-gray-100 px-1 rounded">X-Forwarded-For</code> entry at index <code class="text-[11px] bg-gray-100 px-1 rounded">len(entries) − trusted_proxy_hops</code> (the real client IP written by the last trusted hop). Anything to the left of that index is caller-controlled and discarded — safe against header forgery.
 						</p>
 						<p class="mt-0.5 text-xs text-gray-500">
-							When <strong>off</strong> (default), the limiter keys on the TCP peer — safe under any header forgery, but in deployments behind one shared ingress the counter collapses to a per-project total.
+							When <strong>off</strong> (default), the limiter uses the connection's address.
 						</p>
 						<p class="mt-0.5 text-xs text-amber-700">
-							Leave it off for now: turning it on doesn't change how the limits count yet.
-						</p>
-						<p class="mt-1 text-[11px] text-gray-500">
-							Eurobase ships <strong>off</strong> by default: it's safe under any XFF chain configuration. The trusted-hop-count hardening
-							(rightmost-XFF extraction, fail-closed on missing hops) is in place, so flipping this on is safe against header forgery — but the
-							single-hop precondition (exactly one trusted proxy authoritatively rewrites the header) hasn't been formalized end-to-end for the
-							Scaleway LB + nginx-ingress chain we run. See <code class="text-[11px] bg-gray-100 px-1 rounded">docs/runbooks/rate-limits-ip-source.md</code>
-							for the check to run before flipping.
+							Leave it off unless Eurobase support asks you to turn it on.
 						</p>
 					</div>
 					<div class="shrink-0 pt-1">

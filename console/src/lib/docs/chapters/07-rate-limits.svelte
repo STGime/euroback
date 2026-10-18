@@ -25,9 +25,9 @@
 				</p>
 
 				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-					<p class="text-sm font-semibold text-amber-900">Today the limits count per project</p>
+					<p class="text-sm font-semibold text-amber-900">Launches and migration days</p>
 					<p class="mt-1 text-sm text-amber-800 leading-relaxed">
-						The limits below are counted per client IP, but the platform doesn't see each client's own IP yet. Until it does, every request to your project counts against one shared budget, so "per IP" currently means <strong>a total across all your users</strong>. For a launch, a migration day or anything else where many users sign in at once, set <strong>sign-up / sign-in to 30</strong> and <strong>token verification to 150</strong> per 5 minutes (the maximums). Per-IP counting will follow, and this page will say so.
+						When many users sign up or sign in at once &mdash; a launch, a migration day, a big invite &mdash; set <strong>sign-up / sign-in to 30</strong> and <strong>token verification to 150</strong> per 5 minutes (the maximums) beforehand.
 					</p>
 				</div>
 
@@ -48,13 +48,13 @@
 						<strong>Token verification rate</strong> &mdash; how many phone-OTP, magic-link sign-in, password-reset and email-verification calls per 5 min per IP. <span class="text-gray-500">Default: 30 per 5 min.</span>
 					</li>
 					<li>
-						<strong>Auth emails</strong> &mdash; there's no hourly cap per project on the platform sender today (the "emails per hour" setting isn't enforced, so the console doesn't show it). Per address: 3 magic links and 3 password-reset emails per 15 minutes, one verification resend per 5 minutes. Per client IP (so per project for now): 60 password-reset and 60 verification emails an hour, 300 magic-link requests an hour.
+						<strong>Auth emails</strong> &mdash; there's no hourly cap per project on the platform sender today (the "emails per hour" setting isn't enforced, so the console doesn't show it). Per address: 3 magic links and 3 password-reset emails per 15 minutes, one verification resend per 5 minutes. Per client IP: 60 password-reset and 60 verification emails an hour, 300 magic-link requests an hour.
 					</li>
 					<li>
 						<strong>SMS per hour</strong> &mdash; cap on outbound auth SMS (phone OTP) per rolling hour. <span class="text-gray-500">Default: 30/hour; an override can be at most 10.</span>
 					</li>
 					<li>
-						<strong>IP Address Forwarding (Trust Proxy)</strong> &mdash; when on, the rate limiter takes the client IP from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">X-Forwarded-For</code> instead of the connection. <strong>Leave it off for now:</strong> it doesn't change how the limits count yet (see the note above). <span class="text-gray-500">Default: off.</span>
+						<strong>IP Address Forwarding (Trust Proxy)</strong> &mdash; when on, the rate limiter takes the client IP from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">X-Forwarded-For</code> instead of the connection. <strong>Leave it off</strong> unless Eurobase support asks you to turn it on. <span class="text-gray-500">Default: off.</span>
 					</li>
 				</ul>
 
@@ -69,7 +69,7 @@
 				<ol class="text-sm text-gray-700 space-y-2 ml-4 list-decimal">
 					<li>Open <strong>Auth &rarr; Rate Limits</strong>.</li>
 					<li>For each knob, leave blank to keep the platform default, or enter your value. The placeholder text shows what the default is.</li>
-					<li>For a launch or migration day, set sign-up / sign-in to 30 and token verification to 150 (see the note above).</li>
+					<li>For a launch or migration day, set sign-up / sign-in to 30 and token verification to 150.</li>
 					<li>Hit <strong>Save changes</strong>. The new limits apply within a few seconds &mdash; no redeploy needed.</li>
 				</ol>
 
