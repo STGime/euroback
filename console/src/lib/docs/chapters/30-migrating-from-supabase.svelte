@@ -80,7 +80,7 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can a signed-in user change their password?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /v1/auth/user/password</code> with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">current_password</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">new_password</code> and the user's access token. Their other sessions end once their current access token expires, and the response is a fresh session. An SDK helper (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">updatePassword</code>) comes with the next SDK release.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /v1/auth/user/password</code> with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">current_password</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">new_password</code> and the user's access token. Their other sessions end once their current access token expires, and the response is a fresh session. An SDK helper (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">updatePassword</code>) needs <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">@eurobase/sdk</code> 0.11.0 or later.</p>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
