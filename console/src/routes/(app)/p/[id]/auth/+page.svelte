@@ -221,7 +221,8 @@
 	const FLOW_LABELS: Record<EmailLogEntry['flow'], string> = {
 		verification: 'Email confirmation',
 		password_reset: 'Password reset',
-		magic_link: 'Magic link'
+		magic_link: 'Magic link',
+		password_changed: 'Password changed notice'
 	};
 
 	// Why an email wasn't sent, in words. Keep in sync with the reasons in

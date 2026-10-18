@@ -23,6 +23,9 @@ const (
 	FlowVerification  = "verification"
 	FlowPasswordReset = "password_reset"
 	FlowMagicLink     = "magic_link"
+	// FlowPasswordChanged: the notice after a password change or reset
+	// (#822) — informational, no link.
+	FlowPasswordChanged = "password_changed"
 )
 
 // Outcomes.

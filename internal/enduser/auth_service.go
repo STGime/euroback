@@ -100,6 +100,10 @@ type AuthService struct {
 	// fail open (same fail-open contract as the auth limiter — a Redis
 	// outage shouldn't take auth offline). Set via SetRateLimiter.
 	rateLimiter *ratelimit.RateLimiter
+
+	// passwordChangedHook, when set (tests), is called instead of sending
+	// the "password changed" notice.
+	passwordChangedHook func(projectID, userEmail string)
 }
 
 // NewAuthService creates a new end-user auth service.
@@ -606,8 +610,34 @@ func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID,
 	return nil
 }
 
+// notifyPasswordChanged sends the "your password was changed" notice
+// (#822) in the background: the change already succeeded, and a slow
+// custom SMTP server mustn't hold up the response. The outcome lands in
+// the project's email log like every auth email.
+func (s *AuthService) notifyPasswordChanged(ctx context.Context, projectID, userEmail string) {
+	if userEmail == "" || !strings.Contains(userEmail, "@") {
+		return // phone-only accounts have no address to tell
+	}
+	if s.passwordChangedHook != nil {
+		s.passwordChangedHook(projectID, userEmail)
+		return
+	}
+	if s.emailService == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	go func() {
+		defer cancel()
+		var projectName string
+		_ = s.pool.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`, projectID).Scan(&projectName)
+		if err := s.emailService.SendPasswordChangedEmail(ctx, projectID, projectName, userEmail); err != nil {
+			slog.Warn("password changed notice failed", "error", err, "project_id", projectID)
+		}
+	}()
+}
+
 // ResetPassword completes a password reset using a token.
-func (s *AuthService) ResetPassword(ctx context.Context, schemaName, rawToken, newPassword string, minPasswordLen int) error {
+func (s *AuthService) ResetPassword(ctx context.Context, schemaName, projectID, rawToken, newPassword string, minPasswordLen int) error {
 	if len(newPassword) < minPasswordLen {
 		return fmt.Errorf("password must be at least %d characters", minPasswordLen)
 	}
@@ -642,6 +672,12 @@ func (s *AuthService) ResetPassword(ctx context.Context, schemaName, rawToken, n
 	}
 
 	slog.Info("end-user password reset", "schema", schemaName, "user_id", userID)
+
+	var userEmail string
+	_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, fmt.Sprintf(`SELECT COALESCE(email, '') FROM %s.users WHERE id = $1`, quoteIdent(schemaName)), userID).Scan(&userEmail)
+	})
+	s.notifyPasswordChanged(ctx, projectID, userEmail)
 	return nil
 }
 

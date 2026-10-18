@@ -109,4 +109,14 @@ func TestEmailLog_ProductionRoles(t *testing.T) {
 	if len(entries) != 1 || entries[0].Flow != FlowPasswordReset {
 		t.Errorf("after cleanup: %+v", entries)
 	}
+
+	// The password-changed notice (#822) is an accepted flow; unknown ones aren't.
+	if _, err := admin.Exec(ctx, `INSERT INTO public.project_email_log (project_id, flow, recipient, outcome)
+		VALUES ($1, $2, 'p****@example.com', 'sent')`, projectID, FlowPasswordChanged); err != nil {
+		t.Errorf("flow %s: %v", FlowPasswordChanged, err)
+	}
+	if _, err := admin.Exec(ctx, `INSERT INTO public.project_email_log (project_id, flow, recipient, outcome)
+		VALUES ($1, 'no_such_flow', 'x', 'sent')`, projectID); err == nil || !strings.Contains(err.Error(), "check constraint") {
+		t.Errorf("unknown flow: want a check violation, got %v", err)
+	}
 }

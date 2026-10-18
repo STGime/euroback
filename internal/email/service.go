@@ -341,6 +341,32 @@ func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, pr
 	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
 }
 
+// SendPasswordChangedEmail tells an end user their password was changed —
+// after a change while signed in or a completed reset (#822) — so the
+// real owner notices a change they didn't make. No link, no token. Uses
+// the project's "password_changed" template (custom on plans that include
+// custom templates) and its sender, like the other auth emails.
+func (s *EmailService) SendPasswordChangedEmail(ctx context.Context, projectID, projectName, userEmail string) error {
+	d, err := s.sendPasswordChangedEmail(ctx, projectID, projectName, userEmail)
+	s.recordSend(ctx, projectID, FlowPasswordChanged, userEmail, d, err)
+	return err
+}
+
+func (s *EmailService) sendPasswordChangedEmail(ctx context.Context, projectID, projectName, userEmail string) (Delivery, error) {
+	customSubject, customHTML, err := s.loadCustomTemplate(ctx, projectID, "password_changed")
+	if err != nil {
+		slog.Warn("failed to load custom template, using default", "error", err)
+	}
+	subject, body, err := RenderTemplate("password_changed", customSubject, customHTML, TemplateData{
+		UserEmail:   userEmail,
+		ProjectName: projectName,
+	})
+	if err != nil {
+		return Delivery{}, fmt.Errorf("render password changed email: %w", err)
+	}
+	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
+}
+
 // SendMagicLinkEmail sends a magic link sign-in email to the end-user.
 // See SendVerificationEmail for the redirectURL contract.
 func (s *EmailService) SendMagicLinkEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail, redirectURL string) error {

@@ -359,7 +359,7 @@ func HandleResetPassword(svc *AuthService, limiter ...*ratelimit.RateLimiter) ht
 			return
 		}
 
-		if err := svc.ResetPassword(r.Context(), pc.SchemaName, req.Token, req.Password, config.PasswordMinLength); err != nil {
+		if err := svc.ResetPassword(r.Context(), pc.SchemaName, pc.ProjectID, req.Token, req.Password, config.PasswordMinLength); err != nil {
 			slog.Warn("password reset failed", "error", err, "project_id", pc.ProjectID)
 			writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
