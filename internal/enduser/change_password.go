@@ -132,7 +132,11 @@ func (s *AuthService) ChangePassword(ctx context.Context, schemaName, jwtSecret,
 		return nil, err
 	}
 	slog.Info("end-user changed password", "schema", schemaName, "user_id", userID)
-	s.notifyPasswordChanged(ctx, projectID, user.EmailString())
+	// Only to a confirmed address: an unconfirmed one may not be the
+	// user's, and repeated changes would mail its owner.
+	if user.EmailConfirmedAt != nil {
+		s.notifyPasswordChanged(ctx, projectID, user.EmailString())
+	}
 	return &AuthResponse{AccessToken: accessToken, TokenType: "bearer", ExpiresIn: expiresIn, RefreshToken: refreshToken, User: user}, nil
 }
 

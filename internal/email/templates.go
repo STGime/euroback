@@ -82,7 +82,7 @@ var defaultTemplates = map[string]DefaultTemplate{
 		BodyHTML: fmt.Sprintf(baseLayout,
 			"{{.ProjectName}}",
 			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
-<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Your password for <strong>{{.ProjectName}}</strong> was successfully changed. If you didn't make this change, please contact support immediately.</p>`),
+<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Your password for <strong>{{.ProjectName}}</strong> was changed. If you didn't make this change, reset your password now and contact the {{.ProjectName}} team.</p>`),
 	},
 	"magic_link": {
 		Subject: "Sign in to {{.ProjectName}}",

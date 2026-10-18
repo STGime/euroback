@@ -123,6 +123,21 @@ func TestChangePassword_DB(t *testing.T) {
 		t.Fatal("the old password must no longer work")
 	}
 
+	// No notice to an unconfirmed address (the setting off, so the change itself works).
+	if _, err := pool.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET email_confirmed_at = NULL WHERE id = $1`, up.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := len(notified)
+	if code, out := change(up.User.ID, newPw, "interim-password-9"); code != http.StatusOK {
+		t.Fatalf("change (unconfirmed, setting off): %d %v", code, out)
+	}
+	if len(notified) != before {
+		t.Fatalf("no notice to an unconfirmed address: %v", notified)
+	}
+	if code, out := change(up.User.ID, "interim-password-9", newPw); code != http.StatusOK {
+		t.Fatalf("change back: %d %v", code, out)
+	}
+
 	// "Require email confirmation" on and the user unconfirmed: 403.
 	if _, err := pool.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET email_confirmed_at = NULL WHERE id = $1`, up.User.ID); err != nil {
 		t.Fatal(err)
