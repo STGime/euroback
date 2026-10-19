@@ -51,7 +51,7 @@
 				</div>
 
 				<p class="text-sm text-gray-700 leading-relaxed">
-					In CI or scripts, log in with a <a href="/docs/account" class="text-eurobase-600 hover:underline cursor-pointer">personal access token</a> instead: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login --token "$EUROBASE_PAT"</code>. A project token selects its project automatically and can run the project commands with the access you gave it. Creating or deleting projects needs <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login</code> with your password.
+					In CI or scripts, log in with a <a href="/docs/account" class="text-eurobase-600 hover:underline cursor-pointer">personal access token</a> instead: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login --token "$EUROBASE_PAT"</code>. A project token selects its project automatically and can run the project commands with the access you gave it. A project token can't create or delete projects: do that in the console (or after <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login</code>, if your account signs in with a password only, without a passkey or SSO).
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Command reference</h3>
