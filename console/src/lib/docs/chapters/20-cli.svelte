@@ -18,7 +18,7 @@
 					Without Homebrew (CI, agents, Linux servers), download the binary for your platform (macOS or Linux, amd64 or arm64):
 				</p>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400 space-y-0.5">
-					<div>VER=0.4.0  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
+					<div>VER=0.5.0  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
 					<div>OS=$(uname -s | tr '[:upper:]' '[:lower:]')</div>
 					<div>ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')</div>
 					<div>BASE=https://github.com/STGime/homebrew-tap/releases/download/cli-v$&#123;VER&#125;</div>
@@ -49,6 +49,10 @@
 					<div class="mt-2 text-gray-500"># See project status and usage</div>
 					<div>eurobase status</div>
 				</div>
+
+				<p class="text-sm text-gray-700 leading-relaxed">
+					In CI or scripts, log in with a <a href="/docs/account" class="text-eurobase-600 hover:underline cursor-pointer">personal access token</a> instead: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login --token "$EUROBASE_PAT"</code>. A project token selects its project automatically and can run the project commands with the access you gave it. A project token can't create or delete projects: do that in the console (or after <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login</code>, if your account signs in with a password only, without a passkey or SSO).
+				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Command reference</h3>
 				<div class="rounded-lg border border-gray-200 overflow-hidden">
