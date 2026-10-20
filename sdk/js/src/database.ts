@@ -309,9 +309,11 @@ export class DatabaseClient {
    *
    * Arguments are passed by name, so the keys must match the function's
    * parameter names. The call runs as the signed-in user, under RLS.
+   * A set-returning function gives only its first row: return a list
+   * as one `jsonb` value instead.
    *
    * ```ts
-   * const { data, error, code } = await eb.db.rpc('mission_answers', { mission_id: id })
+   * const { data, error, code } = await eb.db.rpc('mission_summary', { mission_id: id })
    * if (code === 'P0001') showMessage(error) // the function's own RAISE EXCEPTION
    * ```
    */
