@@ -92,6 +92,7 @@ Shared login roles are created via the Scaleway console before their migrations 
 
 ## Auth
 - Custom auth in Go (email/password, magic links, OAuth). Anon key for public client access; service key for server-side only — never in client code.
+- **End-user access tokens (#809):** signed HS256 (project `jwt_secret`) or ES256 per `ENDUSER_JWT_ALG`; `ValidateEndUserJWT` accepts both. The ES256 key pair is derived per project from `jwt_secret` (`internal/auth/enduser_keys.go`, pinned by `TestEndUserSigningKey_PinnedVector` — **never change the derivation**: it invalidates tokens in flight and customers' cached keys). Public key: `GET /v1/auth/.well-known/jwks.json` on the project's subdomain. Switch signing only after every gateway verifies ES256; rolling back past that point makes ES256 tokens fail until they're refreshed.
 
 ## Account suspension
 - `platform_users.suspended_at` (000142) suspends a platform account: **every login path refuses to mint a session** (the check is in `generatePlatformJWT`, the single chokepoint for password / passkey / SSO / magic-link) and **`CreateProject` refuses** (defence-in-depth — an existing JWT stays valid < 24 h). It does NOT touch the user's projects, tokens or data. Superadmin only: `POST`/`DELETE /platform/admin/users/{id}/suspend`; can't suspend yourself or another superadmin. Audited (`user.suspended` / `user.unsuspended`).
