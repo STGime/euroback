@@ -1567,7 +1567,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// #809: the project's public key for verifying ES256 end-user
 		// tokens locally. Public, no API key; the project comes from the
 		// subdomain. No database access beyond the subdomain lookup.
-		r.Get("/auth/.well-known/jwks.json", auth.HandleEndUserJWKS)
+		r.Get(strings.TrimPrefix(auth.EndUserJWKSPath, "/v1"), auth.HandleEndUserJWKS)
 
 		// Auth endpoints (only need API key, no end-user JWT).
 		// sdkTenantPoolMw stashes the runtime pool for Team-tier

@@ -144,6 +144,10 @@ func SignEndUserToken(claims jwt.MapClaims, jwtSecret, projectID string) (string
 	if !endUserSignES256.Load() {
 		return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(jwtSecret))
 	}
+	if projectID == "" {
+		// Verifiers are told to require aud = project id.
+		return "", fmt.Errorf("sign ES256 token: missing project id")
+	}
 	k, err := EndUserKeyFor(jwtSecret)
 	if err != nil {
 		return "", err
@@ -152,9 +156,7 @@ func SignEndUserToken(claims jwt.MapClaims, jwtSecret, projectID string) (string
 	for name, v := range claims {
 		c[name] = v
 	}
-	if projectID != "" {
-		c["aud"] = projectID
-	}
+	c["aud"] = projectID
 	t := jwt.NewWithClaims(jwt.SigningMethodES256, c)
 	t.Header["kid"] = k.KID
 	return t.SignedString(k.Private)
@@ -172,8 +174,10 @@ func endUserVerifyKey(secret string) jwt.Keyfunc {
 			if err != nil {
 				return nil, err
 			}
-			if kid, ok := t.Header["kid"].(string); ok && kid != k.KID {
-				return nil, fmt.Errorf("unknown key id")
+			if raw, present := t.Header["kid"]; present {
+				if kid, ok := raw.(string); !ok || kid != k.KID {
+					return nil, fmt.Errorf("unknown key id")
+				}
 			}
 			return &k.Private.PublicKey, nil
 		default:
@@ -186,6 +190,9 @@ func endUserVerifyKey(secret string) jwt.Keyfunc {
 func jwksResponse(k *EndUserSigningKey) ([]byte, error) {
 	return json.Marshal(map[string]any{"keys": []map[string]string{k.JWK()}})
 }
+
+// EndUserJWKSPath is where a project's end-user token JWKS is served.
+const EndUserJWKSPath = "/v1/auth/.well-known/jwks.json"
 
 // HandleEndUserJWKS serves GET /v1/auth/.well-known/jwks.json on a
 // project's own URL (https://<slug>.<domain>): the public key a customer's

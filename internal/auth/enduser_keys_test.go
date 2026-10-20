@@ -122,6 +122,10 @@ func TestSignEndUserToken_ES256(t *testing.T) {
 		t.Fatalf("validate: %v %+v", err, c)
 	}
 
+	if _, err := SignEndUserToken(testClaims(time.Now().Add(time.Hour)), testSecretA, ""); err == nil {
+		t.Fatal("ES256 token without a project id (no aud) was signed")
+	}
+
 	// Another project's key must not verify it.
 	if _, err := ValidateEndUserJWT(tok, testSecretB); err == nil {
 		t.Fatal("token verified with another project's key")
@@ -159,6 +163,13 @@ func TestValidateEndUserJWT_ES256Refusals(t *testing.T) {
 	wrongKID := sign(testClaims(time.Now().Add(time.Hour)), "someone-else", k.Private)
 	if _, err := ValidateEndUserJWT(wrongKID, testSecretA); err == nil {
 		t.Error("token with a foreign kid accepted")
+	}
+
+	numericKID := jwt.NewWithClaims(jwt.SigningMethodES256, testClaims(time.Now().Add(time.Hour)))
+	numericKID.Header["kid"] = 123
+	nk, _ := numericKID.SignedString(k.Private)
+	if _, err := ValidateEndUserJWT(nk, testSecretA); err == nil {
+		t.Error("token with a non-string kid accepted")
 	}
 
 	other, _ := EndUserKeyFor(testSecretB)
