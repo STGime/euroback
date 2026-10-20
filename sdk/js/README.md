@@ -221,6 +221,20 @@ const { data } = await eurobase.db.from('events')
 
 Pagination: `.limit(n)` and `.offset(n)`.
 
+### Database functions (RPC)
+
+Call a Postgres function by name, with its arguments by parameter name. It runs as the signed-in user under RLS (anonymous without a session; a `SECURITY DEFINER` function runs as its owner).
+
+The result is the function's return value. A function that returns a set (`SETOF` / `RETURNS TABLE`) gives only its first row, so return a list as one `jsonb` value instead (e.g. `SELECT jsonb_agg(a) FROM answers a WHERE …`).
+
+```typescript
+const { data, error, code } = await eurobase.db.rpc('mission_summary', { mission_id: id })
+if (error) {
+  // code is the Postgres error code: 'P0001' = the function's own
+  // RAISE EXCEPTION (error is its message), '42501' = permission / RLS denial
+}
+```
+
 ## Schema (DDL)
 
 Create and drop tables in your tenant schema from code. Requires a **secret API key** (`eb_sk_*`) — the gateway rejects public keys with 403 because DDL is destructive. Your secret key should live in server-side code only (never embed it in a browser bundle).

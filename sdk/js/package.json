@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsc && node test/fix-dist-imports.mjs",
     "prepublishOnly": "npm run build",
-    "test": "npm run build && node test/token-propagation.mjs && node test/realtime-url.mjs && node test/schedules.mjs && node test/auth-export.mjs && node test/auth-email-redirect.mjs && node test/repeated-filters.mjs && node test/storage-public-url.mjs && node test/oauth-session-user.mjs && node test/auth-passkey.mjs && node test/refresh-timer.mjs && node test/email-confirmation.mjs && node test/update-password.mjs && node test/session-robustness.mjs"
+    "test": "npm run build && node test/token-propagation.mjs && node test/realtime-url.mjs && node test/schedules.mjs && node test/auth-export.mjs && node test/auth-email-redirect.mjs && node test/repeated-filters.mjs && node test/storage-public-url.mjs && node test/oauth-session-user.mjs && node test/auth-passkey.mjs && node test/refresh-timer.mjs && node test/email-confirmation.mjs && node test/update-password.mjs && node test/session-robustness.mjs && node test/rpc.mjs"
   },
   "keywords": [
     "eurobase",
