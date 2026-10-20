@@ -516,7 +516,7 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 
 		result, err := engine.CallFunction(r.Context(), schema, funcName, args)
 		if err != nil {
-			e := rpcErrorFor(err, funcName)
+			e := rpcErrorFor(err, funcName, schema)
 			if e.Status >= 500 {
 				slog.Error("rpc call failed", "error", err, "schema", schema, "function", funcName)
 			} else {

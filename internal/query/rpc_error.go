@@ -3,6 +3,7 @@ package query
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -30,7 +31,27 @@ type rpcError struct {
 // /v1/db/sql (no Detail, Hint or position), so a function's own
 // RAISE EXCEPTION message reaches the developer, while values that
 // Postgres puts in Detail don't.
-func rpcErrorFor(err error, funcName string) rpcError {
+//
+// The project's schema name never appears in a message: the call is
+// schema-qualified, so Postgres names it in e.g. "function
+// tenant_x.f(wrong => integer) does not exist"; it is stripped.
+func rpcErrorFor(err error, funcName, schema string) rpcError {
+	e := rpcErrorForUnscrubbed(err, funcName)
+	e.Message = stripSchema(e.Message, schema)
+	return e
+}
+
+// stripSchema removes "<schema>." and "\"<schema>\"." from msg.
+func stripSchema(msg, schema string) string {
+	if schema == "" {
+		return msg
+	}
+	msg = strings.ReplaceAll(msg, `"`+schema+`".`, "")
+	msg = strings.ReplaceAll(msg, schema+".", "")
+	return msg
+}
+
+func rpcErrorForUnscrubbed(err error, funcName string) rpcError {
 	switch {
 	case errors.Is(err, ErrTenantLoginUnavailable):
 		return rpcError{Status: http.StatusServiceUnavailable, Message: "the project's database is not available right now"}

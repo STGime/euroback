@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,6 +40,20 @@ func TestRPCErrorFor(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantMsg:    "function f(x => integer) does not exist",
 			wantCode:   "42883",
+		},
+		{
+			name:       "the schema name is stripped from Postgres' message",
+			err:        wrap(&pgconn.PgError{Code: "42883", Message: `function tenant_abc.f(x => integer) does not exist`}),
+			wantStatus: http.StatusBadRequest,
+			wantMsg:    "function f(x => integer) does not exist",
+			wantCode:   "42883",
+		},
+		{
+			name:       "quoted schema name is stripped too",
+			err:        wrap(&pgconn.PgError{Code: "42P01", Message: `relation "tenant_abc".missions does not exist`}),
+			wantStatus: http.StatusBadRequest,
+			wantMsg:    "relation missions does not exist",
+			wantCode:   "42P01",
 		},
 		{
 			name:       "unique violation hides the offending value",
@@ -97,7 +112,7 @@ func TestRPCErrorFor(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			name := "nope"
-			got := rpcErrorFor(tc.err, name)
+			got := rpcErrorFor(tc.err, name, "tenant_abc")
 			if got.Status != tc.wantStatus || got.Message != tc.wantMsg || got.Code != tc.wantCode {
 				t.Fatalf("got %+v, want status %d message %q code %q", got, tc.wantStatus, tc.wantMsg, tc.wantCode)
 			}
@@ -139,7 +154,10 @@ func TestCallFunctionErrors_RealDB(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: expected an error", tc.fn)
 		}
-		got := rpcErrorFor(err, tc.fn)
+		got := rpcErrorFor(err, tc.fn, schema)
+		if strings.Contains(got.Message, schema) {
+			t.Errorf("%s: message names the schema: %q", tc.fn, got.Message)
+		}
 		if got.Status != tc.wantStatus || got.Code != tc.wantCode || (tc.wantMsg != "" && got.Message != tc.wantMsg) {
 			t.Errorf("%s %v: got %+v, want status %d message %q code %q", tc.fn, tc.args, got, tc.wantStatus, tc.wantMsg, tc.wantCode)
 		}
