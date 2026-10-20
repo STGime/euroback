@@ -1146,7 +1146,17 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, p
 		return nil
 	}
 
-	return s.smsService.SendOTP(ctx, projectID, schemaName, userID, phone)
+	if err := s.smsService.SendOTP(ctx, projectID, schemaName, userID, phone); err != nil {
+		if config.DisableSignup {
+			// An unknown number gets a quiet "sent" while signup is off;
+			// a send error for a known number must look the same, or it
+			// tells the caller the number is registered.
+			slog.Error("phone otp send failed", "project_id", projectID, "user_id", userID, "error", err)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // VerifyPhoneOTP verifies a phone OTP code and returns an auth session.
