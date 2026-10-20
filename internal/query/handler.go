@@ -516,16 +516,17 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 
 		result, err := engine.CallFunction(r.Context(), schema, funcName, args)
 		if err != nil {
-			slog.Error("rpc call failed", "error", err, "schema", schema, "function", funcName)
-			if errors.Is(err, ErrTenantLoginUnavailable) {
-				jsonError(w, "the project's database is not available right now", http.StatusServiceUnavailable)
-				return
+			e := rpcErrorFor(err, funcName)
+			if e.Status >= 500 {
+				slog.Error("rpc call failed", "error", err, "schema", schema, "function", funcName)
+			} else {
+				slog.Info("rpc call refused", "error", err, "schema", schema, "function", funcName, "status", e.Status)
 			}
-			if isNotFoundError(err) {
-				jsonError(w, err.Error(), http.StatusNotFound)
-				return
+			body := map[string]string{"error": e.Message}
+			if e.Code != "" {
+				body["code"] = e.Code
 			}
-			jsonError(w, "internal server error", http.StatusInternalServerError)
+			jsonResponse(w, body, e.Status)
 			return
 		}
 
