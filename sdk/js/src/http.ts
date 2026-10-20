@@ -90,7 +90,11 @@ export function httpClient(config: EurobaseConfig): HttpClient {
       // reports its status.
       const data = await res.json().catch(() => null)
       const errorMessage = data?.error || `HTTP ${res.status}: ${res.statusText}`
-      return { error: errorMessage, status: res.status }
+      const out: { error: string; status: number; code?: string } = { error: errorMessage, status: res.status }
+      // Machine-readable code from the gateway, when it sends one (e.g.
+      // the Postgres error code of a failed RPC call).
+      if (typeof data?.code === 'string') out.code = data.code
+      return out
     }
 
     const data = await res.json()

@@ -7,7 +7,7 @@
 export { createClient } from './client'
 export type { EurobaseClient, EurobaseConfig } from './client'
 export { QueryBuilder, DatabaseClient } from './database'
-export type { QueryResult } from './database'
+export type { QueryResult, RpcResult } from './database'
 export { StorageClient } from './storage'
 export type {
   UploadResult,

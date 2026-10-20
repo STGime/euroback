@@ -18,6 +18,21 @@ export interface QueryResult<T = Record<string, any>> {
   error: string | null
 }
 
+/** Result of `db.rpc()`. */
+export interface RpcResult<T = any> {
+  /** What the function returned, or `null` on an error. */
+  data: T | null
+  error: string | null
+  /**
+   * The Postgres error code when the database refused the call: `P0001`
+   * for the function's own `RAISE EXCEPTION`, `42501` for a permission or
+   * RLS denial, … `null` otherwise (success, network error, not found).
+   */
+  code: string | null
+  /** HTTP status of an error response; absent on success or with no response. */
+  status?: number
+}
+
 // ---------------------------------------------------------------------------
 // Internal filter / order types
 // ---------------------------------------------------------------------------
@@ -287,5 +302,30 @@ export class DatabaseClient {
   /** Start a query chain for the given table. */
   from<T = Record<string, any>>(table: string): QueryBuilder<T> {
     return new QueryBuilder<T>(this.http, table)
+  }
+
+  /**
+   * Call a database (RPC) function. POST /v1/db/rpc/{fn}
+   *
+   * Arguments are passed by name, so the keys must match the function's
+   * parameter names. The call runs as the signed-in user, under RLS.
+   *
+   * ```ts
+   * const { data, error, code } = await eb.db.rpc('mission_answers', { mission_id: id })
+   * if (code === 'P0001') showMessage(error) // the function's own RAISE EXCEPTION
+   * ```
+   */
+  async rpc<T = any>(fn: string, args?: Record<string, any>): Promise<RpcResult<T>> {
+    const res = await this.http.post(`/v1/db/rpc/${encodeURIComponent(fn)}`, args ?? {})
+    if (res?.error) {
+      const out: RpcResult<T> = {
+        data: null,
+        error: res.error,
+        code: typeof res.code === 'string' ? res.code : null,
+      }
+      if (typeof res.status === 'number') out.status = res.status
+      return out
+    }
+    return { data: (res?.result ?? null) as T | null, error: null, code: null }
   }
 }
