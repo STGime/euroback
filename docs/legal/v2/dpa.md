@@ -14,22 +14,48 @@ REVIEWER NOTES — read before publication (v2)
          of Estonia + Harju County Court, Tallinn). No text change
          to this DPA's §13 needed because it already references
          "the law applicable to the Terms of Service."
-  3. This DPA is incorporated by reference into the Terms of Service
+  3. What changed vs v2.0 (this v2.1 amendment):
+       - Annex 3 restructured into two tables — CORE sub-processors
+         (always active) and FEATURE-CONDITIONAL sub-processors
+         (active only when Customer enables the corresponding
+         feature). Customer inquiry (Sg-Prenden-Lanke 1993 e.V.,
+         2026-09-17) surfaced that the flat single-table format
+         reads as if every processor always applies, causing
+         auditor confusion for customers who have not enabled
+         optional providers.
+       - Apple, Microsoft (Entra ID), and LinkedIn added to the
+         feature-conditional table. These OAuth providers are
+         already offered in the console auth-provider settings
+         but were previously missing from Annex 3 — Article 28(2)(a)
+         requires prior authorisation for each sub-processor, so
+         they must be listed even when feature-conditional.
+       - No changes to §§1-14 wording; the annexes are the only
+         diff. Existing acceptance carries forward per the
+         30-day notice + no-objection convention documented in
+         terms.md v2.1 §12.
+  4. This DPA is incorporated by reference into the Terms of Service
      and accepted by click-wrap at signup.
-  4. The clause referencing the live compliance report at
+  5. The clause referencing the live compliance report at
      /console/projects/{id}/compliance assumes that endpoint is
      reachable by Customer. Verify the route is wired before
      publication.
-  5. Annex 2 (TOMs) lists concrete controls in the codebase. Keep in
+  6. Annex 2 (TOMs) lists concrete controls in the codebase. Keep in
      sync with reality at version bumps.
-  6. Annex 3 (Sub-processors) is rendered live from the sub_processors
+  7. Annex 3 (Sub-processors) is rendered live from the sub_processors
      DB table; the static text below is a snapshot for completeness.
-  7. Lawyer review required.
+     The registry.go feature-detection is already the source of truth
+     for which conditional processors are active for a specific
+     project.
+  8. Lawyer review required.
+  9. Ops: before this file's effective date, send the 30-day change
+     notice to all existing customers per Annex 3 line about "30
+     days' notice before adding or replacing." Apple / Microsoft /
+     LinkedIn are the additions that trigger the notice window.
 -->
 
 # Data Processing Agreement
 
-**Version 2.0 — effective 22 July 2026**
+**Version 2.1 — effective 17 October 2026**
 
 This Data Processing Agreement ("**DPA**") is entered into between **Eurobase OÜ**, registered at **Ahtri 12, Tallinn 15551** ("**Eurobase**", "**Processor**"), and the customer identified in the Eurobase account ("**Customer**", "**Controller**"). It is incorporated by reference into the Terms of Service at /legal/terms and applies whenever Customer uses the Service to process personal data about its end-users.
 
@@ -170,17 +196,33 @@ The exact subset that applies to a given Project depends on the features the Cus
 
 ## Annex 3 — Authorised sub-processors
 
-The current list, with country, role, security certifications, and a link to each provider's own DPA, is published at **/legal/sub-processors**. As of 22 July 2026:
+The current list, with country, role, security certifications, and a link to each provider's own DPA, is published at **/legal/sub-processors**. The tables below are a snapshot as of **17 October 2026**. The live per-project view — reflecting which conditional processors are actually active for Customer's specific Project based on the features Customer has enabled — is at **/console/projects/{id}/compliance**.
+
+### 3.1 Core sub-processors — always active
+
+These process personal data on Customer's behalf regardless of which features Customer enables.
 
 | Sub-processor | Country | Role | Certs |
 |---|---|---|---|
 | Scaleway SAS | France | Hosting, managed PostgreSQL, object storage, transactional email, Kubernetes | ISO 27001, HDS, SecNumCloud (where applicable) |
-| GatewayAPI (OnlineCity ApS) | Denmark | SMS for phone authentication (when Customer enables it) | ISO 27001 |
-| Mollie B.V. | Netherlands | Payment processing (when paid plans are active) | PCI DSS Level 1 |
-| Google LLC | United States | Google OAuth (when Customer enables it for its own end-users) | EU-US DPF, ISO 27001, SOC 2 |
-| GitHub, Inc. (Microsoft) | United States | GitHub OAuth (when Customer enables it for its own end-users) | EU-US DPF, SOC 2 |
 
-Eurobase will give Customer at least 30 days' notice before adding or replacing any of these.
+### 3.2 Feature-conditional sub-processors — active only when triggered
+
+These sub-processors receive personal data ONLY when Customer explicitly enables the corresponding feature in its Project. A Customer that has not enabled a given feature does not share any personal data with the listed sub-processor, and the DPA has no operational effect against that entry for that Customer.
+
+| Sub-processor | Country | Role | Triggered when | Certs |
+|---|---|---|---|---|
+| Mollie B.V. | Netherlands | Payment processing | Customer subscribes to a paid plan (Pro, Team, Legal Team) | PCI DSS Level 1 |
+| GatewayAPI (OnlineCity ApS) | Denmark | SMS delivery for phone-OTP authentication | Customer enables the phone-OTP auth provider in Project settings | ISO 27001 |
+| Google LLC | United States | Google OAuth (Customer's end-user identity federation) | Customer enables the Google OAuth provider in Project settings | EU-US DPF, ISO 27001, SOC 2 |
+| GitHub, Inc. (a Microsoft company) | United States | GitHub OAuth (Customer's end-user identity federation) | Customer enables the GitHub OAuth provider in Project settings | EU-US DPF, SOC 2 |
+| Apple Inc. | United States | Sign in with Apple (Customer's end-user identity federation) | Customer enables the Apple OAuth provider in Project settings | EU-US DPF, ISO 27001, SOC 2 |
+| Microsoft Ireland Operations Ltd. | Ireland | Microsoft (Entra ID) OAuth (Customer's end-user identity federation) | Customer enables the Microsoft OAuth provider in Project settings | ISO 27001, EU DPF |
+| LinkedIn Ireland Unlimited Company | Ireland | LinkedIn OAuth (Customer's end-user identity federation) | Customer enables the LinkedIn OAuth provider in Project settings | ISO 27001, EU DPF |
+
+### 3.3 Change notice
+
+Eurobase will give Customer at least 30 days' notice before adding or replacing any entry in either table. Customer may object to a new sub-processor within the notice window; if the objection cannot be resolved by removing the corresponding feature from Customer's Project, Customer may terminate the affected Project without penalty for the remainder of any prepaid billing period.
 
 ## Annex 4 — Contact points
 
