@@ -15,7 +15,7 @@
 	} from '$lib/api.js';
 	import { onMount } from 'svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	// Tab state
 	let activeTab = $state<'dpa' | 'audit' | 'export' | 'retention'>('dpa');
@@ -51,7 +51,7 @@
 	}
 
 	// DPA Report
-	let report: DPAReport | null = $state(null);
+	let report = $state<DPAReport | null>(null);
 	let loading = $state(true);
 	let error: string | null = $state(null);
 

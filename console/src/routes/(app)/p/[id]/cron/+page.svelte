@@ -5,7 +5,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	let jobs: CronJob[] = $state([]);
 	let loading = $state(true);

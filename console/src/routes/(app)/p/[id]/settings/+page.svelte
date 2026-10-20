@@ -6,7 +6,7 @@
 	import { user } from '$lib/stores.js';
 
 	const projectCtx = getContext<{ id: string; project: Project | null }>('projectId');
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	// Tab state
 	let activeTab = $state<'settings' | 'members'>('settings');
