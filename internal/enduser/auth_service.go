@@ -36,6 +36,15 @@ import (
 // Closed advisory GHSA-269x-fqhj-x9jq.
 var ErrAccountExistsLinkRequired = errors.New("account exists — sign in with your existing credentials and link this provider from settings")
 
+// ErrSignupsDisabled: the project has turned off public signup
+// (auth_config.disable_signup), so this request would have created a
+// new user. Existing users are unaffected.
+var ErrSignupsDisabled = errors.New("signups_disabled")
+
+// errPhoneSignupSkipped: phone OTP for an unknown number while signup is
+// disabled. Not returned to the caller (see SendPhoneOTP).
+var errPhoneSignupSkipped = errors.New("phone signup skipped: signup disabled")
+
 // asService runs fn in an auth-service-role transaction. Sets both
 // `app.end_user_role='service'` (RLS service bypass, migration
 // 000038) AND `app.intent='internal_auth_path'` (migration 000055
@@ -160,6 +169,11 @@ func (s *AuthService) SetOAuthSecretLookup(lookup OAuthSecretLookup) {
 func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, projectID string, config tenant.AuthConfig, req SignUpRequest) (*AuthResponse, error) {
 	if !config.IsEmailPasswordEnabled() {
 		return nil, fmt.Errorf("email/password authentication is disabled")
+	}
+	// Checked before any lookup, so the answer doesn't depend on whether
+	// the email is registered.
+	if config.DisableSignup {
+		return nil, ErrSignupsDisabled
 	}
 
 	email := strings.ToLower(strings.TrimSpace(req.Email))
@@ -938,7 +952,11 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 				return fmt.Errorf("query user by email: %w", err)
 			}
 
-			// No existing user for this email — create a fresh one.
+			// No existing user for this email — create a fresh one,
+			// unless the project has turned off public signup.
+			if config.DisableSignup {
+				return ErrSignupsDisabled
+			}
 			var displayName *string
 			if userInfo.Name != "" {
 				displayName = &userInfo.Name
@@ -1092,6 +1110,9 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, p
 	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		e := tx.QueryRow(ctx, findQ, phone).Scan(&userID)
 		if e == pgx.ErrNoRows {
+			if config.DisableSignup {
+				return errPhoneSignupSkipped
+			}
 			if e = tx.QueryRow(ctx, insertQ, phone).Scan(&userID); e != nil {
 				return fmt.Errorf("create phone user: %w", e)
 			}
@@ -1103,6 +1124,13 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, p
 		}
 		return nil
 	})
+	if errors.Is(err, errPhoneSignupSkipped) {
+		// Unknown phone and signup is off: answer as if the code was sent
+		// (no SMS), so the reply doesn't reveal whether a number is
+		// registered — same as the SMS cap below.
+		slog.Info("phone otp skipped: unknown phone and signup is disabled", "project_id", projectID)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -1118,7 +1146,17 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, p
 		return nil
 	}
 
-	return s.smsService.SendOTP(ctx, projectID, schemaName, userID, phone)
+	if err := s.smsService.SendOTP(ctx, projectID, schemaName, userID, phone); err != nil {
+		if config.DisableSignup {
+			// An unknown number gets a quiet "sent" while signup is off;
+			// a send error for a known number must look the same, or it
+			// tells the caller the number is registered.
+			slog.Error("phone otp send failed", "project_id", projectID, "user_id", userID, "error", err)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // VerifyPhoneOTP verifies a phone OTP code and returns an auth session.

@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1465,8 +1466,13 @@ func (s *TenantService) UpdateAuthConfig(ctx context.Context, projectID, ownerID
 	// Refuses values that would exceed platform ceilings (SMS spend,
 	// per-IP throttle bypass). Ops override via SQL when a real
 	// enterprise case needs headroom. See ValidateRateLimits doc.
-	if err := ValidateRateLimits(config.RateLimits); err != nil {
-		return nil, fmt.Errorf("rate limits: %w", err)
+	// Only when they changed: limits ops raised above the ceilings by hand
+	// come back unchanged with every save of the other settings, and must
+	// not make those saves fail.
+	if !s.rateLimitsUnchanged(ctx, projectID, config.RateLimits) {
+		if err := ValidateRateLimits(config.RateLimits); err != nil {
+			return nil, fmt.Errorf("rate limits: %w", err)
+		}
 	}
 
 	// Marshal the (now secret-free) config and persist to auth_config.
@@ -1522,4 +1528,26 @@ func (s *TenantService) oauthClientSecretStatus(ctx context.Context, schemaName,
 		return false, false
 	}
 	return has, true
+}
+
+// rateLimitsUnchanged reports whether rl equals the project's stored
+// rate_limits (compared as JSON). Any read error counts as changed, so
+// the caller validates.
+func (s *TenantService) rateLimitsUnchanged(ctx context.Context, projectID string, rl *RateLimits) bool {
+	if rl == nil {
+		return true
+	}
+	var stored []byte
+	if err := s.pool.QueryRow(ctx,
+		`SELECT auth_config->'rate_limits' FROM projects WHERE id = $1`, projectID,
+	).Scan(&stored); err != nil || len(stored) == 0 {
+		return false
+	}
+	var storedRL RateLimits
+	if err := json.Unmarshal(stored, &storedRL); err != nil {
+		return false
+	}
+	a, errA := json.Marshal(storedRL)
+	b, errB := json.Marshal(rl)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
 }

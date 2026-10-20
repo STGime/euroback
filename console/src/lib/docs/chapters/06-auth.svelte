@@ -35,6 +35,7 @@
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Configuration options</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Password rules</strong> &mdash; set minimum length (8&ndash;128 characters)</li>
+					<li><strong>Allow new signups</strong> &mdash; turn it off for an invitation-only app. Sign-up, OAuth and phone sign-in then create no new users: <code class="bg-gray-100 border border-gray-200 rounded px-1">signUp()</code> returns <code class="bg-gray-100 border border-gray-200 rounded px-1">signups_disabled</code> (403), OAuth redirects back with <code class="bg-gray-100 border border-gray-200 rounded px-1">error=signups_disabled</code>, and a code request for an unknown phone number answers as usual but sends nothing. Existing users sign in as before. Create users from the Users tab or from your server with the Admin users API (one at a time or as an import).</li>
 					<li><strong>Email confirmation</strong> &mdash; require users to verify their email before signing in</li>
 					<li><strong>Session duration</strong> &mdash; how long access tokens remain valid (1h to 30 days)</li>
 					<li><strong>Redirect URLs</strong> &mdash; whitelist URLs your app can redirect to after auth callbacks</li>

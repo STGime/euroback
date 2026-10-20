@@ -93,6 +93,12 @@ type AuthConfig struct {
 	// bound to RPID at creation, so changing RPID orphans every enrolled
 	// end-user credential — treat it as permanent.
 	Passkeys *PasskeyConfig `json:"passkeys,omitempty"`
+
+	// DisableSignup turns off public signup: password signup, OAuth and
+	// phone OTP no longer create new users (existing users keep signing
+	// in). The Admin users API and batch import still create users, so a
+	// project can run invitation-only. False (the default) = open signup.
+	DisableSignup bool `json:"disable_signup,omitempty"`
 }
 
 // PasskeyConfig is the per-project WebAuthn relying-party config (#630).
