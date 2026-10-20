@@ -2,11 +2,11 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.12.0 — 2026-10-20
 
 ### Added — `db.rpc()`
 
-`db.rpc(fn, args?)` calls a database function (`POST /v1/db/rpc/{fn}`) with its arguments by name and returns `{ data, error, code, status? }` (the new `RpcResult` type). `code` is the Postgres error code when the database refused the call (`P0001` for the function's own `RAISE EXCEPTION`, `42501` for a permission or RLS denial). The readable error messages and `code` need the gateway change from #829; with an older gateway every database error is `internal server error`.
+`db.rpc(fn, args?)` calls a database function (`POST /v1/db/rpc/{fn}`) with its arguments by name and returns `{ data, error, code, status? }` (the new `RpcResult` type). `code` is the Postgres error code when the database refused the call (`P0001` for the function's own `RAISE EXCEPTION`, `42501` for a permission or RLS denial). The readable error messages and `code` come from the gateway change in #829 (deployed).
 
 Error results from the HTTP client now also carry `code` when the gateway sends one.
 
