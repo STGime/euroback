@@ -67,6 +67,9 @@ export interface AuthConfig {
 	password_reset_url?: string;
 	/** URL the magic-link email links to. Same allowlist rule. */
 	magic_link_url?: string;
+	/** Public signup off: password signup, OAuth and phone OTP create no
+	 * new users; the Admin users API and import still do. */
+	disable_signup?: boolean;
 }
 
 /** Per-project rate-limit overrides. Numeric zeros / absent fields fall

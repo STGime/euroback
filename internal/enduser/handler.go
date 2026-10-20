@@ -82,6 +82,10 @@ func HandleSignUp(svc *AuthService, limiter ...*ratelimit.RateLimiter) http.Hand
 		resp, err := svc.SignUp(r.Context(), pc.SchemaName, pc.JWTSecret, pc.ProjectID, config, req)
 		if err != nil {
 			slog.Warn("end-user signup failed", "error", err, "project_id", pc.ProjectID)
+			if errors.Is(err, ErrSignupsDisabled) {
+				writeJSON(w, map[string]string{"error": ErrSignupsDisabled.Error()}, http.StatusForbidden)
+				return
+			}
 			status := http.StatusInternalServerError
 			msg := err.Error()
 			if msg == "email is required" || strings.HasPrefix(msg, "password must be at least") || msg == "email already registered" || msg == "email/password authentication is disabled" || strings.HasPrefix(msg, "email confirmation is enabled") || strings.HasPrefix(msg, "email_redirect_to must be listed") {
@@ -732,6 +736,10 @@ func HandleOAuthCallback(svc *AuthService) http.HandlerFunc {
 			// the provider from settings.
 			if errors.Is(err, ErrAccountExistsLinkRequired) {
 				redirectWithError(w, r, clientRedirectURL, "account_exists_link_required", err.Error())
+				return
+			}
+			if errors.Is(err, ErrSignupsDisabled) {
+				redirectWithError(w, r, clientRedirectURL, "signups_disabled", "new accounts can't be created for this app")
 				return
 			}
 			redirectWithError(w, r, clientRedirectURL, "oauth_error", err.Error())

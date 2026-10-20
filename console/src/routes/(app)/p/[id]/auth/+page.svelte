@@ -57,6 +57,7 @@
 		projectCtx.project?.plan !== 'legal_team'
 	);
 	let requireEmailConfirmation = $state(false);
+	let allowSignups = $state(true);
 	let passwordMinLength = $state(8);
 	let sessionDuration = $state('168h');
 	let redirectUrls = $state('http://localhost:3000');
@@ -447,6 +448,7 @@
 				projectCtx.project.plan !== 'legal_team';
 			phoneEnabled = isGated ? false : storedPhoneEnabled;
 			requireEmailConfirmation = cfg.require_email_confirmation;
+			allowSignups = !projectCtx.project?.auth_config?.disable_signup;
 			passwordMinLength = cfg.password_min_length;
 			sessionDuration = cfg.session_duration;
 			redirectUrls = cfg.redirect_urls.join('\n');
@@ -662,7 +664,20 @@
 			// backend transition gate would still allow it (matches
 			// current state), but the stored config never converges.
 			const effectivePhoneEnabled = phonePaidGate ? false : phoneEnabled;
+			// The backend replaces auth_config wholesale, so start from the
+			// stored config: fields this form doesn't manage (rate_limits,
+			// set on the Rate Limits tab) must survive a save. Fields it
+			// manages but may clear are dropped first and re-added below.
+			const {
+				email_verification_url: _evu,
+				password_reset_url: _pru,
+				magic_link_url: _mlu,
+				passkeys: _pk,
+				...kept
+			} = (projectCtx.project?.auth_config ?? {}) as Partial<AuthConfig>;
 			const config: AuthConfig = {
+				...kept,
+				disable_signup: !allowSignups,
 				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled }, phone: { enabled: effectivePhoneEnabled } },
 				oauth_providers: {
 					google: googleProvider as any,
@@ -932,6 +947,34 @@
 	{#if activeTab === 'settings'}
 		<div class="mt-6 space-y-6">
 			<!-- Auth Methods -->
+			<div>
+				<h3 class="text-sm font-semibold text-gray-900">Signups</h3>
+				<div class="mt-3 rounded-lg border border-gray-200 px-4 py-3">
+					<div class="flex items-center justify-between">
+						<div>
+							<p class="text-sm font-medium text-gray-900">Allow new signups</p>
+							<p class="text-xs text-gray-500">
+								{#if allowSignups}
+									Anyone can create an account with your app's sign-up, OAuth or phone sign-in.
+								{:else}
+									Invitation only: sign-up, OAuth and phone sign-in don't create new users. Existing users sign in as usual; add users from the Users tab or your server (Admin API).
+								{/if}
+							</p>
+						</div>
+						<button
+							type="button"
+							role="switch"
+							aria-label="Allow new signups"
+							aria-checked={allowSignups}
+							onclick={() => allowSignups = !allowSignups}
+							class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-eurobase-600 focus:ring-offset-2 {allowSignups ? 'bg-eurobase-600' : 'bg-gray-200'}"
+						>
+							<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {allowSignups ? 'translate-x-5' : 'translate-x-0'}"></span>
+						</button>
+					</div>
+				</div>
+			</div>
+
 			<div>
 				<h3 class="text-sm font-semibold text-gray-900">Auth Methods</h3>
 				{#if secretStatusUnknown}
