@@ -39,6 +39,9 @@ on:
       - internal/query/ddl.go
       - internal/query/ddl_handler.go
       - internal/query/function_definition_test.go
+      - internal/query/rpc_error*.go
+      - internal/query/engine.go
+      - internal/query/handler.go
       - internal/email/delivery_log*.go
       - internal/tenantlogin/**
       - internal/tenantconn/**
@@ -155,6 +158,15 @@ jobs:
         env:
           CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
         run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions|TestGetFunctions_DB'
+
+      # RPC errors raised by real Postgres map to readable SDK answers.
+      - name: RPC error mapping against a provisioned tenant
+        env:
+          DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+        # setupTestDB skips on any setup failure: require a PASS line.
+        run: |
+          go test -count=1 -v ./internal/query/ -run 'TestCallFunctionErrors_RealDB' | tee rpc-test.log
+          grep -q -- '--- PASS: TestCallFunctionErrors_RealDB' rpc-test.log
 
       # End-user passkey store SQL against a provisioned tenant (#630), and
       # the email-confirmation rule across sign-up / sign-in / refresh (#806),

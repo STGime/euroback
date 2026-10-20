@@ -749,7 +749,7 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 	// Validate function name characters (alphanumeric + underscore only).
 	for _, c := range funcName {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
-			return nil, fmt.Errorf("invalid function name: %q", funcName)
+			return nil, fmt.Errorf("%w: %q", errRPCInvalidName, funcName)
 		}
 	}
 
@@ -766,7 +766,7 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 		return nil, fmt.Errorf("check function existence: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("function %q does not exist in schema %q", funcName, schemaName)
+		return nil, fmt.Errorf("%w: %q in schema %q", ErrRPCFunctionNotFound, funcName, schemaName)
 	}
 
 	// Build function call: SELECT "schema"."func"($1, $2, ...)
