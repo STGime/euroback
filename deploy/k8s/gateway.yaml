@@ -176,6 +176,13 @@ spec:
             # Rollback: remove this var and redeploy.
             - name: PLATFORM_DDL_LOGIN
               value: "1"
+            # #809: sign new end-user access tokens with ES256 (public key at
+            # /v1/auth/.well-known/jwks.json) so customers can verify them
+            # locally. Every gateway verifies HS256 and ES256; tokens already
+            # issued stay valid. Rollback: remove this var and redeploy (new
+            # tokens go back to HS256; ES256 tokens still verify).
+            - name: ENDUSER_JWT_ALG
+              value: "ES256"
       imagePullSecrets:
         - name: scw-registry
 ---
