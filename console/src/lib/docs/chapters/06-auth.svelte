@@ -14,6 +14,8 @@
 	const verifyPageHtml = "\x3c!-- verify.html — the page Eurobase's verification email links to.\n     Deploy at whichever URL you configured as email_verification_url. -->\n\x3c!DOCTYPE html>\n\x3chtml lang=\"en\">\n\x3chead>\n  \x3cmeta charset=\"utf-8\">\n  \x3ctitle>Verifying your email…\x3c/title>\n\x3c/head>\n\x3cbody>\n  \x3ch1 id=\"status\">Verifying…\x3c/h1>\n  \x3cscript type=\"module\">\n    import { createClient } from 'https://cdn.jsdelivr.net/npm/@eurobase/sdk/+esm'\n    const eb = createClient({\n      url: 'https://your-project.eurobase.app',\n      apiKey: 'eb_pk_YOUR_PUBLIC_KEY',\n    })\n    const token = new URL(location.href).searchParams.get('token')\n    const status = document.getElementById('status')\n    if (!token) {\n      status.textContent = 'Missing verification token in the URL.'\n    } else {\n      const { error } = await eb.auth.verifyEmail(token)\n      if (error) {\n        status.textContent = 'Verification failed: ' + error\n      } else {\n        status.textContent = 'Verified! You can now sign in.'\n        setTimeout(() => location.href = '/login', 2000)\n      }\n    }\n  \x3c/script>\n\x3c/body>\n\x3c/html>";
 	// Go example for "Verifying tokens on your server".
 	const jwksGoCode = `// go get github.com/MicahParks/keyfunc/v3 github.com/golang-jwt/jwt/v5
+// Create once at startup with a long-lived ctx (it runs the key refresh),
+// not per request.
 jwks, err := keyfunc.NewDefaultCtx(ctx, []string{
 	"https://your-project.eurobase.app/v1/auth/.well-known/jwks.json",
 })
@@ -260,10 +262,10 @@ const {'{'} payload {'}'} = await jwtVerify(token, JWKS, {'{'}
 					>
 						{copiedId === 'jwks-verify-go' ? 'Copied!' : 'Copy'}
 					</button>
-					<pre>{jwksGoCode}</pre>
+					<pre style="tab-size: 4">{jwksGoCode}</pre>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-3">
-					Both libraries cache the key and fetch it again only when a token names a key they don't have yet. Verifying locally is optional: <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> keeps working for every token.
+					Both libraries cache the key, refresh it periodically, and fetch it again when a token names a key they don't have yet. Verifying locally is optional: <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> keeps working for every token.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed mt-3">
 					A token stays valid until it expires, even after the user signs out, changes their password, or is suspended or deleted: local verification can't see those. Keep <strong>Session duration</strong> short, and call <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> with the token where you need to confirm the user still exists and read their current profile. Tokens issued before ES256 signing was switched on (header <code class="bg-gray-100 border border-gray-200 rounded px-1">alg: HS256</code>) can't be verified locally; check those with <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> until they are refreshed.
