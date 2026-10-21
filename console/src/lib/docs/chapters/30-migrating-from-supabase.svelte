@@ -70,7 +70,7 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can I verify access tokens on my server without a network call?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Not yet. Tokens are signed with a per-project secret that stays on the platform, so check a token with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /v1/auth/user</code> (it also tells you whether the user still exists). Asymmetric signing with a JWKS endpoint, for local verification, is planned.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. Access tokens are ES256-signed with your project's own key pair; the public key is at <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">https://your-project.eurobase.app/v1/auth/.well-known/jwks.json</code>. Verify with any JWT library that supports JWKS (issuer <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase</code>, audience = your project ID); see <a href="/docs/auth" class="text-eurobase-600 hover:underline cursor-pointer">chapter 6</a> for an example. A locally verified token stays valid until it expires, so use <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /v1/auth/user</code> where you need to confirm the user still exists and read their current profile.</p>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">

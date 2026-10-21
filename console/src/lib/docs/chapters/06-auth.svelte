@@ -207,6 +207,35 @@ await eb.auth.signOut()</pre>
 					The SDK refreshes the session before the access token expires. The session ends (<code class="bg-gray-100 border border-gray-200 rounded px-1">SIGNED_OUT</code>) only when the server rejects the refresh token: it was revoked or expired, or the user must confirm their email first. If the network is down or the server has a temporary problem, the session is kept and the SDK retries with backoff. Browser tabs of the same app share one session: one tab refreshes, the others use the session it stores, and signing out in one tab signs out all of them. Requires <code class="bg-gray-100 border border-gray-200 rounded px-1">@eurobase/sdk</code> 0.11.0 or later.
 				</p>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Verifying tokens on your server</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Access tokens are JWTs signed with ES256 using a key pair that belongs to your project. Your server can check them itself, with no call to Eurobase: fetch the public key once from <code class="bg-gray-100 border border-gray-200 rounded px-1">https://your-project.eurobase.app/v1/auth/.well-known/jwks.json</code> (public, no API key, safe to cache) and verify each token's signature, issuer (<code class="bg-gray-100 border border-gray-200 rounded px-1">eurobase</code>), audience (your project ID) and expiry. Any JWT library with JWKS support works; with <code class="bg-gray-100 border border-gray-200 rounded px-1">jose</code> in Node:
+				</p>
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<button
+						onclick={() => copyCode("import { createRemoteJWKSet, jwtVerify } from \'jose\'\n\nconst JWKS = createRemoteJWKSet(\n  new URL(\'https://your-project.eurobase.app/v1/auth/.well-known/jwks.json\')\n)\n\n// token = the user\'s access token (Authorization: Bearer …)\nconst { payload } = await jwtVerify(token, JWKS, {\n  issuer: \'eurobase\',\n  audience: \'YOUR_PROJECT_ID\',\n  algorithms: [\'ES256\'],\n})\n// payload.sub = user id, payload.email (the phone number for phone sign-in), payload.exp", 'jwks-verify')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'jwks-verify' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>import {'{'} createRemoteJWKSet, jwtVerify {'}'} from 'jose'
+
+const JWKS = createRemoteJWKSet(
+  new URL('https://your-project.eurobase.app/v1/auth/.well-known/jwks.json')
+)
+
+// token = the user's access token (Authorization: Bearer …)
+const {'{'} payload {'}'} = await jwtVerify(token, JWKS, {'{'}
+  issuer: 'eurobase',
+  audience: 'YOUR_PROJECT_ID',
+  algorithms: ['ES256'],
+{'}'})
+// payload.sub = user id, payload.email (the phone number for phone sign-in), payload.exp</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-3">
+					A token stays valid until it expires, even after the user signs out, changes their password, or is suspended or deleted: local verification can't see those. Keep <strong>Session duration</strong> short, and call <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> with the token where you need to confirm the user still exists and read their current profile. Tokens issued before ES256 signing was switched on (header <code class="bg-gray-100 border border-gray-200 rounded px-1">alg: HS256</code>) can't be verified locally; check those with <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> until they are refreshed.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Magic Links (passwordless)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Magic links let users sign in without a password. They enter their email, receive a link, and click it to sign in. The link expires after 15 minutes and can only be used once. Email is automatically verified on first magic link sign-in.
