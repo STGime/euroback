@@ -136,7 +136,11 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 		// 'active' + hold the response for ~30 s. See the const block
 		// above for the reasoning. Only fires on the state-flipping
 		// request; subsequent requests skip both branches.
-		if state == "paused" {
+		// A JWKS fetch (#809) only reads the project's public key: it
+		// neither wakes a paused project (a key fetch held ~30 s would
+		// time out in JWKS clients) nor counts as activity.
+		keyFetch := r.Method == http.MethodGet && r.URL.Path == EndUserJWKSPath
+		if !keyFetch && state == "paused" {
 			// Detached ctx so a client bailing mid-wake doesn't cancel
 			// the UPDATE — the write is idempotent + must complete
 			// even if this request abandons (otherwise the project
@@ -178,7 +182,7 @@ func (m *SubdomainMiddleware) Handler(next http.Handler) http.Handler {
 					return
 				}
 			}
-		} else {
+		} else if !keyFetch {
 			m.maybeBumpLastActive(pc.ProjectID)
 		}
 

@@ -84,12 +84,10 @@ func (m *EndUserMiddleware) Handler(next http.Handler) http.Handler {
 // realtime WebSocket authorize callback in #62) can validate without
 // duplicating the parse logic.
 func ValidateEndUserJWT(tokenStr, secret string) (*EndUserClaims, error) {
-	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return []byte(secret), nil
-	}, jwt.WithValidMethods([]string{"HS256"}))
+	// HS256 (signed with the project's jwt_secret) and ES256 (signed with
+	// the key derived from it, #809) are both accepted, whichever
+	// algorithm new tokens are currently signed with.
+	token, err := jwt.Parse(tokenStr, endUserVerifyKey(secret), jwt.WithValidMethods([]string{"HS256", "ES256"}))
 	if err != nil || !token.Valid {
 		return nil, fmt.Errorf("invalid token: %w", err)
 	}

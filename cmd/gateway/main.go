@@ -64,6 +64,14 @@ func main() {
 	// ── Load configuration from environment variables ──
 	databaseURL := requireEnv("DATABASE_URL")
 	platformJWTSecret := requireEnv("PLATFORM_JWT_SECRET")
+	// End-user access tokens: HS256 (default) or ES256 (#809). Every
+	// gateway verifies both; switch signing only once all gateways run
+	// code that verifies ES256.
+	if err := auth.SetEndUserTokenAlg(os.Getenv("ENDUSER_JWT_ALG")); err != nil {
+		slog.Error("invalid ENDUSER_JWT_ALG", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("end-user access tokens", "alg", auth.EndUserTokenAlg())
 	redisURL := os.Getenv("REDIS_URL")
 
 	port := os.Getenv("GATEWAY_PORT")

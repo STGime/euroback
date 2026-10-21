@@ -1564,6 +1564,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
 		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 
+		// #809: the project's public key for verifying ES256 end-user
+		// tokens locally. Public, no API key; the project comes from the
+		// subdomain. No database access beyond the subdomain lookup.
+		r.Get(strings.TrimPrefix(auth.EndUserJWKSPath, "/v1"), auth.HandleEndUserJWKS)
+
 		// Auth endpoints (only need API key, no end-user JWT).
 		// sdkTenantPoolMw stashes the runtime pool for Team-tier
 		// projects so the OAuth signin path's GetOAuthClientSecret

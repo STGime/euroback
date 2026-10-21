@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/oauth"
@@ -80,8 +81,8 @@ func (s *AuthService) asService(ctx context.Context, fn func(context.Context, pg
 // for Team-tier requests, or Team-tier gets 42P01 on shared.** The
 // routes that do:
 //
-//   * /v1/auth/**                                    — sdkTenantPoolMw (runtime pool)
-//   * /v1/auth/oauth/{provider}/callback (GET/POST)  — sdkTenantPoolMw (runtime pool)
+//   - /v1/auth/**                                    — sdkTenantPoolMw (runtime pool)
+//   - /v1/auth/oauth/{provider}/callback (GET/POST)  — sdkTenantPoolMw (runtime pool)
 //
 // Falls back to s.pool for Free/Pro (nothing stashed). If a future
 // caller adds a route that reaches AuthService without one of these
@@ -532,7 +533,8 @@ func (s *AuthService) createRefreshToken(ctx context.Context, schemaName, userID
 	return rawToken, nil
 }
 
-// generateAccessToken creates an HS256 JWT for an end-user.
+// generateAccessToken creates an end-user access token, signed with HS256
+// or ES256 depending on ENDUSER_JWT_ALG (auth.SignEndUserToken, #809).
 func generateAccessToken(userID, email, projectID, secret string, sessionDurationSecs int) (string, int, error) {
 	expiresIn := sessionDurationSecs
 	if expiresIn <= 0 {
@@ -550,8 +552,7 @@ func generateAccessToken(userID, email, projectID, secret string, sessionDuratio
 		"exp":        now.Add(time.Duration(expiresIn) * time.Second).Unix(),
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString([]byte(secret))
+	signed, err := auth.SignEndUserToken(claims, secret, projectID)
 	if err != nil {
 		return "", 0, fmt.Errorf("sign JWT: %w", err)
 	}
