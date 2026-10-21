@@ -213,7 +213,7 @@ await eb.auth.signOut()</pre>
 				</p>
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
 					<button
-						onclick={() => copyCode("import { createRemoteJWKSet, jwtVerify } from \'jose\'\n\nconst JWKS = createRemoteJWKSet(\n  new URL(\'https://your-project.eurobase.app/v1/auth/.well-known/jwks.json\')\n)\n\n// token = the user\'s access token (Authorization: Bearer …)\nconst { payload } = await jwtVerify(token, JWKS, {\n  issuer: \'eurobase\',\n  audience: \'YOUR_PROJECT_ID\',\n  algorithms: [\'ES256\'],\n})\n// payload.sub = user id, payload.email, payload.exp", 'jwks-verify')}
+						onclick={() => copyCode("import { createRemoteJWKSet, jwtVerify } from \'jose\'\n\nconst JWKS = createRemoteJWKSet(\n  new URL(\'https://your-project.eurobase.app/v1/auth/.well-known/jwks.json\')\n)\n\n// token = the user\'s access token (Authorization: Bearer …)\nconst { payload } = await jwtVerify(token, JWKS, {\n  issuer: \'eurobase\',\n  audience: \'YOUR_PROJECT_ID\',\n  algorithms: [\'ES256\'],\n})\n// payload.sub = user id, payload.email (the phone number for phone sign-in), payload.exp", 'jwks-verify')}
 						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
 					>
 						{copiedId === 'jwks-verify' ? 'Copied!' : 'Copy'}
@@ -230,10 +230,10 @@ const {'{'} payload {'}'} = await jwtVerify(token, JWKS, {'{'}
   audience: 'YOUR_PROJECT_ID',
   algorithms: ['ES256'],
 {'}'})
-// payload.sub = user id, payload.email, payload.exp</pre>
+// payload.sub = user id, payload.email (the phone number for phone sign-in), payload.exp</pre>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-3">
-					A token stays valid until it expires, even after the user signs out, changes their password, or is suspended or deleted: local verification can't see those. Keep <strong>Session duration</strong> short, and call <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> with the token where you need the user's current state. Tokens issued before ES256 signing was switched on (header <code class="bg-gray-100 border border-gray-200 rounded px-1">alg: HS256</code>) can't be verified locally; check those with <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> until they are refreshed.
+					A token stays valid until it expires, even after the user signs out, changes their password, or is suspended or deleted: local verification can't see those. Keep <strong>Session duration</strong> short, and call <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> with the token where you need to confirm the user still exists and read their current profile. Tokens issued before ES256 signing was switched on (header <code class="bg-gray-100 border border-gray-200 rounded px-1">alg: HS256</code>) can't be verified locally; check those with <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> until they are refreshed.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Magic Links (passwordless)</h3>
