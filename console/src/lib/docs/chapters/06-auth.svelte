@@ -12,6 +12,26 @@
 	// Kept out of the template, with "<" escaped as \x3c: raw tag text in a
 	// component (even inside a string) trips the Svelte/TS tooling.
 	const verifyPageHtml = "\x3c!-- verify.html — the page Eurobase's verification email links to.\n     Deploy at whichever URL you configured as email_verification_url. -->\n\x3c!DOCTYPE html>\n\x3chtml lang=\"en\">\n\x3chead>\n  \x3cmeta charset=\"utf-8\">\n  \x3ctitle>Verifying your email…\x3c/title>\n\x3c/head>\n\x3cbody>\n  \x3ch1 id=\"status\">Verifying…\x3c/h1>\n  \x3cscript type=\"module\">\n    import { createClient } from 'https://cdn.jsdelivr.net/npm/@eurobase/sdk/+esm'\n    const eb = createClient({\n      url: 'https://your-project.eurobase.app',\n      apiKey: 'eb_pk_YOUR_PUBLIC_KEY',\n    })\n    const token = new URL(location.href).searchParams.get('token')\n    const status = document.getElementById('status')\n    if (!token) {\n      status.textContent = 'Missing verification token in the URL.'\n    } else {\n      const { error } = await eb.auth.verifyEmail(token)\n      if (error) {\n        status.textContent = 'Verification failed: ' + error\n      } else {\n        status.textContent = 'Verified! You can now sign in.'\n        setTimeout(() => location.href = '/login', 2000)\n      }\n    }\n  \x3c/script>\n\x3c/body>\n\x3c/html>";
+	// Go example for "Verifying tokens on your server".
+	const jwksGoCode = `// go get github.com/MicahParks/keyfunc/v3 github.com/golang-jwt/jwt/v5
+jwks, err := keyfunc.NewDefaultCtx(ctx, []string{
+	"https://your-project.eurobase.app/v1/auth/.well-known/jwks.json",
+})
+if err != nil {
+	return err
+}
+
+// tokenString = the user's access token (Authorization: Bearer …)
+token, err := jwt.Parse(tokenString, jwks.Keyfunc,
+	jwt.WithValidMethods([]string{"ES256"}),
+	jwt.WithIssuer("eurobase"),
+	jwt.WithAudience("YOUR_PROJECT_ID"),
+	jwt.WithExpirationRequired(),
+)
+if err != nil {
+	return err // invalid or expired: answer 401
+}
+claims := token.Claims.(jwt.MapClaims) // claims["sub"] = user id`;
 </script>
 
 		<section id="auth" class="scroll-mt-20">
@@ -232,6 +252,19 @@ const {'{'} payload {'}'} = await jwtVerify(token, JWKS, {'{'}
 {'}'})
 // payload.sub = user id, payload.email (the phone number for phone sign-in), payload.exp</pre>
 				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-3">In Go, with <code class="bg-gray-100 border border-gray-200 rounded px-1">keyfunc</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">golang-jwt</code>:</p>
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<button
+						onclick={() => copyCode(jwksGoCode, 'jwks-verify-go')}
+						class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer"
+					>
+						{copiedId === 'jwks-verify-go' ? 'Copied!' : 'Copy'}
+					</button>
+					<pre>{jwksGoCode}</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-3">
+					Both libraries cache the key and fetch it again only when a token names a key they don't have yet. Verifying locally is optional: <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> keeps working for every token.
+				</p>
 				<p class="text-sm text-gray-700 leading-relaxed mt-3">
 					A token stays valid until it expires, even after the user signs out, changes their password, or is suspended or deleted: local verification can't see those. Keep <strong>Session duration</strong> short, and call <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> with the token where you need to confirm the user still exists and read their current profile. Tokens issued before ES256 signing was switched on (header <code class="bg-gray-100 border border-gray-200 rounded px-1">alg: HS256</code>) can't be verified locally; check those with <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> until they are refreshed.
 				</p>
