@@ -105,6 +105,14 @@ func TestViewGuard_DB(t *testing.T) {
 		// Not visible to a check of the SQL text.
 		"DO $$ BEGIN EXECUTE 'CREATE VIEW v AS SELECT * FROM secret'; END $$",
 		"DO $$ BEGIN BEGIN EXECUTE 'CREATE VIEW v AS SELECT * FROM secret'; EXCEPTION WHEN OTHERS THEN NULL; END; END $$",
+		// Blinding the catalog query: search_path changed inside a DO
+		// block so the schema's own "=" operator wins over pg_catalog's.
+		`DO $$ BEGIN PERFORM set_config('search_path', current_schema() || ', pg_catalog', true); END $$;
+		 CREATE FUNCTION oid_never_eq(oid, oid) RETURNS boolean LANGUAGE sql AS 'SELECT false';
+		 CREATE OPERATOR = (LEFTARG = oid, RIGHTARG = oid, FUNCTION = oid_never_eq);
+		 CREATE FUNCTION char_never_eq("char", "char") RETURNS boolean LANGUAGE sql AS 'SELECT false';
+		 CREATE OPERATOR = (LEFTARG = "char", RIGHTARG = "char", FUNCTION = char_never_eq);
+		 CREATE VIEW v AS SELECT * FROM secret`,
 		// Replacing an existing owner-run view with a new one.
 		"DROP VIEW legacy; CREATE VIEW legacy AS SELECT * FROM secret",
 	}
@@ -144,6 +152,24 @@ func TestViewGuard_DB(t *testing.T) {
 	err = run("CREATE MATERIALIZED VIEW stats AS SELECT count(*) FROM secret")
 	if err == nil || !strings.Contains(err.Error(), `"stats"`) || !strings.Contains(err.Error(), "materialized") {
 		t.Errorf("materialized refusal message = %v", err)
+	}
+
+	// The guard restores the developer's search_path.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+ident+", public"); err != nil {
+		t.Fatal(err)
+	}
+	if err := withViewGuard(ctx, tx, schema, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	_ = tx.QueryRow(ctx, "SHOW search_path").Scan(&path)
+	_ = tx.Rollback(ctx)
+	if !strings.HasPrefix(path, schema) && !strings.HasPrefix(path, ident) {
+		t.Errorf("search_path after the guard = %q, want the caller's", path)
 	}
 
 	// A view in another schema is not this project's concern.

@@ -25,10 +25,30 @@ import (
 // existing projects keep working until they are converted.
 
 // ownerRunViews lists the project's views that run as their owner, plus
-// all materialized views: oid → description. The catalog query uses only
-// qualified names and built-in comparisons, and the options are read in
-// Go, so nothing the developer defines in their schema can affect it.
+// all materialized views: oid → description. Developer SQL earlier in the
+// transaction may have changed search_path (e.g. inside a DO block) and
+// defined operators in its own schema, so the query runs with only
+// pg_catalog on the path and the previous path is restored afterwards.
+// The options are read in Go.
 func ownerRunViews(ctx context.Context, tx pgx.Tx, schemaName string) (map[uint32]ownerRunView, error) {
+	var prevPath string
+	if err := tx.QueryRow(ctx, "SELECT pg_catalog.current_setting('search_path')").Scan(&prevPath); err != nil {
+		return nil, fmt.Errorf("list views: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO pg_catalog, pg_temp"); err != nil {
+		return nil, fmt.Errorf("list views: %w", err)
+	}
+	views, err := queryOwnerRunViews(ctx, tx, schemaName)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, "SELECT pg_catalog.set_config('search_path', $1, true)", prevPath); err != nil {
+		return nil, fmt.Errorf("list views: %w", err)
+	}
+	return views, nil
+}
+
+func queryOwnerRunViews(ctx context.Context, tx pgx.Tx, schemaName string) (map[uint32]ownerRunView, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT c.oid, c.relname, c.relkind::text, coalesce(c.reloptions, '{}'::text[])
 		  FROM pg_catalog.pg_class c
