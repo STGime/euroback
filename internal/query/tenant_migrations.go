@@ -403,8 +403,13 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
 		return false, fmt.Errorf("set statement_timeout: %w", err)
 	}
-	if _, err := conn.PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
-		return false, fmt.Errorf("migration failed: %w", err)
+	if err := withViewGuard(ctx, tx, schemaName, func() error {
+		if _, err := conn.PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
+			return fmt.Errorf("migration failed: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return false, err
 	}
 
 	// Record via the session_user-bound SECURITY DEFINER helper.

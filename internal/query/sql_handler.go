@@ -351,7 +351,7 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 
 		if err != nil {
 			slog.Error("sql execution failed", "error", err, "schema", schema)
-			logSQL(sqllog.OutcomeError, err.Error(), sqllog.Ms(elapsed), nil)
+			logSQL(sqlLogOutcome(err), err.Error(), sqllog.Ms(elapsed), nil)
 			// The project's per-project login couldn't be opened (not
 			// configured, or a Team project's dedicated DB not serving):
 			// 503, never a fall-through to a shared login.
@@ -420,7 +420,7 @@ func txLogOutcome(i int, ran ranStatements, err error) (outcome, detail string, 
 	}
 	var stmtErr *StatementError
 	if !errors.As(err, &stmtErr) {
-		return sqllog.OutcomeError, "transaction not committed: " + err.Error(), ran.duration(i), nil
+		return sqlLogOutcome(err), "transaction not committed: " + err.Error(), ran.duration(i), nil
 	}
 	what := "failed"
 	if IsRefused(stmtErr) {
