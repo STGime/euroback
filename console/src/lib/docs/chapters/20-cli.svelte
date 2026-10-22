@@ -137,7 +137,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Testing RLS policies with pgTAP</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Create SQL test files in a <code class="bg-gray-100 rounded px-1">tests/</code> directory. Each file uses pgTAP assertions to verify your RLS policies work correctly.
+					Create SQL test files in a <code class="bg-gray-100 rounded px-1">tests/</code> directory. Each file uses pgTAP assertions to verify your RLS policies work correctly. A session's identity comes from two transaction-local settings that the platform sets for you at runtime, and that you set by hand in a test: <code class="bg-gray-100 rounded px-1">app.end_user_id</code> (the end-user's UUID, read by <code class="bg-gray-100 rounded px-1">auth_uid()</code>) and <code class="bg-gray-100 rounded px-1">app.end_user_role</code> (<code class="bg-gray-100 rounded px-1">'authenticated'</code>, <code class="bg-gray-100 rounded px-1">'anon'</code> or <code class="bg-gray-100 rounded px-1">'service'</code>, read by <code class="bg-gray-100 rounded px-1">auth_role()</code> / <code class="bg-gray-100 rounded px-1">is_service_role()</code>). Set <strong>both</strong> to faithfully reproduce a real session &mdash; a policy that checks <code class="bg-gray-100 rounded px-1">auth_role()</code> will not behave as it does in production if you set only the id.
 				</p>
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
@@ -145,8 +145,9 @@
 BEGIN;
 SELECT plan(3);
 
--- Test as Alice
+-- Test as Alice (a signed-in end user)
 SET LOCAL app.end_user_id = 'alice-uuid';
+SET LOCAL app.end_user_role = 'authenticated';
 
 SELECT ok(
     (SELECT count(*) FROM tasks WHERE user_id = 'alice-uuid') > 0,
@@ -158,8 +159,9 @@ SELECT ok(
     'Alice cannot see Bob tasks'
 );
 
--- Test as anonymous
+-- Test as anonymous (no end user; role falls back to 'anon')
 SET LOCAL app.end_user_id = '';
+SET LOCAL app.end_user_role = 'anon';
 SELECT ok(
     (SELECT count(*) FROM tasks) = 0,
     'Anonymous cannot see any tasks'
@@ -181,7 +183,7 @@ ROLLBACK;</pre>
 						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
 					</svg>
 					<div class="text-sm text-eurobase-800">
-						<p><strong>Tip:</strong> Tests run inside a transaction that is rolled back &mdash; no data is modified. Use <code class="bg-white/50 rounded px-1">SET LOCAL app.end_user_id</code> to simulate different users and verify RLS policies enforce correct access.</p>
+						<p><strong>Tip:</strong> Tests run inside a transaction that is rolled back &mdash; no data is modified. Use <code class="bg-white/50 rounded px-1">SET LOCAL app.end_user_id</code> together with <code class="bg-white/50 rounded px-1">SET LOCAL app.end_user_role</code> to simulate different users and verify RLS policies enforce correct access. To test the service-role bypass (server-side / service-key access), set <code class="bg-white/50 rounded px-1">app.end_user_role = 'service'</code> &mdash; <code class="bg-white/50 rounded px-1">is_service_role()</code> then returns true and end-user RLS is bypassed.</p>
 					</div>
 				</div>
 			</div>
