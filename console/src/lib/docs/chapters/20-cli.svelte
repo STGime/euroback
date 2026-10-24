@@ -148,8 +148,7 @@ const eb = createClient({'{'} url: PROJECT_URL, apiKey: PUBLIC_KEY {'}'})
 await eb.auth.signIn({'{'} email: 'alice@example.test', password: '...' {'}'})
 
 const {'{'} data: mine {'}'} = await eb.db.from('tasks').select('*')        // only Alice's rows
-const {'{'} error {'}'} = await eb.db.from('tasks')
-  .update({'{'} title: 'x' {'}'}).eq('user_id', BOB_ID)                      // blocked by RLS
+const {'{'} error {'}'} = await eb.db.from('tasks').update(BOB_TASK_ID, {'{'} title: 'x' {'}'})  // RLS blocks updating Bob's row
 
 // Sign out -> anonymous: a protected table returns nothing.
 await eb.auth.signOut()
