@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/eurobase/euroback/internal/k8sapi"
 	"github.com/eurobase/euroback/internal/pgbouncerconf"
 	"github.com/eurobase/euroback/internal/plans"
@@ -596,10 +598,46 @@ func main() {
 		TenantVault: workers.NewTenantVaultResolver(providerRepo, cipher),
 	})
 
+	// Functions runner, for cron `function` schedules (issue #112) and
+	// function triggers (#845). Optional — without it those fail fast
+	// with a clear message; SQL/RPC schedules keep working. Same env
+	// vars as the gateway.
+	var fnInvoker *cron.FunctionInvoker
+	if fnRunnerURL := os.Getenv("FUNCTION_RUNNER_URL"); fnRunnerURL != "" {
+		var signer *functions.Signer
+		if secret := os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"); secret != "" {
+			s, err := functions.NewSigner(secret)
+			if err != nil {
+				slog.Error("FUNCTIONS_RUNNER_HMAC_SECRET invalid for worker", "error", err)
+				os.Exit(1)
+			}
+			signer = s
+		}
+		fnInvoker = &cron.FunctionInvoker{
+			RunnerURL: fnRunnerURL,
+			Signer:    signer,
+			Client:    &http.Client{Timeout: 65 * time.Second},
+		}
+	}
+
+	// Project events (#845): customer webhooks and function triggers,
+	// enqueued by the gateway on the project_events queue.
+	river.AddWorker(riverWorkers, &workers.DeliverProjectWebhookWorker{
+		Pool:   pool,
+		Client: workers.NewWebhookDeliveryClient(),
+	})
+	river.AddWorker(riverWorkers, &workers.InvokeFunctionTriggerWorker{
+		Pool:    pool,
+		Invoker: fnInvoker,
+	})
+
 	// ── Create River client in worker mode ──
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 10},
+			// Customer endpoints can be slow; their own pool keeps them
+			// from holding up platform jobs.
+			jobs.ProjectEventsQueue: {MaxWorkers: 20},
 		},
 		Workers: riverWorkers,
 	})
@@ -636,26 +674,9 @@ func main() {
 		slog.Warn("FUNC_PASSWORD_SECRET not set — sql/rpc cron schedules will fail")
 	}
 
-	// Wire the function-runner invoker so schedules with action_type
-	// `function` (issue #112) can fire deployed edge functions. Optional
-	// — without it, function schedules fail-fast with a clear message,
-	// SQL/RPC schedules keep working. Same env vars as the gateway.
-	fnRunnerURL := os.Getenv("FUNCTION_RUNNER_URL")
-	if fnRunnerURL != "" {
-		var signer *functions.Signer
-		if secret := os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"); secret != "" {
-			s, err := functions.NewSigner(secret)
-			if err != nil {
-				slog.Error("FUNCTIONS_RUNNER_HMAC_SECRET invalid for worker", "error", err)
-				os.Exit(1)
-			}
-			signer = s
-		}
-		cronExec = cronExec.WithFunctionInvoker(cron.FunctionInvoker{
-			RunnerURL: fnRunnerURL,
-			Signer:    signer,
-		})
-		slog.Info("cron executor wired to functions runner", "url", fnRunnerURL, "signed", signer != nil)
+	if fnInvoker != nil {
+		cronExec = cronExec.WithFunctionInvoker(*fnInvoker)
+		slog.Info("cron executor wired to functions runner", "url", fnInvoker.RunnerURL, "signed", fnInvoker.Signer != nil)
 	} else {
 		slog.Warn("FUNCTION_RUNNER_URL not set on worker — `function` schedules will fail-fast")
 	}
@@ -687,6 +708,9 @@ func main() {
 	// (up to 10 KB/row) the table grew unbounded. Default 30-day
 	// window; set EDGE_FUNCTION_LOGS_RETENTION_DAYS=0 to disable.
 	workers.StartEdgeFunctionLogsRetention(ctx, pool)
+
+	// ── Webhook deliveries retention (#845) ──
+	workers.StartWebhookDeliveriesRetention(ctx, pool)
 
 	// ── Backup sweeper (M3) ──
 	// 6-hour ticker: refreshes backup_snapshots cache from

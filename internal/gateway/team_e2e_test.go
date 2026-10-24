@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
+	"io"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -28,16 +29,23 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/dbprovider"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/vault"
+	"github.com/eurobase/euroback/internal/workers"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivermigrate"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // TestTeamEndToEnd (#683) drives the real gateway router for a Team project
@@ -631,6 +639,68 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if n := env.dedCount(t, "todos", "title = 'from-console'"); n != 1 {
 			return fmt.Errorf("row not on the dedicated DB (count %d)", n)
+		}
+		return nil
+	})
+
+	// #845: an SDK write reaches a webhook — the router enqueues a
+	// delivery job with the row, and the production worker delivers it,
+	// signed the way the webhooks docs verify it.
+	check(t, env, "project_events_webhook", func() error {
+		ctx := context.Background()
+		r := console("POST", "/webhooks", `{"url":"https://example.com/team-e2e","events":["db.insert"]}`)
+		if r.code != http.StatusCreated {
+			return r
+		}
+		var wh struct{ ID, Secret string }
+		if err := json.Unmarshal([]byte(r.body), &wh); err != nil || wh.ID == "" || wh.Secret == "" {
+			return fmt.Errorf("create webhook: %v %s", err, r.body)
+		}
+		if r := sdk("POST", "/v1/db/todos", `{"title":"webhook-event"}`); r.code >= 300 {
+			return r
+		}
+		var raw []byte
+		if err := env.shared.QueryRow(ctx,
+			`DELETE FROM public.river_job WHERE kind = 'deliver_project_webhook' AND args->>'webhook_id' = $1 RETURNING args`, wh.ID,
+		).Scan(&raw); err != nil {
+			return fmt.Errorf("no delivery job for the SDK insert: %w", err)
+		}
+		var args jobs.DeliverProjectWebhookArgs
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return err
+		}
+		var ev events.Envelope
+		if err := json.Unmarshal(args.Body, &ev); err != nil {
+			return err
+		}
+		if ev.Type != events.DBInsert || ev.Table != "todos" || ev.ProjectID != env.projectID || ev.Data["title"] != "webhook-event" {
+			return fmt.Errorf("event = %+v", ev)
+		}
+
+		var got struct {
+			sig  string
+			body []byte
+		}
+		recv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got.sig = r.Header.Get("X-Eurobase-Signature")
+			got.body, _ = io.ReadAll(r.Body)
+		}))
+		defer recv.Close()
+		tr := recv.Client().Transport.(*http.Transport).Clone()
+		addr := recv.Listener.Addr().String()
+		tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}
+		w := &workers.DeliverProjectWebhookWorker{Pool: env.gw, Client: &http.Client{Transport: tr, Timeout: 10 * time.Second}}
+		if err := w.Work(ctx, &river.Job[jobs.DeliverProjectWebhookArgs]{JobRow: &rivertype.JobRow{Attempt: 1}, Args: args}); err != nil {
+			return fmt.Errorf("deliver: %w", err)
+		}
+		if got.sig == "" || got.sig != events.SignWebhookBody(wh.Secret, got.body) || !strings.Contains(string(got.body), "webhook-event") {
+			return fmt.Errorf("delivered %q with signature %q", got.body, got.sig)
+		}
+		var ok bool
+		if err := env.shared.QueryRow(ctx, `SELECT success FROM public.webhook_deliveries WHERE webhook_id = $1 AND event_id = $2`, wh.ID, args.EventID).Scan(&ok); err != nil || !ok {
+			return fmt.Errorf("delivery row: success=%v err=%v", ok, err)
 		}
 		return nil
 	})
@@ -2662,6 +2732,10 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	if ok, err := s3Client.BucketExists(ctx, "eurobase-"+slug); err != nil || !ok {
 		t.Fatalf("bucket eurobase-%s missing after create: %v", slug, err)
 	}
+	// Project events (#845): the emitter cmd/gateway builds, enqueuing on
+	// River (whose schema the worker creates in prod), so writes through
+	// this router queue real delivery jobs.
+	projectEvents := teamProjectEvents(t, admin, gw)
 	// The real functions runner (#676): the Deno server from
 	// functions-runner/, started per scenario (its VAULT_ENCRYPTION_KEY is
 	// the scenario's), wired to this router both ways — invocations go
@@ -2692,7 +2766,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		// login seam is covered by engine_tenant_login_test.go; the real
 		// `<schema>_func` execution path is the functions runner's (below)
 		// and the step-3 prod pooler smoke test.
-		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil, nil, nil)
+		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil, nil, nil, projectEvents)
 	if cfg.deno != "" {
 		gatewaySrv := httptest.NewServer(router)
 		t.Cleanup(gatewaySrv.Close)
@@ -2770,4 +2844,38 @@ func mustExecT(t *testing.T, p *pgxpool.Pool, q string, args ...any) {
 	if _, err := p.Exec(context.Background(), q, args...); err != nil {
 		t.Fatalf("%v\n%s", err, q)
 	}
+}
+
+// teamProjectEvents creates River's schema on the shared cluster (the
+// worker does in prod), lets eurobase_gateway use River's tables only,
+// and returns the emitter cmd/gateway builds (#845).
+func teamProjectEvents(t *testing.T, admin, gw *pgxpool.Pool) *events.Emitter {
+	t.Helper()
+	ctx := context.Background()
+	m, err := rivermigrate.New(riverpgxv5.New(admin), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
+		t.Fatalf("river schema: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relname LIKE 'river%' AND c.relkind IN ('r', 'S') LOOP
+    IF r.relkind = 'S' THEN
+      EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE public.%I TO eurobase_gateway', r.relname);
+    ELSE
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO eurobase_gateway', r.relname);
+    END IF;
+  END LOOP;
+END $$`); err != nil {
+		t.Fatalf("river grants: %v", err)
+	}
+	ins, err := river.NewClient(riverpgxv5.New(gw), &river.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events.NewEmitter(gw, events.RiverInserter(ins))
 }

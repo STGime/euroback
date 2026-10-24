@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -106,12 +109,21 @@ func handleCreate(pool *pgxpool.Pool, limitsSvc *plans.LimitsService) http.Handl
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
+		req.URL = strings.TrimSpace(req.URL)
 		if req.URL == "" {
 			jsonError(w, "url is required", http.StatusBadRequest)
 			return
 		}
+		if err := events.CheckWebhookURL(req.URL); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if len(req.Events) == 0 {
 			jsonError(w, "at least one event is required", http.StatusBadRequest)
+			return
+		}
+		if msg := invalidEvents(req.Events); msg != "" {
+			jsonError(w, msg, http.StatusBadRequest)
 			return
 		}
 
@@ -136,6 +148,7 @@ func handleCreate(pool *pgxpool.Pool, limitsSvc *plans.LimitsService) http.Handl
 			return
 		}
 
+		events.FromContext(r.Context()).Invalidate(projectID)
 		slog.Info("webhook created", "webhook_id", wh.ID, "project_id", projectID, "url", req.URL)
 		jsonResponse(w, wh, http.StatusCreated)
 	}
@@ -158,6 +171,7 @@ func handleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		events.FromContext(r.Context()).Invalidate(projectID)
 		slog.Info("webhook deleted", "webhook_id", webhookID, "project_id", projectID)
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -178,6 +192,24 @@ func handleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
+		if body.URL != nil {
+			u := strings.TrimSpace(*body.URL)
+			if err := events.CheckWebhookURL(u); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			body.URL = &u
+		}
+		if body.Events != nil {
+			if len(body.Events) == 0 {
+				jsonError(w, "at least one event is required", http.StatusBadRequest)
+				return
+			}
+			if msg := invalidEvents(body.Events); msg != "" {
+				jsonError(w, msg, http.StatusBadRequest)
+				return
+			}
+		}
 
 		var wh Webhook
 		err := pool.QueryRow(r.Context(),
@@ -195,6 +227,7 @@ func handleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			jsonError(w, "webhook not found", http.StatusNotFound)
 			return
 		}
+		events.FromContext(r.Context()).Invalidate(projectID)
 
 		jsonResponse(w, wh, http.StatusOK)
 	}
@@ -202,11 +235,17 @@ func handleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 
 func handleDeliveries(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		webhookID := chi.URLParam(r, "webhookId")
 
+		// Scoped to the project in the URL: the caller's access was
+		// checked for that project, not for whichever owns webhookID.
 		rows, err := pool.Query(r.Context(),
-			`SELECT id, webhook_id, event, payload, status_code, response, attempts, success, created_at
-			 FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY created_at DESC LIMIT 50`, webhookID)
+			`SELECT d.id, d.webhook_id, d.event, d.payload, d.status_code, d.response, d.attempts, d.success, d.created_at
+			   FROM webhook_deliveries d
+			   JOIN webhooks wh ON wh.id = d.webhook_id
+			  WHERE d.webhook_id = $1 AND wh.project_id = $2
+			  ORDER BY d.created_at DESC LIMIT 50`, webhookID, projectID)
 		if err != nil {
 			slog.Error("list deliveries failed", "error", err)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
@@ -227,6 +266,17 @@ func handleDeliveries(pool *pgxpool.Pool) http.HandlerFunc {
 
 		jsonResponse(w, deliveries, http.StatusOK)
 	}
+}
+
+// invalidEvents returns an error message when any event isn't one a
+// webhook can subscribe to (events.Types), or "".
+func invalidEvents(evs []string) string {
+	for _, e := range evs {
+		if !events.ValidType(e) {
+			return fmt.Sprintf("unknown event %q: must be one of %s", e, strings.Join(events.Types, ", "))
+		}
+	}
+	return ""
 }
 
 func jsonResponse(w http.ResponseWriter, data any, status int) {

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
@@ -232,6 +233,7 @@ func HandleCreateTrigger(svc *Service, trigSvc *TriggerService) http.HandlerFunc
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		events.FromContext(r.Context()).Invalidate(projectID)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -250,6 +252,7 @@ func HandleDeleteTrigger(trigSvc *TriggerService) http.HandlerFunc {
 			jsonError(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		events.FromContext(r.Context()).Invalidate(projectID)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})

@@ -23,6 +23,7 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/metrics"
 	"github.com/eurobase/euroback/internal/plans"
@@ -62,7 +63,7 @@ import (
 // When devMode is true, the platform auth middleware is replaced with a
 // pass-through that injects a fixed test user (for local curl/Postman testing).
 // devMode must NEVER be enabled in production.
-func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, upgradeSvc *upgrade.Service, sdkLogin *tenantconn.Resolver, platformDDLLogin query.TenantLoginRunner, devMode ...bool) chi.Router {
+func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *query.MigrationExecutor, platformAuth *auth.PlatformAuthMiddleware, platformAuthSvc *auth.PlatformAuthService, limiter *ratelimit.RateLimiter, accessRecorder *audit.AccessRecorder, s3Client *storage.S3Client, hub *realtime.Hub, logCh chan<- LogEntry, subdomainMw *auth.SubdomainMiddleware, emailService *email.EmailService, smsService *sms.Service, limitsSvc *plans.LimitsService, vaultSvc *vault.VaultService, fnRunnerURL string, fnSigner *functions.Signer, fnRunnerHMACSecret string, metricsReg *metrics.Registry, allowedOrigins []string, unsubSigner *email.UnsubscribeSigner, billingSvc *billing.Service, ssoConfig SSOWiring, sovereigntyReg *sovereignty.Registry, upgradeSvc *upgrade.Service, sdkLogin *tenantconn.Resolver, platformDDLLogin query.TenantLoginRunner, projectEvents *events.Emitter, devMode ...bool) chi.Router {
 	// Wrap the platform `_ddl` runner once with the 503-mapping adapter, kept
 	// nil-safe (a nil runner stays a nil interface — the console-500 lesson).
 	var ddlLogin query.TenantLoginRunner
@@ -85,6 +86,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	r.Use(SecurityHeadersMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	// Project events (#845): handlers that write hand committed changes
+	// to the project's webhooks and function triggers through the
+	// request context. nil = events off.
+	r.Use(events.Middleware(projectEvents))
 
 	// Prometheus request metrics — must run after chi has matched the route
 	// so RoutePattern() is populated. chi runs middleware in registration

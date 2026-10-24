@@ -291,57 +291,111 @@ func (e *Executor) executeFunctionJob(ctx context.Context, job DueJob) error {
 		return fmt.Errorf("function %q is disabled", job.Action)
 	}
 
+	var hdrs map[string]string
+	if len(job.Headers) > 0 {
+		_ = json.Unmarshal(job.Headers, &hdrs)
+	}
+	return e.invoker.Invoke(ctx, FunctionCall{
+		ProjectID:       job.ProjectID,
+		SchemaName:      job.SchemaName,
+		Plan:            job.Plan,
+		FunctionID:      fnID,
+		FunctionName:    job.Action,
+		FunctionVersion: fnVersion,
+		Body:            job.Payload,
+		Headers:         hdrs,
+		Reserved:        map[string]string{"X-Cron-Job-ID": job.ID},
+	})
+}
+
+// FunctionCall is one invocation of a deployed edge function without an
+// end user (cron schedules, function triggers): the function runs with
+// the service identity.
+type FunctionCall struct {
+	ProjectID       string
+	SchemaName      string
+	Plan            string // "" = free
+	FunctionID      string
+	FunctionName    string
+	FunctionVersion int
+	Body            []byte
+	// Headers are caller-chosen (a cron job's configured headers); they
+	// go on first, so they can't override the identity headers.
+	Headers map[string]string
+	// Reserved are platform headers set after the identity headers
+	// (e.g. X-Cron-Job-ID).
+	Reserved map[string]string
+}
+
+// ErrFunctionStatus is wrapped by Invoke when the function answered with
+// a status ≥ 400. A 5xx is worth retrying; a 4xx usually isn't.
+type ErrFunctionStatus struct {
+	Status int
+	Body   string
+}
+
+func (e *ErrFunctionStatus) Error() string {
+	return fmt.Sprintf("function returned %d: %s", e.Status, e.Body)
+}
+
+// Invoke POSTs the call to the runner's /invoke, HMAC-signed like the
+// gateway's invoke path, and waits up to 60 s for the function.
+func (inv *FunctionInvoker) Invoke(ctx context.Context, call FunctionCall) error {
+	if inv == nil || inv.RunnerURL == "" {
+		return fmt.Errorf("functions runner is not configured")
+	}
 	var body io.Reader
-	if len(job.Payload) > 0 {
-		body = bytes.NewReader(job.Payload)
+	if len(call.Body) > 0 {
+		body = bytes.NewReader(call.Body)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, e.invoker.RunnerURL+"/invoke", body)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, inv.RunnerURL+"/invoke", body)
 	if err != nil {
 		return fmt.Errorf("build runner request: %w", err)
 	}
 
 	// Caller-supplied headers go on first; reserved identity headers
 	// overwrite so a malicious schedule can't spoof project_id.
-	if len(job.Headers) > 0 {
-		var hdrs map[string]string
-		if err := json.Unmarshal(job.Headers, &hdrs); err == nil {
-			for k, v := range hdrs {
-				req.Header.Set(k, v)
-			}
-		}
+	for k, v := range call.Headers {
+		req.Header.Set(k, v)
 	}
-	req.Header.Set("X-Project-ID", job.ProjectID)
-	req.Header.Set("X-Schema-Name", job.SchemaName)
-	req.Header.Set("X-Function-Name", job.Action)
-	req.Header.Set("X-Function-ID", fnID)
+	req.Header.Set("X-Project-ID", call.ProjectID)
+	req.Header.Set("X-Schema-Name", call.SchemaName)
+	req.Header.Set("X-Function-Name", call.FunctionName)
+	req.Header.Set("X-Function-ID", call.FunctionID)
 	// Runner cache key includes the version so redeploys take effect
 	// immediately (closes #200) — same as the gateway invoke path.
-	req.Header.Set("X-Function-Version", strconv.Itoa(fnVersion))
-	plan := job.Plan
+	req.Header.Set("X-Function-Version", strconv.Itoa(call.FunctionVersion))
+	plan := call.Plan
 	if plan == "" {
 		plan = "free"
 	}
 	req.Header.Set("X-Plan", plan)
-	req.Header.Set("X-Cron-Job-ID", job.ID)
-	if req.Header.Get("Content-Type") == "" && len(job.Payload) > 0 {
+	for k, v := range call.Reserved {
+		req.Header.Set(k, v)
+	}
+	if req.Header.Get("Content-Type") == "" && len(call.Body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if e.invoker.Signer != nil {
-		e.invoker.Signer.Sign(req.Header, time.Now())
+	if inv.Signer != nil {
+		inv.Signer.Sign(req.Header, time.Now())
 	}
 
-	resp, err := e.invoker.Client.Do(req)
+	client := inv.Client
+	if client == nil {
+		client = &http.Client{Timeout: 65 * time.Second}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("invoke function: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("function returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return &ErrFunctionStatus{Status: resp.StatusCode, Body: strings.TrimSpace(string(respBody))}
 	}
 	// Drain so the connection can be reused by http.Client's transport pool.
 	io.Copy(io.Discard, resp.Body)

@@ -16,6 +16,7 @@ import (
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
 	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/go-chi/chi/v5"
@@ -880,6 +881,9 @@ func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	events.Emit(r.Context(), events.Event{ProjectID: projectIDForRequest(r), Type: events.StorageUpload,
+		Data: map[string]any{"key": key, "content_type": contentType, "size": size}})
+
 	resp := uploadResponse{
 		Key:         key,
 		ContentType: contentType,
@@ -1168,8 +1172,21 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 				"error", err, "schema", schema, "key", key)
 		}
 	}
+	events.Emit(r.Context(), events.Event{ProjectID: projectIDForRequest(r), Type: events.StorageDelete, Data: map[string]any{"key": key}})
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// projectIDForRequest is the project a storage request acts on (#845
+// events): the tenant context's project, or the API key's.
+func projectIDForRequest(r *http.Request) string {
+	if id := query.ProjectIDFromContext(r.Context()); id != "" {
+		return id
+	}
+	if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc != nil {
+		return pc.ProjectID
+	}
+	return ""
 }
 
 // ---------- List ----------

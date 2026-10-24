@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -191,6 +192,16 @@ func handleBatchCreateUsers(pool *pgxpool.Pool, resolver PoolResolver) http.Hand
 			http.Error(w, `{"error":"failed to import users; nothing was created"}`, http.StatusInternalServerError)
 			return
 		}
+		var created []events.Event
+		projectID := query.ProjectIDFromContext(r.Context())
+		for i, res := range resp.Results {
+			if res.Status == "created" {
+				email := req.Users[i].Email
+				created = append(created, events.Event{ProjectID: projectID, Type: events.AuthUserCreated,
+					Data: map[string]any{"id": res.ID, "email": email, "provider": "email"}})
+			}
+		}
+		events.FromContext(r.Context()).EmitMany(r.Context(), created)
 		for _, res := range resp.Results {
 			switch res.Status {
 			case "created":
