@@ -59,7 +59,6 @@ func main() {
 	root.AddCommand(cli.EdgeFunctionsCmd())
 	root.AddCommand(cli.StorageCmd())
 	root.AddCommand(cli.InitCmd())
-	root.AddCommand(cli.TestCmd())
 	root.AddCommand(cli.ComplianceCmd())
 	root.AddCommand(cli.AdminCmd())
 	// Import path from other backends (#267). Currently: Supabase.
