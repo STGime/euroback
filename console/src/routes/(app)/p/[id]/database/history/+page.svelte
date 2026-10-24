@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { api, type SchemaChange } from '$lib/api.js';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let changes: SchemaChange[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);

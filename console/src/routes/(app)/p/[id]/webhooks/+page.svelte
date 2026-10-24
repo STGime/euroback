@@ -3,7 +3,7 @@
 	import { api, type Webhook, type WebhookDelivery } from '$lib/api.js';
 	import { onMount } from 'svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	let webhooks: Webhook[] = $state([]);
 	let loading = $state(true);

@@ -5,7 +5,7 @@
 
 	const projectCtx = getContext<{ id: string; project: Project | null }>('projectId');
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	let users: EndUser[] = $state([]);
 	let total = $state(0);
