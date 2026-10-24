@@ -879,7 +879,7 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 		var columns []string
 		var results []map[string]interface{}
 		err := e.ddlLogin.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, true, "10s"), func(ctx context.Context, tx pgx.Tx) error {
-			return withViewGuard(ctx, tx, schemaName, func() error {
+			return withOwnerRightsGuard(ctx, tx, schemaName, func() error {
 				var ferr error
 				columns, results, ferr = runCustomerSQL(ctx, tx, rawSQL, maxRows)
 				return ferr
@@ -975,7 +975,7 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	}
 
 	// DML/DDL: execute and return affected rows. Developer SQL (not the
-	// SDK) may create views: they must apply RLS (withViewGuard).
+	// SDK) may create views: they must apply RLS (withOwnerRightsGuard).
 	var tag pgconn.CommandTag
 	exec := func() error {
 		var xerr error
@@ -988,7 +988,7 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 	if opts.SDKPath {
 		err = exec()
 	} else {
-		err = withViewGuard(ctx, tx, schemaName, exec)
+		err = withOwnerRightsGuard(ctx, tx, schemaName, exec)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -1196,7 +1196,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 			return nil
 		}
 		err := e.ddlLogin.Run(ctx, schemaName, isReadOnly, setup, func(ctx context.Context, tx pgx.Tx) error {
-			return withViewGuard(ctx, tx, schemaName, func() error {
+			return withOwnerRightsGuard(ctx, tx, schemaName, func() error {
 				var ferr error
 				results, ferr = e.runTxStatements(ctx, tx, statements, maxRows)
 				return ferr
@@ -1242,7 +1242,7 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 	}
 
 	var results []StatementResult
-	err = withViewGuard(ctx, tx, schemaName, func() error {
+	err = withOwnerRightsGuard(ctx, tx, schemaName, func() error {
 		var ferr error
 		results, ferr = e.runTxStatements(ctx, tx, statements, maxRows)
 		return ferr

@@ -1577,7 +1577,8 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 	// whoever reads them. A view that runs as its owner (the owner of the
 	// tables) would skip it: a service-only table read through such a view
 	// returned every row to an anonymous SDK caller. Developer SQL that
-	// leaves such a view (or a materialized view) behind is refused.
+	// leaves such a view (or a materialized view, a SECURITY DEFINER
+	// function or a rule) behind is refused.
 	check(t, env, "views_apply_rls", func() error {
 		sqlAs := func(path, sql string) *httpResult {
 			b, _ := json.Marshal(map[string]string{"sql": sql})
@@ -1601,6 +1602,9 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			`ALTER VIEW view_rls_ok RESET (security_invoker)`,
 			`CREATE MATERIALIZED VIEW view_rls_mat AS SELECT * FROM view_rls_secret`,
 			`DO $$ BEGIN EXECUTE 'CREATE VIEW view_rls_leak AS SELECT * FROM view_rls_secret'; END $$`,
+			// Functions and rules that run with the owner's rights.
+			`DO $$ BEGIN EXECUTE 'CREATE FUNCTION view_rls_peek() RETURNS SETOF view_rls_secret LANGUAGE sql SECURITY DEFINER AS ''SELECT * FROM view_rls_secret'''; END $$`,
+			`CREATE RULE view_rls_rule AS ON INSERT TO view_rls_secret DO ALSO NOTIFY view_rls`,
 		} {
 			r := sqlAs("/data/sql", q)
 			if r.code != http.StatusBadRequest || !strings.Contains(r.body, "view_rls_") {

@@ -403,7 +403,7 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
 		return false, fmt.Errorf("set statement_timeout: %w", err)
 	}
-	if err := withViewGuard(ctx, tx, schemaName, func() error {
+	if err := withOwnerRightsGuard(ctx, tx, schemaName, func() error {
 		if _, err := conn.PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
 			return fmt.Errorf("migration failed: %w", err)
 		}

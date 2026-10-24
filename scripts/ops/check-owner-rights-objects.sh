@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Read-only inventory of views in tenant schemas (shared cluster) that are
-# not `security_invoker`, plus all materialized views. Such a view runs
-# with its owner's privileges, so row-level security on the tables it reads
-# is evaluated for the owner, not for the caller.
+# Read-only inventory of objects in tenant schemas (shared cluster) that run
+# with their owner's rights, and so skip the row-level security of the
+# tables they read: views that are not `security_invoker`, materialized
+# views, SECURITY DEFINER functions/procedures and rules. New ones are
+# refused by query.withOwnerRightsGuard; this lists what already exists.
 #
-# One line per view:
+# One line per object:
 #   VIEW <schema>.<name> kind=<view|materialized> project=<slug> plan=<plan>
 #        rls_tables=<base tables with RLS on, or -> app_select=<yes|no>
-# rls_tables lists base tables of the view that have RLS enabled (those
-# are the ones whose policies the view does not apply). app_select says
-# whether the project's app-facing roles (<schema>_func, eurobase_gateway)
-# can SELECT the view.
+#   DEFINER <schema>.<function>() project=<slug> plan=<plan> app_execute=<yes|no>
+#   RULE <schema>.<rule> on <table> project=<slug> plan=<plan>
+# rls_tables lists base tables of a view that have RLS enabled. app_select /
+# app_execute say whether the project's app-facing roles (<schema>_func,
+# eurobase_gateway) can read the view / call the function.
 #
 # Team projects keep their tables on a dedicated database; they are only
 # counted here, not inspected.
@@ -19,16 +21,16 @@
 # check-console-ddl-readiness.sh). Prints schema and object names only —
 # never row data. This script never writes.
 #
-# Usage: ./scripts/ops/check-view-security.sh
+# Usage: ./scripts/ops/check-owner-rights-objects.sh
 set -euo pipefail
 NS=eurobase
-JOB=view-security-check
+JOB=owner-rights-check
 
 kubectl -n "$NS" delete job "$JOB" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 kubectl -n "$NS" apply -f - >/dev/null <<'YAML'
 apiVersion: batch/v1
 kind: Job
-metadata: { name: view-security-check, namespace: eurobase }
+metadata: { name: owner-rights-check, namespace: eurobase }
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 200
@@ -75,6 +77,29 @@ spec:
                             THEN 'yes' ELSE 'no' END
                   FROM v
                  ORDER BY 1;
+                SELECT 'DEFINER ' || n.nspname || '.' || p.proname || '()'
+                       || ' project=' || coalesce(pr.slug, '?')
+                       || ' plan=' || coalesce(pr.plan::text, '?')
+                       || ' app_execute=' || CASE WHEN
+                            (EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = n.nspname || '_func')
+                               AND has_function_privilege(n.nspname || '_func', p.oid, 'EXECUTE'))
+                            OR has_function_privilege('eurobase_gateway', p.oid, 'EXECUTE')
+                            THEN 'yes' ELSE 'no' END
+                  FROM pg_proc p
+                  JOIN pg_namespace n ON n.oid = p.pronamespace
+                  JOIN public.projects pr ON pr.schema_name = n.nspname
+                 WHERE p.prosecdef
+                   AND p.proname <> ALL (ARRAY['auth_uid', 'auth_role', 'auth_email'])
+                 ORDER BY 1;
+                SELECT 'RULE ' || n.nspname || '.' || r.rulename || ' on ' || c.relname
+                       || ' project=' || coalesce(pr.slug, '?')
+                       || ' plan=' || coalesce(pr.plan::text, '?')
+                  FROM pg_rewrite r
+                  JOIN pg_class c ON c.oid = r.ev_class
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  JOIN public.projects pr ON pr.schema_name = n.nspname
+                 WHERE r.rulename <> '_RETURN'
+                 ORDER BY 1;
                 SELECT 'TEAM_NOT_CHECKED ' || count(DISTINCT project_id)
                   FROM public.project_databases WHERE deleted_at IS NULL;
                 SELECT 'SCHEMAS_CHECKED ' || count(*)
@@ -94,14 +119,20 @@ if ! printf "%s\n" "$OUT" | grep -q '^SCHEMAS_CHECKED '; then
   exit 1
 fi
 
-printf "%s\n" "$OUT" | grep '^VIEW ' || true
+printf "%s\n" "$OUT" | grep -E '^(VIEW|DEFINER|RULE) ' || true
 echo ""
 TOTAL=$(printf "%s\n" "$OUT" | grep -c '^VIEW ' || true)
 EXPOSED=$(printf "%s\n" "$OUT" | grep '^VIEW ' | grep -v 'rls_tables=- ' | grep -c 'app_select=yes' || true)
 MAT=$(printf "%s\n" "$OUT" | grep '^VIEW ' | grep -c 'kind=materialized' || true)
-PROJECTS=$(printf "%s\n" "$OUT" | grep '^VIEW ' | sed -E 's/.* project=([^ ]+).*/\1/' | sort -u | grep -c . || true)
+DEFINERS=$(printf "%s\n" "$OUT" | grep -c '^DEFINER ' || true)
+DEFINERS_APP=$(printf "%s\n" "$OUT" | grep '^DEFINER ' | grep -c 'app_execute=yes' || true)
+RULES=$(printf "%s\n" "$OUT" | grep -c '^RULE ' || true)
+PROJECTS=$(printf "%s\n" "$OUT" | grep -E '^(VIEW|DEFINER|RULE) ' | sed -E 's/.* project=([^ ]+).*/\1/' | sort -u | grep -c . || true)
 echo "Summary:"
 echo "  schemas checked (shared cluster)                     : $(printf "%s\n" "$OUT" | sed -n 's/^SCHEMAS_CHECKED //p')"
-echo "  views without security_invoker + materialized views  : $TOTAL (materialized: $MAT) in $PROJECTS project(s)"
+echo "  projects with any of the objects below               : $PROJECTS"
+echo "  views without security_invoker + materialized views  : $TOTAL (materialized: $MAT)"
 echo "  of those reading RLS tables and selectable by the app: $EXPOSED"
+echo "  SECURITY DEFINER functions (callable by the app)     : $DEFINERS ($DEFINERS_APP)"
+echo "  rules                                                : $RULES"
 echo "  Team projects (dedicated DB, not checked here)       : $(printf "%s\n" "$OUT" | sed -n 's/^TEAM_NOT_CHECKED //p')"
