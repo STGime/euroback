@@ -152,6 +152,8 @@ type projectState struct {
 }
 
 // Emitter matches events against subscriptions and enqueues deliveries.
+// The work happens on a few background goroutines fed by a bounded queue,
+// so a write's response never waits for the jobs database.
 type Emitter struct {
 	pool   *pgxpool.Pool
 	insert InsertFunc
@@ -165,7 +167,28 @@ type Emitter struct {
 
 	mu       sync.Mutex
 	projects map[string]*projectState
+
+	queue        chan emitBatch
+	workers      int
+	startOnce    sync.Once
+	pending      sync.WaitGroup
+	fullLogMu    sync.Mutex
+	fullLoggedAt time.Time
 }
+
+// emitBatch is one EmitMany call waiting for a background worker.
+type emitBatch struct {
+	ctx context.Context
+	evs []Event
+	at  time.Time
+}
+
+// Background processing: QueueSize EmitMany calls can wait; beyond that
+// events are dropped and logged rather than held without bound.
+const (
+	QueueSize    = 4096
+	queueWorkers = 4
+)
 
 // NewEmitter returns an Emitter that reads subscriptions with pool (the
 // gateway pool can read public.webhooks and public.function_triggers)
@@ -180,6 +203,8 @@ func NewEmitter(pool *pgxpool.Pool, insert InsertFunc) *Emitter {
 		now:          time.Now,
 		enqueueAfter: 3 * time.Second,
 		projects:     map[string]*projectState{},
+		queue:        make(chan emitBatch, QueueSize),
+		workers:      queueWorkers,
 	}
 	e.loadSubs = e.loadFromDB
 	return e
@@ -216,19 +241,84 @@ func Middleware(e *Emitter) func(http.Handler) http.Handler {
 // Emit delivers one event. See EmitMany.
 func Emit(ctx context.Context, ev Event) { FromContext(ctx).EmitMany(ctx, []Event{ev}) }
 
-// EmitMany matches events (all of one project) against the project's
-// subscriptions and enqueues a delivery per match. Call it after the
-// change has committed. It never fails the caller: the write already
-// happened, so problems are logged. Unsubscribed projects cost one
-// cached lookup and no database round trip.
+// EmitMany hands events (all of one project) over for delivery. Call it
+// after the change has committed. It doesn't wait for the database: a
+// project known to have no subscriptions returns at once; otherwise the
+// events are queued for a background worker, which matches them against
+// the project's subscriptions and enqueues a delivery job per match. It
+// never fails the caller: the write already happened, so problems
+// (including a full queue) are logged.
 func (e *Emitter) EmitMany(ctx context.Context, evs []Event) {
-	if e == nil || len(evs) == 0 {
+	if e == nil || len(evs) == 0 || evs[0].ProjectID == "" {
 		return
 	}
+	if e.knownUnsubscribed(evs[0].ProjectID) {
+		return
+	}
+	e.startOnce.Do(e.start)
+	e.pending.Add(1)
+	select {
+	case e.queue <- emitBatch{ctx: context.WithoutCancel(ctx), evs: evs, at: e.now()}:
+	default:
+		e.pending.Done()
+		e.logQueueFull(evs[0].ProjectID, len(evs))
+	}
+}
+
+// Wait blocks until every event handed to EmitMany so far has been
+// processed, or ctx ends (graceful shutdown, tests).
+func (e *Emitter) Wait(ctx context.Context) error {
+	if e == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() { e.pending.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *Emitter) start() {
+	for range e.workers {
+		go func() {
+			for b := range e.queue {
+				e.process(b)
+				e.pending.Done()
+			}
+		}()
+	}
+}
+
+// knownUnsubscribed: the cached, still-fresh subscriptions are empty.
+func (e *Emitter) knownUnsubscribed(projectID string) bool {
+	now := e.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.projects[projectID]
+	return st != nil && now.Sub(st.loadedAt) < e.ttl &&
+		len(st.subs.webhooks) == 0 && len(st.subs.triggers) == 0
+}
+
+func (e *Emitter) logQueueFull(projectID string, n int) {
+	now := e.now()
+	e.fullLogMu.Lock()
+	log := now.Sub(e.fullLoggedAt) >= time.Minute
+	if log {
+		e.fullLoggedAt = now
+	}
+	e.fullLogMu.Unlock()
+	if log {
+		slog.Warn("events: delivery queue full — events dropped", "project_id", projectID, "events", n, "queue_size", QueueSize)
+	}
+}
+
+// process matches one batch and enqueues its deliveries.
+func (e *Emitter) process(b emitBatch) {
+	ctx, evs, now := b.ctx, b.evs, b.at
 	projectID := evs[0].ProjectID
-	if projectID == "" {
-		return
-	}
 	st, subs, err := e.state(ctx, projectID)
 	if err != nil {
 		slog.Error("events: load subscriptions failed — events dropped",
@@ -236,7 +326,6 @@ func (e *Emitter) EmitMany(ctx context.Context, evs []Event) {
 		return
 	}
 
-	now := e.now()
 	var params []river.InsertManyParams
 	dropped := 0
 	for _, ev := range evs {
@@ -273,9 +362,9 @@ func (e *Emitter) EmitMany(ctx context.Context, evs []Event) {
 	if len(params) == 0 {
 		return
 	}
-	// The write has committed: don't let a client disconnect cancel the
-	// enqueue, but don't hold the response for long either.
-	ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.enqueueAfter)
+	// Bounded, so a stuck jobs database can't stall the workers forever
+	// (the queue in front of them then fills and drops instead).
+	ictx, cancel := context.WithTimeout(ctx, e.enqueueAfter)
 	defer cancel()
 	if err := e.insert(ictx, params); err != nil {
 		slog.Error("events: enqueue deliveries failed — events dropped",

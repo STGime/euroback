@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,13 @@ type fakeQueue struct {
 	mu     sync.Mutex
 	params []river.InsertManyParams
 	err    error
+	e      *Emitter // waited for before reading (processing is async)
+}
+
+func (q *fakeQueue) wait() {
+	if q.e != nil {
+		_ = q.e.Wait(context.Background())
+	}
 }
 
 func (q *fakeQueue) insert(_ context.Context, p []river.InsertManyParams) error {
@@ -30,6 +38,7 @@ func (q *fakeQueue) insert(_ context.Context, p []river.InsertManyParams) error 
 }
 
 func (q *fakeQueue) webhookJobs() []jobs.DeliverProjectWebhookArgs {
+	q.wait()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var out []jobs.DeliverProjectWebhookArgs
@@ -42,6 +51,7 @@ func (q *fakeQueue) webhookJobs() []jobs.DeliverProjectWebhookArgs {
 }
 
 func (q *fakeQueue) triggerJobs() []jobs.InvokeFunctionTriggerArgs {
+	q.wait()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var out []jobs.InvokeFunctionTriggerArgs
@@ -58,6 +68,7 @@ func (q *fakeQueue) triggerJobs() []jobs.InvokeFunctionTriggerArgs {
 func testEmitter(subs map[string]subscriptions, loads *int, now *time.Time) (*Emitter, *fakeQueue) {
 	q := &fakeQueue{}
 	e := NewEmitter(nil, q.insert)
+	q.e = e
 	e.now = func() time.Time { return *now }
 	var mu sync.Mutex
 	e.loadSubs = func(_ context.Context, projectID string) ([]webhookSub, []triggerSub, error) {
@@ -131,6 +142,7 @@ func TestEmitCachesSubscriptions(t *testing.T) {
 	ctx := WithEmitter(context.Background(), e)
 	for range 5 {
 		Emit(ctx, Event{ProjectID: "p1", Type: DBInsert, Table: "t"})
+		_ = e.Wait(ctx)
 	}
 	if loads != 1 || len(q.webhookJobs()) != 5 {
 		t.Fatalf("loads = %d, jobs = %d; want 1 load, 5 jobs", loads, len(q.webhookJobs()))
@@ -139,6 +151,7 @@ func TestEmitCachesSubscriptions(t *testing.T) {
 	subs["p1"] = subscriptions{}
 	now = now.Add(DefaultCacheTTL + time.Second)
 	Emit(ctx, Event{ProjectID: "p1", Type: DBInsert, Table: "t"})
+	_ = e.Wait(ctx)
 	if loads != 2 || len(q.webhookJobs()) != 5 {
 		t.Fatalf("after TTL: loads = %d, jobs = %d; want 2 loads, still 5 jobs", loads, len(q.webhookJobs()))
 	}
@@ -157,6 +170,7 @@ func TestEmitKeepsStaleSubscriptionsOnReloadError(t *testing.T) {
 	}
 	ctx := WithEmitter(context.Background(), e)
 	Emit(ctx, Event{ProjectID: "p1", Type: DBInsert, Table: "t"})
+	_ = e.Wait(ctx)
 	now = now.Add(DefaultCacheTTL + time.Second)
 	Emit(ctx, Event{ProjectID: "p1", Type: DBInsert, Table: "t"})
 	if len(q.webhookJobs()) != 2 {
@@ -164,6 +178,7 @@ func TestEmitKeepsStaleSubscriptionsOnReloadError(t *testing.T) {
 	}
 	// A project never loaded and the DB down: dropped, no panic.
 	Emit(ctx, Event{ProjectID: "p2", Type: DBInsert, Table: "t"})
+	_ = e.Wait(ctx)
 }
 
 func TestEmitTruncatesLargeData(t *testing.T) {
@@ -191,6 +206,7 @@ func TestEmitRateCap(t *testing.T) {
 	if n := len(q.webhookJobs()); n != DefaultBurst {
 		t.Fatalf("jobs = %d, want the burst (%d)", n, DefaultBurst)
 	}
+	_ = e.Wait(context.Background())
 	now = now.Add(time.Second)
 	e.EmitMany(context.Background(), evs[:10])
 	if n := len(q.webhookJobs()); n != DefaultBurst+10 {
@@ -207,6 +223,7 @@ func TestEmitNilAndEnqueueErrorAreSafe(t *testing.T) {
 	e2, q := testEmitter(map[string]subscriptions{"p1": {webhooks: []webhookSub{{id: "wh", events: []string{DBInsert}}}}}, new(int), &now)
 	q.err = errors.New("queue down")
 	Emit(WithEmitter(context.Background(), e2), Event{ProjectID: "p1", Type: DBInsert, Table: "t"})
+	_ = e2.Wait(context.Background())
 }
 
 func TestEmitConcurrent(t *testing.T) {
@@ -239,5 +256,74 @@ func TestValidType(t *testing.T) {
 	}
 	if ValidType("db.*") || ValidType("auth.signin") {
 		t.Error("unknown types accepted")
+	}
+}
+
+// A write's response doesn't wait for the jobs database (#848 review):
+// EmitMany returns while the insert is stuck, and a full queue drops
+// instead of blocking.
+func TestEmitDoesNotBlockOnTheJobsDatabase(t *testing.T) {
+	now := time.Now()
+	e, _ := testEmitter(map[string]subscriptions{"p1": {webhooks: []webhookSub{{id: "wh", events: []string{DBInsert}}}}}, new(int), &now)
+	release := make(chan struct{})
+	var inserts atomic.Int32
+	e.insert = func(ctx context.Context, p []river.InsertManyParams) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		inserts.Add(1)
+		return nil
+	}
+	e.enqueueAfter = time.Minute
+	e.workers = 1
+	e.queue = make(chan emitBatch, 2)
+
+	start := time.Now()
+	// One batch stuck in the worker, up to two queued, the rest dropped —
+	// none of the calls blocks.
+	for range 10 {
+		e.EmitMany(context.Background(), []Event{{ProjectID: "p1", Type: DBInsert, Table: "t"}})
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("EmitMany blocked for %s", d)
+	}
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := e.Wait(ctx); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if n := inserts.Load(); n < 2 || n > 3 {
+		t.Fatalf("inserts = %d, want 2 or 3 (the rest dropped)", n)
+	}
+}
+
+// A project the cache knows has no subscriptions never reaches the queue;
+// once the cache entry is stale (or invalidated) it goes through again.
+func TestEmitSkipsKnownUnsubscribedProjects(t *testing.T) {
+	now := time.Now()
+	loads := 0
+	e, _ := testEmitter(map[string]subscriptions{}, &loads, &now)
+	if e.knownUnsubscribed("p1") {
+		t.Fatal("unknown project treated as unsubscribed")
+	}
+	e.EmitMany(context.Background(), []Event{{ProjectID: "p1", Type: DBInsert}})
+	_ = e.Wait(context.Background())
+	if !e.knownUnsubscribed("p1") {
+		t.Fatal("loaded project without subscriptions not on the fast path")
+	}
+	e.Invalidate("p1")
+	if e.knownUnsubscribed("p1") {
+		t.Fatal("invalidated project still on the fast path")
+	}
+	e.EmitMany(context.Background(), []Event{{ProjectID: "p1", Type: DBInsert}})
+	_ = e.Wait(context.Background())
+	now = now.Add(DefaultCacheTTL + time.Second)
+	if e.knownUnsubscribed("p1") {
+		t.Fatal("stale cache entry still on the fast path")
+	}
+	if loads != 2 {
+		t.Fatalf("loads = %d, want 2", loads)
 	}
 }

@@ -838,6 +838,11 @@ func main() {
 	// Flush buffered data-access-log events before closing the pool.
 	accessRecorder.Close(shutdownCtx)
 
+	// Enqueue project events (#845) still waiting in memory.
+	if err := projectEvents.Wait(shutdownCtx); err != nil {
+		slog.Warn("project events still queued at shutdown were dropped", "error", err)
+	}
+
 	pool.Close()
 	slog.Info("gateway shut down cleanly")
 }

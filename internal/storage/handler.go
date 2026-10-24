@@ -1160,19 +1160,25 @@ func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove the tracking row from storage_objects.
+	// Remove the tracking row from storage_objects. Its existence is what
+	// says a file was there: S3 answers a delete of a missing key with
+	// success, so only a removed row produces a storage.delete event.
+	tracked := false
 	if schema := h.schemaForRequest(r); schema != "" && h.pool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
 		q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1`, escSchema)
 		if err := h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, q, key)
+			tag, err := tx.Exec(ctx, q, key)
+			tracked = tag.RowsAffected() > 0
 			return err
 		}); err != nil {
 			slog.Error("storage: failed to delete from storage_objects",
 				"error", err, "schema", schema, "key", key)
 		}
 	}
-	events.Emit(r.Context(), events.Event{ProjectID: projectIDForRequest(r), Type: events.StorageDelete, Data: map[string]any{"key": key}})
+	if tracked {
+		events.Emit(r.Context(), events.Event{ProjectID: projectIDForRequest(r), Type: events.StorageDelete, Data: map[string]any{"key": key}})
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

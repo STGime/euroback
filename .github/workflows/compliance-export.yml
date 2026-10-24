@@ -27,6 +27,8 @@ on:
       - internal/workers/invoke_function_trigger*.go
       - internal/workers/project_events*.go
       - internal/cron/executor.go
+      - internal/storage/handler.go
+      - internal/storage/delete_events_test.go
       - cmd/worker/main.go
       - migrations/**
       - deploy/docker/Dockerfile.worker
@@ -107,11 +109,13 @@ jobs:
           TEAM_EXPORT_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
           UPGRADE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
           EVENTS_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
+          EVENTS_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
         run: |
           pg_dump --version
           go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection|FailStaleRunning'
           go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker|DeliverProjectWebhook|WebhookDeliveryClient|InvokeFunctionTrigger'
           go test -count=1 -v ./internal/events/ ./internal/webhook/
+          go test -count=1 -v ./internal/storage/ -run 'DeleteFileEmits'
 
       # Not an export suite, but the only job with a production-role PG16:
       # the retrievable public key (000132) — storage, CHECK, and the API-key

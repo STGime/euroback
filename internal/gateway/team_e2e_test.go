@@ -659,11 +659,18 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := sdk("POST", "/v1/db/todos", `{"title":"webhook-event"}`); r.code >= 300 {
 			return r
 		}
+		// The emitter enqueues in the background: poll for the job.
 		var raw []byte
-		if err := env.shared.QueryRow(ctx,
-			`DELETE FROM public.river_job WHERE kind = 'deliver_project_webhook' AND args->>'webhook_id' = $1 RETURNING args`, wh.ID,
-		).Scan(&raw); err != nil {
-			return fmt.Errorf("no delivery job for the SDK insert: %w", err)
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+			err := env.shared.QueryRow(ctx,
+				`DELETE FROM public.river_job WHERE kind = 'deliver_project_webhook' AND args->>'webhook_id' = $1 RETURNING args`, wh.ID,
+			).Scan(&raw)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, pgx.ErrNoRows) || time.Now().After(deadline) {
+				return fmt.Errorf("no delivery job for the SDK insert: %w", err)
+			}
 		}
 		var args jobs.DeliverProjectWebhookArgs
 		if err := json.Unmarshal(raw, &args); err != nil {
