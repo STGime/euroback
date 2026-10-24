@@ -46,7 +46,7 @@ func runDDL(ctx context.Context, pool *pgxpool.Pool, schemaName string, fn func(
 			return applyRLSContextTx(ctx, tx)
 		}
 		return ddl.Run(ctx, schemaName, false, setup, func(ctx context.Context, tx pgx.Tx) error {
-			return withViewGuard(ctx, tx, schemaName, func() error { return fn(tx) })
+			return withOwnerRightsGuard(ctx, tx, schemaName, func() error { return fn(tx) })
 		})
 	}
 
@@ -63,7 +63,7 @@ func runDDL(ctx context.Context, pool *pgxpool.Pool, schemaName string, fn func(
 	if err := applyDeveloperRole(ctx, tx, routed); err != nil {
 		return err
 	}
-	if err := withViewGuard(ctx, tx, schemaName, func() error { return fn(tx) }); err != nil {
+	if err := withOwnerRightsGuard(ctx, tx, schemaName, func() error { return fn(tx) }); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

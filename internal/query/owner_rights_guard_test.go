@@ -39,14 +39,14 @@ func TestSecurityInvokerOn(t *testing.T) {
 	}
 }
 
-// TestViewGuard_DB runs the rule against real Postgres: every way of
+// TestOwnerRightsGuard_DB runs the rule against real Postgres: every way of
 // creating or changing a view that would run as its owner is refused,
 // views that apply RLS are allowed, and views that existed before the
 // request are left alone.
 //
 //	CONVERGE_TEST_ADMIN_URL=postgres://postgres@localhost:5432/eurobase \
-//	go test ./internal/query/ -run TestViewGuard_DB
-func TestViewGuard_DB(t *testing.T) {
+//	go test ./internal/query/ -run TestOwnerRightsGuard_DB
+func TestOwnerRightsGuard_DB(t *testing.T) {
 	adminURL := os.Getenv("CONVERGE_TEST_ADMIN_URL")
 	if adminURL == "" {
 		t.Skip("CONVERGE_TEST_ADMIN_URL not set")
@@ -58,7 +58,7 @@ func TestViewGuard_DB(t *testing.T) {
 	}
 	defer pool.Close()
 
-	schema := fmt.Sprintf("tenant_viewguard_%d", os.Getpid())
+	schema := fmt.Sprintf("tenant_ownerguard_%d", os.Getpid())
 	ident := pgx.Identifier{schema}.Sanitize()
 	mustExec := func(q string) {
 		t.Helper()
@@ -72,6 +72,12 @@ func TestViewGuard_DB(t *testing.T) {
 	mustExec("CREATE TABLE " + ident + ".secret (id int, note text)")
 	mustExec("CREATE VIEW " + ident + ".legacy AS SELECT * FROM " + ident + ".secret")
 	mustExec("CREATE VIEW " + ident + ".safe WITH (security_invoker = true) AS SELECT * FROM " + ident + ".secret")
+	mustExec("CREATE TABLE " + ident + ".audit (id int, note text)")
+	// Already there before the request: a definer function, an invoker
+	// function and a rule.
+	mustExec("CREATE FUNCTION " + ident + ".legacy_definer() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT 1::bigint'")
+	mustExec("CREATE FUNCTION " + ident + ".plain() RETURNS bigint LANGUAGE sql AS 'SELECT 1::bigint'")
+	mustExec("CREATE RULE legacy_rule AS ON INSERT TO " + ident + ".audit DO ALSO NOTIFY audit")
 
 	// run executes sql under the guard in a transaction that is always
 	// rolled back, so each case starts from the same schema.
@@ -84,7 +90,7 @@ func TestViewGuard_DB(t *testing.T) {
 		if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+ident); err != nil {
 			t.Fatal(err)
 		}
-		return withViewGuard(ctx, tx, schema, func() error {
+		return withOwnerRightsGuard(ctx, tx, schema, func() error {
 			_, err := tx.Exec(ctx, sql)
 			return err
 		})
@@ -115,6 +121,20 @@ func TestViewGuard_DB(t *testing.T) {
 		 CREATE FUNCTION char_never_eq("char", "char") RETURNS boolean LANGUAGE sql AS 'SELECT false';
 		 CREATE OPERATOR = (LEFTARG = "char", RIGHTARG = "char", FUNCTION = char_never_eq);
 		 CREATE VIEW v AS SELECT * FROM secret`,
+		// SECURITY DEFINER functions and procedures, however they are made.
+		"CREATE FUNCTION peek() RETURNS SETOF secret LANGUAGE sql SECURITY DEFINER AS 'SELECT * FROM secret'",
+		"CREATE PROCEDURE p() LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'",
+		"DO $$ BEGIN EXECUTE 'CREATE FUNCTION peek() RETURNS SETOF secret LANGUAGE sql SECURITY DEFINER AS ''SELECT * FROM secret'''; END $$",
+		"ALTER FUNCTION plain() SECURITY DEFINER",
+		"CREATE OR REPLACE FUNCTION plain() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT 1::bigint'",
+		// Editing an existing definer function.
+		"CREATE OR REPLACE FUNCTION legacy_definer() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT count(*) FROM secret'",
+		"ALTER FUNCTION legacy_definer() SET work_mem = '1MB'",
+		// Rules on tables and views.
+		"CREATE RULE leak AS ON INSERT TO audit DO ALSO INSERT INTO audit SELECT * FROM secret",
+		"CREATE RULE ins AS ON INSERT TO safe DO INSTEAD INSERT INTO secret VALUES (NEW.id, NEW.note)",
+		"DO $$ BEGIN EXECUTE 'CREATE RULE leak AS ON INSERT TO audit DO ALSO INSERT INTO audit SELECT * FROM secret'; END $$",
+		"CREATE OR REPLACE RULE legacy_rule AS ON INSERT TO audit DO ALSO INSERT INTO audit SELECT * FROM secret",
 		// Replacing an existing owner-run view with a new one.
 		"DROP VIEW legacy; CREATE VIEW legacy AS SELECT * FROM secret",
 	}
@@ -142,6 +162,16 @@ func TestViewGuard_DB(t *testing.T) {
 		"ALTER VIEW legacy RENAME TO legacy2",
 		"DROP VIEW legacy",
 		"SELECT * FROM legacy",
+		// Plain functions and triggers are fine; existing definer
+		// functions and rules keep working unchanged.
+		"CREATE FUNCTION f() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM secret'",
+		"CREATE OR REPLACE FUNCTION plain() RETURNS bigint LANGUAGE sql SECURITY INVOKER AS 'SELECT 2::bigint'",
+		"CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'; CREATE TRIGGER t BEFORE INSERT ON secret FOR EACH ROW EXECUTE FUNCTION trg()",
+		"SELECT legacy_definer()",
+		"INSERT INTO audit VALUES (1, 'x')",
+		"ALTER FUNCTION legacy_definer() SECURITY INVOKER",
+		"DROP FUNCTION legacy_definer()",
+		"DROP RULE legacy_rule ON audit",
 		"INSERT INTO secret VALUES (1, 'x')",
 	}
 	for _, sql := range allowed {
@@ -154,6 +184,14 @@ func TestViewGuard_DB(t *testing.T) {
 	err = run("CREATE VIEW leaky AS SELECT * FROM secret")
 	if err == nil || !strings.Contains(err.Error(), `"leaky"`) || !strings.Contains(err.Error(), "security_invoker = true") || !strings.Contains(err.Error(), "Repeat the WITH clause") {
 		t.Errorf("refusal message = %v", err)
+	}
+	err = run("CREATE FUNCTION peek() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT 1::bigint'")
+	if err == nil || !strings.Contains(err.Error(), `"peek"`) || !strings.Contains(err.Error(), "SECURITY DEFINER") {
+		t.Errorf("definer refusal message = %v", err)
+	}
+	err = run("CREATE RULE leak AS ON INSERT TO audit DO ALSO NOTIFY x")
+	if err == nil || !strings.Contains(err.Error(), `"leak on audit"`) || !strings.Contains(err.Error(), "trigger") {
+		t.Errorf("rule refusal message = %v", err)
 	}
 	err = run("CREATE MATERIALIZED VIEW stats AS SELECT count(*) FROM secret")
 	if err == nil || !strings.Contains(err.Error(), `"stats"`) || !strings.Contains(err.Error(), "materialized") {
@@ -170,7 +208,7 @@ func TestViewGuard_DB(t *testing.T) {
 	}
 	// Developer SQL inside the guard changes the path (as a DO block
 	// could); the guard must hand back the path the SQL left behind.
-	if err := withViewGuard(ctx, tx, schema, func() error {
+	if err := withOwnerRightsGuard(ctx, tx, schema, func() error {
 		_, err := tx.Exec(ctx, "DO $$ BEGIN PERFORM set_config('search_path', '"+strings.ReplaceAll(ident, "'", "''")+`, "$user", public', true); END $$`)
 		return err
 	}); err != nil {

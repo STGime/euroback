@@ -41,7 +41,7 @@ on:
       - internal/query/ddl_handler.go
       - internal/query/function_definition_test.go
       - internal/query/rpc_error*.go
-      - internal/query/view_guard*.go
+      - internal/query/owner_rights_guard*.go
       - internal/query/tenant_migrations.go
       - internal/query/sql_handler.go
       - internal/query/engine.go
@@ -161,7 +161,7 @@ jobs:
       - name: Converge tenant ownership (000136)
         env:
           CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
-        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions|TestGetFunctions_DB|TestViewGuard_DB'
+        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions|TestGetFunctions_DB|TestOwnerRightsGuard_DB'
 
       # RPC errors raised by real Postgres map to readable SDK answers.
       - name: RPC error mapping against a provisioned tenant
