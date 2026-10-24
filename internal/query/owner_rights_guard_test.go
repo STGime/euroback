@@ -56,7 +56,7 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close) // registered first, so it runs after the other cleanups
 
 	schema := fmt.Sprintf("tenant_ownerguard_%d", os.Getpid())
 	ident := pgx.Identifier{schema}.Sanitize()
@@ -66,18 +66,37 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
+	var mustExecAs func(q string) // set once the owner role exists
+	// Everything runs as an ordinary role that owns the schema and its
+	// tables, like a project's own login — not as a superuser.
+	owner := pgx.Identifier{schema + "_owner"}.Sanitize()
 	mustExec("DROP SCHEMA IF EXISTS " + ident + " CASCADE")
-	mustExec("CREATE SCHEMA " + ident)
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+ident+" CASCADE") })
-	mustExec("CREATE TABLE " + ident + ".secret (id int, note text)")
-	mustExec("CREATE VIEW " + ident + ".legacy AS SELECT * FROM " + ident + ".secret")
-	mustExec("CREATE VIEW " + ident + ".safe WITH (security_invoker = true) AS SELECT * FROM " + ident + ".secret")
-	mustExec("CREATE TABLE " + ident + ".audit (id int, note text)")
+	mustExec("DROP ROLE IF EXISTS " + owner)
+	mustExec("CREATE ROLE " + owner + " NOLOGIN")
+	mustExec("CREATE SCHEMA " + ident + " AUTHORIZATION " + owner)
+	t.Cleanup(func() {
+		for _, q := range []string{"DROP SCHEMA IF EXISTS " + ident + " CASCADE", "DROP ROLE IF EXISTS " + owner} {
+			if _, err := pool.Exec(context.Background(), q); err != nil {
+				t.Logf("cleanup %s: %v", q, err)
+			}
+		}
+	})
+	mustExecAs = func(q string) {
+		t.Helper()
+		mustExec("SET ROLE " + owner + "; " + q + "; RESET ROLE")
+	}
+	mustExecAs("CREATE TABLE " + ident + ".secret (id int, note text)")
+	mustExecAs("CREATE VIEW " + ident + ".legacy AS SELECT * FROM " + ident + ".secret")
+	mustExecAs("CREATE VIEW " + ident + ".safe WITH (security_invoker = true) AS SELECT * FROM " + ident + ".secret")
+	mustExecAs("CREATE TABLE " + ident + ".audit (id int, note text)")
 	// Already there before the request: a definer function, an invoker
 	// function and a rule.
-	mustExec("CREATE FUNCTION " + ident + ".legacy_definer() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT 1::bigint'")
-	mustExec("CREATE FUNCTION " + ident + ".plain() RETURNS bigint LANGUAGE sql AS 'SELECT 1::bigint'")
-	mustExec("CREATE RULE legacy_rule AS ON INSERT TO " + ident + ".audit DO ALSO NOTIFY audit")
+	mustExecAs("CREATE FUNCTION " + ident + ".legacy_definer() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT 1::bigint'")
+	mustExecAs("CREATE FUNCTION " + ident + ".plain() RETURNS bigint LANGUAGE sql AS 'SELECT 1::bigint'")
+	mustExecAs("CREATE RULE legacy_rule AS ON INSERT TO " + ident + ".audit DO ALSO NOTIFY audit")
+	mustExecAs("CREATE FUNCTION " + ident + ".atomic_definer() RETURNS bigint LANGUAGE sql SECURITY DEFINER BEGIN ATOMIC SELECT 1::bigint; END")
+	mustExecAs("CREATE RULE legacy_off AS ON UPDATE TO " + ident + ".audit DO ALSO NOTIFY audit")
+	mustExecAs("ALTER TABLE " + ident + ".audit DISABLE RULE legacy_off")
 
 	// run executes sql under the guard in a transaction that is always
 	// rolled back, so each case starts from the same schema.
@@ -87,7 +106,7 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
-		if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+ident); err != nil {
+		if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+ident+"; SET LOCAL ROLE "+owner); err != nil {
 			t.Fatal(err)
 		}
 		return withOwnerRightsGuard(ctx, tx, schema, func() error {
@@ -135,6 +154,13 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 		"CREATE RULE ins AS ON INSERT TO safe DO INSTEAD INSERT INTO secret VALUES (NEW.id, NEW.note)",
 		"DO $$ BEGIN EXECUTE 'CREATE RULE leak AS ON INSERT TO audit DO ALSO INSERT INTO audit SELECT * FROM secret'; END $$",
 		"CREATE OR REPLACE RULE legacy_rule AS ON INSERT TO audit DO ALSO INSERT INTO audit SELECT * FROM secret",
+		// Editing an existing owner-run view, or turning an existing rule
+		// on or into an INSTEAD rule.
+		"CREATE OR REPLACE VIEW legacy AS SELECT * FROM secret WHERE id > 0",
+		"ALTER TABLE audit ENABLE RULE legacy_off",
+		"CREATE OR REPLACE RULE legacy_rule AS ON INSERT TO audit DO INSTEAD NOTIFY audit",
+		// Editing an existing BEGIN ATOMIC definer function.
+		"CREATE OR REPLACE FUNCTION atomic_definer() RETURNS bigint LANGUAGE sql SECURITY DEFINER BEGIN ATOMIC SELECT count(*) FROM secret; END",
 		// Replacing an existing owner-run view with a new one.
 		"DROP VIEW legacy; CREATE VIEW legacy AS SELECT * FROM secret",
 	}
@@ -158,8 +184,9 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 		"ALTER TABLE secret ADD COLUMN extra int",
 		"DROP VIEW safe",
 		// Views that already ran as their owner keep working.
-		"CREATE OR REPLACE VIEW legacy AS SELECT * FROM secret",
 		"ALTER VIEW legacy RENAME TO legacy2",
+		"ALTER TABLE secret RENAME COLUMN note TO body",
+		"COMMENT ON VIEW legacy IS 'x'",
 		"DROP VIEW legacy",
 		"SELECT * FROM legacy",
 		// Plain functions and triggers are fine; existing definer
@@ -172,6 +199,7 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 		"ALTER FUNCTION legacy_definer() SECURITY INVOKER",
 		"DROP FUNCTION legacy_definer()",
 		"DROP RULE legacy_rule ON audit",
+		"ALTER TABLE audit DISABLE RULE legacy_rule",
 		"INSERT INTO secret VALUES (1, 'x')",
 	}
 	for _, sql := range allowed {
@@ -223,7 +251,7 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 
 	// A view in another schema is not this project's concern.
 	other := pgx.Identifier{schema + "_other"}.Sanitize()
-	mustExec("CREATE SCHEMA " + other)
+	mustExec("CREATE SCHEMA " + other + " AUTHORIZATION " + owner)
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+other+" CASCADE") })
 	if err := run("CREATE VIEW " + other + ".v AS SELECT 1 AS x"); err != nil {
 		t.Errorf("view in another schema: %v", err)

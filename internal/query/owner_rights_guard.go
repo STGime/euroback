@@ -25,10 +25,10 @@ import (
 // developer's SQL has run, in the same transaction, any such object that
 // is new or changed by it refuses (and rolls back) the request. That also
 // covers objects made by DO blocks, functions or dynamic SQL. Objects that
-// were already there unchanged are left alone. Views are matched by oid
-// (a rename or an edit keeps one that already ran as its owner);
-// functions and rules also by definition, so editing an existing one is
-// refused.
+// were already there unchanged are left alone; they are matched by oid
+// and definition (a view's stored query, a function's full definition, a
+// rule's actions; a disabled rule doesn't count), so editing or enabling an existing one is refused, while
+// renaming it or a column of a table it reads is not.
 
 // guardedObject is one object that runs with its owner's rights.
 type guardedObject struct {
@@ -64,20 +64,25 @@ func queryOwnerRightsObjects(ctx context.Context, tx pgx.Tx, schemaName string) 
 	rows, err := tx.Query(ctx, `
 		WITH ns AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = $1)
 		SELECT CASE c.relkind WHEN 'm' THEN 'materialized' ELSE 'view' END,
-		       c.oid::text, c.relname, coalesce(c.reloptions, '{}'::text[])
+		       c.oid::text || ':' || pg_catalog.md5(coalesce((
+		           SELECT r.ev_action::text FROM pg_catalog.pg_rewrite r
+		            WHERE r.ev_class = c.oid AND r.rulename = '_RETURN'), '')),
+		       c.relname, coalesce(c.reloptions, '{}'::text[])
 		  FROM pg_catalog.pg_class c
 		 WHERE c.relnamespace = (SELECT oid FROM ns) AND c.relkind IN ('v', 'm')
 		UNION ALL
-		SELECT 'definer', p.oid::text || ':' || pg_catalog.md5(p.prosrc || coalesce(p.proconfig::text, '')),
+		SELECT 'definer', p.oid::text || ':' || pg_catalog.md5(pg_catalog.pg_get_functiondef(p.oid)),
 		       p.proname, '{}'::text[]
 		  FROM pg_catalog.pg_proc p
-		 WHERE p.pronamespace = (SELECT oid FROM ns) AND p.prosecdef
+		 WHERE p.pronamespace = (SELECT oid FROM ns) AND p.prosecdef AND p.prokind IN ('f', 'p')
 		UNION ALL
-		SELECT 'rule', r.oid::text || ':' || pg_catalog.md5(r.ev_action::text || coalesce(r.ev_qual::text, '') || r.ev_type::text),
+		SELECT 'rule', r.oid::text || ':' || pg_catalog.md5(r.ev_action::text || coalesce(r.ev_qual::text, '')
+		           || r.ev_type::text || r.is_instead::text),
 		       r.rulename || ' on ' || c.relname, '{}'::text[]
 		  FROM pg_catalog.pg_rewrite r
 		  JOIN pg_catalog.pg_class c ON c.oid = r.ev_class
-		 WHERE c.relnamespace = (SELECT oid FROM ns) AND r.rulename <> '_RETURN'`, schemaName)
+		 WHERE c.relnamespace = (SELECT oid FROM ns) AND r.rulename <> '_RETURN'
+		   AND r.ev_enabled <> 'D'`, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("list objects: %w", err)
 	}
@@ -166,7 +171,7 @@ func withOwnerRightsGuard(ctx context.Context, tx pgx.Tx, schemaName string, fn 
 func quoteList(names []string) string {
 	q := make([]string, len(names))
 	for i, n := range names {
-		q[i] = `"` + n + `"`
+		q[i] = `"` + strings.ReplaceAll(n, `"`, `""`) + `"`
 	}
 	return strings.Join(q, ", ")
 }
