@@ -77,6 +77,7 @@ CREATE POLICY listings_owner ON listings
 					<li><code class="bg-gray-100 rounded px-1">GRANT</code>/<code class="bg-gray-100 rounded px-1">REVOKE</code>, <code class="bg-gray-100 rounded px-1">SET ROLE</code>/<code class="bg-gray-100 rounded px-1">search_path</code> — access control belongs to the platform.</li>
 					<li>Transaction control (<code class="bg-gray-100 rounded px-1">COMMIT</code>, <code class="bg-gray-100 rounded px-1">BEGIN</code>) — your file already runs in a transaction.</li>
 					<li><code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code> functions, <code class="bg-gray-100 rounded px-1">CREATE EXTENSION</code>, <code class="bg-gray-100 rounded px-1">COPY</code>.</li>
+					<li>Views without <code class="bg-gray-100 rounded px-1">WITH (security_invoker = true)</code>, and materialized views: both would skip your RLS policies. This includes dropping and recreating a view: add <code class="bg-gray-100 rounded px-1">security_invoker</code> when you do (see <a href="/docs/rls" class="text-eurobase-600 hover:underline">chapter 12</a>).</li>
 				</ul>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Plain <code class="bg-gray-100 rounded px-1">LANGUAGE plpgsql</code> functions and triggers are fine. Bulk data loads belong in the SDK/REST data path, not migrations.

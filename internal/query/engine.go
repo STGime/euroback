@@ -875,9 +875,11 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 		var columns []string
 		var results []map[string]interface{}
 		err := e.ddlLogin.Run(ctx, schemaName, opts.ReadOnly, e.sdkSetup(schemaName, true, "10s"), func(ctx context.Context, tx pgx.Tx) error {
-			var ferr error
-			columns, results, ferr = runCustomerSQL(ctx, tx, rawSQL, maxRows)
-			return ferr
+			return withViewGuard(ctx, tx, schemaName, func() error {
+				var ferr error
+				columns, results, ferr = runCustomerSQL(ctx, tx, rawSQL, maxRows)
+				return ferr
+			})
 		})
 		if err != nil {
 			return nil, nil, err
@@ -968,10 +970,24 @@ func (e *QueryEngine) ExecuteSQLWithOpts(ctx context.Context, schemaName, rawSQL
 		return columns, results, nil
 	}
 
-	// DML/DDL: execute and return affected rows.
-	tag, err := execCustomerStatement(ctx, tx, rawSQL)
+	// DML/DDL: execute and return affected rows. Developer SQL (not the
+	// SDK) may create views: they must apply RLS (withViewGuard).
+	var tag pgconn.CommandTag
+	exec := func() error {
+		var xerr error
+		tag, xerr = execCustomerStatement(ctx, tx, rawSQL)
+		if xerr != nil {
+			return fmt.Errorf("execute query: %w", xerr)
+		}
+		return nil
+	}
+	if opts.SDKPath {
+		err = exec()
+	} else {
+		err = withViewGuard(ctx, tx, schemaName, exec)
+	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("execute query: %w", err)
+		return nil, nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1176,9 +1192,11 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 			return nil
 		}
 		err := e.ddlLogin.Run(ctx, schemaName, isReadOnly, setup, func(ctx context.Context, tx pgx.Tx) error {
-			var ferr error
-			results, ferr = e.runTxStatements(ctx, tx, statements, maxRows)
-			return ferr
+			return withViewGuard(ctx, tx, schemaName, func() error {
+				var ferr error
+				results, ferr = e.runTxStatements(ctx, tx, statements, maxRows)
+				return ferr
+			})
 		})
 		if err != nil {
 			return results, err
@@ -1219,7 +1237,12 @@ func (e *QueryEngine) ExecuteSQLTransaction(ctx context.Context, schemaName stri
 		return nil, fmt.Errorf("set statement_timeout: %w", err)
 	}
 
-	results, err := e.runTxStatements(ctx, tx, statements, maxRows)
+	var results []StatementResult
+	err = withViewGuard(ctx, tx, schemaName, func() error {
+		var ferr error
+		results, ferr = e.runTxStatements(ctx, tx, statements, maxRows)
+		return ferr
+	})
 	if err != nil {
 		return results, err
 	}

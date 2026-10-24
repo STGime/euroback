@@ -70,6 +70,15 @@
 					</div>
 				</div>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Views</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					A view must apply the RLS policies of its tables to whoever reads it, so create views with <code class="bg-gray-100 border border-gray-200 rounded px-1">security_invoker</code>:
+				</p>
+				<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">CREATE VIEW open_tasks WITH (security_invoker = true) AS SELECT * FROM tasks WHERE done = false;</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Without it, a view reads its tables with its owner's rights and skips their policies, so the SQL editor, migrations and MCP refuse to create one (or to switch <code class="bg-gray-100 border border-gray-200 rounded px-1">security_invoker</code> off). Materialized views are refused too: they store their rows and can't apply RLS. For precomputed data, use a view or a table you refresh from a cron job. Repeat <code class="bg-gray-100 border border-gray-200 rounded px-1">WITH (security_invoker = true)</code> whenever you replace or re-create a view: <code class="bg-gray-100 border border-gray-200 rounded px-1">CREATE OR REPLACE VIEW</code> without it switches the option off. On the Team plan, SQL you run over a direct database connection isn't checked: create views with <code class="bg-gray-100 border border-gray-200 rounded px-1">security_invoker</code> there too.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Full example: secure a tasks table</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Follow these steps to create a table where each user can only see and manage their own rows.

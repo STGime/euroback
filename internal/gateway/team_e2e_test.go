@@ -1496,6 +1496,84 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Views must apply the row-level security of the tables they read for
+	// whoever reads them. A view that runs as its owner (the owner of the
+	// tables) would skip it: a service-only table read through such a view
+	// returned every row to an anonymous SDK caller. Developer SQL that
+	// leaves such a view (or a materialized view) behind is refused.
+	check(t, env, "views_apply_rls", func() error {
+		sqlAs := func(path, sql string) *httpResult {
+			b, _ := json.Marshal(map[string]string{"sql": sql})
+			return console("POST", path, string(b))
+		}
+		for _, q := range []string{
+			`CREATE TABLE view_rls_secret (id serial PRIMARY KEY, note text)`,
+			`ALTER TABLE view_rls_secret ENABLE ROW LEVEL SECURITY`,
+			`CREATE POLICY view_rls_service_only ON view_rls_secret USING (public.is_service_role()) WITH CHECK (public.is_service_role())`,
+			`INSERT INTO view_rls_secret (note) VALUES ('service-only-row')`,
+			`CREATE VIEW view_rls_ok WITH (security_invoker = true) AS SELECT * FROM view_rls_secret`,
+		} {
+			if r := sqlAs("/data/sql", q); r.code != 200 {
+				return fmt.Errorf("setup %q: %w", q, r)
+			}
+		}
+		for _, q := range []string{
+			`CREATE VIEW view_rls_leak AS SELECT * FROM view_rls_secret`,
+			`CREATE VIEW view_rls_leak WITH (security_invoker = 0) AS SELECT * FROM view_rls_secret`,
+			`ALTER VIEW view_rls_ok SET (security_invoker = false)`,
+			`ALTER VIEW view_rls_ok RESET (security_invoker)`,
+			`CREATE MATERIALIZED VIEW view_rls_mat AS SELECT * FROM view_rls_secret`,
+			`DO $$ BEGIN EXECUTE 'CREATE VIEW view_rls_leak AS SELECT * FROM view_rls_secret'; END $$`,
+		} {
+			r := sqlAs("/data/sql", q)
+			if r.code != http.StatusBadRequest || !strings.Contains(r.body, "view_rls_") {
+				return fmt.Errorf("%q: want 400 refusal, got %w", q, r)
+			}
+		}
+		// Multi-statement: refused and nothing committed.
+		r := console("POST", "/data/sql/transaction", `{"statements":["INSERT INTO view_rls_secret (note) VALUES ('from-tx')","CREATE VIEW view_rls_leak AS SELECT * FROM view_rls_secret"]}`)
+		if r.code != http.StatusBadRequest || !strings.Contains(r.body, "view_rls_leak") {
+			return fmt.Errorf("transaction: want 400 refusal, got %w", r)
+		}
+		if r := sqlAs("/data/sql", `SELECT count(*) AS n FROM view_rls_secret WHERE note = 'from-tx'`); r.code != 200 || !strings.Contains(r.body, `"n":0`) {
+			return fmt.Errorf("refused transaction left rows behind: %w", r)
+		}
+
+		// The allowed view applies RLS for SDK callers: anonymous and a
+		// signed-in user see nothing, the service key sees the row.
+		sdkSQL := func(apiKey, jwtTok, sql string) *httpResult {
+			b, _ := json.Marshal(map[string]string{"sql": sql})
+			req := httptest.NewRequest("POST", "http://"+env.slug+".eurobase.test/v1/db/sql", strings.NewReader(string(b)))
+			req.Header.Set("apikey", apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			if jwtTok != "" {
+				req.Header.Set("Authorization", "Bearer "+jwtTok)
+			}
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: "sdk POST /v1/db/sql " + sql, code: rec.Code, body: rec.Body.String()}
+		}
+		email := "view-rls@team.test"
+		sdk("POST", "/v1/auth/signup", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+		si := sdk("POST", "/v1/auth/signin", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+		var tok struct {
+			AccessToken string `json:"access_token"`
+		}
+		if err := json.Unmarshal([]byte(si.body), &tok); err != nil || tok.AccessToken == "" {
+			return fmt.Errorf("sign in: %w", si)
+		}
+		for _, c := range []struct{ who, jwt string }{{"anonymous", ""}, {"signed-in user", tok.AccessToken}} {
+			r := sdkSQL(env.publicKey, c.jwt, `SELECT * FROM view_rls_ok`)
+			if r.code != 200 || strings.Contains(r.body, "service-only-row") {
+				return fmt.Errorf("%s read through the view: %w", c.who, r)
+			}
+		}
+		if r := sdkSQL(env.secretKey, "", `SELECT * FROM view_rls_ok`); r.code != 200 || !strings.Contains(r.body, "service-only-row") {
+			return fmt.Errorf("service key through the view: %w", r)
+		}
+		return nil
+	})
+
 	// Edge functions through the real Deno runner (#676): an invocation
 	// via the SDK route runs ctx.db.sql / ctx.vault.get / ctx.storage on the
 	// project's own database — dedicated for Team, shared for Free — as
