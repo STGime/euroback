@@ -100,6 +100,8 @@ func TestViewGuard_DB(t *testing.T) {
 		"CREATE RECURSIVE VIEW v (id) AS SELECT 1 UNION ALL SELECT id + 1 FROM v WHERE id < 2",
 		"ALTER VIEW safe SET (security_invoker = false)",
 		"ALTER VIEW safe RESET (security_invoker)",
+		// CREATE OR REPLACE without WITH clears the view's options.
+		"CREATE OR REPLACE VIEW safe AS SELECT * FROM secret",
 		"CREATE MATERIALIZED VIEW m AS SELECT * FROM secret",
 		"CREATE MATERIALIZED VIEW m WITH (fillfactor = 70) AS SELECT * FROM secret WITH NO DATA",
 		// Not visible to a check of the SQL text.
@@ -130,6 +132,10 @@ func TestViewGuard_DB(t *testing.T) {
 		"CREATE VIEW v WITH (security_invoker = 'yes') AS SELECT * FROM secret",
 		"CREATE VIEW v AS SELECT 1 AS x; ALTER VIEW v SET (security_invoker = true)",
 		"ALTER VIEW safe SET (security_barrier = true)",
+		"CREATE OR REPLACE VIEW safe WITH (security_invoker = true) AS SELECT * FROM secret",
+		"ALTER VIEW safe RENAME COLUMN note TO body",
+		"COMMENT ON VIEW safe IS 'x'",
+		"ALTER TABLE secret ADD COLUMN extra int",
 		"DROP VIEW safe",
 		// Views that already ran as their owner keep working.
 		"CREATE OR REPLACE VIEW legacy AS SELECT * FROM secret",
@@ -146,7 +152,7 @@ func TestViewGuard_DB(t *testing.T) {
 
 	// The refusal names the view and says how to fix it.
 	err = run("CREATE VIEW leaky AS SELECT * FROM secret")
-	if err == nil || !strings.Contains(err.Error(), `"leaky"`) || !strings.Contains(err.Error(), "security_invoker = true") {
+	if err == nil || !strings.Contains(err.Error(), `"leaky"`) || !strings.Contains(err.Error(), "security_invoker = true") || !strings.Contains(err.Error(), "Repeat the WITH clause") {
 		t.Errorf("refusal message = %v", err)
 	}
 	err = run("CREATE MATERIALIZED VIEW stats AS SELECT count(*) FROM secret")
@@ -162,14 +168,19 @@ func TestViewGuard_DB(t *testing.T) {
 	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+ident+", public"); err != nil {
 		t.Fatal(err)
 	}
-	if err := withViewGuard(ctx, tx, schema, func() error { return nil }); err != nil {
+	// Developer SQL inside the guard changes the path (as a DO block
+	// could); the guard must hand back the path the SQL left behind.
+	if err := withViewGuard(ctx, tx, schema, func() error {
+		_, err := tx.Exec(ctx, "DO $$ BEGIN PERFORM set_config('search_path', '"+strings.ReplaceAll(ident, "'", "''")+`, "$user", public', true); END $$`)
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var path string
 	_ = tx.QueryRow(ctx, "SHOW search_path").Scan(&path)
 	_ = tx.Rollback(ctx)
-	if !strings.HasPrefix(path, schema) && !strings.HasPrefix(path, ident) {
-		t.Errorf("search_path after the guard = %q, want the caller's", path)
+	if path != schema+`, "$user", public` && path != ident+`, "$user", public` {
+		t.Errorf("search_path after the guard = %q, want the one the SQL set", path)
 	}
 
 	// A view in another schema is not this project's concern.

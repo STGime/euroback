@@ -1526,13 +1526,13 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			`DO $$ BEGIN EXECUTE 'CREATE VIEW view_rls_leak AS SELECT * FROM view_rls_secret'; END $$`,
 		} {
 			r := sqlAs("/data/sql", q)
-			if r.code != http.StatusBadRequest || !strings.Contains(r.body, "security") {
+			if r.code != http.StatusBadRequest || !strings.Contains(r.body, "view_rls_") {
 				return fmt.Errorf("%q: want 400 refusal, got %w", q, r)
 			}
 		}
 		// Multi-statement: refused and nothing committed.
 		r := console("POST", "/data/sql/transaction", `{"statements":["INSERT INTO view_rls_secret (note) VALUES ('from-tx')","CREATE VIEW view_rls_leak AS SELECT * FROM view_rls_secret"]}`)
-		if r.code != http.StatusBadRequest || !strings.Contains(r.body, "security_invoker") {
+		if r.code != http.StatusBadRequest || !strings.Contains(r.body, "view_rls_leak") {
 			return fmt.Errorf("transaction: want 400 refusal, got %w", r)
 		}
 		if r := sqlAs("/data/sql", `SELECT count(*) AS n FROM view_rls_secret WHERE note = 'from-tx'`); r.code != 200 || !strings.Contains(r.body, `"n":0`) {

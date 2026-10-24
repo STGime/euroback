@@ -137,7 +137,8 @@ func withViewGuard(ctx context.Context, tx pgx.Tx, schemaName string, fn func() 
 			"so anyone who can read it sees all of its rows. Use a view WITH (security_invoker = true), "+
 			"or a table you refresh from a cron job", quoteList(matviews))
 	case len(views) > 0:
-		return refusedf("view %s needs security_invoker = true, e.g. CREATE VIEW %s WITH (security_invoker = true) AS SELECT …. "+
+		return refusedf("view %s needs security_invoker = true, e.g. CREATE OR REPLACE VIEW %s WITH (security_invoker = true) AS SELECT …. "+
+			"Repeat the WITH clause whenever you replace or re-create a view: CREATE OR REPLACE VIEW without it switches the option off. "+
 			"Without it, reading the view skips the row-level security of the tables it reads",
 			quoteList(views), pgx.Identifier{views[0]}.Sanitize())
 	}

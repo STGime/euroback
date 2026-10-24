@@ -54,7 +54,7 @@ spec:
                    WHERE c.relkind IN ('v', 'm')
                      AND (c.relkind = 'm' OR NOT EXISTS (
                            SELECT 1 FROM unnest(coalesce(c.reloptions, '{}'::text[])) o
-                            WHERE o ~* '^security_invoker=(true|on|1|yes)$'))
+                            WHERE o ~* '^security_invoker=(t|tr|tru|true|y|ye|yes|on|1)$'))
                 )
                 SELECT 'VIEW ' || v.nspname || '.' || v.relname
                        || ' kind=' || CASE v.relkind WHEN 'm' THEN 'materialized' ELSE 'view' END
