@@ -2,6 +2,8 @@ package cron
 
 import (
 	"testing"
+
+	"github.com/eurobase/euroback/internal/query"
 )
 
 // Closes advisory GHSA-fjjq-cqq9-q793 — cron SQL action validation.
@@ -81,6 +83,14 @@ func TestValidateCronSQLAction_Rejects(t *testing.T) {
 				t.Errorf("validateCronSQLAction(%q) returned nil, want an error", tc.sql)
 			}
 		})
+	}
+}
+
+// #661: the cron path gives the SECURITY DEFINER explanation too.
+func TestValidateCronSQLAction_SecurityDefinerExplains(t *testing.T) {
+	err := validateCronSQLAction("CREATE FUNCTION f() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'", testSchema)
+	if err == nil || err.Error() != query.SecurityDefinerRejection {
+		t.Errorf("err = %v, want query.SecurityDefinerRejection", err)
 	}
 }
 

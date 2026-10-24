@@ -1,6 +1,9 @@
 package query
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateNoPrivilegeStatements(t *testing.T) {
 	blocked := []string{
@@ -119,5 +122,31 @@ func TestValidateNoPrivilegeStatements_StringLiteralSettings(t *testing.T) {
 	}
 	if err := ValidateNoPrivilegeStatements("SELECT 'standard_conforming_strings' AS doc"); err != nil {
 		t.Errorf("string literal mentioning the setting: %v", err)
+	}
+}
+
+// #661: SECURITY DEFINER gets an explanation and the alternatives, not a
+// bare "not allowed".
+func TestSecurityDefinerRejectionExplains(t *testing.T) {
+	for _, q := range []string{
+		"CREATE FUNCTION f() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$",
+		"create or replace function f() returns void language plpgsql security   definer as $$ begin end $$",
+		"ALTER FUNCTION f() SECURITY DEFINER",
+	} {
+		err := ValidateNoPrivilegeStatements(q)
+		if err == nil || err.Error() != SecurityDefinerRejection {
+			t.Errorf("%q: err = %v, want SecurityDefinerRejection", q, err)
+		}
+	}
+	for _, want := range []string{"SECURITY INVOKER", "is_service_role()", "Run as service role", "service key", SecurityDefinerDocsURL} {
+		if !strings.Contains(SecurityDefinerRejection, want) {
+			t.Errorf("rejection text lacks %q", want)
+		}
+	}
+	if err := ValidateNoPrivilegeStatements("CREATE FUNCTION f() RETURNS int LANGUAGE sql SECURITY INVOKER AS $$ SELECT 1 $$"); err != nil {
+		t.Errorf("SECURITY INVOKER refused: %v", err)
+	}
+	if err := ValidateTenantMigrationSQL("CREATE FUNCTION f() RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$;"); err == nil || err.Error() != SecurityDefinerRejection {
+		t.Errorf("migrations: err = %v, want SecurityDefinerRejection", err)
 	}
 }
