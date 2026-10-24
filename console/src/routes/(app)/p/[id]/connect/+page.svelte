@@ -20,7 +20,7 @@
 		return 'claude';
 	}
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let info = $state<ConnectInfo | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -237,13 +237,13 @@
 							</div>
 							<div class="flex gap-2">
 								<button
-									onclick={() => copyToClipboard(info.claude_md, 'claude')}
+									onclick={() => copyToClipboard(info!.claude_md, 'claude')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 								>
 									{copiedField === 'claude' ? 'Copied!' : 'Copy'}
 								</button>
 								<button
-									onclick={() => downloadFile('CLAUDE.md', info.claude_md)}
+									onclick={() => downloadFile('CLAUDE.md', info!.claude_md)}
 									class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 								>
 									Download
@@ -260,7 +260,7 @@
 								<p class="text-xs text-gray-500">Lets Claude Code list tables, run SQL, manage Vault, invoke functions on this project. Run once in your shell — paste a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a>.</p>
 							</div>
 							<button
-								onclick={() => copyToClipboard(info.mcp_config.claude, 'mcp-claude')}
+								onclick={() => copyToClipboard(info!.mcp_config.claude, 'mcp-claude')}
 								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 							>
 								{copiedField === 'mcp-claude' ? 'Copied!' : 'Copy'}
@@ -279,7 +279,7 @@
 								<p class="text-xs text-gray-500">Environment variables for your project</p>
 							</div>
 							<button
-								onclick={() => downloadFile('.env', info.env_template)}
+								onclick={() => downloadFile('.env', info!.env_template)}
 								class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 							>
 								Download
@@ -595,13 +595,13 @@
 							</div>
 							<div class="flex gap-2">
 								<button
-									onclick={() => copyToClipboard(info.codex_md, 'codex')}
+									onclick={() => copyToClipboard(info!.codex_md, 'codex')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 								>
 									{copiedField === 'codex' ? 'Copied!' : 'Copy'}
 								</button>
 								<button
-									onclick={() => downloadFile('AGENTS.md', info.codex_md)}
+									onclick={() => downloadFile('AGENTS.md', info!.codex_md)}
 									class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 								>
 									Download
@@ -618,7 +618,7 @@
 								<p class="text-xs text-gray-500">Append to <code class="rounded bg-gray-100 px-1 font-mono">~/.codex/config.toml</code> so Codex can run SQL, manage Vault, and invoke functions on this project. Codex sends the token from the <code class="rounded bg-gray-100 px-1 font-mono">EUROBASE_PAT</code> environment variable.</p>
 							</div>
 							<button
-								onclick={() => copyToClipboard(info.mcp_config.codex, 'mcp-codex')}
+								onclick={() => copyToClipboard(info!.mcp_config.codex, 'mcp-codex')}
 								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 							>
 								{copiedField === 'mcp-codex' ? 'Copied!' : 'Copy'}
@@ -635,7 +635,7 @@
 								<p class="text-xs text-gray-500">Environment variables for your project</p>
 							</div>
 							<button
-								onclick={() => downloadFile('.env', info.env_template)}
+								onclick={() => downloadFile('.env', info!.env_template)}
 								class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 							>
 								Download
@@ -655,13 +655,13 @@
 							</div>
 							<div class="flex gap-2">
 								<button
-									onclick={() => copyToClipboard(info.cursor_rules, 'cursor')}
+									onclick={() => copyToClipboard(info!.cursor_rules, 'cursor')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 								>
 									{copiedField === 'cursor' ? 'Copied!' : 'Copy'}
 								</button>
 								<button
-									onclick={() => downloadFile('.cursorrules', info.cursor_rules)}
+									onclick={() => downloadFile('.cursorrules', info!.cursor_rules)}
 									class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 								>
 									Download
@@ -678,7 +678,7 @@
 								<p class="text-xs text-gray-500">Add to <code class="rounded bg-gray-100 px-1 font-mono">~/.cursor/mcp.json</code> (or your workspace's <code class="rounded bg-gray-100 px-1 font-mono">.cursor/mcp.json</code>) — paste a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a>.</p>
 							</div>
 							<button
-								onclick={() => copyToClipboard(info.mcp_config.cursor, 'mcp-cursor')}
+								onclick={() => copyToClipboard(info!.mcp_config.cursor, 'mcp-cursor')}
 								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 							>
 								{copiedField === 'mcp-cursor' ? 'Copied!' : 'Copy'}
@@ -695,7 +695,7 @@
 								<p class="text-xs text-gray-500">Environment variables for your project</p>
 							</div>
 							<button
-								onclick={() => downloadFile('.env', info.env_template)}
+								onclick={() => downloadFile('.env', info!.env_template)}
 								class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 							>
 								Download
@@ -715,13 +715,13 @@
 							</div>
 							<div class="flex gap-2">
 								<button
-									onclick={() => copyToClipboard(info.cursor_rules, 'windsurf')}
+									onclick={() => copyToClipboard(info!.cursor_rules, 'windsurf')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 								>
 									{copiedField === 'windsurf' ? 'Copied!' : 'Copy'}
 								</button>
 								<button
-									onclick={() => downloadFile('.windsurfrules', info.cursor_rules)}
+									onclick={() => downloadFile('.windsurfrules', info!.cursor_rules)}
 									class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 								>
 									Download
@@ -738,7 +738,7 @@
 								<p class="text-xs text-gray-500">Add to Windsurf's MCP config — paste a Personal Access Token from <a href="/account" class="text-eurobase-700 hover:underline">Account → Tokens</a>.</p>
 							</div>
 							<button
-								onclick={() => copyToClipboard(info.mcp_config.windsurf, 'mcp-windsurf')}
+								onclick={() => copyToClipboard(info!.mcp_config.windsurf, 'mcp-windsurf')}
 								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 							>
 								{copiedField === 'mcp-windsurf' ? 'Copied!' : 'Copy'}
@@ -776,7 +776,7 @@
 								<p class="text-xs text-gray-500">Create a <code class="text-xs bg-gray-100 rounded px-1">.env</code> file in your project root. Get your API keys from <a href="/p/{info.project_id}/settings" class="text-eurobase-600 hover:underline">Settings</a>.</p>
 							</div>
 							<button
-								onclick={() => downloadFile('.env', info.env_template)}
+								onclick={() => downloadFile('.env', info!.env_template)}
 								class="rounded-md bg-eurobase-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-eurobase-700 transition-colors cursor-pointer"
 							>
 								Download .env
@@ -804,7 +804,7 @@
 								<p class="text-xs text-gray-500">Any MCP-compatible client can connect. Auth: <code class="rounded bg-gray-100 px-1 font-mono">Authorization: Bearer &lt;PAT&gt;</code> · <a href="/account" class="text-eurobase-700 hover:underline">get your token here</a></p>
 							</div>
 							<button
-								onclick={() => copyToClipboard(info.mcp_url, 'mcp-url')}
+								onclick={() => copyToClipboard(info!.mcp_url, 'mcp-url')}
 								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 							>
 								{copiedField === 'mcp-url' ? 'Copied!' : 'Copy'}
@@ -818,7 +818,7 @@
 							<div class="flex items-center justify-between mb-3">
 								<p class="text-sm font-semibold text-gray-900">3. Use the SDK</p>
 								<button
-									onclick={() => copyToClipboard(info.sample_code.javascript, 'js')}
+									onclick={() => copyToClipboard(info!.sample_code.javascript, 'js')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 								>
 									{copiedField === 'js' ? 'Copied!' : 'Copy'}
@@ -833,7 +833,7 @@
 							<div class="flex items-center justify-between mb-3">
 								<p class="text-sm font-semibold text-gray-900">Or use cURL directly</p>
 								<button
-									onclick={() => copyToClipboard(info.sample_code.curl, 'curl')}
+									onclick={() => copyToClipboard(info!.sample_code.curl, 'curl')}
 									class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer"
 								>
 									{copiedField === 'curl' ? 'Copied!' : 'Copy'}

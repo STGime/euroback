@@ -5,7 +5,7 @@
 	import { api, type Project, type TableSchema } from '$lib/api.js';
 
 	const projectCtx = getContext<{ id: string; project: Project | null }>('projectId');
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	let tables: TableSchema[] = $state([]);
 	let loading = $state(true);

@@ -3,7 +3,7 @@
 	import { api, type VaultSecret } from '$lib/api.js';
 	import { onMount } from 'svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	let secrets: VaultSecret[] = $state([]);
 	let loading = $state(true);

@@ -6,7 +6,7 @@
 	import { api } from '$lib/api.js';
 
 	type State = 'verifying' | 'success' | 'error';
-	let state = $state<State>('verifying');
+	let status = $state<State>('verifying');
 	let errorMsg = $state('');
 	let resendEmail = $state('');
 	let resending = $state(false);
@@ -39,7 +39,7 @@
 
 	onMount(async () => {
 		if (!token) {
-			state = 'error';
+			status = 'error';
 			errorMsg = 'This verification link is missing its token. Please use the link from your email.';
 			return;
 		}
@@ -48,10 +48,10 @@
 			// Verifying also signs the user in — persist the session and
 			// send them into the app.
 			user.set({ token: resp.access_token, email: resp.user.email });
-			state = 'success';
+			status = 'success';
 			await redirectAfterLogin();
 		} catch (err) {
-			state = 'error';
+			status = 'error';
 			errorMsg = err instanceof Error ? err.message : 'Verification failed.';
 		}
 	});
@@ -75,9 +75,9 @@
 		</div>
 
 		<div class="rounded-xl border border-gray-200 bg-white p-8 shadow-sm text-center">
-			{#if state === 'verifying'}
+			{#if status === 'verifying'}
 				<p class="text-sm text-gray-600">Verifying your email…</p>
-			{:else if state === 'success'}
+			{:else if status === 'success'}
 				<h1 class="text-lg font-semibold text-gray-900">Email verified</h1>
 				<p class="mt-2 text-sm text-gray-600">Your account is active. Redirecting you to the console…</p>
 			{:else}

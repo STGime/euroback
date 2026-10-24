@@ -5,7 +5,7 @@
 	import { api, type TableSchema } from '$lib/api.js';
 	import SchemaDiagram from '$lib/components/SchemaDiagram.svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 	let tables: TableSchema[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);

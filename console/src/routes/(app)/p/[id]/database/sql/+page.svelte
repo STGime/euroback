@@ -6,7 +6,7 @@
 	import SqlEditor from '$lib/components/SqlEditor.svelte';
 	import ResultsTable from '$lib/components/ResultsTable.svelte';
 
-	let projectId = $derived($page.params.id);
+	let projectId = $derived($page.params.id!);
 
 	// ---- Schema sidebar state ----
 	let tables: TableSchema[] = $state([]);
