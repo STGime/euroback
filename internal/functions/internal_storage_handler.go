@@ -13,6 +13,7 @@ import (
 	"time"
 
 	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -221,6 +222,9 @@ func (h *InternalStorageHandler) upload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	events.Emit(r.Context(), events.Event{ProjectID: projectID, Type: events.StorageUpload,
+		Data: map[string]any{"key": key, "content_type": contentType, "size": len(body)}})
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -363,17 +367,24 @@ func (h *InternalStorageHandler) delete(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"delete failed"}`, http.StatusBadGateway)
 		return
 	}
+	// Only a removed tracking row means a file was there (S3 deletes a
+	// missing key successfully), so only then is storage.delete emitted.
+	tracked := false
 	if schema != "" && metaPool != nil {
 		escSchema := strings.ReplaceAll(schema, `"`, `""`)
 		q := fmt.Sprintf(`DELETE FROM "%s".storage_objects WHERE key = $1`, escSchema)
 		if err := edb.RunAsService(r.Context(), metaPool, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, q, key)
+			tag, err := tx.Exec(ctx, q, key)
+			tracked = tag.RowsAffected() > 0
 			return err
 		}); err != nil {
 			// The object is gone; the row stays until the next delete of
 			// the same key (or an ops sweep). Visible, not silent.
 			slog.Error("internal storage delete: object removed but its storage_objects row wasn't", "error", err, "schema", schema, "key", key)
 		}
+	}
+	if tracked {
+		events.Emit(r.Context(), events.Event{ProjectID: projectID, Type: events.StorageDelete, Data: map[string]any{"key": key}})
 	}
 
 	w.WriteHeader(http.StatusNoContent)

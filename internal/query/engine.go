@@ -716,32 +716,36 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 }
 
 // DeleteRows deletes multiple rows by ID using ANY($1).
-// Returns the number of rows affected.
-func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) (int64, error) {
+// Returns the IDs of the rows actually deleted (as text), so callers
+// report deletes only for rows that existed.
+func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) ([]string, error) {
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	qt := qualifiedTable(schemaName, tableName)
-	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1)", qt, quoteIdent("id"))
+	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1) RETURNING %s::text", qt, quoteIdent("id"), quoteIdent("id"))
 	slog.Debug("executing bulk delete", "sql", sql, "id_count", len(ids))
 
-	var affected int64
+	var deleted []string
 	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, sql, ids)
+		rows, err := tx.Query(ctx, sql, ids)
 		if err != nil {
 			return fmt.Errorf("execute bulk delete: %w", err)
 		}
-		affected = tag.RowsAffected()
+		deleted, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return fmt.Errorf("execute bulk delete: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return affected, nil
+	return deleted, nil
 }
 
 // CallFunction calls a PostgreSQL function via SELECT schema.func(args).

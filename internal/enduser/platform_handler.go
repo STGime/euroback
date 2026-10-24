@@ -3,6 +3,7 @@ package enduser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/compliance"
 	edb "github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/go-chi/chi/v5"
@@ -360,6 +362,8 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		}
 
 		slog.Info("platform created end-user", "schema", schema, "user_id", u.ID, "email", u.Email)
+		emitUserEvent(r.Context(), query.ProjectIDFromContext(r.Context()), events.AuthUserCreated,
+			User{ID: u.ID, Email: u.Email, Phone: u.Phone, CreatedAt: u.CreatedAt}, "email")
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -507,27 +511,24 @@ func handleDeleteUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 			}
 		}
 
-		q := fmt.Sprintf(`DELETE FROM %s.users WHERE id = $1`, quoteIdent(schema))
-		var rowsAffected int64
+		q := fmt.Sprintf(`DELETE FROM %s.users WHERE id = $1 RETURNING email, phone`, quoteIdent(schema))
+		var deleted User
 		err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
-			tag, e := tx.Exec(ctx, q, userID)
-			if e != nil {
-				return e
-			}
-			rowsAffected = tag.RowsAffected()
-			return nil
+			return tx.QueryRow(ctx, q, userID).Scan(&deleted.Email, &deleted.Phone)
 		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+			return
+		}
 		if err != nil {
 			slog.Error("delete end-user failed", "error", err, "schema", schema, "user_id", userID)
 			http.Error(w, `{"error":"failed to delete user"}`, http.StatusInternalServerError)
 			return
 		}
-		if rowsAffected == 0 {
-			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
-			return
-		}
 
 		slog.Info("platform deleted end-user", "schema", schema, "user_id", userID)
+		deleted.ID = userID
+		emitUserEvent(r.Context(), query.ProjectIDFromContext(r.Context()), events.AuthUserDeleted, deleted, "")
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

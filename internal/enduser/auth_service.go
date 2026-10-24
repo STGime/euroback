@@ -16,6 +16,7 @@ import (
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/db"
 	"github.com/eurobase/euroback/internal/email"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/oauth"
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/ratelimit"
@@ -244,6 +245,7 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 	_ = json.Unmarshal(metadataJSON, &user.Metadata)
 
 	slog.Info("end-user signed up", "schema", schemaName, "user_id", user.ID, "email", user.Email)
+	emitUserEvent(ctx, projectID, events.AuthUserCreated, user, "email")
 
 	// If email confirmation is required and an email service is available, send verification email.
 	// verifyRedirectURL is guaranteed non-empty here because the resolver
@@ -901,6 +903,7 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 	})
 
 	// Run the whole find-or-create flow inside one service-role transaction.
+	createdUser := false // a new account was created in the tx below (#845 event)
 	txErr := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		// Try to find user via user_identities table (supports multiple linked providers).
 		findIdentityQ := fmt.Sprintf(
@@ -980,6 +983,7 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 			}
 			_ = json.Unmarshal(metadataJSON, &user.Metadata)
 			slog.Info("end-user signed up via oauth", "schema", schemaName, "user_id", user.ID, "provider", providerName)
+			createdUser = true
 
 			// Create identity row.
 			upsertIdentityQ := fmt.Sprintf(
@@ -1015,6 +1019,9 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 	})
 	if txErr != nil {
 		return nil, txErr
+	}
+	if createdUser {
+		emitUserEvent(ctx, projectID, events.AuthUserCreated, user, providerName)
 	}
 
 	if bannedAt != nil {
@@ -1101,6 +1108,7 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, p
 
 	// Find or create user by phone number.
 	var userID string
+	createdUser := false // #845 event
 	findQ := fmt.Sprintf(`SELECT id FROM %s.users WHERE phone = $1`, quoteIdent(schemaName))
 	insertQ := fmt.Sprintf(
 		`INSERT INTO %s.users (phone, metadata)
@@ -1118,6 +1126,7 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, p
 				return fmt.Errorf("create phone user: %w", e)
 			}
 			slog.Info("end-user created via phone otp", "schema", schemaName, "user_id", userID)
+			createdUser = true
 			return nil
 		}
 		if e != nil {
@@ -1134,6 +1143,9 @@ func (s *AuthService) SendPhoneOTP(ctx context.Context, schemaName, projectID, p
 	}
 	if err != nil {
 		return err
+	}
+	if createdUser {
+		emitUserEvent(ctx, projectID, events.AuthUserCreated, User{ID: userID, Phone: &phone}, "phone")
 	}
 
 	// #227: per-project hourly SMS cap. Silent skip — the user attempt

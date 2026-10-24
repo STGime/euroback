@@ -30,6 +30,7 @@ import (
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/enduser"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/gateway"
 	"github.com/eurobase/euroback/internal/metrics"
@@ -795,7 +796,12 @@ func main() {
 	// above — see internal/upgrade for the state machine flow.
 	upgradeSvc := upgrade.NewService(developerPool, riverInsertOnly)
 
-	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, sdkLoginResolver, gateway.PlatformDDLLogin(platformDDLRunner), devMode)
+	// Customer webhooks and function triggers (#845): the router's write
+	// paths enqueue deliveries on the project_events queue; the worker
+	// sends them.
+	projectEvents := events.NewEmitter(pool, events.RiverInserter(riverInsertOnly))
+
+	r := gateway.NewRouter(pool, developerPool, migrationExec, platformAuth, platformAuthSvc, limiter, accessRecorder, s3Client, hub, logCh, subdomainMw, emailService, smsService, limitsSvc, vaultSvc, fnRunnerURL, fnSigner, os.Getenv("FUNCTIONS_RUNNER_HMAC_SECRET"), metricsReg, allowedOrigins, unsubSigner, billingSvc, ssoWiring, sovereigntyReg, upgradeSvc, sdkLoginResolver, gateway.PlatformDDLLogin(platformDDLRunner), projectEvents, devMode)
 
 	// ── Start HTTP server ──
 	srv := &http.Server{
@@ -831,6 +837,11 @@ func main() {
 
 	// Flush buffered data-access-log events before closing the pool.
 	accessRecorder.Close(shutdownCtx)
+
+	// Enqueue project events (#845) still waiting in memory.
+	if err := projectEvents.Wait(shutdownCtx); err != nil {
+		slog.Warn("project events still queued at shutdown were dropped", "error", err)
+	}
 
 	pool.Close()
 	slog.Info("gateway shut down cleanly")

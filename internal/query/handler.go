@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,6 +62,17 @@ func jsonResponse(w http.ResponseWriter, data interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// emitRowEvent hands a committed data-API write to the project's webhooks
+// and function triggers (#845). Same payload as the realtime event.
+func emitRowEvent(r *http.Request, eventType, table string, data map[string]any) {
+	events.Emit(r.Context(), events.Event{
+		ProjectID: ProjectIDFromContext(r.Context()),
+		Type:      eventType,
+		Table:     table,
+		Data:      data,
+	})
 }
 
 // HandleQuery returns a chi.Router that handles all /v1/db/ routes.
@@ -135,7 +147,7 @@ func HandleTableBulkDelete(engine *QueryEngine, pub *realtime.EventPublisher) ht
 			return
 		}
 
-		deleted, err := engine.DeleteRows(r.Context(), schema, tableName, body.IDs)
+		deletedIDs, err := engine.DeleteRows(r.Context(), schema, tableName, body.IDs)
 		if err != nil {
 			slog.Error("bulk delete failed", "error", err, "schema", schema, "table", tableName)
 			if !handleQueryError(w, err) {
@@ -143,14 +155,22 @@ func HandleTableBulkDelete(engine *QueryEngine, pub *realtime.EventPublisher) ht
 			}
 			return
 		}
+		deleted := len(deletedIDs)
 
+		// Realtime fan-out key is the project UUID, not schema name —
+		// the WebSocket subscriber also keys on the UUID (closes #62).
+		projectID := ProjectIDFromContext(r.Context())
 		if pub != nil {
-			// Realtime fan-out key is the project UUID, not schema name —
-			// the WebSocket subscriber also keys on the UUID (closes #62).
-			projectID := ProjectIDFromContext(r.Context())
-			for _, id := range body.IDs {
+			for _, id := range deletedIDs {
 				_ = pub.PublishDelete(r.Context(), projectID, tableName, map[string]interface{}{"id": id})
 			}
+		}
+		if deleted > 0 {
+			evs := make([]events.Event, 0, deleted)
+			for _, id := range deletedIDs {
+				evs = append(evs, events.Event{ProjectID: projectID, Type: events.DBDelete, Table: tableName, Data: map[string]any{"id": id}})
+			}
+			events.FromContext(r.Context()).EmitMany(r.Context(), evs)
 		}
 
 		slog.Debug("bulk delete complete", "schema", schema, "table", tableName, "deleted", deleted)
@@ -408,6 +428,7 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		if pub != nil {
 			_ = pub.PublishInsert(r.Context(), ProjectIDFromContext(r.Context()), tableName, PublishableRow(tableName, row))
 		}
+		emitRowEvent(r, events.DBInsert, tableName, PublishableRow(tableName, row))
 
 		slog.Debug("row inserted", "schema", schema, "table", tableName)
 		jsonResponse(w, row, http.StatusCreated)
@@ -448,6 +469,7 @@ func handleUpdateRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		if pub != nil {
 			_ = pub.PublishUpdate(r.Context(), ProjectIDFromContext(r.Context()), tableName, PublishableRow(tableName, row), nil)
 		}
+		emitRowEvent(r, events.DBUpdate, tableName, PublishableRow(tableName, row))
 
 		slog.Debug("row updated", "schema", schema, "table", tableName, "id", rowID)
 		jsonResponse(w, row, http.StatusOK)
@@ -482,6 +504,7 @@ func handleDeleteRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		if pub != nil {
 			_ = pub.PublishDelete(r.Context(), ProjectIDFromContext(r.Context()), tableName, map[string]interface{}{"id": rowID})
 		}
+		emitRowEvent(r, events.DBDelete, tableName, map[string]any{"id": rowID})
 
 		slog.Debug("row deleted", "schema", schema, "table", tableName, "id", rowID)
 		w.WriteHeader(http.StatusNoContent)

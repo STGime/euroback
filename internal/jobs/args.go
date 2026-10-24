@@ -2,7 +2,11 @@
 // tenant service (enqueuing) and workers (processing).
 package jobs
 
-import "github.com/riverqueue/river"
+import (
+	"encoding/json"
+
+	"github.com/riverqueue/river"
+)
 
 // ProvisionProjectArgs are the arguments for the async project provisioning job.
 type ProvisionProjectArgs struct {
@@ -302,4 +306,47 @@ func (RestoreTeamDatabaseArgs) Kind() string { return "restore_team_database" }
 // restore_operations.state='failed' on terminal errors.
 func (RestoreTeamDatabaseArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 3}
+}
+
+// ProjectEventsQueue is the River queue for customer webhook deliveries
+// and function-trigger invocations (#845). Its own queue so a burst of
+// project events can't hold up provisioning, exports or billing jobs on
+// the default queue.
+const ProjectEventsQueue = "project_events"
+
+// DeliverProjectWebhookArgs delivers one project event (#845) to one
+// customer webhook. Body is the event envelope; the worker signs and
+// POSTs the exact bytes it sends. URL, secret and enabled are read from
+// public.webhooks at run time, so a change or a delete takes effect on
+// the next attempt.
+type DeliverProjectWebhookArgs struct {
+	WebhookID string          `json:"webhook_id"`
+	EventID   string          `json:"event_id"`
+	EventType string          `json:"event_type"`
+	Body      json.RawMessage `json:"body"`
+}
+
+func (DeliverProjectWebhookArgs) Kind() string { return "deliver_project_webhook" }
+
+// MaxAttempts 8 with River's backoff (attempt⁴ seconds) spreads retries
+// over roughly an hour and a half before the delivery is given up.
+func (DeliverProjectWebhookArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 8, Queue: ProjectEventsQueue}
+}
+
+// InvokeFunctionTriggerArgs runs one edge function for one database
+// event (#845, public.function_triggers). Body is the event envelope,
+// passed to the function as its request body.
+type InvokeFunctionTriggerArgs struct {
+	TriggerID string          `json:"trigger_id"`
+	EventID   string          `json:"event_id"`
+	Body      json.RawMessage `json:"body"`
+}
+
+func (InvokeFunctionTriggerArgs) Kind() string { return "invoke_function_trigger" }
+
+// MaxAttempts 3: a function may not be idempotent, so retry only a few
+// times (runner unreachable, 5xx).
+func (InvokeFunctionTriggerArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 3, Queue: ProjectEventsQueue}
 }

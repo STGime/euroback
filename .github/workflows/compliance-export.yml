@@ -6,7 +6,9 @@ name: Compliance export
 # dump a PG16 server (the schema section of every tenant export needs it).
 # Also runs the Team-tier upgrade worker's production-role test (#673):
 # same database shape, and the same class of bug (a platform job on a pool
-# whose role lacks the grants it needs).
+# whose role lacks the grants it needs). And the project-events suites
+# (#845: customer webhook delivery, function triggers, subscription
+# loading) as eurobase_gateway, the role the gateway and worker use.
 #
 # Path-filtered: don't make this a *required* check without dropping the
 # filter, or unrelated PRs will wait on it forever.
@@ -19,6 +21,14 @@ on:
       - internal/dbprovider/owner_pool.go
       - internal/storage/s3.go
       - internal/workers/upgrade_project*.go
+      - internal/events/**
+      - internal/webhook/**
+      - internal/workers/deliver_project_webhook*.go
+      - internal/workers/invoke_function_trigger*.go
+      - internal/workers/project_events*.go
+      - internal/cron/executor.go
+      - internal/storage/handler.go
+      - internal/storage/delete_events_test.go
       - cmd/worker/main.go
       - migrations/**
       - deploy/docker/Dockerfile.worker
@@ -98,10 +108,14 @@ jobs:
           EXPORT_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           TEAM_EXPORT_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
           UPGRADE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
+          EVENTS_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
+          EVENTS_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=require
         run: |
           pg_dump --version
           go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection|FailStaleRunning'
-          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker'
+          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker|DeliverProjectWebhook|WebhookDeliveryClient|InvokeFunctionTrigger'
+          go test -count=1 -v ./internal/events/ ./internal/webhook/
+          go test -count=1 -v ./internal/storage/ -run 'DeleteFileEmits'
 
       # Not an export suite, but the only job with a production-role PG16:
       # the retrievable public key (000132) — storage, CHECK, and the API-key
