@@ -127,63 +127,45 @@
 							<tr><td class="px-3 py-1 font-mono text-gray-700">storage delete &lt;key&gt;</td><td class="px-3 py-1 text-gray-500">Delete a file</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">storage url &lt;key&gt;</td><td class="px-3 py-1 text-gray-500">Generate signed URL</td></tr>
 
-							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Testing & Compliance</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">test [file-or-dir]</td><td class="px-3 py-1 text-gray-500">Run pgTAP database tests</td></tr>
+							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Compliance</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">compliance report</td><td class="px-3 py-1 text-gray-500">Generate the DPA / sub-processor report</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">compliance sub-processors</td><td class="px-3 py-1 text-gray-500">List active sub-processors</td></tr>
 						</tbody>
 					</table>
 				</div>
 
-				<h3 class="text-lg font-semibold text-gray-900 mt-6">Testing RLS policies with pgTAP</h3>
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Testing RLS policies</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Create SQL test files in a <code class="bg-gray-100 rounded px-1">tests/</code> directory. Each file uses pgTAP assertions to verify your RLS policies work correctly. A session's identity comes from two transaction-local settings that the platform sets for you at runtime, and that you set by hand in a test: <code class="bg-gray-100 rounded px-1">app.end_user_id</code> (the end-user's UUID, read by <code class="bg-gray-100 rounded px-1">auth_uid()</code>) and <code class="bg-gray-100 rounded px-1">app.end_user_role</code> (<code class="bg-gray-100 rounded px-1">'authenticated'</code>, <code class="bg-gray-100 rounded px-1">'anon'</code> or <code class="bg-gray-100 rounded px-1">'service'</code>, read by <code class="bg-gray-100 rounded px-1">auth_role()</code> / <code class="bg-gray-100 rounded px-1">is_service_role()</code>). Set <strong>both</strong> to faithfully reproduce a real session &mdash; a policy that checks <code class="bg-gray-100 rounded px-1">auth_role()</code> will not behave as it does in production if you set only the id.
+					Test your policies the way your users actually reach your data: as an authenticated client. Create a few test end-users in a separate project, sign each one in, and exercise the SDK (or REST API) with that user's access token. Row-Level Security is evaluated under the same non-owner role as in production, so what a test user can read or write is exactly what a real client would get.
 				</p>
 
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
-					<pre>-- tests/rls_tasks.sql
-BEGIN;
-SELECT plan(3);
+					<pre>import {'{'} createClient {'}'} from '@eurobase/sdk'
 
--- Test as Alice (a signed-in end user)
-SET LOCAL app.end_user_id = 'alice-uuid';
-SET LOCAL app.end_user_role = 'authenticated';
+const eb = createClient({'{'} url: PROJECT_URL, apiKey: PUBLIC_KEY {'}'})
 
-SELECT ok(
-    (SELECT count(*) FROM tasks WHERE user_id = 'alice-uuid') > 0,
-    'Alice can see her own tasks'
-);
+// Sign in as a seeded test user, then read/write under their session.
+await eb.auth.signIn({'{'} email: 'alice@example.test', password: '...' {'}'})
 
-SELECT ok(
-    (SELECT count(*) FROM tasks WHERE user_id = 'bob-uuid') = 0,
-    'Alice cannot see Bob tasks'
-);
+const {'{'} data: mine {'}'} = await eb.db.from('tasks').select('*')        // only Alice's rows
+const {'{'} error {'}'} = await eb.db.from('tasks')
+  .update({'{'} title: 'x' {'}'}).eq('user_id', BOB_ID)                      // blocked by RLS
 
--- Test as anonymous (no end user; role falls back to 'anon')
-SET LOCAL app.end_user_id = '';
-SET LOCAL app.end_user_role = 'anon';
-SELECT ok(
-    (SELECT count(*) FROM tasks) = 0,
-    'Anonymous cannot see any tasks'
-);
-
-SELECT * FROM finish();
-ROLLBACK;</pre>
+// Sign out -> anonymous: a protected table returns nothing.
+await eb.auth.signOut()
+const {'{'} data: anon {'}'} = await eb.db.from('tasks').select('*')        // []</pre>
 				</div>
 
-				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400 mt-3">
-					<div class="text-gray-500"># Run all tests</div>
-					<div>eurobase test</div>
-					<div class="mt-1 text-gray-500"># Run a specific test file</div>
-					<div>eurobase test tests/rls_tasks.sql</div>
-				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-3">
+					Each session carries its identity automatically: the platform sets <code class="bg-gray-100 rounded px-1">app.end_user_id</code> and <code class="bg-gray-100 rounded px-1">app.end_user_role</code> for the request, which your policies read through <code class="bg-gray-100 rounded px-1">auth_uid()</code>, <code class="bg-gray-100 rounded px-1">auth_role()</code> and <code class="bg-gray-100 rounded px-1">is_service_role()</code>. Confirm what a session resolves to with <code class="bg-gray-100 rounded px-1">GET /v1/auth/user</code> using that user's token. The <a href="/docs/rls" class="text-eurobase-600 hover:text-eurobase-700">Row-Level Security</a> chapter has the policy patterns and a "Test it from the SDK" walkthrough.
+				</p>
 
 				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">
 					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
 					</svg>
 					<div class="text-sm text-eurobase-800">
-						<p><strong>Tip:</strong> Tests run inside a transaction that is rolled back &mdash; no data is modified. Use <code class="bg-white/50 rounded px-1">SET LOCAL app.end_user_id</code> together with <code class="bg-white/50 rounded px-1">SET LOCAL app.end_user_role</code> to simulate different users and verify RLS policies enforce correct access. To test the service-role bypass (server-side / service-key access), set <code class="bg-white/50 rounded px-1">app.end_user_role = 'service'</code> &mdash; <code class="bg-white/50 rounded px-1">is_service_role()</code> then returns true and end-user RLS is bypassed.</p>
+						<p><strong>Why not test from inside the database (e.g. pgTAP)?</strong> Every statement you run on Eurobase goes through a non-owner, RLS-enforced role, one statement at a time, with no transaction control &mdash; the same constraints that make your RLS guarantees trustworthy. Testing policies from inside the database would mean relaxing exactly that boundary. Our EU-managed Postgres also ships a vetted, security-reviewed set of extensions, and in-database test frameworks such as pgTAP aren't part of it. Testing as an authenticated client covers the whole path &mdash; sign-in &rarr; identity &rarr; policy &rarr; response &mdash; which is what your users actually exercise.</p>
 					</div>
 				</div>
 			</div>
