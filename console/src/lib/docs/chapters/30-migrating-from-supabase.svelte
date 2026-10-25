@@ -47,6 +47,16 @@
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">Can I copy my schema to a test project without the data?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. Apply your migration files to a fresh, empty project (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase migrations up</code>) &mdash; you get tables, foreign keys, CHECK constraints, RLS policies and functions, with no rows copied. There&rsquo;s no standalone schema-only export yet; on Team you can also <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">pg_dump --schema-only</code> over the direct connection. See <a href="/docs/migrations" class="cursor-pointer text-eurobase-700 hover:underline">Migrations</a>.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">How do I see my full RLS policies for a table?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Use the schema endpoints rather than catalog SQL (which is refused): <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /platform/projects/&lt;id&gt;/schema/tables/&lt;table&gt;/policies</code> returns each policy&rsquo;s USING and WITH CHECK (developer role); <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET .../schema</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">.../schema/rls-audit</code> give foreign keys and RLS status at viewer level. See <a href="/docs/rls" class="cursor-pointer text-eurobase-700 hover:underline">Row-Level Security</a>.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can I send auth emails (reset, magic link) to my own site, with my own templates and sender?</p>
 					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Redirect URLs to your own app are fully configurable (allow-listed, same idea as Supabase's site URL). Custom email templates are available on Pro. A custom SMTP sender is a Pro feature we're finalising — validate your provider in a test project before relying on it.</p>
 				</div>
