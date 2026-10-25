@@ -68,6 +68,19 @@ CREATE POLICY listings_owner ON listings
     EUROBASE_PAT: $&#123;&#123; secrets.EUROBASE_PAT &#125;&#125;</pre>
 				</div>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Spin up a test project from your schema (no data)</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Because migrations are plain SQL files you can apply to any project, they&rsquo;re the simplest way to stand up a test or staging project with your schema but none of your production data. Create an empty project, point the CLI at it, and apply your migrations:
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
+					<pre>eurobase projects create floorball-test
+eurobase switch floorball-test
+eurobase migrations up</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					You get the tables, foreign keys, CHECK constraints, RLS policies and functions &mdash; with no rows copied. There&rsquo;s no one-click &ldquo;schema-only export&rdquo; yet; on Team / Legal Team you can alternatively run <code class="bg-gray-100 rounded px-1">pg_dump --schema-only</code> over your <a href="/docs/connect-db" class="text-eurobase-600 hover:underline">direct connection</a> and load it into the new project.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What migration SQL can't do (and why)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Migrations run with your project's developer credentials (PAT or console session) — <strong>never with API keys</strong>: a leaked server key must not be able to alter your schema. Each migration executes under a database role scoped to <em>only your project's schema</em>, so it physically cannot read or write another project or the platform's own tables — that boundary is enforced by Postgres, not just by validation. On top of that, the platform rejects operations that try to reach outside your project before they run:

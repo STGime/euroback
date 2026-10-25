@@ -167,6 +167,43 @@
 						<p class="mt-1.5 leading-relaxed"><strong>Fix</strong>: add a SELECT policy that permits the authenticated user to read the row they just wrote &mdash; usually the same predicate as the INSERT policy. If your INSERT policy is <code class="bg-red-100 rounded px-1">WITH CHECK (user_id = auth_uid())</code>, add <code class="bg-red-100 rounded px-1">FOR SELECT USING (user_id = auth_uid())</code>. The Table Editor bypasses this because it runs through the elevated <code class="bg-red-100 rounded px-1">is_service_role()</code> branch, which is why the same insert succeeds there and fails from the SDK.</p>
 					</div>
 				</div>
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Inspecting your schema, policies and functions</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					You can read your full schema without raw SQL, at two access levels. With <strong>viewer</strong>: the Database &rarr; Schema diagram (foreign keys drawn between tables), <code class="bg-gray-100 rounded px-1">GET /platform/projects/&lt;id&gt;/schema</code> (columns, foreign keys, primary/unique keys, indexes, and whether RLS is on), and <code class="bg-gray-100 rounded px-1">GET .../schema/rls-audit</code> (which tables have RLS and how many policies). With <strong>developer</strong>: the full policy expressions (USING + WITH CHECK) at <code class="bg-gray-100 rounded px-1">GET .../schema/tables/&lt;table&gt;/policies</code>, and a function&rsquo;s definition at <code class="bg-gray-100 rounded px-1">GET .../schema/functions/&lt;name&gt;</code> (or the MCP tools <code class="bg-gray-100 rounded px-1">describeTable</code> / <code class="bg-gray-100 rounded px-1">getDbFunction</code>). Catalog queries in your own SQL (<code class="bg-gray-100 rounded px-1">pg_policies</code>, <code class="bg-gray-100 rounded px-1">pg_get_expr</code>, <code class="bg-gray-100 rounded px-1">pg_get_functiondef</code>) are refused by a tenant-isolation guard &mdash; these endpoints run that introspection for you. CHECK-constraint expressions aren&rsquo;t returned by the JSON endpoints; read those from your migration files (or, on Team, a direct <code class="bg-gray-100 rounded px-1">pg_dump --schema-only</code>).
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Verifying a session&rsquo;s identity</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Your policies act on the end-user the request carries: <code class="bg-gray-100 rounded px-1">app.end_user_id</code> (the UUID, read by <code class="bg-gray-100 rounded px-1">auth_uid()</code> / <code class="bg-gray-100 rounded px-1">current_end_user_id()</code>) and <code class="bg-gray-100 rounded px-1">app.end_user_role</code> (read by <code class="bg-gray-100 rounded px-1">auth_role()</code> / <code class="bg-gray-100 rounded px-1">is_service_role()</code>), both set by the platform per request. To see what a given session resolves to, call <code class="bg-gray-100 rounded px-1">GET /v1/auth/user</code> with that user&rsquo;s access token &mdash; it returns the user record and claims. How your app maps that UUID onward (to a profile row and its relationships) is your own schema design; read it with the introspection methods above.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Making a column immutable</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					RLS decides <em>who</em> may update <em>which rows</em>, but a policy only sees the new row, so it can&rsquo;t stop one column from changing (there&rsquo;s no old row to compare against). To freeze a column such as <code class="bg-gray-100 rounded px-1">id</code> or <code class="bg-gray-100 rounded px-1">created_at</code> while still allowing other updates over the normal API, add a <code class="bg-gray-100 rounded px-1">BEFORE UPDATE</code> trigger in a <a href="/docs/migrations" class="text-eurobase-600 hover:underline">migration</a>:
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>create or replace function enforce_clubs_immutable()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.id is distinct from old.id
+     or new.created_at is distinct from old.created_at then
+    raise exception 'clubs.id and clubs.created_at are immutable';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger clubs_immutable
+  before update on clubs
+  for each row
+  execute function enforce_clubs_immutable();</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Keep the function plain (not <code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code>, which self-serve surfaces refuse). It fires on every update &mdash; SDK, REST and SQL editor alike &mdash; so any attempt to change <code class="bg-gray-100 rounded px-1">id</code> or <code class="bg-gray-100 rounded px-1">created_at</code> is rejected while other columns update normally. Pair it with your RLS policy, which restricts which rows a given role may update.
+				</p>
+
 			</div>
 
 			<div class="mt-6 text-right">
