@@ -35,6 +35,19 @@
 					Once invited, a member sees the project in their project list alongside any projects they own. All member actions are recorded in the <strong>Compliance &rarr; Audit Log</strong>: invitations sent, accepted, roles changed, and members removed.
 				</p>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Transferring ownership</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Built a project for a client, a club or an association, and want it to live in <em>their</em> account rather than yours? The owner can hand the whole project over. Go to <strong>Settings &rarr; Transfer this project</strong>, enter the recipient's email, and confirm (you'll be asked for your password if you haven't signed in recently). The recipient gets an email and accepts while signed in to their own account — nothing changes until they do.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					When they accept: they become the <strong>owner</strong>, you're demoted to <strong>admin</strong> (so you can keep helping, or leave the project), and both sides are recorded in the audit log. The recipient needs room for the project under their own plan's project limit.
+				</p>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Paid projects:</strong> the project stays on its paid plan through the period you've already paid for — you're not charged again, and you aren't refunded for the remainder. The new owner starts their own subscription from <strong>Settings &rarr; Billing</strong> to keep it active for the next cycle. There's no double-billing: only one subscription is ever active for a project at a time.</li>
+					<li><strong>Invoices already issued stay with you</strong> &mdash; keep the copies emailed to you at the time. New invoices go to the new owner.</li>
+					<li><strong>Not yet transferable this way:</strong> projects attached to an organization, and Team / Legal Team projects &mdash; contact support for those.</li>
+				</ul>
+
 				<div class="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 flex gap-3">
 					<svg class="h-5 w-5 text-blue-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
