@@ -43,7 +43,7 @@
 					When they accept: they become the <strong>owner</strong>, you're demoted to <strong>admin</strong> (so you can keep helping, or leave the project), and both sides are recorded in the audit log. The recipient needs room for the project under their own plan's project limit.
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>Paid projects:</strong> the project stays on its paid plan through the period you've already paid for — you're not charged again, and you aren't refunded for the remainder. The new owner starts their own subscription from <strong>Settings &rarr; Billing</strong> to keep it active for the next cycle. There's no double-billing: only one subscription is ever active for a project at a time.</li>
+					<li><strong>Paid projects:</strong> the project stays on its paid plan through the period you've already paid for — you're not charged again, and you aren't refunded for the remainder. Once that period ends, the new owner starts their own subscription from <strong>Settings &rarr; Billing</strong> (there may be a short gap on the Free plan until they do). There's no double-billing: only one subscription is ever active for a project at a time, so the new owner's first charge is the next cycle.</li>
 					<li><strong>Invoices already issued stay with you</strong> &mdash; keep the copies emailed to you at the time. New invoices go to the new owner.</li>
 					<li><strong>Not yet transferable this way:</strong> projects attached to an organization, and Team / Legal Team projects &mdash; contact support for those.</li>
 				</ul>

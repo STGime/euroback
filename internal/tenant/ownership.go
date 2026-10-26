@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"log/slog"
 	"net/http"
@@ -49,6 +50,11 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 
 // transferTokenTTL mirrors the project-invitation expiry.
 const transferTokenTTL = 7 * 24 * time.Hour
+
+// errAlreadyAccepted is returned inside the accept transaction when the
+// single-use claim of the transfer row loses a race (another accept of the
+// same token committed first).
+var errAlreadyAccepted = errors.New("transfer already accepted")
 
 // CancelSubAtPeriodEnd cancels a project's live subscription at period end,
 // run as the current owner. Injected from the billing service so this
@@ -361,9 +367,13 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 		billingHandover := false
 		if cancelSub != nil {
 			var subID string
+			// Only a genuinely paying subscription is handed over. An
+			// 'incomplete' row is an abandoned checkout by the old owner;
+			// it isn't billing anyone, so there's nothing to cancel and
+			// reporting a handover would be misleading.
 			subErr := pool.QueryRow(r.Context(),
 				`SELECT id FROM public.subscriptions
-				  WHERE project_id = $1 AND status IN ('incomplete','active','past_due')
+				  WHERE project_id = $1 AND status IN ('active','past_due')
 				  ORDER BY created_at DESC LIMIT 1`,
 				projectID,
 			).Scan(&subID)
@@ -381,51 +391,74 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			}
 		}
 
-		// Reassign ownership atomically.
-		tx, err := pool.Begin(r.Context())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete transfer"})
-			return
-		}
-		defer tx.Rollback(r.Context())
+		// Reassign ownership atomically. The transfer row is claimed with a
+		// compare-and-swap (accepted_at IS NULL) so the token is single-use
+		// and concurrent accepts serialize on its row lock. Because nothing
+		// is committed until the CAS wins, a failure here leaves accepted_at
+		// NULL and the recipient can safely retry — the billing cancel above
+		// is idempotent (COALESCE on canceled_at).
+		txErr := func() error {
+			tx, err := pool.Begin(r.Context())
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
 
-		if _, err := tx.Exec(r.Context(),
-			`UPDATE public.project_members SET role = 'admin'
-			  WHERE project_id = $1 AND user_id = $2 AND role = 'owner'`,
-			projectID, oldOwnerID,
-		); err != nil {
-			slog.Error("transfer: demote old owner", "project_id", projectID, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete transfer"})
+			// Old owner becomes admin. Upsert (not a conditional UPDATE) so
+			// a project somehow missing its owner membership row still
+			// leaves the old owner with admin access rather than locked out.
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO public.project_members (project_id, user_id, role, invited_by)
+				 VALUES ($1, $2, 'admin', $2)
+				 ON CONFLICT (project_id, user_id) DO UPDATE SET role = 'admin'`,
+				projectID, oldOwnerID,
+			); err != nil {
+				return fmt.Errorf("demote old owner: %w", err)
+			}
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO public.project_members (project_id, user_id, role, invited_by)
+				 VALUES ($1, $2, 'owner', $3)
+				 ON CONFLICT (project_id, user_id) DO UPDATE SET role = 'owner'`,
+				projectID, claims.Subject, oldOwnerID,
+			); err != nil {
+				return fmt.Errorf("promote new owner: %w", err)
+			}
+			if _, err := tx.Exec(r.Context(),
+				`UPDATE public.projects SET owner_id = $1 WHERE id = $2`,
+				claims.Subject, projectID,
+			); err != nil {
+				return fmt.Errorf("reassign owner_id: %w", err)
+			}
+			tag, err := tx.Exec(r.Context(),
+				`UPDATE public.project_ownership_transfers
+				    SET accepted_at = now()
+				  WHERE id = $1 AND accepted_at IS NULL`,
+				transferID,
+			)
+			if err != nil {
+				return fmt.Errorf("stamp accepted_at: %w", err)
+			}
+			if tag.RowsAffected() == 0 {
+				return errAlreadyAccepted
+			}
+			return tx.Commit(r.Context())
+		}()
+		if errors.Is(txErr, errAlreadyAccepted) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "this transfer has already been accepted"})
 			return
 		}
-		if _, err := tx.Exec(r.Context(),
-			`INSERT INTO public.project_members (project_id, user_id, role, invited_by)
-			 VALUES ($1, $2, 'owner', $3)
-			 ON CONFLICT (project_id, user_id) DO UPDATE SET role = 'owner'`,
-			projectID, claims.Subject, oldOwnerID,
-		); err != nil {
-			slog.Error("transfer: promote new owner", "project_id", projectID, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete transfer"})
-			return
-		}
-		if _, err := tx.Exec(r.Context(),
-			`UPDATE public.projects SET owner_id = $1 WHERE id = $2`,
-			claims.Subject, projectID,
-		); err != nil {
-			slog.Error("transfer: reassign owner_id", "project_id", projectID, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete transfer"})
-			return
-		}
-		if _, err := tx.Exec(r.Context(),
-			`UPDATE public.project_ownership_transfers SET accepted_at = now() WHERE id = $1`,
-			transferID,
-		); err != nil {
-			slog.Error("transfer: stamp accepted_at", "transfer_id", transferID, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete transfer"})
-			return
-		}
-		if err := tx.Commit(r.Context()); err != nil {
-			slog.Error("transfer: commit", "project_id", projectID, "error", err)
+		if txErr != nil {
+			// If the billing cancel already succeeded, flag the abandoned
+			// window distinctly: the old owner's subscription is set to
+			// cancel at period end but ownership hasn't moved. The recipient
+			// retrying accept resolves it; this line lets ops catch one that
+			// never retries.
+			if billingHandover {
+				slog.Error("transfer: ABANDONED — old subscription cancelled but ownership flip failed; recipient must retry accept",
+					"project_id", projectID, "transfer_id", transferID, "error", txErr)
+			} else {
+				slog.Error("transfer: complete", "project_id", projectID, "error", txErr)
+			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete transfer"})
 			return
 		}
