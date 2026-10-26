@@ -2188,6 +2188,45 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Ownership transfer (#846) ----
+
+	/** Get the pending ownership transfer for a project, if any. */
+	async getTransfer(projectId: string): Promise<{ transfer: PendingTransfer | null }> {
+		return this.fetch(`/platform/projects/${projectId}/transfer`);
+	}
+
+	/**
+	 * Start transferring a project to another user. `currentPassword` is
+	 * sent when the server asks for re-auth (APIError code "reauth_required").
+	 */
+	async initiateTransfer(
+		projectId: string,
+		email: string,
+		currentPassword?: string
+	): Promise<{ status: string; email: string }> {
+		return this.fetch(`/platform/projects/${projectId}/transfer`, {
+			method: 'POST',
+			body: JSON.stringify({ email, current_password: currentPassword })
+		});
+	}
+
+	/** Cancel a pending ownership transfer. */
+	async cancelTransfer(projectId: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/transfer`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** Accept an ownership transfer (recipient, signed in to their own account). */
+	async acceptTransfer(
+		token: string
+	): Promise<{ status: string; project_id: string; billing_handover: boolean }> {
+		return this.fetch('/platform/transfers/accept', {
+			method: 'POST',
+			body: JSON.stringify({ token })
+		});
+	}
+
 	// ---- Edge Functions ----
 
 	/** List all edge functions for a project. */
@@ -3236,6 +3275,12 @@ export interface ProjectInvitation {
 export interface MembersResponse {
 	members: ProjectMember[];
 	invitations: ProjectInvitation[];
+}
+
+export interface PendingTransfer {
+	email: string;
+	sent_at: string;
+	expires_at: string;
 }
 
 export interface AuditLogEntry {

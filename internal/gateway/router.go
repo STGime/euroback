@@ -783,6 +783,30 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(auth.RequirePersonalSession).Post("/accept", tenant.HandleAcceptInvitation(pool))
 		})
 
+		// Authenticated: accept a project ownership transfer (#846).
+		// Recipient signs in to their own account; the token carries the
+		// offer. Billing + project-limit checks are injected so this
+		// package doesn't import billing/plans.
+		r.Route("/transfers", func(r chi.Router) {
+			if isDev {
+				r.Use(devAuthMiddleware)
+			} else {
+				r.Use(platformAuth.Handler)
+			}
+			var cancelSub tenant.CancelSubAtPeriodEnd
+			if billingSvc != nil {
+				cancelSub = func(ctx context.Context, ownerID, subID string) error {
+					_, err := billingSvc.CancelSubscription(ctx, ownerID, subID, billing.CancelModeEndOfPeriod)
+					return err
+				}
+			}
+			var checkLimit tenant.CheckOwnerProjectLimit
+			if limitsSvc != nil {
+				checkLimit = limitsSvc.CheckProjectLimit
+			}
+			r.With(auth.RequirePersonalSession).Post("/accept", tenant.HandleAcceptTransfer(pool, cancelSub, checkLimit))
+		})
+
 		// Team-tier organizations — CRUD + membership + SSO config.
 		// Platform-authenticated (any signed-in user can create an
 		// org and list their memberships). Per-handler role gate
@@ -1336,6 +1360,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Post("/members/resend", tenant.HandleResendInvitation(pool, sendEmailFn))
 			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("admin")).Delete("/members/{userId}", tenant.HandleRemoveMember(pool))
 			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Patch("/members/{userId}", tenant.HandleChangeRole(pool))
+
+			// Ownership transfer (#846) — owner only, console session.
+			// Initiate requires a fresh re-auth (giving the project away).
+			var transferReauth tenant.ReauthFunc
+			if platformAuthSvc != nil {
+				transferReauth = platformAuthSvc.CheckPasskeyReauth
+			}
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Get("/transfer", tenant.HandleGetTransfer(pool))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Post("/transfer", tenant.HandleInitiateTransfer(pool, transferReauth, sendEmailFn))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Delete("/transfer", tenant.HandleCancelTransfer(pool))
 
 			// Edge Functions (serverless compute management).
 			fnSvc := functions.NewService(pool, vaultSvc)
