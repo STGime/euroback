@@ -205,8 +205,8 @@ func TestAcceptTransfer_BillingHandover(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	if gotOwner != fx.oldOwnerID {
-		t.Errorf("cancelSub owner = %s, want old owner %s (must run before the owner flip)", gotOwner, fx.oldOwnerID)
+	if gotOwner != fx.newOwnerID {
+		t.Errorf("cancelSub owner = %s, want new owner %s (cancel runs after the flip, as the new owner)", gotOwner, fx.newOwnerID)
 	}
 	if gotSub != subID {
 		t.Errorf("cancelSub subID = %s, want %s", gotSub, subID)
@@ -287,6 +287,48 @@ func TestAcceptTransfer_TeamPlanRefused(t *testing.T) {
 	_ = pool.QueryRow(context.Background(), `SELECT owner_id FROM projects WHERE id=$1`, fx.projectID).Scan(&ownerID)
 	if ownerID != fx.oldOwnerID {
 		t.Errorf("owner_id changed on a refused Team transfer")
+	}
+}
+
+// A suspended recipient can't acquire the project (M3).
+func TestAcceptTransfer_SuspendedRecipient(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE platform_users SET suspended_at = now() WHERE id = $1`, fx.newOwnerID); err != nil {
+		t.Fatalf("suspend recipient: %v", err)
+	}
+
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	var ownerID string
+	_ = pool.QueryRow(context.Background(), `SELECT owner_id FROM projects WHERE id=$1`, fx.projectID).Scan(&ownerID)
+	if ownerID != fx.oldOwnerID {
+		t.Errorf("owner_id changed for a suspended recipient")
+	}
+}
+
+// A live subscription with no billing hook wired is refused, not transferred
+// unsafely (M4).
+func TestAcceptTransfer_LiveSubNoBillingHook(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "pro", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO public.subscriptions (project_id, plan, status) VALUES ($1,'pro','active')`,
+		fx.projectID); err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil /* no cancelSub */, nil)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+	var ownerID string
+	_ = pool.QueryRow(context.Background(), `SELECT owner_id FROM projects WHERE id=$1`, fx.projectID).Scan(&ownerID)
+	if ownerID != fx.oldOwnerID {
+		t.Errorf("owner_id changed despite unavailable billing handover")
 	}
 }
 

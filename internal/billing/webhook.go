@@ -596,8 +596,9 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at)
-		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now())`,
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at, billed_to_user_id)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(),
+		         (SELECT owner_id FROM public.projects WHERE id = $1))`,
 		projectID, subscriptionID, payment.ID, priceCents,
 	); err != nil {
 		return fmt.Errorf("insert invoice: %w", err)
@@ -711,8 +712,9 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	// (PR 6 review).
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at)
-		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now())
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at, billed_to_user_id)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(),
+		         (SELECT owner_id FROM public.projects WHERE id = $1))
 		 ON CONFLICT (mollie_payment_id) DO NOTHING`,
 		projectID, subscriptionID, payment.ID, priceCents,
 	)

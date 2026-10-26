@@ -16,16 +16,16 @@ import (
 // GET /platform/billing/invoices. Kept flat so a table view in
 // the console needs no client-side denormalisation.
 type invoiceListItem struct {
-	ID             string  `json:"id"`
-	Number         string  `json:"number"`
-	ProjectID      string  `json:"project_id"`
-	ProjectName    string  `json:"project_name"`
-	CreatedAt      string  `json:"created_at"`
-	PaidAt         *string `json:"paid_at,omitempty"`
-	AmountCents    int     `json:"amount_cents"`
-	Currency       string  `json:"currency"`
-	Status         string  `json:"status"`
-	HasPDF         bool    `json:"has_pdf"`
+	ID          string  `json:"id"`
+	Number      string  `json:"number"`
+	ProjectID   string  `json:"project_id"`
+	ProjectName string  `json:"project_name"`
+	CreatedAt   string  `json:"created_at"`
+	PaidAt      *string `json:"paid_at,omitempty"`
+	AmountCents int     `json:"amount_cents"`
+	Currency    string  `json:"currency"`
+	Status      string  `json:"status"`
+	HasPDF      bool    `json:"has_pdf"`
 }
 
 // HandleListInvoices is GET /platform/billing/invoices. Returns
@@ -49,7 +49,7 @@ func HandleListInvoices(svc *Service) http.HandlerFunc {
 			        i.invoice_number
 			   FROM public.invoices i
 			   JOIN public.projects p ON p.id = i.project_id
-			  WHERE p.owner_id = $1::uuid
+			  WHERE COALESCE(i.billed_to_user_id, p.owner_id) = $1::uuid
 			  ORDER BY i.created_at DESC
 			  LIMIT 500`,
 			claims.Subject,
@@ -205,7 +205,7 @@ func HandleDownloadInvoicePDF(svc *Service) http.HandlerFunc {
 			createdAt     time.Time
 		)
 		err := svc.pool.QueryRow(r.Context(),
-			`SELECT i.pdf_object_key, (p.owner_id = $2::uuid) AS owner_match,
+			`SELECT i.pdf_object_key, (COALESCE(i.billed_to_user_id, p.owner_id) = $2::uuid) AS owner_match,
 			        i.invoice_number, i.created_at
 			   FROM public.invoices i
 			   JOIN public.projects p ON p.id = i.project_id

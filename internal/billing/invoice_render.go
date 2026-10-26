@@ -224,7 +224,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		        bp.registry_code, bp.vat_number
 		   FROM public.invoices i
 		   JOIN public.projects p ON p.id = i.project_id
-		   JOIN public.platform_users u ON u.id = p.owner_id
+		   JOIN public.platform_users u ON u.id = COALESCE(i.billed_to_user_id, p.owner_id)
 		   LEFT JOIN public.billing_profiles bp ON bp.platform_user_id = u.id
 		   LEFT JOIN public.subscriptions s ON s.id = COALESCE(
 		          i.subscription_id,
