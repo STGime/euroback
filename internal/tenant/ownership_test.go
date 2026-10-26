@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,6 +36,7 @@ func TestRenderTransferEmail(t *testing.T) {
 type transferFixture struct {
 	pool       *pgxpool.Pool
 	oldOwnerID string
+	oldEmail   string
 	newOwnerID string
 	newEmail   string
 	projectID  string
@@ -95,7 +97,23 @@ func seedTransfer(t *testing.T, pool *pgxpool.Pool, plan string, expiresAt time.
 		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE id = ANY($1)`, []string{oldID, newID})
 	})
 
-	return &transferFixture{pool: pool, oldOwnerID: oldID, newOwnerID: newID, newEmail: newEmail, projectID: projectID, rawToken: raw}
+	return &transferFixture{pool: pool, oldOwnerID: oldID, oldEmail: oldEmail, newOwnerID: newID, newEmail: newEmail, projectID: projectID, rawToken: raw}
+}
+
+// initiateRequest drives HandleInitiateTransfer with a project route param,
+// claims, and a stashed caller role (set by the real route middleware).
+func initiateRequest(fx *transferFixture, asUserID, asEmail, role, toEmail, password string, reauth ReauthFunc) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]string{"email": toEmail, "current_password": password})
+	req := httptest.NewRequest(http.MethodPost, "/platform/projects/"+fx.projectID+"/transfer", strings.NewReader(string(body)))
+	rc := chi.NewRouteContext()
+	rc.URLParams.Add("id", fx.projectID)
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rc)
+	ctx = auth.ContextWithClaims(ctx, &auth.Claims{Subject: asUserID, Email: asEmail})
+	ctx = WithRole(ctx, role)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	HandleInitiateTransfer(fx.pool, reauth, nil)(w, req)
+	return w
 }
 
 func acceptRequest(fx *transferFixture, asUserID, asEmail, token string, cancelSub CancelSubAtPeriodEnd, checkLimit CheckOwnerProjectLimit) *httptest.ResponseRecorder {
@@ -217,5 +235,99 @@ func TestAcceptTransfer_ProjectLimitReached(t *testing.T) {
 	_ = pool.QueryRow(context.Background(), `SELECT owner_id FROM projects WHERE id=$1`, fx.projectID).Scan(&ownerID)
 	if ownerID != fx.oldOwnerID {
 		t.Errorf("owner_id changed despite project-limit rejection")
+	}
+}
+
+// A second accept of an already-accepted token is rejected (single-use).
+func TestAcceptTransfer_DoubleAccept(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+
+	if w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil); w.Code != http.StatusOK {
+		t.Fatalf("first accept status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("second accept status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// The recipient is already a member (admin) → promoted to owner, not duplicated.
+func TestAcceptTransfer_RecipientAlreadyMember(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO public.project_members (project_id, user_id, role) VALUES ($1,$2,'admin')`,
+		fx.projectID, fx.newOwnerID); err != nil {
+		t.Fatalf("seed existing membership: %v", err)
+	}
+
+	if w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var role string
+	var n int
+	_ = pool.QueryRow(context.Background(), `SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2`, fx.projectID, fx.newOwnerID).Scan(&role)
+	_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM project_members WHERE project_id=$1 AND user_id=$2`, fx.projectID, fx.newOwnerID).Scan(&n)
+	if role != "owner" || n != 1 {
+		t.Errorf("recipient role=%q count=%d, want owner x1", role, n)
+	}
+}
+
+// Team-tier projects are refused at accept (deferred scope).
+func TestAcceptTransfer_TeamPlanRefused(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "team", time.Now().Add(time.Hour))
+
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+	var ownerID string
+	_ = pool.QueryRow(context.Background(), `SELECT owner_id FROM projects WHERE id=$1`, fx.projectID).Scan(&ownerID)
+	if ownerID != fx.oldOwnerID {
+		t.Errorf("owner_id changed on a refused Team transfer")
+	}
+}
+
+func TestInitiateTransfer_SelfRefused(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+
+	w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", fx.oldEmail, "", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (self-transfer); body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestInitiateTransfer_TeamPlanRefused(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "legal_team", time.Now().Add(time.Hour))
+
+	w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@example.com", "", nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (team plan); body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestInitiateTransfer_ReauthRequired(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+
+	reauth := func(ctx context.Context, c *auth.Claims, pw string) error {
+		if pw == "" {
+			return auth.ErrReauthRequired
+		}
+		return nil
+	}
+	// No password → reauth_required.
+	w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@example.com", "", reauth)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "reauth_required") {
+		t.Fatalf("status = %d body=%s, want 403 reauth_required", w.Code, w.Body.String())
+	}
+	// With password → succeeds (201).
+	w = initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@example.com", "hunter2", reauth)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
 	}
 }

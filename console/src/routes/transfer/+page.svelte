@@ -105,7 +105,8 @@
 					</p>
 					<p class="text-sm text-gray-500">
 						If the project is on a paid plan, it keeps running through the period the previous owner already paid for.
-						To keep it active afterwards, set up your own billing from the project's settings once it's yours.
+						Once that period ends you set up your own subscription from <strong>Settings &rarr; Billing</strong> to continue on a paid plan
+						(there may be a short gap before you subscribe, during which the project is on the Free plan).
 					</p>
 					<button
 						onclick={acceptTransfer}
@@ -123,7 +124,7 @@
 					</div>
 					<h2 class="text-lg font-semibold text-gray-900">You're now the owner</h2>
 					{#if billingHandover}
-						<p class="text-sm text-gray-500">The project stays on its paid plan through the current period. Head to <strong>Settings → Billing</strong> to set up your own subscription before it ends.</p>
+						<p class="text-sm text-gray-500">The project stays on its paid plan through the current billing period. Once that period ends, start your own subscription from <strong>Settings → Billing</strong> to keep it on a paid plan — there may be a brief gap on the Free plan until you do.</p>
 					{:else}
 						<p class="text-sm text-gray-500">Redirecting to your project…</p>
 					{/if}
