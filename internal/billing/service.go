@@ -504,8 +504,9 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	// invoices don't drift after cancel+resubscribe (PR 6 review).
 	_, err = tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status)
-		 VALUES ($1, $2, $3, $4, 'EUR', 'pending')`,
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, billed_to_user_id)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'pending',
+		         (SELECT owner_id FROM public.projects WHERE id = $1))`,
 		projectID, subscriptionID, payment.ID, price,
 	)
 	if err != nil {

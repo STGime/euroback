@@ -325,6 +325,23 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			return
 		}
 
+		// A suspended account can't acquire a project — same bar as
+		// CreateProject (an existing JWT stays valid up to ~24h after
+		// suspension, so this is the enforcement point, not the token).
+		var suspendedAt *time.Time
+		if err := pool.QueryRow(r.Context(),
+			`SELECT suspended_at FROM public.platform_users WHERE id = $1`,
+			claims.Subject,
+		).Scan(&suspendedAt); err != nil {
+			slog.Error("transfer: accept load account", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load account"})
+			return
+		}
+		if suspendedAt != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "your account is suspended"})
+			return
+		}
+
 		// Current owner + plan, re-checked under the live row.
 		var (
 			oldOwnerID string
@@ -359,36 +376,31 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			}
 		}
 
-		// Billing handover: cancel the old owner's live subscription at
-		// period end (no refund). Done BEFORE the ownership flip so the
-		// cancel runs as the still-current owner. The project keeps its
-		// paid plan until next_charge_at; the downgrade sweep flips it to
-		// Free then if the new owner hasn't started their own subscription.
-		billingHandover := false
-		if cancelSub != nil {
-			var subID string
-			// Only a genuinely paying subscription is handed over. An
-			// 'incomplete' row is an abandoned checkout by the old owner;
-			// it isn't billing anyone, so there's nothing to cancel and
-			// reporting a handover would be misleading.
-			subErr := pool.QueryRow(r.Context(),
-				`SELECT id FROM public.subscriptions
-				  WHERE project_id = $1 AND status IN ('active','past_due')
-				  ORDER BY created_at DESC LIMIT 1`,
-				projectID,
-			).Scan(&subID)
-			if subErr == nil {
-				if err := cancelSub(r.Context(), oldOwnerID, subID); err != nil {
-					slog.Error("transfer: cancel old subscription", "project_id", projectID, "subscription_id", subID, "error", err)
-					writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not hand over billing — please try again"})
-					return
-				}
-				billingHandover = true
-			} else if !errors.Is(subErr, pgx.ErrNoRows) {
-				slog.Error("transfer: find live subscription", "project_id", projectID, "error", subErr)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not hand over billing"})
-				return
-			}
+		// Does the project have a genuinely paying subscription to hand
+		// over? ('incomplete' is an abandoned checkout — bills nobody — so
+		// it's not a handover.) We look it up BEFORE the flip but only
+		// CANCEL it AFTER the ownership tx commits, so a lost race or a
+		// failed tx can never cancel the old owner's subscription without
+		// the transfer actually happening.
+		var liveSubID string
+		subErr := pool.QueryRow(r.Context(),
+			`SELECT id FROM public.subscriptions
+			  WHERE project_id = $1 AND status IN ('active','past_due')
+			  ORDER BY created_at DESC LIMIT 1`,
+			projectID,
+		).Scan(&liveSubID)
+		if subErr != nil && !errors.Is(subErr, pgx.ErrNoRows) {
+			slog.Error("transfer: find live subscription", "project_id", projectID, "error", subErr)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load billing"})
+			return
+		}
+		hasLiveSub := subErr == nil
+		// A live subscription needs the billing hook to hand it over;
+		// without it the old owner would keep being charged for a project
+		// they no longer own — refuse rather than transfer unsafely.
+		if hasLiveSub && cancelSub == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "billing handover is unavailable right now — please try again later or contact support"})
+			return
 		}
 
 		// Reassign ownership atomically. The transfer row is claimed with a
@@ -448,19 +460,24 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			return
 		}
 		if txErr != nil {
-			// If the billing cancel already succeeded, flag the abandoned
-			// window distinctly: the old owner's subscription is set to
-			// cancel at period end but ownership hasn't moved. The recipient
-			// retrying accept resolves it; this line lets ops catch one that
-			// never retries.
-			if billingHandover {
-				slog.Error("transfer: ABANDONED — old subscription cancelled but ownership flip failed; recipient must retry accept",
-					"project_id", projectID, "transfer_id", transferID, "error", txErr)
-			} else {
-				slog.Error("transfer: complete", "project_id", projectID, "error", txErr)
-			}
+			slog.Error("transfer: complete", "project_id", projectID, "error", txErr)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete transfer"})
 			return
+		}
+
+		// Ownership has moved. Now cancel the old owner's subscription at
+		// period end, run as the NEW owner (who now owns the project, so the
+		// billing ownership check passes). Best-effort and only on a
+		// committed transfer: if it fails the transfer still stands and we
+		// log loudly for ops (the new owner can also cancel it themselves).
+		billingHandover := false
+		if hasLiveSub && cancelSub != nil {
+			if err := cancelSub(r.Context(), claims.Subject, liveSubID); err != nil {
+				slog.Error("transfer: NEEDS RECONCILE — ownership moved but the old subscription cancel failed; the new owner holds the previous owner's live subscription",
+					"project_id", projectID, "subscription_id", liveSubID, "error", err)
+			} else {
+				billingHandover = true
+			}
 		}
 
 		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
