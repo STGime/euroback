@@ -71,8 +71,9 @@ func runDDL(ctx context.Context, pool *pgxpool.Pool, schemaName string, fn func(
 
 // platformHelperFunctions are the per-tenant RLS helpers provision_tenant
 // / dedicated_bootstrap.sql create in the tenant schema. Hidden from the
-// function listing and refused by CreateFunction / DropFunction —
-// CREATE OR REPLACE would silently rewrite RLS.
+// function listing (readable by name, marked Platform) and refused by
+// CreateFunction / DropFunction — CREATE OR REPLACE would silently
+// rewrite RLS.
 var platformHelperFunctions = map[string]bool{"auth_uid": true, "auth_role": true, "auth_email": true}
 
 // validIdentRe matches safe SQL identifiers (letters, digits, underscores).
@@ -1025,6 +1026,10 @@ type DBFunction struct {
 	// Definition is the full CREATE OR REPLACE FUNCTION statement —
 	// only from GetFunctions, not the list.
 	Definition string `json:"definition,omitempty"`
+	// Platform marks the RLS helpers the platform installs in every
+	// project (auth_uid / auth_role / auth_email): readable, never
+	// replaced or dropped by the project. Only from GetFunctions.
+	Platform bool `json:"platform,omitempty"`
 }
 
 // ListFunctions returns user-authored RPC-callable functions in the
@@ -1082,24 +1087,21 @@ func ListFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName string) (
 	return funcs, nil
 }
 
-// functionColumns / functionFromWhere are shared by ListFunctions and
-// GetFunctions so both see exactly the same set of functions: SQL and
-// PL/pgSQL in the project's own schema, minus platform helpers, trigger
-// functions and extension members. $1 is the schema.
+// functionColumns / functionFromWhere select what ListFunctions shows: SQL
+// and PL/pgSQL in the project's own schema, minus platform helpers,
+// trigger functions and extension members. $1 is the schema.
 const functionColumns = `p.proname,
 		        l.lanname,
 		        pg_get_function_result(p.oid),
 		        pg_get_function_identity_arguments(p.oid),
 		        CASE WHEN p.prosecdef THEN 'definer' ELSE 'invoker' END`
 
-const functionFromWhere = `
+const functionInSchema = `
 		   FROM pg_proc p
 		   JOIN pg_namespace n ON n.oid = p.pronamespace
 		   JOIN pg_language  l ON l.oid = p.prolang
 		  WHERE n.nspname = $1
 		    AND l.lanname IN ('sql', 'plpgsql')
-		    AND p.proname NOT IN ('auth_uid', 'auth_role', 'auth_email') -- platformHelperFunctions
-		    AND pg_get_function_result(p.oid) <> 'trigger'
 		    AND NOT EXISTS (
 		          SELECT 1
 		            FROM pg_depend d
@@ -1108,17 +1110,25 @@ const functionFromWhere = `
 		             AND d.refclassid = 'pg_extension'::regclass
 		    )`
 
+const functionFromWhere = functionInSchema + `
+		    AND p.proname NOT IN ('auth_uid', 'auth_role', 'auth_email') -- platformHelperFunctions
+		    AND pg_get_function_result(p.oid) <> 'trigger'`
+
 // GetFunctions returns every function called name in the schema (one per
 // overload) with its definition (#820). The definition is read by the
 // platform with pg_get_functiondef — customer SQL can't reach the
-// catalog — and only for the functions ListFunctions shows.
+// catalog. Besides what ListFunctions shows it also answers for trigger
+// functions (listed at /schema/functions/triggers) and the platform's RLS
+// helpers (Platform set), so a project can read everything its policies
+// and triggers call. Still only the project's own schema, never
+// extension members.
 func GetFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName, name string) ([]DBFunction, error) {
 	pool, perr := tenantDDLPool(ctx, pool)
 	if perr != nil {
 		return nil, perr
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT `+functionColumns+`, pg_get_functiondef(p.oid)`+functionFromWhere+` AND p.proname = $2 ORDER BY 4`,
+		`SELECT `+functionColumns+`, pg_get_functiondef(p.oid)`+functionInSchema+` AND p.proname = $2 ORDER BY 4`,
 		schemaName, name)
 	if err != nil {
 		return nil, fmt.Errorf("get function: %w", err)
@@ -1130,6 +1140,7 @@ func GetFunctions(ctx context.Context, pool *pgxpool.Pool, schemaName, name stri
 		if err := rows.Scan(&f.Name, &f.Language, &f.ReturnType, &f.Arguments, &f.Security, &f.Definition); err != nil {
 			return nil, fmt.Errorf("scan function: %w", err)
 		}
+		f.Platform = platformHelperFunctions[f.Name]
 		funcs = append(funcs, f)
 	}
 	return funcs, rows.Err()
