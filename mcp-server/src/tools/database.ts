@@ -47,7 +47,7 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'getDbFunction',
-    'Get a database (RPC) function\'s definition: the full CREATE OR REPLACE FUNCTION statement. To change it, edit that statement and run it with runSQL. If several functions share the name, pass args (the arguments from listDbFunctions). Needs Developer access.',
+    'Get a database function\'s definition: the full CREATE OR REPLACE FUNCTION statement. Works for RPC functions, trigger functions and the platform helpers auth_uid / auth_role / auth_email (marked platform: true; read-only). To change one of your own, edit that statement and run it with runSQL. If several functions share the name, pass args (the arguments from listDbFunctions). Needs Developer access.',
     {
       projectId: z.string().uuid().describe('The project UUID'),
       functionName: z.string().describe('The function name'),

@@ -169,7 +169,7 @@
 				</div>
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Inspecting your schema, policies and functions</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					You can read your full schema without raw SQL, at two access levels. With <strong>viewer</strong>: the Database &rarr; Schema diagram (foreign keys drawn between tables), <code class="bg-gray-100 rounded px-1">GET /platform/projects/&lt;id&gt;/schema</code> (columns, foreign keys, primary/unique keys, indexes, and whether RLS is on), and <code class="bg-gray-100 rounded px-1">GET .../schema/rls-audit</code> (which tables have RLS and how many policies). With <strong>developer</strong>: the full policy expressions (USING + WITH CHECK) at <code class="bg-gray-100 rounded px-1">GET .../schema/tables/&lt;table&gt;/policies</code>, and a function&rsquo;s definition at <code class="bg-gray-100 rounded px-1">GET .../schema/functions/&lt;name&gt;</code> (or the MCP tools <code class="bg-gray-100 rounded px-1">describeTable</code> / <code class="bg-gray-100 rounded px-1">getDbFunction</code>). Catalog queries in your own SQL (<code class="bg-gray-100 rounded px-1">pg_policies</code>, <code class="bg-gray-100 rounded px-1">pg_get_expr</code>, <code class="bg-gray-100 rounded px-1">pg_get_functiondef</code>) are refused by a tenant-isolation guard &mdash; these endpoints run that introspection for you. CHECK-constraint expressions aren&rsquo;t returned by the JSON endpoints; read those from your migration files (or, on Team, a direct <code class="bg-gray-100 rounded px-1">pg_dump --schema-only</code>).
+					You can read your full schema without raw SQL, at two access levels. With <strong>viewer</strong>: the Database &rarr; Schema diagram (foreign keys drawn between tables), <code class="bg-gray-100 rounded px-1">GET /platform/projects/&lt;id&gt;/schema</code> (columns, foreign keys, primary/unique keys, indexes, and whether RLS is on), and <code class="bg-gray-100 rounded px-1">GET .../schema/rls-audit</code> (which tables have RLS and how many policies). With <strong>developer</strong>: the full policy expressions (USING + WITH CHECK) at <code class="bg-gray-100 rounded px-1">GET .../schema/tables/&lt;table&gt;/policies</code>, and a function&rsquo;s definition at <code class="bg-gray-100 rounded px-1">GET .../schema/functions/&lt;name&gt;</code> &mdash; your RPC functions, your trigger functions, and the platform helpers <code class="bg-gray-100 rounded px-1">auth_uid()</code>, <code class="bg-gray-100 rounded px-1">auth_role()</code> and <code class="bg-gray-100 rounded px-1">auth_email()</code> (returned with <code class="bg-gray-100 rounded px-1">"platform": true</code>; they&rsquo;re the same in every project and can&rsquo;t be replaced or dropped) (or the MCP tools <code class="bg-gray-100 rounded px-1">describeTable</code> / <code class="bg-gray-100 rounded px-1">getDbFunction</code>). Catalog queries in your own SQL (<code class="bg-gray-100 rounded px-1">pg_policies</code>, <code class="bg-gray-100 rounded px-1">pg_get_expr</code>, <code class="bg-gray-100 rounded px-1">pg_get_functiondef</code>) are refused by a tenant-isolation guard &mdash; these endpoints run that introspection for you. CHECK-constraint expressions aren&rsquo;t returned by the JSON endpoints; read those from your migration files (or, on Team, a direct <code class="bg-gray-100 rounded px-1">pg_dump --schema-only</code>).
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Verifying a session&rsquo;s identity</h3>
@@ -202,6 +202,59 @@ create trigger clubs_immutable
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
 					Keep the function plain (not <code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code>, which self-serve surfaces refuse). It fires on every update &mdash; SDK, REST and SQL editor alike &mdash; so any attempt to change <code class="bg-gray-100 rounded px-1">id</code> or <code class="bg-gray-100 rounded px-1">created_at</code> is rejected while other columns update normally. Pair it with your RLS policy, which restricts which rows a given role may update.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Keeping a change history</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					A plain trigger can write an append-only history of corrections, with no <code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code> and no extra grants. It runs inside the request that made the change, as the same caller, so <code class="bg-gray-100 rounded px-1">auth_uid()</code> is the user making the correction and its insert into the history table is checked against that table&rsquo;s policies:
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>create table assessment_history (
+  id            uuid primary key default gen_random_uuid(),
+  assessment_id uuid not null references assessments(id),
+  changed_by    uuid default auth_uid(),
+  changed_at    timestamptz not null default now(),
+  old_row       jsonb not null,
+  new_row       jsonb not null
+);
+alter table assessment_history enable row level security;
+
+-- Insert only in your own name; no UPDATE or DELETE policy,
+-- so the app can never change or remove history rows.
+create policy history_insert on assessment_history for insert
+  with check (changed_by = auth_uid() or public.is_service_role());
+-- add a SELECT policy for whoever may read the history
+
+create or replace function record_assessment_change()
+returns trigger
+language plpgsql
+as $$
+begin
+  insert into assessment_history (assessment_id, changed_by, old_row, new_row)
+  values (old.id, auth_uid(), to_jsonb(old), to_jsonb(new));
+  return new;
+end;
+$$;
+
+create trigger assessments_history
+  after update on assessments
+  for each row when (old.* is distinct from new.*)
+  execute function record_assessment_change();</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<code class="bg-gray-100 rounded px-1">auth_uid()</code> is NULL for anonymous requests and for the secret key (service role), so changes your server makes are recorded without a user unless you write the ID yourself. The SQL editor and migrations run as the table owner, where RLS doesn&rsquo;t apply: to keep history rows unchangeable there too, add a <code class="bg-gray-100 rounded px-1">BEFORE UPDATE OR DELETE</code> trigger on the history table that raises an exception (removing it then takes a migration, which appears in your SQL log). A signed-in user allowed to insert history rows can also add one directly, though only in their own name. If history must come only from the trigger, make the history table service-only and make corrections through your server.
+				</p>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Several writes in one transaction</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Apps can&rsquo;t open a transaction of their own, but every API request runs in one, so related writes are atomic when they happen in one request:
+				</p>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1 mt-2">
+					<li><strong>Triggers:</strong> an insert, update or delete through the API (SDK or REST) and every trigger it fires commit or roll back together. If the trigger fails, the write is undone.</li>
+					<li><strong>RPC functions:</strong> <code class="bg-gray-100 rounded px-1">POST /v1/db/rpc/&lt;function&gt;</code> (SDK: <code class="bg-gray-100 rounded px-1">eb.db.rpc('name', &#123; ... &#125;)</code>) runs the whole function in one transaction. If any statement fails or the function raises an exception, nothing is kept. RPC functions run with the caller&rsquo;s rights, so your policies apply to every statement inside.</li>
+				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Use a trigger for what must happen on every change, such as the history above: it fires however the row is changed. Use an RPC function when one operation needs inputs or checks beyond a single row update; its writes still fire your triggers in the same transaction.
 				</p>
 
 			</div>

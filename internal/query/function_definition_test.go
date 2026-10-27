@@ -14,10 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// #820: GET …/schema/functions/{name} returns an RPC function's
-// definition — only for the project's own schema and only the functions
-// the list shows — and the list carries arguments + security so
-// overloads can be told apart.
+// #820: GET …/schema/functions/{name} returns a function's definition —
+// only for the project's own schema: the functions the list shows plus
+// trigger functions and the platform's RLS helpers (marked platform) —
+// and the list carries arguments + security so overloads can be told
+// apart.
 //
 //	CONVERGE_TEST_ADMIN_URL=postgres://postgres@localhost:5432/eurobase \
 //	go test ./internal/query/ -run GetFunctions
@@ -115,9 +116,29 @@ func TestGetFunctions_DB(t *testing.T) {
 		t.Fatalf("unknown args: %d", code)
 	}
 
-	// Not shown by the list → not readable: other schemas, public, trigger
-	// functions, platform helpers.
-	for _, name := range []string{"secret_fn", "fndef_public_" + suffix, "on_insert", "auth_uid", "uuid_generate_v4"} {
+	// Trigger functions and the platform's RLS helpers aren't in the list
+	// but are readable by name, so a project can see what its triggers
+	// and policies call. Helpers are marked platform.
+	code, body = get("on_insert", "")
+	f = DBFunction{}
+	_ = json.Unmarshal(body, &f)
+	if code != http.StatusOK || f.ReturnType != "trigger" || f.Platform || !strings.Contains(f.Definition, "RETURN NEW") {
+		t.Fatalf("get trigger function: %d %s", code, body)
+	}
+	for _, name := range []string{"auth_uid", "auth_role", "auth_email"} {
+		code, body = get(name, "")
+		f = DBFunction{}
+		_ = json.Unmarshal(body, &f)
+		if code != http.StatusOK || !f.Platform || f.Security != "invoker" || f.Definition == "" {
+			t.Fatalf("get %s: %d %s", name, code, body)
+		}
+	}
+	if code, body = get("auth_uid", ""); !strings.Contains(string(body), "current_end_user_id") {
+		t.Fatalf("auth_uid definition: %d %s", code, body)
+	}
+
+	// Never readable: other schemas, public, extension members.
+	for _, name := range []string{"secret_fn", "fndef_public_" + suffix, "uuid_generate_v4"} {
 		if code, body := get(name, ""); code != http.StatusNotFound {
 			t.Fatalf("%s must be 404: %d %s", name, code, body)
 		}

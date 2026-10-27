@@ -3021,6 +3021,8 @@ export interface DBFunction {
 	security?: 'invoker' | 'definer';
 	/** full CREATE OR REPLACE FUNCTION statement — only from getFunction */
 	definition?: string;
+	/** a platform RLS helper (auth_uid / auth_role / auth_email): read-only — only from getFunction */
+	platform?: boolean;
 }
 
 export interface CronJobRun {

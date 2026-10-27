@@ -128,24 +128,28 @@ func GetTableColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 }
 
 // GetTableConstraints enriches a slice of ColumnInfo with PK, FK, and unique constraint metadata.
+//
+// It reads pg_constraint, not information_schema: constraint_column_usage
+// only lists a referenced table to a role that owns it, and the runtime
+// pool owns no tenant tables, so every foreign key came back without its
+// target. Composite keys map column by column (conkey[i] → confkey[i]).
 func GetTableConstraints(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string, columns []ColumnInfo) ([]ColumnInfo, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT
-			tc.constraint_type,
-			tc.constraint_name,
-			kcu.column_name,
-			ccu.table_name AS referenced_table,
-			ccu.column_name AS referenced_column
-		 FROM information_schema.table_constraints tc
-		 JOIN information_schema.key_column_usage kcu
-			ON tc.constraint_name = kcu.constraint_name
-			AND tc.table_schema = kcu.table_schema
-		 LEFT JOIN information_schema.constraint_column_usage ccu
-			ON tc.constraint_name = ccu.constraint_name
-			AND tc.table_schema = ccu.table_schema
-			AND tc.constraint_type = 'FOREIGN KEY'
-		 WHERE tc.table_schema = $1 AND tc.table_name = $2
-		   AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY', 'UNIQUE')`,
+		`SELECT c.contype::text,
+		        c.conname,
+		        a.attname,
+		        rt.relname AS referenced_table,
+		        ra.attname AS referenced_column
+		   FROM pg_catalog.pg_constraint c
+		   JOIN pg_catalog.pg_class t     ON t.oid = c.conrelid
+		   JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+		   CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+		   JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+		   LEFT JOIN pg_catalog.pg_class rt     ON rt.oid = c.confrelid
+		   LEFT JOIN pg_catalog.pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = c.confkey[k.ord]
+		  WHERE n.nspname = $1 AND t.relname = $2
+		    AND c.contype IN ('p', 'f', 'u')
+		  ORDER BY c.conname, k.ord`,
 		schemaName, tableName,
 	)
 	if err != nil {
@@ -169,11 +173,11 @@ func GetTableConstraints(ctx context.Context, pool *pgxpool.Pool, schemaName, ta
 			continue
 		}
 		switch constraintType {
-		case "PRIMARY KEY":
+		case "p":
 			columns[idx].IsPrimaryKey = true
-		case "UNIQUE":
+		case "u":
 			columns[idx].IsUnique = true
-		case "FOREIGN KEY":
+		case "f":
 			if refTable != nil && refCol != nil {
 				columns[idx].ForeignKey = &ForeignKeyInfo{
 					ConstraintName:   constraintName,
