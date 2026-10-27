@@ -51,6 +51,13 @@ func TestGetTableConstraints_DB(t *testing.T) {
 		"CREATE TABLE " + ident + ".players (id uuid PRIMARY KEY, team_id uuid NOT NULL, season int NOT NULL, coach_id uuid," +
 			" CONSTRAINT players_team_fk FOREIGN KEY (team_id, season) REFERENCES " + ident + ".teams (id, season)," +
 			" CONSTRAINT players_coach_fk FOREIGN KEY (coach_id) REFERENCES " + ident + ".teams (id))",
+		// FK to a partitioned table: Postgres adds a clone constraint per
+		// partition on the referencing table; the FK must still name ev.
+		"CREATE TABLE " + ident + ".ev (id uuid, region text, PRIMARY KEY (id, region)) PARTITION BY LIST (region)",
+		"CREATE TABLE " + ident + ".ev_eu PARTITION OF " + ident + ".ev FOR VALUES IN ('eu')",
+		"CREATE TABLE " + ident + ".ev_us PARTITION OF " + ident + ".ev FOR VALUES IN ('us')",
+		"CREATE TABLE " + ident + ".refs (id uuid PRIMARY KEY, ev_id uuid, ev_region text," +
+			" CONSTRAINT refs_ev_fk FOREIGN KEY (ev_id, ev_region) REFERENCES " + ident + ".ev (id, region))",
 		"GRANT USAGE ON SCHEMA " + ident + " TO " + app,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA " + ident + " TO " + app,
 		"RESET ROLE",
@@ -120,9 +127,35 @@ func TestGetTableConstraints_DB(t *testing.T) {
 			if !c.IsUnique {
 				t.Errorf("teams.code not marked unique")
 			}
+		case "season":
+			// Only part of UNIQUE (id, season): not unique on its own.
+			if c.IsUnique {
+				t.Errorf("teams.season marked unique")
+			}
 		}
 		if c.ForeignKey != nil {
 			t.Errorf("teams.%s has foreign key %+v", c.Name, c.ForeignKey)
+		}
+	}
+
+	cols, err = GetTableColumns(ctx, asApp, schema, "refs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols, err = GetTableConstraints(ctx, asApp, schema, "refs", cols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cols {
+		want := map[string]ForeignKeyInfo{
+			"ev_id":     {ConstraintName: "refs_ev_fk", ReferencedTable: "ev", ReferencedColumn: "id"},
+			"ev_region": {ConstraintName: "refs_ev_fk", ReferencedTable: "ev", ReferencedColumn: "region"},
+		}[c.Name]
+		if want.ConstraintName == "" {
+			continue
+		}
+		if c.ForeignKey == nil || *c.ForeignKey != want {
+			t.Errorf("refs.%s foreign key = %+v, want %+v", c.Name, c.ForeignKey, want)
 		}
 	}
 }

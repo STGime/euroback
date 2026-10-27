@@ -133,6 +133,10 @@ func GetTableColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 // only lists a referenced table to a role that owns it, and the runtime
 // pool owns no tenant tables, so every foreign key came back without its
 // target. Composite keys map column by column (conkey[i] → confkey[i]).
+// An FK to a partitioned table also has one clone row per partition on the
+// same table (conparentid set); those are skipped so the FK names the
+// partitioned table. A partition's own inherited FK (parent on another
+// table) is kept. UNIQUE marks a column only when it is unique on its own.
 func GetTableConstraints(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string, columns []ColumnInfo) ([]ColumnInfo, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT c.contype::text,
@@ -149,6 +153,10 @@ func GetTableConstraints(ctx context.Context, pool *pgxpool.Pool, schemaName, ta
 		   LEFT JOIN pg_catalog.pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = c.confkey[k.ord]
 		  WHERE n.nspname = $1 AND t.relname = $2
 		    AND c.contype IN ('p', 'f', 'u')
+		    AND (c.contype <> 'u' OR cardinality(c.conkey) = 1)
+		    AND (c.conparentid = 0 OR NOT EXISTS (
+		          SELECT 1 FROM pg_catalog.pg_constraint pc
+		           WHERE pc.oid = c.conparentid AND pc.conrelid = c.conrelid))
 		  ORDER BY c.conname, k.ord`,
 		schemaName, tableName,
 	)
