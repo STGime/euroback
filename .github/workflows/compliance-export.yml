@@ -70,7 +70,9 @@ permissions:
 
 jobs:
   export-db-tests:
-    runs-on: ubuntu-latest
+    # Pinned: postgresql-client-16 is in the 24.04 archive; ubuntu-latest
+    # (26.04) no longer carries it.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
