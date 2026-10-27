@@ -114,6 +114,7 @@ func functionsGetCmd() *cobra.Command {
 				Returns    string `json:"return_type"`
 				Security   string `json:"security"`
 				Definition string `json:"definition"`
+				Platform   bool   `json:"platform,omitempty"`
 			}
 			if err := json.Unmarshal(data, &fn); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
@@ -121,6 +122,9 @@ func functionsGetCmd() *cobra.Command {
 			if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
 				PrintJSON(fn)
 				return nil
+			}
+			if fn.Platform {
+				fmt.Fprintln(cmd.OutOrStdout(), "-- Platform helper: managed by Eurobase, the same in every project. Don't change it.")
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), fn.Definition)
 			return nil
