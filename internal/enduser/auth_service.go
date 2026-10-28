@@ -436,10 +436,11 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 	// A banned user gets no new tokens, even with a still-valid refresh
 	// token. The other entry paths (sign-in, magic link, OAuth, phone)
 	// check this; refresh did not, so a ban didn't end existing sessions.
-	// The old token is already revoked above (the deferred rollback keeps
-	// it as it was on this error).
+	// Answered 403 (ErrAccountSuspended) so the SDK ends the session
+	// rather than retrying a 5xx. The old token's revoke is rolled back
+	// with the deferred rollback on this error.
 	if bannedAt != nil {
-		return nil, fmt.Errorf("account suspended")
+		return nil, ErrAccountSuspended
 	}
 	// Same rule as SignIn (#806): a password user whose email isn't
 	// confirmed gets no new tokens (the deferred rollback keeps the old
