@@ -18,6 +18,8 @@ func TestRefreshErrorResponse(t *testing.T) {
 		{ErrInvalidRefreshToken, http.StatusUnauthorized},
 		{fmt.Errorf("wrapped: %w", ErrInvalidRefreshToken), http.StatusUnauthorized},
 		{ErrEmailNotConfirmed, http.StatusForbidden},
+		{ErrAccountSuspended, http.StatusForbidden},
+		{fmt.Errorf("wrapped: %w", ErrAccountSuspended), http.StatusForbidden},
 		{errors.New("begin tx: connection refused"), http.StatusInternalServerError},
 		{fmt.Errorf("commit: %w", errors.New("timeout")), http.StatusInternalServerError},
 	}

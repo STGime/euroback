@@ -18,6 +18,10 @@ var ErrEmailNotConfirmed = errors.New("email_not_confirmed")
 // (database down, …) must not be reported as 401.
 var ErrInvalidRefreshToken = errors.New("invalid or expired refresh token")
 
+// ErrAccountSuspended is returned by RefreshToken when the user is banned.
+// Answered 403 so the SDK ends the session (not a retryable 5xx).
+var ErrAccountSuspended = errors.New("account_suspended")
+
 // maxPasswordHashCost is the highest bcrypt cost a stored end-user hash
 // may have — the platform hashes at 12, Supabase at 10. Imports refuse
 // higher ones, and sign-in won't evaluate them.

@@ -1211,6 +1211,16 @@ func CreateFunction(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 		return refusedf("function body cannot contain '$$'")
 	}
 
+	// A function body runs as the caller (the tenant's own role), so it
+	// must not change role/session identity, search_path, privileges or
+	// ownership, or flip a session GUC. Most importantly it must not reach
+	// set_config / app.intent — the only predicate guarding the credential
+	// tables (migration 000055). Defense in depth alongside migration
+	// 000147, which revokes those tables from the function-running role.
+	if err := ValidateNoPrivilegeStatementsInFunctionBody(req.Body); err != nil {
+		return refused(err)
+	}
+
 	createSQL := fmt.Sprintf(
 		"CREATE OR REPLACE FUNCTION %s.%s() RETURNS %s LANGUAGE %s AS $$ %s $$",
 		quoteIdent(schemaName), quoteIdent(req.Name),

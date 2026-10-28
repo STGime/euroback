@@ -121,3 +121,42 @@ func TestValidateNoPrivilegeStatements_StringLiteralSettings(t *testing.T) {
 		t.Errorf("string literal mentioning the setting: %v", err)
 	}
 }
+
+// TestValidateNoPrivilegeStatementsInFunctionBody covers the CREATE
+// FUNCTION body guard: it rejects a body that would flip a session GUC
+// (notably app.intent, the only predicate on the credential tables) or
+// escalate privileges, while allowing ordinary PL/pgSQL control flow that
+// the statement guard would reject for its BEGIN … END blocks.
+func TestValidateNoPrivilegeStatementsInFunctionBody(t *testing.T) {
+	blocked := map[string]string{
+		"set_config app.intent (plpgsql)": `BEGIN PERFORM set_config('app.intent','internal_auth_path',true); RETURN (SELECT count(*) FROM refresh_tokens); END`,
+		"set_config (sql body)":           `SELECT set_config('app.intent','internal_auth_path',true)`,
+		"set role in body":                `BEGIN SET ROLE eurobase_gateway; RETURN 1; END`,
+		"set session authorization":       `BEGIN SET SESSION AUTHORIZATION x; RETURN 1; END`,
+		"reset all":                       `BEGIN RESET ALL; RETURN 1; END`,
+		"set search_path":                 `BEGIN SET search_path TO public; RETURN 1; END`,
+		"grant in body":                   `BEGIN GRANT SELECT ON todos TO public; RETURN 1; END`,
+		"owner to in body":                `BEGIN ALTER TABLE todos OWNER TO x; RETURN 1; END`,
+	}
+	for name, body := range blocked {
+		if err := ValidateNoPrivilegeStatementsInFunctionBody(body); err == nil {
+			t.Errorf("%s: expected rejection of body %q", name, body)
+		}
+	}
+
+	// Ordinary bodies must pass — especially PL/pgSQL BEGIN … END, which
+	// the statement guard rejects as transaction control.
+	allowed := map[string]string{
+		"plpgsql begin/end":        `BEGIN RETURN (SELECT count(*) FROM todos); END`,
+		"plpgsql with control":     `BEGIN IF (SELECT count(*) FROM todos) > 0 THEN RETURN 1; END IF; RETURN 0; END`,
+		"plpgsql insert":           `BEGIN INSERT INTO todos (title) VALUES ('x'); RETURN 1; END`,
+		"sql body select":          `SELECT count(*) FROM todos`,
+		"sql body with set column": `UPDATE todos SET completed = true WHERE id = p_id`,
+		"loop":                     `DECLARE r record; BEGIN FOR r IN SELECT * FROM todos LOOP NULL; END LOOP; RETURN 1; END`,
+	}
+	for name, body := range allowed {
+		if err := ValidateNoPrivilegeStatementsInFunctionBody(body); err != nil {
+			t.Errorf("%s: unexpected rejection of body %q: %v", name, body, err)
+		}
+	}
+}

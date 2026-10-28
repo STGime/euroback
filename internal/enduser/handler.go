@@ -223,6 +223,8 @@ func refreshErrorResponse(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrEmailNotConfirmed):
 		return http.StatusForbidden, ErrEmailNotConfirmed.Error()
+	case errors.Is(err, ErrAccountSuspended):
+		return http.StatusForbidden, ErrAccountSuspended.Error()
 	case errors.Is(err, ErrInvalidRefreshToken):
 		return http.StatusUnauthorized, ErrInvalidRefreshToken.Error()
 	default:

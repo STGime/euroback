@@ -1457,8 +1457,9 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return nil // shared vault: public.vault_get_for_runner (runner's own login)
 		}
 		// ctx.vault on Team: <schema>.runner_vault_get returns the sealed
-		// row (per-tenant key) from the dedicated vault; the table itself
-		// stays RLS-hidden.
+		// row (per-tenant key) from the dedicated vault; the function role
+		// can't reach vault_secrets directly at all (migration 000147 /
+		// ensure_tenant_func_role revoke the grant).
 		var enc, want []byte
 		var kv *int16
 		if err := conn.QueryRow(ctx, `SELECT encrypted, key_version FROM `+pgx.Identifier{env.schema}.Sanitize()+`.runner_vault_get($1)`,
@@ -1474,12 +1475,20 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if kv == nil || *kv < 1 {
 			return fmt.Errorf("dedicated vault secret has key_version %v; the runner only accepts per-tenant sealed (>= 1)", kv)
 		}
-		var direct int
-		if err := conn.QueryRow(ctx, `SELECT count(*) FROM `+pgx.Identifier{env.schema, "vault_secrets"}.Sanitize()).Scan(&direct); err != nil {
-			return err
-		}
-		if direct != 0 {
-			return fmt.Errorf("function role reads vault_secrets directly (%d rows)", direct)
+		// A direct read is denied at the grant layer, not merely
+		// RLS-filtered to 0 rows — the func role has no privilege on the
+		// credential/secret tables (migration 000147). Same for
+		// refresh_tokens / email_tokens.
+		for _, tbl := range []string{"vault_secrets", "refresh_tokens", "email_tokens"} {
+			var direct int
+			err := conn.QueryRow(ctx, `SELECT count(*) FROM `+pgx.Identifier{env.schema, tbl}.Sanitize()).Scan(&direct)
+			var pgErr *pgconn.PgError
+			switch {
+			case err == nil:
+				return fmt.Errorf("function role can read %s directly (%d rows); the grant must be revoked", tbl, direct)
+			case !errors.As(err, &pgErr) || pgErr.Code != "42501":
+				return fmt.Errorf("direct %s read: got %v, want permission denied (42501)", tbl, err)
+			}
 		}
 		return nil
 	})

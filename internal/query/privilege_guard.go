@@ -25,7 +25,33 @@ func ValidateNoPrivilegeStatements(sql string) error {
 		return err
 	}
 	for _, st := range stmts {
-		if err := checkPrivilegeStatement(st); err != nil {
+		if err := checkPrivilegeStatement(st, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateNoPrivilegeStatementsInFunctionBody applies the same role,
+// session, search_path, set_config and privilege/ownership checks to a
+// CREATE FUNCTION body, so a tenant function can't flip a session GUC
+// (notably app.intent — the only predicate on the credential tables) or
+// escalate privileges. Unlike the statement guard it does NOT reject the
+// transaction-control keywords, because a PL/pgSQL body legitimately uses
+// BEGIN … END blocks.
+//
+// This is a defense-in-depth backstop that gives a clear error at create
+// time. The real control is the database grant: migration 000147 revokes
+// the credential tables from the <schema>_func role that runs function
+// bodies, so the read/write is denied before RLS even if a body reaches
+// set_config by a route this lexical check can't see (dynamic EXECUTE).
+func ValidateNoPrivilegeStatementsInFunctionBody(body string) error {
+	stmts, err := splitPrivStatements(body)
+	if err != nil {
+		return err
+	}
+	for _, st := range stmts {
+		if err := checkPrivilegeStatement(st, false); err != nil {
 			return err
 		}
 	}
@@ -64,7 +90,11 @@ type privWord struct {
 	name string // lower-cased value for identifiers (quoted or not)
 }
 
-func checkPrivilegeStatement(st []privWord) error {
+// checkPrivilegeStatement flags role/session/privilege/config statements.
+// With rejectTxnControl, statement-starting transaction-control keywords
+// (BEGIN/COMMIT/…) are also rejected; function-body callers pass false
+// because a PL/pgSQL body legitimately opens BEGIN … END blocks.
+func checkPrivilegeStatement(st []privWord, rejectTxnControl bool) error {
 	kw := func(i int) string {
 		if i >= 0 && i < len(st) {
 			return st[i].kw
@@ -77,15 +107,23 @@ func checkPrivilegeStatement(st []privWord) error {
 	// transaction, so customer SQL may not end, nest or split it (same
 	// rule as the tenant-migrations validator). Statement-start only, so
 	// CASE … END is unaffected.
-	switch first {
-	case "begin", "commit", "rollback", "savepoint", "release", "end", "abort", "start", "prepare":
-		return privErr(strings.ToUpper(first) + " (transaction control)")
+	if rejectTxnControl {
+		switch first {
+		case "begin", "commit", "rollback", "savepoint", "release", "end", "abort", "start", "prepare":
+			return privErr(strings.ToUpper(first) + " (transaction control)")
+		}
 	}
 
-	// SET / RESET as a *command* (statement start). `UPDATE … SET col`
-	// never reaches this branch, so role/owner-named columns stay usable.
-	if first == "set" || first == "reset" {
-		j := 1
+	// SET / RESET as a *command*. At statement start, or — in a function
+	// body, where statements aren't rejected for opening a BEGIN block —
+	// right after a leading BEGIN. `UPDATE … SET col` never starts with
+	// SET, so role/owner-named columns stay usable.
+	cmd := 0
+	if !rejectTxnControl && first == "begin" {
+		cmd = 1
+	}
+	if kw(cmd) == "set" || kw(cmd) == "reset" {
+		j := cmd + 1
 		for kw(j) == "local" || kw(j) == "session" {
 			j++
 		}
@@ -95,7 +133,7 @@ func checkPrivilegeStatement(st []privWord) error {
 		}
 		switch target {
 		case "role", "all", "search_path", "session", "authorization", "session_authorization":
-			return privErr(strings.ToUpper(first + " " + target))
+			return privErr(strings.ToUpper(kw(cmd) + " " + target))
 		}
 	}
 

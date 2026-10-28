@@ -418,19 +418,29 @@ func (s *AuthService) RefreshToken(ctx context.Context, schemaName, jwtSecret, p
 	var user User
 	var metadataJSON []byte
 	var hasPassword bool
+	var bannedAt *time.Time
 	userQ := fmt.Sprintf(
-		`SELECT id, email, display_name, avatar_url, metadata, email_confirmed_at, password_hash IS NOT NULL, created_at, updated_at
+		`SELECT id, email, display_name, avatar_url, metadata, banned_at, email_confirmed_at, password_hash IS NOT NULL, created_at, updated_at
 		 FROM %s.users WHERE id = $1`,
 		quoteIdent(schemaName),
 	)
 	err = tx.QueryRow(ctx, userQ, userID).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &hasPassword, &user.CreatedAt, &user.UpdatedAt)
+		Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &bannedAt, &user.EmailConfirmedAt, &hasPassword, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			// The user was deleted: the session is over.
 			return nil, ErrInvalidRefreshToken
 		}
 		return nil, fmt.Errorf("query user: %w", err)
+	}
+	// A banned user gets no new tokens, even with a still-valid refresh
+	// token. The other entry paths (sign-in, magic link, OAuth, phone)
+	// check this; refresh did not, so a ban didn't end existing sessions.
+	// Answered 403 (ErrAccountSuspended) so the SDK ends the session
+	// rather than retrying a 5xx. The old token's revoke is rolled back
+	// with the deferred rollback on this error.
+	if bannedAt != nil {
+		return nil, ErrAccountSuspended
 	}
 	// Same rule as SignIn (#806): a password user whose email isn't
 	// confirmed gets no new tokens (the deferred rollback keeps the old
