@@ -81,6 +81,19 @@ eurobase migrations up</pre>
 					You get the tables, foreign keys, CHECK constraints, RLS policies and functions &mdash; with no rows copied. There&rsquo;s no one-click &ldquo;schema-only export&rdquo; yet; on Team / Legal Team you can alternatively run <code class="bg-gray-100 rounded px-1">pg_dump --schema-only</code> over your <a href="/docs/connect-db" class="text-eurobase-600 hover:underline">direct connection</a> and load it into the new project.
 				</p>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Applying migrations over the API</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The CLI calls a plain HTTP API, which you can use directly (for example from CI) with a personal access token &mdash; ideally one scoped to the project, with the Developer role. Each request applies one migration in a single transaction: all of it or nothing.
+				</p>
+				<div class="mt-2 rounded-lg bg-gray-900 p-4 font-mono text-sm text-gray-100 overflow-x-auto">
+					<div>curl -X POST https://api.eurobase.app/platform/projects/$PROJECT_ID/migrations \</div>
+					<div>&nbsp;&nbsp;-H "Authorization: Bearer $EUROBASE_PAT" -H "Content-Type: application/json" \</div>
+					<div>&nbsp;&nbsp;-d '&#123;"version": 1, "name": "create_listings", "sql": "create table listings (...)"&#125;'</div>
+				</div>
+				<p class="mt-2 text-sm text-gray-700 leading-relaxed">
+					<code class="bg-gray-100 rounded px-1">GET</code> on the same path lists the versions already applied (with their checksums), so a script can skip what&rsquo;s done, as <code class="bg-gray-100 rounded px-1">eurobase migrations up</code> does.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What migration SQL can't do (and why)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Migrations run with your project's developer credentials (PAT or console session) — <strong>never with API keys</strong>: a leaked server key must not be able to alter your schema. Each migration executes under a database role scoped to <em>only your project's schema</em>, so it physically cannot read or write another project or the platform's own tables — that boundary is enforced by Postgres, not just by validation. On top of that, the platform rejects operations that try to reach outside your project before they run:

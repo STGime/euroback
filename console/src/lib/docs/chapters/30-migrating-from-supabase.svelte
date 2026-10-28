@@ -47,6 +47,11 @@
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">How do I keep a test project apart from production in the CLI?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Log in with a personal access token scoped to the test project, under its own <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">HOME</code>: the CLI keeps its login and active project only in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">$HOME/.eurobase/config.json</code>, and a scoped token is refused for every other project. See <a href="/docs/cli" class="cursor-pointer text-eurobase-700 hover:underline">CLI</a>.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can I copy my schema to a test project without the data?</p>
 					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. Apply your migration files to a fresh, empty project (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase migrations up</code>) &mdash; you get tables, foreign keys, CHECK constraints, RLS policies and functions, with no rows copied. There&rsquo;s no standalone schema-only export yet; on Team you can also <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">pg_dump --schema-only</code> over the direct connection. See <a href="/docs/migrations" class="cursor-pointer text-eurobase-700 hover:underline">Migrations</a>.</p>
 				</div>
