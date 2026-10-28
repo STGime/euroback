@@ -70,6 +70,24 @@ BEGIN
     EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', p_schema, v_role);
     EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', v_role);
 
+    -- SECURITY: the func role runs customer RPC bodies and edge-function
+    -- SQL, which must never reach the credential/secret tables. Their RLS
+    -- is a single GUC (app.intent) a function body can set in its own
+    -- transaction, so the blanket DML grant above is what that GUC would
+    -- unlock. The func role never needs them: the runner reads vault via
+    -- runner_vault_get (SECURITY DEFINER) below. Revoke so the grant check
+    -- (before RLS) denies the access regardless of the GUC. (Matches the
+    -- shared cluster's migration 000147.)
+    IF to_regclass(format('%I.refresh_tokens', p_schema)) IS NOT NULL THEN
+        EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON %I.refresh_tokens FROM %I', p_schema, v_role);
+    END IF;
+    IF to_regclass(format('%I.email_tokens', p_schema)) IS NOT NULL THEN
+        EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON %I.email_tokens FROM %I', p_schema, v_role);
+    END IF;
+    IF to_regclass(format('%I.vault_secrets', p_schema)) IS NOT NULL THEN
+        EXECUTE format('REVOKE SELECT, INSERT, UPDATE, DELETE ON %I.vault_secrets FROM %I', p_schema, v_role);
+    END IF;
+
     EXECUTE format(
         'CREATE OR REPLACE FUNCTION %I.runner_vault_get(p_name text)
          RETURNS TABLE(encrypted bytea, nonce bytea, key_version smallint)
