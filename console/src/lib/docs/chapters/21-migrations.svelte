@@ -91,7 +91,7 @@ eurobase migrations up</pre>
 					<div>&nbsp;&nbsp;-d '&#123;"version": 1, "name": "create_listings", "sql": "create table listings (...)"&#125;'</div>
 				</div>
 				<p class="mt-2 text-sm text-gray-700 leading-relaxed">
-					<code class="bg-gray-100 rounded px-1">GET</code> on the same path lists the versions already applied (with their checksums), so a script can skip what&rsquo;s done, as <code class="bg-gray-100 rounded px-1">eurobase migrations up</code> does.
+					<code class="bg-gray-100 rounded px-1">GET</code> on the same path lists the versions already applied (with their checksums), so a script can skip what&rsquo;s done, as <code class="bg-gray-100 rounded px-1">eurobase migrations up</code> does. Sending an applied version again with the same SQL changes nothing; with different SQL it answers 409 &mdash; give the change a new version instead of editing an applied migration.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What migration SQL can't do (and why)</h3>

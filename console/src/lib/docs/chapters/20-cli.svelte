@@ -56,16 +56,15 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Where the CLI keeps your login, and working with several projects</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Every command reads one file, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">$HOME/.eurobase/config.json</code> (mode 600): your token, the active project and the API URL. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase projects switch</code> write it; nothing is kept in the macOS Keychain or any other credential store, and the CLI finds the file only through <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">HOME</code>. There&rsquo;s no profile option or <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">--project</code> flag yet, so to keep a test project fully apart from production, give each its own <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">HOME</code> and a token scoped to that project:
+					Every command reads one file, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">$HOME/.eurobase/config.json</code> (mode 600): your token, the active project and the API URL. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase login</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase switch</code> write it; nothing is kept in the macOS Keychain or any other credential store, and the CLI finds the file only through <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">HOME</code>. There&rsquo;s no profile option or <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">--project</code> flag yet, so to keep a test project fully apart from production, give it its own directory as <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">HOME</code> for the CLI, and log in there with a token scoped to that project:
 				</p>
 				<div class="mt-2 rounded-lg bg-gray-900 p-4 font-mono text-sm text-gray-100 overflow-x-auto">
-					<div>export HOME="$(mktemp -d)"</div>
-					<div>eurobase login --token "$TEST_PROJECT_TOKEN"   <span class="text-gray-500"># selects the token's project</span></div>
-					<div>eurobase status                               <span class="text-gray-500"># confirm the project</span></div>
-					<div>eurobase migrations up</div>
+					<div>HOME=~/.eurobase-test eurobase login --token "$TEST_PROJECT_TOKEN"  <span class="text-gray-500"># selects the token's project</span></div>
+					<div>HOME=~/.eurobase-test eurobase status  <span class="text-gray-500"># confirm the project</span></div>
+					<div>HOME=~/.eurobase-test eurobase migrations up</div>
 				</div>
 				<p class="mt-2 text-sm text-gray-700 leading-relaxed">
-					A project token is refused for every other project, so even a mixed-up configuration can&rsquo;t reach production. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase migrations up</code> reads <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">./migrations/*.sql</code> from the current directory.
+					Setting <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">HOME</code> per command keeps the rest of your shell unchanged, and the test login stays in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">~/.eurobase-test</code> for next time. A project token is refused for every other project, so even a mixed-up configuration can&rsquo;t reach production. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eurobase migrations up</code> reads <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">./migrations/*.sql</code> from the current directory.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Command reference</h3>
