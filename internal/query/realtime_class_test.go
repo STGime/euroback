@@ -125,4 +125,30 @@ func TestTableIsPublicReadable_RealtimeClass(t *testing.T) {
 	if got, err := TableIsPublicReadable(ctx, pool, schema, "does_not_exist"); err != nil || got {
 		t.Errorf("missing table: got %v err %v, want false nil", got, err)
 	}
+
+	// In production the resolver runs on the eurobase_gateway runtime role,
+	// not a superuser. The classifier reads only pg_catalog (pg_policy /
+	// pg_class / pg_get_expr), which is readable regardless of schema
+	// privileges — assert that holds for the gateway role so the feature
+	// isn't silently always-fail-closed in prod.
+	if gwURL := os.Getenv("EXPORT_TEST_GATEWAY_URL"); gwURL != "" {
+		gw, err := pgxpool.New(ctx, gwURL)
+		if err != nil {
+			t.Fatalf("gateway pool: %v", err)
+		}
+		defer gw.Close()
+		for _, p := range []struct {
+			tbl  string
+			want bool
+		}{{"pub", true}, {"owner", false}, {"svc", false}, {"norls", true}} {
+			got, err := TableIsPublicReadable(ctx, gw, schema, p.tbl)
+			if err != nil {
+				t.Errorf("gateway role, %s: %v", p.tbl, err)
+				continue
+			}
+			if got != p.want {
+				t.Errorf("gateway role, %s: public = %v, want %v", p.tbl, got, p.want)
+			}
+		}
+	}
 }

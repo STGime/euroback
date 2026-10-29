@@ -182,6 +182,7 @@ jobs:
         env:
           CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           REALTIME_CLASS_TEST_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+          EXPORT_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions|TestGetFunctions_DB|TestGetTableConstraints_DB|TestOwnerRightsGuard_DB|TestTableIsPublicReadable_RealtimeClass'
 
       # RPC errors raised by real Postgres map to readable SDK answers.
