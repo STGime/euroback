@@ -27,6 +27,8 @@ on:
       - internal/workers/invoke_function_trigger*.go
       - internal/workers/project_events*.go
       - internal/cron/executor.go
+      - internal/query/realtime_class*.go
+      - internal/realtime/**
       - internal/storage/handler.go
       - internal/storage/delete_events_test.go
       - cmd/worker/main.go
@@ -176,10 +178,12 @@ jobs:
         run: go test -count=1 -v ./internal/tenantconn/ -run 'TestDDLRunner_ServiceRoleReachesSystemTables'
 
       # Tenant-table ownership convergence (000136): reassigns to _ddl.
-      - name: Converge tenant ownership (000136)
+      - name: Converge tenant ownership (000136) + realtime table class (#861)
         env:
           CONVERGE_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
-        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions|TestGetFunctions_DB|TestGetTableConstraints_DB|TestOwnerRightsGuard_DB'
+          REALTIME_CLASS_TEST_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+          EXPORT_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
+        run: go test -count=1 -v ./internal/query/ -run 'TestConvergeTenantOwnership|TestConvergeTenantFunctions|TestGetFunctions_DB|TestGetTableConstraints_DB|TestOwnerRightsGuard_DB|TestTableIsPublicReadable_RealtimeClass'
 
       # RPC errors raised by real Postgres map to readable SDK answers.
       - name: RPC error mapping against a provisioned tenant

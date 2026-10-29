@@ -67,30 +67,37 @@ func TestClient_ShouldReceive(t *testing.T) {
 		name        string
 		endUserID   string
 		service     bool
+		public      bool
 		ownerUserID string
 		want        bool
 	}{
-		// No recognised owner column → fail closed for non-service
-		// clients: the row's visibility can't be established, so it is
-		// withheld from end-users and anon. Only the service role gets it.
-		{"anon client, no owner", "", false, "", false},
-		{"end-user client, no owner", "u-1", false, "", false},
-		{"service client, no owner", "", true, "", true},
+		// No recognised owner column, not public → fail closed for
+		// non-service clients: the row's visibility can't be established,
+		// so it is withheld from end-users and anon. Only service gets it.
+		{"anon client, no owner, not public", "", false, false, "", false},
+		{"end-user client, no owner, not public", "u-1", false, false, "", false},
+		{"service client, no owner, not public", "", true, false, "", true},
 
-		// Owner column present → service sees all
-		{"service client, owner present", "", true, "owner-x", true},
+		// Public table (#861) → everyone receives, owner column irrelevant.
+		{"anon client, public", "", false, true, "", true},
+		{"end-user client, public", "u-1", false, true, "", true},
+		{"public overrides a present owner column", "u-1", false, true, "owner-x", true},
+		{"service client, public", "", true, true, "", true},
 
-		// Owner column present → anon (no end-user id, not service) sees nothing
-		{"anon client, owner present", "", false, "owner-x", false},
+		// Owner column present, not public → service sees all
+		{"service client, owner present", "", true, false, "owner-x", true},
 
-		// Owner column present → end-user matches
-		{"end-user matches owner", "u-1", false, "u-1", true},
-		{"end-user does not match owner", "u-1", false, "u-2", false},
+		// Owner column present, not public → anon sees nothing
+		{"anon client, owner present", "", false, false, "owner-x", false},
+
+		// Owner column present, not public → end-user matches
+		{"end-user matches owner", "u-1", false, false, "u-1", true},
+		{"end-user does not match owner", "u-1", false, false, "u-2", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cli := &Client{endUserID: c.endUserID, service: c.service}
-			if got := cli.shouldReceive(c.ownerUserID); got != c.want {
+			if got := cli.shouldReceive(c.public, c.ownerUserID); got != c.want {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
@@ -282,6 +289,35 @@ func TestRealtime_NoOwnerColumn_WithheldFromEndUsers(t *testing.T) {
 	msg, err := svc.readWithin(t, 1*time.Second)
 	if err != nil || !strings.Contains(string(msg), "France") {
 		t.Errorf("service client should still receive the owner-less row: %v %s", err, msg)
+	}
+}
+
+// TestRealtime_PublicTable_DeliversToEveryone — with a resolver that
+// classifies the table public (#861: RLS-off or a USING(true) SELECT
+// policy, so REST returns every row to every reader), an owner-less row
+// is delivered to end-users and anon again, not only the service role.
+func TestRealtime_PublicTable_DeliversToEveryone(t *testing.T) {
+	hub, wsURL, stop := startServerForOwnerTest(t)
+	defer stop()
+
+	end := dialSubscribed(t, wsURL, "user:A", "p-1", "db:countries")
+	defer end.close()
+	anon := dialSubscribed(t, wsURL, "anon-pk", "p-1", "db:countries")
+	defer anon.close()
+
+	pub := NewEventPublisher(nil, hub).WithPublicResolver(
+		func(_ context.Context, _, table string) bool { return table == "countries" },
+	)
+	_ = pub.PublishInsert(context.Background(), "p-1", "countries", map[string]interface{}{
+		"id":   "fr",
+		"name": "France",
+	})
+
+	for label, cli := range map[string]*rtTestClient{"end-user": end, "anon": anon} {
+		msg, err := cli.readWithin(t, 1*time.Second)
+		if err != nil || !strings.Contains(string(msg), "France") {
+			t.Errorf("%s should receive a public-table row: %v %s", label, err, msg)
+		}
 	}
 }
 
