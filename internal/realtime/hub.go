@@ -39,26 +39,27 @@ type Client struct {
 	mu            sync.Mutex // protects subscriptions
 }
 
-// shouldReceive reports whether this client is entitled to a row whose
-// detected owner column equals ownerUserID. ownerUserID is "" when the
-// row has no recognised owner column (user_id / owner_id / created_by /
-// uploaded_by) — see ownerUserIDFromRow.
+// shouldReceive reports whether this client is entitled to a row.
 //
-// Fail closed: realtime must never deliver a row the subscriber could
-// not read via REST under RLS. We can only prove that for the service
-// role (RLS bypass) and for an end-user who is the row's recognised
-// owner. Everything else — an owner-less row whose visibility we can't
-// establish (a table scoped by tenant_id / org_id / a custom column, a
-// service-only table, a genuinely public one), an anonymous subscriber,
-// or a row owned by someone else — is withheld.
+// public is true when the table is public-readable under RLS — every
+// reader, anonymous included, can SELECT every row (RLS disabled, or a
+// permissive `USING (true)` SELECT policy with nothing restrictive
+// narrowing it; see query.TableIsPublicReadable, #861). Such a row goes
+// to everyone, matching REST.
 //
-// This is deliberately stricter than REST for genuinely public tables
-// without an owner column (those end-users/anon stop receiving events):
-// without resolving the table's policy we cannot tell a public table
-// apart from a privately-scoped one, so we withhold rather than leak.
-// Restoring public-table delivery is the policy-aware follow-up.
-func (c *Client) shouldReceive(ownerUserID string) bool {
-	if c.service {
+// Otherwise the owner filter applies (fail closed, #860): ownerUserID is
+// the row's recognised owner-column value (user_id / owner_id /
+// created_by / uploaded_by), or "" when the row has no recognised owner
+// column. Realtime must never deliver a row the subscriber could not read
+// via REST, and off the public path we can only prove that for the
+// service role (RLS bypass) and for an end-user who is the row's
+// recognised owner. Everything else — an owner-less row we can't
+// attribute, an anonymous subscriber, or a row owned by someone else — is
+// withheld. (A table that is owner-scoped by a column realtime doesn't
+// recognise, or authenticated-read, is not yet classified as public and
+// so stays owner-filtered/withheld — tracked in #861.)
+func (c *Client) shouldReceive(public bool, ownerUserID string) bool {
+	if public || c.service {
 		return true
 	}
 	return ownerUserID != "" && c.endUserID != "" && c.endUserID == ownerUserID
@@ -94,7 +95,10 @@ type Hub struct {
 type broadcastMsg struct {
 	key         string // "tenantID:channel"
 	event       []byte // JSON-encoded Event
-	ownerUserID string // "" if the row has no owner column; otherwise the value of user_id/owner_id/created_by/uploaded_by
+	ownerUserID string // "" if the row has no recognised owner column; otherwise the value of user_id/owner_id/created_by/uploaded_by
+	// public is true when the table is public-readable under RLS (#861):
+	// the row goes to every subscriber, owner column notwithstanding.
+	public bool
 }
 
 // NewHub creates a Hub ready to be started with Run().
@@ -131,7 +135,7 @@ func (h *Hub) Run() {
 			h.mu.RUnlock()
 
 			for client := range clients {
-				if !client.shouldReceive(msg.ownerUserID) {
+				if !client.shouldReceive(msg.public, msg.ownerUserID) {
 					// Not provably visible to this client (not the
 					// owner, anon, or an owner-less row we can't
 					// attribute). Silent skip — equivalent to a
@@ -199,16 +203,17 @@ func (h *Hub) Unsubscribe(client *Client, channel string) {
 }
 
 // Broadcast sends a JSON-encoded event to clients subscribed to the
-// key. ownerUserID, when non-empty, is the row's owner column value
-// (user_id / owner_id / created_by / uploaded_by) — delivery is filtered
-// to that user (and the service role). "" means the row has no
-// recognised owner column: it is delivered only to service clients, not
-// to end-users or anon (fail closed — see shouldReceive).
-func (h *Hub) Broadcast(tenantID, channel string, data []byte, ownerUserID string) {
+// key. When public is true the table is public-readable under RLS and the
+// event goes to every subscriber. Otherwise ownerUserID filters delivery:
+// non-empty delivers to that owner (and the service role); "" (no
+// recognised owner column) delivers only to service clients, not
+// end-users or anon (fail closed — see shouldReceive).
+func (h *Hub) Broadcast(tenantID, channel string, data []byte, ownerUserID string, public bool) {
 	h.broadcast <- &broadcastMsg{
 		key:         tenantID + ":" + channel,
 		event:       data,
 		ownerUserID: ownerUserID,
+		public:      public,
 	}
 }
 

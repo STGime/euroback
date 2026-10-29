@@ -78,6 +78,15 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	if developerPool == nil {
 		developerPool = pool
 	}
+
+	// Realtime public-table resolver (#861): lets the data-API event
+	// publishers deliver a public-readable table's owner-less rows to every
+	// subscriber again, instead of only the service role (#860's
+	// fail-closed default). Reads the table's RLS class from the catalog on
+	// the write's tenant pool (shared fallback), cached per table; fails
+	// closed on anything it can't confirm public.
+	realtimePublic := newRealtimePublicResolver(pool)
+
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -1444,7 +1453,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				if ddlLogin != nil {
 					queryEngine = queryEngine.WithDDLLogin(ddlLogin)
 				}
-				publisher := realtime.NewEventPublisher(nil, hub)
+				publisher := realtime.NewEventPublisher(nil, hub).WithPublicResolver(realtimePublic)
 
 				// Reads → viewer; mutations + SQL exec → developer
 				// (closes #50). HandlePlatformSQL{,Transaction} can run
@@ -1657,7 +1666,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			if sdkLogin != nil && sdkLogin.Configured() {
 				queryEngine = queryEngine.WithTenantLogin(sdkTenantLogin{resolver: sdkLogin})
 			}
-			publisher := realtime.NewEventPublisher(nil, hub)
+			publisher := realtime.NewEventPublisher(nil, hub).WithPublicResolver(realtimePublic)
 
 			r.Post("/sql", query.HandleSQL(queryEngine))
 			r.Mount("/rpc", query.HandleRPC(queryEngine))

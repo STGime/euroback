@@ -87,6 +87,10 @@ func (b *RedisBridge) Subscribe(ctx context.Context) {
 type redisEnvelope struct {
 	Event       json.RawMessage `json:"e"`
 	OwnerUserID string          `json:"o,omitempty"`
+	// Public (#861): the table is public-readable under RLS, so the
+	// receiving hub delivers to every subscriber. Omitted (false) for
+	// scoped tables and for legacy payloads — the safe default.
+	Public bool `json:"p,omitempty"`
 }
 
 // handleMessage parses a Redis pub/sub message and broadcasts it to Hub
@@ -111,10 +115,12 @@ func (b *RedisBridge) handleMessage(msg *redis.Message) {
 	// payload from a still-rolling instance is handled as no-owner.
 	payload := []byte(msg.Payload)
 	ownerUserID := ""
+	public := false
 	var env redisEnvelope
 	if err := json.Unmarshal(payload, &env); err == nil && len(env.Event) > 0 {
 		payload = env.Event
 		ownerUserID = env.OwnerUserID
+		public = env.Public
 	}
 
 	slog.Debug("received redis realtime event",
@@ -124,14 +130,14 @@ func (b *RedisBridge) handleMessage(msg *redis.Message) {
 		"has_owner", ownerUserID != "",
 	)
 
-	b.hub.Broadcast(tenantID, channel, payload, ownerUserID)
+	b.hub.Broadcast(tenantID, channel, payload, ownerUserID, public)
 }
 
 // Publish publishes an event to Redis so that all gateway instances can
 // broadcast it to their connected clients. ownerUserID is the row's
 // owner column value (or "" if the row has no owner column); the
 // receiving Hub uses it to apply per-subscriber #108 filtering.
-func (b *RedisBridge) Publish(ctx context.Context, tenantID, table, eventType string, record, oldRecord map[string]interface{}, ownerUserID string) error {
+func (b *RedisBridge) Publish(ctx context.Context, tenantID, table, eventType string, record, oldRecord map[string]interface{}, ownerUserID string, public bool) error {
 	event := Event{
 		Channel:   "db:" + table,
 		Type:      eventType,
@@ -145,7 +151,7 @@ func (b *RedisBridge) Publish(ctx context.Context, tenantID, table, eventType st
 		return fmt.Errorf("marshal realtime event: %w", err)
 	}
 
-	envelope, err := json.Marshal(redisEnvelope{Event: eventJSON, OwnerUserID: ownerUserID})
+	envelope, err := json.Marshal(redisEnvelope{Event: eventJSON, OwnerUserID: ownerUserID, Public: public})
 	if err != nil {
 		return fmt.Errorf("marshal realtime envelope: %w", err)
 	}

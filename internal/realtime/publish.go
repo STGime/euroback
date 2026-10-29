@@ -13,9 +13,18 @@ import (
 // instance. When RedisBridge is set, events are published via Redis pub/sub
 // for cross-instance delivery.
 type EventPublisher struct {
-	bridge *RedisBridge
-	hub    *Hub
+	bridge      *RedisBridge
+	hub         *Hub
+	publicTable PublicTableResolver
 }
+
+// PublicTableResolver reports whether a table is public-readable under RLS
+// (query.TableIsPublicReadable, #861): every reader, anon included, can
+// SELECT every row, so an owner-less realtime event may go to all
+// subscribers. It is called once per event (the gateway backs it with a
+// cache). A nil resolver, or a false result, means "not public" — the
+// owner filter applies (#860's fail-closed default).
+type PublicTableResolver func(ctx context.Context, projectID, table string) bool
 
 // NewEventPublisher creates an EventPublisher. Both bridge and hub may be nil
 // for no-op behaviour.
@@ -24,6 +33,15 @@ func NewEventPublisher(bridge *RedisBridge, hub *Hub) *EventPublisher {
 		bridge: bridge,
 		hub:    hub,
 	}
+}
+
+// WithPublicResolver sets the resolver used to decide whether a table's
+// owner-less rows may be broadcast to everyone (#861). Without it the
+// publisher never classifies a table public, so owner-less rows reach
+// only the service role (#860).
+func (p *EventPublisher) WithPublicResolver(r PublicTableResolver) *EventPublisher {
+	p.publicTable = r
+	return p
 }
 
 // PublishInsert broadcasts an INSERT event for the given table and record.
@@ -81,9 +99,18 @@ func (p *EventPublisher) publish(ctx context.Context, projectID, table, eventTyp
 		ownerUserID = ownerUserIDFromRow(oldRecord)
 	}
 
+	// #861: is the table public-readable under RLS? If so the hub delivers
+	// the row to every subscriber; otherwise the owner filter applies.
+	// Resolved once here (same answer for every subscriber) and carried on
+	// the broadcast envelope.
+	public := false
+	if p.publicTable != nil {
+		public = p.publicTable(ctx, projectID, table)
+	}
+
 	// If Redis bridge is available, publish via Redis for cross-instance delivery.
 	if p.bridge != nil {
-		if err := p.bridge.Publish(ctx, projectID, table, eventType, record, oldRecord, ownerUserID); err != nil {
+		if err := p.bridge.Publish(ctx, projectID, table, eventType, record, oldRecord, ownerUserID, public); err != nil {
 			slog.Error("realtime publisher: redis publish failed, falling back to local",
 				"error", err,
 				"project_id", projectID,
@@ -98,7 +125,7 @@ func (p *EventPublisher) publish(ctx context.Context, projectID, table, eventTyp
 	}
 
 	// Local-only broadcast (no Redis, or Redis publish failed).
-	p.hub.Broadcast(projectID, event.Channel, payload, ownerUserID)
+	p.hub.Broadcast(projectID, event.Channel, payload, ownerUserID, public)
 
 	slog.Debug("realtime publisher: broadcast locally",
 		"project_id", projectID,
