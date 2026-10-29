@@ -119,14 +119,17 @@ var ownerColumns = []string{"user_id", "owner_id", "created_by", "uploaded_by"}
 
 // ownerUserIDFromRow returns the row's owner-column value, or "" if
 // the row has no recognised owner column. Used by the hub to decide
-// whether to broadcast a realtime event to a given subscriber.
+// whether to deliver a realtime event to a given subscriber.
 //
-// Closes #108. Designed to match the most common RLS pattern (the
-// owner_access preset) without re-running policy SQL on every event,
-// which would be O(events × subscribers) Postgres queries at fan-out
-// time. Tables with more complex policies (multi-tenant via a
-// per-row org_id, role-based readers, etc.) are still broadcast to
-// every subscriber — see the SDK realtime docs for the limitation.
+// Matches the most common RLS pattern (the owner_access preset) without
+// re-running policy SQL on every event, which would be O(events ×
+// subscribers) Postgres queries at fan-out time. When it returns ""
+// (a table scoped by a column it doesn't recognise — tenant_id, org_id,
+// a custom column — or a table with no owner concept) the hub does NOT
+// fall back to broadcasting: it withholds the row from end-users and
+// anon subscribers and delivers only to the service role (shouldReceive
+// fails closed). Correctly delivering genuinely public owner-less tables
+// to end-users again is a policy-aware follow-up.
 func ownerUserIDFromRow(record map[string]interface{}) string {
 	if record == nil {
 		return ""

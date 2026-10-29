@@ -165,8 +165,10 @@ func TestRealtime_PublishWithProjectID_DeliversToMatchingSubscriber(t *testing.T
 	// subscriber connected as project_id=X receives the event.
 	hub := NewHub()
 	go hub.Run()
+	// Service client so the routing assertion doesn't depend on the
+	// per-row owner filter (this test is about #62 routing, not authz).
 	authorize := func(_ context.Context, _, qpID string) (AuthorizedClient, error) {
-		return AuthorizedClient{ProjectID: qpID, Plan: "pro"}, nil
+		return AuthorizedClient{ProjectID: qpID, Plan: "pro", Service: true}, nil
 	}
 	originOK := func(_ *http.Request) bool { return true }
 	srv := httptest.NewServer(HandleWebSocket(hub, authorize, originOK, false))

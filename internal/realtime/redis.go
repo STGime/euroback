@@ -77,11 +77,13 @@ func (b *RedisBridge) Subscribe(ctx context.Context) {
 //	{"e": <Event JSON>, "o": "<ownerUserID|empty>"}
 //
 // Receiving instances try this shape first; if it doesn't decode they
-// fall back to treating the raw payload as a v0.4 Event (no owner →
-// broadcast to all). The fallback exists so a rolling deploy where
-// old publishers and new receivers coexist for a few minutes doesn't
-// break — once every instance is on the new code, every event carries
-// its envelope and the filter takes effect everywhere.
+// fall back to treating the raw payload as an owner-less Event. Under
+// the fail-closed filter (shouldReceive) an owner-less event reaches
+// only service clients, so a legacy payload from a still-rolling old
+// publisher is withheld from end-users rather than broadcast — the safe
+// direction during a rollout. (A row leaks only on an OLD receiver that
+// predates the fail-closed change; finish rolling all instances to
+// close that window.)
 type redisEnvelope struct {
 	Event       json.RawMessage `json:"e"`
 	OwnerUserID string          `json:"o,omitempty"`

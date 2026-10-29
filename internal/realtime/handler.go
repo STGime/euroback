@@ -25,16 +25,16 @@ var ErrUnauthorized = errors.New("realtime: unauthorized")
 var ErrForbidden = errors.New("realtime: forbidden")
 
 // AuthorizedClient is what the Authorize callback returns. ProjectID
-// + Plan drive routing and quota; EndUserID + Service drive the #108
-// per-row filter applied at fan-out time:
+// + Plan drive routing and quota; EndUserID + Service drive the
+// per-row filter applied at fan-out time (fail closed — see
+// shouldReceive):
 //
 //   - Service=true sees every row regardless of owner column. Mapped
 //     to: eb_sk_* apikey (server-side), platform JWT (console/admin).
-//   - EndUserID non-empty filters to rows whose owner column equals
-//     this value, plus rows without an owner column. Mapped to:
-//     end-user JWT.
+//   - EndUserID non-empty filters to rows whose recognised owner column
+//     equals this value. Mapped to: end-user JWT.
 //   - Both empty: anonymous subscriber (eb_pk_* apikey only). Receives
-//     rows without an owner column; rows with one are dropped.
+//     nothing — an anon caller can never be proven to be allowed a row.
 type AuthorizedClient struct {
 	ProjectID string
 	Plan      string
