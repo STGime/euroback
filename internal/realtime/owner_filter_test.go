@@ -70,11 +70,11 @@ func TestClient_ShouldReceive(t *testing.T) {
 		ownerUserID string
 		want        bool
 	}{
-		// No owner column → broadcast to all (preserves v0.4 behaviour
-		// for tables that aren't owner-scoped: lookup tables, public
-		// feeds, etc.)
-		{"any client, no owner", "", false, "", true},
-		{"end-user client, no owner", "u-1", false, "", true},
+		// No recognised owner column → fail closed for non-service
+		// clients: the row's visibility can't be established, so it is
+		// withheld from end-users and anon. Only the service role gets it.
+		{"anon client, no owner", "", false, "", false},
+		{"end-user client, no owner", "u-1", false, "", false},
 		{"service client, no owner", "", true, "", true},
 
 		// Owner column present → service sees all
@@ -251,12 +251,13 @@ func TestRealtime_ServiceSeesEverything(t *testing.T) {
 	}
 }
 
-// TestRealtime_NoOwnerColumn_StillBroadcasts — tables without an owner
-// column keep broadcasting to all subscribers (lookup tables, public
-// feeds, anything where rows aren't user-scoped). Without this we'd
-// silently break every realtime use case that isn't strictly
-// owner-scoped.
-func TestRealtime_NoOwnerColumn_StillBroadcasts(t *testing.T) {
+// TestRealtime_NoOwnerColumn_WithheldFromEndUsers — a row with no
+// recognised owner column is withheld from end-user and anon
+// subscribers (fail closed): we can't tell a genuinely public table
+// apart from a privately-scoped one, so we don't deliver. The service
+// role still receives it. (Restoring delivery for genuinely public
+// tables is the policy-aware follow-up.)
+func TestRealtime_NoOwnerColumn_WithheldFromEndUsers(t *testing.T) {
 	hub, wsURL, stop := startServerForOwnerTest(t)
 	defer stop()
 
@@ -264,6 +265,8 @@ func TestRealtime_NoOwnerColumn_StillBroadcasts(t *testing.T) {
 	defer end.close()
 	anon := dialSubscribed(t, wsURL, "anon-pk", "p-1", "db:countries")
 	defer anon.close()
+	svc := dialSubscribed(t, wsURL, "svc-sk", "p-1", "db:countries")
+	defer svc.close()
 
 	pub := NewEventPublisher(nil, hub)
 	_ = pub.PublishInsert(context.Background(), "p-1", "countries", map[string]interface{}{
@@ -272,13 +275,48 @@ func TestRealtime_NoOwnerColumn_StillBroadcasts(t *testing.T) {
 	})
 
 	for label, cli := range map[string]*rtTestClient{"end-user": end, "anon": anon} {
-		msg, err := cli.readWithin(t, 1*time.Second)
-		if err != nil {
-			t.Errorf("%s did not receive non-owner-scoped row: %v", label, err)
-			continue
+		if _, err := cli.readWithin(t, 250*time.Millisecond); err == nil {
+			t.Errorf("%s received an owner-less row (fail-closed regression)", label)
 		}
-		if !strings.Contains(string(msg), "France") {
-			t.Errorf("%s got wrong row: %s", label, msg)
+	}
+	msg, err := svc.readWithin(t, 1*time.Second)
+	if err != nil || !strings.Contains(string(msg), "France") {
+		t.Errorf("service client should still receive the owner-less row: %v %s", err, msg)
+	}
+}
+
+// TestRealtime_TenantScopedColumn_NoCrossAccountLeak — the reported
+// defect: a table scoped by a column realtime doesn't recognise
+// (tenant_id/org_id/account_id) must not be delivered to a different
+// end-user or to anon. REST hides these rows under RLS; realtime now
+// agrees by withholding. The service role still sees them.
+func TestRealtime_TenantScopedColumn_NoCrossAccountLeak(t *testing.T) {
+	hub, wsURL, stop := startServerForOwnerTest(t)
+	defer stop()
+
+	// Attacker A and anon subscribe to a tenant_id-scoped table; the row
+	// belongs to a different account B.
+	attacker := dialSubscribed(t, wsURL, "user:A", "p-1", "db:invoices")
+	defer attacker.close()
+	anon := dialSubscribed(t, wsURL, "anon-pk", "p-1", "db:invoices")
+	defer anon.close()
+	svc := dialSubscribed(t, wsURL, "svc-sk", "p-1", "db:invoices")
+	defer svc.close()
+
+	pub := NewEventPublisher(nil, hub)
+	for _, col := range []string{"tenant_id", "org_id", "account_id", "customer_id"} {
+		row := map[string]interface{}{"id": "r-1", col: "account-B", "secret_data": "B-PRIVATE"}
+		if err := pub.PublishInsert(context.Background(), "p-1", "invoices", row); err != nil {
+			t.Fatalf("publish (%s): %v", col, err)
+		}
+		if _, err := attacker.readWithin(t, 200*time.Millisecond); err == nil {
+			t.Errorf("%s: a different end-user received a cross-account row", col)
+		}
+		if _, err := anon.readWithin(t, 200*time.Millisecond); err == nil {
+			t.Errorf("%s: anon received a cross-account row", col)
+		}
+		if _, err := svc.readWithin(t, 1*time.Second); err != nil {
+			t.Errorf("%s: service client should still receive the row: %v", col, err)
 		}
 	}
 }
@@ -303,7 +341,7 @@ func TestRealtime_DeleteUsesOldRecordOwner(t *testing.T) {
 	// about. Exercise PublishUpdate: new record has the owner col
 	// blanked, but old_record has user_id=A.
 	_ = pub.PublishUpdate(context.Background(), "p-1", "notes",
-		map[string]interface{}{"id": "n-1"}, // new (no owner — simulates a column removal/cleanup)
+		map[string]interface{}{"id": "n-1"},                 // new (no owner — simulates a column removal/cleanup)
 		map[string]interface{}{"id": "n-1", "user_id": "A"}, // old
 	)
 

@@ -14,19 +14,19 @@ import (
 
 // Client represents a single WebSocket connection.
 //
-// Closes #108. endUserID + service let the hub decide per-event whether
-// a given client is entitled to receive a row. The two fields are
-// populated by HandleWebSocket from the Authorize callback:
+// endUserID + service let the hub decide per-event whether a given
+// client is entitled to receive a row (fail closed; see shouldReceive).
+// The two fields are populated by HandleWebSocket from the Authorize
+// callback:
 //   - service=true → eb_sk_* apikey or platform JWT. The client sees
 //     every row; matches the "service role" semantics RLS already uses
 //     on the REST side.
-//   - endUserID != "" → end-user JWT. The client sees rows whose
+//   - endUserID != "" → end-user JWT. The client sees only rows whose
 //     ownership column (user_id/owner_id/created_by/uploaded_by) equals
-//     this value, plus any row without an owner column.
+//     this value.
 //   - both empty → eb_pk_* apikey, no signed-in user. The client sees
-//     rows without an owner column; rows with one are dropped. Anon
-//     subscribers cannot be the row owner so this is the safer default
-//     than the pre-fix "broadcast everything" behaviour.
+//     nothing from owner-scoped or owner-less tables; an anon subscriber
+//     can never be proven to be allowed a row, so nothing is delivered.
 type Client struct {
 	hub           *Hub
 	conn          *websocket.Conn
@@ -34,26 +34,34 @@ type Client struct {
 	endUserID     string
 	service       bool
 	denied        map[string]bool // tables whose db: channels are refused
-	subscriptions []string // channels like "db:users", "db:users:uuid", "storage:bucket"
+	subscriptions []string        // channels like "db:users", "db:users:uuid", "storage:bucket"
 	send          chan []byte
 	mu            sync.Mutex // protects subscriptions
 }
 
 // shouldReceive reports whether this client is entitled to a row whose
 // detected owner column equals ownerUserID. ownerUserID is "" when the
-// row has no owner column at all; in that case every client receives,
-// preserving v0.4 behaviour. Full RLS is a v1.1 follow-up.
+// row has no recognised owner column (user_id / owner_id / created_by /
+// uploaded_by) — see ownerUserIDFromRow.
+//
+// Fail closed: realtime must never deliver a row the subscriber could
+// not read via REST under RLS. We can only prove that for the service
+// role (RLS bypass) and for an end-user who is the row's recognised
+// owner. Everything else — an owner-less row whose visibility we can't
+// establish (a table scoped by tenant_id / org_id / a custom column, a
+// service-only table, a genuinely public one), an anonymous subscriber,
+// or a row owned by someone else — is withheld.
+//
+// This is deliberately stricter than REST for genuinely public tables
+// without an owner column (those end-users/anon stop receiving events):
+// without resolving the table's policy we cannot tell a public table
+// apart from a privately-scoped one, so we withhold rather than leak.
+// Restoring public-table delivery is the policy-aware follow-up.
 func (c *Client) shouldReceive(ownerUserID string) bool {
-	if ownerUserID == "" {
-		return true
-	}
 	if c.service {
 		return true
 	}
-	if c.endUserID == "" {
-		return false
-	}
-	return c.endUserID == ownerUserID
+	return ownerUserID != "" && c.endUserID != "" && c.endUserID == ownerUserID
 }
 
 // Event represents a database change event broadcast to clients.
@@ -124,10 +132,10 @@ func (h *Hub) Run() {
 
 			for client := range clients {
 				if !client.shouldReceive(msg.ownerUserID) {
-					// Closes #108. Row has an owner column but
-					// this client isn't the owner (or is anon).
-					// Silent skip — equivalent to a SELECT that
-					// returned no rows under RLS.
+					// Not provably visible to this client (not the
+					// owner, anon, or an owner-less row we can't
+					// attribute). Silent skip — equivalent to a
+					// SELECT that returned no rows under RLS.
 					continue
 				}
 				select {
@@ -192,9 +200,10 @@ func (h *Hub) Unsubscribe(client *Client, channel string) {
 
 // Broadcast sends a JSON-encoded event to clients subscribed to the
 // key. ownerUserID, when non-empty, is the row's owner column value
-// (user_id / owner_id / created_by / uploaded_by) — used to filter
-// delivery to that user only. Pass "" to broadcast to everyone (rows
-// with no owner column, or system/notification events).
+// (user_id / owner_id / created_by / uploaded_by) — delivery is filtered
+// to that user (and the service role). "" means the row has no
+// recognised owner column: it is delivered only to service clients, not
+// to end-users or anon (fail closed — see shouldReceive).
 func (h *Hub) Broadcast(tenantID, channel string, data []byte, ownerUserID string) {
 	h.broadcast <- &broadcastMsg{
 		key:         tenantID + ":" + channel,
