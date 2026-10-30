@@ -712,6 +712,12 @@ func main() {
 	// ── Webhook deliveries retention (#845) ──
 	workers.StartWebhookDeliveriesRetention(ctx, pool)
 
+	// ── Email bounce suppression ──
+	// Hourly: records platform recipients whose mail failed permanently
+	// (from the email provider), so bulk announcements and the onboarding
+	// series skip them.
+	workers.StartEmailBounceSync(ctx, pool, emailClient)
+
 	// ── Backup sweeper (M3) ──
 	// 6-hour ticker: refreshes backup_snapshots cache from
 	// Provider.ListSnapshots for every Team project, prunes rows

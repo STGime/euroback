@@ -15,6 +15,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/mailaddr"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -207,6 +208,10 @@ func HandleInviteMember(pool *pgxpool.Pool, sendEmail func(ctx context.Context, 
 
 		if req.Email == "" || !strings.Contains(req.Email, "@") {
 			http.Error(w, `{"error":"valid email is required"}`, http.StatusBadRequest)
+			return
+		}
+		if mailaddr.IsReserved(req.Email) {
+			http.Error(w, `{"error":"this address can't receive email (reserved test domain) — use a real address"}`, http.StatusBadRequest)
 			return
 		}
 		if req.Role != "admin" && req.Role != "developer" && req.Role != "viewer" {

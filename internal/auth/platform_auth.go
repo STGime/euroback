@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/eurobase/euroback/internal/mailaddr"
 )
 
 // PlatformAuthService handles sign-up, sign-in, and JWT generation
@@ -198,6 +199,10 @@ func (e *ErrStaleDocumentVersion) Error() string {
 // grounds.
 var requiredAcceptances = []string{"terms", "dpa"}
 
+// ErrUndeliverableEmail refuses a signup with an address on a domain that
+// can never receive mail (reserved test domains, mailaddr.IsReserved).
+var ErrUndeliverableEmail = errors.New("this address can't receive email (reserved test domain) — use a real address")
+
 // SignUp creates a new platform user with email + bcrypt-hashed password.
 // When AllowPublicSignup is false (default), only emails present in the
 // platform_allowlist table can register. Others receive a waitlist error.
@@ -213,6 +218,9 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return nil, fmt.Errorf("email is required")
+	}
+	if mailaddr.IsReserved(email) {
+		return nil, ErrUndeliverableEmail
 	}
 	if err := ValidatePasswordStrength(password, email); err != nil {
 		return nil, err

@@ -26,6 +26,8 @@ on:
       - internal/workers/deliver_project_webhook*.go
       - internal/workers/invoke_function_trigger*.go
       - internal/workers/project_events*.go
+      - internal/workers/email_bounces*.go
+      - internal/workers/drip.go
       - internal/cron/executor.go
       - internal/storage/handler.go
       - internal/storage/delete_events_test.go
@@ -118,7 +120,7 @@ jobs:
         run: |
           pg_dump --version
           go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection|FailStaleRunning'
-          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker|DeliverProjectWebhook|WebhookDeliveryClient|InvokeFunctionTrigger'
+          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker|DeliverProjectWebhook|WebhookDeliveryClient|InvokeFunctionTrigger|EmailBounceSync'
           go test -count=1 -v ./internal/events/ ./internal/webhook/
           go test -count=1 -v ./internal/storage/ -run 'DeleteFileEmits'
 
