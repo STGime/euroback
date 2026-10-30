@@ -36,6 +36,8 @@ import (
 //     transitions cleanly but the dedicated instance has zero user
 //     data. Real work in follow-up team-tier/upgrade-worker-copy:
 //     1. Replay public.tenant_migrations against the dedicated DB
+//        (and write public.tenant_migration_markers for each version,
+//        as MigrationExecutor.ApplyDedicated does)
 //     2. Copy per-project public.* rows (edge_functions, cron_jobs,
 //        email_templates, function_triggers, backup_snapshots).
 //        cron_jobs: copy run_as explicitly — the column default is

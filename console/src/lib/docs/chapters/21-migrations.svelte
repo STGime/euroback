@@ -51,7 +51,7 @@ CREATE POLICY listings_owner ON listings
 					<li>Applied versions are recorded with a checksum. Re-applying an identical file is a no-op; <strong>editing an already-applied file is rejected</strong> — add a new version instead.</li>
 					<li>There are no down migrations — to undo something, write a new forward migration. For a risky change, write and review that rollback migration before you apply the change.</li>
 					<li>Concurrent runs are serialized per project, so two CI jobs can't race each other.</li>
-					<li>Not available for Team projects yet (dedicated database): the request is refused. Use the SQL editor or the direct connection there.</li>
+					<li>On Team, migrations run on your project&rsquo;s dedicated database, the same way.</li>
 				</ul>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Verifying a policy change</h3>
