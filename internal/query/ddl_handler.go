@@ -83,35 +83,42 @@ func HandleDDL(pool *pgxpool.Pool) chi.Router {
 	r.Use(requireTenantPool)
 
 	r.Post("/", handleCreateTable(pool))
-	r.Delete("/{table}", handleDropTable(pool))
-	r.Patch("/{table}", handleRenameTable(pool))
-	r.Post("/{table}/columns", handleAddColumn(pool))
-	r.Delete("/{table}/columns/{column}", handleDropColumn(pool))
-	r.Patch("/{table}/columns/{column}", handleAlterColumn(pool))
+
+	// Every route that changes a table refuses the platform-managed ones
+	// (refuseSystemTableRoutes). Create-policy checks in its handler
+	// instead, so the refusal is recorded in the SQL log.
+	// TestDDLRoutesRefuseSystemTables walks this router: a new route that
+	// changes a table must be guarded.
+	g := r.With(refuseSystemTableRoutes)
+	g.Delete("/{table}", handleDropTable(pool))
+	g.Patch("/{table}", handleRenameTable(pool))
+	g.Post("/{table}/columns", handleAddColumn(pool))
+	g.Delete("/{table}/columns/{column}", handleDropColumn(pool))
+	g.Patch("/{table}/columns/{column}", handleAlterColumn(pool))
 
 	// Foreign keys
-	r.Post("/{table}/foreign-keys", handleAddForeignKey(pool))
-	r.Delete("/{table}/constraints/{constraint}", handleDropConstraint(pool))
+	g.Post("/{table}/foreign-keys", handleAddForeignKey(pool))
+	g.Delete("/{table}/constraints/{constraint}", handleDropConstraint(pool))
 
 	// Unique constraints
-	r.Post("/{table}/constraints/unique", handleAddUniqueConstraint(pool))
+	g.Post("/{table}/constraints/unique", handleAddUniqueConstraint(pool))
 
 	// Indexes
 	r.Get("/{table}/indexes", handleListIndexes(pool))
-	r.Post("/{table}/indexes", handleCreateIndex(pool))
-	r.Delete("/{table}/indexes/{index}", handleDropIndex(pool))
+	g.Post("/{table}/indexes", handleCreateIndex(pool))
+	g.Delete("/{table}/indexes/{index}", handleDropIndex(pool))
 
 	// Triggers
 	r.Get("/{table}/triggers", handleListTriggers(pool))
-	r.Post("/{table}/triggers", handleCreateTrigger(pool))
-	r.Delete("/{table}/triggers/{trigger}", handleDropTrigger(pool))
+	g.Post("/{table}/triggers", handleCreateTrigger(pool))
+	g.Delete("/{table}/triggers/{trigger}", handleDropTrigger(pool))
 
 	// RLS
-	r.Post("/{table}/rls", handleToggleRLS(pool))
+	g.Post("/{table}/rls", handleToggleRLS(pool))
 	r.Get("/{table}/policies", handleListPolicies(pool))
 	r.Post("/{table}/policies", handleCreatePolicy(pool))
-	r.Post("/{table}/policies/preset", handleApplyPreset(pool))
-	r.Delete("/{table}/policies/{policy}", handleDropPolicy(pool))
+	g.Post("/{table}/policies/preset", handleApplyPreset(pool))
+	g.Delete("/{table}/policies/{policy}", handleDropPolicy(pool))
 
 	return r
 }
@@ -1457,6 +1464,19 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 // middlewares already refuse in that case; this makes every DDL handler
 // return 503 rather than whatever status it maps the underlying
 // ErrDedicatedPoolUnavailable to, should a new route skip them.
+// refuseSystemTableRoutes answers 403 for a request that would change a
+// platform-managed table ({table} in reservedTableNames), before any
+// database work.
+func refuseSystemTableRoutes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := refuseSystemTableChange(chi.URLParam(r, "table")); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func requireTenantPool(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if refuseWithoutTenantPool(w, r) {

@@ -110,6 +110,15 @@ func refuseSystemTableRLS(tableName string) error {
 	return &RefusedError{Err: fmt.Errorf("%w: RLS and policies on %q are managed by the platform and can't be changed", ErrSystemTable, tableName)}
 }
 
+// refuseSystemTableChange refuses any schema change (columns,
+// constraints, indexes, triggers, RLS) to a platform-managed table.
+func refuseSystemTableChange(tableName string) error {
+	if !reservedTableNames[tableName] {
+		return nil
+	}
+	return &RefusedError{Err: fmt.Errorf("%w: %q is managed by the platform and can't be changed", ErrSystemTable, tableName)}
+}
+
 // ForeignKeyDefinition describes a foreign key to add.
 type ForeignKeyDefinition struct {
 	Column           string `json:"column"`
