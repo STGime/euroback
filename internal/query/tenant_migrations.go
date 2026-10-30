@@ -100,6 +100,7 @@ var forbiddenMigStatementRes = []struct {
 	{regexp.MustCompile(`(?i)\b(create|drop|alter)\s+schema\b`), "schema management is not allowed — migrations run inside your project schema"},
 	{regexp.MustCompile(`(?i)\b(grant|revoke)\b`), "GRANT/REVOKE are not allowed in migrations — access control is managed by the platform"},
 	{regexp.MustCompile(`(?i)\balter\s+system\b`), "ALTER SYSTEM is not allowed"},
+	{regexp.MustCompile(`(?i)\b(standard_conforming_strings|backslash_quote|escape_string_warning)\b`), "changing how string literals are parsed is not allowed in migrations"},
 	{regexp.MustCompile(`(?i)\bcopy\b`), "COPY is not allowed in migrations — load data via the SDK or REST API"},
 }
 
@@ -132,6 +133,12 @@ func ValidateTenantMigrationSQL(sql string) error {
 		if f.re.MatchString(scanned) {
 			return errors.New(f.msg)
 		}
+	}
+	// Same rule as the SQL editor, transaction endpoint and cron: no
+	// pg_-prefixed catalog objects, qualified or not (the check above only
+	// sees qualified references, and catalog views resolve unqualified).
+	if err := ValidateNoCatalogRefs(trimmed); err != nil {
+		return err
 	}
 	return nil
 }
@@ -400,6 +407,11 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", pgx.Identifier{schemaName}.Sanitize())); err != nil {
 		return false, fmt.Errorf("set search_path: %w", err)
 	}
+	// Same string-parsing setting as the other customer-SQL paths, so the
+	// server reads the body the way the validator did.
+	if _, err := tx.Exec(ctx, "SET LOCAL standard_conforming_strings = on"); err != nil {
+		return false, fmt.Errorf("set standard_conforming_strings: %w", err)
+	}
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
 		return false, fmt.Errorf("set statement_timeout: %w", err)
 	}
@@ -448,8 +460,9 @@ func ListTenantMigrations(ctx context.Context, pool *pgxpool.Pool, projectID str
 
 // stripSQLLiterals blanks single-quoted strings, double-quoted
 // identifiers, dollar-quoted bodies, and comments so token scans don't
-// false-positive on quoted text. Mirrors internal/cron's scanner (which
-// in turn mirrors multistmt.go); kept local to avoid an import cycle.
+// false-positive on quoted text. String and identifier boundaries follow
+// the shared tokenizer (scanIdentifiersAndDots): E-prefixed strings use backslash
+// escapes, and '$' inside an identifier is part of the name.
 func stripSQLLiterals(sql string) string {
 	out := make([]byte, 0, len(sql))
 	blank := func(n int) {
@@ -463,30 +476,20 @@ func stripSQLLiterals(sql string) string {
 		c := s[i]
 		switch {
 		case c == '\'':
-			j := i + 1
-			for j < n {
-				if s[j] == '\'' {
-					if j+1 < n && s[j+1] == '\'' {
-						j += 2
-						continue
-					}
-					j++
-					break
-				}
-				j++
-			}
+			// An E prefix (a lone E/e word right before the quote) means
+			// backslash escapes, as in the shared tokenizer.
+			escaped := i >= 1 && (s[i-1] == 'E' || s[i-1] == 'e') && (i < 2 || !isIdentCont(s[i-2]))
+			j, _ := skipQuoted(s, i, '\'', escaped)
 			blank(j - i)
 			i = j
 		case c == '"':
-			j := i + 1
-			for j < n && s[j] != '"' {
-				j++
-			}
-			if j < n {
-				j++
-			}
+			j, _ := skipQuoted(s, i, '"', false)
 			blank(j - i)
 			i = j
+		case c == '$' && i > 0 && isIdentCont(s[i-1]):
+			// Part of an identifier (e.g. a$b), not a dollar quote.
+			out = append(out, c)
+			i++
 		case c == '$':
 			// dollar-quote: $tag$ ... $tag$
 			j := i + 1

@@ -42,6 +42,21 @@ func TestValidateTenantMigrationSQL_AcceptsRealisticMigrations(t *testing.T) {
 			  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();`,
 		"string literal containing forbidden-looking text": `
 			INSERT INTO notes (body) VALUES ('see public.users and COMMIT; for details');`,
+		"allowlisted catalog helper": `
+			ALTER TABLE listings ADD CONSTRAINT price_type CHECK (pg_typeof(price)::text = 'numeric');`,
+		"catalog-looking text in a string literal": `
+			INSERT INTO notes (body) VALUES ('pg_policies lists policies');`,
+		"catalog-looking text in a comment": `
+			-- see pg_class for details
+			ALTER TABLE listings ADD COLUMN note text; /* pg_index */`,
+		"catalog name inside a function body": `
+			CREATE FUNCTION notify_change() RETURNS trigger LANGUAGE plpgsql AS $fn$
+			BEGIN
+			  PERFORM pg_notify('changes', NEW.id::text);
+			  RETURN NEW;
+			END;
+			$fn$;`,
+		"pg_temp": `CREATE TABLE scratch AS SELECT 1 AS n; DROP TABLE IF EXISTS pg_temp.scratch;`,
 	}
 	for name, sql := range cases {
 		if err := ValidateTenantMigrationSQL(sql); err != nil {
@@ -75,6 +90,11 @@ func TestValidateTenantMigrationSQL_RejectsEscapeHatches(t *testing.T) {
 		"uuid_generate_v4 unqualified": `CREATE TABLE t (id uuid DEFAULT uuid_generate_v4());`,
 		"empty":                        `   `,
 		"oversized":                    "SELECT 1; -- " + strings.Repeat("x", maxMigrationSQLBytes),
+		"unqualified catalog view":     `CREATE TABLE snapshot AS SELECT * FROM pg_policies;`,
+		"unqualified catalog table":    `INSERT INTO t (name) SELECT relname FROM pg_class;`,
+		"catalog function":             `CREATE TABLE t AS SELECT pg_get_functiondef(1);`,
+		"quoted pg_ column":            `ALTER TABLE t ADD COLUMN "pg_score" int;`,
+		"string parsing setting":       `SET LOCAL standard_conforming_strings = off;`,
 	}
 	for name, sql := range cases {
 		if err := ValidateTenantMigrationSQL(sql); err == nil {
@@ -120,5 +140,47 @@ func TestStripSQLLiterals_BlanksQuotedRegions(t *testing.T) {
 	}
 	if !strings.Contains(out, "FROM t") {
 		t.Errorf("non-quoted structure lost:\n%s", out)
+	}
+}
+
+// String boundaries follow the shared tokenizer: an E-prefixed string ends
+// where the server ends it, '$' inside a name isn't a dollar quote, and the
+// text after a literal is still scanned.
+func TestStripSQLLiterals_FollowsSharedTokenizer(t *testing.T) {
+	cases := []struct{ in, keep, drop string }{
+		{`SELECT E'it\'s' AS a FROM t1;`, "FROM t1", "it"},
+		{`SELECT e'\\' AS b FROM t2;`, "FROM t2", ""},
+		{`SELECT 'it''s' AS c FROM t3;`, "FROM t3", "it"},
+		{`SELECT name'x' FROM t4;`, "FROM t4", "x'"},
+		{`SELECT a$b FROM t5;`, "a$b FROM t5", ""},
+	}
+	for _, tc := range cases {
+		out := stripSQLLiterals(tc.in)
+		if !strings.Contains(out, tc.keep) {
+			t.Errorf("%q: lost %q:\n%s", tc.in, tc.keep, out)
+		}
+		if tc.drop != "" && strings.Contains(out, tc.drop) {
+			t.Errorf("%q: still contains %q:\n%s", tc.in, tc.drop, out)
+		}
+	}
+}
+
+// Each refusal names the rule that caught it, so a reordering of the
+// checks can't hide one behind another.
+func TestValidateTenantMigrationSQL_RefusalReasons(t *testing.T) {
+	cases := []struct{ name, sql, want string }{
+		{"unqualified catalog view", `CREATE TABLE snapshot AS SELECT * FROM pg_policies;`, "system catalog"},
+		{"unqualified catalog table", `INSERT INTO t (name) SELECT relname FROM pg_class;`, "system catalog"},
+		{"catalog function", `CREATE TABLE t AS SELECT pg_get_functiondef(1);`, "system catalog"},
+		{"quoted pg_ column", `ALTER TABLE t ADD COLUMN "pg_score" int;`, "system catalog"},
+		{"qualified catalog keeps the schema message", `SELECT * FROM pg_catalog.pg_class;`, "forbidden schema"},
+		{"string parsing setting", `SET LOCAL standard_conforming_strings = off;`, "string literals are parsed"},
+		{"statement after an E-prefixed string", `INSERT INTO notes (body) VALUES (E'\''); GRANT SELECT ON notes TO PUBLIC;`, "GRANT/REVOKE"},
+	}
+	for _, tc := range cases {
+		err := ValidateTenantMigrationSQL(tc.sql)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want refusal containing %q, got %v", tc.name, tc.want, err)
+		}
 	}
 }
