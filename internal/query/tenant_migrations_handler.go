@@ -22,10 +22,6 @@ type ApplyMigrationRequest struct {
 	SQL     string `json:"sql"`
 }
 
-// ErrTeamMigrationsUnsupported refuses migrations for a project with a
-// dedicated database (Team): the executor only reaches the shared cluster.
-var ErrTeamMigrationsUnsupported = errors.New("migrations aren't available for Team projects yet: apply schema changes in the SQL editor or over your project's direct database connection")
-
 // HandleTenantMigrations mounts the tenant-migration endpoints (#190):
 //
 //	GET  /  — applied-migration history
@@ -62,21 +58,21 @@ func HandleTenantMigrations(exec *MigrationExecutor, readPool *pgxpool.Pool) htt
 			jsonError(w, "project ID is required", http.StatusBadRequest)
 			return
 		}
-		// The executor connects to the shared cluster only. A Team
-		// project's schema lives on its dedicated database, so refuse
-		// rather than migrate the shared cluster (no schema there, or a
-		// stale pre-upgrade copy). Never fall back to shared for Team.
-		if HasDedicatedDBFromContext(req.Context()) {
-			var body ApplyMigrationRequest
-			_ = json.NewDecoder(req.Body).Decode(&body)
-			logEntry := sqllog.FromRequest(req, sqllog.SourceMigration)
-			logEntry.Outcome = sqllog.OutcomeRefused
-			logEntry.Detail = fmt.Sprintf("migration %d (%s): %s", body.Version, body.Name, ErrTeamMigrationsUnsupported)
-			sqllog.FromContext(req.Context()).Record(req.Context(), projectID, body.SQL, logEntry)
-			jsonError(w, ErrTeamMigrationsUnsupported.Error(), http.StatusNotImplemented)
-			return
-		}
-		if !exec.Enabled() {
+		// A Team project's schema lives on its dedicated database: run the
+		// migration there (owner pool from the request), history on the
+		// shared cluster. Never fall back to the shared cluster's schema.
+		dedicated := HasDedicatedDBFromContext(req.Context())
+		var dedPool *pgxpool.Pool
+		if dedicated {
+			if dedPool = TenantPoolFromContext(req.Context()); dedPool == nil {
+				jsonError(w, "the project's dedicated database is not available right now", http.StatusServiceUnavailable)
+				return
+			}
+			if !exec.DedicatedEnabled() {
+				jsonError(w, "tenant migrations are not enabled on this deployment", http.StatusServiceUnavailable)
+				return
+			}
+		} else if !exec.Enabled() {
 			// Fail closed: never run a migration on a privileged pool.
 			jsonError(w, "tenant migrations are not enabled on this deployment (DDL_PASSWORD_SECRET not configured)", http.StatusServiceUnavailable)
 			return
@@ -100,7 +96,13 @@ func HandleTenantMigrations(exec *MigrationExecutor, readPool *pgxpool.Pool) htt
 
 		logEntry := sqllog.FromRequest(req, sqllog.SourceMigration)
 		start := time.Now()
-		applied, err := exec.Apply(req.Context(), projectID, schemaName, body.Version, body.Name, body.SQL)
+		var applied bool
+		var err error
+		if dedicated {
+			applied, err = exec.ApplyDedicated(req.Context(), dedPool, projectID, schemaName, body.Version, body.Name, body.SQL)
+		} else {
+			applied, err = exec.Apply(req.Context(), projectID, schemaName, body.Version, body.Name, body.SQL)
+		}
 		logEntry.DurationMs = sqllog.Ms(time.Since(start))
 		switch {
 		case err != nil:

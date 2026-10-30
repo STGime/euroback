@@ -436,6 +436,146 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	return true, nil
 }
 
+// dedicatedMarkerDDL creates, on a Team project's dedicated database, the
+// table that records which migrations ran there. The history itself stays
+// in public.tenant_migrations on the shared cluster (a platform table);
+// the marker is written in the same transaction as the migration body, so
+// if the shared history write fails after the dedicated commit, the next
+// run sees the marker and records the history instead of running the body
+// again. Also created by the dedicated bootstrap; kept idempotent here so
+// an instance bootstrapped earlier gets it on first use.
+const dedicatedMarkerDDL = `CREATE TABLE IF NOT EXISTS public.tenant_migration_markers (
+	schema_name text NOT NULL,
+	version     bigint NOT NULL CHECK (version > 0),
+	checksum    text NOT NULL,
+	applied_at  timestamptz NOT NULL DEFAULT now(),
+	PRIMARY KEY (schema_name, version)
+);
+REVOKE ALL ON public.tenant_migration_markers FROM PUBLIC`
+
+// DedicatedEnabled reports whether migrations can run on a Team project's
+// dedicated database: only the shared bookkeeping pool is needed (the body
+// runs on the dedicated owner pool from the request).
+func (e *MigrationExecutor) DedicatedEnabled() bool {
+	return e != nil && e.adminPool != nil
+}
+
+// ApplyDedicated applies one versioned migration on a Team project's
+// dedicated database (ded: its owner pool), with the history on the shared
+// cluster. Returns applied=false (no error) when the identical
+// version+checksum is already recorded.
+//
+// Order: the shared transaction takes the per-project lock and checks the
+// history; the dedicated transaction checks the marker, runs the body
+// under the same pins and owner-rights guard as Apply, writes the marker
+// and commits; then the shared transaction records the history and
+// commits. A marker without a history row (shared write failed after the
+// dedicated commit) is recorded without running the body again.
+func (e *MigrationExecutor) ApplyDedicated(ctx context.Context, ded *pgxpool.Pool, projectID, schemaName string, version int64, name, sqlText string) (applied bool, err error) {
+	if !e.DedicatedEnabled() || ded == nil {
+		return false, errors.New("tenant migrations on a dedicated database are not available")
+	}
+	if version <= 0 {
+		return false, errors.New("version must be a positive integer")
+	}
+	if !validIdentRe.MatchString(schemaName) {
+		return false, errors.New("invalid schema name")
+	}
+	if err := ValidateTenantMigrationSQL(sqlText); err != nil {
+		return false, refused(err)
+	}
+	checksum := MigrationChecksum(sqlText)
+
+	// Shared cluster: lock + history check, kept open until the history
+	// row is written.
+	stx, err := e.adminPool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin history tx: %w", err)
+	}
+	defer stx.Rollback(ctx) //nolint:errcheck
+	if _, err := stx.Exec(ctx, "SET LOCAL ROLE eurobase_migrator"); err != nil {
+		return false, fmt.Errorf("set migrator role: %w", err)
+	}
+	if _, err := stx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 190))", projectID); err != nil {
+		return false, fmt.Errorf("acquire migration lock: %w", err)
+	}
+	var recorded *string
+	if err := stx.QueryRow(ctx,
+		`SELECT checksum FROM public.tenant_migrations WHERE project_id = $1 AND version = $2`,
+		projectID, version).Scan(&recorded); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("check migration history: %w", err)
+	}
+	if recorded != nil {
+		if *recorded == checksum {
+			return false, nil // already applied, identical — no-op
+		}
+		return false, ErrMigrationChecksumMismatch
+	}
+
+	// Dedicated database: marker check, body, marker — one transaction.
+	dconn, err := ded.Acquire(ctx)
+	if err != nil {
+		return false, fmt.Errorf("connect to the dedicated database: %w", err)
+	}
+	defer dconn.Release()
+	dtx, err := dconn.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin migration tx: %w", err)
+	}
+	defer dtx.Rollback(ctx) //nolint:errcheck
+	if _, err := dtx.Exec(ctx, dedicatedMarkerDDL); err != nil {
+		return false, fmt.Errorf("ensure migration markers: %w", err)
+	}
+	var marked *string
+	if err := dtx.QueryRow(ctx,
+		`SELECT checksum FROM public.tenant_migration_markers WHERE schema_name = $1 AND version = $2`,
+		schemaName, version).Scan(&marked); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("check migration marker: %w", err)
+	}
+	if marked != nil && *marked != checksum {
+		return false, ErrMigrationChecksumMismatch
+	}
+	if marked == nil {
+		if _, err := dtx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", pgx.Identifier{schemaName}.Sanitize())); err != nil {
+			return false, fmt.Errorf("set search_path: %w", err)
+		}
+		if _, err := dtx.Exec(ctx, "SET LOCAL standard_conforming_strings = on"); err != nil {
+			return false, fmt.Errorf("set standard_conforming_strings: %w", err)
+		}
+		if _, err := dtx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
+			return false, fmt.Errorf("set statement_timeout: %w", err)
+		}
+		if err := withOwnerRightsGuard(ctx, dtx, schemaName, func() error {
+			if _, err := dconn.Conn().PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
+				return fmt.Errorf("migration failed: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return false, err
+		}
+		// The body may have changed search_path; the marker is schema-qualified.
+		if _, err := dtx.Exec(ctx,
+			`INSERT INTO public.tenant_migration_markers (schema_name, version, checksum) VALUES ($1, $2, $3)`,
+			schemaName, version, checksum); err != nil {
+			return false, fmt.Errorf("record migration marker: %w", err)
+		}
+	}
+	if err := dtx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit migration: %w", err)
+	}
+
+	if _, err := stx.Exec(ctx,
+		`INSERT INTO public.tenant_migrations (project_id, version, name, sql, checksum, applied_by)
+		 VALUES ($1, $2, $3, $4, $5, 'dedicated database')`,
+		projectID, version, name, sqlText, checksum); err != nil {
+		return false, fmt.Errorf("migration applied on the dedicated database but not yet recorded (the next run records it): %w", err)
+	}
+	if err := stx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("migration applied on the dedicated database but not yet recorded (the next run records it): %w", err)
+	}
+	return true, nil
+}
+
 // ListTenantMigrations returns the applied-migration history for a project.
 func ListTenantMigrations(ctx context.Context, pool *pgxpool.Pool, projectID string) ([]TenantMigration, error) {
 	rows, err := pool.Query(ctx,

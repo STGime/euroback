@@ -33,6 +33,7 @@ import (
 	"github.com/eurobase/euroback/internal/functions"
 	"github.com/eurobase/euroback/internal/jobs"
 	"github.com/eurobase/euroback/internal/plans"
+	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/tenantlogin"
@@ -1180,25 +1181,65 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
-	// The migration executor only reaches the shared cluster, so a Team
-	// project's migrations are refused (never applied to shared); the
-	// history listing still works. shared_cluster_untouched checks that
-	// nothing reached the shared cluster.
-	check(t, env, "migrations_refused_for_team", func() error {
-		r := console("POST", "/migrations", `{"version":1,"name":"e2e_team","sql":"CREATE TABLE e2e_team_mig (id int)"}`)
-		if r.code != http.StatusNotImplemented || !strings.Contains(r.body, "Team projects") {
-			return fmt.Errorf("a Team project's migration must be refused with 501: %w", r)
+	// Tenant migrations run on the dedicated database (owner pool) with the
+	// history on the shared cluster: applied, listed, a re-run is a no-op,
+	// changed SQL is refused, and a marker without a history row (the
+	// history write failed after the dedicated commit) is recorded without
+	// running the body again. Nothing reaches the shared cluster's schema.
+	check(t, env, "migrations_on_dedicated", func() error {
+		ctx := context.Background()
+		const v1 = `CREATE TABLE e2e_team_mig (id int PRIMARY KEY)`
+		post := func(version int, sql string) *httpResult {
+			body, _ := json.Marshal(map[string]any{"version": version, "name": "e2e_team", "sql": sql})
+			return console("POST", "/migrations", string(body))
 		}
-		if r := console("GET", "/migrations", ""); r.code != http.StatusOK {
-			return fmt.Errorf("migration history must still be listed: %w", r)
+		tableOn := func(pool *pgxpool.Pool, table string) (bool, error) {
+			var ok bool
+			err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, env.schema+"."+table).Scan(&ok)
+			return ok, err
+		}
+		if r := post(1, v1); r.code != http.StatusOK || !strings.Contains(r.body, `"applied":true`) {
+			return fmt.Errorf("apply on the dedicated database: %w", r)
+		}
+		if ok, err := tableOn(env.ded, "e2e_team_mig"); err != nil || !ok {
+			return fmt.Errorf("migration table missing on the dedicated database (err %v)", err)
+		}
+		if env.upgraded {
+			if ok, err := tableOn(env.shared, "e2e_team_mig"); err != nil || ok {
+				return fmt.Errorf("migration reached the shared cluster's stale copy (err %v)", err)
+			}
+		}
+		if r := console("GET", "/migrations", ""); r.code != http.StatusOK || !strings.Contains(r.body, `"version":1`) {
+			return fmt.Errorf("history must list version 1: %w", r)
+		}
+		if r := post(1, v1); r.code != http.StatusOK || !strings.Contains(r.body, `"applied":false`) {
+			return fmt.Errorf("re-running an applied version must be a no-op: %w", r)
+		}
+		if r := post(1, v1+"; CREATE TABLE e2e_team_other (id int)"); r.code != http.StatusConflict {
+			return fmt.Errorf("changed SQL for an applied version must be 409: %w", r)
+		}
+
+		// Recovery: version 2 is marked as applied on the dedicated
+		// database but has no history row.
+		const v2 = `CREATE TABLE e2e_team_rerun (id int)`
+		if _, err := env.ded.Exec(ctx,
+			`INSERT INTO public.tenant_migration_markers (schema_name, version, checksum) VALUES ($1, 2, $2)`,
+			env.schema, query.MigrationChecksum(v2)); err != nil {
+			return fmt.Errorf("seed marker: %w", err)
+		}
+		if r := post(2, v2); r.code != http.StatusOK {
+			return fmt.Errorf("recording a marked migration: %w", r)
+		}
+		if ok, err := tableOn(env.ded, "e2e_team_rerun"); err != nil || ok {
+			return fmt.Errorf("a marked migration's body ran again (err %v)", err)
 		}
 		var recorded int
-		if err := env.shared.QueryRow(context.Background(),
+		if err := env.shared.QueryRow(ctx,
 			`SELECT count(*) FROM public.tenant_migrations WHERE project_id = $1`, env.projectID).Scan(&recorded); err != nil {
 			return err
 		}
-		if recorded != 0 {
-			return fmt.Errorf("a refused migration was recorded as applied (%d rows)", recorded)
+		if recorded != 2 {
+			return fmt.Errorf("history rows = %d, want 2", recorded)
 		}
 		return nil
 	})
@@ -2244,7 +2285,7 @@ var teamOnlyChecks = map[string]bool{
 	"console_fails_closed_while_provisioning":       true,
 	"readonly_connection_limit":                     true,
 	"shared_cluster_untouched":                      true,
-	"migrations_refused_for_team":                   true,
+	"migrations_on_dedicated":                       true,
 	"credential_reseal":                             true,
 	"console_connection_roles":                      true,
 	"function_storage_refused_without_dedicated_db": true,
@@ -2804,7 +2845,11 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	}
 	// The console's cron Test Run (#645) dry-runs as the tenant login.
 	t.Setenv("FUNC_PASSWORD_SECRET", string(funcSecret))
-	router := NewRouter(gw, dev, nil, auth.NewPlatformAuthMiddleware(platformSvc).WithPATService(auth.NewPATService(gw)), platformSvc, nil, nil, s3Client, nil, nil,
+	// Tenant migrations: the shared-cluster path needs DDL_PASSWORD_SECRET
+	// (not configured here, so Free answers 503); a Team project's
+	// migrations need only the shared bookkeeping pool.
+	migrationExec := query.NewMigrationExecutor(dev, "", nil)
+	router := NewRouter(gw, dev, migrationExec, auth.NewPlatformAuthMiddleware(platformSvc).WithPATService(auth.NewPATService(gw)), platformSvc, nil, nil, s3Client, nil, nil,
 		// sdkLogin nil: SDK /sql + /rpc stay on the shared gateway pool in
 		// the e2e (as in prod until SDK_FUNC_LOGIN flips). The per-project-
 		// login seam is covered by engine_tenant_login_test.go; the real

@@ -16,9 +16,10 @@
 --   * NO `eurobase_function_runner` role — edge functions running
 --     against a Team-tier dedicated instance is a follow-up
 --     (routing the runner pod is a separate design).
---   * NO `<schema>_ddl` role — tenant migrations against a
---     dedicated instance land in part 2c (migration executor
---     routing).
+--   * NO `<schema>_ddl` role — tenant migrations run on the
+--     owner connection (query.MigrationExecutor.ApplyDedicated); their
+--     history stays in the shared cluster's public.tenant_migrations,
+--     with a marker per applied version here (see below).
 --   * NO `<schema>_func` role — same reason as `_function_runner`
 --     above.
 --   * NO `public.projects` / `public.tenant_migrations` — those
@@ -184,6 +185,21 @@ END $$;
 --     platform's Repo layer already knows the schema_name of a
 --     Team-tier project (it was set at create time on the shared
 --     cluster's projects row).
+
+-- Tenant-migration markers: one row per migration applied on this
+-- database, written in the same transaction as the migration body. The
+-- history lives on the shared cluster; a marker without a history row
+-- (history write failed after this commit) is recorded on the next run
+-- instead of re-running the body. Owner only. Same definition as
+-- query.dedicatedMarkerDDL (which also creates it on first use).
+CREATE TABLE IF NOT EXISTS public.tenant_migration_markers (
+    schema_name text NOT NULL,
+    version     bigint NOT NULL CHECK (version > 0),
+    checksum    text NOT NULL,
+    applied_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (schema_name, version)
+);
+REVOKE ALL ON public.tenant_migration_markers FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION public.provision_tenant(
     p_project_id   UUID,

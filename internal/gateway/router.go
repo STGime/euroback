@@ -1067,11 +1067,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// on /v1: data-plane keys never run DDL. Fails closed (503) when
 			// the executor isn't configured (no DDL_PASSWORD_SECRET).
 			// The context middleware marks a Team project (dedicated
-			// database): the executor only reaches the shared cluster, so
-			// the handler refuses those rather than migrate the wrong
-			// database (#684). The settings variant keeps the history
-			// (a platform table) readable while the dedicated pool can't
-			// be opened; POST is refused either way.
+			// database) and attaches its owner pool: the migration runs
+			// there, its history stays on the shared cluster (#684). The
+			// settings variant keeps the history (a platform table)
+			// readable while the dedicated pool can't be opened; POST then
+			// answers 503 — never the shared cluster's schema.
 			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContextForSettings(pool, developerPool, tenantPoolResolver)).Mount("/migrations", query.HandleTenantMigrations(migrationExec, pool))
 			r.With(tenant.RequireMinRole("developer")).Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
