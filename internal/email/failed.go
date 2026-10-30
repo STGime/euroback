@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -60,15 +61,16 @@ func (c *EmailClient) ListFailedEmails(ctx context.Context, since time.Time) ([]
 		if resp.StatusCode >= 300 {
 			return nil, &TEMError{Status: resp.StatusCode, Body: string(body)}
 		}
-		emails, err := parseFailedEmails(body)
+		emails, pageLen, err := parseFailedEmailsPage(body)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, emails...)
-		if len(emails) < failedEmailsPageSize {
-			break
+		if pageLen < failedEmailsPageSize {
+			return out, nil
 		}
 	}
+	slog.Warn("listing failed emails stopped at the page limit", "pages", failedEmailsMaxPages)
 	return out, nil
 }
 
@@ -77,6 +79,7 @@ type temListResponse struct {
 		MailRcpt      string    `json:"mail_rcpt"`
 		Status        string    `json:"status"`
 		StatusDetails string    `json:"status_details"`
+		Flags         []string  `json:"flags"`
 		CreatedAt     time.Time `json:"created_at"`
 		LastTries     []struct {
 			Message string `json:"message"`
@@ -85,11 +88,21 @@ type temListResponse struct {
 }
 
 // parseFailedEmails reads one page of the provider's email list, keeping
-// only failed emails with a recipient.
+// only permanent failures: emails the provider flags as a hard bounce, a
+// missing mailbox or a blocklisted recipient, or whose recipient domain
+// doesn't exist. Other failures (an unreachable mail server, a rejection
+// the provider doesn't flag) may be temporary and are not kept.
 func parseFailedEmails(body []byte) ([]FailedEmail, error) {
+	out, _, err := parseFailedEmailsPage(body)
+	return out, err
+}
+
+// parseFailedEmailsPage also returns how many emails the page held (for
+// paging), before filtering.
+func parseFailedEmailsPage(body []byte) ([]FailedEmail, int, error) {
 	var parsed temListResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("parse failed emails: %w", err)
+		return nil, 0, fmt.Errorf("parse failed emails: %w", err)
 	}
 	out := make([]FailedEmail, 0, len(parsed.Emails))
 	for _, e := range parsed.Emails {
@@ -97,17 +110,40 @@ func parseFailedEmails(body []byte) ([]FailedEmail, error) {
 		if e.Status != "failed" || rcpt == "" {
 			continue
 		}
+		lastMsg := ""
+		if n := len(e.LastTries); n > 0 {
+			lastMsg = e.LastTries[n-1].Message
+		}
+		if !isHardFailure(e.Flags, lastMsg) {
+			continue
+		}
 		reason := e.StatusDetails
-		if n := len(e.LastTries); n > 0 && e.LastTries[n-1].Message != "" {
-			reason = strings.TrimSpace(reason + ": " + e.LastTries[n-1].Message)
+		if len(e.Flags) > 0 {
+			reason = strings.TrimSpace(reason + " [" + strings.Join(e.Flags, ",") + "]")
 		}
-		if len(reason) > 300 {
-			reason = reason[:300]
+		if lastMsg != "" {
+			reason = strings.TrimSpace(reason + ": " + lastMsg)
 		}
+		if r := []rune(reason); len(r) > 300 {
+			reason = string(r[:300])
+		}
+		reason = strings.ToValidUTF8(reason, "")
 		if reason == "" {
 			reason = "failed"
 		}
 		out = append(out, FailedEmail{Recipient: rcpt, Reason: reason, At: e.CreatedAt})
 	}
-	return out, nil
+	return out, len(parsed.Emails), nil
+}
+
+// isHardFailure: the provider's own permanent-failure flags, or a
+// recipient domain that doesn't exist.
+func isHardFailure(flags []string, lastMessage string) bool {
+	for _, f := range flags {
+		switch f {
+		case "hard_bounce", "mailbox_not_found", "blocklisted":
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(lastMessage), "non-existing domain")
 }

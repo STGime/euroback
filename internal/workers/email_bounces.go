@@ -54,6 +54,9 @@ func StartEmailBounceSync(ctx context.Context, pool *pgxpool.Pool, lister *email
 // syncEmailBounces runs one pass and returns how many addresses it
 // recorded (new or refreshed). Errors are logged; the next pass retries.
 func syncEmailBounces(ctx context.Context, pool *pgxpool.Pool, lister failedEmailLister, since time.Time) int {
+	// Cleanup runs even when the listing fails, so addresses of deleted
+	// accounts never linger.
+	defer removeStaleSuppressions(ctx, pool)
 	failed, err := lister.ListFailedEmails(ctx, since)
 	if err != nil {
 		slog.Warn("email bounce sync: listing failed emails", "error", err)
@@ -83,14 +86,26 @@ func syncEmailBounces(ctx context.Context, pool *pgxpool.Pool, lister failedEmai
 		}
 		recorded += int(tag.RowsAffected())
 	}
-	if _, err := pool.Exec(ctx, `
-		DELETE FROM public.email_suppressions s
-		 WHERE NOT EXISTS (SELECT 1 FROM public.platform_users u WHERE lower(u.email) = s.email)
-		   AND NOT EXISTS (SELECT 1 FROM public.platform_allowlist a WHERE lower(trim(a.email)) = s.email)`); err != nil {
-		slog.Warn("email bounce sync: removing stale suppressions", "error", err)
-	}
 	if recorded > 0 {
 		slog.Info("email bounce sync: suppressions recorded", "count", recorded)
 	}
 	return recorded
+}
+
+// emailSuppressionTTL: a suppression not refreshed by a new bounce for
+// this long is dropped, so a mailbox that comes back gets mail again.
+const emailSuppressionTTL = 90 * 24 * time.Hour
+
+// removeStaleSuppressions drops rows whose address no longer belongs to a
+// platform account or allowlist entry, and rows not seen for
+// emailSuppressionTTL.
+func removeStaleSuppressions(ctx context.Context, pool *pgxpool.Pool) {
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM public.email_suppressions s
+		 WHERE s.last_seen_at < now() - make_interval(secs => $1)
+		    OR (NOT EXISTS (SELECT 1 FROM public.platform_users u WHERE lower(u.email) = s.email)
+		        AND NOT EXISTS (SELECT 1 FROM public.platform_allowlist a WHERE lower(trim(a.email)) = s.email))`,
+		emailSuppressionTTL.Seconds()); err != nil {
+		slog.Warn("email bounce sync: removing stale suppressions", "error", err)
+	}
 }

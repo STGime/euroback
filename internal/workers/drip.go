@@ -133,10 +133,24 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 		return w.recordSend(ctx, args.UserID, args.Step, "skipped_bounced", "")
 	}
 	if !confirmed {
-		if time.Since(job.CreatedAt) < dripVerifyWait {
+		if age := time.Since(job.CreatedAt); age < dripVerifyWait {
+			// Check back soon at first, so the welcome email follows a
+			// prompt verification; hourly after that.
+			if age < 24*time.Hour {
+				return river.JobSnooze(10 * time.Minute)
+			}
 			return river.JobSnooze(time.Hour)
 		}
 		logger.Info("drip skip — email never verified")
+		return w.recordSend(ctx, args.UserID, args.Step, "skipped_unconfirmed", "")
+	}
+	// A step held back for verification whose successor is already due is
+	// skipped, so a late verification doesn't release several onboarding
+	// emails at once (all steps are enqueued at signup, so CreatedAt is
+	// the signup time).
+	interval := time.Duration(email.OnboardingIntervalDays) * 24 * time.Hour
+	if args.Step < email.NumOnboardingSteps-1 && time.Since(job.CreatedAt) > time.Duration(args.Step+1)*interval {
+		logger.Info("drip skip — next step already due")
 		return w.recordSend(ctx, args.UserID, args.Step, "skipped_unconfirmed", "")
 	}
 

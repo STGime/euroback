@@ -570,6 +570,11 @@ func (s *PlatformAuthService) VerifyEmail(ctx context.Context, rawToken string) 
 	}
 
 	slog.Info("platform user verified email", "user_id", user.ID, "email", user.Email)
+	// A verified address is deliverable: take it off the bounce list
+	// (best effort; the list only gates non-essential mail).
+	if _, err := s.pool.Exec(ctx, `DELETE FROM email_suppressions WHERE email = lower($1)`, user.Email); err != nil {
+		slog.Warn("clearing email suppression after verification failed", "user_id", user.ID, "error", err)
+	}
 
 	// MFA (#621): a verification link must not become a passkey bypass.
 	// A leftover link (e.g. an earlier "resend" still inside its 24h

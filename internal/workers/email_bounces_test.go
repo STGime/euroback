@@ -50,11 +50,15 @@ func TestEmailBounceSyncAndDripSkips(t *testing.T) {
 	unconfirmed := "unverified-" + sfx + "@bounce-check.eu"
 	invited := "invited-" + sfx + "@bounce-check.eu"
 	stranger := "end-user-" + sfx + "@bounce-check.eu"
-	var bouncedID, unconfirmedID string
+	late := "late-" + sfx + "@bounce-check.eu"
+	var bouncedID, unconfirmedID, lateID string
 	if err := admin.QueryRow(ctx, `INSERT INTO platform_users (email, email_confirmed_at) VALUES ($1, now()) RETURNING id`, bounced).Scan(&bouncedID); err != nil {
 		t.Fatal(err)
 	}
 	if err := admin.QueryRow(ctx, `INSERT INTO platform_users (email) VALUES ($1) RETURNING id`, unconfirmed).Scan(&unconfirmedID); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRow(ctx, `INSERT INTO platform_users (email, email_confirmed_at) VALUES ($1, now()) RETURNING id`, late).Scan(&lateID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx, `INSERT INTO platform_allowlist (email) VALUES ($1)`, invited); err != nil {
@@ -63,7 +67,7 @@ func TestEmailBounceSyncAndDripSkips(t *testing.T) {
 	t.Cleanup(func() {
 		c := context.Background()
 		_, _ = admin.Exec(c, `DELETE FROM email_suppressions WHERE email LIKE $1`, "%-"+sfx+"@bounce-check.eu")
-		_, _ = admin.Exec(c, `DELETE FROM platform_users WHERE id = ANY($1)`, []string{bouncedID, unconfirmedID})
+		_, _ = admin.Exec(c, `DELETE FROM platform_users WHERE id = ANY($1)`, []string{bouncedID, unconfirmedID, lateID})
 		_, _ = admin.Exec(c, `DELETE FROM platform_allowlist WHERE email = $1`, invited)
 	})
 
@@ -113,11 +117,35 @@ func TestEmailBounceSyncAndDripSkips(t *testing.T) {
 	if err := w.Work(ctx, job(unconfirmedID, time.Now())); !errors.As(err, &snooze) {
 		t.Fatalf("unverified, recent signup: err = %v, want a snooze", err)
 	}
+	if got := status(unconfirmedID); got != "" {
+		t.Fatalf("a snooze must not record anything, got %q", got)
+	}
 	if err := w.Work(ctx, job(unconfirmedID, time.Now().Add(-8*24*time.Hour))); err != nil {
 		t.Fatalf("unverified, old signup: %v", err)
 	}
 	if got := status(unconfirmedID); got != "skipped_unconfirmed" {
 		t.Fatalf("unverified status = %q, want skipped_unconfirmed", got)
+	}
+
+	// Verified, but step 0 runs after step 1 was already due (verification
+	// came late): skipped, so the user doesn't get several at once.
+	if err := w.Work(ctx, job(lateID, time.Now().Add(-5*24*time.Hour))); err != nil {
+		t.Fatalf("late step: %v", err)
+	}
+	if got := status(lateID); got != "skipped_unconfirmed" {
+		t.Fatalf("late step status = %q, want skipped_unconfirmed", got)
+	}
+
+	// A suppression not refreshed for 90 days expires.
+	if _, err := admin.Exec(ctx, `UPDATE email_suppressions SET last_seen_at = now() - interval '91 days' WHERE email = $1`, bounced); err != nil {
+		t.Fatal(err)
+	}
+	syncEmailBounces(ctx, gw, fakeFailedLister{}, time.Now())
+	if suppressed(bounced) {
+		t.Fatal("an expired suppression must be removed")
+	}
+	if _, err := admin.Exec(ctx, `INSERT INTO email_suppressions (email, reason) VALUES ($1, 'dropped')`, bounced); err != nil {
+		t.Fatal(err)
 	}
 
 	// A row whose address no longer belongs to any account or invitation

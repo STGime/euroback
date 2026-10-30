@@ -305,6 +305,10 @@ func HandleResendInvitation(pool *pgxpool.Pool, sendEmail func(ctx context.Conte
 			return
 		}
 		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+		if mailaddr.IsReserved(req.Email) {
+			http.Error(w, `{"error":"this address can't receive email (reserved test domain) — use a real address"}`, http.StatusBadRequest)
+			return
+		}
 
 		// Generate a fresh token.
 		rawToken, tokenHash, err := generateInviteToken()
