@@ -42,6 +42,10 @@ func TestValidateTenantMigrationSQL_AcceptsRealisticMigrations(t *testing.T) {
 			  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();`,
 		"string literal containing forbidden-looking text": `
 			INSERT INTO notes (body) VALUES ('see public.users and COMMIT; for details');`,
+		"allowlisted catalog helper": `
+			ALTER TABLE listings ADD CONSTRAINT price_type CHECK (pg_typeof(price)::text = 'numeric');`,
+		"catalog-looking text in a string literal": `
+			INSERT INTO notes (body) VALUES ('pg_policies lists policies');`,
 	}
 	for name, sql := range cases {
 		if err := ValidateTenantMigrationSQL(sql); err != nil {
@@ -75,6 +79,9 @@ func TestValidateTenantMigrationSQL_RejectsEscapeHatches(t *testing.T) {
 		"uuid_generate_v4 unqualified": `CREATE TABLE t (id uuid DEFAULT uuid_generate_v4());`,
 		"empty":                        `   `,
 		"oversized":                    "SELECT 1; -- " + strings.Repeat("x", maxMigrationSQLBytes),
+		"unqualified catalog view":     `CREATE TABLE snapshot AS SELECT * FROM pg_policies;`,
+		"unqualified catalog table":    `INSERT INTO t (name) SELECT relname FROM pg_class;`,
+		"catalog function":             `CREATE TABLE t AS SELECT pg_get_functiondef(1);`,
 	}
 	for name, sql := range cases {
 		if err := ValidateTenantMigrationSQL(sql); err == nil {

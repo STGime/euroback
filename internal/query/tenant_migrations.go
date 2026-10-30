@@ -133,6 +133,12 @@ func ValidateTenantMigrationSQL(sql string) error {
 			return errors.New(f.msg)
 		}
 	}
+	// Same rule as the SQL editor, transaction endpoint and cron: no
+	// pg_-prefixed catalog objects, qualified or not (the check above only
+	// sees qualified references, and catalog views resolve unqualified).
+	if err := ValidateNoCatalogRefs(trimmed); err != nil {
+		return err
+	}
 	return nil
 }
 
