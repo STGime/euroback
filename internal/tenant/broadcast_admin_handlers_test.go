@@ -405,6 +405,64 @@ func TestAdminListBroadcastAudience_ExcludesReservedTLDs(t *testing.T) {
 	}
 }
 
+// TestAdminListBroadcastAudience_ExcludesExampleDomainsAndBounces: the
+// reserved second-level example.com / .net / .org domains and addresses
+// on the bounce list (public.email_suppressions) are not offered — and
+// the send handler, which shares the filter, refuses them too.
+func TestAdminListBroadcastAudience_ExcludesExampleDomainsAndBounces(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM email_suppressions WHERE email LIKE '%@test.eurobase.local'`)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_allowlist WHERE email LIKE '%@test.eurobase.local' OR email LIKE 'probe-%@%example.%'`)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email LIKE '%@test.eurobase.local' OR email LIKE 'probe-%@%example.%'`)
+	}
+	cleanup()
+	defer cleanup()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO platform_allowlist (email, note) VALUES
+		    ('probe-f@example.com', 'RFC 2606 second level'),
+		    ('probe-g@mail.example.org', 'RFC 2606 second level, subdomain'),
+		    ('still-real@test.eurobase.local', 'must appear')
+		ON CONFLICT (email) DO NOTHING`); err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO platform_users (email, password_hash, email_confirmed_at) VALUES
+		    ('bounced@test.eurobase.local', 'x', now()),
+		    ('probe-h@example.net', 'x', now())`); err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO email_suppressions (email, reason) VALUES ('bounced@test.eurobase.local', 'dropped')`); err != nil {
+		t.Fatalf("seed suppression: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	AdminListBroadcastAudience(pool).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/platform/admin/broadcast/audience", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	var body struct {
+		Recipients []BroadcastRecipient `json:"recipients"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, r := range body.Recipients {
+		seen[r.Email] = true
+	}
+	if !seen["still-real@test.eurobase.local"] {
+		t.Error("a real address is missing from the audience")
+	}
+	for _, banned := range []string{"probe-f@example.com", "probe-g@mail.example.org", "probe-h@example.net", "bounced@test.eurobase.local"} {
+		if seen[banned] {
+			t.Errorf("%q must not be in the audience", banned)
+		}
+	}
+}
+
 // TestAdminSendAllowlistEmail_RejectsReservedTLDInSend is the
 // send-side mirror. Even if the caller manages to include a
 // reserved-TLD address in the request payload (bypassing the

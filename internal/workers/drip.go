@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/eurobase/euroback/internal/email"
 	"github.com/eurobase/euroback/internal/jobs"
@@ -12,6 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 )
+
+// dripVerifyWait is how long after signup an onboarding email waits for
+// the address to be verified before the step is skipped.
+const dripVerifyWait = 7 * 24 * time.Hour
 
 // SendDripEmailWorker fires one step of the onboarding drip series
 // (Phase C of the public-beta launch plan).
@@ -58,6 +63,8 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 		userEmail   string
 		displayName *string
 		projectName *string
+		confirmed   bool
+		suppressed  bool
 	)
 	err := w.DBPool.QueryRow(ctx,
 		`SELECT u.email, u.display_name,
@@ -66,11 +73,13 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 		           JOIN project_members pm ON pm.project_id = p.id
 		          WHERE pm.user_id = u.id
 		          ORDER BY p.created_at ASC
-		          LIMIT 1) AS first_project
+		          LIMIT 1) AS first_project,
+		        u.email_confirmed_at IS NOT NULL,
+		        EXISTS (SELECT 1 FROM email_suppressions s WHERE s.email = lower(u.email))
 		 FROM platform_users u
 		 WHERE u.id = $1`,
 		args.UserID,
-	).Scan(&userEmail, &displayName, &projectName)
+	).Scan(&userEmail, &displayName, &projectName, &confirmed, &suppressed)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// User deleted between enqueue + fire — nothing to do.
@@ -115,13 +124,43 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 	// welcome mail is annoying, not incorrect. Do not build stronger
 	// guarantees (billing side-effects, external one-shot API calls)
 	// on top of this worker without adding a 'sending' pre-write.
+	// Mail to an address that bounced, or that was never verified, only
+	// adds bounces (which count against the sending domain). An
+	// unverified address gets until dripVerifyWait after signup to be
+	// verified — the job checks back hourly — then the step is skipped.
+	if suppressed {
+		logger.Info("drip skip — address bounced before")
+		return w.recordSend(ctx, args.UserID, args.Step, "skipped_bounced", "")
+	}
+	if !confirmed {
+		if age := time.Since(job.CreatedAt); age < dripVerifyWait {
+			// Check back soon at first, so the welcome email follows a
+			// prompt verification; hourly after that.
+			if age < 24*time.Hour {
+				return river.JobSnooze(10 * time.Minute)
+			}
+			return river.JobSnooze(time.Hour)
+		}
+		logger.Info("drip skip — email never verified")
+		return w.recordSend(ctx, args.UserID, args.Step, "skipped_unconfirmed", "")
+	}
+	// A step held back for verification whose successor is already due is
+	// skipped, so a late verification doesn't release several onboarding
+	// emails at once (all steps are enqueued at signup, so CreatedAt is
+	// the signup time).
+	interval := time.Duration(email.OnboardingIntervalDays) * 24 * time.Hour
+	if args.Step < email.NumOnboardingSteps-1 && time.Since(job.CreatedAt) > time.Duration(args.Step+1)*interval {
+		logger.Info("drip skip — next step already due")
+		return w.recordSend(ctx, args.UserID, args.Step, "skipped_unconfirmed", "")
+	}
+
 	var already bool
 	err = w.DBPool.QueryRow(ctx,
 		`SELECT EXISTS (
 		   SELECT 1 FROM drip_email_sends
 		    WHERE user_id = $1
 		      AND step = $2
-		      AND status IN ('sent', 'skipped_opt_out')
+		      AND status IN ('sent', 'skipped_opt_out', 'skipped_unconfirmed', 'skipped_bounced')
 		 )`,
 		args.UserID, args.Step,
 	).Scan(&already)

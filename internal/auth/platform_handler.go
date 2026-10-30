@@ -448,6 +448,9 @@ func isUserError(err error) bool {
 	if errors.As(err, &weak) {
 		return true
 	}
+	if errors.Is(err, ErrUndeliverableEmail) {
+		return true
+	}
 	msg := err.Error()
 	return msg == "email is required" ||
 		msg == "email already registered" ||

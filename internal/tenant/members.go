@@ -15,6 +15,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/mailaddr"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -209,6 +210,10 @@ func HandleInviteMember(pool *pgxpool.Pool, sendEmail func(ctx context.Context, 
 			http.Error(w, `{"error":"valid email is required"}`, http.StatusBadRequest)
 			return
 		}
+		if mailaddr.IsReserved(req.Email) {
+			http.Error(w, `{"error":"this address can't receive email (reserved test domain) — use a real address"}`, http.StatusBadRequest)
+			return
+		}
 		if req.Role != "admin" && req.Role != "developer" && req.Role != "viewer" {
 			http.Error(w, `{"error":"role must be admin, developer, or viewer"}`, http.StatusBadRequest)
 			return
@@ -300,6 +305,10 @@ func HandleResendInvitation(pool *pgxpool.Pool, sendEmail func(ctx context.Conte
 			return
 		}
 		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+		if mailaddr.IsReserved(req.Email) {
+			http.Error(w, `{"error":"this address can't receive email (reserved test domain) — use a real address"}`, http.StatusBadRequest)
+			return
+		}
 
 		// Generate a fresh token.
 		rawToken, tokenHash, err := generateInviteToken()

@@ -30,11 +30,19 @@ import (
 // subdomain form `foo@app.localhost` — the RFC 6762 reserved zone
 // covers the whole `.localhost.` subtree, and `%@localhost` alone
 // would miss subdomain uses. #434 review 🟢.
+//
+// Also excluded: the reserved second-level domains example.com / .net /
+// .org (RFC 2606, same set as mailaddr.IsReserved), and addresses in
+// public.email_suppressions — mail to them failed permanently before
+// (filled by the worker's bounce sync); repeat hard bounces hurt the
+// sending domain's reputation.
 const reservedEmailFilterSQL = `lower(email) NOT LIKE '%.invalid'
 	AND lower(email) NOT LIKE '%.test'
 	AND lower(email) NOT LIKE '%.example'
 	AND lower(email) NOT LIKE '%@localhost'
-	AND lower(email) NOT LIKE '%.localhost'`
+	AND lower(email) NOT LIKE '%.localhost'
+	AND lower(trim(email)) !~ '@(.+\.)?example\.(com|net|org)$'
+	AND lower(trim(email)) NOT IN (SELECT s.email FROM public.email_suppressions s)`
 
 // BroadcastRecipient is one row on GET /platform/admin/broadcast/audience.
 // The endpoint returns the deduped union of platform_allowlist.email and

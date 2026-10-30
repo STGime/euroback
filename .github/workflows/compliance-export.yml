@@ -26,6 +26,12 @@ on:
       - internal/workers/deliver_project_webhook*.go
       - internal/workers/invoke_function_trigger*.go
       - internal/workers/project_events*.go
+      - internal/workers/email_bounces*.go
+      - internal/tenant/broadcast_admin_handlers*.go
+      - internal/tenant/admin_handlers.go
+      - internal/tenant/members*.go
+      - internal/mailaddr/**
+      - internal/workers/drip.go
       - internal/cron/executor.go
       - internal/storage/handler.go
       - internal/storage/delete_events_test.go
@@ -118,7 +124,7 @@ jobs:
         run: |
           pg_dump --version
           go test -count=1 -v ./internal/compliance/ -run 'RLS|SchemaSection|FailStaleRunning'
-          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker|DeliverProjectWebhook|WebhookDeliveryClient|InvokeFunctionTrigger'
+          go test -count=1 -v ./internal/workers/ -run 'TeamTier|ResolveExportSource|UpgradeWorker|DeliverProjectWebhook|WebhookDeliveryClient|InvokeFunctionTrigger|EmailBounceSync'
           go test -count=1 -v ./internal/events/ ./internal/webhook/
           go test -count=1 -v ./internal/storage/ -run 'DeleteFileEmits'
 
@@ -130,7 +136,7 @@ jobs:
           DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           PAT_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
-        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs|TestSuperadminBypassVerify|TestUpdateAuthConfig_UnchangedRateLimitsAboveCeiling'
+        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs|TestSuperadminBypassVerify|TestUpdateAuthConfig_UnchangedRateLimitsAboveCeiling|TestAdminListBroadcastAudience_Excludes|TestAdminSendAllowlistEmail'
 
       - name: Account suspension (sign-in + project-create gates)
         env:

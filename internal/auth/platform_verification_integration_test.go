@@ -78,7 +78,7 @@ func TestPlatformSignupVerificationFlow(t *testing.T) {
 		t.Skip("no active terms/dpa legal_documents seeded; skipping")
 	}
 
-	email := fmt.Sprintf("verif-flow-%d@eurobase.test", os.Getpid())
+	email := fmt.Sprintf("verif-flow-%d@test.eurobase.local", os.Getpid())
 	t.Cleanup(func() { cleanupPlatformUser(context.Background(), pool, email) })
 	cleanupPlatformUser(ctx, pool, email) // clear any residue from a crashed run
 
@@ -226,8 +226,8 @@ func TestDeleteAccount_RefusesSoleAdminOfSharedOrg(t *testing.T) {
 		t.Skipf("cannot ping: %v", err)
 	}
 
-	adminEmail := fmt.Sprintf("selfdel-admin-%d@eurobase.test", os.Getpid())
-	memberEmail := fmt.Sprintf("selfdel-member-%d@eurobase.test", os.Getpid())
+	adminEmail := fmt.Sprintf("selfdel-admin-%d@test.eurobase.local", os.Getpid())
+	memberEmail := fmt.Sprintf("selfdel-member-%d@test.eurobase.local", os.Getpid())
 	t.Cleanup(func() {
 		cleanupPlatformUser(context.Background(), pool, adminEmail)
 		cleanupPlatformUser(context.Background(), pool, memberEmail)
@@ -306,7 +306,7 @@ func TestDeleteAccount_DeletesSoloOrg(t *testing.T) {
 		t.Skipf("cannot ping: %v", err)
 	}
 
-	email := fmt.Sprintf("selfdel-solo-%d@eurobase.test", os.Getpid())
+	email := fmt.Sprintf("selfdel-solo-%d@test.eurobase.local", os.Getpid())
 	t.Cleanup(func() { cleanupPlatformUser(context.Background(), pool, email) })
 	cleanupPlatformUser(ctx, pool, email)
 
