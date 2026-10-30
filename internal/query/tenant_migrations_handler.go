@@ -22,6 +22,10 @@ type ApplyMigrationRequest struct {
 	SQL     string `json:"sql"`
 }
 
+// ErrTeamMigrationsUnsupported refuses migrations for a project with a
+// dedicated database (Team): the executor only reaches the shared cluster.
+var ErrTeamMigrationsUnsupported = errors.New("migrations aren't available for Team projects yet: apply schema changes in the SQL editor or over your project's direct database connection")
+
 // HandleTenantMigrations mounts the tenant-migration endpoints (#190):
 //
 //	GET  /  — applied-migration history
@@ -56,6 +60,20 @@ func HandleTenantMigrations(exec *MigrationExecutor, readPool *pgxpool.Pool) htt
 		projectID := chi.URLParam(req, "id")
 		if projectID == "" {
 			jsonError(w, "project ID is required", http.StatusBadRequest)
+			return
+		}
+		// The executor connects to the shared cluster only. A Team
+		// project's schema lives on its dedicated database, so refuse
+		// rather than migrate the shared cluster (no schema there, or a
+		// stale pre-upgrade copy). Never fall back to shared for Team.
+		if HasDedicatedDBFromContext(req.Context()) {
+			var body ApplyMigrationRequest
+			_ = json.NewDecoder(req.Body).Decode(&body)
+			logEntry := sqllog.FromRequest(req, sqllog.SourceMigration)
+			logEntry.Outcome = sqllog.OutcomeRefused
+			logEntry.Detail = fmt.Sprintf("migration %d (%s): %s", body.Version, body.Name, ErrTeamMigrationsUnsupported)
+			sqllog.FromContext(req.Context()).Record(req.Context(), projectID, body.SQL, logEntry)
+			jsonError(w, ErrTeamMigrationsUnsupported.Error(), http.StatusNotImplemented)
 			return
 		}
 		if !exec.Enabled() {

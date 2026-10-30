@@ -1180,6 +1180,29 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// The migration executor only reaches the shared cluster, so a Team
+	// project's migrations are refused (never applied to shared); the
+	// history listing still works. shared_cluster_untouched checks that
+	// nothing reached the shared cluster.
+	check(t, env, "migrations_refused_for_team", func() error {
+		r := console("POST", "/migrations", `{"version":1,"name":"e2e_team","sql":"CREATE TABLE e2e_team_mig (id int)"}`)
+		if r.code != http.StatusNotImplemented || !strings.Contains(r.body, "Team projects") {
+			return fmt.Errorf("a Team project's migration must be refused with 501: %w", r)
+		}
+		if r := console("GET", "/migrations", ""); r.code != http.StatusOK {
+			return fmt.Errorf("migration history must still be listed: %w", r)
+		}
+		var recorded int
+		if err := env.shared.QueryRow(context.Background(),
+			`SELECT count(*) FROM public.tenant_migrations WHERE project_id = $1`, env.projectID).Scan(&recorded); err != nil {
+			return err
+		}
+		if recorded != 0 {
+			return fmt.Errorf("a refused migration was recorded as applied (%d rows)", recorded)
+		}
+		return nil
+	})
+
 	check(t, env, "console_schema_changes_backfill", func() error {
 		// Earlier checks log DDL on ded_only themselves; only the backfill
 		// writes a create_table entry for it (it was created outside the
@@ -2221,6 +2244,7 @@ var teamOnlyChecks = map[string]bool{
 	"console_fails_closed_while_provisioning":       true,
 	"readonly_connection_limit":                     true,
 	"shared_cluster_untouched":                      true,
+	"migrations_refused_for_team":                   true,
 	"credential_reseal":                             true,
 	"console_connection_roles":                      true,
 	"function_storage_refused_without_dedicated_db": true,
