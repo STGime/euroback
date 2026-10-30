@@ -49,9 +49,20 @@ CREATE POLICY listings_owner ON listings
 					<li>Each migration runs in <strong>one transaction</strong> — if any statement fails, nothing from that file is applied.</li>
 					<li>It runs inside <strong>your project schema</strong>: use unqualified table names. Multi-statement files are expected.</li>
 					<li>Applied versions are recorded with a checksum. Re-applying an identical file is a no-op; <strong>editing an already-applied file is rejected</strong> — add a new version instead.</li>
-					<li>There are no down migrations — to undo something, write a new forward migration.</li>
+					<li>There are no down migrations — to undo something, write a new forward migration. For a risky change, write and review that rollback migration before you apply the change.</li>
 					<li>Concurrent runs are serialized per project, so two CI jobs can't race each other.</li>
 				</ul>
+
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Verifying a policy change</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					A migration can&rsquo;t check its own result (catalog reads such as <code class="bg-gray-100 rounded px-1">pg_policies</code> are refused), so verify around it:
+				</p>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1 mt-2">
+					<li><strong>Rehearse</strong> on a fresh test project: apply your existing migrations (schema only, no data), then the change, then its rollback.</li>
+					<li><strong>Before:</strong> save the policies of the affected tables (<code class="bg-gray-100 rounded px-1">GET .../schema/tables/&lt;table&gt;/policies</code>) and the definitions of the functions involved (<code class="bg-gray-100 rounded px-1">GET .../schema/functions/&lt;name&gt;</code>).</li>
+					<li><strong>Apply</strong> the migration, fetch the same data again and compare.</li>
+					<li><strong>Test behaviour</strong> with real callers: a test user&rsquo;s session, the public key alone, and your server&rsquo;s secret key. Each call should be allowed or refused as intended (see <a href="/docs/rls" class="text-eurobase-600 hover:underline">Row-Level Security</a>).</li>
+				</ol>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Running migrations in CI</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
