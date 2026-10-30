@@ -22,8 +22,8 @@ func TestSystemTableRLSRefused(t *testing.T) {
 			"drop policy":   DropPolicy(ctx, nil, "tenant_x", table, "user_identities_policy"),
 		}
 		for name, err := range checks {
-			if !errors.Is(err, ErrSystemTableRLS) || !IsRefused(err) {
-				t.Errorf("%s on %s: got %v, want a refused ErrSystemTableRLS", name, table, err)
+			if !errors.Is(err, ErrSystemTable) || !IsRefused(err) {
+				t.Errorf("%s on %s: got %v, want a refused ErrSystemTable", name, table, err)
 			}
 			if got := systemTableStatus(err, http.StatusBadRequest); got != http.StatusForbidden {
 				t.Errorf("%s on %s: status %d, want 403", name, table, got)
@@ -32,12 +32,12 @@ func TestSystemTableRLSRefused(t *testing.T) {
 
 		r := chi.NewRouter()
 		r.Post("/p/{id}/tables/{table}/rls", handleToggleRLS(nil))
-		r.Post("/p/{id}/tables/{table}/preset", handleApplyPreset(nil))
+		r.Post("/p/{id}/tables/{table}/policies/preset", handleApplyPreset(nil))
 		r.Post("/p/{id}/tables/{table}/policies", handleCreatePolicy(nil))
 		r.Delete("/p/{id}/tables/{table}/policies/{policy}", handleDropPolicy(nil))
 		for _, req := range []struct{ method, path, body string }{
 			{http.MethodPost, "/rls", `{"enabled":false}`},
-			{http.MethodPost, "/preset", `{"preset":"full_access"}`},
+			{http.MethodPost, "/policies/preset", `{"preset":"full_access"}`},
 			{http.MethodPost, "/policies", `{"name":"p","command":"ALL","using":"true"}`},
 			{http.MethodDelete, "/policies/p", ``},
 		} {
@@ -48,16 +48,21 @@ func TestSystemTableRLSRefused(t *testing.T) {
 			}
 		}
 
-		// Dropping or renaming one is refused too (on Team, platform SQL
-		// runs as the database owner).
+		// Creating, dropping or renaming one is refused too (on Team,
+		// platform SQL runs as the database owner).
 		if !reservedTableNames[table] {
 			t.Errorf("%s is missing from reservedTableNames", table)
 		}
-		if err := DropTable(ctx, nil, "tenant_x", table); err == nil {
-			t.Errorf("drop %s: not refused", table)
-		}
-		if err := RenameTable(ctx, nil, "tenant_x", table, "x"); err == nil {
-			t.Errorf("rename %s: not refused", table)
+		cols := []ColumnDefinition{{Name: "id", Type: "uuid", IsPrimaryKey: true}}
+		for name, err := range map[string]error{
+			"create":    CreateTable(ctx, nil, "tenant_x", table, cols),
+			"drop":      DropTable(ctx, nil, "tenant_x", table),
+			"rename":    RenameTable(ctx, nil, "tenant_x", table, "x"),
+			"rename to": RenameTable(ctx, nil, "tenant_x", "todos", table),
+		} {
+			if !errors.Is(err, ErrSystemTable) || !IsRefused(err) {
+				t.Errorf("%s %s: got %v, want a refused ErrSystemTable", name, table, err)
+			}
 		}
 	}
 
