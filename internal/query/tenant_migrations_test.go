@@ -46,6 +46,17 @@ func TestValidateTenantMigrationSQL_AcceptsRealisticMigrations(t *testing.T) {
 			ALTER TABLE listings ADD CONSTRAINT price_type CHECK (pg_typeof(price)::text = 'numeric');`,
 		"catalog-looking text in a string literal": `
 			INSERT INTO notes (body) VALUES ('pg_policies lists policies');`,
+		"catalog-looking text in a comment": `
+			-- see pg_class for details
+			ALTER TABLE listings ADD COLUMN note text; /* pg_index */`,
+		"catalog name inside a function body": `
+			CREATE FUNCTION notify_change() RETURNS trigger LANGUAGE plpgsql AS $fn$
+			BEGIN
+			  PERFORM pg_notify('changes', NEW.id::text);
+			  RETURN NEW;
+			END;
+			$fn$;`,
+		"pg_temp": `CREATE TABLE scratch AS SELECT 1 AS n; DROP TABLE IF EXISTS pg_temp.scratch;`,
 	}
 	for name, sql := range cases {
 		if err := ValidateTenantMigrationSQL(sql); err != nil {
@@ -82,6 +93,8 @@ func TestValidateTenantMigrationSQL_RejectsEscapeHatches(t *testing.T) {
 		"unqualified catalog view":     `CREATE TABLE snapshot AS SELECT * FROM pg_policies;`,
 		"unqualified catalog table":    `INSERT INTO t (name) SELECT relname FROM pg_class;`,
 		"catalog function":             `CREATE TABLE t AS SELECT pg_get_functiondef(1);`,
+		"quoted pg_ column":            `ALTER TABLE t ADD COLUMN "pg_score" int;`,
+		"string parsing setting":       `SET LOCAL standard_conforming_strings = off;`,
 	}
 	for name, sql := range cases {
 		if err := ValidateTenantMigrationSQL(sql); err == nil {

@@ -222,8 +222,8 @@ var catalogAllowedNames = map[string]bool{
 // (case-insensitive) is refused unless it is in catalogAllowedNames.
 // Identifier tokens only — string literals, comments and dollar-quoted
 // bodies are skipped by the scanner, so `SELECT 'pg_stat_activity'`
-// does not false-positive. Applied to the SDK SQL path AND the platform
-// SQL/transaction paths, because both are customer-driven and both can
+// does not false-positive. Applied to the SDK SQL path, the platform
+// SQL/transaction paths, cron SQL and tenant migrations, because both are customer-driven and both can
 // see the shared role's sessions.
 //
 // The complementary DB-level belt is `REVOKE SELECT ON

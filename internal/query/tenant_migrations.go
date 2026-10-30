@@ -100,6 +100,7 @@ var forbiddenMigStatementRes = []struct {
 	{regexp.MustCompile(`(?i)\b(create|drop|alter)\s+schema\b`), "schema management is not allowed — migrations run inside your project schema"},
 	{regexp.MustCompile(`(?i)\b(grant|revoke)\b`), "GRANT/REVOKE are not allowed in migrations — access control is managed by the platform"},
 	{regexp.MustCompile(`(?i)\balter\s+system\b`), "ALTER SYSTEM is not allowed"},
+	{regexp.MustCompile(`(?i)\b(standard_conforming_strings|backslash_quote|escape_string_warning)\b`), "changing how string literals are parsed is not allowed in migrations"},
 	{regexp.MustCompile(`(?i)\bcopy\b`), "COPY is not allowed in migrations — load data via the SDK or REST API"},
 }
 
@@ -405,6 +406,11 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	// and a body's RESET ROLE lands right back here.
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path TO %s", pgx.Identifier{schemaName}.Sanitize())); err != nil {
 		return false, fmt.Errorf("set search_path: %w", err)
+	}
+	// Same string-parsing setting as the other customer-SQL paths, so the
+	// server reads the body the way the validator did.
+	if _, err := tx.Exec(ctx, "SET LOCAL standard_conforming_strings = on"); err != nil {
+		return false, fmt.Errorf("set standard_conforming_strings: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
 		return false, fmt.Errorf("set statement_timeout: %w", err)
