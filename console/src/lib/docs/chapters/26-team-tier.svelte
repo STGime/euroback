@@ -48,7 +48,7 @@
 					<strong>What's NOT in the beta yet.</strong> Say this up front to your own team so nobody plans around it:
 					SAML SSO (OIDC only for now), project-level RBAC (Owner/Admin/Developer/Read-only),
 					domain-based SSO auto-provisioning (invitees must be added by email today),
-					dev/staging/prod branches, preview function envs. PITR was removed in favour of snapshots.
+					dev/staging/prod branches, preview function envs, versioned migrations (<code>eurobase migrations up</code> is refused for Team projects for now &mdash; apply schema changes in the SQL editor or over the direct connection). PITR was removed in favour of snapshots.
 				</div>
 
 				<h3 class="text-base font-semibold text-gray-900 pt-2">1. Requesting beta access</h3>
