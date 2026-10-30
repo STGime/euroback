@@ -94,8 +94,9 @@ var reservedTableNames = map[string]bool{
 	"vault_secrets":            true,
 }
 
-// ErrSystemTable: a request to change RLS or policies on a
-// platform-managed table, or to create, drop or rename one (403).
+// ErrSystemTable: a request to change a platform-managed table — its RLS,
+// policies, columns, constraints, indexes or triggers — or to create, drop
+// or rename one (403).
 var ErrSystemTable = errors.New("platform-managed table")
 
 // refuseSystemTableRLS refuses RLS and policy changes on the platform's
@@ -108,6 +109,15 @@ func refuseSystemTableRLS(tableName string) error {
 		return nil
 	}
 	return &RefusedError{Err: fmt.Errorf("%w: RLS and policies on %q are managed by the platform and can't be changed", ErrSystemTable, tableName)}
+}
+
+// refuseSystemTableChange refuses any schema change (columns,
+// constraints, indexes, triggers, RLS) to a platform-managed table.
+func refuseSystemTableChange(tableName string) error {
+	if !reservedTableNames[tableName] {
+		return nil
+	}
+	return &RefusedError{Err: fmt.Errorf("%w: %q is managed by the platform and can't be changed", ErrSystemTable, tableName)}
 }
 
 // ForeignKeyDefinition describes a foreign key to add.

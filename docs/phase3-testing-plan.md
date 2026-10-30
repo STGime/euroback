@@ -35,7 +35,7 @@ Same as Phase 3 — gateway in dev mode, console dev server running, at least on
 - [ ] Refresh — column gone
 
 ### 1.4 Drop Table Protection
-- [ ] DELETE `.../schema/tables/storage_objects` — expect 400 with "system table" error
+- [ ] DELETE `.../schema/tables/storage_objects` — expect 403 with "system table" error
 - [ ] DELETE `.../schema/tables/todos` — expect 204 (user tables can be dropped)
 
 ---
