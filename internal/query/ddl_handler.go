@@ -350,7 +350,7 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := CreateTable(r.Context(), pool, schemaName, req.Name, req.Columns); err != nil {
 			slog.Error("create table failed", "error", err, "schema", schemaName, "table", req.Name)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 
@@ -464,7 +464,7 @@ func handleDropTable(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := DropTable(r.Context(), pool, schemaName, tableName); err != nil {
 			slog.Error("drop table failed", "error", err, "schema", schemaName, "table", tableName)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 
@@ -594,7 +594,7 @@ func handleRenameTable(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := RenameTable(r.Context(), pool, schemaName, tableName, req.NewName); err != nil {
 			slog.Error("rename table failed", "error", err, "schema", schemaName, "table", tableName, "new_name", req.NewName)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 
@@ -1258,6 +1258,10 @@ func handleToggleRLS(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
 
 		var schemaName string
 		err := pool.QueryRow(r.Context(),
@@ -1325,6 +1329,10 @@ func handleApplyPreset(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
 
 		var schemaName string
 		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
@@ -1343,7 +1351,7 @@ func handleApplyPreset(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := ApplyPolicyPreset(r.Context(), pool, schemaName, tableName, body.Preset, body.UserIDColumn); err != nil {
 			slog.Error("apply preset failed", "error", err)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 
@@ -1352,16 +1360,19 @@ func handleApplyPreset(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// systemTableStatus answers 403 for a refused change to a platform-managed
+// table, else the handler's usual status.
+func systemTableStatus(err error, fallback int) int {
+	if errors.Is(err, ErrSystemTable) {
+		return http.StatusForbidden
+	}
+	return fallback
+}
+
 func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
-
-		var schemaName string
-		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
-			jsonError(w, "project not found", http.StatusNotFound)
-			return
-		}
 
 		var body struct {
 			Name      string `json:"name"`
@@ -1387,12 +1398,23 @@ func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
 			logText += " WITH CHECK (" + body.WithCheck + ")"
 		}
 		logEntry := sqllog.FromRequest(r, sqllog.SourcePolicy)
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			logEntry.Outcome, logEntry.Detail = sqllog.OutcomeRefused, err.Error()
+			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		var schemaName string
+		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
+			jsonError(w, "project not found", http.StatusNotFound)
+			return
+		}
 		start := time.Now()
 		if err := CreateCustomPolicy(r.Context(), pool, schemaName, tableName, body.Name, body.Command, body.Using, body.WithCheck); err != nil {
 			slog.Error("create policy failed", "error", err)
 			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqlLogOutcome(err), err.Error(), sqllog.Ms(time.Since(start))
 			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 		logEntry.Outcome, logEntry.DurationMs = sqllog.OutcomeOK, sqllog.Ms(time.Since(start))
@@ -1408,6 +1430,10 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
 		policyName := chi.URLParam(r, "policy")
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
 
 		var schemaName string
 		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
@@ -1417,7 +1443,7 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := DropPolicy(r.Context(), pool, schemaName, tableName, policyName); err != nil {
 			slog.Error("drop policy failed", "error", err)
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusInternalServerError))
 			return
 		}
 
