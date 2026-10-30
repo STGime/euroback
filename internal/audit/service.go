@@ -15,24 +15,29 @@ import (
 
 // Action constants used across the codebase.
 const (
-	ActionAuthConfigUpdated   = "auth_config.updated"
-	ActionAPIKeysRegenerated  = "api_keys.regenerated"
-	ActionProjectCreated      = "project.created"
-	ActionProjectDeleted      = "project.deleted"
-	ActionVaultSecretSet      = "vault.secret_set"
-	ActionVaultSecretUpdated  = "vault.secret_updated"
-	ActionVaultSecretDeleted  = "vault.secret_deleted"
-	ActionVaultSecretAccessed = "vault.secret_accessed"
-	ActionVaultRekeyed        = "vault.rekeyed"
-	ActionOAuthSecretSet      = "oauth.secret_set"
-	ActionDataExported        = "data.exported"
-	ActionMemberInvited       = "member.invited"
-	ActionMemberRemoved       = "member.removed"
-	ActionMemberRoleChanged   = "member.role_changed"
-	ActionFunctionCreated     = "function.created"
-	ActionFunctionDeleted     = "function.deleted"
-	ActionAllowlistAdded      = "allowlist.added"
-	ActionAllowlistRemoved    = "allowlist.removed"
+	ActionAuthConfigUpdated  = "auth_config.updated"
+	ActionAPIKeysRegenerated = "api_keys.regenerated"
+	ActionProjectCreated     = "project.created"
+	ActionProjectDeleted     = "project.deleted"
+	// Ownership transfer (#846): initiated by the current owner, accepted
+	// by the recipient, or cancelled before acceptance.
+	ActionTransferInitiated    = "project.transfer_initiated"
+	ActionOwnershipTransferred = "project.ownership_transferred"
+	ActionTransferCancelled    = "project.transfer_cancelled"
+	ActionVaultSecretSet       = "vault.secret_set"
+	ActionVaultSecretUpdated   = "vault.secret_updated"
+	ActionVaultSecretDeleted   = "vault.secret_deleted"
+	ActionVaultSecretAccessed  = "vault.secret_accessed"
+	ActionVaultRekeyed         = "vault.rekeyed"
+	ActionOAuthSecretSet       = "oauth.secret_set"
+	ActionDataExported         = "data.exported"
+	ActionMemberInvited        = "member.invited"
+	ActionMemberRemoved        = "member.removed"
+	ActionMemberRoleChanged    = "member.role_changed"
+	ActionFunctionCreated      = "function.created"
+	ActionFunctionDeleted      = "function.deleted"
+	ActionAllowlistAdded       = "allowlist.added"
+	ActionAllowlistRemoved     = "allowlist.removed"
 	// ActionAllowlistEmailed is the legacy action for the pre-widening
 	// send flow that only reached rows on public.platform_allowlist.
 	// Retained so historical audit rows keep parsing; new sends log
