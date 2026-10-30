@@ -87,6 +87,11 @@ var reservedTableNames = map[string]bool{
 	"storage_shared_prefixes":  true, // #697: the sharing API and storage policies depend on it
 	"user_passkey_credentials": true, // #630: end-user passkeys
 	"webauthn_challenges":      true,
+	"users":                    true,
+	"user_identities":          true,
+	"refresh_tokens":           true,
+	"email_tokens":             true,
+	"vault_secrets":            true,
 }
 
 // ErrSystemTableRLS: a request to change RLS or policies on a

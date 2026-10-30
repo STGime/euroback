@@ -32,10 +32,32 @@ func TestSystemTableRLSRefused(t *testing.T) {
 
 		r := chi.NewRouter()
 		r.Post("/p/{id}/tables/{table}/rls", handleToggleRLS(nil))
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/p/x/tables/"+table+"/rls", strings.NewReader(`{"enabled":false}`)))
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("toggle RLS on %s: status %d, want 403", table, rec.Code)
+		r.Post("/p/{id}/tables/{table}/preset", handleApplyPreset(nil))
+		r.Post("/p/{id}/tables/{table}/policies", handleCreatePolicy(nil))
+		r.Delete("/p/{id}/tables/{table}/policies/{policy}", handleDropPolicy(nil))
+		for _, req := range []struct{ method, path, body string }{
+			{http.MethodPost, "/rls", `{"enabled":false}`},
+			{http.MethodPost, "/preset", `{"preset":"full_access"}`},
+			{http.MethodPost, "/policies", `{"name":"p","command":"ALL","using":"true"}`},
+			{http.MethodDelete, "/policies/p", ``},
+		} {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(req.method, "/p/x/tables/"+table+req.path, strings.NewReader(req.body)))
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s %s on %s: status %d, want 403", req.method, req.path, table, rec.Code)
+			}
+		}
+
+		// Dropping or renaming one is refused too (on Team, platform SQL
+		// runs as the database owner).
+		if !reservedTableNames[table] {
+			t.Errorf("%s is missing from reservedTableNames", table)
+		}
+		if err := DropTable(ctx, nil, "tenant_x", table); err == nil {
+			t.Errorf("drop %s: not refused", table)
+		}
+		if err := RenameTable(ctx, nil, "tenant_x", table, "x"); err == nil {
+			t.Errorf("rename %s: not refused", table)
 		}
 	}
 

@@ -1054,7 +1054,7 @@ func handleCreateFunction(pool *pgxpool.Pool) http.HandlerFunc {
 			slog.Error("create function failed", "error", err, "schema", schemaName, "function", req.Name)
 			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqlLogOutcome(err), err.Error(), sqllog.Ms(time.Since(start))
 			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
-			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
+			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		logEntry.Outcome, logEntry.DurationMs = sqllog.OutcomeOK, sqllog.Ms(time.Since(start))
@@ -1329,6 +1329,10 @@ func handleApplyPreset(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
 
 		var schemaName string
 		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
@@ -1369,6 +1373,10 @@ func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
 
 		var schemaName string
 		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
@@ -1405,7 +1413,7 @@ func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
 			slog.Error("create policy failed", "error", err)
 			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqlLogOutcome(err), err.Error(), sqllog.Ms(time.Since(start))
 			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 		logEntry.Outcome, logEntry.DurationMs = sqllog.OutcomeOK, sqllog.Ms(time.Since(start))
@@ -1421,6 +1429,10 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
 		policyName := chi.URLParam(r, "policy")
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
 
 		var schemaName string
 		if err := pool.QueryRow(r.Context(), `SELECT schema_name FROM projects WHERE id = $1`, projectID).Scan(&schemaName); err != nil {
