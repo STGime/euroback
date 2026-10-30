@@ -1054,7 +1054,7 @@ func handleCreateFunction(pool *pgxpool.Pool) http.HandlerFunc {
 			slog.Error("create function failed", "error", err, "schema", schemaName, "function", req.Name)
 			logEntry.Outcome, logEntry.Detail, logEntry.DurationMs = sqlLogOutcome(err), err.Error(), sqllog.Ms(time.Since(start))
 			sqllog.FromContext(r.Context()).Record(r.Context(), projectID, logText, logEntry)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 		logEntry.Outcome, logEntry.DurationMs = sqllog.OutcomeOK, sqllog.Ms(time.Since(start))
@@ -1258,6 +1258,10 @@ func handleToggleRLS(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		tableName := chi.URLParam(r, "table")
+		if err := refuseSystemTableRLS(tableName); err != nil {
+			jsonError(w, err.Error(), http.StatusForbidden)
+			return
+		}
 
 		var schemaName string
 		err := pool.QueryRow(r.Context(),
@@ -1343,13 +1347,22 @@ func handleApplyPreset(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := ApplyPolicyPreset(r.Context(), pool, schemaName, tableName, body.Preset, body.UserIDColumn); err != nil {
 			slog.Error("apply preset failed", "error", err)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusBadRequest))
 			return
 		}
 
 		logSchemaChange(pool, r, projectID, "apply_rls_preset", tableName, nil, map[string]any{"preset": body.Preset})
 		jsonResponse(w, map[string]any{"status": "ok", "preset": body.Preset}, http.StatusOK)
 	}
+}
+
+// systemTableStatus answers 403 for a refused change to a platform-managed
+// table, else the handler's usual status.
+func systemTableStatus(err error, fallback int) int {
+	if errors.Is(err, ErrSystemTableRLS) {
+		return http.StatusForbidden
+	}
+	return fallback
 }
 
 func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
@@ -1417,7 +1430,7 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := DropPolicy(r.Context(), pool, schemaName, tableName, policyName); err != nil {
 			slog.Error("drop policy failed", "error", err)
-			jsonError(w, err.Error(), http.StatusInternalServerError)
+			jsonError(w, err.Error(), systemTableStatus(err, http.StatusInternalServerError))
 			return
 		}
 

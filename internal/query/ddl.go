@@ -2,9 +2,11 @@ package query
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -85,6 +87,22 @@ var reservedTableNames = map[string]bool{
 	"storage_shared_prefixes":  true, // #697: the sharing API and storage policies depend on it
 	"user_passkey_credentials": true, // #630: end-user passkeys
 	"webauthn_challenges":      true,
+}
+
+// ErrSystemTableRLS: a request to change RLS or policies on a
+// platform-managed table (403).
+var ErrSystemTableRLS = errors.New("platform-managed table")
+
+// refuseSystemTableRLS refuses RLS and policy changes on the platform's
+// own tenant tables (tenantSystemTables). Their policies come from
+// provision_tenant and the platform's code depends on them; on Team
+// projects platform SQL runs as the database owner, so the database
+// alone wouldn't stop it.
+func refuseSystemTableRLS(tableName string) error {
+	if !slices.Contains(tenantSystemTables, tableName) {
+		return nil
+	}
+	return &RefusedError{Err: fmt.Errorf("%w: RLS and policies on %q are managed by the platform and can't be changed", ErrSystemTableRLS, tableName)}
 }
 
 // ForeignKeyDefinition describes a foreign key to add.
@@ -1451,6 +1469,9 @@ func ListPolicies(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName
 
 // ApplyPolicyPreset drops all existing policies and applies a preset.
 func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, preset, userIDColumn string) error {
+	if err := refuseSystemTableRLS(tableName); err != nil {
+		return err
+	}
 	pool, perr := tenantDDLPool(ctx, pool)
 	if perr != nil {
 		return perr
@@ -1558,6 +1579,9 @@ func ApplyPolicyPreset(ctx context.Context, pool *pgxpool.Pool, schemaName, tabl
 
 // CreateCustomPolicy creates a single custom RLS policy.
 func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, policyName, command, usingExpr, withCheckExpr string) error {
+	if err := refuseSystemTableRLS(tableName); err != nil {
+		return err
+	}
 	pool, perr := tenantDDLPool(ctx, pool)
 	if perr != nil {
 		return perr
@@ -1600,6 +1624,9 @@ func CreateCustomPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tab
 
 // DropPolicy drops an RLS policy by name.
 func DropPolicy(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName, policyName string) error {
+	if err := refuseSystemTableRLS(tableName); err != nil {
+		return err
+	}
 	pool, perr := tenantDDLPool(ctx, pool)
 	if perr != nil {
 		return perr
