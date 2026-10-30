@@ -1459,11 +1459,6 @@ func handleDropPolicy(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// requireTenantPool answers 503 for a Team project whose dedicated pool is
-// not on the request, before any handler runs (#679). The routes'
-// middlewares already refuse in that case; this makes every DDL handler
-// return 503 rather than whatever status it maps the underlying
-// ErrDedicatedPoolUnavailable to, should a new route skip them.
 // refuseSystemTableRoutes answers 403 for a request that would change a
 // platform-managed table ({table} in reservedTableNames), before any
 // database work.
@@ -1477,6 +1472,11 @@ func refuseSystemTableRoutes(next http.Handler) http.Handler {
 	})
 }
 
+// requireTenantPool answers 503 for a Team project whose dedicated pool is
+// not on the request, before any handler runs (#679). The routes'
+// middlewares already refuse in that case; this makes every DDL handler
+// return 503 rather than whatever status it maps the underlying
+// ErrDedicatedPoolUnavailable to, should a new route skip them.
 func requireTenantPool(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if refuseWithoutTenantPool(w, r) {

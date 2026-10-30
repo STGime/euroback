@@ -244,7 +244,7 @@
 					]
 				},
 				{
-					"name": "7. Drop Table — system table (expect 400)",
+					"name": "7. Drop Table — system table (expect 403)",
 					"request": {
 						"method": "DELETE",
 						"url": {
@@ -259,7 +259,7 @@
 							"listen": "test",
 							"script": {
 								"exec": [
-									"pm.test('Status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('Status is 403', () => pm.response.to.have.status(403));",
 									"pm.test('Error mentions system table', () => {",
 									"    const body = pm.response.json();",
 									"    pm.expect(body.error).to.include('system table');",

@@ -94,8 +94,9 @@ var reservedTableNames = map[string]bool{
 	"vault_secrets":            true,
 }
 
-// ErrSystemTable: a request to change RLS or policies on a
-// platform-managed table, or to create, drop or rename one (403).
+// ErrSystemTable: a request to change a platform-managed table — its RLS,
+// policies, columns, constraints, indexes or triggers — or to create, drop
+// or rename one (403).
 var ErrSystemTable = errors.New("platform-managed table")
 
 // refuseSystemTableRLS refuses RLS and policy changes on the platform's
