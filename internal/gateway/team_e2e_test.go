@@ -1192,6 +1192,14 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if r := console("GET", "/migrations", ""); r.code != http.StatusOK {
 			return fmt.Errorf("migration history must still be listed: %w", r)
 		}
+		var recorded int
+		if err := env.shared.QueryRow(context.Background(),
+			`SELECT count(*) FROM public.tenant_migrations WHERE project_id = $1`, env.projectID).Scan(&recorded); err != nil {
+			return err
+		}
+		if recorded != 0 {
+			return fmt.Errorf("a refused migration was recorded as applied (%d rows)", recorded)
+		}
 		return nil
 	})
 

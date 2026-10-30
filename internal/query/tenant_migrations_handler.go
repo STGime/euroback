@@ -22,15 +22,15 @@ type ApplyMigrationRequest struct {
 	SQL     string `json:"sql"`
 }
 
+// ErrTeamMigrationsUnsupported refuses migrations for a project with a
+// dedicated database (Team): the executor only reaches the shared cluster.
+var ErrTeamMigrationsUnsupported = errors.New("migrations aren't available for Team projects yet: apply schema changes in the SQL editor or over your project's direct database connection")
+
 // HandleTenantMigrations mounts the tenant-migration endpoints (#190):
 //
 //	GET  /  — applied-migration history
 //	POST /  — apply one versioned migration
 //
-// ErrTeamMigrationsUnsupported refuses migrations for a project with a
-// dedicated database (Team): the executor only reaches the shared cluster.
-var ErrTeamMigrationsUnsupported = errors.New("migrations aren't available for Team projects yet: apply schema changes in the SQL editor or over your project's direct database connection")
-
 // Mounted under the platform project routes with RequireMinRole
 // ("developer"). exec runs each migration under a per-tenant LOGIN role
 // (see MigrationExecutor). readPool (gateway pool) serves history/lookups.

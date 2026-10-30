@@ -1066,11 +1066,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// malicious body can reach exactly one tenant. Deliberately NOT
 			// on /v1: data-plane keys never run DDL. Fails closed (503) when
 			// the executor isn't configured (no DDL_PASSWORD_SECRET).
-			// PlatformTenantContext marks a Team project (dedicated
+			// The context middleware marks a Team project (dedicated
 			// database): the executor only reaches the shared cluster, so
 			// the handler refuses those rather than migrate the wrong
-			// database (#684).
-			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Mount("/migrations", query.HandleTenantMigrations(migrationExec, pool))
+			// database (#684). The settings variant keeps the history
+			// (a platform table) readable while the dedicated pool can't
+			// be opened; POST is refused either way.
+			r.With(tenant.RequireMinRole("developer"), tenant.PlatformTenantContextForSettings(pool, developerPool, tenantPoolResolver)).Mount("/migrations", query.HandleTenantMigrations(migrationExec, pool))
 			r.With(tenant.RequireMinRole("developer")).Mount("/webhooks", webhook.Routes(pool, limitsSvc))
 			cronSvc := cron.NewCronService(pool)
 			// Test Run (#645): dry-run as the tenant login, like the worker.
