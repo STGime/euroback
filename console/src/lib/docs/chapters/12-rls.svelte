@@ -173,19 +173,19 @@
 				</p>
 
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					Two helpers your policies use live in the platform&rsquo;s shared schema, not yours, so the function lookup doesn&rsquo;t return them. They&rsquo;re plain (SECURITY INVOKER) STABLE functions, the same in every project, and read values the platform sets for each request:
+					Two helpers your policies use live in the platform&rsquo;s shared schema, not yours, so the function lookup doesn&rsquo;t return them. They&rsquo;re plain (SECURITY INVOKER) STABLE functions, managed by the platform and the same in every project (don&rsquo;t redefine them), and read values the platform sets for each request:
 				</p>
 				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
 					<pre>public.is_service_role()     -- select current_setting('app.end_user_role', true) = 'service'
 public.current_end_user_id() -- select nullif(current_setting('app.end_user_id', true), '')::uuid</pre>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					<code class="bg-gray-100 rounded px-1">GET .../schema</code> lists tables, not views, and nothing lists which functions use a given table: search your function definitions and migration files. Views must be <code class="bg-gray-100 rounded px-1">security_invoker</code>, so they apply RLS for whoever reads them.
+					<code class="bg-gray-100 rounded px-1">GET .../schema</code> lists tables, not views, and nothing lists which functions use a given table: search your function definitions and migration files. New and changed views must be <code class="bg-gray-100 rounded px-1">security_invoker</code>, so they apply RLS for whoever reads them.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Who can call your functions</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Roles and grants are managed by the platform (<code class="bg-gray-100 rounded px-1">GRANT</code> / <code class="bg-gray-100 rounded px-1">REVOKE</code> are refused), and every API request &mdash; public key with or without a user token, secret key, RPC &mdash; runs as a role that doesn&rsquo;t own your tables and has no BYPASSRLS, so RLS always applies. Only the SQL editor, migrations and project exports run with owner rights. Any function in your schema can be called through <code class="bg-gray-100 rounded px-1">POST /v1/db/rpc/&lt;name&gt;</code> by anyone with your public key, because who may execute it can&rsquo;t be restricted: a function meant only for your server must check <code class="bg-gray-100 rounded px-1">public.is_service_role()</code> itself (and raise otherwise), and one for signed-in users should check <code class="bg-gray-100 rounded px-1">auth_uid()</code>.
+					Roles and grants are managed by the platform (<code class="bg-gray-100 rounded px-1">GRANT</code> / <code class="bg-gray-100 rounded px-1">REVOKE</code> are refused). Your app&rsquo;s data requests &mdash; REST, SQL and RPC, with the public key (with or without a user token) or the secret key &mdash; run as a role that doesn&rsquo;t own the tables you create, so the policies on every table with RLS enabled always apply; the secret key passes them through their <code class="bg-gray-100 rounded px-1">is_service_role()</code> branch. Owner rights, which skip RLS, are limited to the console and the MCP/CLI tools (SQL editor, table editor, schema changes), migrations, schema changes made with the secret key, and project exports. Any function in your schema can be called through <code class="bg-gray-100 rounded px-1">POST /v1/db/rpc/&lt;name&gt;</code> by anyone with your public key, because who may execute it can&rsquo;t be restricted: a function meant only for your server must check <code class="bg-gray-100 rounded px-1">public.is_service_role()</code> itself (and raise otherwise), and one for signed-in users should check <code class="bg-gray-100 rounded px-1">auth_uid()</code>.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Verifying a session&rsquo;s identity</h3>

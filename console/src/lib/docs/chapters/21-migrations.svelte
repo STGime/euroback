@@ -55,7 +55,7 @@ CREATE POLICY listings_owner ON listings
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Verifying a policy change</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					A migration can&rsquo;t check its own result (catalog reads such as <code class="bg-gray-100 rounded px-1">pg_policies</code> are refused), so verify around it:
+					A migration returns no query results, and catalog queries aren&rsquo;t supported for your SQL, so verify around it:
 				</p>
 				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1 mt-2">
 					<li><strong>Rehearse</strong> on a fresh test project: apply your existing migrations (schema only, no data), then the change, then its rollback.</li>
