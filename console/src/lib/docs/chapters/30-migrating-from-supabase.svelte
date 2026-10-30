@@ -57,6 +57,11 @@
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">How do I check a policy change and roll it back safely?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Apply it as a migration (one transaction: all or nothing), with a reviewed rollback migration written beforehand, since there are no down migrations. Rehearse both on a test project, save the policies and function definitions before and after through the schema endpoints, and test real calls as a user, anonymously and with your secret key. See <a href="/docs/migrations" class="cursor-pointer text-eurobase-700 hover:underline">Migrations</a>.</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">How do I see my full RLS policies for a table?</p>
 					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Use the schema endpoints rather than catalog SQL (which is refused): <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /platform/projects/&lt;id&gt;/schema/tables/&lt;table&gt;/policies</code> returns each policy&rsquo;s USING and WITH CHECK (developer role); <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET .../schema</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">.../schema/rls-audit</code> give foreign keys and RLS status at viewer level. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET .../schema/functions/&lt;name&gt;</code> returns a function&rsquo;s definition, including trigger functions and the platform helpers <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth_uid()</code> / <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth_role()</code> / <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth_email()</code>. See <a href="/docs/rls" class="cursor-pointer text-eurobase-700 hover:underline">Row-Level Security</a>.</p>
 				</div>
