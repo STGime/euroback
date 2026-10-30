@@ -142,3 +142,45 @@ func TestStripSQLLiterals_BlanksQuotedRegions(t *testing.T) {
 		t.Errorf("non-quoted structure lost:\n%s", out)
 	}
 }
+
+// String boundaries follow the shared tokenizer: an E-prefixed string ends
+// where the server ends it, '$' inside a name isn't a dollar quote, and the
+// text after a literal is still scanned.
+func TestStripSQLLiterals_FollowsSharedTokenizer(t *testing.T) {
+	cases := []struct{ in, keep, drop string }{
+		{`SELECT E'it\'s' AS a FROM t1;`, "FROM t1", "it"},
+		{`SELECT e'\\' AS b FROM t2;`, "FROM t2", ""},
+		{`SELECT 'it''s' AS c FROM t3;`, "FROM t3", "it"},
+		{`SELECT name'x' FROM t4;`, "FROM t4", "x'"},
+		{`SELECT a$b FROM t5;`, "a$b FROM t5", ""},
+	}
+	for _, tc := range cases {
+		out := stripSQLLiterals(tc.in)
+		if !strings.Contains(out, tc.keep) {
+			t.Errorf("%q: lost %q:\n%s", tc.in, tc.keep, out)
+		}
+		if tc.drop != "" && strings.Contains(out, tc.drop) {
+			t.Errorf("%q: still contains %q:\n%s", tc.in, tc.drop, out)
+		}
+	}
+}
+
+// Each refusal names the rule that caught it, so a reordering of the
+// checks can't hide one behind another.
+func TestValidateTenantMigrationSQL_RefusalReasons(t *testing.T) {
+	cases := []struct{ name, sql, want string }{
+		{"unqualified catalog view", `CREATE TABLE snapshot AS SELECT * FROM pg_policies;`, "system catalog"},
+		{"unqualified catalog table", `INSERT INTO t (name) SELECT relname FROM pg_class;`, "system catalog"},
+		{"catalog function", `CREATE TABLE t AS SELECT pg_get_functiondef(1);`, "system catalog"},
+		{"quoted pg_ column", `ALTER TABLE t ADD COLUMN "pg_score" int;`, "system catalog"},
+		{"qualified catalog keeps the schema message", `SELECT * FROM pg_catalog.pg_class;`, "forbidden schema"},
+		{"string parsing setting", `SET LOCAL standard_conforming_strings = off;`, "string literals are parsed"},
+		{"statement after an E-prefixed string", `INSERT INTO notes (body) VALUES (E'\''); GRANT SELECT ON notes TO PUBLIC;`, "GRANT/REVOKE"},
+	}
+	for _, tc := range cases {
+		err := ValidateTenantMigrationSQL(tc.sql)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want refusal containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+}

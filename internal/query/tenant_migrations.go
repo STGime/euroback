@@ -460,8 +460,9 @@ func ListTenantMigrations(ctx context.Context, pool *pgxpool.Pool, projectID str
 
 // stripSQLLiterals blanks single-quoted strings, double-quoted
 // identifiers, dollar-quoted bodies, and comments so token scans don't
-// false-positive on quoted text. Mirrors internal/cron's scanner (which
-// in turn mirrors multistmt.go); kept local to avoid an import cycle.
+// false-positive on quoted text. String and identifier boundaries follow
+// the shared tokenizer (scanIdentifiersAndDots): E-prefixed strings use backslash
+// escapes, and '$' inside an identifier is part of the name.
 func stripSQLLiterals(sql string) string {
 	out := make([]byte, 0, len(sql))
 	blank := func(n int) {
@@ -475,30 +476,20 @@ func stripSQLLiterals(sql string) string {
 		c := s[i]
 		switch {
 		case c == '\'':
-			j := i + 1
-			for j < n {
-				if s[j] == '\'' {
-					if j+1 < n && s[j+1] == '\'' {
-						j += 2
-						continue
-					}
-					j++
-					break
-				}
-				j++
-			}
+			// An E prefix (a lone E/e word right before the quote) means
+			// backslash escapes, as in the shared tokenizer.
+			escaped := i >= 1 && (s[i-1] == 'E' || s[i-1] == 'e') && (i < 2 || !isIdentCont(s[i-2]))
+			j, _ := skipQuoted(s, i, '\'', escaped)
 			blank(j - i)
 			i = j
 		case c == '"':
-			j := i + 1
-			for j < n && s[j] != '"' {
-				j++
-			}
-			if j < n {
-				j++
-			}
+			j, _ := skipQuoted(s, i, '"', false)
 			blank(j - i)
 			i = j
+		case c == '$' && i > 0 && isIdentCont(s[i-1]):
+			// Part of an identifier (e.g. a$b), not a dollar quote.
+			out = append(out, c)
+			i++
 		case c == '$':
 			// dollar-quote: $tag$ ... $tag$
 			j := i + 1
