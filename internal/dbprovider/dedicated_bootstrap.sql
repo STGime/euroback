@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS public.tenant_migration_markers (
     applied_at  timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (schema_name, version)
 );
-REVOKE ALL ON public.tenant_migration_markers FROM PUBLIC;
+REVOKE ALL ON public.tenant_migration_markers FROM PUBLIC, eurobase_gateway, eurobase_readonly;
 
 CREATE OR REPLACE FUNCTION public.provision_tenant(
     p_project_id   UUID,

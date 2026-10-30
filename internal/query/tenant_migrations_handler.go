@@ -115,8 +115,11 @@ func HandleTenantMigrations(exec *MigrationExecutor, readPool *pgxpool.Pool) htt
 		sqllog.FromContext(req.Context()).Record(req.Context(), projectID, body.SQL, logEntry)
 		if err != nil {
 			status := http.StatusBadRequest
-			if errors.Is(err, ErrMigrationChecksumMismatch) {
+			switch {
+			case errors.Is(err, ErrMigrationChecksumMismatch), errors.Is(err, ErrMigrationRunning):
 				status = http.StatusConflict
+			case errors.Is(err, ErrMigrationNotRecorded):
+				status = http.StatusServiceUnavailable
 			}
 			slog.Warn("tenant migration rejected or failed",
 				"project_id", projectID, "version", body.Version, "error", err)

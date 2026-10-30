@@ -52,6 +52,11 @@ func TestApplyDedicated_DB(t *testing.T) {
 	if _, err := pool.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schema}.Sanitize()); err != nil {
 		t.Fatal(err)
 	}
+	// Start without the marker table, as on an instance bootstrapped before
+	// it existed: the first run creates it.
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS public.tenant_migration_markers`); err != nil {
+		t.Fatal(err)
+	}
 
 	exec := NewMigrationExecutor(pool, "", nil)
 	tableExists := func(name string) bool {
@@ -111,6 +116,22 @@ func TestApplyDedicated_DB(t *testing.T) {
 	}
 	if history() != 2 {
 		t.Fatalf("history = %d, want 2", history())
+	}
+
+	// A run while another holds the project's lock is refused, not queued.
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 190))", projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.ApplyDedicated(ctx, pool, projectID, schema, 5, "busy", `CREATE TABLE busy (id int);`); !errors.Is(err, ErrMigrationRunning) {
+		t.Fatalf("concurrent run: err=%v, want ErrMigrationRunning", err)
+	}
+	_ = holder.Rollback(ctx)
+	if tableExists("busy") {
+		t.Fatal("a refused concurrent run left a table")
 	}
 
 	// Validator still applies.
