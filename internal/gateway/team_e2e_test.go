@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,6 +37,7 @@ import (
 	"github.com/eurobase/euroback/internal/query"
 	"github.com/eurobase/euroback/internal/storage"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/eurobase/euroback/internal/tenantconn"
 	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/vault"
 	"github.com/eurobase/euroback/internal/workers"
@@ -1736,6 +1738,100 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 	// via the SDK route runs ctx.db.sql / ctx.vault.get / ctx.storage on the
 	// project's own database — dedicated for Team, shared for Free — as
 	// <schema>_func, and the storage callback records the object there.
+	// Catalog access is limited to platform roles
+	// (scripts/db/catalog-lockdown.sql, applied by the harness bootstrap):
+	// a function a developer defines reads only its own project's catalog
+	// entries, whichever surface defined it and whichever surface runs it.
+	// Shared cluster only: a dedicated database holds one tenant.
+	check(t, env, "catalog_isolation", func() error {
+		if env.scenario != "free" {
+			return nil
+		}
+		ctx := context.Background()
+		// The cron Test Run and the runner log in as the tenant's `_func`.
+		if err := env.ensureFuncLogins(ctx); err != nil {
+			return err
+		}
+		const marker = "CATALOG-ISOLATION-MARKER"
+		victim := "tenant_catvictim_" + randHexT(t, 4)
+		mustExecT(t, env.shared, `CREATE SCHEMA `+pgx.Identifier{victim}.Sanitize())
+		t.Cleanup(func() {
+			_, _ = env.shared.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+pgx.Identifier{victim}.Sanitize()+` CASCADE`)
+		})
+		mustExecT(t, env.shared, `CREATE FUNCTION `+pgx.Identifier{victim, "pricing"}.Sanitize()+`() RETURNS text LANGUAGE sql AS $f$ SELECT '`+marker+`' $f$`)
+		var oid uint32
+		if err := env.shared.QueryRow(ctx, `SELECT $1::regproc::oid`, victim+".pricing").Scan(&oid); err != nil {
+			return err
+		}
+		body := func(name string) string {
+			return fmt.Sprintf(`CREATE FUNCTION %s() RETURNS text LANGUAGE sql AS $p$ SELECT coalesce((SELECT prosrc FROM pg_catalog.pg_proc WHERE oid = %d), '') || coalesce(pg_catalog.pg_get_functiondef(%d), '') $p$`, name, oid, oid)
+		}
+		sqlReq := func(sql string) string { b, _ := json.Marshal(map[string]string{"sql": sql}); return string(b) }
+		// Defined through each surface that accepts a function body.
+		defs := map[string]*httpResult{
+			"catprobe_sql": console("POST", "/data/sql", sqlReq(body("catprobe_sql"))),
+		}
+		b, _ := json.Marshal(map[string]any{"statements": []string{body("catprobe_tx")}})
+		defs["catprobe_tx"] = console("POST", "/data/sql/transaction", string(b))
+		b, _ = json.Marshal(map[string]any{"name": "catprobe_api", "returns": "text", "language": "sql",
+			"body": fmt.Sprintf(`SELECT coalesce((SELECT prosrc FROM pg_catalog.pg_proc WHERE oid = %d), '')`, oid)})
+		defs["catprobe_api"] = console("POST", "/schema/functions", string(b))
+		b, _ = json.Marshal(map[string]any{"version": 9001, "name": "catprobe", "sql": body("catprobe_mig")})
+		defs["catprobe_mig"] = console("POST", "/migrations", string(b))
+		var fns []string
+		for name, r := range defs {
+			if r.code >= 300 {
+				return fmt.Errorf("define %s: %w", name, r)
+			}
+			fns = append(fns, name)
+		}
+		sort.Strings(fns)
+		denied := func(where string, r *httpResult) error {
+			if strings.Contains(r.body, marker) {
+				return fmt.Errorf("%s: read another tenant's catalog entry: %s", where, r.body)
+			}
+			if r.code < 300 || !strings.Contains(r.body, "permission denied") {
+				return fmt.Errorf("%s: want permission denied, got %w", where, r)
+			}
+			return nil
+		}
+		for _, fn := range fns {
+			call := "SELECT " + fn + "() AS v"
+			if err := denied(fn+" via console SQL", console("POST", "/data/sql", sqlReq(call))); err != nil {
+				return err
+			}
+			if err := denied(fn+" via SDK SQL", sdk("POST", "/v1/db/sql", sqlReq(call))); err != nil {
+				return err
+			}
+			if err := denied(fn+" via SDK rpc", sdk("POST", "/v1/db/rpc/"+fn, `{}`)); err != nil {
+				return err
+			}
+			cb, _ := json.Marshal(map[string]string{"action_type": "sql", "action": call, "run_as": "service"})
+			if err := denied(fn+" via cron Test Run", console("POST", "/cron/test", string(cb))); err != nil {
+				return err
+			}
+		}
+		// The runner runs function SQL as the tenant's `_func` login.
+		if env.runnerOn {
+			code := `export default async function handler(req, ctx) {
+  try { var rows = await ctx.db.sql("SELECT catprobe_sql() AS v"); return new Response(JSON.stringify(rows)); }
+  catch (e) { return new Response(String(e && e.message || e), { status: 500 }); }
+}`
+			fb, _ := json.Marshal(map[string]any{"name": "e2e-catprobe", "code": code, "verify_jwt": false})
+			if r := console("POST", "/functions", string(fb)); r.code >= 300 {
+				return r
+			}
+			if err := denied("edge function ctx.db.sql", sdk("POST", "/v1/functions/e2e-catprobe", `{}`)); err != nil {
+				return err
+			}
+		}
+		// The project's own catalog stays readable through the platform.
+		if r := console("GET", "/schema/functions", ""); r.code != http.StatusOK || !strings.Contains(r.body, "catprobe_sql") {
+			return fmt.Errorf("own functions listing: %w", r)
+		}
+		return nil
+	})
+
 	check(t, env, "function_invoke_real_runner", func() error {
 		if !env.runnerOn {
 			t.Skip("no deno (TEAM_TEST_DENO); CI runs this with TEAM_TEST_REQUIRE_RUNNER=1")
@@ -2718,6 +2814,11 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
+		// Converged to the tenant's `_ddl` role as production did for
+		// migrator-made objects (000136 / 000141): console SQL and schema
+		// DDL run on that login here, as in production.
+		mustExecT(t, admin, `SELECT public.converge_tenant_ownership($1)`, schema)
+		mustExecT(t, admin, `SELECT public.converge_tenant_functions($1)`, schema)
 	} else {
 		// The dedicated instance, bootstrapped as ProvisionTeamDatabaseWorker
 		// does: owner DSN via BuildOwnerDSN (sslmode=require), display name =
@@ -2849,17 +2950,31 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 	}
 	// The console's cron Test Run (#645) dry-runs as the tenant login.
 	t.Setenv("FUNC_PASSWORD_SECRET", string(funcSecret))
-	// Tenant migrations: the shared-cluster path needs DDL_PASSWORD_SECRET
-	// (not configured here, so Free answers 503); a Team project's
+	// Shared-cluster console SQL, schema DDL and tenant migrations run on
+	// the project's own persistent `_ddl` login, as in production
+	// (DDL_PERSISTENT_LOGIN + PLATFORM_DDL_LOGIN); a Team project's
 	// migrations need only the shared bookkeeping pool.
-	migrationExec := query.NewMigrationExecutor(dev, "", nil)
+	ddlSecret := []byte(randHexT(t, 32))
+	ddlEnsurer, err := tenantlogin.NewDDLEnsurer(dev, "eurobase", ddlSecret)
+	if err != nil || ddlEnsurer == nil {
+		t.Fatalf("DDL ensurer: %v", err)
+	}
+	migrationExec := query.NewMigrationExecutor(dev, cfg.sharedGW, ddlSecret).WithPersistentLogin(ddlEnsurer.EnsureOne)
+	ddlBase, err := pgx.ParseConfig(cfg.sharedGW)
+	if err != nil {
+		t.Fatal(err)
+	}
+	platformDDLLogin := tenantconn.NewDDLRunner(ddlBase, ddlSecret, ddlEnsurer.EnsureOne)
+	if platformDDLLogin == nil {
+		t.Fatal("DDL runner not configured")
+	}
 	router := NewRouter(gw, dev, migrationExec, auth.NewPlatformAuthMiddleware(platformSvc).WithPATService(auth.NewPATService(gw)), platformSvc, nil, nil, s3Client, nil, nil,
 		// sdkLogin nil: SDK /sql + /rpc stay on the shared gateway pool in
 		// the e2e (as in prod until SDK_FUNC_LOGIN flips). The per-project-
 		// login seam is covered by engine_tenant_login_test.go; the real
 		// `<schema>_func` execution path is the functions runner's (below)
 		// and the step-3 prod pooler smoke test.
-		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil, nil, nil, projectEvents)
+		subdomain, nil, nil, plans.NewLimitsService(gw), vaultSvc, runnerURL, fnSigner, string(runnerHMAC), nil, nil, nil, nil, SSOWiring{}, nil, nil, nil, platformDDLLogin, projectEvents)
 	if cfg.deno != "" {
 		gatewaySrv := httptest.NewServer(router)
 		t.Cleanup(gatewaySrv.Close)

@@ -88,7 +88,16 @@ func main() {
 
 	// ── Run River schema migrations ──
 	slog.Info("running river schema migrations")
-	migrator, err := rivermigrate.New(riverpgxv5.New(pool), nil)
+	// As eurobase_migrator (developer login + SET ROLE): River's migrator
+	// reads the catalog (information_schema), which the runtime role can't,
+	// and River's tables are migrator-owned, with the runtime role's DML
+	// from the migrator's default privileges.
+	riverMigratePool, rmpErr := riverMigrationPool(ctx, pool, developerPool)
+	if rmpErr != nil {
+		slog.Error("failed to open the river migration pool", "error", rmpErr)
+		os.Exit(1)
+	}
+	migrator, err := rivermigrate.New(riverpgxv5.New(riverMigratePool), nil)
 	if err != nil {
 		slog.Error("failed to create river migrator", "error", err)
 		os.Exit(1)
@@ -96,6 +105,9 @@ func main() {
 	if _, err := migrator.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
 		slog.Error("failed to run river migrations", "error", err)
 		os.Exit(1)
+	}
+	if riverMigratePool != pool {
+		riverMigratePool.Close()
 	}
 	slog.Info("river schema migrations complete")
 
@@ -635,6 +647,10 @@ func main() {
 
 	// ── Create River client in worker mode ──
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+		// The reindexer looks indexes up in pg_catalog and REINDEXes River's
+		// tables, neither of which the runtime role can do (no catalog
+		// access, not the tables' owner): off.
+		ReindexerSchedule: river.NeverSchedule(),
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 10},
 			// Customer endpoints can be slow; their own pool keeps them
@@ -886,4 +902,23 @@ func funcPasswordSecretForTeam() []byte {
 		return nil
 	}
 	return []byte(s)
+}
+
+// riverMigrationPool opens a short-lived pool on the developer login that
+// runs as eurobase_migrator, for River's schema migrations. Without a
+// separate developer pool (local dev) it returns the runtime pool, as
+// before.
+func riverMigrationPool(ctx context.Context, pool, developerPool *pgxpool.Pool) (*pgxpool.Pool, error) {
+	if developerPool == nil || developerPool == pool {
+		return pool, nil
+	}
+	cfg := developerPool.Config()
+	cfg.MaxConns = 2
+	cfg.MinConns = 0
+	cfg.AfterRelease = nil
+	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+		_, err := c.Exec(ctx, "SET ROLE eurobase_migrator")
+		return err
+	}
+	return pgxpool.NewWithConfig(ctx, cfg)
 }

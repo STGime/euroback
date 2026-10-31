@@ -213,5 +213,39 @@ must_deny "pg_stat_get_activity function"  as_role eurobase_gateway pw -tAc "SEL
 [ "$(as_role eurobase_gateway pw -tAc 'SELECT pg_backend_pid() > 0;' 2>&1)" = "t" ] \
   || fail "revoke over-reached: pg_backend_pid() should still work for the gateway role"
 
+echo "13. catalog: limited to platform roles by scripts/db/catalog-lockdown.sql; a tenant sees only its own objects (information_schema) ..."
+# All tenant schemas share one database. The lockdown (a superuser step on
+# managed Postgres, like check 12) limits the system catalogs and the
+# definition functions to platform roles; tenant roles keep
+# information_schema, which shows only their own objects.
+psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DO $r$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'eurobase_developer') THEN
+    CREATE ROLE eurobase_developer NOLOGIN;
+  END IF;
+END $r$;
+SET ROLE tenant_b_ddl;
+CREATE FUNCTION tenant_b.pricing() RETURNS text LANGUAGE sql AS $f$ SELECT 'B-PRIVATE-LOGIC' $f$;
+RESET ROLE;
+SET ROLE tenant_a_ddl;
+CREATE TABLE tenant_a.items (id int primary key);
+RESET ROLE;
+SQL
+B_FN_OID=$(psql -tAc "SELECT 'tenant_b.pricing'::regproc::oid")
+# Control: PostgreSQL's default (PUBLIC can read the catalog) before the step.
+src=$(as_role tenant_a_ddl pw_a -tAc "SELECT prosrc FROM pg_proc WHERE oid = $B_FN_OID" 2>&1)
+echo "$src" | grep -q "B-PRIVATE-LOGIC" || fail "default catalog access not observed before the lockdown (got: $src)"
+psql -v ON_ERROR_STOP=1 -q -f - >/dev/null < "$(dirname "$0")/db/catalog-lockdown.sql"
+must_deny "pg_proc source"          as_role tenant_a_ddl pw_a -tAc "SELECT prosrc FROM pg_proc WHERE oid = $B_FN_OID;"
+must_deny "pg_get_functiondef(oid)" as_role tenant_a_ddl pw_a -tAc "SELECT pg_get_functiondef($B_FN_OID);"
+must_deny "pg_class listing"        as_role tenant_a_ddl pw_a -tAc "SELECT count(*) FROM pg_class;"
+must_deny "pg_attribute"            as_role tenant_a_ddl pw_a -tAc "SELECT count(*) FROM pg_catalog.pg_attribute;"
+must_deny "gateway information_schema" as_role eurobase_gateway pw -tAc "SELECT count(*) FROM information_schema.tables;"
+own=$(as_role tenant_a_ddl pw_a -tAc "SELECT string_agg(table_schema || '.' || table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema LIKE 'tenant_%'" 2>&1)
+echo ",$own," | grep -q ",tenant_a.items," || fail "information_schema should list the tenant's own table (got: $own)"
+echo "$own" | grep -q "tenant_b" && fail "information_schema lists another tenant's table (got: $own)"
+# A second run is a no-op (idempotent).
+psql -v ON_ERROR_STOP=1 -q -f - >/dev/null < "$(dirname "$0")/db/catalog-lockdown.sql" || fail "lockdown re-run failed"
+
 echo
 echo "ALL CHECKS PASSED — tenant migrations are isolated to one tenant."
