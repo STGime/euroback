@@ -64,7 +64,9 @@ func queryOwnerRightsObjects(ctx context.Context, tx pgx.Tx, schemaName string) 
 	// On the shared cluster the tenant's own login has no catalog access:
 	// public.owner_rights_objects (000149) reads it for the caller's own
 	// schema. A dedicated (Team) database has no such helper; its owner
-	// reads the catalog directly.
+	// reads the catalog directly. (A Team customer owns that database and
+	// could create a function of that name; the guard protects developers
+	// from mistakes, it isn't a boundary against their own database.)
 	var viaHelper bool
 	if err := tx.QueryRow(ctx,
 		`SELECT pg_catalog.to_regprocedure('public.owner_rights_objects(text)') IS NOT NULL`).Scan(&viaHelper); err != nil {

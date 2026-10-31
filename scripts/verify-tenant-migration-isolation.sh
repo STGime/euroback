@@ -240,6 +240,9 @@ must_deny "pg_proc source"          as_role tenant_a_ddl pw_a -tAc "SELECT prosr
 must_deny "pg_get_functiondef(oid)" as_role tenant_a_ddl pw_a -tAc "SELECT pg_get_functiondef($B_FN_OID);"
 must_deny "pg_class listing"        as_role tenant_a_ddl pw_a -tAc "SELECT count(*) FROM pg_class;"
 must_deny "pg_attribute"            as_role tenant_a_ddl pw_a -tAc "SELECT count(*) FROM pg_catalog.pg_attribute;"
+must_deny "statistics function"     as_role tenant_a_ddl pw_a -tAc "SELECT pg_stat_get_numscans('tenant_b.secrets'::regclass);"
+must_deny "relation size"           as_role tenant_a_ddl pw_a -tAc "SELECT pg_relation_size('tenant_b.secrets'::regclass);"
+must_deny "gateway statistics"      as_role eurobase_gateway pw -tAc "SELECT pg_stat_get_backend_userid(1);"
 must_deny "gateway information_schema" as_role eurobase_gateway pw -tAc "SELECT count(*) FROM information_schema.tables;"
 own=$(as_role tenant_a_ddl pw_a -tAc "SELECT string_agg(table_schema || '.' || table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema LIKE 'tenant_%'" 2>&1)
 echo ",$own," | grep -q ",tenant_a.items," || fail "information_schema should list the tenant's own table (got: $own)"

@@ -11,6 +11,7 @@ BEGIN
                FROM pg_catalog.pg_class c
               WHERE c.relnamespace = 'pg_catalog'::regnamespace
                 AND c.relkind IN ('r', 'v', 'm')
+                AND c.relname <> 'pg_stat_activity'  -- revoked separately, stays closed
                 AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a
                              WHERE a.grantee = 'eurobase_migrator'::regrole
                                AND a.privilege_type = 'SELECT')
@@ -20,6 +21,7 @@ BEGIN
     FOR o IN SELECT p.oid::regprocedure AS fn
                FROM pg_catalog.pg_proc p
               WHERE p.pronamespace = 'pg_catalog'::regnamespace
+                AND p.proname <> 'pg_stat_get_activity'  -- revoked separately, stays closed
                 AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(p.proacl) a
                              WHERE a.grantee = 'eurobase_migrator'::regrole
                                AND a.privilege_type = 'EXECUTE')
