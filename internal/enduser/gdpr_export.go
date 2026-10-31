@@ -384,30 +384,49 @@ func exportUserOwnedRows(ctx context.Context, tx pgx.Tx, schema, userID string, 
 	for _, ot := range tables {
 		q := fmt.Sprintf(`SELECT row_to_json(t)::text FROM %s.%s t WHERE %s = $1`,
 			qs, quoteIdent(ot.table), quoteIdent(ot.column))
-		rows, err := tx.Query(ctx, q, userID)
+		// Each table in its own savepoint: a table this role can't read
+		// (e.g. the developer revoked its access) is skipped instead of
+		// aborting the whole export transaction.
+		if _, err := tx.Exec(ctx, "SAVEPOINT gdpr_table"); err != nil {
+			return nil, err
+		}
+		tableRows, err := readJSONRows(ctx, tx, q, userID)
 		if err != nil {
 			slog.Debug("gdpr export: skip table", "table", ot.table, "error", err)
+			if _, rbErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT gdpr_table"); rbErr != nil {
+				return nil, rbErr
+			}
 			continue
 		}
-
-		var tableRows []map[string]any
-		for rows.Next() {
-			var jsonStr string
-			if err := rows.Scan(&jsonStr); err != nil {
-				continue
-			}
-			var row map[string]any
-			if err := json.Unmarshal([]byte(jsonStr), &row); err != nil {
-				continue
-			}
-			tableRows = append(tableRows, row)
+		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT gdpr_table"); err != nil {
+			return nil, err
 		}
-		rows.Close()
-
 		if len(tableRows) > 0 {
 			result[ot.table] = tableRows
 		}
 	}
 
 	return result, nil
+}
+
+// readJSONRows runs q (one row_to_json text column) and decodes each row.
+func readJSONRows(ctx context.Context, tx pgx.Tx, q string, args ...any) ([]map[string]any, error) {
+	rows, err := tx.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var jsonStr string
+		if err := rows.Scan(&jsonStr); err != nil {
+			continue
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(jsonStr), &row); err != nil {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }

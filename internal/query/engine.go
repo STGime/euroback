@@ -367,7 +367,7 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 	return normalizeValue(result), nil
 }
 
-// resolveRelations queries the information_schema to find FK columns linking
+// resolveRelations reads the catalog to find FK columns linking
 // the main table to each related table.
 func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableName string, relations []Relation) ([]ResolvedRelation, error) {
 	resolved := make([]ResolvedRelation, 0, len(relations))
@@ -393,22 +393,24 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 			return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
 		}
 
-		// Find FK from main table to related table.
+		// Find FK from main table to related table. Read from pg_constraint,
+		// not information_schema: constraint_column_usage lists a referenced
+		// table only to a role that owns it, so the answer depended on which
+		// pool asked. Single-column keys only (the embed joins on one column).
 		var fkCol, refCol string
 		err := e.catalogPool(ctx).QueryRow(ctx,
-			`SELECT kcu.column_name, ccu.column_name
-			 FROM information_schema.key_column_usage kcu
-			 JOIN information_schema.table_constraints tc
-			   ON kcu.constraint_name = tc.constraint_name
-			   AND kcu.table_schema = tc.table_schema
-			 JOIN information_schema.constraint_column_usage ccu
-			   ON tc.constraint_name = ccu.constraint_name
-			   AND tc.table_schema = ccu.table_schema
-			 WHERE tc.constraint_type = 'FOREIGN KEY'
-			   AND kcu.table_schema = $1
-			   AND kcu.table_name = $2
-			   AND ccu.table_name = $3
-			 LIMIT 1`,
+			`SELECT a.attname, ra.attname
+			   FROM pg_catalog.pg_constraint c
+			   JOIN pg_catalog.pg_class t      ON t.oid = c.conrelid
+			   JOIN pg_catalog.pg_namespace n  ON n.oid = t.relnamespace
+			   JOIN pg_catalog.pg_class rt     ON rt.oid = c.confrelid
+			   JOIN pg_catalog.pg_attribute a  ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+			   JOIN pg_catalog.pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = c.confkey[1]
+			  WHERE c.contype = 'f' AND cardinality(c.conkey) = 1
+			    AND n.nspname = $1 AND t.relname = $2
+			    AND rt.relnamespace = n.oid AND rt.relname = $3
+			  ORDER BY c.conname
+			  LIMIT 1`,
 			schemaName, tableName, rel.Table,
 		).Scan(&fkCol, &refCol)
 		if err != nil {
