@@ -13,7 +13,8 @@
 //
 // Environment:
 //
-//	PGB_UPSTREAM_URL_VAR          env var holding the URL for upstream host/db + tenant listing (default DATABASE_URL)
+//	PGB_UPSTREAM_URL_VAR          env var holding the URL for upstream host/db + tenant listing (default DATABASE_URL);
+//	                              listing tenants reads the catalog, so it must be a platform role with catalog access
 //	PGB_PLATFORM_URL_VARS         platform roles served, as env var names (default DATABASE_URL,DATABASE_URL_FUNCTION_RUNNER; "" for none)
 //	PGB_INCLUDE_TENANTS           1 (default): tenant alias + tenant roles; 0: platform roles only
 //	PGB_METRICS_ADDR              /metrics listen address (default :9127)

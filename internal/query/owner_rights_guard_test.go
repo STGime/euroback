@@ -74,8 +74,17 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 	mustExec("DROP ROLE IF EXISTS " + owner)
 	mustExec("CREATE ROLE " + owner + " NOLOGIN")
 	mustExec("CREATE SCHEMA " + ident + " AUTHORIZATION " + owner)
+	// Where the shared-cluster helper exists (000149), the guard reads the
+	// catalog through it; a tenant role holds EXECUTE on it.
+	var hasHelper bool
+	if err := pool.QueryRow(ctx, `SELECT to_regprocedure('public.owner_rights_objects(text)') IS NOT NULL`).Scan(&hasHelper); err != nil {
+		t.Fatal(err)
+	}
+	if hasHelper {
+		mustExec("GRANT EXECUTE ON FUNCTION public.owner_rights_objects(text) TO " + owner)
+	}
 	t.Cleanup(func() {
-		for _, q := range []string{"DROP SCHEMA IF EXISTS " + ident + " CASCADE", "DROP ROLE IF EXISTS " + owner} {
+		for _, q := range []string{"DROP SCHEMA IF EXISTS " + ident + " CASCADE", "DROP OWNED BY " + owner, "DROP ROLE IF EXISTS " + owner} {
 			if _, err := pool.Exec(context.Background(), q); err != nil {
 				t.Logf("cleanup %s: %v", q, err)
 			}
@@ -255,5 +264,89 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+other+" CASCADE") })
 	if err := run("CREATE VIEW " + other + ".v AS SELECT 1 AS x"); err != nil {
 		t.Errorf("view in another schema: %v", err)
+	}
+}
+
+// TestOwnerRightsObjectsAuthorization_DB: public.owner_rights_objects
+// (000149) answers a tenant's <schema>_ddl login for its own schema only,
+// by session_user (tenant SQL can't change it), and lists the schema's
+// owner-run objects.
+//
+//	CONVERGE_TEST_ADMIN_URL=postgres://postgres@localhost:5432/eurobase \
+//	go test ./internal/query/ -run TestOwnerRightsObjectsAuthorization_DB
+func TestOwnerRightsObjectsAuthorization_DB(t *testing.T) {
+	adminURL := os.Getenv("CONVERGE_TEST_ADMIN_URL")
+	if adminURL == "" {
+		t.Skip("CONVERGE_TEST_ADMIN_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	var hasHelper bool
+	if err := pool.QueryRow(ctx, `SELECT to_regprocedure('public.owner_rights_objects(text)') IS NOT NULL`).Scan(&hasHelper); err != nil {
+		t.Fatal(err)
+	}
+	if !hasHelper {
+		t.Skip("public.owner_rights_objects not installed (migration 000149)")
+	}
+
+	a := fmt.Sprintf("tenant_orauth_a_%d", os.Getpid())
+	b := fmt.Sprintf("tenant_orauth_b_%d", os.Getpid())
+	ident := func(s string) string { return pgx.Identifier{s}.Sanitize() }
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	for _, s := range []string{a, b} {
+		mustExec("DROP SCHEMA IF EXISTS " + ident(s) + " CASCADE")
+		mustExec("DROP ROLE IF EXISTS " + ident(s+"_ddl"))
+		mustExec("CREATE ROLE " + ident(s+"_ddl") + " NOLOGIN")
+		mustExec("CREATE SCHEMA " + ident(s) + " AUTHORIZATION " + ident(s+"_ddl"))
+		mustExec("GRANT EXECUTE ON FUNCTION public.owner_rights_objects(text) TO " + ident(s+"_ddl"))
+		mustExec("GRANT USAGE ON SCHEMA public TO " + ident(s+"_ddl"))
+	}
+	t.Cleanup(func() {
+		for _, s := range []string{a, b} {
+			_, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+ident(s)+" CASCADE")
+			_, _ = pool.Exec(context.Background(), "DROP ROLE IF EXISTS "+ident(s+"_ddl"))
+		}
+	})
+	mustExec("CREATE VIEW " + ident(a) + ".owner_run AS SELECT 1 AS x")
+	mustExec("ALTER VIEW " + ident(a) + ".owner_run OWNER TO " + ident(a+"_ddl"))
+
+	// asSession runs q with session_user = role (as a tenant login would).
+	asSession := func(role, q string, args ...any) (int, error) {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		defer conn.Exec(context.Background(), "RESET SESSION AUTHORIZATION") //nolint:errcheck
+		if _, err := conn.Exec(ctx, "SET SESSION AUTHORIZATION "+ident(role)); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		err = conn.QueryRow(ctx, q, args...).Scan(&n)
+		return n, err
+	}
+
+	n, err := asSession(a+"_ddl", `SELECT count(*)::int FROM public.owner_rights_objects($1) WHERE kind = 'view'`, a)
+	if err != nil || n != 1 {
+		t.Fatalf("own schema: got %d, %v; want the one owner-run view", n, err)
+	}
+	if _, err := asSession(b+"_ddl", `SELECT count(*)::int FROM public.owner_rights_objects($1)`, a); err == nil ||
+		!strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("another tenant's schema: want refused, got %v", err)
+	}
+	// The platform (superuser here; eurobase_migrator members in prod) may
+	// list any schema.
+	var m int
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM public.owner_rights_objects($1)`, a).Scan(&m); err != nil || m != 1 {
+		t.Fatalf("platform: got %d, %v", m, err)
 	}
 }

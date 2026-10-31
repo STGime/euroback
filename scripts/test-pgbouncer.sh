@@ -36,8 +36,12 @@ docker build -q -f "$REPO_ROOT/deploy/docker/Dockerfile.pgbouncer" -t eurobase-p
 
 # Same two steps as the pod (init container, then pgbouncer + sync
 # sidecar); here one container so the sidecar can SIGHUP pgbouncer.
+# Tenants are listed from the catalog, which only platform roles can read
+# (scripts/db/catalog-lockdown.sql): the listing uses the developer login.
 docker run -d --name "$PGB" --network "$NET" -p "$PGB_PORT:6432" \
   -e DATABASE_URL="postgres://eurobase_gateway:localdev@$PG:5432/eurobase?sslmode=disable" \
+  -e DATABASE_URL_DEVELOPER="postgres://eurobase_developer:localdev@$PG:5432/eurobase?sslmode=disable" \
+  -e PGB_UPSTREAM_URL_VAR=DATABASE_URL_DEVELOPER \
   -e DATABASE_URL_FUNCTION_RUNNER="postgres://eurobase_function_runner:localdev@$PG:5432/eurobase?sslmode=disable" \
   -e FUNC_PASSWORD_SECRET="$SECRET" \
   -e PGB_SERVER_TLS=disable -e PGB_SYNC_INTERVAL=2s -e PGB_POOL_SIZE_EUROBASE_GATEWAY=1 \
@@ -51,7 +55,7 @@ docker run -d --name "$PGB" --network "$NET" -p "$PGB_PORT:6432" \
 # reads them — it gets no FUNC_PASSWORD_SECRET and no database URL.
 docker volume create "$PUBVOL" >/dev/null
 docker run -d --name "$PGB_P" --network "$NET" -v "$PUBVOL:/pub" --user 0 \
-  -e DATABASE_URL="postgres://eurobase_gateway:localdev@$PG:5432/eurobase?sslmode=disable" \
+  -e DATABASE_URL="postgres://eurobase_developer:localdev@$PG:5432/eurobase?sslmode=disable" \
   -e FUNC_PASSWORD_SECRET="$SECRET" -e PGB_PUBLISH_TO=file:/pub -e PGB_SYNC_INTERVAL=2s \
   eurobase-pgbouncer:test pgbouncer-userlist publish >/dev/null
 docker run -d --name "$PGB_R" --network "$NET" -p 6467:6432 -p 9128:9127 -v "$PUBVOL:/pub:ro" \
@@ -88,7 +92,7 @@ PGB_TEST_SECRET="$SECRET" \
 sleep 6 # publisher publishes the new tenant, runner pooler's sidecar picks it up
 PGB_TEST_RUNNER_POOLER="postgres://localhost:6467" PGB_TEST_GATEWAY_POOLER="postgres://localhost:6468" \
 PGB_TEST_RUNNER_METRICS="http://localhost:9128/metrics" PGB_TEST_GATEWAY_METRICS="http://localhost:9129/metrics" \
-PGB_TEST_DIRECT_URL="postgres://eurobase_gateway:localdev@localhost:$PG_PORT/eurobase?sslmode=disable" \
+PGB_TEST_DIRECT_URL="postgres://eurobase_developer:localdev@localhost:$PG_PORT/eurobase?sslmode=disable" \
 PGB_TEST_SECRET="$SECRET" \
   go test ./internal/pgbouncerconf/ -run TestPoolerSplit -count=1 -v
 
@@ -96,6 +100,7 @@ PGB_TEST_SECRET="$SECRET" \
 if command -v deno >/dev/null; then
   echo "── postgres.js probe"
   PGB_PROBE_GATEWAY="postgres://eurobase_gateway:localdev@localhost:$PGB_PORT/eurobase?sslmode=disable" \
+  PGB_PROBE_DISCOVERY="postgres://eurobase_developer:localdev@localhost:$PG_PORT/eurobase?sslmode=disable" \
   PGB_PROBE_TENANT_BASE="postgres://x:x@localhost:$PGB_PORT/eurobase_tenant?sslmode=disable" \
   PGB_TEST_SECRET="$SECRET" \
     deno run --allow-net --allow-env --allow-read --no-lock scripts/pgbouncer-probe.ts

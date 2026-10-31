@@ -34,7 +34,9 @@ func TestGetTableConstraints_DB(t *testing.T) {
 	owner := pgx.Identifier{schema + "_owner"}.Sanitize()
 	app := pgx.Identifier{schema + "_app"}.Sanitize()
 	cleanup := func() {
-		for _, q := range []string{"DROP SCHEMA IF EXISTS " + ident + " CASCADE", "DROP ROLE IF EXISTS " + owner, "DROP ROLE IF EXISTS " + app} {
+		for _, q := range []string{"DROP SCHEMA IF EXISTS " + ident + " CASCADE",
+			"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + schema + "_app') THEN EXECUTE 'DROP OWNED BY " + app + "'; END IF; END $$",
+			"DROP ROLE IF EXISTS " + owner, "DROP ROLE IF EXISTS " + app} {
 			if _, err := admin.Exec(context.Background(), q); err != nil {
 				t.Logf("cleanup %s: %v", q, err)
 			}
@@ -61,6 +63,11 @@ func TestGetTableConstraints_DB(t *testing.T) {
 		"GRANT USAGE ON SCHEMA " + ident + " TO " + app,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA " + ident + " TO " + app,
 		"RESET ROLE",
+		// The platform role these lookups run as reads the catalog; with
+		// the catalog lockdown (scripts/db/catalog-lockdown.sql) PUBLIC
+		// can't, so give the non-owner test role the same reads.
+		"GRANT USAGE ON SCHEMA information_schema TO " + app,
+		"GRANT SELECT ON pg_catalog.pg_class, pg_catalog.pg_namespace, pg_catalog.pg_attribute, pg_catalog.pg_constraint, pg_catalog.pg_index, pg_catalog.pg_type TO " + app,
 	} {
 		if _, err := admin.Exec(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
