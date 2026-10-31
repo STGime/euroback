@@ -469,7 +469,9 @@ func main() {
 					pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 					defer cancel()
 					var wrote bool
-					conn, err := pool.Acquire(pctx)
+					// Lists tenant schemas from the catalog: the developer
+					// pool (the runtime role has no catalog access).
+					conn, err := developerPool.Acquire(pctx)
 					if err == nil {
 						wrote, err = pub.Publish(pctx, conn.Conn())
 						conn.Release()
@@ -506,7 +508,7 @@ func main() {
 	// dedicated-DB flags. Currently used by the provision worker's
 	// backup-schedule step (#457) and the reconcile-backup-schedule
 	// worker. In-memory cached per plan for process lifetime.
-	limitsService := plans.NewLimitsService(pool)
+	limitsService := plans.NewLimitsService(pool).WithCatalogPool(developerPool)
 
 	provisionTeamDBWorker := &workers.ProvisionTeamDatabaseWorker{
 		Registry:              providerRegistry,

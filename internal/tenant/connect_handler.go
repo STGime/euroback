@@ -58,7 +58,12 @@ type ConnectColumn struct {
 // CLAUDE.md, .cursorrules, and sample code for a project.
 //
 // GET /platform/projects/{id}/connect
-func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
+// HandleConnect serves the Connect page. catalog answers the schema
+// introspection (the developer pool on the shared cluster); nil uses pool.
+func HandleConnect(pool, catalog *pgxpool.Pool) http.HandlerFunc {
+	if catalog == nil {
+		catalog = pool
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
@@ -82,7 +87,7 @@ func HandleConnect(pool *pgxpool.Pool) http.HandlerFunc {
 		apiURL := fmt.Sprintf("https://%s.eurobase.app", slug)
 
 		// Introspect tables in the tenant schema.
-		tables := introspectSchema(r.Context(), pool, schemaName)
+		tables := introspectSchema(r.Context(), catalog, schemaName)
 
 		// Build CLAUDE.md content.
 		claudeMD := generateClaudeMD(name, slug, apiURL, plan, tables)

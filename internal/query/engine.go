@@ -62,11 +62,40 @@ type QueryEngine struct {
 	// the tenant's own `<schema>_ddl` login on the shared cluster instead of
 	// SET LOCAL ROLE eurobase_migrator. Dedicated (Team) traffic is unaffected.
 	ddlLogin TenantLoginRunner
+	// catalog, when set, answers this engine's catalog lookups (table,
+	// column, relation and function checks) on the shared cluster
+	// instead of pool. The SDK engine's pool is eurobase_gateway, which
+	// also runs tenant-defined code (policies, triggers, rpc) and so must
+	// not need catalog access; the developer pool does.
+	catalog *pgxpool.Pool
 }
 
 // NewQueryEngine creates a new QueryEngine backed by the given connection pool.
 func NewQueryEngine(pool *pgxpool.Pool) *QueryEngine {
 	return &QueryEngine{pool: pool}
+}
+
+// WithCatalogPool sets the pool used for catalog lookups on the shared
+// cluster (nil keeps the engine's own pool). A Team project's lookups
+// still go to its dedicated pool.
+func (e *QueryEngine) WithCatalogPool(p *pgxpool.Pool) *QueryEngine {
+	e.catalog = p
+	return e
+}
+
+// catalogPool returns the pool for catalog lookups: the project's
+// dedicated pool when the resolver has one, else the catalog pool, else
+// the engine's own pool.
+func (e *QueryEngine) catalogPool(ctx context.Context) *pgxpool.Pool {
+	if e.resolver != nil {
+		if p := e.resolver(ctx); p != nil {
+			return p
+		}
+	}
+	if e.catalog != nil {
+		return e.catalog
+	}
+	return e.pool
 }
 
 // WithPoolResolver attaches a per-project pool resolver so tenant
@@ -283,7 +312,7 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 		return nil, err
 	}
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
 
@@ -302,7 +331,7 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 
 	// Validate the aggregate column exists (if not count).
 	if aggCol != "" {
-		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, []string{aggCol}); err != nil {
+		if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, []string{aggCol}); err != nil {
 			return nil, err
 		}
 		if err := checkDeniedColumns(ctx, tableName, []string{aggCol}); err != nil {
@@ -316,7 +345,7 @@ func (e *QueryEngine) AggregateQuery(ctx context.Context, schemaName, tableName 
 		filterCols = append(filterCols, f.Column)
 	}
 	if len(filterCols) > 0 {
-		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, filterCols); err != nil {
+		if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, filterCols); err != nil {
 			return nil, err
 		}
 	}
@@ -348,13 +377,13 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 			return nil, err
 		}
 		// Validate the related table exists.
-		if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, rel.Table); err != nil {
+		if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, rel.Table); err != nil {
 			return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
 		}
 
 		// Validate the related table columns (unless "*").
 		if len(rel.Columns) > 0 && !(len(rel.Columns) == 1 && rel.Columns[0] == "*") {
-			if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, rel.Table, rel.Columns); err != nil {
+			if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, rel.Table, rel.Columns); err != nil {
 				return nil, fmt.Errorf("relation %q: %w", rel.Table, err)
 			}
 		}
@@ -366,7 +395,7 @@ func (e *QueryEngine) resolveRelations(ctx context.Context, schemaName, tableNam
 
 		// Find FK from main table to related table.
 		var fkCol, refCol string
-		err := e.resolvePool(ctx).QueryRow(ctx,
+		err := e.catalogPool(ctx).QueryRow(ctx,
 			`SELECT kcu.column_name, ccu.column_name
 			 FROM information_schema.key_column_usage kcu
 			 JOIN information_schema.table_constraints tc
@@ -405,7 +434,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		return nil, 0, err
 	}
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, 0, err
 	}
 
@@ -418,7 +447,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 			}
 		}
 		if len(colsToValidate) > 0 {
-			if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, colsToValidate); err != nil {
+			if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, colsToValidate); err != nil {
 				return nil, 0, err
 			}
 		}
@@ -433,7 +462,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		filterCols = append(filterCols, f.Column)
 	}
 	if len(filterCols) > 0 {
-		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, filterCols); err != nil {
+		if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, filterCols); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -447,7 +476,7 @@ func (e *QueryEngine) SelectRows(ctx context.Context, schemaName, tableName stri
 		orderCols = append(orderCols, o.Column)
 	}
 	if len(orderCols) > 0 {
-		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, orderCols); err != nil {
+		if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, orderCols); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -581,7 +610,7 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 		return nil, err
 	}
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
 
@@ -598,7 +627,7 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 		for k := range data {
 			cols = append(cols, k)
 		}
-		if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, cols); err != nil {
+		if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, cols); err != nil {
 			return nil, err
 		}
 		if err := checkDeniedColumns(ctx, tableName, cols); err != nil {
@@ -645,7 +674,7 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	}
 
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
 
@@ -654,7 +683,7 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	for k := range data {
 		cols = append(cols, k)
 	}
-	if err := ValidateColumns(ctx, e.resolvePool(ctx), schemaName, tableName, cols); err != nil {
+	if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, cols); err != nil {
 		return nil, err
 	}
 	if err := checkDeniedColumns(ctx, tableName, cols); err != nil {
@@ -696,7 +725,7 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 		return err
 	}
 	// Validate table exists.
-	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return err
 	}
 
@@ -722,7 +751,7 @@ func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName stri
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
-	if err := ValidateTable(ctx, e.resolvePool(ctx), schemaName, tableName); err != nil {
+	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
 
@@ -759,7 +788,7 @@ func (e *QueryEngine) CallFunction(ctx context.Context, schemaName, funcName str
 
 	// Validate the function exists in the schema.
 	var exists bool
-	err := e.resolvePool(ctx).QueryRow(ctx,
+	err := e.catalogPool(ctx).QueryRow(ctx,
 		`SELECT EXISTS (
 			SELECT 1 FROM information_schema.routines
 			WHERE routine_schema = $1 AND routine_name = $2

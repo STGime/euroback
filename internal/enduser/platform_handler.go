@@ -93,8 +93,9 @@ type PoolResolver func(ctx context.Context, projectID string) *pgxpool.Pool
 // PlatformRoutes returns a chi.Router with end-user management handlers.
 // The optional resolver routes tenant-schema reads / writes to the
 // project's dedicated instance for Team-tier; pass nil for Free/Pro-only
-// deployments or tests.
-func PlatformRoutes(pool *pgxpool.Pool, resolver PoolResolver, limiter *ratelimit.RateLimiter) chi.Router {
+// deployments or tests. catalog answers catalog reads (the developer pool
+// on the shared cluster); nil uses pool.
+func PlatformRoutes(pool *pgxpool.Pool, resolver PoolResolver, limiter *ratelimit.RateLimiter, catalog *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", handleListUsers(pool, resolver))
 	r.Post("/", handleCreateUser(pool, resolver))
@@ -105,7 +106,7 @@ func PlatformRoutes(pool *pgxpool.Pool, resolver PoolResolver, limiter *ratelimi
 	r.Post("/{userId}/suspend", handleSuspendUser(pool, resolver))
 	r.Delete("/{userId}/suspend", handleUnsuspendUser(pool, resolver))
 	r.Post("/{userId}/reset-password", handleResetPassword(pool, resolver))
-	r.Get("/{userId}/export", HandleGDPRExport(pool, limiter))
+	r.Get("/{userId}/export", HandleGDPRExport(pool, catalog, limiter))
 	return r
 }
 
@@ -128,7 +129,9 @@ func tenantPool(ctx context.Context, sharedPool *pgxpool.Pool, resolver PoolReso
 	return sharedPool
 }
 
-func scanUser(rows interface{ Scan(dest ...interface{}) error }) (PlatformUser, error) {
+func scanUser(rows interface {
+	Scan(dest ...interface{}) error
+}) (PlatformUser, error) {
 	var u PlatformUser
 	var metadataJSON []byte
 	var providersArr []string
@@ -668,7 +671,6 @@ func handleResetPassword(pool *pgxpool.Pool, resolver PoolResolver) http.Handler
 		}
 
 		// Refresh tokens already revoked inside the transaction above.
-
 
 		slog.Info("platform reset end-user password", "schema", schema, "user_id", userID)
 

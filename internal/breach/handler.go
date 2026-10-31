@@ -40,8 +40,11 @@ func (m *MailerAdapter) SendRaw(ctx context.Context, to, subject, htmlBody strin
 
 // Handler is the HTTP surface for the breach register.
 type Handler struct {
-	Svc      *Service
-	Pool     *pgxpool.Pool
+	Svc  *Service
+	Pool *pgxpool.Pool
+	// Catalog answers catalog reads (tenant table discovery); the
+	// developer pool on the shared cluster. Nil uses Pool.
+	Catalog  *pgxpool.Pool
 	Mailer   Mailer
 	DPOEmail string // populated from env (DPO_EMAIL) by the router wiring.
 }
@@ -212,7 +215,7 @@ func (h *Handler) HandleSubjects() http.HandlerFunc {
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&q)
 		}
-		result, err := IdentifySubjects(r.Context(), h.Pool, projectID, q)
+		result, err := IdentifySubjects(r.Context(), h.Pool, h.catalog(), projectID, q)
 		if err != nil {
 			slog.Error("breach subject identification failed", "incident_id", incidentID, "error", err)
 			writeError(w, err.Error(), http.StatusInternalServerError)
@@ -437,15 +440,23 @@ func (h *Handler) HandleSLAStatus() http.HandlerFunc {
 		customerSLA := latest.AwarenessAt.Add(24 * time.Hour)
 		authoritySLA := latest.AwarenessAt.Add(72 * time.Hour)
 		writeJSON(w, map[string]interface{}{
-			"incident_id":       incidentID,
-			"awareness_at":      latest.AwarenessAt,
-			"now":               now,
-			"customer_sla_at":   customerSLA,
-			"customer_notified": latest.NotifiedCustomers,
-			"customer_breach":   !latest.NotifiedCustomers && now.After(customerSLA),
-			"authority_sla_at":  authoritySLA,
+			"incident_id":        incidentID,
+			"awareness_at":       latest.AwarenessAt,
+			"now":                now,
+			"customer_sla_at":    customerSLA,
+			"customer_notified":  latest.NotifiedCustomers,
+			"customer_breach":    !latest.NotifiedCustomers && now.After(customerSLA),
+			"authority_sla_at":   authoritySLA,
 			"authority_notified": latest.NotifiedAuthority,
-			"authority_breach":  !latest.NotifiedAuthority && now.After(authoritySLA),
+			"authority_breach":   !latest.NotifiedAuthority && now.After(authoritySLA),
 		}, http.StatusOK)
 	}
+}
+
+// catalog returns the pool for catalog reads.
+func (h *Handler) catalog() *pgxpool.Pool {
+	if h.Catalog != nil {
+		return h.Catalog
+	}
+	return h.Pool
 }

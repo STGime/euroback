@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
@@ -81,7 +80,12 @@ type GDPRRefreshToken struct {
 
 // HandleGDPRExport returns a handler for GET /platform/projects/{id}/users/{userId}/export.
 // Requires admin or owner role on the project; rate-limited per actor.
-func HandleGDPRExport(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.HandlerFunc {
+// catalog answers the table and column discovery (the developer pool on
+// the shared cluster); nil uses pool.
+func HandleGDPRExport(pool, catalog *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.HandlerFunc {
+	if catalog == nil {
+		catalog = pool
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		userID := chi.URLParam(r, "userId")
@@ -108,6 +112,11 @@ func HandleGDPRExport(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.H
 
 		ctx := r.Context()
 		qs := quoteIdent(schema)
+
+		// Which developer tables hold rows owned by a user: read from the
+		// catalog before the service transaction (the runtime role has no
+		// catalog access).
+		ownedTables, ownedErr := discoverUserOwnedTables(ctx, catalog, schema)
 
 		// Run all export queries inside a single service-role transaction
 		// so RLS policies on the tenant schema permit reading rows owned
@@ -145,7 +154,10 @@ func HandleGDPRExport(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) http.H
 			} else {
 				tokens = t
 			}
-			if d, err := exportUserOwnedRows(ctx, tx, schema, userID); err != nil {
+			if ownedErr != nil {
+				slog.Error("gdpr export: user data tables", "error", ownedErr, "user_id", userID)
+				userData = map[string][]map[string]any{}
+			} else if d, err := exportUserOwnedRows(ctx, tx, schema, userID, ownedTables); err != nil {
 				slog.Error("gdpr export: user data", "error", err, "user_id", userID)
 				userData = map[string][]map[string]any{}
 			} else {
@@ -309,46 +321,72 @@ var gdprPlatformTables = map[string]bool{
 // ownerColumns are column names that link a row to an end-user.
 var ownerColumns = []string{"user_id", "owner_id", "created_by"}
 
-// exportUserOwnedRows scans every developer-created table in the schema for
-// rows belonging to the given user, identified by any column in ownerColumns.
-func exportUserOwnedRows(ctx context.Context, tx pgx.Tx, schema, userID string) (map[string][]map[string]any, error) {
-	qs := quoteIdent(schema)
+// ownedTable is a developer table with the column that links its rows to
+// an end user.
+type ownedTable struct{ table, column string }
 
-	// Discover tables.
-	tableRows, err := tx.Query(ctx,
-		`SELECT table_name FROM information_schema.tables
-		 WHERE table_schema = $1 AND table_type = 'BASE TABLE'
-		 ORDER BY table_name`, schema)
+// discoverUserOwnedTables lists the developer-created tables in the schema
+// that have one of ownerColumns (the first one present, in that order).
+// It reads the catalog, so q must be a pool with catalog access.
+func discoverUserOwnedTables(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, schema string) ([]ownedTable, error) {
+	rows, err := q.Query(ctx,
+		`SELECT c.table_name, c.column_name
+		   FROM information_schema.columns c
+		   JOIN information_schema.tables t
+		     ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+		  WHERE c.table_schema = $1 AND t.table_type = 'BASE TABLE'
+		    AND c.column_name = ANY($2)
+		  ORDER BY c.table_name`, schema, ownerColumns)
 	if err != nil {
 		return nil, err
 	}
-	defer tableRows.Close()
-
-	var tables []string
-	for tableRows.Next() {
-		var t string
-		if err := tableRows.Scan(&t); err != nil {
+	found := map[string]map[string]bool{}
+	var order []string
+	for rows.Next() {
+		var t, c string
+		if err := rows.Scan(&t, &c); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		if !gdprPlatformTables[t] {
-			tables = append(tables, t)
-		}
-	}
-
-	result := map[string][]map[string]any{}
-
-	for _, table := range tables {
-		// Find which owner column exists in this table.
-		col, err := findOwnerColumn(ctx, tx, schema, table)
-		if err != nil || col == "" {
+		if gdprPlatformTables[t] {
 			continue
 		}
+		if found[t] == nil {
+			found[t] = map[string]bool{}
+			order = append(order, t)
+		}
+		found[t][c] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []ownedTable
+	for _, t := range order {
+		for _, c := range ownerColumns {
+			if found[t][c] {
+				out = append(out, ownedTable{table: t, column: c})
+				break
+			}
+		}
+	}
+	return out, nil
+}
 
+// exportUserOwnedRows reads, from each owned table, the rows belonging to
+// the given user.
+func exportUserOwnedRows(ctx context.Context, tx pgx.Tx, schema, userID string, tables []ownedTable) (map[string][]map[string]any, error) {
+	qs := quoteIdent(schema)
+	result := map[string][]map[string]any{}
+
+	for _, ot := range tables {
 		q := fmt.Sprintf(`SELECT row_to_json(t)::text FROM %s.%s t WHERE %s = $1`,
-			qs, quoteIdent(table), quoteIdent(col))
+			qs, quoteIdent(ot.table), quoteIdent(ot.column))
 		rows, err := tx.Query(ctx, q, userID)
 		if err != nil {
-			slog.Debug("gdpr export: skip table", "table", table, "error", err)
+			slog.Debug("gdpr export: skip table", "table", ot.table, "error", err)
 			continue
 		}
 
@@ -367,34 +405,9 @@ func exportUserOwnedRows(ctx context.Context, tx pgx.Tx, schema, userID string) 
 		rows.Close()
 
 		if len(tableRows) > 0 {
-			result[table] = tableRows
+			result[ot.table] = tableRows
 		}
 	}
 
 	return result, nil
-}
-
-// findOwnerColumn checks if a table has any of the known owner columns.
-func findOwnerColumn(ctx context.Context, tx pgx.Tx, schema, table string) (string, error) {
-	placeholders := make([]string, len(ownerColumns))
-	args := make([]any, len(ownerColumns)+2)
-	args[0] = schema
-	args[1] = table
-	for i, c := range ownerColumns {
-		placeholders[i] = fmt.Sprintf("$%d", i+3)
-		args[i+2] = c
-	}
-
-	q := fmt.Sprintf(
-		`SELECT column_name FROM information_schema.columns
-		 WHERE table_schema = $1 AND table_name = $2
-		   AND column_name IN (%s)
-		 LIMIT 1`, strings.Join(placeholders, ","))
-
-	var col string
-	err := tx.QueryRow(ctx, q, args...).Scan(&col)
-	if err != nil {
-		return "", err
-	}
-	return col, nil
 }
