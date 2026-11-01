@@ -369,6 +369,161 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// A server using the project's secret key (no end-user session, so no
+	// Authorization header — as the SDK sends it) is the service role on
+	// /v1/storage, as on /v1/db: it uploads developer files, lists the
+	// bucket, issues upload URLs and deletes. A public key alone still
+	// can't write.
+	check(t, env, "storage_secret_key", func() error {
+		callAs := func(method, path, apiKey, jwt, contentType string, body io.Reader) *httpResult {
+			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, body)
+			req.Header.Set("apikey", apiKey)
+			if jwt != "" {
+				req.Header.Set("Authorization", "Bearer "+jwt)
+			}
+			if contentType != "" {
+				req.Header.Set("Content-Type", contentType)
+			}
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		call := func(method, path, apiKey, contentType string, body io.Reader) *httpResult {
+			return callAs(method, path, apiKey, "", contentType, body)
+		}
+		uploadAs := func(apiKey, jwt, key string) *httpResult {
+			var buf bytes.Buffer
+			mw := multipart.NewWriter(&buf)
+			_ = mw.WriteField("key", key)
+			fw, _ := mw.CreateFormFile("file", "server.txt")
+			_, _ = fw.Write([]byte("from the server"))
+			_ = mw.Close()
+			return callAs("POST", "/v1/storage/upload", apiKey, jwt, mw.FormDataContentType(), &buf)
+		}
+		upload := func(apiKey, key string) *httpResult { return uploadAs(apiKey, "", key) }
+		owner := func(key string) string {
+			return env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = '"+key+"'", "storage_objects")
+		}
+		if r := upload(env.publicKey, "server/anon.txt"); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("public key alone must not upload: %w", r)
+		}
+		if r := upload(env.secretKey, "server/report.txt"); r.code >= 300 {
+			return fmt.Errorf("secret-key upload: %w", r)
+		}
+		if o := owner("server/report.txt"); o != "<null>" {
+			return fmt.Errorf("a secret-key upload must be a developer file (uploaded_by NULL), got %q", o)
+		}
+		if r := call("GET", "/v1/storage/server/report.txt", env.secretKey, "", nil); r.code != 200 || r.body != "from the server" {
+			return fmt.Errorf("secret-key download of its own upload: %w", r)
+		}
+		// The listing is the bucket's, as for the console: it includes a
+		// console upload too.
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "server/console.txt"); r.code >= 300 {
+			return fmt.Errorf("console upload: %w", r)
+		}
+		if r := call("GET", "/v1/storage/?prefix=server/", env.secretKey, "", nil); r.code != 200 ||
+			!strings.Contains(r.body, "server/report.txt") || !strings.Contains(r.body, "server/console.txt") {
+			return fmt.Errorf("secret-key listing must include server and console uploads: %w", r)
+		}
+		if r := call("GET", "/v1/storage/server/console.txt", env.secretKey, "", nil); r.code != 200 {
+			return fmt.Errorf("secret-key download of a console upload: %w", r)
+		}
+		// Upload URL: the key is tracked when the URL is issued (the PUT
+		// bypasses the gateway), so the file can be read back.
+		sr := call("POST", "/v1/storage/signed-url", env.secretKey, "application/json",
+			strings.NewReader(`{"key":"server/signed.txt","operation":"upload","content_type":"text/plain"}`))
+		var su struct {
+			URL string `json:"url"`
+		}
+		if sr.code != 200 || json.Unmarshal([]byte(sr.body), &su) != nil || su.URL == "" {
+			return fmt.Errorf("secret-key upload URL: %w", sr)
+		}
+		put, _ := http.NewRequest("PUT", su.URL, strings.NewReader("signed by server"))
+		put.Header.Set("Content-Type", "text/plain")
+		resp, err := http.DefaultClient.Do(put)
+		if err != nil {
+			return fmt.Errorf("PUT to signed URL: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return fmt.Errorf("PUT to signed URL: %s", resp.Status)
+		}
+		if o := owner("server/signed.txt"); o != "<null>" {
+			return fmt.Errorf("a secret-key upload URL must track a developer file, got %q", o)
+		}
+		if r := call("GET", "/v1/storage/server/signed.txt", env.secretKey, "", nil); r.code != 200 || r.body != "signed by server" {
+			return fmt.Errorf("secret-key download of an upload-URL upload: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "application/json",
+			strings.NewReader(`{"key":"server/signed2.txt","operation":"upload","content_type":"text/plain"}`)); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("public key alone must not get an upload URL: %w", r)
+		}
+		if r := call("DELETE", "/v1/storage/server/console.txt", env.publicKey, "", nil); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("public key alone must not delete: %w", r)
+		}
+		// Secret key + end-user JWT is the service role (as on /v1/db): a
+		// new file is a developer file; overwriting an end user's file
+		// keeps its owner.
+		if r := call("POST", "/v1/auth/signup", env.publicKey, "application/json",
+			strings.NewReader(`{"email":"serverkey@team.test","password":"Correct-horse-9"}`)); r.code >= 300 && !strings.Contains(r.body, "already registered") {
+			return r
+		}
+		si := call("POST", "/v1/auth/signin", env.publicKey, "application/json",
+			strings.NewReader(`{"email":"serverkey@team.test","password":"Correct-horse-9"}`))
+		var tok struct {
+			AccessToken string `json:"access_token"`
+		}
+		if si.code != 200 || json.Unmarshal([]byte(si.body), &tok) != nil || tok.AccessToken == "" {
+			return fmt.Errorf("signin: %w", si)
+		}
+		if r := uploadAs(env.publicKey, tok.AccessToken, "server/user.txt"); r.code >= 300 {
+			return fmt.Errorf("end-user upload: %w", r)
+		}
+		userOwner := owner("server/user.txt")
+		if userOwner == "<null>" {
+			return fmt.Errorf("an end-user upload must record its owner")
+		}
+		if r := uploadAs(env.secretKey, tok.AccessToken, "server/user.txt"); r.code >= 300 {
+			return fmt.Errorf("secret-key overwrite with a JWT: %w", r)
+		}
+		if o := owner("server/user.txt"); o != userOwner {
+			return fmt.Errorf("a secret-key overwrite must keep the end user as owner, got %q", o)
+		}
+		if r := uploadAs(env.secretKey, tok.AccessToken, "server/both.txt"); r.code >= 300 {
+			return fmt.Errorf("secret-key upload with a JWT: %w", r)
+		}
+		if o := owner("server/both.txt"); o != "<null>" {
+			return fmt.Errorf("a secret-key upload with a JWT must be a developer file, got %q", o)
+		}
+		for _, k := range []string{"server/report.txt", "server/console.txt", "server/signed.txt", "server/user.txt", "server/both.txt"} {
+			if r := call("DELETE", "/v1/storage/"+k, env.secretKey, "", nil); r.code >= 300 {
+				return fmt.Errorf("secret-key delete %s: %w", k, r)
+			}
+		}
+		if n := env.dedCount(t, "storage_objects", "key LIKE 'server/%'"); n != 0 {
+			return fmt.Errorf("deleted objects still tracked (count %d)", n)
+		}
+		// Export archives stay console-admin only, also for the secret key.
+		exportKey := "exports/" + env.projectID + "/x.zip"
+		if r := upload(env.secretKey, exportKey); r.code != http.StatusForbidden {
+			return fmt.Errorf("secret-key write into the export namespace must be refused: %w", r)
+		}
+		if err := env.s3.UploadObject(context.Background(), env.bucket, exportKey, strings.NewReader("zip"), "application/zip", 3); err != nil {
+			return err
+		}
+		if r := call("GET", "/v1/storage/"+exportKey, env.secretKey, "", nil); r.code != http.StatusNotFound {
+			return fmt.Errorf("secret-key download of an export archive must be refused: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.secretKey, "application/json",
+			strings.NewReader(`{"key":"`+exportKey+`","operation":"download"}`)); r.code != http.StatusNotFound {
+			return fmt.Errorf("secret-key download URL for an export archive must be refused: %w", r)
+		}
+		if r := call("GET", "/v1/storage/?prefix=exports/", env.secretKey, "", nil); r.code != 200 || strings.Contains(r.body, exportKey) {
+			return fmt.Errorf("secret-key listing must hide export archives: %w", r)
+		}
+		return env.s3.DeleteObject(context.Background(), env.bucket, exportKey)
+	})
+
 	// #697 shared folders: developer-uploaded files become readable by end
 	// users (never writable) once their folder is shared.
 	check(t, env, "storage_shared_folders", func() error {

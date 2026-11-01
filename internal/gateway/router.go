@@ -1716,6 +1716,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					r.Use(apiKeyMw.Handler)
 					r.Use(MaintenanceModeMiddleware)
 					r.Use(endUserMw.Handler)
+					// Key type and schema on the query context, as on /v1/db:
+					// a secret key is the service role here too (RLS and the
+					// handler's service-caller checks read it from there).
+					r.Use(tenant.TenantContextFromProject())
 				}
 
 				// SDK storage — same routing story as SDK SQL: tenant
