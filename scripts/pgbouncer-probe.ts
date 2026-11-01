@@ -2,7 +2,8 @@
 // runner will use it (#641 PR 3). Run by scripts/test-pgbouncer.sh after
 // the Go e2e test has provisioned a tenant with a login.
 //
-// Env: PGB_PROBE_GATEWAY (gateway via pooler), PGB_PROBE_TENANT_BASE
+// Env: PGB_PROBE_DISCOVERY (a platform role that can read the catalog, to
+// find a tenant; falls back to PGB_PROBE_GATEWAY), PGB_PROBE_TENANT_BASE
 // (pooler URL with the tenant alias db; user/pass replaced), PGB_TEST_SECRET.
 import { funcPassword, tenantDbUrl } from "../functions-runner/tenant_db.ts";
 const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.7/mod.js");
@@ -18,7 +19,7 @@ let failed = false;
 const fail = (m: string) => { console.log("FAIL " + m); failed = true; };
 const ok = (m: string) => console.log("OK   " + m);
 
-const gw = postgres(Deno.env.get("PGB_PROBE_GATEWAY")!, { max: 1 });
+const gw = postgres(Deno.env.get("PGB_PROBE_DISCOVERY") ?? Deno.env.get("PGB_PROBE_GATEWAY")!, { max: 1 });
 const [t] = await gw`SELECT n.nspname AS s FROM pg_namespace n JOIN pg_roles r ON r.rolname = n.nspname || '_func' AND r.rolcanlogin WHERE n.nspname ~ '^tenant_[0-9a-f_]+$' ORDER BY 1 LIMIT 1`;
 await gw.end();
 if (!t) { fail("no loginable tenant (run the Go e2e test first)"); Deno.exit(1); }

@@ -382,7 +382,11 @@ func TestTenantExport_SchemaSection(t *testing.T) {
 	})
 
 	t.Run("a dump that can't read the tables fails instead of shipping partial DDL", func(t *testing.T) {
-		// The gateway role can't lock <schema>_ddl-owned tables.
+		// The gateway role can't lock <schema>_ddl-owned tables (and, with
+		// the catalog lockdown, can't read the catalog at all).
+		if refusedWithoutCatalog(t, gw, schema, projectID) {
+			return
+		}
 		_, entries, meta := runTenantExport(t, gw, ExportSource{Pool: gw}, schema, projectID)
 		if sec := findSection(meta.Sections, "schema"); sec == nil || sec.Status != TableFailed {
 			t.Errorf("schema section = %+v", sec)

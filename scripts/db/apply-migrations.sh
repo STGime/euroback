@@ -158,3 +158,12 @@ if [ "$APPLIED" != "$LATEST" ]; then
     exit 1
 fi
 echo "OK: migrations applied through $LATEST."
+
+# The superuser catalog lockdown (scripts/db/catalog-lockdown.sql): prod
+# applies it as _rdb_superadmin after 000149; here the admin stand-in does,
+# so every suite runs against it. Idempotent. CATALOG_LOCKDOWN=0 skips it.
+if [ "${CATALOG_LOCKDOWN:-1}" != "0" ]; then
+    echo "── Catalog lockdown (superuser step) ──"
+    sql -f "$REPO_ROOT/scripts/db/catalog-lockdown.sql" >/dev/null || fail
+    echo "OK: catalog lockdown applied."
+fi

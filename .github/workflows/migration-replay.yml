@@ -16,6 +16,7 @@ on:
       - migrations/**
       - scripts/db/**
       - scripts/replay-migrations.sh
+      - scripts/verify-tenant-migration-isolation.sh
       - deploy/docker/Dockerfile.migrations
       - .github/workflows/migration-replay.yml
   push:
@@ -24,6 +25,7 @@ on:
       - migrations/**
       - scripts/db/**
       - scripts/replay-migrations.sh
+      - scripts/verify-tenant-migration-isolation.sh
       - deploy/docker/Dockerfile.migrations
       - .github/workflows/migration-replay.yml
   workflow_dispatch:
@@ -65,3 +67,8 @@ jobs:
         env:
           PGURL: postgres://postgres:replay-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
         run: scripts/replay-migrations.sh
+
+      # Tenant isolation proofs (own throwaway PG16), incl. check 13: the
+      # catalog lockdown (scripts/db/catalog-lockdown.sql).
+      - name: Tenant isolation checks
+        run: bash scripts/verify-tenant-migration-isolation.sh

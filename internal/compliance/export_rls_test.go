@@ -101,7 +101,13 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 
 	// The runtime role can't read owner-only tables; that must show up as
 	// failures, not as tables with no rows (the pre-#654 behaviour).
+	// With the catalog lockdown (scripts/db/catalog-lockdown.sql) the
+	// runtime role can't read the catalog at all, so the export fails
+	// outright — also never an empty "complete" archive.
 	t.Run("a runtime-role source reports RLS tables as failed, never empty", func(t *testing.T) {
+		if refusedWithoutCatalog(t, gw, schema, projectID) {
+			return
+		}
 		res, entries, meta := runTenantExport(t, gw, ExportSource{Pool: gw}, schema, projectID)
 		if _, ok := entries["tables/bookings.json"]; ok {
 			t.Error("bookings exported via the gateway role — expected a refused read")
@@ -381,4 +387,26 @@ func mustPool(t *testing.T, url string) *pgxpool.Pool {
 	}
 	t.Cleanup(p.Close)
 	return p
+}
+
+// refusedWithoutCatalog: when the source role has no catalog access (the
+// catalog lockdown, scripts/db/catalog-lockdown.sql), an export from it
+// must fail outright with permission denied — never an empty or partial
+// archive. Reports whether that case applied.
+func refusedWithoutCatalog(t *testing.T, src *pgxpool.Pool, schema, projectID string) bool {
+	t.Helper()
+	var catalog bool
+	if err := src.QueryRow(context.Background(), `SELECT has_table_privilege('pg_catalog.pg_namespace', 'SELECT')`).Scan(&catalog); err != nil {
+		t.Fatal(err)
+	}
+	if catalog {
+		return false
+	}
+	var buf bytes.Buffer
+	_, err := WriteTenantExport(context.Background(), src, ExportSource{Pool: src}, &buf, schema, projectID, "exp-rls", "json",
+		TenantExportOptions{Objects: fakeLister{}, Bucket: "b"})
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("export from a role without catalog access: err = %v, want permission denied", err)
+	}
+	return true
 }
