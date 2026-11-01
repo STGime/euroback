@@ -484,6 +484,27 @@ func (h *StorageHandler) claimKey(r *http.Request, bucket, key, contentType stri
 	return ok, created, err
 }
 
+// trackServiceUploadURL records a key a service-role caller (secret key,
+// console) is issued an upload URL for, as a developer file (uploaded_by
+// NULL, size 0 until known). An existing row keeps its owner. End users'
+// keys are tracked by claimKey instead.
+func (h *StorageHandler) trackServiceUploadURL(r *http.Request, key, contentType string) error {
+	if !serviceCaller(r) || h.engine == nil || h.pool == nil {
+		return nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" {
+		return nil
+	}
+	return h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, fmt.Sprintf(
+			`INSERT INTO "%s".storage_objects (key, content_type, size_bytes, uploaded_by)
+			 VALUES ($1, $2, 0, NULL) ON CONFLICT (key) DO NOTHING`, strings.ReplaceAll(schema, `"`, `""`)),
+			key, contentType)
+		return err
+	})
+}
+
 // errClaimNoUser: the caller's end user no longer exists (tenant users FK).
 var errClaimNoUser = errors.New("end user no longer exists")
 
@@ -1377,6 +1398,14 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			return
 		} else if !ok {
 			http.Error(w, `{"error":"an object with this key belongs to another user"}`, http.StatusForbidden)
+			return
+		}
+		// claimKey records no row for the service role, and the PUT to
+		// the URL never passes through the gateway: track the key now so
+		// the file can be read back (downloads check storage_objects).
+		if err := h.trackServiceUploadURL(r, req.Key, ct); err != nil {
+			slog.Error("storage signed-url: tracking failed", "error", err, "key", req.Key)
+			writeClaimError(w, err)
 			return
 		}
 	}
