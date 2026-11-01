@@ -13,7 +13,14 @@ CNAME=eb-mig-isolation
 docker rm -f "$CNAME" >/dev/null 2>&1 || true
 docker run -d --name "$CNAME" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=eurobase -p 5456:5432 postgres:16-alpine >/dev/null
 trap 'docker rm -f "$CNAME" >/dev/null 2>&1 || true' EXIT
-for _ in $(seq 1 30); do docker exec "$CNAME" pg_isready -U postgres -d eurobase >/dev/null 2>&1 && break; sleep 1; done
+# Wait for a real query over TCP: the image's temporary init server answers
+# on the socket before it has created the database.
+ready=0
+for _ in $(seq 1 60); do
+  docker exec -e PGPASSWORD=postgres "$CNAME" psql -h 127.0.0.1 -U postgres -d eurobase -tAc 'SELECT 1' >/dev/null 2>&1 && { ready=1; break; }
+  sleep 1
+done
+[ "$ready" = 1 ] || { echo "postgres did not become ready" >&2; exit 1; }
 
 psql() { docker exec -i "$CNAME" psql -U postgres -d eurobase "$@"; }
 as_role() { local role="$1" pw="$2"; shift 2; PGPASSWORD="$pw" docker exec -i "$CNAME" psql -h localhost -U "$role" -d eurobase "$@"; }
