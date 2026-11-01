@@ -78,6 +78,16 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	if developerPool == nil {
 		developerPool = pool
 	}
+	// Catalog reads (pg_catalog, information_schema) about tenant schemas
+	// run on the developer pool, never on eurobase_gateway: the gateway
+	// runs tenant-defined code (policies, triggers, rpc), so it must not
+	// need catalog access.
+	catalogPool := developerPool
+	// The SDK engine's lookups (table / column / relation / rpc checks on
+	// every typed request) get their own small pool, so SDK load can't
+	// take the developer pool's connections from console sign-in and
+	// platform routes.
+	sdkCatalogPool := newSDKCatalogPool(pool, developerPool)
 	r := chi.NewRouter()
 
 	// Global middleware.
@@ -1036,11 +1046,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.With(tenant.RequireMinRole("admin")).Get("/sql-log", sqllog.HandleProjectLog(developerPool))
 			}
 			// PlatformTenantContext (#679): the catalog reads go to a Team
-			// project's dedicated DB (or 503); projects / schema_changes
-			// lookups stay on the platform DB via `pool`.
-			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema", query.HandleSchemaIntrospection(pool))
-			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/changes", query.HandleSchemaChanges(pool))
-			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/rls-audit", query.HandleRLSAudit(pool))
+			// project's dedicated DB (or 503), else to catalogPool (the
+			// developer pool), which also answers the projects /
+			// schema_changes lookups on the platform DB.
+			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema", query.HandleSchemaIntrospection(catalogPool))
+			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/changes", query.HandleSchemaChanges(catalogPool))
+			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/rls-audit", query.HandleRLSAudit(catalogPool))
 			// DDL on tenant schemas.
 			//
 			// Free/Pro: the developer pool + SET LOCAL ROLE
@@ -1088,7 +1099,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc, cronDry))
 			r.With(tenant.RequireMinRole("viewer")).Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.With(tenant.RequireMinRole("admin")).Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
-			r.With(tenant.RequireMinRole("viewer")).Get("/connect", tenant.HandleConnect(pool))
+			r.With(tenant.RequireMinRole("viewer")).Get("/connect", tenant.HandleConnect(pool, catalogPool))
 
 			// Plan usage.
 			if limitsSvc != nil {
@@ -1315,7 +1326,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				breachMailer = &breach.MailerAdapter{Svc: emailService}
 			}
 			breachSvc := breach.NewService(pool, auditSvc, metricsReg)
-			breachH := &breach.Handler{Svc: breachSvc, Pool: pool, Mailer: breachMailer, DPOEmail: dpoEmail}
+			breachH := &breach.Handler{Svc: breachSvc, Pool: pool, Catalog: catalogPool, Mailer: breachMailer, DPOEmail: dpoEmail}
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/breaches", breachH.HandleList())
 			r.With(tenant.RequireMinRole("admin")).Post("/compliance/breaches", breachH.HandleOpen())
 			r.With(tenant.RequireMinRole("admin")).Get("/compliance/breaches/{incidentId}", breachH.HandleGet())
@@ -1373,7 +1384,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Route("/users", func(r chi.Router) {
 				r.Use(tenant.RequireMinRole("admin"))
 				r.Use(tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver))
-				r.Mount("/", enduser.PlatformRoutes(pool, enduserPoolResolver, limiter))
+				r.Mount("/", enduser.PlatformRoutes(pool, enduserPoolResolver, limiter, catalogPool))
 			})
 
 			// Console storage proxy — platform-authenticated access to project storage.
@@ -1654,7 +1665,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// SDK runtime engine — routes tenant queries to the
 			// dedicated pool when the API key resolves to a Team+
 			// project with HasDedicatedDB=true (Team-tier M2.5).
-			queryEngine := query.NewQueryEngine(pool).WithPoolResolver(poolResolver)
+			queryEngine := query.NewQueryEngine(pool).WithPoolResolver(poolResolver).WithCatalogPool(sdkCatalogPool)
 			// Customer SQL (/sql, /rpc) runs on the project's own
 			// `<schema>_func` login when configured — the step-4 security
 			// remediation. Typed REST (/{table}) and SDK DDL keep their
@@ -1718,7 +1729,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// sdkTenantPoolMw put on the request (503 if a Team
 				// project has none), as the engine's resolver does.
 				r.Use(sdkTenantPoolMw)
-				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(query.TenantPoolFromContext)).
+				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(query.TenantPoolFromContext).WithCatalogPool(sdkCatalogPool)).
 					WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
 					WithHoldChecker(compliance.NewHoldService(pool)).
 					WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) })
@@ -2238,4 +2249,29 @@ func loadTLSCertFromRouterPEM(bundle []byte) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("bundle must contain both CERTIFICATE and PRIVATE KEY blocks")
 	}
 	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// sdkCatalogMaxConns caps the SDK engine's catalog pool (part of the
+// gateway's connection budget).
+const sdkCatalogMaxConns = 4
+
+// newSDKCatalogPool opens a small pool with the developer pool's login
+// for the SDK engine's catalog lookups. These run only catalog queries (no
+// tenant-defined code), so the pool needs no session reset on release.
+// Without a separate developer pool (local dev) it returns the gateway
+// pool, as before; if the pool can't be created, the developer pool.
+func newSDKCatalogPool(pool, developerPool *pgxpool.Pool) *pgxpool.Pool {
+	if developerPool == nil || developerPool == pool {
+		return pool
+	}
+	cfg := developerPool.Config()
+	cfg.MaxConns = sdkCatalogMaxConns
+	cfg.MinConns = 0
+	cfg.AfterRelease = nil
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		slog.Warn("SDK catalog pool: using the developer pool", "error", err)
+		return developerPool
+	}
+	return p
 }

@@ -30,7 +30,7 @@ func (s *LimitsService) GetUsage(ctx context.Context, projectID, schemaName stri
 
 	// Database size: sum of all table sizes in the tenant schema.
 	var dbSizeBytes int64
-	err := tenantPool.QueryRow(ctx,
+	err := s.catalogPool(ctx, projectID).QueryRow(ctx,
 		`SELECT COALESCE(SUM(pg_total_relation_size(quote_ident(schemaname) || '.' || quote_ident(tablename))), 0)
 		 FROM pg_tables WHERE schemaname = $1`, schemaName,
 	).Scan(&dbSizeBytes)

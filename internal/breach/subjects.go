@@ -53,7 +53,8 @@ type SubjectResult struct {
 // Connects through edb.RunAsService so app.end_user_role='service' is set
 // for the transaction; tenant users RLS would otherwise filter every row
 // out — there's no end-user actor here, the caller is the DPO.
-func IdentifySubjects(ctx context.Context, pool *pgxpool.Pool, projectID string, q SubjectQuery) (*SubjectResult, error) {
+// catalog answers the table discovery (pg_catalog); pool runs the rest.
+func IdentifySubjects(ctx context.Context, pool, catalog *pgxpool.Pool, projectID string, q SubjectQuery) (*SubjectResult, error) {
 	var schemaName string
 	if err := pool.QueryRow(ctx,
 		`SELECT schema_name FROM projects WHERE id = $1`, projectID,
@@ -75,11 +76,11 @@ func IdentifySubjects(ctx context.Context, pool *pgxpool.Pool, projectID string,
 
 	result := &SubjectResult{SchemaName: schemaName, AffectedIDs: []string{}}
 
-	tables, err := compliance.ListTenantTables(ctx, pool, schemaName)
+	tables, err := compliance.ListTenantTables(ctx, catalog, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("list tenant tables: %w", err)
 	}
-	refs, err := compliance.DiscoverUserTables(ctx, pool, schemaName)
+	refs, err := compliance.DiscoverUserTables(ctx, catalog, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("discover user tables: %w", err)
 	}

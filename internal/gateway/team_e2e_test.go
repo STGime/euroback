@@ -1478,8 +1478,10 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		defer conn.Close(ctx)
 
+		// The limit is read on the admin connection: tenant logins have no
+		// catalog access.
 		var limit int
-		if err := conn.QueryRow(ctx, `SELECT rolconnlimit FROM pg_roles WHERE rolname = current_user`).Scan(&limit); err != nil {
+		if err := env.ded.QueryRow(ctx, `SELECT rolconnlimit FROM pg_roles WHERE rolname = $1`, role).Scan(&limit); err != nil {
 			return err
 		}
 		wantLimit := tenantlogin.DedicatedFuncConnLimit
@@ -1498,20 +1500,22 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			}
 		}
 		// Exactly the shared cluster's privileges: DML, no TRUNCATE (which
-		// skips RLS) / REFERENCES / TRIGGER, no setval, no CREATE.
+		// skips RLS) / REFERENCES / TRIGGER, no setval, no CREATE. Checked
+		// for the role on the admin connection (tenant logins have no
+		// catalog access).
 		var extra string
-		if err := conn.QueryRow(ctx, `
+		if err := env.ded.QueryRow(ctx, `
 			SELECT coalesce(string_agg(x, ', '), '') FROM (
 			  SELECT c.relname || ':' || p AS x
 			    FROM pg_class c, unnest(ARRAY['TRUNCATE','REFERENCES','TRIGGER']) p
 			   WHERE c.relnamespace = $1::regnamespace
-			     AND CASE WHEN c.relkind = 'r' THEN has_table_privilege(c.oid, p) ELSE false END
+			     AND CASE WHEN c.relkind = 'r' THEN has_table_privilege($2, c.oid, p) ELSE false END
 			  UNION ALL
 			  SELECT c.relname || ':UPDATE' FROM pg_class c
 			   WHERE c.relnamespace = $1::regnamespace
-			     AND CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(c.oid, 'UPDATE') ELSE false END
+			     AND CASE WHEN c.relkind = 'S' THEN has_sequence_privilege($2, c.oid, 'UPDATE') ELSE false END
 			  UNION ALL
-			  SELECT 'schema:CREATE' WHERE has_schema_privilege($1, 'CREATE')) q`, env.schema).Scan(&extra); err != nil {
+			  SELECT 'schema:CREATE' WHERE has_schema_privilege($2, $1, 'CREATE')) q`, env.schema, role).Scan(&extra); err != nil {
 			return err
 		}
 		if extra != "" {

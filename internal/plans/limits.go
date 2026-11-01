@@ -13,16 +13,16 @@ import (
 
 // PlanLimits represents the resource limits for a billing plan.
 type PlanLimits struct {
-	Plan             string `json:"plan"`
-	DBSizeMB         int    `json:"db_size_mb"`
-	StorageMB        int    `json:"storage_mb"`
-	BandwidthMB      int    `json:"bandwidth_mb"`
-	MAULimit         int    `json:"mau_limit"`
-	RateLimitRPS     int    `json:"rate_limit_rps"`
-	WSConnections    int    `json:"ws_connections"`
-	UploadSizeMB     int    `json:"upload_size_mb"`
-	WebhookLimit     int    `json:"webhook_limit"`
-	ProjectLimit     int    `json:"project_limit"`
+	Plan              string `json:"plan"`
+	DBSizeMB          int    `json:"db_size_mb"`
+	StorageMB         int    `json:"storage_mb"`
+	BandwidthMB       int    `json:"bandwidth_mb"`
+	MAULimit          int    `json:"mau_limit"`
+	RateLimitRPS      int    `json:"rate_limit_rps"`
+	WSConnections     int    `json:"ws_connections"`
+	UploadSizeMB      int    `json:"upload_size_mb"`
+	WebhookLimit      int    `json:"webhook_limit"`
+	ProjectLimit      int    `json:"project_limit"`
 	LogRetentionDays  int    `json:"log_retention_days"`
 	CustomTemplates   bool   `json:"custom_templates"`
 	EdgeFunctionLimit int    `json:"edge_function_limit"`
@@ -94,8 +94,11 @@ type PoolResolver func(ctx context.Context, projectID string) *pgxpool.Pool
 type LimitsService struct {
 	pool         *pgxpool.Pool
 	poolResolver PoolResolver
-	mu           sync.RWMutex
-	cache        map[string]*PlanLimits
+	// catalog answers catalog reads (database size) on the shared
+	// cluster; nil uses pool.
+	catalog *pgxpool.Pool
+	mu      sync.RWMutex
+	cache   map[string]*PlanLimits
 }
 
 // NewLimitsService creates a new LimitsService backed by the given connection pool.
@@ -114,6 +117,27 @@ func NewLimitsService(pool *pgxpool.Pool) *LimitsService {
 func (s *LimitsService) WithPoolResolver(r PoolResolver) *LimitsService {
 	s.poolResolver = r
 	return s
+}
+
+// WithCatalogPool sets the pool for catalog reads on the shared cluster
+// (the developer pool; the runtime role has no catalog access).
+func (s *LimitsService) WithCatalogPool(p *pgxpool.Pool) *LimitsService {
+	s.catalog = p
+	return s
+}
+
+// catalogPool is tenantPool for catalog reads: the dedicated pool for a
+// Team project, else the catalog pool, else the shared pool.
+func (s *LimitsService) catalogPool(ctx context.Context, projectID string) *pgxpool.Pool {
+	if s.poolResolver != nil {
+		if p := s.poolResolver(ctx, projectID); p != nil {
+			return p
+		}
+	}
+	if s.catalog != nil {
+		return s.catalog
+	}
+	return s.pool
 }
 
 // tenantPool picks the dedicated pool for projectID when the resolver

@@ -221,6 +221,9 @@ func main() {
 
 	// ── Set up plan limits ──
 	limitsSvc := plans.NewLimitsService(pool)
+	if developerPool != nil {
+		limitsSvc.WithCatalogPool(developerPool)
+	}
 	slog.Info("plan limits service initialized")
 
 	// ── Idle-pause worker ── (Phase B of the public-beta launch plan)
