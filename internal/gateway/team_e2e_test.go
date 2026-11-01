@@ -369,6 +369,78 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// A server using the project's secret key (no end-user session, so no
+	// Authorization header — as the SDK sends it) is the service role on
+	// /v1/storage, as on /v1/db: it uploads developer files, lists the
+	// bucket, issues upload URLs and deletes. A public key alone still
+	// can't write.
+	check(t, env, "storage_secret_key", func() error {
+		call := func(method, path, apiKey, contentType string, body io.Reader) *httpResult {
+			req := httptest.NewRequest(method, "http://api.eurobase.test"+path, body)
+			req.Header.Set("apikey", apiKey)
+			if contentType != "" {
+				req.Header.Set("Content-Type", contentType)
+			}
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		upload := func(apiKey, key string) *httpResult {
+			var buf bytes.Buffer
+			mw := multipart.NewWriter(&buf)
+			_ = mw.WriteField("key", key)
+			fw, _ := mw.CreateFormFile("file", "server.txt")
+			_, _ = fw.Write([]byte("from the server"))
+			_ = mw.Close()
+			return call("POST", "/v1/storage/upload", apiKey, mw.FormDataContentType(), &buf)
+		}
+		if r := upload(env.publicKey, "server/anon.txt"); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("public key alone must not upload: %w", r)
+		}
+		if r := upload(env.secretKey, "server/report.txt"); r.code >= 300 {
+			return fmt.Errorf("secret-key upload: %w", r)
+		}
+		if owner := env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = 'server/report.txt'", "storage_objects"); owner != "<null>" {
+			return fmt.Errorf("a secret-key upload must be a developer file (uploaded_by NULL), got %q", owner)
+		}
+		// The listing is the bucket's, as for the console: it includes a
+		// console upload too.
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "server/console.txt"); r.code >= 300 {
+			return fmt.Errorf("console upload: %w", r)
+		}
+		if r := call("GET", "/v1/storage/?prefix=server/", env.secretKey, "", nil); r.code != 200 ||
+			!strings.Contains(r.body, "server/report.txt") || !strings.Contains(r.body, "server/console.txt") {
+			return fmt.Errorf("secret-key listing must include server and console uploads: %w", r)
+		}
+		if r := call("GET", "/v1/storage/server/console.txt", env.secretKey, "", nil); r.code != 200 {
+			return fmt.Errorf("secret-key download of a console upload: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.secretKey, "application/json",
+			strings.NewReader(`{"key":"server/signed.txt","operation":"upload","content_type":"text/plain"}`)); r.code != 200 || !strings.Contains(r.body, `"url"`) {
+			return fmt.Errorf("secret-key upload URL: %w", r)
+		}
+		if r := call("POST", "/v1/storage/signed-url", env.publicKey, "application/json",
+			strings.NewReader(`{"key":"server/signed2.txt","operation":"upload","content_type":"text/plain"}`)); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("public key alone must not get an upload URL: %w", r)
+		}
+		if r := call("DELETE", "/v1/storage/server/console.txt", env.publicKey, "", nil); r.code != http.StatusUnauthorized {
+			return fmt.Errorf("public key alone must not delete: %w", r)
+		}
+		for _, k := range []string{"server/report.txt", "server/console.txt"} {
+			if r := call("DELETE", "/v1/storage/"+k, env.secretKey, "", nil); r.code >= 300 {
+				return fmt.Errorf("secret-key delete %s: %w", k, r)
+			}
+		}
+		if n := env.dedCount(t, "storage_objects", "key IN ('server/report.txt', 'server/console.txt')"); n != 0 {
+			return fmt.Errorf("deleted objects still tracked (count %d)", n)
+		}
+		// Export archives stay console-admin only, also for the secret key.
+		if r := upload(env.secretKey, "exports/"+env.projectID+"/x.zip"); r.code != http.StatusForbidden {
+			return fmt.Errorf("secret-key write into the export namespace must be refused: %w", r)
+		}
+		return nil
+	})
+
 	// #697 shared folders: developer-uploaded files become readable by end
 	// users (never writable) once their folder is shared.
 	check(t, env, "storage_shared_folders", func() error {

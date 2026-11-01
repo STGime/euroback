@@ -396,11 +396,21 @@ func (h *StorageHandler) objectOwned(r *http.Request, key string) (bool, error) 
 	return owned, nil
 }
 
-// serviceCaller: console traffic (PlatformStorageContext marks it
-// service-role). SDK storage is always scoped to the end user by RLS,
-// like assertObjectVisible.
+// serviceCaller: the service role — console traffic (PlatformStorageContext
+// marks it) and SDK requests made with the project's secret key
+// (TenantContextFromProject on /v1/storage), as on /v1/db. Other SDK
+// callers are scoped to the end user by RLS, like assertObjectVisible.
 func serviceCaller(r *http.Request) bool {
 	return query.KeyTypeFromContext(r.Context()) == "secret"
+}
+
+// writeAllowed: writes need a signed-in end user or console caller, or the
+// service role (secret key). A public key alone can only read.
+func writeAllowed(r *http.Request) bool {
+	if _, ok := isAuthenticated(r); ok {
+		return true
+	}
+	return serviceCaller(r)
 }
 
 // claimKey decides whether the caller may write key, and for an end user
@@ -612,7 +622,13 @@ func isAuthenticated(r *http.Request) (string, bool) {
 // end-user" signal — we don't want to synthesize a placeholder UUID
 // (would collide with a real end-user with the same ID; hides the
 // distinction in downstream queries).
+//
+// A secret-key (service-role) upload is a developer file like a console
+// upload — NULL even when the request also carries an end-user JWT.
 func uploaderForInsert(r *http.Request) any {
+	if serviceCaller(r) {
+		return nil
+	}
 	if eu, ok := auth.EndUserClaimsFromContext(r.Context()); ok && eu != nil && eu.UserID != "" {
 		return eu.UserID
 	}
@@ -709,8 +725,8 @@ type uploadResponse struct {
 // Accepts multipart/form-data with a "file" field and an optional "key" field.
 // Streams directly to S3 without buffering the entire file in memory.
 func (h *StorageHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
-	userID, ok := isAuthenticated(r)
-	if !ok {
+	userID, _ := isAuthenticated(r)
+	if !writeAllowed(r) {
 		slog.Warn("storage upload called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
@@ -1059,8 +1075,7 @@ func (h *StorageHandler) recordedContentType(r *http.Request, key string) string
 
 // DeleteFile handles DELETE /v1/storage/{key...}.
 func (h *StorageHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
-	_, ok := isAuthenticated(r)
-	if !ok {
+	if !writeAllowed(r) {
 		slog.Warn("storage delete called without auth claims")
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
@@ -1336,7 +1351,7 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"operation must be upload or download"}`, http.StatusBadRequest)
 		return
 	}
-	if _, signedIn := isAuthenticated(r); req.Operation == "upload" && !signedIn {
+	if req.Operation == "upload" && !writeAllowed(r) {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
