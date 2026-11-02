@@ -79,6 +79,74 @@
 					Without it, a view reads its tables with its owner's rights and skips their policies, so the SQL editor, migrations and MCP refuse to create one (or to switch <code class="bg-gray-100 border border-gray-200 rounded px-1">security_invoker</code> off). Materialized views are refused too: they store their rows and can't apply RLS. For precomputed data, use a view or a table you refresh from a cron job. Repeat <code class="bg-gray-100 border border-gray-200 rounded px-1">WITH (security_invoker = true)</code> whenever you replace or re-create a view: <code class="bg-gray-100 border border-gray-200 rounded px-1">CREATE OR REPLACE VIEW</code> without it switches the option off. For the same reason, <code class="bg-gray-100 border border-gray-200 rounded px-1">SECURITY DEFINER</code> functions and rules are refused: both run with the owner's rights. Use plain functions with RLS policies, and triggers instead of rules. On the Team plan, SQL you run over a direct database connection isn't checked: create views with <code class="bg-gray-100 border border-gray-200 rounded px-1">security_invoker</code> there too.
 				</p>
 
+				<h3 id="rls-group-access" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Group and team access</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					A common need: each user sees their own rows, and a coach or manager sees everyone in the groups (teams, clubs, workspaces) they manage. On other platforms this is often solved with a <code class="bg-gray-100 rounded px-1">SECURITY DEFINER</code> helper such as <code class="bg-gray-100 rounded px-1">is_member_of(team_id)</code>. Eurobase refuses those, and you don&rsquo;t need one. If a policy on <code class="bg-gray-100 rounded px-1">team_memberships</code> reads <code class="bg-gray-100 rounded px-1">team_memberships</code>, Postgres reports infinite recursion. The fix is to keep the &ldquo;who manages which group&rdquo; rows in their own table, whose policy never reads the membership table:
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>-- Who coaches which team. Each user sees only their own rows.
+create table team_coaches (
+  team_id uuid not null references teams(id) on delete cascade,
+  user_id uuid not null,
+  primary key (team_id, user_id)
+);
+create index on team_coaches (user_id, team_id);
+alter table team_coaches enable row level security;
+create policy "read own coach rows" on team_coaches
+  for select using (user_id = auth_uid());
+-- Only server-side code (secret key, edge functions) assigns coaches.
+create policy "service manages coaches" on team_coaches
+  for all using (is_service_role()) with check (is_service_role());
+
+-- Players see their own memberships; coaches see their teams' rosters.
+create index on team_memberships (user_id);
+alter table team_memberships enable row level security;
+create policy "read memberships" on team_memberships
+  for select using (
+    is_service_role()
+    or user_id = auth_uid()
+    or team_id in (select team_id from team_coaches where user_id = auth_uid())
+  );
+create policy "service manages memberships" on team_memberships
+  for all using (is_service_role()) with check (is_service_role());
+
+-- Coaches add and remove players in their own teams only.
+create policy "coaches add members" on team_memberships
+  for insert with check (
+    team_id in (select team_id from team_coaches where user_id = auth_uid())
+  );
+create policy "coaches remove members" on team_memberships
+  for delete using (
+    team_id in (select team_id from team_coaches where user_id = auth_uid())
+  );
+
+-- Profiles (and any per-player data): own row, or a player in a team I coach.
+alter table app_profiles enable row level security;
+create policy "read profiles" on app_profiles
+  for select using (
+    is_service_role()
+    or user_id = auth_uid()
+    or exists (
+      select 1 from team_memberships m
+      join team_coaches c on c.team_id = m.team_id
+      where m.user_id = app_profiles.user_id
+        and c.user_id = auth_uid()
+    )
+  );</pre>
+				</div>
+				<ul class="text-sm text-gray-700 leading-relaxed mt-2 list-disc pl-5 space-y-1">
+					<li><strong>No recursion:</strong> the policies only point one way (profiles &rarr; memberships &rarr; coaches), and <code class="bg-gray-100 rounded px-1">team_coaches</code> reads nothing else. This handles several coaches per team and players in several teams.</li>
+					<li><strong>Players don&rsquo;t see teammates.</strong> A policy on <code class="bg-gray-100 rounded px-1">team_memberships</code> that reads <code class="bg-gray-100 rounded px-1">team_memberships</code> (&ldquo;rows of teams I&rsquo;m in&rdquo;) is exactly the recursion Postgres refuses. If players need a roster, serve it from an edge function that checks membership first.</li>
+					<li><strong>Don&rsquo;t let app users write <code class="bg-gray-100 rounded px-1">team_coaches</code>:</strong> only the service role can, so SDK and REST callers can&rsquo;t make themselves a coach. Assign coaches from the console or from an <a href="/docs/edge-functions" class="text-eurobase-600 hover:underline">edge function</a> that checks the caller first. Edge functions and the secret key run under RLS through the <code class="bg-gray-100 rounded px-1">is_service_role()</code> branches, so keep those branches in every policy they need to pass.</li>
+					<li><strong>Coaches adding members:</strong> the &ldquo;coaches add members&rdquo; policy only checks the team, so a coach can add any user and then read that user&rsquo;s profile. If that&rsquo;s too open, drop the policy and add members from an edge function instead (for example when a player accepts an invitation).</li>
+					<li><strong>Private fields:</strong> a policy grants whole rows. If coaches shouldn&rsquo;t see some profile fields, put those in a separate table that only the owner can read.</li>
+					<li><strong>More levels:</strong> for clubs or organisations above teams, add a <code class="bg-gray-100 rounded px-1">club_admins</code> table with the same &ldquo;read own rows&rdquo; policy and reference it the same way. Index the columns your policies filter on.</li>
+					<li><strong>Not a trigger-maintained copy:</strong> a trigger runs as the user who made the change, so its writes are checked against that user&rsquo;s policies. It can&rsquo;t keep a shared roster table up to date for everyone; read through policies like the ones above instead.</li>
+				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					This works the same on every plan.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Full example: secure a tasks table</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Follow these steps to create a table where each user can only see and manage their own rows.
