@@ -33,7 +33,7 @@
 
 				<div class="rounded-xl border border-amber-200 bg-amber-50 p-5">
 					<p class="text-sm font-semibold text-gray-900">Are <code class="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-mono text-amber-900">SECURITY DEFINER</code> functions supported?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Not on self-serve surfaces — this is the biggest difference to plan for. Re-express them as plain (invoker) functions plus RLS, as server-side code using the service key, or as edge functions. Plain functions and trigger functions port fine.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Not on self-serve surfaces — this is the biggest difference to plan for. Re-express them as plain (invoker) functions plus RLS, as server-side code using the service key, or as edge functions. Plain functions and trigger functions port fine. For the common <code class="rounded bg-gray-100 px-1 text-xs font-mono">is_member_of()</code>-style helper used in team or organisation policies, see <a href="/docs/rls#rls-group-access" class="text-eurobase-600 hover:underline">Group and team access</a>.</p>
 				</div>
 
 				<div class="rounded-xl border border-amber-200 bg-amber-50 p-5">
