@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -56,6 +57,10 @@ func TestSchemaObjects_DB(t *testing.T) {
 		`CREATE TYPE ` + s + `score AS (home int, away int)`,
 		`CREATE DOMAIN ` + s + `jersey AS smallint CHECK (VALUE BETWEEN 1 AND 99)`,
 		`CREATE TYPE ` + s + `minutes AS RANGE (subtype = int4)`,
+		`ALTER TYPE ` + s + `position ADD VALUE 'center' BEFORE 'forward'`,
+		// A domain over the project's own type shows it unqualified
+		// (quoted, since position is a keyword).
+		`CREATE DOMAIN ` + s + `main_position AS ` + s + `position`,
 		// Another schema: never listed.
 		`CREATE VIEW ` + other + `.secret_view AS SELECT 1 AS x`,
 		`CREATE SEQUENCE ` + other + `.secret_seq`,
@@ -110,8 +115,9 @@ func TestSchemaObjects_DB(t *testing.T) {
 	for _, ty := range objs.Types {
 		types[ty.Name] = ty
 	}
-	if len(types) != 4 ||
-		types["position"].Kind != "enum" || strings.Join(types["position"].Labels, ",") != "goalie,defender,forward" ||
+	if len(types) != 5 ||
+		types["position"].Kind != "enum" || strings.Join(types["position"].Labels, ",") != "goalie,defender,center,forward" ||
+		types["main_position"].BaseType != `"position"` ||
 		types["score"].Kind != "composite" ||
 		types["jersey"].Kind != "domain" || types["jersey"].BaseType != "smallint" ||
 		types["minutes"].Kind != "range" || types["minutes"].BaseType != "integer" {
@@ -174,8 +180,25 @@ func TestSchemaObjects_DB(t *testing.T) {
 	if code != http.StatusOK || len(o.Views) != 3 || o.Views[0].Definition == "" || len(o.Sequences) != 4 {
 		t.Fatalf("developer: %d %+v", code, o)
 	}
-	code, o = get("viewer")
-	if code != http.StatusOK || len(o.Views) != 3 || o.Views[0].Definition != "" || len(o.Sequences) != 3 {
-		t.Fatalf("viewer: %d %+v", code, o)
+	// Viewer, and any role that isn't developer+ (fail closed): names only.
+	for _, role := range []string{"viewer", "", "auditor"} {
+		code, o = get(role)
+		if code != http.StatusOK || len(o.Views) != 3 || len(o.Sequences) != 3 {
+			t.Fatalf("role %q: %d %+v", role, code, o)
+		}
+		for _, v := range o.Views {
+			if v.Definition != "" {
+				t.Fatalf("role %q got a view definition: %+v", role, v)
+			}
+		}
+	}
+}
+
+// A Team project without its dedicated pool is refused, never read from
+// the shared cluster.
+func TestListSchemaObjects_DedicatedUnavailable(t *testing.T) {
+	ctx := WithDedicatedDB(context.Background())
+	if _, err := ListSchemaObjects(ctx, nil, "tenant_x", true, false); !errors.Is(err, ErrDedicatedPoolUnavailable) {
+		t.Fatalf("want ErrDedicatedPoolUnavailable, got %v", err)
 	}
 }

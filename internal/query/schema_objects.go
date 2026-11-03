@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -170,6 +171,10 @@ func ListSchemaObjects(ctx context.Context, pool *pgxpool.Pool, schemaName strin
 			rows.Close()
 			return nil, fmt.Errorf("scan type: %w", err)
 		}
+		// format_type qualifies a type from this schema when it isn't on
+		// the search_path (shared vs. Team pools differ): show it unqualified.
+		ty.BaseType = strings.TrimPrefix(ty.BaseType, schemaName+".")
+		ty.BaseType = strings.TrimPrefix(ty.BaseType, `"`+schemaName+`".`)
 		out.Types = append(out.Types, ty)
 	}
 	rows.Close()
@@ -195,10 +200,11 @@ func HandleSchemaObjects(pool *pgxpool.Pool) http.HandlerFunc {
 			jsonError(w, "project not found", http.StatusNotFound)
 			return
 		}
-		// A Viewer gets names only, and no platform-table sequences (the
-		// same bar as the table listing).
-		viewer := viewerHidesInternal(r.Context())
-		objs, err := ListSchemaObjects(r.Context(), pool, schemaName, !viewer, viewer)
+		// Definitions and platform-table sequences need developer and up;
+		// any other role (viewer, unknown, unset) gets names only, so the
+		// route fails closed if it's ever mounted without the role middleware.
+		full := RoleSeesInternalTables(PlatformRoleFromContext(r.Context()))
+		objs, err := ListSchemaObjects(r.Context(), pool, schemaName, full, !full)
 		if err != nil {
 			if errors.Is(err, ErrDedicatedPoolUnavailable) {
 				jsonError(w, err.Error(), http.StatusServiceUnavailable)
