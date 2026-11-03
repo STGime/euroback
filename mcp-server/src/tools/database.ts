@@ -47,7 +47,7 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
 
   server.tool(
     'listSchemaObjects',
-    'List a project\'s views (with security_invoker, and their definitions with Developer access), materialized views, sequences (with the column that owns them) and types (enum with its values, composite, domain, range). Tables are in listTables / describeTable, functions in listDbFunctions. Useful to check for name conflicts before a migration.',
+    'List a project\'s views (with security_invoker, and their definitions with Developer access), materialized views, sequences (with the column that owns them) and types (enum with its values, composite, domain, range with its multirange, shell types declared but not yet defined). Tables are in listTables / describeTable, functions in listDbFunctions. Useful to check for name conflicts before a migration.',
     { projectId: z.string().uuid().describe('The project UUID') },
     async ({ projectId }) => {
       const data = await getClient().get(`/platform/projects/${projectId}/schema/objects`);

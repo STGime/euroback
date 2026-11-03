@@ -120,6 +120,11 @@ func dbObjectsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// --json prints the server's answer as is, so new fields show up.
+			if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+				PrintJSON(json.RawMessage(data))
+				return nil
+			}
 			var objs struct {
 				Views []struct {
 					Name            string `json:"name"`
@@ -133,18 +138,15 @@ func dbObjectsCmd() *cobra.Command {
 					OwnedBy  string `json:"owned_by,omitempty"`
 				} `json:"sequences"`
 				Types []struct {
-					Name     string   `json:"name"`
-					Kind     string   `json:"kind"`
-					Labels   []string `json:"labels,omitempty"`
-					BaseType string   `json:"base_type,omitempty"`
+					Name       string   `json:"name"`
+					Kind       string   `json:"kind"`
+					Labels     []string `json:"labels,omitempty"`
+					BaseType   string   `json:"base_type,omitempty"`
+					Multirange string   `json:"multirange,omitempty"`
 				} `json:"types"`
 			}
 			if err := json.Unmarshal(data, &objs); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
-			}
-			if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
-				PrintJSON(objs)
-				return nil
 			}
 
 			var rows [][]string
@@ -166,8 +168,13 @@ func dbObjectsCmd() *cobra.Command {
 			}
 			for _, t := range objs.Types {
 				detail := t.BaseType
-				if t.Kind == "enum" {
+				switch {
+				case t.Kind == "enum":
 					detail = strings.Join(t.Labels, ", ")
+				case t.Kind == "shell":
+					detail = "declared, not yet defined"
+				case t.Multirange != "":
+					detail += ", multirange " + t.Multirange
 				}
 				rows = append(rows, []string{t.Kind, t.Name, detail})
 			}

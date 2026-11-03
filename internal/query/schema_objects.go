@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -40,12 +41,16 @@ type SchemaSequence struct {
 	OwnedBy  string `json:"owned_by,omitempty"` // "table.column"
 }
 
-// SchemaType is a standalone type: enum, composite, domain or range.
+// SchemaType is a standalone type: enum, composite, domain, range, or a
+// shell (`CREATE TYPE name;` not yet defined).
 type SchemaType struct {
 	Name     string   `json:"name"`
 	Kind     string   `json:"kind"`
 	Labels   []string `json:"labels,omitempty"`    // enum values, in order
 	BaseType string   `json:"base_type,omitempty"` // domain base / range subtype
+	// Multirange: the type PostgreSQL creates with each range; its name is
+	// taken too.
+	Multirange string `json:"multirange,omitempty"`
 }
 
 // SchemaObjects is the response of GET …/schema/objects.
@@ -74,12 +79,24 @@ func ListSchemaObjects(ctx context.Context, pool *pgxpool.Pool, schemaName strin
 	}
 	out := &SchemaObjects{Views: []SchemaView{}, Sequences: []SchemaSequence{}, Types: []SchemaType{}}
 
+	// One read-only snapshot for the three listings, with a time limit.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("list schema objects: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '10s'`); err != nil {
+		return nil, fmt.Errorf("list schema objects: %w", err)
+	}
+
 	// Views and materialized views.
 	def := `''`
 	if withDefinitions {
-		def = `pg_get_viewdef(c.oid, true)`
+		// NULL if the view was dropped since the scan (it reads the
+		// catalog cache, not the snapshot).
+		def = `COALESCE(pg_get_viewdef(c.oid, true), '')`
 	}
-	rows, err := pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT c.relname, c.relkind = 'm', COALESCE(c.reloptions, '{}'), `+def+`
 		  FROM pg_class c
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -106,7 +123,7 @@ func ListSchemaObjects(ctx context.Context, pool *pgxpool.Pool, schemaName strin
 
 	// Sequences, with the owning column (OWNED BY / serial: 'a',
 	// identity: 'i').
-	rows, err = pool.Query(ctx, `
+	rows, err = tx.Query(ctx, `
 		SELECT c.relname, format_type(s.seqtypid, NULL),
 		       COALESCE(t.relname, ''), COALESCE(a.attname, '')
 		  FROM pg_class c
@@ -143,22 +160,24 @@ func ListSchemaObjects(ctx context.Context, pool *pgxpool.Pool, schemaName strin
 	}
 
 	// Standalone types. A table's or view's row type isn't one (composite
-	// types count only for CREATE TYPE … AS, relkind 'c'); array types and
-	// the multirange each range gets are left out.
-	rows, err = pool.Query(ctx, `
+	// types count only for CREATE TYPE … AS, relkind 'c'); array types are
+	// left out, and a range's multirange is reported with the range.
+	rows, err = tx.Query(ctx, `
 		SELECT t.typname,
 		       CASE t.typtype WHEN 'e' THEN 'enum' WHEN 'c' THEN 'composite'
-		                      WHEN 'd' THEN 'domain' ELSE 'range' END,
+		                      WHEN 'd' THEN 'domain' WHEN 'r' THEN 'range' ELSE 'shell' END,
 		       COALESCE((SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder)
 		                   FROM pg_enum e WHERE e.enumtypid = t.oid), '{}'),
 		       CASE t.typtype
 		            WHEN 'd' THEN format_type(t.typbasetype, t.typtypmod)
 		            WHEN 'r' THEN (SELECT format_type(r.rngsubtype, NULL) FROM pg_range r WHERE r.rngtypid = t.oid)
-		            ELSE '' END
+		            ELSE '' END,
+		       COALESCE((SELECT mt.typname FROM pg_range r JOIN pg_type mt ON mt.oid = r.rngmultitypid
+		                  WHERE r.rngtypid = t.oid), '')
 		  FROM pg_type t
 		  JOIN pg_namespace n ON n.oid = t.typnamespace
 		 WHERE n.nspname = $1
-		   AND t.typtype IN ('e', 'c', 'd', 'r')
+		   AND (t.typtype IN ('e', 'c', 'd', 'r') OR (t.typtype = 'p' AND NOT t.typisdefined))
 		   AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind = 'c'))
 		   AND `+notExtensionMember("pg_type", "t.oid")+`
 		 ORDER BY t.typname`, schemaName)
@@ -167,7 +186,7 @@ func ListSchemaObjects(ctx context.Context, pool *pgxpool.Pool, schemaName strin
 	}
 	for rows.Next() {
 		var ty SchemaType
-		if err := rows.Scan(&ty.Name, &ty.Kind, &ty.Labels, &ty.BaseType); err != nil {
+		if err := rows.Scan(&ty.Name, &ty.Kind, &ty.Labels, &ty.BaseType, &ty.Multirange); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan type: %w", err)
 		}

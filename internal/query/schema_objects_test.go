@@ -61,6 +61,7 @@ func TestSchemaObjects_DB(t *testing.T) {
 		// A domain over the project's own type shows it unqualified
 		// (quoted, since position is a keyword).
 		`CREATE DOMAIN ` + s + `main_position AS ` + s + `position`,
+		`CREATE TYPE ` + s + `later_type`,
 		// Another schema: never listed.
 		`CREATE VIEW ` + other + `.secret_view AS SELECT 1 AS x`,
 		`CREATE SEQUENCE ` + other + `.secret_seq`,
@@ -115,7 +116,9 @@ func TestSchemaObjects_DB(t *testing.T) {
 	for _, ty := range objs.Types {
 		types[ty.Name] = ty
 	}
-	if len(types) != 5 ||
+	if len(types) != 6 ||
+		types["later_type"].Kind != "shell" ||
+		types["minutes"].Multirange != "minutes_multirange" ||
 		types["position"].Kind != "enum" || strings.Join(types["position"].Labels, ",") != "goalie,defender,center,forward" ||
 		types["main_position"].BaseType != `"position"` ||
 		types["score"].Kind != "composite" ||

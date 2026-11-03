@@ -40,7 +40,7 @@
 					A token works for <strong>one project</strong> and does there exactly what a member with its access level does in the console &mdash; never more than your own role:
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1 ml-4 list-disc">
-					<li><strong>Read-only</strong> &mdash; list and describe tables, read rows with filters and counts (<code class="rounded bg-gray-100 px-1 text-xs font-mono">queryTable</code>), list and read files (<code class="rounded bg-gray-100 px-1 text-xs font-mono">downloadFile</code>). No SQL, no changes. The default, and enough for questions like "how many users signed up this week?".</li>
+					<li><strong>Read-only</strong> &mdash; list and describe tables, list views, sequences and types (<code class="rounded bg-gray-100 px-1 text-xs font-mono">listSchemaObjects</code>), read rows with filters and counts (<code class="rounded bg-gray-100 px-1 text-xs font-mono">queryTable</code>), list and read files (<code class="rounded bg-gray-100 px-1 text-xs font-mono">downloadFile</code>). No SQL, no changes. The default, and enough for questions like "how many users signed up this week?".</li>
 					<li><strong>Developer</strong> &mdash; also SQL (reads and writes), creating and changing tables, deploying and invoking functions, signed URLs. What an AI app builder such as Lovable needs to change your schema.</li>
 					<li><strong>Admin</strong> &mdash; also secrets (Vault), end users and API keys. Project settings (auth providers, CORS, redirect URLs) stay in the console.</li>
 				</ul>
