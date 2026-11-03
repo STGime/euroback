@@ -45,6 +45,9 @@
 					<strong>What a PAT can do</strong>: in its one project, exactly what a member with its access level can do in the console, via the platform API, the CLI or the MCP server. If your own role in the project is lowered, the token's is too; if you leave the project, the token stops working there. Older tokens created before project tokens (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">eb_pat_</code>, shown as <em>All projects (legacy)</em>) still reach every project you're in &mdash; replace them with project tokens.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed">
+					To read the token&rsquo;s project details (name, plan, status, API URL, auth settings), call <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">GET /v1/tenants</code>: a project token gets a list with just its own project. There&rsquo;s no <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">GET /platform/projects/&lt;id&gt;</code> (404).
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed">
 					<strong>What a PAT can't do</strong>:
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1 ml-4 list-disc">

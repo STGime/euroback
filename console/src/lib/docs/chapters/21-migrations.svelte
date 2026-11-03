@@ -48,6 +48,8 @@ CREATE POLICY listings_owner ON listings
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
 					<li>Each migration runs in <strong>one transaction</strong> — if any statement fails, nothing from that file is applied.</li>
 					<li>It runs inside <strong>your project schema</strong>: use unqualified table names. Multi-statement files are expected.</li>
+					<li>It runs as <strong>your project&rsquo;s owner role</strong>, which owns the tables you create, so their RLS policies don&rsquo;t limit the migration itself (a backfill sees every row). A migration has no end user and isn&rsquo;t the service role: <code class="bg-gray-100 rounded px-1">public.is_service_role()</code> isn&rsquo;t true and <code class="bg-gray-100 rounded px-1">public.current_end_user_id()</code> is NULL. Use them in policy definitions, which are checked later on each request, not to make decisions inside the migration. Leave the platform-managed tables (<code class="bg-gray-100 rounded px-1">users</code> and the others) alone in migrations: reference them with foreign keys, but don&rsquo;t read or change their rows.</li>
+					<li>A migration request must finish within <strong>30 seconds</strong>. Split long backfills into several migrations.</li>
 					<li>Applied versions are recorded with a checksum. Re-applying an identical file is a no-op; <strong>editing an already-applied file is rejected</strong> — add a new version instead.</li>
 					<li>There are no down migrations — to undo something, write a new forward migration. For a risky change, write and review that rollback migration before you apply the change.</li>
 					<li>Concurrent runs are serialized per project, so two CI jobs can't race each other.</li>
@@ -104,6 +106,9 @@ eurobase migrations up</pre>
 				</div>
 				<p class="mt-2 text-sm text-gray-700 leading-relaxed">
 					<code class="bg-gray-100 rounded px-1">GET</code> on the same path lists the versions already applied (with their checksums), so a script can skip what&rsquo;s done, as <code class="bg-gray-100 rounded px-1">eurobase migrations up</code> does. Sending an applied version again with the same SQL changes nothing; with different SQL it answers 409 &mdash; give the change a new version instead of editing an applied migration.
+				</p>
+				<p class="mt-2 text-sm text-gray-700 leading-relaxed">
+					<strong>Checking the schema first.</strong> <code class="bg-gray-100 rounded px-1">GET /platform/projects/$PROJECT_ID/schema</code> lists your tables with their columns, keys, indexes, triggers and whether RLS is on (with the Developer role, the platform-managed tables too), and <code class="bg-gray-100 rounded px-1">GET .../schema/functions</code> lists your SQL and PL/pgSQL functions (<code class="bg-gray-100 rounded px-1">.../schema/functions/triggers</code> lists trigger functions). Views, sequences and types aren&rsquo;t listed yet. The safest conflict check is the migration itself: use plain <code class="bg-gray-100 rounded px-1">CREATE</code> without <code class="bg-gray-100 rounded px-1">IF NOT EXISTS</code>, so any name that already exists fails the migration and nothing is applied. (A <code class="bg-gray-100 rounded px-1">CREATE FUNCTION</code> with different arguments adds an overload instead of failing.) The sample <code class="bg-gray-100 rounded px-1">todos</code> table is yours to keep or drop; a migration that doesn&rsquo;t touch it can ignore it. Its policy lets everyone read and write it, so drop it or tighten it before going live.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What migration SQL can't do (and why)</h3>
