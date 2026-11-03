@@ -1,4 +1,4 @@
-package tenantlogin
+package tenantlogin_test
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/eurobase/euroback/internal/query"
+	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,16 +56,16 @@ func TestDDLLoginIntegration(t *testing.T) {
 
 	secret := []byte(strings.Repeat("d", 32))
 	database := dev.Config().ConnConfig.Database
-	if err := EnsureDDLLogin(ctx, dev, database, secret, schemaA); err != nil {
+	if err := tenantlogin.EnsureDDLLogin(ctx, dev, database, secret, schemaA); err != nil {
 		t.Fatalf("EnsureDDLLogin: %v", err)
 	}
 
-	role := DDLRole(schemaA)
+	role := tenantlogin.DDLRole(schemaA)
 	cfg, err := pgx.ParseConfig(devURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.User, cfg.Password = role, DDLPassword(secret, schemaA)
+	cfg.User, cfg.Password = role, tenantlogin.DDLPassword(secret, schemaA)
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("login as %s: %v", role, err)
@@ -99,10 +100,17 @@ func TestDDLLoginIntegration(t *testing.T) {
 		fmt.Sprintf("CREATE TABLE %s.planted (id int)", b),
 		"SET ROLE eurobase_migrator",
 		"SET ROLE eurobase_gateway",
-		fmt.Sprintf("SET ROLE %s", pgx.Identifier{FuncRole(schemaB)}.Sanitize()),
+		fmt.Sprintf("SET ROLE %s", pgx.Identifier{tenantlogin.FuncRole(schemaB)}.Sanitize()),
 		"CREATE TABLE public.planted (id int)",
 		"ALTER ROLE CURRENT_USER CONNECTION LIMIT -1",
 		fmt.Sprintf("ALTER TABLE %s.users ADD COLUMN planted int", a),
+		// Its own credential tables: no privilege at all, whatever the
+		// session settings say.
+		fmt.Sprintf("SELECT count(*) FROM %s.refresh_tokens", a),
+		fmt.Sprintf("SELECT count(*) FROM %s.email_tokens", a),
+		fmt.Sprintf("SELECT count(*) FROM %s.vault_secrets", a),
+		fmt.Sprintf("DO $$ BEGIN PERFORM set_config('app.intent', 'internal_auth_path', true); PERFORM count(*) FROM %s.refresh_tokens; END $$", a),
+		fmt.Sprintf("DO $$ BEGIN PERFORM set_config('app.intent', 'internal_auth_path', true); INSERT INTO %s.vault_secrets (name) VALUES ('x'); END $$", a),
 	} {
 		_, err := conn.Exec(ctx, q)
 		var pgErr *pgconn.PgError
@@ -116,7 +124,7 @@ func TestDDLLoginIntegration(t *testing.T) {
 	if _, err := conn.Exec(ctx, "ALTER ROLE CURRENT_USER SET work_mem = '1GB'"); err != nil {
 		t.Fatalf("self SET (allowed by Postgres): %v", err)
 	}
-	if err := EnsureDDLLogin(ctx, dev, database, secret, schemaA); err != nil {
+	if err := tenantlogin.EnsureDDLLogin(ctx, dev, database, secret, schemaA); err != nil {
 		t.Fatalf("second EnsureDDLLogin: %v", err)
 	}
 	var limit int
@@ -127,8 +135,8 @@ func TestDDLLoginIntegration(t *testing.T) {
 		   FROM pg_roles r WHERE r.rolname = $1`, role).Scan(&limit, &settings); err != nil {
 		t.Fatal(err)
 	}
-	if limit != DDLConnLimit {
-		t.Errorf("connection limit = %d, want %d", limit, DDLConnLimit)
+	if limit != tenantlogin.DDLConnLimit {
+		t.Errorf("connection limit = %d, want %d", limit, tenantlogin.DDLConnLimit)
 	}
 	if len(settings) != 0 {
 		t.Errorf("role settings not reset: %v", settings)
@@ -137,7 +145,7 @@ func TestDDLLoginIntegration(t *testing.T) {
 	// Tenant migrations through the persistent login: they connect as the
 	// role, run, and leave the login on.
 	exec := query.NewMigrationExecutor(dev, devURL, secret).WithPersistentLogin(func(ctx context.Context, schema string) error {
-		return EnsureDDLLogin(ctx, dev, database, secret, schema)
+		return tenantlogin.EnsureDDLLogin(ctx, dev, database, secret, schema)
 	})
 	applied, err := exec.Apply(ctx, projectA, schemaA, 1, "init", "CREATE TABLE migrated (id int PRIMARY KEY)")
 	if err != nil || !applied {
@@ -150,11 +158,53 @@ func TestDDLLoginIntegration(t *testing.T) {
 
 	// The keeper never touched tenant B's role.
 	var bLogin bool
-	if err := admin.QueryRow(ctx, `SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, DDLRole(schemaB)).Scan(&bLogin); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, tenantlogin.DDLRole(schemaB)).Scan(&bLogin); err != nil {
 		t.Fatal(err)
 	}
 	if bLogin {
 		t.Error("tenant B's DDL role got a login without being ensured")
+	}
+
+	// A credential-table grant (e.g. from the migrator's default
+	// privileges when a platform migration re-creates the table) is taken
+	// back by the keeper and by the migration path without the persistent
+	// login.
+	regrant := func() {
+		t.Helper()
+		if _, err := admin.Exec(ctx, fmt.Sprintf(
+			`SET ROLE eurobase_migrator; GRANT SELECT, INSERT ON %s.refresh_tokens, %s.vault_secrets TO %s; RESET ROLE`,
+			a, a, pgx.Identifier{role}.Sanitize())); err != nil {
+			t.Fatalf("re-grant: %v", err)
+		}
+	}
+	credentialPrivs := func() int {
+		t.Helper()
+		var n int
+		if err := admin.QueryRow(ctx, `
+			SELECT count(*) FROM pg_class c
+			 WHERE c.relnamespace = $1::regnamespace
+			   AND c.relname IN ('refresh_tokens', 'email_tokens', 'vault_secrets')
+			   AND (has_table_privilege($2, c.oid, 'SELECT') OR has_table_privilege($2, c.oid, 'INSERT')
+			     OR has_table_privilege($2, c.oid, 'UPDATE') OR has_table_privilege($2, c.oid, 'DELETE'))`,
+			schemaA, role).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	regrant()
+	if err := tenantlogin.EnsureDDLLogin(ctx, dev, database, secret, schemaA); err != nil {
+		t.Fatalf("EnsureDDLLogin after re-grant: %v", err)
+	}
+	if n := credentialPrivs(); n != 0 {
+		t.Errorf("keeper left privileges on %d credential tables", n)
+	}
+	regrant()
+	plain := query.NewMigrationExecutor(dev, devURL, secret)
+	if applied, err := plain.Apply(ctx, projectA, schemaA, 2, "second", "CREATE TABLE migrated2 (id int PRIMARY KEY)"); err != nil || !applied {
+		t.Fatalf("Apply without persistent login: applied=%v err=%v", applied, err)
+	}
+	if n := credentialPrivs(); n != 0 {
+		t.Errorf("migration path left privileges on %d credential tables", n)
 	}
 }
 
@@ -184,7 +234,7 @@ func provisionTestTenant(t *testing.T, admin *pgxpool.Pool) (string, string) {
 		_, _ = admin.Exec(c, `SELECT deprovision_tenant($1)`, projectID)
 		_, _ = admin.Exec(c, `DELETE FROM projects WHERE id = $1`, projectID)
 		_, _ = admin.Exec(c, `DELETE FROM platform_users WHERE id = $1`, ownerID)
-		for _, r := range []string{FuncRole(schema), DDLRole(schema)} {
+		for _, r := range []string{tenantlogin.FuncRole(schema), tenantlogin.DDLRole(schema)} {
 			id := pgx.Identifier{r}.Sanitize()
 			_, _ = admin.Exec(c, "DROP OWNED BY "+id) // grants on the database / public
 			_, _ = admin.Exec(c, "DROP ROLE IF EXISTS "+id)

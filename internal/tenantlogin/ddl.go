@@ -63,7 +63,8 @@ func DDLScramVerifier(secret []byte, schema string) (string, error) {
 // the tenant's `_func` role has (plus REFERENCES on real tables, so DDL run
 // as `_ddl` can add a FK to a migrator-owned system table) — including the
 // platform-managed system tables, which `_ddl` can read and write (subject to
-// their RLS) but not alter. Runs as eurobase_migrator via adminPool.
+// their RLS) but not alter — except CredentialTables, on which it holds
+// nothing. Runs as eurobase_migrator via adminPool.
 func EnsureDDLLogin(ctx context.Context, adminPool *pgxpool.Pool, database string, secret []byte, schema string) error {
 	if !schemaRe.MatchString(schema) {
 		return fmt.Errorf("invalid tenant schema %q", schema)
@@ -113,6 +114,7 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 		  FROM pg_class c
 		 WHERE c.relnamespace = $1::regnamespace
 		   AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+		   AND c.relname <> ALL($3)
 		   AND NOT (has_table_privilege($2, c.oid, 'SELECT') AND has_table_privilege($2, c.oid, 'INSERT')
 		        AND has_table_privilege($2, c.oid, 'UPDATE') AND has_table_privilege($2, c.oid, 'DELETE')
 		        AND (c.relkind NOT IN ('r', 'p') OR has_table_privilege($2, c.oid, 'REFERENCES')))
@@ -125,7 +127,7 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 		SELECT 'ROUTINE', p.oid::regprocedure::text, pg_has_role(current_user, p.proowner, 'USAGE'), 'EXECUTE'
 		  FROM pg_proc p
 		 WHERE p.pronamespace = $1::regnamespace AND p.prokind IN ('f', 'p')
-		   AND NOT has_function_privilege($2, p.oid, 'EXECUTE')`, schema, role)
+		   AND NOT has_function_privilege($2, p.oid, 'EXECUTE')`, schema, role, CredentialTables)
 	if err != nil {
 		return fmt.Errorf("list %s objects: %w", schema, err)
 	}
@@ -171,7 +173,63 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 			return fmt.Errorf("default privileges for %s: %w", role, err)
 		}
 	}
+	// The default privileges above also cover a credential table the
+	// migrator re-creates; take those (and any older grant) back.
+	return RevokeDDLCredentialAccess(ctx, tx, schema, role)
+}
+
+// CredentialTables are the system tables that hold credentials and
+// secrets. `_ddl` gets no privilege on them, like `_func` (migration
+// 000147): the platform reads and writes them on its own pools, and SQL a
+// developer writes (editor, transactions, migrations) runs as `_ddl`.
+var CredentialTables = []string{"refresh_tokens", "email_tokens", "vault_secrets"}
+
+const credentialPrivQuery = `
+	SELECT c.oid::regclass::text
+	  FROM pg_class c
+	 WHERE c.relnamespace = $1::regnamespace
+	   AND c.relname = ANY($3)
+	   AND (has_table_privilege($2, c.oid, 'SELECT') OR has_table_privilege($2, c.oid, 'INSERT')
+	     OR has_table_privilege($2, c.oid, 'UPDATE') OR has_table_privilege($2, c.oid, 'DELETE')
+	     OR has_table_privilege($2, c.oid, 'TRUNCATE') OR has_table_privilege($2, c.oid, 'REFERENCES')
+	     OR has_table_privilege($2, c.oid, 'TRIGGER'))`
+
+// RevokeDDLCredentialAccess removes every privilege `role` holds on the
+// schema's credential tables and verifies none is left. Runs as
+// eurobase_migrator; a steady-state call changes nothing.
+func RevokeDDLCredentialAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
+	held, err := credentialTablesHeld(ctx, tx, schema, role)
+	if err != nil {
+		return err
+	}
+	r := pgx.Identifier{role}.Sanitize()
+	for _, t := range held {
+		// t is a regclass rendering: already quoted.
+		if _, err := tx.Exec(ctx, fmt.Sprintf("REVOKE ALL ON TABLE %s FROM %s", t, r)); err != nil {
+			return fmt.Errorf("revoke %s on %s: %w", role, t, err)
+		}
+	}
+	if len(held) == 0 {
+		return nil
+	}
+	// A REVOKE by a role that can't act for the grantor is a WARNING, not
+	// an error: verify.
+	left, err := credentialTablesHeld(ctx, tx, schema, role)
+	if err != nil {
+		return err
+	}
+	if len(left) > 0 {
+		return fmt.Errorf("role %s still has privileges on %v after REVOKE", role, left)
+	}
 	return nil
+}
+
+func credentialTablesHeld(ctx context.Context, tx pgx.Tx, schema, role string) ([]string, error) {
+	rows, err := tx.Query(ctx, credentialPrivQuery, schema, role, CredentialTables)
+	if err != nil {
+		return nil, fmt.Errorf("list %s credential-table privileges: %w", role, err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // DDLEnsurer keeps every shared-cluster tenant's `_ddl` role loginable.

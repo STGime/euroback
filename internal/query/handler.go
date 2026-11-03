@@ -13,6 +13,7 @@ import (
 	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -580,6 +581,13 @@ func handleQueryError(w http.ResponseWriter, err error) bool {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(body)
+		return true
+	}
+	// Any other permission error (e.g. a table the project's own login has
+	// no privilege on, such as the credential tables): 403, not a 500.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
+		jsonError(w, "permission denied", http.StatusForbidden)
 		return true
 	}
 	if isUniqueViolation(err) {
