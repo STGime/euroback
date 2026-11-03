@@ -155,7 +155,9 @@ func checkPrivilegeStatement(st []privWord, rejectTxnControl bool) error {
 			// SESSION AUTHORIZATION, CREATE SCHEMA … AUTHORIZATION.
 			return privErr("AUTHORIZATION")
 		case "privileges":
-			if kw(i-1) == "default" {
+			// ALTER DEFAULT PRIVILEGES — not a column named "privileges"
+			// after a DEFAULT clause (literals aren't tokens here).
+			if kw(i-1) == "default" && kw(i-2) == "alter" {
 				return privErr("ALTER DEFAULT PRIVILEGES")
 			}
 		case "role", "user", "group":
@@ -168,7 +170,9 @@ func checkPrivilegeStatement(st []privWord, rejectTxnControl bool) error {
 				return privErr("DROP OWNED")
 			}
 		case "owner":
-			if kw(i+1) == "to" {
+			// … OWNER TO role — not RENAME COLUMN owner TO new_name
+			// (COLUMN is reserved, so it can't be a table name here).
+			if kw(i+1) == "to" && !(kw(i-1) == "column" && kw(i-2) == "rename") {
 				return privErr("OWNER TO")
 			}
 		case "definer":

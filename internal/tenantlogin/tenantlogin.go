@@ -191,7 +191,17 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 	if err != nil {
 		return err
 	}
-	return ensureLogin(ctx, pool, database, FuncRole(schema), verifier, connLimit, asMigrator, nil)
+	// Shared cluster: keep the role off the credential tables (000147),
+	// including a grant the migrator's default privileges add when a
+	// table is re-created. Dedicated instances apply the same in
+	// dedicated_func_role.sql.
+	var extra func(context.Context, pgx.Tx) error
+	if asMigrator {
+		extra = func(ctx context.Context, tx pgx.Tx) error {
+			return revokeCredentialAccessInPass(ctx, tx, schema, FuncRole(schema))
+		}
+	}
+	return ensureLogin(ctx, pool, database, FuncRole(schema), verifier, connLimit, asMigrator, extra)
 }
 
 // ensureLogin gives role LOGIN with the verifier and connection limit,

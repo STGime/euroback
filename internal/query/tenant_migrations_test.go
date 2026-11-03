@@ -176,6 +176,11 @@ func TestValidateTenantMigrationSQL_RefusalReasons(t *testing.T) {
 		{"qualified catalog keeps the schema message", `SELECT * FROM pg_catalog.pg_class;`, "forbidden schema"},
 		{"string parsing setting", `SET LOCAL standard_conforming_strings = off;`, "string literals are parsed"},
 		{"statement after an E-prefixed string", `INSERT INTO notes (body) VALUES (E'\''); GRANT SELECT ON notes TO PUBLIC;`, "GRANT/REVOKE"},
+		// The SQL editor's role / session guard applies to migrations too.
+		{"set_config", `SELECT set_config('app.end_user_role', 'service', true);`, "SET_CONFIG"},
+		{"set_config in a later statement", `CREATE TABLE t (id int); SELECT set_config('app.intent', 'x', true);`, "SET_CONFIG"},
+		{"default privileges", `ALTER DEFAULT PRIVILEGES IN SCHEMA s GRANT SELECT ON TABLES TO x;`, "GRANT/REVOKE"},
+		{"owner change", `ALTER TABLE t OWNER TO someone;`, "OWNER TO"},
 	}
 	for _, tc := range cases {
 		err := ValidateTenantMigrationSQL(tc.sql)
