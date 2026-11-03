@@ -198,7 +198,7 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 	var extra func(context.Context, pgx.Tx) error
 	if asMigrator {
 		extra = func(ctx context.Context, tx pgx.Tx) error {
-			return RevokeCredentialAccess(ctx, tx, schema, FuncRole(schema))
+			return revokeCredentialAccessInPass(ctx, tx, schema, FuncRole(schema))
 		}
 	}
 	return ensureLogin(ctx, pool, database, FuncRole(schema), verifier, connLimit, asMigrator, extra)

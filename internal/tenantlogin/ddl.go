@@ -175,7 +175,25 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	}
 	// The default privileges above also cover a credential table the
 	// migrator re-creates; take those (and any older grant) back.
-	return RevokeCredentialAccess(ctx, tx, schema, role)
+	return revokeCredentialAccessInPass(ctx, tx, schema, role)
+}
+
+// revokeCredentialAccessInPass is RevokeCredentialAccess for the login
+// keepers: it runs in a savepoint, and a failure is logged (and retried on
+// the next pass) without undoing the login the pass just set, so a new
+// project still gets a working login. The migration path calls
+// RevokeCredentialAccess directly and refuses to run instead.
+func revokeCredentialAccessInPass(ctx context.Context, tx pgx.Tx, schema, role string) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("savepoint: %w", err)
+	}
+	if err := RevokeCredentialAccess(ctx, sp, schema, role); err != nil {
+		_ = sp.Rollback(ctx)
+		slog.Error("tenantlogin: could not remove credential-table access", "schema", schema, "role", role, "error", err)
+		return nil
+	}
+	return sp.Commit(ctx)
 }
 
 // CredentialTables are the system tables that hold credentials and
@@ -206,8 +224,8 @@ type credentialAccess struct {
 }
 
 // RevokeCredentialAccess removes every privilege role holds on the
-// schema's credential tables (table and column grants) and verifies none
-// is left. A table role owns is an error: REVOKE can't take an owner's
+// schema's credential tables (a table-level REVOKE ALL also clears column
+// grants) and verifies none is left. A table role owns is an error: REVOKE can't take an owner's
 // rights. Runs as eurobase_migrator; a steady-state call changes nothing.
 func RevokeCredentialAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	held, err := credentialTablesHeld(ctx, tx, schema, role)
@@ -224,20 +242,6 @@ func RevokeCredentialAccess(ctx context.Context, tx pgx.Tx, schema, role string)
 		}
 		if _, err := tx.Exec(ctx, fmt.Sprintf("REVOKE ALL ON TABLE %s FROM %s", h.table, r)); err != nil {
 			return fmt.Errorf("revoke %s on %s: %w", role, h.table, err)
-		}
-		// Column grants survive a table-level REVOKE ALL; the column
-		// list comes from the catalog (attribute names quoted by format).
-		var cols string
-		if err := tx.QueryRow(ctx, `
-			SELECT coalesce(string_agg(format('%I', attname), ', '), '')
-			  FROM pg_attribute
-			 WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped`, h.table).Scan(&cols); err != nil {
-			return fmt.Errorf("list columns of %s: %w", h.table, err)
-		}
-		if cols != "" {
-			if _, err := tx.Exec(ctx, fmt.Sprintf("REVOKE ALL (%s) ON TABLE %s FROM %s", cols, h.table, r)); err != nil {
-				return fmt.Errorf("revoke column privileges of %s on %s: %w", role, h.table, err)
-			}
 		}
 	}
 	// A REVOKE by a role that can't act for the grantor is a WARNING, not
