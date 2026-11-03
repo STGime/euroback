@@ -20,6 +20,9 @@ func TestValidateNoPrivilegeStatements(t *testing.T) {
 		"REASSIGN OWNED BY a TO b",
 		"DROP OWNED BY a",
 		"ALTER TABLE t OWNER TO x",
+		"ALTER TABLE rename OWNER TO x",
+		"ALTER TABLE t RENAME owner TO x", // ambiguous without COLUMN: refused
+		"ALTER DEFAULT PRIVILEGES FOR ROLE r IN SCHEMA s REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC",
 		"CREATE FUNCTION f() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$",
 		"select 1; reset role",
 	}
@@ -38,6 +41,8 @@ func TestValidateNoPrivilegeStatements(t *testing.T) {
 		`SELECT "grant" FROM awards`,
 		"UPDATE settings SET value = 'x' WHERE key = 'search'",
 		"CREATE POLICY p ON posts USING (owner = auth_uid())",
+		"ALTER TABLE members RENAME COLUMN owner TO owner_id",
+		"CREATE TABLE settings (k text, v text DEFAULT 'x', privileges jsonb)",
 		"CREATE FUNCTION f() RETURNS int LANGUAGE sql SECURITY INVOKER AS $$ SELECT 1 $$",
 	}
 	for _, q := range allowed {
