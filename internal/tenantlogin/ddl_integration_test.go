@@ -169,15 +169,16 @@ func TestDDLLoginIntegration(t *testing.T) {
 	// privileges when a platform migration re-creates the table) is taken
 	// back by the keeper and by the migration path without the persistent
 	// login.
-	regrant := func() {
+	regrantTo := func(grantee string) {
 		t.Helper()
 		if _, err := admin.Exec(ctx, fmt.Sprintf(
-			`SET ROLE eurobase_migrator; GRANT SELECT, INSERT ON %s.refresh_tokens, %s.vault_secrets TO %s; RESET ROLE`,
-			a, a, pgx.Identifier{role}.Sanitize())); err != nil {
-			t.Fatalf("re-grant: %v", err)
+			`SET ROLE eurobase_migrator; GRANT SELECT, INSERT ON %s.refresh_tokens, %s.vault_secrets TO %s; GRANT SELECT (id) ON %s.email_tokens TO %s; RESET ROLE`,
+			a, a, pgx.Identifier{grantee}.Sanitize(), a, pgx.Identifier{grantee}.Sanitize())); err != nil {
+			t.Fatalf("re-grant to %s: %v", grantee, err)
 		}
 	}
-	credentialPrivs := func() int {
+	regrant := func() { regrantTo(role) }
+	credentialPrivsOf := func(grantee string) int {
 		t.Helper()
 		var n int
 		if err := admin.QueryRow(ctx, `
@@ -185,12 +186,14 @@ func TestDDLLoginIntegration(t *testing.T) {
 			 WHERE c.relnamespace = $1::regnamespace
 			   AND c.relname IN ('refresh_tokens', 'email_tokens', 'vault_secrets')
 			   AND (has_table_privilege($2, c.oid, 'SELECT') OR has_table_privilege($2, c.oid, 'INSERT')
-			     OR has_table_privilege($2, c.oid, 'UPDATE') OR has_table_privilege($2, c.oid, 'DELETE'))`,
-			schemaA, role).Scan(&n); err != nil {
+			     OR has_table_privilege($2, c.oid, 'UPDATE') OR has_table_privilege($2, c.oid, 'DELETE')
+			     OR has_any_column_privilege($2, c.oid, 'SELECT'))`,
+			schemaA, grantee).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n
 	}
+	credentialPrivs := func() int { return credentialPrivsOf(role) }
 	regrant()
 	if err := tenantlogin.EnsureDDLLogin(ctx, dev, database, secret, schemaA); err != nil {
 		t.Fatalf("EnsureDDLLogin after re-grant: %v", err)
@@ -205,6 +208,20 @@ func TestDDLLoginIntegration(t *testing.T) {
 	}
 	if n := credentialPrivs(); n != 0 {
 		t.Errorf("migration path left privileges on %d credential tables", n)
+	}
+
+	// The function-login keeper does the same for `_func`.
+	funcRole := tenantlogin.FuncRole(schemaA)
+	regrantTo(funcRole)
+	fe, err := tenantlogin.NewEnsurer(dev, database, []byte(strings.Repeat("f", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fe.EnsureOne(ctx, schemaA); err != nil {
+		t.Fatalf("func EnsureOne after re-grant: %v", err)
+	}
+	if n := credentialPrivsOf(funcRole); n != 0 {
+		t.Errorf("func keeper left privileges on %d credential tables", n)
 	}
 }
 

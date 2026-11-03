@@ -175,42 +175,70 @@ func grantDDLAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	}
 	// The default privileges above also cover a credential table the
 	// migrator re-creates; take those (and any older grant) back.
-	return RevokeDDLCredentialAccess(ctx, tx, schema, role)
+	return RevokeCredentialAccess(ctx, tx, schema, role)
 }
 
 // CredentialTables are the system tables that hold credentials and
-// secrets. `_ddl` gets no privilege on them, like `_func` (migration
-// 000147): the platform reads and writes them on its own pools, and SQL a
-// developer writes (editor, transactions, migrations) runs as `_ddl`.
+// secrets. The per-project roles that run developer-written SQL (`_ddl`:
+// editor, transactions, data API, migrations; `_func`: functions, cron)
+// get no privilege on them (migration 000147 for `_func`): the platform
+// reads and writes them on its own pools.
 var CredentialTables = []string{"refresh_tokens", "email_tokens", "vault_secrets"}
 
+// credentialPrivQuery lists the credential tables in a schema that role
+// can reach: any table privilege, any column privilege, or ownership (an
+// owner keeps its rights after REVOKE, so it is listed as such).
 const credentialPrivQuery = `
-	SELECT c.oid::regclass::text
+	SELECT c.oid::regclass::text, pg_has_role($2, c.relowner, 'USAGE')
 	  FROM pg_class c
 	 WHERE c.relnamespace = $1::regnamespace
 	   AND c.relname = ANY($3)
-	   AND (has_table_privilege($2, c.oid, 'SELECT') OR has_table_privilege($2, c.oid, 'INSERT')
+	   AND (pg_has_role($2, c.relowner, 'USAGE')
+	     OR has_table_privilege($2, c.oid, 'SELECT') OR has_table_privilege($2, c.oid, 'INSERT')
 	     OR has_table_privilege($2, c.oid, 'UPDATE') OR has_table_privilege($2, c.oid, 'DELETE')
 	     OR has_table_privilege($2, c.oid, 'TRUNCATE') OR has_table_privilege($2, c.oid, 'REFERENCES')
-	     OR has_table_privilege($2, c.oid, 'TRIGGER'))`
+	     OR has_table_privilege($2, c.oid, 'TRIGGER')
+	     OR has_any_column_privilege($2, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))`
 
-// RevokeDDLCredentialAccess removes every privilege `role` holds on the
-// schema's credential tables and verifies none is left. Runs as
-// eurobase_migrator; a steady-state call changes nothing.
-func RevokeDDLCredentialAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
+type credentialAccess struct {
+	table string // regclass rendering: already quoted
+	owned bool
+}
+
+// RevokeCredentialAccess removes every privilege role holds on the
+// schema's credential tables (table and column grants) and verifies none
+// is left. A table role owns is an error: REVOKE can't take an owner's
+// rights. Runs as eurobase_migrator; a steady-state call changes nothing.
+func RevokeCredentialAccess(ctx context.Context, tx pgx.Tx, schema, role string) error {
 	held, err := credentialTablesHeld(ctx, tx, schema, role)
 	if err != nil {
 		return err
 	}
-	r := pgx.Identifier{role}.Sanitize()
-	for _, t := range held {
-		// t is a regclass rendering: already quoted.
-		if _, err := tx.Exec(ctx, fmt.Sprintf("REVOKE ALL ON TABLE %s FROM %s", t, r)); err != nil {
-			return fmt.Errorf("revoke %s on %s: %w", role, t, err)
-		}
-	}
 	if len(held) == 0 {
 		return nil
+	}
+	r := pgx.Identifier{role}.Sanitize()
+	for _, h := range held {
+		if h.owned {
+			return fmt.Errorf("role %s owns credential table %s (should be eurobase_migrator)", role, h.table)
+		}
+		if _, err := tx.Exec(ctx, fmt.Sprintf("REVOKE ALL ON TABLE %s FROM %s", h.table, r)); err != nil {
+			return fmt.Errorf("revoke %s on %s: %w", role, h.table, err)
+		}
+		// Column grants survive a table-level REVOKE ALL; the column
+		// list comes from the catalog (attribute names quoted by format).
+		var cols string
+		if err := tx.QueryRow(ctx, `
+			SELECT coalesce(string_agg(format('%I', attname), ', '), '')
+			  FROM pg_attribute
+			 WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped`, h.table).Scan(&cols); err != nil {
+			return fmt.Errorf("list columns of %s: %w", h.table, err)
+		}
+		if cols != "" {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("REVOKE ALL (%s) ON TABLE %s FROM %s", cols, h.table, r)); err != nil {
+				return fmt.Errorf("revoke column privileges of %s on %s: %w", role, h.table, err)
+			}
+		}
 	}
 	// A REVOKE by a role that can't act for the grantor is a WARNING, not
 	// an error: verify.
@@ -219,17 +247,21 @@ func RevokeDDLCredentialAccess(ctx context.Context, tx pgx.Tx, schema, role stri
 		return err
 	}
 	if len(left) > 0 {
-		return fmt.Errorf("role %s still has privileges on %v after REVOKE", role, left)
+		return fmt.Errorf("role %s still has privileges on %d credential table(s) after REVOKE (first: %s)", role, len(left), left[0].table)
 	}
 	return nil
 }
 
-func credentialTablesHeld(ctx context.Context, tx pgx.Tx, schema, role string) ([]string, error) {
+func credentialTablesHeld(ctx context.Context, tx pgx.Tx, schema, role string) ([]credentialAccess, error) {
 	rows, err := tx.Query(ctx, credentialPrivQuery, schema, role, CredentialTables)
 	if err != nil {
 		return nil, fmt.Errorf("list %s credential-table privileges: %w", role, err)
 	}
-	return pgx.CollectRows(rows, pgx.RowTo[string])
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (credentialAccess, error) {
+		var a credentialAccess
+		err := row.Scan(&a.table, &a.owned)
+		return a, err
+	})
 }
 
 // DDLEnsurer keeps every shared-cluster tenant's `_ddl` role loginable.

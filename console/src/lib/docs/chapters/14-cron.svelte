@@ -104,9 +104,10 @@
 
 				<div class="mt-3 space-y-3">
 					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-						<p class="text-xs font-semibold text-gray-700">Example: Clean up expired sessions (void — for cron)</p>
+						<p class="text-xs font-semibold text-gray-700">Example: Delete old notifications (void — for cron)</p>
 						<p class="text-xs text-gray-500 mt-0.5">Language: PL/pgSQL &middot; Returns: void</p>
-						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">BEGIN<br/>&nbsp;&nbsp;DELETE FROM refresh_tokens WHERE expires_at &lt; now();<br/>&nbsp;&nbsp;DELETE FROM email_tokens WHERE expires_at &lt; now();<br/>END;</div>
+						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400">BEGIN<br/>&nbsp;&nbsp;DELETE FROM notifications WHERE created_at &lt; now() - interval '30 days';<br/>END;</div>
+						<p class="text-xs text-gray-500 mt-1.5">Expired sessions and email tokens are cleaned up by the platform; your functions can't read or change those tables.</p>
 					</div>
 
 					<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">

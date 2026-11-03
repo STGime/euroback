@@ -241,7 +241,7 @@ func (e *MigrationExecutor) ddlRolePassword(schemaName string) string {
 // true iff the role can connect (via the grant OR PUBLIC), so it's the
 // authoritative check — fail loud here rather than with an opaque
 // "permission denied for database" at connect time.
-func (e *MigrationExecutor) setRoleLogin(ctx context.Context, ddlRole, password string, login bool) error {
+func (e *MigrationExecutor) setRoleLogin(ctx context.Context, schemaName, ddlRole, password string, login bool) error {
 	tx, err := e.adminPool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin admin tx: %w", err)
@@ -299,7 +299,7 @@ func (e *MigrationExecutor) setRoleLogin(ctx context.Context, ddlRole, password 
 	// The credential tables are the platform's: a migration body runs as
 	// this role and gets no privilege on them (also when the persistent
 	// login, whose keeper does the same, is off).
-	if err := tenantlogin.RevokeDDLCredentialAccess(ctx, tx, strings.TrimSuffix(ddlRole, "_ddl"), ddlRole); err != nil {
+	if err := tenantlogin.RevokeCredentialAccess(ctx, tx, schemaName, ddlRole); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -370,7 +370,7 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 		// One retry covers the race where a concurrent apply for the same tenant
 		// demoted the role to NOLOGIN between our promote and connect.
 		for attempt := 0; attempt < 2; attempt++ {
-			if err = e.setRoleLogin(ctx, ddlRole, password, true); err != nil {
+			if err = e.setRoleLogin(ctx, schemaName, ddlRole, password, true); err != nil {
 				return false, err
 			}
 			conn, err = pgx.ConnectConfig(ctx, cfg)
@@ -384,7 +384,7 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 		// Demote back to NOLOGIN on the way out (best-effort; uses the parent
 		// ctx so a cancelled request still attempts the lockdown).
 		defer func() {
-			_ = e.setRoleLogin(context.WithoutCancel(ctx), ddlRole, "", false)
+			_ = e.setRoleLogin(context.WithoutCancel(ctx), schemaName, ddlRole, "", false)
 		}()
 	}
 	defer conn.Close(ctx)
