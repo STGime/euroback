@@ -563,7 +563,9 @@ func TestAdminSendAllowlistEmail_ExcludesUnverifiedAndOptedOut(t *testing.T) {
 		    ('optout-all'||$1, 'x', now()),
 		    ('resubscribed'||$1, 'x', now()),
 		    ('optout-onboarding'||$1, 'x', now()),
-		    ('invited-unverified'||$1, 'x', NULL)`, d); err != nil {
+		    ('invited-unverified'||$1, 'x', NULL),
+		    ('invited-ok'||$1, 'x', now()),
+		    ('padded-optout'||$1, 'x', now())`, d); err != nil {
 		t.Fatalf("seed users: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -572,7 +574,8 @@ func TestAdminSendAllowlistEmail_ExcludesUnverifiedAndOptedOut(t *testing.T) {
 		    ('optout-updates'||$1, 'beta_updates', now()),
 		    ('optout-all'||$1, 'all', now()),
 		    ('resubscribed'||$1, 'beta_updates', NULL::timestamptz),
-		    ('optout-onboarding'||$1, 'onboarding', now())
+		    ('optout-onboarding'||$1, 'onboarding', now()),
+		    ('padded-optout'||$1, 'all', now())
 		) v(e, c, o) JOIN platform_users u ON u.email = v.e`, d); err != nil {
 		t.Fatalf("seed preferences: %v", err)
 	}
@@ -580,15 +583,18 @@ func TestAdminSendAllowlistEmail_ExcludesUnverifiedAndOptedOut(t *testing.T) {
 		INSERT INTO platform_allowlist (email, note) VALUES
 		    ('invited-only'||$1, 'no account'),
 		    ('invited-unverified'||$1, 'account never verified'),
-		    ('OPTOUT-ALL'||$1, 'account opted out, other case')
+		    ('OPTOUT-ALL'||$1, 'account opted out, other case'),
+		    ('invited-ok'||$1, 'account verified, opted in'),
+		    ('  Padded-Optout'||$1||'  ', 'account opted out, padded')
 		ON CONFLICT (email) DO NOTHING`, d); err != nil {
 		t.Fatalf("seed allowlist: %v", err)
 	}
 
 	want := map[string]bool{
 		"ok" + d: true, "resubscribed" + d: true, "optout-onboarding" + d: true, "invited-only" + d: true,
+		"invited-ok" + d: true,
 	}
-	banned := []string{"unverified" + d, "optout-updates" + d, "optout-all" + d, "invited-unverified" + d}
+	banned := []string{"unverified" + d, "optout-updates" + d, "optout-all" + d, "invited-unverified" + d, "padded-optout" + d}
 
 	// Send.
 	all := []string{}

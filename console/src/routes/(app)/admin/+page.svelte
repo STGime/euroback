@@ -182,6 +182,10 @@
 			allowlist = a.entries;
 			teamBeta = tb.entries;
 			signupUsers = su.users;
+			// Drop selections that no longer get product updates (their
+			// checkbox is disabled, so they couldn't be unticked).
+			const mailable = new Set(su.users.filter((u) => u.mailable).map((u) => u.email));
+			selectedSignups = new Set([...selectedSignups].filter((e) => mailable.has(e)));
 			contactRequests = cr.requests;
 			currentUserId = profile.id;
 		} catch (e: any) {
@@ -425,6 +429,11 @@
 		}
 	}
 
+	// Addresses the server left out: not eligible for product updates.
+	function skippedNote(n: number | undefined): string {
+		return n ? ` ${n} left out (unverified, unsubscribed, bounced or unknown).` : '';
+	}
+
 	function openSignupCompose() {
 		composeError = null;
 		composeSuccess = null;
@@ -527,7 +536,7 @@
 			// chunks so the operator can retry just those addresses
 			// instead of re-sending to everyone.
 			if (res.status === 'partial') {
-				composeSuccess = `Partial: ${res.sent} sent, ${res.failed} failed${res.bcc ? ' (BCC)' : ''}.`;
+				composeSuccess = `Partial: ${res.sent} sent, ${res.failed} failed${res.bcc ? ' (BCC)' : ''}.${skippedNote(res.skipped)}`;
 				composeFailures = res.errors ?? [];
 				// Only relevant to the 'selected' flow — audience mode
 				// doesn't consult `selected`, so re-selecting the
@@ -541,7 +550,7 @@
 					selectedSignups = new Set(composeFailures.flatMap((e) => e.recipients));
 				}
 			} else {
-				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.${res.skipped ? ` ${res.skipped} left out (unverified, unsubscribed or bounced).` : ''}`;
+				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.${skippedNote(res.skipped)}`;
 				if (composeMode === 'selected') {
 					selected = new Set();
 				} else if (composeMode === 'signup-selected') {
