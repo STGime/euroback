@@ -652,7 +652,7 @@
 	<div class="flex-1 flex flex-col min-w-0 min-h-[70vh] md:min-h-0 overflow-hidden">
 		{#if selectedTable && selectedSchema}
 			<!-- Top toolbar -->
-			<div class="flex items-center justify-between mb-4">
+			<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
 				<div class="flex items-center gap-3">
 					<h2 class="text-lg font-semibold text-gray-900">{selectedTable}</h2>
 					<button

@@ -267,9 +267,17 @@
 	});
 	// On narrow screens the tab bar scrolls sideways; keep the active tab in view.
 	let tabStrip: HTMLElement | undefined = $state();
+	// Scrolls only the strip sideways (never the page), and only where it scrolls.
 	$effect(() => {
 		void $page.url.pathname;
-		tabStrip?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		const strip = tabStrip;
+		const active = strip?.querySelector<HTMLElement>('[aria-current="page"]');
+		if (!strip || !active || strip.scrollWidth <= strip.clientWidth) return;
+		const s = strip.getBoundingClientRect();
+		const a = active.getBoundingClientRect();
+		if (a.left < s.left || a.right > s.right) {
+			strip.scrollLeft += a.left - s.left - (s.width - a.width) / 2;
+		}
 	});
 </script>
 

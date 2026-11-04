@@ -172,9 +172,24 @@
 
 	// Phone / small-tablet navigation drawer (below md the sidebar is hidden).
 	let mobileNavOpen = $state(false);
+	let menuButton: HTMLButtonElement | undefined = $state();
+	let drawer: HTMLElement | undefined = $state();
 	$effect(() => {
 		void currentPath;
 		mobileNavOpen = false;
+	});
+	// While the drawer is open: move focus into it, keep the page behind from
+	// scrolling, and hand focus back to the menu button when it closes.
+	$effect(() => {
+		if (!mobileNavOpen) return;
+		drawer?.querySelector<HTMLElement>('a, button')?.focus();
+		const prev = document.body.style.overflow;
+		document.body.style.overflow = 'hidden';
+		return () => {
+			document.body.style.overflow = prev;
+			if (menuButton && document.activeElement && drawer?.contains(document.activeElement)) menuButton.focus();
+			else if (document.activeElement === document.body) menuButton?.focus({ preventScroll: true });
+		};
 	});
 
 	async function handleLogout() {
@@ -200,6 +215,7 @@
 				{#each navItems as item}
 					<a
 						href={item.href}
+						onclick={() => (mobileNavOpen = false)}
 						class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors {currentPath === item.href ? 'bg-eurobase-50 text-eurobase-700' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'}"
 					>
 						{#if item.icon === 'projects'}
@@ -318,7 +334,7 @@
 				class="absolute inset-0 bg-gray-900/40 cursor-pointer"
 				onclick={() => (mobileNavOpen = false)}
 			></button>
-			<aside class="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col overflow-y-auto bg-white shadow-xl">
+			<aside bind:this={drawer} class="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col overflow-y-auto bg-white shadow-xl">
 				{@render sidebarContent()}
 			</aside>
 		</div>
@@ -329,7 +345,7 @@
 		<!-- Top bar -->
 		<header class="flex h-16 items-center justify-between gap-3 border-b border-gray-200 bg-white px-4 sm:px-6">
 			<!-- Mobile menu button -->
-			<button type="button" aria-label="Open menu" aria-expanded={mobileNavOpen} onclick={() => (mobileNavOpen = true)} class="md:hidden rounded-lg p-2 text-gray-500 hover:bg-gray-100 cursor-pointer">
+			<button bind:this={menuButton} type="button" aria-label="Open menu" aria-expanded={mobileNavOpen} onclick={() => (mobileNavOpen = true)} class="md:hidden rounded-lg p-2 text-gray-500 hover:bg-gray-100 cursor-pointer">
 				<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
 				</svg>

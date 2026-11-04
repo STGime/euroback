@@ -569,9 +569,9 @@ module.exports = async (req, ctx) => {
 			Loading functions...
 		</div>
 	{:else}
-		<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+		<div class="grid grid-cols-1 md:grid-cols-12 gap-6">
 			<!-- Function list sidebar -->
-			<div class="lg:col-span-3 space-y-2">
+			<div class="md:col-span-3 space-y-2">
 				{#if functions.length === 0}
 					<div class="rounded-lg border border-dashed border-gray-300 p-8 text-center">
 						<p class="text-sm text-gray-500">No edge functions yet</p>
@@ -602,7 +602,7 @@ module.exports = async (req, ctx) => {
 			</div>
 
 			<!-- Editor panel -->
-			<div class="lg:col-span-6 min-w-0">
+			<div class="md:col-span-6 min-w-0">
 				{#if selectedFn}
 					<div class="rounded-lg border border-gray-200 bg-white">
 						<!-- Header -->
@@ -1046,7 +1046,7 @@ module.exports = async (req, ctx) => {
 			</div>
 
 			<!-- Schema browser sidebar -->
-			<div class="hidden lg:block lg:col-span-3">
+			<div class="hidden md:block md:col-span-3">
 				<div class="rounded-lg border border-gray-200 bg-white overflow-hidden">
 					<div class="border-b border-gray-200 px-4 py-3">
 						<h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500">Tables</h3>
