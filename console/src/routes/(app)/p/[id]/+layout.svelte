@@ -265,6 +265,20 @@
 		updateProject(p: Project) { project = p; },
 		reload: loadProject
 	});
+	// On narrow screens the tab bar scrolls sideways; keep the active tab in view.
+	let tabStrip: HTMLElement | undefined = $state();
+	// Scrolls only the strip sideways (never the page), and only where it scrolls.
+	$effect(() => {
+		void $page.url.pathname;
+		const strip = tabStrip;
+		const active = strip?.querySelector<HTMLElement>('[aria-current="page"]');
+		if (!strip || !active || strip.scrollWidth <= strip.clientWidth) return;
+		const s = strip.getBoundingClientRect();
+		const a = active.getBoundingClientRect();
+		if (a.left < s.left || a.right > s.right) {
+			strip.scrollLeft += a.left - s.left - (s.width - a.width) / 2;
+		}
+	});
 </script>
 
 <!-- Project secondary nav -->
@@ -283,13 +297,13 @@
 			>Retry</button>
 		</div>
 	{:else if project}
-		<div class="mb-4 flex items-center gap-3">
+		<div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
 			<a href="/projects" class="text-gray-400 hover:text-gray-600 transition-colors" aria-label="Back to projects">
 				<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
 				</svg>
 			</a>
-			<h1 class="text-xl font-bold text-gray-900">{project.name}</h1>
+			<h1 class="min-w-0 break-words text-xl font-bold text-gray-900">{project.name}</h1>
 			<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
 				{project.status === 'active' ? 'bg-green-100 text-green-700' :
 				 project.status === 'provisioning' ? 'bg-amber-100 text-amber-700' :
@@ -299,11 +313,11 @@
 			<button
 				type="button"
 				onclick={copyProjectId}
-				class="cursor-pointer inline-flex items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-colors"
+				class="cursor-pointer inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-md bg-gray-100 px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-colors"
 				title="Copy project ID"
 			>
 				<span class="font-medium text-gray-400">Project ID</span>
-				<span class="font-mono">{projectId}</span>
+				<span class="min-w-0 truncate font-mono">{projectId}</span>
 				{#if copied}
 					<svg class="h-3.5 w-3.5 text-green-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
@@ -317,13 +331,14 @@
 		</div>
 	{/if}
 
-	<nav class="flex gap-1 border-b border-gray-200">
+	<nav bind:this={tabStrip} class="tab-strip flex gap-1 overflow-x-auto md:flex-wrap md:overflow-visible border-b border-gray-200">
 		{#each tabs as tab}
 			{@const sub = currentTab()}
 			{@const isActive = tab.href === '' ? sub === '' : sub.startsWith(tab.href)}
 			<a
 				href="/p/{projectId}{tab.href}"
-				class="relative px-4 py-2.5 text-sm font-medium transition-colors
+				aria-current={isActive ? 'page' : undefined}
+				class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2.5 text-sm font-medium transition-colors
 					{isActive
 						? 'text-eurobase-700'
 						: 'text-gray-500 hover:text-gray-700'}"

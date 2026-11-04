@@ -424,7 +424,7 @@
 
 	<!-- Sub-tabs -->
 	<div class="border-b border-gray-200">
-		<nav class="-mb-px flex gap-6">
+		<nav class="tab-strip -mb-px flex gap-6 overflow-x-auto whitespace-nowrap">
 			<button
 				onclick={() => activeSubTab = 'jobs'}
 				class="pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer {activeSubTab === 'jobs' ? 'border-eurobase-600 text-eurobase-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"
@@ -446,7 +446,7 @@
 		<p class="text-sm text-gray-500">Run SQL or call functions on a recurring schedule.</p>
 		<button
 			type="button"
-			class="cursor-pointer inline-flex items-center gap-1.5 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
+			class="shrink-0 whitespace-nowrap cursor-pointer inline-flex items-center gap-1.5 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
 			onclick={openCreate}
 		>
 			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
@@ -593,7 +593,7 @@
 		<p class="text-sm text-gray-500">Reusable PostgreSQL functions (SQL or PL/pgSQL) that run <em>inside</em> the database. Call from cron jobs or the SDK via <code class="bg-gray-100 rounded px-1 text-xs">eb.db.rpc('name')</code>.</p>
 		<button
 			type="button"
-			class="cursor-pointer inline-flex items-center gap-1.5 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
+			class="shrink-0 whitespace-nowrap cursor-pointer inline-flex items-center gap-1.5 rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
 			onclick={() => { showCreateFunction = true; newFuncError = null; funcTestResult = null; funcTestError = null; loadSchema(); }}
 		>
 			<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">

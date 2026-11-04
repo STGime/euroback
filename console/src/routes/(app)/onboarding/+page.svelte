@@ -1153,7 +1153,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 			     enough — they'll find the copy-paste snippets
 			     there once they've generated a key pair. -->
 			<div class="mt-6 border-b border-gray-200">
-				<nav class="flex gap-6" aria-label="Tabs">
+				<nav class="tab-strip flex gap-6 overflow-x-auto whitespace-nowrap" aria-label="Tabs">
 					<button
 						onclick={() => activeTab = 'quickstart'}
 						class="border-b-2 pb-3 text-sm font-medium transition-colors cursor-pointer {activeTab === 'quickstart' ? 'border-eurobase-600 text-eurobase-700' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}"

@@ -327,7 +327,7 @@ curl -X POST \\
 										<div class="space-y-3">
 											<!-- Query params for list -->
 											{#if needsQueryParams(ep.kind)}
-												<div class="grid grid-cols-4 gap-2">
+												<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
 													<div>
 														<label class="block text-[10px] font-medium text-gray-500 mb-1">select</label>
 														<input type="text" bind:value={trySelect} placeholder="*" class="w-full rounded border border-gray-300 px-2 py-1.5 text-xs font-mono focus:border-eurobase-500 focus:ring-1 focus:ring-eurobase-500 outline-none" />

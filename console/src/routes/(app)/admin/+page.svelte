@@ -663,7 +663,7 @@
 			</div>
 		</div>
 
-		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
 			<table class="w-full text-sm">
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>
@@ -755,7 +755,7 @@
 			</button>
 		</div>
 
-		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
 			<table class="w-full text-sm">
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>
@@ -984,7 +984,7 @@
 				</select>
 			</div>
 		</div>
-		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
 			<table class="w-full text-sm">
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>
@@ -1091,7 +1091,7 @@
 
 	<section class="space-y-3">
 		<h2 class="text-lg font-semibold text-gray-900">All Projects</h2>
-		<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
 			<table class="w-full text-sm">
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>

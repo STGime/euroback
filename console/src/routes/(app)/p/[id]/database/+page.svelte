@@ -582,9 +582,9 @@
 	</div>
 {/if}
 
-<div class="flex gap-6 h-[calc(100vh-13rem)] overflow-hidden">
+<div class="flex flex-col md:flex-row gap-4 md:gap-6 md:h-[calc(100vh-13rem)] md:overflow-hidden">
 	<!-- Left sidebar: table list -->
-	<div class="w-56 shrink-0 flex flex-col rounded-xl border border-gray-200 bg-white overflow-hidden">
+	<div class="w-full max-h-56 md:max-h-none md:w-56 shrink-0 flex flex-col rounded-xl border border-gray-200 bg-white overflow-hidden">
 		<div class="flex items-center justify-between border-b border-gray-200 px-4 py-3">
 			<h3 class="text-sm font-semibold text-gray-700">Tables</h3>
 			<button
@@ -649,10 +649,10 @@
 	</div>
 
 	<!-- Main content area -->
-	<div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+	<div class="flex-1 flex flex-col min-w-0 min-h-[70vh] md:min-h-0 overflow-hidden">
 		{#if selectedTable && selectedSchema}
 			<!-- Top toolbar -->
-			<div class="flex items-center justify-between mb-4">
+			<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
 				<div class="flex items-center gap-3">
 					<h2 class="text-lg font-semibold text-gray-900">{selectedTable}</h2>
 					<button

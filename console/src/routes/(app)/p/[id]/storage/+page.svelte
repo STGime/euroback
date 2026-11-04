@@ -541,9 +541,9 @@
 			{/each}
 		</nav>
 
-		<div class="flex items-center gap-2">
+		<div class="flex min-w-0 items-center gap-2">
 			<!-- Search -->
-			<div class="relative">
+			<div class="relative min-w-0 flex-1 sm:flex-none">
 				<svg class="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
 					<path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
 				</svg>
@@ -551,7 +551,7 @@
 					type="text"
 					placeholder="Filter files..."
 					bind:value={searchQuery}
-					class="h-9 w-48 rounded-lg border border-gray-300 pl-8 pr-3 text-sm text-gray-900 placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
+					class="h-9 w-full sm:w-48 rounded-lg border border-gray-300 pl-8 pr-3 text-sm text-gray-900 placeholder:text-gray-400 focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none"
 				/>
 			</div>
 
@@ -570,7 +570,7 @@
 			<!-- New Folder -->
 			<button
 				onclick={() => { showNewFolderModal = true; newFolderName = ''; }}
-				class="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors cursor-pointer"
+				class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors cursor-pointer"
 			>
 				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M12 10.5v6m3-3H9m4.06-7.19-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
@@ -579,7 +579,7 @@
 			</button>
 
 			<!-- View toggle -->
-			<div class="flex rounded-lg border border-gray-300 bg-white overflow-hidden">
+			<div class="flex shrink-0 rounded-lg border border-gray-300 bg-white overflow-hidden">
 				<button
 					onclick={() => { viewMode = 'list'; }}
 					class="p-2 cursor-pointer transition-colors {viewMode === 'list' ? 'bg-gray-100 text-gray-900' : 'text-gray-500 hover:text-gray-700'}"

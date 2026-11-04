@@ -287,9 +287,9 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="flex gap-4 h-[calc(100vh-16rem)] overflow-hidden">
+<div class="flex gap-4 h-[calc(100vh-16rem)] min-h-[28rem] overflow-hidden">
 	<!-- Schema sidebar -->
-	<div class="w-52 shrink-0 flex flex-col rounded-xl border border-gray-200 bg-white overflow-hidden">
+	<div class="hidden md:flex w-52 shrink-0 flex-col rounded-xl border border-gray-200 bg-white overflow-hidden">
 		<div class="border-b border-gray-200 px-4 py-3">
 			<h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500">Tables</h3>
 		</div>
