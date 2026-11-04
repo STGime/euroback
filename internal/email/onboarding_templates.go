@@ -29,6 +29,7 @@ type OnboardingData struct {
 	UserEmail      string
 	DisplayName    string // optional; empty for users who haven't set one
 	ProjectName    string // optional; empty when the user has no projects yet
+	ProjectSlug    string // optional; the subdomain label (projects.slug) — the live URL is <slug>.eurobase.app, NOT <name>. Set together with ProjectName.
 	UnsubscribeURL string // HMAC-signed absolute URL — see BuildUnsubscribeURL
 	DocsURL        string // deep link to the in-console docs
 	ConsoleURL     string // marketing/console URL for CTA buttons
@@ -99,7 +100,7 @@ var onboardingTemplates = []onboardingTemplate{
 			<h2 style="margin:16px 0 4px; font-size:17px; color:#111827;">👋 Welcome to Eurobase</h2>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
 			  {{if .DisplayName}}Hi {{.DisplayName}}!{{else}}Hi,{{end}}
-			  Thanks for creating a Eurobase account. {{if .ProjectName}}Your project <strong>{{.ProjectName}}</strong> is live at <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">https://{{.ProjectName}}.eurobase.app</code>.{{else}}Your account is set up — create your first project when you're ready.{{end}}
+			  Thanks for creating a Eurobase account. {{if .ProjectName}}Your project <strong>{{.ProjectName}}</strong> is live at <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">https://{{.ProjectSlug}}.eurobase.app</code>.{{else}}Your account is set up — create your first project when you're ready.{{end}}
 			</p>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
 			  Eurobase is EU-sovereign Backend-as-a-Service — Postgres, auth, storage, realtime, edge functions, all hosted on Scaleway (France). No US jurisdiction, no CLOUD Act.
@@ -111,7 +112,7 @@ var onboardingTemplates = []onboardingTemplate{
 			  <p style="margin:0 0 6px; font-size:14px; font-weight:600; color:#1e3a8a;">Get started in five minutes</p>
 			  <ul style="margin:0; padding-left:20px; font-size:14px; line-height:1.6; color:#1e40af;">
 			    <li>Open <a href="{{.DocsURL}}" style="color:#1d4ed8;">/docs</a> — the in-console docs walk you through the SDK.</li>
-			    <li>Copy your project's <code style="background:#e0e7ff; padding:1px 4px; border-radius:3px; font-size:12px;">public_key</code> from the console → SDK Keys.</li>
+			    <li>Copy your project's <code style="background:#e0e7ff; padding:1px 4px; border-radius:3px; font-size:12px;">public_key</code> from the console → <strong>Project Settings → API Keys</strong> (generate a pair if you haven't yet).</li>
 			    <li>Reply to this email if anything doesn't work. We read replies.</li>
 			  </ul>
 			</div>
@@ -164,21 +165,21 @@ var onboardingTemplates = []onboardingTemplate{
 			  Every project gets a bucket. Upload from the SDK:
 			</p>
 			<pre style="background:#0f172a; color:#e2e8f0; padding:16px; border-radius:8px; font-size:12px; line-height:1.5; overflow-x:auto; margin:0 0 12px;">await eb.storage.upload('avatars/alice.png', file, { contentType: 'image/png' })
-const url = await eb.storage.signedUrl('avatars/alice.png', { expiresIn: 3600 })</pre>
+const { url } = await eb.storage.createSignedUrl('avatars/alice.png', 'download', { expiresIn: 3600 })</pre>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
 			  Files carry policies just like DB rows — same <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">auth_uid()</code>-shaped rules apply. Docs: <a href="{{.DocsURL}}#storage" style="color:#1d4ed8;">/docs → Storage</a>.
 			</p>
 
-			<h3 style="margin:16px 0 6px; font-size:15px; color:#111827;">Realtime — WebSocket subscriptions with row filters</h3>
+			<h3 style="margin:16px 0 6px; font-size:15px; color:#111827;">Realtime — live table subscriptions over WebSocket</h3>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  Subscribe to a table + filter server-side. The gateway checks the filter against your RLS policies before pushing — no need to over-fetch:
+			  Subscribe to a table's <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">INSERT</code> / <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">UPDATE</code> / <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">DELETE</code> events (or <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">'*'</code> for all three). Delivery is scoped per subscriber: a signed-in user only receives rows they're allowed to read, your service-key code receives everything, and public-readable tables stream to everyone — you never get a row you couldn't read over REST.
 			</p>
-			<pre style="background:#0f172a; color:#e2e8f0; padding:16px; border-radius:8px; font-size:12px; line-height:1.5; overflow-x:auto; margin:0 0 12px;">eb.realtime
-  .from('messages', { filter: 'room_id=eq.42' })
-  .on('INSERT', (msg) => console.log('new message', msg.record))
-  .subscribe()</pre>
+			<pre style="background:#0f172a; color:#e2e8f0; padding:16px; border-radius:8px; font-size:12px; line-height:1.5; overflow-x:auto; margin:0 0 12px;">const sub = eb.realtime.on('messages', 'INSERT', (evt) => {
+  console.log('new message', evt.record)
+})
+// later: eb.realtime.off(sub)</pre>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  50 concurrent connections on Free, 10 000 on Pro. Docs: <a href="{{.DocsURL}}#realtime" style="color:#1d4ed8;">/docs → Realtime</a>.
+			  100 concurrent connections on Free, 10 000 on Pro. Docs: <a href="{{.DocsURL}}" style="color:#1d4ed8;">/docs</a>.
 			</p>
 		`),
 	},
@@ -208,7 +209,7 @@ const url = await eb.storage.signedUrl('avatars/alice.png', { expiresIn: 3600 })
 // Inside an edge function:
 const key = ctx.env.STRIPE_KEY</pre>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  Encrypted at rest with a per-tenant key. Docs: <a href="{{.DocsURL}}#functions" style="color:#1d4ed8;">/docs → Edge Functions</a> and <a href="{{.DocsURL}}#vault" style="color:#1d4ed8;">/docs → Vault</a>.
+			  Encrypted at rest with a per-tenant key. Docs: <a href="{{.DocsURL}}#edge-functions" style="color:#1d4ed8;">/docs → Edge Functions</a> and <a href="{{.DocsURL}}#vault" style="color:#1d4ed8;">/docs → Vault</a>.
 			</p>
 		`),
 	},
@@ -255,13 +256,13 @@ const key = ctx.env.STRIPE_KEY</pre>
 			  <li><strong>DPA + Article 30 record</strong> — auto-generated from the sub-processor registry.</li>
 			</ul>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  The console flow is Pro; the underlying API is on every tier (DSAR is a legal obligation and we're not paywalling compliance). Docs: <a href="{{.DocsURL}}#compliance" style="color:#1d4ed8;">/docs → Compliance</a>.
+			  Available on every tier — DSAR is a legal obligation and we're not paywalling compliance. Docs: <a href="{{.DocsURL}}#compliance" style="color:#1d4ed8;">/docs → Compliance</a>.
 			</p>
 
 			<h2 style="margin:24px 0 4px; font-size:17px; color:#111827;">🚧 What's coming</h2>
 			<ul style="margin:0 0 12px 18px; padding:0; font-size:14px; line-height:1.6; color:#374151;">
 			  <li><strong>Supabase migration CLI</strong> — in testing. Move an existing Supabase project across in one flow.</li>
-			  <li><strong>Team tier (€149/mo)</strong> — dedicated Postgres per project (direct <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">DATABASE_URL</code>), daily scheduled backups (7-day retention) + on-demand snapshots, 1 restore/month included, SSO, RBAC, SOC 2. Coming later this year.</li>
+			  <li><strong>Team tier</strong> — dedicated Postgres per project (direct <code style="background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px;">DATABASE_URL</code>), daily scheduled backups (7-day retention) + on-demand snapshots, 1 restore/month included, SSO, RBAC, SOC 2. Coming soon.</li>
 			</ul>
 
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
