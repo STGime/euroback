@@ -153,3 +153,27 @@ func TestParseMollieDate(t *testing.T) {
 		})
 	}
 }
+
+// Mollie sometimes leaves nextPaymentDate out of a new subscription;
+// the first charge is then its startDate (we always send one).
+func TestFirstChargeDate(t *testing.T) {
+	day := func(s string) string {
+		got := firstChargeDate(&mollie.Subscription{NextPaymentDate: "", StartDate: s})
+		if got == nil {
+			return ""
+		}
+		return got.Format("2006-01-02")
+	}
+	if got := firstChargeDate(&mollie.Subscription{NextPaymentDate: "2026-12-01", StartDate: "2026-11-19"}); got == nil || got.Format("2006-01-02") != "2026-12-01" {
+		t.Fatalf("nextPaymentDate must win, got %v", got)
+	}
+	if got := day("2026-11-19"); got != "2026-11-19" {
+		t.Fatalf("startDate fallback: got %q", got)
+	}
+	if got := day(""); got != "" {
+		t.Fatalf("no dates: got %q", got)
+	}
+	if firstChargeDate(nil) != nil {
+		t.Fatal("nil subscription")
+	}
+}

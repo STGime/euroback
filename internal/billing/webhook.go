@@ -273,7 +273,7 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 
 	// Flip state atomically. next_charge_at from Mollie's
 	// nextPaymentDate string (YYYY-MM-DD) — parse defensively.
-	nextChargeAt := parseMollieDate(mollieSub.NextPaymentDate)
+	nextChargeAt := firstChargeDate(mollieSub)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -569,7 +569,7 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 		// subscription creation.
 	} else {
 		mollieSubID = mollieSub.ID
-		nextChargeAt = parseMollieDate(mollieSub.NextPaymentDate)
+		nextChargeAt = firstChargeDate(mollieSub)
 	}
 
 	// Commit the follow-up state in one tx: subscription row,
@@ -971,6 +971,20 @@ func (s *Service) markInvoicePaid(ctx context.Context, payment *mollie.Payment) 
 		return fmt.Errorf("mark invoice paid: %w", err)
 	}
 	return nil
+}
+
+// firstChargeDate is the next charge of a subscription just created:
+// Mollie's nextPaymentDate, or its startDate when Mollie leaves
+// nextPaymentDate out (seen in production). Cancel at end of period
+// and the downgrade sweeper need this date.
+func firstChargeDate(sub *mollie.Subscription) *time.Time {
+	if sub == nil {
+		return nil
+	}
+	if t := parseMollieDate(sub.NextPaymentDate); t != nil {
+		return t
+	}
+	return parseMollieDate(sub.StartDate)
 }
 
 // parseMollieDate parses "YYYY-MM-DD" as returned by Mollie's
