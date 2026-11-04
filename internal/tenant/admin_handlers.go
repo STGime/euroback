@@ -220,10 +220,12 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			       SELECT email, 'allowlist' AS source
 			         FROM public.platform_allowlist
 			        WHERE `+reservedEmailFilterSQL+`
+			          AND `+broadcastAllowlistConsentSQL+`
 			       UNION ALL
 			       SELECT email, 'user' AS source
 			         FROM public.platform_users
 			        WHERE `+reservedEmailFilterSQL+`
+			          AND `+broadcastUserConsentSQL+`
 			   ) s
 			   WHERE lower(trim(email)) = ANY($1::text[])
 			   GROUP BY lower(trim(email))`,
@@ -277,7 +279,7 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			// Widened message: could be allowlist OR user; a "not on
 			// allowlist" refusal would mislead an operator whose
 			// intent was to reach a signed-up user only.
-			http.Error(w, `{"error":"no valid recipients — every address must be on the allowlist or have a platform_users account"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"no valid recipients — every address must be on the allowlist or have a platform_users account, with a verified address and no opt-out from product updates"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -312,6 +314,7 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			svc.Log(r.Context(), "", actorID, actorEmail, audit.ActionBroadcastEmailed,
 				audit.WithMetadata(map[string]any{
 					"recipient_count":      len(final),
+					"skipped_count":        len(recipients) - len(final),
 					"allowlist_only_count": allowlistOnly,
 					"users_only_count":     usersOnly,
 					"both_count":           both,
@@ -329,6 +332,8 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			"failed": result.Failed,
 			"errors": result.Errors,
 			"bcc":    len(final) > 1,
+			// Left out: bounced, reserved, unverified or opted out.
+			"skipped": len(recipients) - len(final),
 		})
 	}
 }

@@ -44,6 +44,29 @@ const reservedEmailFilterSQL = `lower(email) NOT LIKE '%.invalid'
 	AND lower(trim(email)) !~ '@(.+\.)?example\.(com|net|org)$'
 	AND lower(trim(email)) NOT IN (SELECT s.email FROM public.email_suppressions s)`
 
+// Consent for product-update mail. An account gets a broadcast only with
+// a verified address and without an opt-out of product updates
+// (beta_updates) or of all platform mail. An invite-list address gets it
+// when it has no account, or when its account would.
+
+// accountMailableSQL is true for the platform_users row aliased by alias.
+func accountMailableSQL(alias string) string {
+	return alias + `.email_confirmed_at IS NOT NULL
+	AND NOT EXISTS (SELECT 1 FROM public.mailing_preferences mp
+	                 WHERE mp.user_id = ` + alias + `.id
+	                   AND mp.category IN ('beta_updates', 'all')
+	                   AND mp.opted_out_at IS NOT NULL)`
+}
+
+// broadcastUserConsentSQL filters FROM public.platform_users (unaliased).
+var broadcastUserConsentSQL = accountMailableSQL("platform_users")
+
+// broadcastAllowlistConsentSQL filters FROM public.platform_allowlist
+// (unaliased): no account under that address fails the rules above.
+var broadcastAllowlistConsentSQL = `NOT EXISTS (SELECT 1 FROM public.platform_users pu
+	 WHERE lower(trim(pu.email)) = lower(trim(platform_allowlist.email))
+	   AND NOT (` + accountMailableSQL("pu") + `))`
+
 // BroadcastRecipient is one row on GET /platform/admin/broadcast/audience.
 // The endpoint returns the deduped union of platform_allowlist.email and
 // platform_users.email; each entry annotates its provenance so the
@@ -111,11 +134,13 @@ func AdminListBroadcastAudience(pool *pgxpool.Pool) http.HandlerFunc {
 			    SELECT DISTINCT lower(trim(email)) AS a_email
 			      FROM public.platform_allowlist
 			     WHERE ` + reservedEmailFilterSQL + `
+			       AND ` + broadcastAllowlistConsentSQL + `
 			) a
 			FULL OUTER JOIN (
 			    SELECT lower(trim(email)) AS u_email, max(created_at) AS u_signed_up_at
 			      FROM public.platform_users
 			     WHERE ` + reservedEmailFilterSQL + `
+			       AND ` + broadcastUserConsentSQL + `
 			     GROUP BY lower(trim(email))
 			) u ON a.a_email = u.u_email
 			WHERE COALESCE(u_email, a_email) IS NOT NULL

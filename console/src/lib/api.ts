@@ -251,6 +251,9 @@ export interface SignupUserEntry {
 	project_count: number;
 	team_beta_access: boolean;
 	legal_team_beta_access: boolean;
+	/** Product updates reach this address: verified, not opted out,
+	 *  not bounced, not a reserved domain. */
+	mailable: boolean;
 }
 
 // ContactRequestEntry — one row on the admin "Contact Requests"
@@ -2667,6 +2670,8 @@ export class EurobaseAPI {
 		failed: number;
 		errors?: { recipients: string[]; error: string }[];
 		bcc: boolean;
+		/** Left out: bounced, reserved, unverified or opted out. */
+		skipped?: number;
 	}> {
 		return this.fetch('/platform/admin/allowlist/email', {
 			method: 'POST',

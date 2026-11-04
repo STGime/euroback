@@ -400,9 +400,12 @@
 	// visible rows, not the whole dataset — matches the allowlist
 	// pattern above). Signup-row selection uses email as the key so
 	// it dedupes across a re-fetch.
+	// Only rows that product updates reach can be selected (verified,
+	// not opted out, not bounced); the server applies the same rules.
+	let signupMailable = $derived(signupFiltered.filter((u) => u.mailable));
 	let allSignupsSelected = $derived(
-		signupFiltered.length > 0 &&
-			signupFiltered.every((u) => selectedSignups.has(u.email))
+		signupMailable.length > 0 &&
+			signupMailable.every((u) => selectedSignups.has(u.email))
 	);
 	let someSignupsSelected = $derived(
 		selectedSignups.size > 0 && !allSignupsSelected
@@ -413,11 +416,11 @@
 			// Clear only the currently-visible-and-selected rows so
 			// selections made under a different filter are preserved.
 			const next = new Set(selectedSignups);
-			for (const u of signupFiltered) next.delete(u.email);
+			for (const u of signupMailable) next.delete(u.email);
 			selectedSignups = next;
 		} else {
 			const next = new Set(selectedSignups);
-			for (const u of signupFiltered) next.add(u.email);
+			for (const u of signupMailable) next.add(u.email);
 			selectedSignups = next;
 		}
 	}
@@ -538,7 +541,7 @@
 					selectedSignups = new Set(composeFailures.flatMap((e) => e.recipients));
 				}
 			} else {
-				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.`;
+				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.${res.skipped ? ` ${res.skipped} left out (unverified, unsubscribed or bounced).` : ''}`;
 				if (composeMode === 'selected') {
 					selected = new Set();
 				} else if (composeMode === 'signup-selected') {
@@ -865,12 +868,19 @@
 									<input
 										type="checkbox"
 										checked={selectedSignups.has(u.email)}
+										disabled={!u.mailable}
+										title={u.mailable ? undefined : 'No product updates: unverified, unsubscribed or bounced'}
 										onchange={() => toggleOneSignup(u.email)}
 										aria-label={`Select ${u.email}`}
 										class="h-4 w-4 rounded border-gray-300 text-eurobase-600 focus:ring-eurobase-500"
 									/>
 								</td>
-								<td class="px-4 py-2 font-medium text-gray-900">{u.email}</td>
+								<td class="px-4 py-2 font-medium text-gray-900">
+									{u.email}
+									{#if !u.mailable}
+										<span class="ml-1 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-normal text-gray-500" title="Unverified, unsubscribed from product updates, or bounced">no mail</span>
+									{/if}
+								</td>
 								<td class="px-4 py-2 text-gray-600">{u.display_name ?? '—'}</td>
 								<td class="px-4 py-2 text-gray-500">
 									{new Date(u.signup_date).toLocaleDateString('en-GB')}
