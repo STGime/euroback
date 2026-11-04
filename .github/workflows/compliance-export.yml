@@ -29,6 +29,7 @@ on:
       - internal/workers/email_bounces*.go
       - internal/tenant/broadcast_admin_handlers*.go
       - internal/tenant/admin_handlers.go
+      - internal/tenant/signup_users_admin_handlers.go
       - internal/tenant/members*.go
       - internal/mailaddr/**
       - internal/workers/drip.go

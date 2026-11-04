@@ -41,6 +41,9 @@ type SignupUserEntry struct {
 	ProjectCount        int        `json:"project_count"`
 	TeamBetaAccess      bool       `json:"team_beta_access"`
 	LegalTeamBetaAccess bool       `json:"legal_team_beta_access"`
+	// Mailable: product updates reach this address — verified, not
+	// opted out, not bounced, not a reserved domain (the send rules).
+	Mailable bool `json:"mailable"`
 }
 
 // AdminListSignupUsers returns every platform_users row + derived
@@ -58,7 +61,7 @@ type SignupUserEntry struct {
 //     hit the ceiling so we know when to add pagination.
 func AdminListSignupUsers(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		const q = `
+		q := `
 			SELECT
 			    u.id,
 			    u.email,
@@ -81,7 +84,11 @@ func AdminListSignupUsers(pool *pgxpool.Pool) http.HandlerFunc {
 			    COALESCE(
 			        SUM(CASE WHEN s.status = 'active' THEN s.price_cents ELSE 0 END),
 			        0
-			    ) AS mrr_cents
+			    ) AS mrr_cents,
+			    EXISTS (SELECT 1 FROM public.platform_users
+			             WHERE platform_users.id = u.id
+			               AND ` + reservedEmailFilterSQL + `
+			               AND ` + broadcastUserConsentSQL + `) AS mailable
 			FROM public.platform_users u
 			LEFT JOIN public.projects p       ON p.owner_id = u.id
 			LEFT JOIN public.subscriptions s  ON s.project_id = p.id
@@ -107,7 +114,7 @@ func AdminListSignupUsers(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := rows.Scan(
 				&e.UserID, &e.Email, &e.DisplayName, &e.SignupDate, &e.LastActiveAt,
 				&e.TeamBetaAccess, &e.LegalTeamBetaAccess,
-				&e.ProjectCount, &e.Plan, &pending, &e.MRRCents,
+				&e.ProjectCount, &e.Plan, &pending, &e.MRRCents, &e.Mailable,
 			); err != nil {
 				slog.Error("AdminListSignupUsers: scan failed", "error", err)
 				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)

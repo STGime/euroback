@@ -539,3 +539,141 @@ func TestAdminSendAllowlistEmail_RejectsIfNoValidRecipients(t *testing.T) {
 		t.Errorf("mailer was called for %d recipients; expected 0 (no valid targets)", len(mailer.seen))
 	}
 }
+
+// Product updates go only to verified accounts that haven't opted out of
+// product updates (beta_updates) or all platform mail; an invite-list
+// address follows its account's rules when it has one. Covers the send,
+// the audience preview and the Signup Users "mailable" flag.
+func TestAdminSendAllowlistEmail_ExcludesUnverifiedAndOptedOut(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_allowlist WHERE email LIKE '%@consent.test.eurobase.local'`)
+		_, _ = pool.Exec(ctx, `DELETE FROM platform_users WHERE email LIKE '%@consent.test.eurobase.local'`)
+	}
+	cleanup()
+	defer cleanup()
+
+	const d = "@consent.test.eurobase.local"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO platform_users (email, password_hash, email_confirmed_at) VALUES
+		    ('ok'||$1, 'x', now()),
+		    ('unverified'||$1, 'x', NULL),
+		    ('optout-updates'||$1, 'x', now()),
+		    ('optout-all'||$1, 'x', now()),
+		    ('resubscribed'||$1, 'x', now()),
+		    ('optout-onboarding'||$1, 'x', now()),
+		    ('invited-unverified'||$1, 'x', NULL),
+		    ('invited-ok'||$1, 'x', now()),
+		    ('padded-optout'||$1, 'x', now())`, d); err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO mailing_preferences (user_id, category, opted_out_at)
+		SELECT id, c, o FROM (VALUES
+		    ('optout-updates'||$1, 'beta_updates', now()),
+		    ('optout-all'||$1, 'all', now()),
+		    ('resubscribed'||$1, 'beta_updates', NULL::timestamptz),
+		    ('optout-onboarding'||$1, 'onboarding', now()),
+		    ('padded-optout'||$1, 'all', now())
+		) v(e, c, o) JOIN platform_users u ON u.email = v.e`, d); err != nil {
+		t.Fatalf("seed preferences: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO platform_allowlist (email, note) VALUES
+		    ('invited-only'||$1, 'no account'),
+		    ('invited-unverified'||$1, 'account never verified'),
+		    ('OPTOUT-ALL'||$1, 'account opted out, other case'),
+		    ('invited-ok'||$1, 'account verified, opted in'),
+		    ('  Padded-Optout'||$1||'  ', 'account opted out, padded')
+		ON CONFLICT (email) DO NOTHING`, d); err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+
+	want := map[string]bool{
+		"ok" + d: true, "resubscribed" + d: true, "optout-onboarding" + d: true, "invited-only" + d: true,
+		"invited-ok" + d: true,
+	}
+	banned := []string{"unverified" + d, "optout-updates" + d, "optout-all" + d, "invited-unverified" + d, "padded-optout" + d}
+
+	// Send.
+	all := []string{}
+	for e := range want {
+		all = append(all, e)
+	}
+	all = append(all, banned...)
+	payload, _ := json.Marshal(map[string]any{"emails": all, "subject": "s", "body_html": "<p>x</p>"})
+	mailer := &stubBulkEmailer{}
+	rec := httptest.NewRecorder()
+	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/platform/admin/allowlist/email", strings.NewReader(string(payload))))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
+	}
+	sent := map[string]bool{}
+	for _, e := range mailer.seen {
+		sent[e] = true
+	}
+	for e := range want {
+		if !sent[e] {
+			t.Errorf("send: %q missing (sent %v)", e, mailer.seen)
+		}
+	}
+	for _, e := range banned {
+		if sent[e] {
+			t.Errorf("send: %q must be left out", e)
+		}
+	}
+	var res struct {
+		Skipped int `json:"skipped"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Skipped != len(banned) {
+		t.Errorf("skipped: got %d, want %d", res.Skipped, len(banned))
+	}
+
+	// Audience preview.
+	rec = httptest.NewRecorder()
+	AdminListBroadcastAudience(pool).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/platform/admin/broadcast/audience", nil))
+	var aud struct {
+		Recipients []BroadcastRecipient `json:"recipients"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &aud); err != nil {
+		t.Fatalf("audience: %v", err)
+	}
+	inAud := map[string]bool{}
+	for _, r := range aud.Recipients {
+		inAud[r.Email] = true
+	}
+	for e := range want {
+		if !inAud[e] {
+			t.Errorf("audience: %q missing", e)
+		}
+	}
+	for _, e := range banned {
+		if inAud[e] {
+			t.Errorf("audience: %q must be left out", e)
+		}
+	}
+
+	// Signup Users: mailable flag.
+	rec = httptest.NewRecorder()
+	AdminListSignupUsers(pool).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/platform/admin/signup-users", nil))
+	var su struct {
+		Users []SignupUserEntry `json:"users"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &su); err != nil {
+		t.Fatalf("signup users: %v (%s)", err, rec.Body.String())
+	}
+	flags := map[string]bool{}
+	for _, u := range su.Users {
+		flags[u.Email] = u.Mailable
+	}
+	for e, ok := range map[string]bool{
+		"ok" + d: true, "resubscribed" + d: true, "optout-onboarding" + d: true,
+		"unverified" + d: false, "optout-updates" + d: false, "optout-all" + d: false, "invited-unverified" + d: false,
+	} {
+		if got, present := flags[e]; !present || got != ok {
+			t.Errorf("signup users: %q mailable=%v (present %v), want %v", e, got, present, ok)
+		}
+	}
+}
