@@ -153,3 +153,61 @@ func TestParseMollieDate(t *testing.T) {
 		})
 	}
 }
+
+// Mollie sometimes leaves nextPaymentDate out of a new subscription;
+// the first charge is then its startDate (we always send one).
+func TestFirstChargeDate(t *testing.T) {
+	day := func(s string) string {
+		got := firstChargeDate(&mollie.Subscription{NextPaymentDate: "", StartDate: s})
+		if got == nil {
+			return ""
+		}
+		return got.Format("2006-01-02")
+	}
+	if got := firstChargeDate(&mollie.Subscription{NextPaymentDate: "2026-12-01", StartDate: "2026-11-19"}); got == nil || got.Format("2006-01-02") != "2026-12-01" {
+		t.Fatalf("nextPaymentDate must win, got %v", got)
+	}
+	if got := day("2026-11-19"); got != "2026-11-19" {
+		t.Fatalf("startDate fallback: got %q", got)
+	}
+	if got := day(""); got != "" {
+		t.Fatalf("no dates: got %q", got)
+	}
+	if firstChargeDate(nil) != nil {
+		t.Fatal("nil subscription")
+	}
+	if got := firstChargeDate(&mollie.Subscription{NextPaymentDate: "garbage", StartDate: "2026-11-19"}); got == nil || got.Format("2006-01-02") != "2026-11-19" {
+		t.Fatalf("malformed nextPaymentDate: got %v", got)
+	}
+}
+
+// After a monthly charge, a missing nextPaymentDate must not leave the
+// charged (past) date in place: an end-of-period cancel would downgrade
+// a month early.
+func TestRenewalNextCharge(t *testing.T) {
+	d := func(s string) *time.Time { v, _ := time.Parse("2006-01-02", s); return &v }
+	str := func(v *time.Time) string {
+		if v == nil {
+			return ""
+		}
+		return v.Format("2006-01-02")
+	}
+	now := *d("2026-11-19")
+	for _, tt := range []struct {
+		name string
+		sub  *mollie.Subscription
+		prev *time.Time
+		want string
+	}{
+		{"mollie date wins", &mollie.Subscription{NextPaymentDate: "2026-12-19"}, d("2026-11-19"), "2026-12-19"},
+		{"missing: prev + 1 month", &mollie.Subscription{}, d("2026-11-19"), "2026-12-19"},
+		{"lookup failed: prev + 1 month", nil, d("2026-11-19"), "2026-12-19"},
+		{"month end clamps", nil, d("2026-01-31"), "2026-02-28"},
+		{"prev still ahead: kept", nil, d("2026-12-01"), "2026-12-01"},
+		{"no prev: unchanged", nil, nil, ""},
+	} {
+		if got := str(renewalNextCharge(tt.sub, tt.prev, now, "sub")); got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}

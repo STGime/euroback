@@ -272,8 +272,9 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	}
 
 	// Flip state atomically. next_charge_at from Mollie's
-	// nextPaymentDate string (YYYY-MM-DD) — parse defensively.
-	nextChargeAt := parseMollieDate(mollieSub.NextPaymentDate)
+	// nextPaymentDate (YYYY-MM-DD), or the startDate we sent when
+	// Mollie leaves it out — parse defensively.
+	nextChargeAt := firstChargeDate(mollieSub)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -569,7 +570,7 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 		// subscription creation.
 	} else {
 		mollieSubID = mollieSub.ID
-		nextChargeAt = parseMollieDate(mollieSub.NextPaymentDate)
+		nextChargeAt = firstChargeDate(mollieSub)
 	}
 
 	// Commit the follow-up state in one tx: subscription row,
@@ -675,12 +676,13 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	// Look up our subscription row via Mollie's ID.
 	var subscriptionID, projectID string
 	var priceCents int
+	var prevNextCharge *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, project_id, price_cents
+		`SELECT id, project_id, price_cents, next_charge_at
 		   FROM public.subscriptions
 		  WHERE mollie_subscription_id = $1`,
 		payment.SubscriptionID,
-	).Scan(&subscriptionID, &projectID, &priceCents)
+	).Scan(&subscriptionID, &projectID, &priceCents, &prevNextCharge)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("no local subscription for mollie sub %s", payment.SubscriptionID)
 	}
@@ -729,15 +731,7 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 		        past_due_since = NULL,
 		        next_charge_at = COALESCE($1, next_charge_at)
 		  WHERE id = $2 AND status IN ('active', 'past_due')`,
-		func() *time.Time {
-			if mollieSub != nil {
-				t := parseMollieDate(mollieSub.NextPaymentDate)
-				if t != nil {
-					return t
-				}
-			}
-			return nil
-		}(),
+		renewalNextCharge(mollieSub, prevNextCharge, time.Now(), subscriptionID),
 		subscriptionID,
 	); err != nil {
 		return fmt.Errorf("clear past_due: %w", err)
@@ -971,6 +965,56 @@ func (s *Service) markInvoicePaid(ctx context.Context, payment *mollie.Payment) 
 		return fmt.Errorf("mark invoice paid: %w", err)
 	}
 	return nil
+}
+
+// firstChargeDate is the next charge of a subscription just created:
+// Mollie's nextPaymentDate, or its startDate when Mollie leaves
+// nextPaymentDate out (seen in production). Cancel at end of period
+// and the downgrade sweeper need this date.
+func firstChargeDate(sub *mollie.Subscription) *time.Time {
+	if sub == nil {
+		return nil
+	}
+	if t := parseMollieDate(sub.NextPaymentDate); t != nil {
+		return t
+	}
+	slog.Warn("billing.mollie.next_payment_date_missing",
+		"mollie_subscription_id", sub.ID, "mollie_status", sub.Status,
+		"start_date", sub.StartDate, "fallback", "start_date")
+	return parseMollieDate(sub.StartDate)
+}
+
+// renewalNextCharge is next_charge_at after a monthly charge was paid:
+// Mollie's nextPaymentDate, else the previous date plus one month when
+// that date has been reached (keeping the charged date would make an
+// end-of-period cancel downgrade a month early), else the previous date.
+// nil leaves the column unchanged.
+func renewalNextCharge(sub *mollie.Subscription, prev *time.Time, now time.Time, subscriptionID string) *time.Time {
+	if sub != nil {
+		if t := parseMollieDate(sub.NextPaymentDate); t != nil {
+			return t
+		}
+	}
+	if prev == nil || prev.After(now) {
+		return prev
+	}
+	next := addMonthClamped(*prev)
+	slog.Warn("billing.mollie.next_payment_date_missing",
+		"subscription_id", subscriptionID, "fallback", "previous_plus_one_month",
+		"next_charge_at", next.Format("2006-01-02"))
+	return &next
+}
+
+// addMonthClamped adds one calendar month, clamped to the last day of
+// that month (Jan 31 → Feb 28), like mollie.DefaultRecurringStartDate.
+func addMonthClamped(t time.Time) time.Time {
+	first := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
+	lastOfNext := first.AddDate(0, 2, -1).Day()
+	day := t.Day()
+	if day > lastOfNext {
+		day = lastOfNext
+	}
+	return time.Date(t.Year(), t.Month()+1, day, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
 }
 
 // parseMollieDate parses "YYYY-MM-DD" as returned by Mollie's
