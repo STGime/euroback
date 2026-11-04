@@ -176,4 +176,38 @@ func TestFirstChargeDate(t *testing.T) {
 	if firstChargeDate(nil) != nil {
 		t.Fatal("nil subscription")
 	}
+	if got := firstChargeDate(&mollie.Subscription{NextPaymentDate: "garbage", StartDate: "2026-11-19"}); got == nil || got.Format("2006-01-02") != "2026-11-19" {
+		t.Fatalf("malformed nextPaymentDate: got %v", got)
+	}
+}
+
+// After a monthly charge, a missing nextPaymentDate must not leave the
+// charged (past) date in place: an end-of-period cancel would downgrade
+// a month early.
+func TestRenewalNextCharge(t *testing.T) {
+	d := func(s string) *time.Time { v, _ := time.Parse("2006-01-02", s); return &v }
+	str := func(v *time.Time) string {
+		if v == nil {
+			return ""
+		}
+		return v.Format("2006-01-02")
+	}
+	now := *d("2026-11-19")
+	for _, tt := range []struct {
+		name string
+		sub  *mollie.Subscription
+		prev *time.Time
+		want string
+	}{
+		{"mollie date wins", &mollie.Subscription{NextPaymentDate: "2026-12-19"}, d("2026-11-19"), "2026-12-19"},
+		{"missing: prev + 1 month", &mollie.Subscription{}, d("2026-11-19"), "2026-12-19"},
+		{"lookup failed: prev + 1 month", nil, d("2026-11-19"), "2026-12-19"},
+		{"month end clamps", nil, d("2026-01-31"), "2026-02-28"},
+		{"prev still ahead: kept", nil, d("2026-12-01"), "2026-12-01"},
+		{"no prev: unchanged", nil, nil, ""},
+	} {
+		if got := str(renewalNextCharge(tt.sub, tt.prev, now, "sub")); got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
 }
