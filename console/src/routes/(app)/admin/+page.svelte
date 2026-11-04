@@ -1246,7 +1246,7 @@
 						placeholder="<p>Hi,</p><p>…</p>"
 						class="w-full rounded-md border border-gray-300 px-3 py-2 text-xs font-mono"
 					></textarea>
-					<p class="mt-1 text-xs text-gray-400">Paste or write HTML. Plain text is fine too — just use &lt;p&gt; tags for line breaks.</p>
+					<p class="mt-1 text-xs text-gray-400">Paste or write HTML. Plain text is fine too — just use &lt;p&gt; tags for line breaks. A line on how to turn off product updates is added at the bottom automatically.</p>
 				</div>
 
 				<details class="rounded-md border border-gray-200 bg-gray-50">

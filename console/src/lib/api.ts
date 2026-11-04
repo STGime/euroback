@@ -2871,7 +2871,9 @@ export class EurobaseAPI {
  * same-origin paths. */
 export function loginURLReturningHere(): string {
 	if (typeof window === 'undefined') return '/login';
-	const back = window.location.pathname + window.location.search;
+	// Keep the hash too (e.g. /account#mail from an email), so sign-in
+	// lands on the same section; the login page allows same-site paths only.
+	const back = window.location.pathname + window.location.search + window.location.hash;
 	return back === '/' ? '/login' : '/login?redirect=' + encodeURIComponent(back);
 }
 
