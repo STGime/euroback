@@ -183,7 +183,7 @@
 		/>
 	{/if}
 
-	<div class="rounded-md border border-gray-200 bg-white overflow-hidden">
+	<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
 		<table class="w-full text-sm">
 			<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 				<tr>

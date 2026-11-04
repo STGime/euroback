@@ -504,7 +504,7 @@ module.exports = async (req, ctx) => {
 		</div>
 		<button
 			onclick={() => { showCreate = true; }}
-			class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
+			class="cursor-pointer shrink-0 whitespace-nowrap rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
 		>+ New Function</button>
 	</div>
 
@@ -569,9 +569,9 @@ module.exports = async (req, ctx) => {
 			Loading functions...
 		</div>
 	{:else}
-		<div class="grid grid-cols-12 gap-6">
+		<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
 			<!-- Function list sidebar -->
-			<div class="col-span-3 space-y-2">
+			<div class="lg:col-span-3 space-y-2">
 				{#if functions.length === 0}
 					<div class="rounded-lg border border-dashed border-gray-300 p-8 text-center">
 						<p class="text-sm text-gray-500">No edge functions yet</p>
@@ -602,7 +602,7 @@ module.exports = async (req, ctx) => {
 			</div>
 
 			<!-- Editor panel -->
-			<div class="col-span-6 min-w-0">
+			<div class="lg:col-span-6 min-w-0">
 				{#if selectedFn}
 					<div class="rounded-lg border border-gray-200 bg-white">
 						<!-- Header -->
@@ -825,7 +825,7 @@ module.exports = async (req, ctx) => {
 								{#if loadingMetrics}
 									<div class="px-4 py-6 text-center text-xs text-gray-500">Loading metrics...</div>
 								{:else if metrics}
-									<div class="grid grid-cols-4 gap-4 px-4 py-4">
+									<div class="grid grid-cols-2 sm:grid-cols-4 gap-4 px-4 py-4">
 										<div class="text-center">
 											<p class="text-2xl font-semibold text-gray-900">{metrics.total_invocations}</p>
 											<p class="text-[11px] text-gray-500">Invocations</p>
@@ -1046,7 +1046,7 @@ module.exports = async (req, ctx) => {
 			</div>
 
 			<!-- Schema browser sidebar -->
-			<div class="col-span-3">
+			<div class="hidden lg:block lg:col-span-3">
 				<div class="rounded-lg border border-gray-200 bg-white overflow-hidden">
 					<div class="border-b border-gray-200 px-4 py-3">
 						<h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500">Tables</h3>

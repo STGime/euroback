@@ -15,3 +15,11 @@
 	--color-eurobase-950: #172554;
 	--font-sans: 'Inter', system-ui, -apple-system, sans-serif;
 }
+
+/* Sideways-scrolling tab bars on narrow screens: scroll by swipe, no scrollbar. */
+.tab-strip {
+	scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar {
+	display: none;
+}

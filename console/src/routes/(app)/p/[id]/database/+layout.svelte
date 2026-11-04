@@ -31,10 +31,10 @@
 	});
 </script>
 
-<div class="mb-4 flex gap-1 border-b border-gray-200">
+<div class="tab-strip mb-4 flex gap-1 overflow-x-auto border-b border-gray-200">
 	<a
 		href="/p/{projectId}/database"
-		class="relative px-4 py-2 text-sm font-medium transition-colors
+		class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium transition-colors
 			{activeTab === 'tables' ? 'text-eurobase-700' : 'text-gray-500 hover:text-gray-700'}"
 	>
 		Table Editor
@@ -44,7 +44,7 @@
 	</a>
 	<a
 		href="/p/{projectId}/database/sql"
-		class="relative px-4 py-2 text-sm font-medium transition-colors
+		class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium transition-colors
 			{activeTab === 'sql' ? 'text-eurobase-700' : 'text-gray-500 hover:text-gray-700'}"
 	>
 		SQL Editor
@@ -54,7 +54,7 @@
 	</a>
 	<a
 		href="/p/{projectId}/database/schema"
-		class="relative px-4 py-2 text-sm font-medium transition-colors
+		class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium transition-colors
 			{activeTab === 'schema' ? 'text-eurobase-700' : 'text-gray-500 hover:text-gray-700'}"
 	>
 		Schema Diagram
@@ -64,7 +64,7 @@
 	</a>
 	<a
 		href="/p/{projectId}/database/history"
-		class="relative px-4 py-2 text-sm font-medium transition-colors
+		class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium transition-colors
 			{activeTab === 'history' ? 'text-eurobase-700' : 'text-gray-500 hover:text-gray-700'}"
 	>
 		Migration History
@@ -75,7 +75,7 @@
 	{#if showTeamTabs}
 		<a
 			href="/p/{projectId}/database/backups"
-			class="relative px-4 py-2 text-sm font-medium transition-colors
+			class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium transition-colors
 				{activeTab === 'backups' ? 'text-eurobase-700' : 'text-gray-500 hover:text-gray-700'}"
 		>
 			Backups
@@ -85,7 +85,7 @@
 		</a>
 		<a
 			href="/p/{projectId}/database/connection"
-			class="relative px-4 py-2 text-sm font-medium transition-colors
+			class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium transition-colors
 				{activeTab === 'connection' ? 'text-eurobase-700' : 'text-gray-500 hover:text-gray-700'}"
 		>
 			Connection

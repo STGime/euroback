@@ -1135,6 +1135,7 @@
 			{:else if exports.length === 0}
 				<div class="px-4 py-6 text-center text-sm text-gray-500">No exports yet.</div>
 			{:else}
+				<div class="overflow-x-auto">
 				<table class="min-w-full divide-y divide-gray-200">
 					<thead class="bg-gray-50">
 						<tr>
@@ -1200,6 +1201,7 @@
 						{/each}
 					</tbody>
 				</table>
+				</div>
 			{/if}
 		</div>
 	</div>
@@ -1283,7 +1285,7 @@
 						<code class="mx-1 rounded bg-white border border-gray-200 px-1.5 py-0.5 font-mono text-[11px]">mandant/</code> 6y §50 BRAO.
 					</div>
 				{:else}
-					<div class="overflow-hidden rounded-lg border border-gray-200">
+					<div class="overflow-x-auto rounded-lg border border-gray-200">
 						<table class="min-w-full divide-y divide-gray-200">
 							<thead class="bg-gray-50">
 								<tr>
@@ -1332,7 +1334,7 @@
 						No active retention holds.
 					</div>
 				{:else}
-					<div class="overflow-hidden rounded-lg border border-gray-200">
+					<div class="overflow-x-auto rounded-lg border border-gray-200">
 						<table class="min-w-full divide-y divide-gray-200">
 							<thead class="bg-gray-50">
 								<tr>
@@ -1386,7 +1388,7 @@
 						No SIEM destinations configured. <span class="font-mono text-[11px]">webhook</span> (HTTPS POST) or <span class="font-mono text-[11px]">syslog</span> (RFC 5424 over TLS) — pick a sink you already run.
 					</div>
 				{:else}
-					<div class="overflow-hidden rounded-lg border border-gray-200">
+					<div class="overflow-x-auto rounded-lg border border-gray-200">
 						<table class="min-w-full divide-y divide-gray-200">
 							<thead class="bg-gray-50">
 								<tr>
