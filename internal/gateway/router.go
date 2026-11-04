@@ -1050,6 +1050,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// developer pool), which also answers the projects /
 			// schema_changes lookups on the platform DB.
 			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema", query.HandleSchemaIntrospection(catalogPool))
+			// Views, sequences and types (#874); view definitions for developer+.
+			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/objects", query.HandleSchemaObjects(catalogPool))
 			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/changes", query.HandleSchemaChanges(catalogPool))
 			r.With(tenant.RequireMinRole("viewer"), tenant.PlatformTenantContext(pool, developerPool, tenantPoolResolver)).Get("/schema/rls-audit", query.HandleRLSAudit(catalogPool))
 			// DDL on tenant schemas.

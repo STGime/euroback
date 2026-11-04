@@ -20,6 +20,7 @@ func DbCmd() *cobra.Command {
 	}
 	cmd.AddCommand(dbTablesCmd())
 	cmd.AddCommand(dbSchemaCmd())
+	cmd.AddCommand(dbObjectsCmd())
 	cmd.AddCommand(dbQueryCmd())
 	cmd.AddCommand(dbDumpCmd())
 	cmd.AddCommand(dbCreateTableCmd())
@@ -92,6 +93,96 @@ func dbTablesCmd() *cobra.Command {
 				})
 			}
 			PrintTable(headers, rows)
+			return nil
+		},
+	}
+}
+
+// dbObjectsCmd lists views, sequences and types (#874) — what `db tables`
+// and `db schema` don't show.
+func dbObjectsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "objects",
+		Short: "List views, sequences and types",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+			data, err := client.Get("/platform/projects/" + cfg.ActiveProject + "/schema/objects")
+			if err != nil {
+				return err
+			}
+			// --json prints the server's answer as is, so new fields show up.
+			if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+				PrintJSON(json.RawMessage(data))
+				return nil
+			}
+			var objs struct {
+				Views []struct {
+					Name            string `json:"name"`
+					Materialized    bool   `json:"materialized"`
+					SecurityInvoker bool   `json:"security_invoker"`
+					Definition      string `json:"definition,omitempty"`
+				} `json:"views"`
+				Sequences []struct {
+					Name     string `json:"name"`
+					DataType string `json:"data_type"`
+					OwnedBy  string `json:"owned_by,omitempty"`
+				} `json:"sequences"`
+				Types []struct {
+					Name       string   `json:"name"`
+					Kind       string   `json:"kind"`
+					Labels     []string `json:"labels,omitempty"`
+					BaseType   string   `json:"base_type,omitempty"`
+					Multirange string   `json:"multirange,omitempty"`
+				} `json:"types"`
+			}
+			if err := json.Unmarshal(data, &objs); err != nil {
+				return fmt.Errorf("parsing response: %w", err)
+			}
+
+			var rows [][]string
+			for _, v := range objs.Views {
+				kind, detail := "view", "security_invoker off"
+				if v.Materialized {
+					kind, detail = "materialized view", ""
+				} else if v.SecurityInvoker {
+					detail = "security_invoker on"
+				}
+				rows = append(rows, []string{kind, v.Name, detail})
+			}
+			for _, s := range objs.Sequences {
+				detail := s.DataType
+				if s.OwnedBy != "" {
+					detail += ", owned by " + s.OwnedBy
+				}
+				rows = append(rows, []string{"sequence", s.Name, detail})
+			}
+			for _, t := range objs.Types {
+				detail := t.BaseType
+				switch {
+				case t.Kind == "enum":
+					detail = strings.Join(t.Labels, ", ")
+				case t.Kind == "shell":
+					detail = "declared, not yet defined"
+				case t.Multirange != "":
+					detail += ", multirange " + t.Multirange
+				}
+				rows = append(rows, []string{t.Kind, t.Name, detail})
+			}
+			if len(rows) == 0 {
+				fmt.Println("No views, sequences or types.")
+				return nil
+			}
+			PrintTable([]string{"Kind", "Name", "Details"}, rows)
 			return nil
 		},
 	}

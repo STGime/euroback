@@ -90,6 +90,7 @@
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Database</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db tables</td><td class="px-3 py-1 text-gray-500">List tables (excludes system tables)</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db schema [table]</td><td class="px-3 py-1 text-gray-500">Show columns and types</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">db objects</td><td class="px-3 py-1 text-gray-500">List views, sequences and types</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db query "SQL"</td><td class="px-3 py-1 text-gray-500">Execute SQL and print results</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db create-table &lt;name&gt; &lt;col:type&gt;...</td><td class="px-3 py-1 text-gray-500">Create a table with RLS preset</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">db add-column &lt;table&gt; &lt;col:type&gt;</td><td class="px-3 py-1 text-gray-500">Add a column</td></tr>

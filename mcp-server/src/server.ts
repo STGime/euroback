@@ -77,6 +77,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   describeTable: { title: 'Describe table', readOnlyHint: true, openWorldHint: false },
   listDbFunctions: { title: 'List database functions', readOnlyHint: true, openWorldHint: false },
   getDbFunction: { title: 'Get database function', readOnlyHint: true, openWorldHint: false },
+  listSchemaObjects: { title: 'List views, sequences and types', readOnlyHint: true, openWorldHint: false },
   queryTable: { title: 'Query table', readOnlyHint: true, openWorldHint: false },
   listFiles: { title: 'List files', readOnlyHint: true, openWorldHint: false },
   downloadFile: { title: 'Read file', readOnlyHint: true, openWorldHint: false },

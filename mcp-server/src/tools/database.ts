@@ -46,6 +46,16 @@ export function registerDatabaseTools(server: McpServer, getClient: () => ApiCli
   );
 
   server.tool(
+    'listSchemaObjects',
+    'List a project\'s views (with security_invoker, and their definitions with Developer access), materialized views, sequences (with the column that owns them) and types (enum with its values, composite, domain, range with its multirange, shell types declared but not yet defined). Tables are in listTables / describeTable, functions in listDbFunctions. Useful to check for name conflicts before a migration.',
+    { projectId: z.string().uuid().describe('The project UUID') },
+    async ({ projectId }) => {
+      const data = await getClient().get(`/platform/projects/${projectId}/schema/objects`);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
     'getDbFunction',
     'Get a database function\'s definition: the full CREATE OR REPLACE FUNCTION statement. Works for RPC functions, trigger functions and the platform helpers auth_uid / auth_role / auth_email (marked platform: true; read-only). To change one of your own, edit that statement and run it with runSQL. If several functions share the name, pass args (the arguments from listDbFunctions). Needs Developer access.',
     {

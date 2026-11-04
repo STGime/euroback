@@ -1025,6 +1025,7 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			{"GET", "/data/users", ""},
 			{"GET", "/data/vault_secrets", ""},
 			{"GET", "/schema", ""},
+			{"GET", "/schema/objects", ""},
 			{"POST", "/data/sql", `{"sql":"SELECT 1 AS one"}`},
 			{"POST", "/schema/tables", `{}`},
 			{"GET", "/migrations", ""},
@@ -1254,6 +1255,23 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if !strings.Contains(r.body, "ded_only") {
 			return fmt.Errorf("schema listing lacks the dedicated-only table: %w", r)
+		}
+		return nil
+	})
+
+	// Views, sequences and types (#874): read from the project's own DB;
+	// shared_decoy_kind exists only in the upgraded scenario's stale copy.
+	check(t, env, "console_schema_objects", func() error {
+		r := console("GET", "/schema/objects", "")
+		if r.code != 200 {
+			return r
+		}
+		if !strings.Contains(r.body, `"name":"ded_only_view"`) || !strings.Contains(r.body, `"security_invoker":true`) ||
+			!strings.Contains(r.body, `"labels":["ded_a","ded_b"]`) {
+			return fmt.Errorf("objects listing lacks the dedicated-only view/type: %w", r)
+		}
+		if strings.Contains(r.body, "shared_decoy_kind") {
+			return fmt.Errorf("objects listing read the stale shared copy: %w", r)
 		}
 		return nil
 	})
@@ -2811,6 +2829,7 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 			VALUES ($1, $2, 'team e2e', $3, $4, $5, 'fr-par', 'pro', 'active')`, projectID, ownerUser, slug, schema, "b-"+slug)
 		mustExecT(t, admin, `SELECT provision_tenant($1, 'team e2e', 'pro')`, projectID)
 		mustExecT(t, admin, fmt.Sprintf(`INSERT INTO %s (title) VALUES ($1)`, pgx.Identifier{schema, "todos"}.Sanitize()), decoyTitle)
+		mustExecT(t, admin, fmt.Sprintf(`CREATE TYPE %s AS ENUM ('x')`, pgx.Identifier{schema, "shared_decoy_kind"}.Sanitize()))
 		mustExecT(t, admin, `UPDATE projects SET plan = 'team' WHERE id = $1`, projectID)
 		q := fmt.Sprintf(sharedFingerprintSQL, pgx.Identifier{schema, "todos"}.Sanitize(), pgx.Identifier{schema, "vault_secrets"}.Sanitize(), pgx.Identifier{schema, "storage_objects"}.Sanitize())
 		if err := admin.QueryRow(ctx, q, schema).Scan(&sharedFP); err != nil {
@@ -2865,6 +2884,8 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 			fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
 			fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()),
 			fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()),
+			fmt.Sprintf(`CREATE VIEW %s WITH (security_invoker = true) AS SELECT id FROM %s`, pgx.Identifier{schema, "ded_only_view"}.Sanitize(), pgx.Identifier{schema, "ded_only"}.Sanitize()),
+			fmt.Sprintf(`CREATE TYPE %s AS ENUM ('ded_a', 'ded_b')`, pgx.Identifier{schema, "ded_only_kind"}.Sanitize()),
 		} {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				t.Fatalf("%v\n%s", err, q)
@@ -2904,6 +2925,8 @@ func setupTeamProject(t *testing.T, cfg teamTestConfig, scenario, dedDB string, 
 		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE INDEX ded_only_marker_idx ON %s (id)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
 		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE POLICY ded_only_policy ON %s FOR SELECT USING (true)`, pgx.Identifier{schema, "ded_only"}.Sanitize()))
 		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS 'SELECT 1'`, pgx.Identifier{schema, "ded_only_fn"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE VIEW %s WITH (security_invoker = true) AS SELECT id FROM %s`, pgx.Identifier{schema, "ded_only_view"}.Sanitize(), pgx.Identifier{schema, "ded_only"}.Sanitize()))
+		mustExecT(t, ownerPool, fmt.Sprintf(`CREATE TYPE %s AS ENUM ('ded_a', 'ded_b')`, pgx.Identifier{schema, "ded_only_kind"}.Sanitize()))
 
 		// project_databases row with sealed credentials (owner, runtime, readonly).
 		seal := func(s string) ([]byte, []byte, int16) {
