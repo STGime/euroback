@@ -281,7 +281,7 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			return
 		}
 
-		result, err := mailer.SendBulkBCC(r.Context(), final, req.Subject, req.BodyHTML)
+		result, err := mailer.SendBulkBCC(r.Context(), final, req.Subject, withBroadcastFooter(req.BodyHTML, broadcastConsoleURL()))
 		if err != nil && result.Sent == 0 {
 			// Every chunk failed. Return 502 so the console treats it
 			// as a hard failure to retry.
