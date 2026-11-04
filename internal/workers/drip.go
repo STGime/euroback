@@ -63,23 +63,30 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 		userEmail   string
 		displayName *string
 		projectName *string
+		projectSlug *string
 		confirmed   bool
 		suppressed  bool
 	)
+	// name + slug come from the SAME first project (slug is the subdomain
+	// label: the live URL is <slug>.eurobase.app, not <name>). A LATERAL
+	// join picks one row so the two can't diverge across tie-broken
+	// ORDER BY evaluations.
 	err := w.DBPool.QueryRow(ctx,
-		`SELECT u.email, u.display_name,
-		        (SELECT p.name
-		           FROM projects p
-		           JOIN project_members pm ON pm.project_id = p.id
-		          WHERE pm.user_id = u.id
-		          ORDER BY p.created_at ASC
-		          LIMIT 1) AS first_project,
+		`SELECT u.email, u.display_name, fp.name, fp.slug,
 		        u.email_confirmed_at IS NOT NULL,
 		        EXISTS (SELECT 1 FROM email_suppressions s WHERE s.email = lower(u.email))
-		 FROM platform_users u
-		 WHERE u.id = $1`,
+		   FROM platform_users u
+		   LEFT JOIN LATERAL (
+		        SELECT p.name, p.slug
+		          FROM projects p
+		          JOIN project_members pm ON pm.project_id = p.id
+		         WHERE pm.user_id = u.id
+		         ORDER BY p.created_at ASC
+		         LIMIT 1
+		   ) fp ON true
+		  WHERE u.id = $1`,
 		args.UserID,
-	).Scan(&userEmail, &displayName, &projectName, &confirmed, &suppressed)
+	).Scan(&userEmail, &displayName, &projectName, &projectSlug, &confirmed, &suppressed)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// User deleted between enqueue + fire — nothing to do.
@@ -177,6 +184,7 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 		UserEmail:      userEmail,
 		DisplayName:    stringOrEmpty(displayName),
 		ProjectName:    stringOrEmpty(projectName),
+		ProjectSlug:    stringOrEmpty(projectSlug),
 		UnsubscribeURL: email.BuildUnsubscribeURL(w.Signer, w.BaseURL, args.UserID, "onboarding"),
 		DocsURL:        w.DocsURL,
 		ConsoleURL:     w.ConsoleURL,
