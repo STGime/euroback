@@ -58,6 +58,10 @@ type Project struct {
 	// this org can see the project through the additive access path.
 	OrgID   *string `json:"org_id,omitempty"`
 	OrgName *string `json:"org_name,omitempty"`
+	// OwnerEmail is set in project listings only, and only for projects
+	// the caller doesn't own, so the console can show whose project it
+	// is. The caller can already see it under Settings → Members.
+	OwnerEmail *string `json:"owner_email,omitempty"`
 }
 
 // SecretStore is the minimal interface the tenant package needs to persist
@@ -1051,8 +1055,61 @@ func (s *TenantService) ListProjects(ctx context.Context, claims *auth.Claims) (
 	if s.developerPool != nil {
 		s.enrichOrgNames(ctx, projects)
 	}
+	s.enrichOwnerEmails(ctx, projects, platformUserID)
 
 	return projects, nil
+}
+
+// enrichOwnerEmails sets OwnerEmail on every project the caller doesn't
+// own, in one round-trip. Silent on failure — the card then just doesn't
+// name the owner.
+func (s *TenantService) enrichOwnerEmails(ctx context.Context, projects []Project, callerID string) {
+	ids := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, p := range projects {
+		if p.OwnerID == "" || p.OwnerID == callerID {
+			continue
+		}
+		if _, dup := seen[p.OwnerID]; dup {
+			continue
+		}
+		seen[p.OwnerID] = struct{}{}
+		ids = append(ids, p.OwnerID)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id::text, email FROM public.platform_users WHERE id = ANY($1::uuid[])`,
+		ids,
+	)
+	if err != nil {
+		slog.Warn("ListProjects owner-email enrichment failed", "error", err)
+		return
+	}
+	defer rows.Close()
+	emails := make(map[string]string, len(ids))
+	for rows.Next() {
+		var id, email string
+		if err := rows.Scan(&id, &email); err != nil {
+			slog.Warn("ListProjects owner-email enrichment scan failed", "error", err)
+			return
+		}
+		emails[id] = email
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("ListProjects owner-email enrichment iterate failed", "error", err)
+		return
+	}
+	for i := range projects {
+		if projects[i].OwnerID == callerID {
+			continue
+		}
+		if e, ok := emails[projects[i].OwnerID]; ok {
+			e := e
+			projects[i].OwnerEmail = &e
+		}
+	}
 }
 
 // enrichOrgNames populates OrgName on every project with a set
