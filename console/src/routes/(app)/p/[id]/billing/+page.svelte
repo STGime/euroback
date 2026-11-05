@@ -293,6 +293,11 @@
 							{/if}
 						</p>
 					{:else if project.plan === 'free'}
+						{#if subscription?.status === 'scheduled' && subscription.scheduled}
+							<p class="mt-2 text-sm text-green-800">
+								Your Pro subscription starts on {formatDay(subscription.scheduled.starts_at)} — {formatEUR(subscription.scheduled.price_cents, subscription.scheduled.currency)}/month, first charged that day.
+							</p>
+						{/if}
 						<p class="mt-2 text-sm text-gray-600">
 							5,000 MAU · 512 MB storage · 2 GB bandwidth · auto-pauses after 30 days idle.
 						</p>
@@ -336,6 +341,15 @@
 							class="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
 						>
 							{checkoutInFlight ? 'Redirecting…' : 'Add payment (€25/mo)'}
+						</button>
+					{:else if project.plan === 'free' && subscription?.status === 'scheduled'}
+						<button
+							type="button"
+							onclick={cancelScheduled}
+							disabled={cancelingScheduled}
+							class="text-sm text-gray-600 hover:text-red-700 disabled:opacity-50"
+						>
+							{cancelingScheduled ? 'Cancelling…' : 'Cancel subscription'}
 						</button>
 					{:else if project.plan === 'free'}
 						<button

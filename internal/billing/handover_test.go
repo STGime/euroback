@@ -28,6 +28,7 @@ type fakeMollie struct {
 	canceledSubs  []string                  // DELETE …/subscriptions/{id}
 	refunded      []string                  // POST /payments/{id}/refunds
 	nextPaymentID int
+	failCancel    bool // DELETE …/subscriptions/{id} answers 500
 }
 
 func newFakeMollie(t *testing.T) (*fakeMollie, *mollie.Client) {
@@ -79,6 +80,9 @@ func (f *fakeMollie) serve(w http.ResponseWriter, r *http.Request) {
 		f.createdSubs = append(f.createdSubs, body)
 		start, _ := body["startDate"].(string)
 		reply(map[string]any{"id": "sub_new", "status": "active", "startDate": start, "nextPaymentDate": start})
+	case r.Method == http.MethodDelete && len(parts) == 4 && f.failCancel:
+		w.WriteHeader(http.StatusInternalServerError)
+		reply(map[string]any{"status": 500})
 	case r.Method == http.MethodDelete && len(parts) == 4:
 		f.canceledSubs = append(f.canceledSubs, parts[3])
 		reply(map[string]any{"id": parts[3], "status": "canceled"})
@@ -154,9 +158,10 @@ func seedHandover(t *testing.T, pool *pgxpool.Pool, oldStatus string) *handoverF
 		`INSERT INTO public.subscriptions
 		    (project_id, mollie_customer_id, mollie_subscription_id, plan, price_cents,
 		     currency, billing_interval, status, started_at, next_charge_at)
-		 VALUES ($1, 'cst_old', $2, 'pro', 2500, 'EUR', '1 month', $3, now() - interval '20 days', $4)
+		 VALUES ($1, 'cst_old', NULLIF($2, ''), 'pro', 2500, 'EUR', '1 month', $3, now() - interval '20 days', $4)
 		 RETURNING id`,
-		fx.projectID, "sub_old_"+u, oldStatus, fx.paidUntil,
+		// An open checkout has no Mollie subscription yet.
+		fx.projectID, map[bool]string{true: "", false: "sub_old_" + u}[oldStatus == "incomplete"], oldStatus, fx.paidUntil,
 	).Scan(&fx.oldSubID); err != nil {
 		t.Fatal(err)
 	}
@@ -399,5 +404,253 @@ func TestHandover_PastDueNotTransferable(t *testing.T) {
 	fx := seedHandover(t, pool, "past_due")
 	if err := svc.CheckTransferable(context.Background(), fx.projectID); !errors.Is(err, ErrPaymentOverdue) {
 		t.Errorf("err = %v, want ErrPaymentOverdue", err)
+	}
+}
+
+// Review round 2 on #855.
+
+func TestHandover_BetaGrantStatusStillAllowed(t *testing.T) {
+	pool := handoverTestDB(t)
+	fx := seedHandover(t, pool, "active")
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE public.subscriptions SET status = 'beta_grant' WHERE id = $1`, fx.oldSubID); err != nil {
+		t.Fatalf("beta_grant rejected by the status check: %v", err)
+	}
+}
+
+// Mollie unreachable during the handover: the database side still
+// completes, so a later charge is refunded.
+func TestHandover_MollieCancelFails(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	fake, client := newFakeMollie(t)
+	fake.failCancel = true
+	svc := NewService(pool, client, Config{}, true)
+	fx := seedHandover(t, pool, "active")
+
+	res, err := svc.HandOverOnTransfer(ctx, fx.projectID)
+	if err != nil {
+		t.Fatalf("handover: %v", err)
+	}
+	if !res.HandedOver || !res.MollieCancelFailed {
+		t.Fatalf("result = %+v, want handed over with MollieCancelFailed", res)
+	}
+	var canceled bool
+	_ = pool.QueryRow(ctx, `SELECT canceled_at IS NOT NULL FROM public.subscriptions WHERE id = $1`, fx.oldSubID).Scan(&canceled)
+	if !canceled {
+		t.Fatal("canceled_at not stamped when the Mollie cancel failed")
+	}
+	var mollieSub string
+	_ = pool.QueryRow(ctx, `SELECT mollie_subscription_id FROM public.subscriptions WHERE id = $1`, fx.oldSubID).Scan(&mollieSub)
+	fake.setPayment("tr_after", map[string]any{
+		"status": "paid", "sequenceType": "recurring", "customerId": "cst_old", "subscriptionId": mollieSub,
+		"amount": map[string]any{"value": "25.00", "currency": "EUR"}, "createdAt": time.Now().UTC().Add(time.Minute),
+	})
+	if err := svc.ProcessMollieWebhook(ctx, "tr_after"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.refunded) != 1 {
+		t.Errorf("refunds = %v, want the charge after the failed cancel refunded", fake.refunded)
+	}
+}
+
+// With no known period end, the handover derives one from the last paid
+// charge instead of leaving the project on Pro forever.
+func TestHandover_NoNextChargeDerived(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	_, client := newFakeMollie(t)
+	svc := NewService(pool, client, Config{}, true)
+	fx := seedHandover(t, pool, "active")
+	paid := time.Now().UTC().Add(-5 * 24 * time.Hour).Truncate(time.Second)
+	if _, err := pool.Exec(ctx, `UPDATE public.subscriptions SET next_charge_at = NULL WHERE id = $1`, fx.oldSubID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.invoices (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at, billed_to_user_id)
+		 VALUES ($1, $2, $3, 2500, 'EUR', 'paid', $4, $5)`,
+		fx.projectID, fx.oldSubID, "tr_paid_"+fx.oldSubID, paid, fx.oldOwner); err != nil {
+		t.Fatal(err)
+	}
+	res, err := svc.HandOverOnTransfer(ctx, fx.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := addMonthClamped(paid)
+	if res.PaidUntil == nil || !res.PaidUntil.Equal(want) {
+		t.Errorf("paid until = %v, want %v", res.PaidUntil, want)
+	}
+}
+
+// A confirmed waiting subscription blocks a second checkout even when
+// nothing is live any more (no double charge), and the summary shows it.
+func TestHandover_WaitingSubscriptionBlocksSecondCheckout(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	fake, client := newFakeMollie(t)
+	svc := NewService(pool, client, Config{}, true)
+	fx := seedHandover(t, pool, "active")
+	if _, err := svc.HandOverOnTransfer(ctx, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	co, err := svc.CreateCheckout(ctx, fx.newOwner, fx.projectID, "pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.setPayment("tr_m", map[string]any{
+		"status": "paid", "sequenceType": "first", "customerId": "cst_new", "mandateId": "mdt_1",
+		"amount": map[string]any{"value": "0.00", "currency": "EUR"}, "createdAt": time.Now().UTC(),
+		"metadata": map[string]any{"subscription_id": co.SubscriptionID, "project_id": fx.projectID, "plan_code": "pro"},
+	})
+	if err := svc.ProcessMollieWebhook(ctx, "tr_m"); err != nil {
+		t.Fatal(err)
+	}
+	// The subscription it was to follow ends early (e.g. by ops).
+	if _, err := pool.Exec(ctx, `UPDATE public.subscriptions SET status = 'canceled' WHERE id = $1`, fx.oldSubID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.projects SET plan = 'free' WHERE id = $1`, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateCheckout(ctx, fx.newOwner, fx.projectID, "pro"); !errors.Is(err, ErrAlreadyScheduled) {
+		t.Errorf("checkout with a waiting subscription: err = %v, want ErrAlreadyScheduled", err)
+	}
+	// A repeated first-payment webhook (e.g. after a refund on it) for a
+	// subscription that has since ended refunds nothing.
+	if _, err := pool.Exec(ctx, `UPDATE public.subscriptions SET status = 'canceled' WHERE id = $1`, co.SubscriptionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessMollieWebhook(ctx, "tr_m"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.refunded) != 0 {
+		t.Errorf("refunds = %v, want none for an already-processed first payment", fake.refunded)
+	}
+}
+
+// Mollie charges the scheduled subscription before starts_at (its date is
+// a day in Amsterdam): the charge promotes it; a failed one is tracked.
+func TestHandover_ChargeBeforeStartsAtPromotes(t *testing.T) {
+	for _, outcome := range []string{"paid", "failed"} {
+		t.Run(outcome, func(t *testing.T) {
+			pool := handoverTestDB(t)
+			ctx := context.Background()
+			fake, client := newFakeMollie(t)
+			svc := NewService(pool, client, Config{}, true)
+			fx := seedHandover(t, pool, "active")
+			if _, err := svc.HandOverOnTransfer(ctx, fx.projectID); err != nil {
+				t.Fatal(err)
+			}
+			co, err := svc.CreateCheckout(ctx, fx.newOwner, fx.projectID, "pro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.setPayment("tr_m", map[string]any{
+				"status": "paid", "sequenceType": "first", "customerId": "cst_new", "mandateId": "mdt_1",
+				"amount": map[string]any{"value": "0.00", "currency": "EUR"}, "createdAt": time.Now().UTC(),
+				"metadata": map[string]any{"subscription_id": co.SubscriptionID, "project_id": fx.projectID, "plan_code": "pro"},
+			})
+			if err := svc.ProcessMollieWebhook(ctx, "tr_m"); err != nil {
+				t.Fatal(err)
+			}
+			fake.setPayment("tr_c", map[string]any{
+				"status": outcome, "sequenceType": "recurring", "customerId": "cst_new", "subscriptionId": "sub_new",
+				"amount": map[string]any{"value": "25.00", "currency": "EUR"}, "createdAt": time.Now().UTC(),
+			})
+			if err := svc.ProcessMollieWebhook(ctx, "tr_c"); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{"paid": "active", "failed": "past_due"}[outcome]
+			if got := fx.status(t, co.SubscriptionID); got != want {
+				t.Errorf("status after a %s charge before starts_at = %s, want %s", outcome, got, want)
+			}
+			if got := fx.status(t, fx.oldSubID); got != "expired" {
+				t.Errorf("old subscription = %s, want expired", got)
+			}
+		})
+	}
+}
+
+// The period-end sweep selected the old subscription, then a webhook
+// promoted the successor: the sweep must not drop the project to Free.
+func TestHandover_SweepRaceKeepsPlan(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	fake, client := newFakeMollie(t)
+	svc := NewService(pool, client, Config{}, true)
+	ds := NewDowngradeService(pool, client, nil, "")
+	fx := seedHandover(t, pool, "active")
+	if _, err := svc.HandOverOnTransfer(ctx, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	co, err := svc.CreateCheckout(ctx, fx.newOwner, fx.projectID, "pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.subscriptions SET next_charge_at = now() - interval '1 hour' WHERE id = $1`, fx.oldSubID); err != nil {
+		t.Fatal(err)
+	}
+	cands, err := ds.findEndOfPeriodElapsed(ctx) // successor not confirmed yet → selected
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mine *downgradeCandidate
+	for i := range cands {
+		if cands[i].ProjectID == fx.projectID {
+			mine = &cands[i]
+		}
+	}
+	if mine == nil {
+		t.Fatal("old subscription not selected by the end-of-period sweep")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.subscriptions SET starts_at = now() - interval '1 hour' WHERE id = $1`, co.SubscriptionID); err != nil {
+		t.Fatal(err)
+	}
+	fake.setPayment("tr_m", map[string]any{
+		"status": "paid", "sequenceType": "first", "customerId": "cst_new", "mandateId": "mdt_1",
+		"amount": map[string]any{"value": "0.00", "currency": "EUR"}, "createdAt": time.Now().UTC(),
+		"metadata": map[string]any{"subscription_id": co.SubscriptionID, "project_id": fx.projectID, "plan_code": "pro"},
+	})
+	if err := svc.ProcessMollieWebhook(ctx, "tr_m"); err != nil { // late confirm → promotes now
+		t.Fatal(err)
+	}
+	ds.downgradeOne(ctx, *mine, "end_of_period_cancel")
+	if got := fx.plan(t); got != "pro" {
+		t.Errorf("plan = %s, want pro (successor active)", got)
+	}
+}
+
+// A checkout of the previous owner that slipped in during the transfer
+// (inserted after the handover closed open checkouts): its payment is
+// refunded even though the new owner has no Mollie customer yet.
+func TestHandover_PreviousOwnerPaymentRefusedWhenNewOwnerHasNoCustomer(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	fake, client := newFakeMollie(t)
+	svc := NewService(pool, client, Config{}, true)
+	fx := seedHandover(t, pool, "active")
+	if _, err := svc.HandOverOnTransfer(ctx, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.subscriptions SET status = 'expired' WHERE id = $1`, fx.oldSubID); err != nil {
+		t.Fatal(err)
+	}
+	var lateID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO public.subscriptions (project_id, mollie_customer_id, plan, price_cents, currency, billing_interval, status)
+		 VALUES ($1, 'cst_old', 'pro', 2500, 'EUR', '1 month', 'incomplete') RETURNING id`,
+		fx.projectID).Scan(&lateID); err != nil {
+		t.Fatal(err)
+	}
+	fake.setPayment("tr_late_first", map[string]any{
+		"status": "paid", "sequenceType": "first", "customerId": "cst_old", "mandateId": "mdt_old",
+		"amount": map[string]any{"value": "25.00", "currency": "EUR"}, "createdAt": time.Now().UTC(),
+		"metadata": map[string]any{"subscription_id": lateID, "project_id": fx.projectID, "plan_code": "pro"},
+	})
+	if err := svc.ProcessMollieWebhook(ctx, "tr_late_first"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.createdSubs) != 0 || len(fake.refunded) != 1 {
+		t.Errorf("created subs = %d, refunds = %v; want none created and the payment refunded", len(fake.createdSubs), fake.refunded)
 	}
 }

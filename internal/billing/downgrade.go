@@ -170,7 +170,7 @@ func (s *DowngradeService) promoteDueScheduled(ctx context.Context) {
 	}
 	rows.Close()
 	for _, id := range projects {
-		if _, err := promoteScheduled(ctx, s.pool, s.client, id); err != nil {
+		if _, err := promoteScheduled(ctx, s.pool, s.client, id, false); err != nil {
 			slog.Error("billing: scheduled subscription takeover failed", "project_id", id, "error", err)
 		}
 	}
@@ -373,16 +373,25 @@ func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidat
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if c.SubscriptionID != nil {
-		if _, err := tx.Exec(ctx,
+		subRes, err := tx.Exec(ctx,
 			`UPDATE public.subscriptions
 			    SET status = 'expired',
 			        canceled_at = COALESCE(canceled_at, now())
 			  WHERE id = $1
 			    AND status IN ('active', 'past_due', 'incomplete')`,
 			*c.SubscriptionID,
-		); err != nil {
+		)
+		if err != nil {
 			slog.Error("billing: downgrade subscription update failed",
 				"project_id", c.ProjectID, "error", err)
+			return
+		}
+		// Someone else closed this subscription since the candidate was
+		// selected — e.g. a scheduled successor took over (handover.go),
+		// which also expired it. Leave the project's plan alone.
+		if subRes.RowsAffected() == 0 {
+			slog.Debug("billing: downgrade skipped — subscription already closed",
+				"project_id", c.ProjectID, "subscription_id", *c.SubscriptionID)
 			return
 		}
 	}

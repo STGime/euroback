@@ -20,7 +20,7 @@ ALTER TABLE public.subscriptions
 
 ALTER TABLE public.subscriptions
     ADD CONSTRAINT subscriptions_status_check
-        CHECK (status IN ('incomplete', 'scheduled', 'active', 'past_due', 'canceled', 'expired'));
+        CHECK (status IN ('incomplete', 'scheduled', 'active', 'past_due', 'canceled', 'expired', 'beta_grant'));
 
 ALTER TABLE public.subscriptions
     ADD COLUMN IF NOT EXISTS starts_at TIMESTAMPTZ,

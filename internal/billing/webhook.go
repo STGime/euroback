@@ -240,22 +240,38 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	if err != nil {
 		return fmt.Errorf("load subscription %s: %w", subscriptionID, err)
 	}
-	confirmed := existingMollieSub != nil && *existingMollieSub != ""
-	if confirmed && (currentStatus == "active" || currentStatus == "scheduled") {
-		// Already activated — likely a webhook retry. Just make
-		// sure the invoice is marked paid (idempotent below).
-		return s.markInvoicePaid(ctx, payment)
+	if existingMollieSub != nil && *existingMollieSub != "" {
+		// Already processed — a webhook retry, or Mollie re-calling the
+		// webhook for a refund / chargeback on this payment. Never
+		// treat it as a new or orphaned payment.
+		if currentStatus == "active" || currentStatus == "scheduled" {
+			return s.markInvoicePaid(ctx, payment)
+		}
+		return nil
 	}
 	// A checkout that was closed meanwhile (the project changed owner,
 	// the owner started another one) or a payer who no longer owns the
 	// project: never start a subscription on their mandate.
 	// The payer must be the customer the checkout was started for, and
-	// that customer must belong to the project's current owner (a NULL
-	// on platform_users means the ID was never persisted there; the
-	// checkout row still carries it).
+	// that customer must be the project's current owner's. A customer no
+	// platform user carries (its ID was never persisted there) is
+	// accepted on the checkout row's match alone.
+	var payerUserID string
+	if perr := s.pool.QueryRow(ctx,
+		`SELECT id FROM public.platform_users WHERE mollie_customer_id = $1 ORDER BY created_at LIMIT 1`,
+		payment.CustomerID,
+	).Scan(&payerUserID); perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
+		return fmt.Errorf("resolve payer: %w", perr)
+	}
+	var ownerID string
+	if oerr := s.pool.QueryRow(ctx,
+		`SELECT owner_id FROM public.projects WHERE id = $1`, projectID,
+	).Scan(&ownerID); oerr != nil {
+		return fmt.Errorf("load project owner: %w", oerr)
+	}
 	scheduled := currentStatus == "scheduled"
 	payerIsOwner := subCustomerID != nil && *subCustomerID == payment.CustomerID &&
-		(ownerCustomerID == nil || *ownerCustomerID == payment.CustomerID)
+		(payerUserID == ownerID || (payerUserID == "" && ownerCustomerID == nil))
 	if (currentStatus != "incomplete" && !scheduled) || !payerIsOwner {
 		slog.Warn("billing.webhook.first_payment_for_closed_checkout",
 			"subscription_id", subscriptionID, "project_id", projectID,
@@ -335,7 +351,7 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 			"start_date", startDate,
 		)
 		// Late confirmation (the period already ended): take over now.
-		if _, perr := promoteScheduled(ctx, s.pool, s.client, projectID); perr != nil {
+		if _, perr := promoteScheduled(ctx, s.pool, s.client, projectID, false); perr != nil {
 			slog.Warn("billing.webhook.promote_failed", "project_id", projectID, "error", perr)
 		}
 		return nil
@@ -767,7 +783,7 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	// First charge of a scheduled subscription (handover.go) before the
 	// hourly sweep promoted it: promote now.
 	if status == "scheduled" {
-		if _, perr := promoteScheduled(ctx, s.pool, s.client, projectID); perr != nil {
+		if _, perr := promoteScheduled(ctx, s.pool, s.client, projectID, true); perr != nil {
 			return fmt.Errorf("promote scheduled subscription: %w", perr)
 		}
 		if err := load(); err != nil {
@@ -962,7 +978,7 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 		  WHERE mollie_subscription_id = $1 AND status = 'scheduled'`,
 		payment.SubscriptionID,
 	).Scan(&schedProject); qerr == nil {
-		if _, perr := promoteScheduled(ctx, s.pool, s.client, schedProject); perr != nil {
+		if _, perr := promoteScheduled(ctx, s.pool, s.client, schedProject, true); perr != nil {
 			return fmt.Errorf("promote scheduled subscription: %w", perr)
 		}
 	} else if !errors.Is(qerr, pgx.ErrNoRows) {

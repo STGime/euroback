@@ -79,98 +79,117 @@ func (s *Service) CheckTransferable(ctx context.Context, projectID string) error
 // HandOverOnTransfer runs after a project's ownership has moved. It closes
 // whatever the previous owner had open on the project and cancels their
 // paid subscription at period end.
+//
+// All database changes happen first, in one transaction, so that once it
+// commits every later safety net applies even if Mollie can't be reached:
+// a charge Mollie still creates on a subscription with canceled_at set is
+// refunded (recordRecurringPayment), and the period-end takeover repeats
+// the Mollie cancel. The Mollie calls come after, each best-effort.
 func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*HandoverResult, error) {
 	res := &HandoverResult{}
 
-	// 1. An open checkout of the previous owner. If its payment still
-	// completes, activateFromFirstPayment refunds it (the row is no longer
-	// 'incomplete' and the payer no longer owns the project).
-	if _, err := s.pool.Exec(ctx,
+	type mollieSubRef struct{ subID, cus string }
+	var toCancel []mollieSubRef
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return res, fmt.Errorf("billing: handover begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. An open checkout of the previous owner, and a follow-on
+	// subscription they had scheduled. If an open checkout's payment still
+	// completes, activateFromFirstPayment refunds it.
+	rows, err := tx.Query(ctx,
 		`UPDATE public.subscriptions
 		    SET status = 'canceled', canceled_at = now()
-		  WHERE project_id = $1 AND status = 'incomplete'`,
-		projectID,
-	); err != nil {
-		return res, fmt.Errorf("billing: close open checkout: %w", err)
-	}
-
-	// 2. A follow-on subscription the previous owner had scheduled.
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, mollie_subscription_id, mollie_customer_id
-		   FROM public.subscriptions
-		  WHERE project_id = $1 AND status = 'scheduled'`,
+		  WHERE project_id = $1 AND status IN ('incomplete', 'scheduled')
+		  RETURNING mollie_subscription_id, mollie_customer_id`,
 		projectID,
 	)
 	if err != nil {
-		return res, fmt.Errorf("billing: load scheduled subscription: %w", err)
+		return res, fmt.Errorf("billing: close open subscriptions: %w", err)
 	}
-	type sched struct {
-		id             string
-		mollieSub, cus *string
-	}
-	var scheduled []sched
 	for rows.Next() {
-		var sc sched
-		if err := rows.Scan(&sc.id, &sc.mollieSub, &sc.cus); err != nil {
+		var sub, cus *string
+		if err := rows.Scan(&sub, &cus); err != nil {
 			rows.Close()
-			return res, fmt.Errorf("billing: scan scheduled subscription: %w", err)
+			return res, fmt.Errorf("billing: scan closed subscription: %w", err)
 		}
-		scheduled = append(scheduled, sc)
+		if sub != nil && cus != nil && *sub != "" && *cus != "" {
+			toCancel = append(toCancel, mollieSubRef{*sub, *cus})
+		}
 	}
 	rows.Close()
-	for _, sc := range scheduled {
-		if sc.mollieSub != nil && sc.cus != nil && *sc.mollieSub != "" {
-			if _, cerr := s.client.CancelSubscription(ctx, *sc.cus, *sc.mollieSub); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
-				return res, fmt.Errorf("billing: cancel scheduled mollie subscription: %w", cerr)
-			}
-		}
-		if _, err := s.pool.Exec(ctx,
-			`UPDATE public.subscriptions
-			    SET status = 'canceled', canceled_at = now()
-			  WHERE id = $1 AND status = 'scheduled'`,
-			sc.id,
-		); err != nil {
-			return res, fmt.Errorf("billing: cancel scheduled subscription: %w", err)
-		}
-	}
 
-	// 3. The paid subscription.
+	// 2. The paid subscription: cancelled at period end.
 	var (
 		subID          string
 		mollieSub, cus *string
 		nextChargeAt   *time.Time
 	)
-	err = s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT id, mollie_subscription_id, mollie_customer_id, next_charge_at
 		   FROM public.subscriptions
 		  WHERE project_id = $1 AND status IN ('active', 'past_due')
-		  ORDER BY created_at DESC LIMIT 1`,
+		  ORDER BY created_at DESC LIMIT 1
+		  FOR UPDATE`,
 		projectID,
 	).Scan(&subID, &mollieSub, &cus, &nextChargeAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return res, nil
-	}
-	if err != nil {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
 		return res, fmt.Errorf("billing: load live subscription: %w", err)
+	default:
+		// Without a known period end, nothing would ever end this
+		// subscription or let the new owner take over: derive it from the
+		// last paid charge (one month after it), else end it now.
+		if nextChargeAt == nil {
+			var lastPaid *time.Time
+			if err := tx.QueryRow(ctx,
+				`SELECT max(paid_at) FROM public.invoices
+				  WHERE subscription_id = $1 AND status = 'paid'`,
+				subID,
+			).Scan(&lastPaid); err != nil {
+				return res, fmt.Errorf("billing: last paid charge: %w", err)
+			}
+			end := time.Now().UTC()
+			if lastPaid != nil {
+				if next := addMonthClamped(lastPaid.UTC()); next.After(end) {
+					end = next
+				}
+			}
+			nextChargeAt = &end
+			slog.Warn("billing: handover — subscription had no next_charge_at; derived one",
+				"project_id", projectID, "subscription_id", subID, "next_charge_at", end)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE public.subscriptions
+			    SET canceled_at = COALESCE(canceled_at, now()),
+			        next_charge_at = $2
+			  WHERE id = $1`,
+			subID, nextChargeAt,
+		); err != nil {
+			return res, fmt.Errorf("billing: stamp canceled_at: %w", err)
+		}
+		if mollieSub != nil && cus != nil && *mollieSub != "" && *cus != "" {
+			toCancel = append(toCancel, mollieSubRef{*mollieSub, *cus})
+		}
+		res.HandedOver = true
+		res.PaidUntil = nextChargeAt
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return res, fmt.Errorf("billing: handover commit: %w", err)
 	}
 
-	if mollieSub != nil && cus != nil && *mollieSub != "" && *cus != "" {
-		if _, cerr := s.client.CancelSubscription(ctx, *cus, *mollieSub); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+	// 3. Stop the charges at Mollie. Keep going past failures.
+	for _, m := range toCancel {
+		if _, cerr := s.client.CancelSubscription(ctx, m.cus, m.subID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
 			res.MollieCancelFailed = true
-			slog.Error("billing: handover — mollie cancel failed; retried at period end, later charges are refunded",
-				"project_id", projectID, "subscription_id", subID, "error", cerr)
+			slog.Error("billing: handover — mollie cancel failed; later charges are refunded and the cancel is retried at period end",
+				"project_id", projectID, "mollie_subscription_id", m.subID, "error", cerr)
 		}
 	}
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE public.subscriptions
-		    SET canceled_at = COALESCE(canceled_at, now())
-		  WHERE id = $1`,
-		subID,
-	); err != nil {
-		return res, fmt.Errorf("billing: stamp canceled_at: %w", err)
-	}
-	res.HandedOver = true
-	res.PaidUntil = nextChargeAt
 	return res, nil
 }
 
@@ -178,6 +197,21 @@ func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*Ha
 // a gap: active, cancelled at period end, and with the period running for
 // at least minScheduleLead.
 func (s *Service) scheduleTarget(ctx context.Context, projectID string) (predID string, startsAt time.Time, ok bool, err error) {
+	// A confirmed subscription already waiting to start: a second one
+	// (scheduled or immediate) would charge twice.
+	var waiting int
+	if err = s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM public.subscriptions
+		  WHERE project_id = $1 AND status = 'scheduled'
+		    AND mollie_subscription_id IS NOT NULL`,
+		projectID,
+	).Scan(&waiting); err != nil {
+		return "", time.Time{}, false, fmt.Errorf("billing: scheduled-sub check: %w", err)
+	}
+	if waiting > 0 {
+		return "", time.Time{}, false, ErrAlreadyScheduled
+	}
+
 	var (
 		status       string
 		canceledAt   *time.Time
@@ -239,15 +273,22 @@ func (s *Service) createScheduledCheckout(ctx context.Context, userID, projectID
 		return nil, err
 	}
 
+	// Inserted only while the caller still owns the project (the
+	// ownership check above was before the Mollie customer call).
 	var subscriptionID string
 	err = s.pool.QueryRow(ctx,
 		`INSERT INTO public.subscriptions
 		    (project_id, mollie_customer_id, plan, price_cents, currency,
 		     billing_interval, status, starts_at, predecessor_id)
-		 VALUES ($1, $2, $3, $4, 'EUR', '1 month', 'scheduled', $5, $6)
+		 SELECT $1, $2, $3, $4, 'EUR', '1 month', 'scheduled', $5, $6
+		  WHERE EXISTS (SELECT 1 FROM public.projects
+		                 WHERE id = $1 AND owner_id = $7::uuid AND status = 'active')
 		 RETURNING id`,
-		projectID, customerID, planCode, price, startsAt, predID,
+		projectID, customerID, planCode, price, startsAt, predID, userID,
 	).Scan(&subscriptionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrProjectNotFound
+	}
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -303,7 +344,11 @@ func (s *Service) createScheduledCheckout(ctx context.Context, userID, projectID
 // active once its start date has passed, and expires the cancelled
 // subscription it follows. Returns false when there was nothing to do.
 // Safe to call concurrently (row locks) and repeatedly.
-func promoteScheduled(ctx context.Context, pool *pgxpool.Pool, client *mollie.Client, projectID string) (bool, error) {
+//
+// charged: Mollie has charged (or tried to charge) the scheduled
+// subscription, so it has started whatever starts_at says — Mollie's
+// start date is a day in Amsterdam, starts_at is midnight UTC of that day.
+func promoteScheduled(ctx context.Context, pool *pgxpool.Pool, client *mollie.Client, projectID string, charged bool) (bool, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -315,9 +360,9 @@ func promoteScheduled(ctx context.Context, pool *pgxpool.Pool, client *mollie.Cl
 		`SELECT id, plan FROM public.subscriptions
 		  WHERE project_id = $1 AND status = 'scheduled'
 		    AND mollie_subscription_id IS NOT NULL
-		    AND starts_at <= now()
+		    AND (starts_at <= now() OR $2)
 		  FOR UPDATE`,
-		projectID,
+		projectID, charged,
 	).Scan(&succID, &plan)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil

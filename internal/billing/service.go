@@ -395,15 +395,22 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	// slow-Mollie failure mode (which would block every concurrent
 	// checkout on the same project). Any SQLSTATE 23505 from the
 	// unique partial index surfaces as ErrAlreadySubscribed.
+	// Inserted only while the caller still owns the project (an ownership
+	// transfer may have completed during the Mollie customer call).
 	var subscriptionID string
 	err = s.pool.QueryRow(ctx,
 		`INSERT INTO public.subscriptions
 		    (project_id, mollie_customer_id, plan, price_cents, currency,
 		     billing_interval, status)
-		 VALUES ($1, $2, $3, $4, 'EUR', '1 month', 'incomplete')
+		 SELECT $1, $2, $3, $4, 'EUR', '1 month', 'incomplete'
+		  WHERE EXISTS (SELECT 1 FROM public.projects
+		                 WHERE id = $1 AND owner_id = $5::uuid AND status = 'active')
 		 RETURNING id`,
-		projectID, customerID, planCode, price,
+		projectID, customerID, planCode, price, userID,
 	).Scan(&subscriptionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrProjectNotFound
+	}
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {

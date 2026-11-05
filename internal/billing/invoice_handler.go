@@ -177,6 +177,31 @@ func HandleGetProjectSubscription(svc *Service) http.HandlerFunc {
 			}
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
+			// No live subscription, but one may be waiting to start
+			// (the one it was to follow ended early): show that.
+			var sc scheduledSummary
+			serr := svc.pool.QueryRow(r.Context(),
+				`SELECT s.id, s.plan, s.price_cents, s.currency, s.starts_at
+				   FROM public.subscriptions s
+				   JOIN public.projects p ON p.id = s.project_id
+				  WHERE s.project_id = $1 AND p.owner_id = $2::uuid
+				    AND s.status = 'scheduled'
+				    AND s.mollie_subscription_id IS NOT NULL`,
+				projectID, claims.Subject,
+			).Scan(&sc.ID, &sc.PlanCode, &sc.PriceCents, &sc.Currency, &sc.StartsAt)
+			if serr == nil {
+				starts := sc.StartsAt
+				sum = subscriptionSummary{
+					ID: sc.ID, PlanCode: sc.PlanCode, Status: "scheduled",
+					PriceCents: sc.PriceCents, Currency: sc.Currency,
+					NextChargeAt: &starts, PaidByYou: true, Scheduled: &sc,
+				}
+				err = nil
+			} else if !errors.Is(serr, pgx.ErrNoRows) {
+				err = serr
+			}
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "subscription_not_found", "no live subscription for this project")
 			return
 		}

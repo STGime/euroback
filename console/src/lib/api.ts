@@ -3508,7 +3508,9 @@ export interface BillingConfig {
 export interface ProjectSubscription {
 	id: string;
 	plan_code: string;
-	status: 'incomplete' | 'active' | 'past_due';
+	/** 'scheduled' only when nothing is live and a subscription is
+	 * waiting to start (see `scheduled`). */
+	status: 'incomplete' | 'active' | 'past_due' | 'scheduled';
 	price_cents: number;
 	currency: string;
 	next_charge_at?: string | null;
