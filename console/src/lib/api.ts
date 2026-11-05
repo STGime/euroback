@@ -487,6 +487,9 @@ export interface Project {
 	/** Convenience: the org name resolved server-side; matches
 	 * `org_id` when set. */
 	org_name?: string | null;
+	/** Set in project listings only for projects the signed-in user
+	 * doesn't own: whose project it is. */
+	owner_email?: string | null;
 }
 
 export interface ForeignKeyInfo {

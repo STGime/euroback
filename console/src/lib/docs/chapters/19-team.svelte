@@ -32,7 +32,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">How it works</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Once invited, a member sees the project in their project list alongside any projects they own. All member actions are recorded in the <strong>Compliance &rarr; Audit Log</strong>: invitations sent, accepted, roles changed, and members removed.
+					Once invited, a member sees the project in their project list alongside any projects they own, marked <strong>Shared</strong> with the owner's email on the card. All member actions are recorded in the <strong>Compliance &rarr; Audit Log</strong>: invitations sent, accepted, roles changed, and members removed.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Transferring ownership</h3>
