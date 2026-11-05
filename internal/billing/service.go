@@ -383,6 +383,18 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 		return s.createScheduledCheckout(ctx, userID, projectID, projectName, planCode, price, predID, startsAt)
 	}
 
+	// An unconfirmed scheduled checkout (abandoned €0 payment) is replaced
+	// by this subscription: if its payment still completed later, it would
+	// otherwise start a second one.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE public.subscriptions
+		    SET status = 'canceled', canceled_at = now()
+		  WHERE project_id = $1 AND status = 'scheduled' AND mollie_subscription_id IS NULL`,
+		projectID,
+	); err != nil {
+		return nil, fmt.Errorf("billing: close abandoned scheduled checkout: %w", err)
+	}
+
 	// 3. Get or create the Mollie customer.
 	customerID, err := s.ensureMollieCustomer(ctx, userID)
 	if err != nil {

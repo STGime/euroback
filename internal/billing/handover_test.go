@@ -28,7 +28,8 @@ type fakeMollie struct {
 	canceledSubs  []string                  // DELETE …/subscriptions/{id}
 	refunded      []string                  // POST /payments/{id}/refunds
 	nextPaymentID int
-	failCancel    bool // DELETE …/subscriptions/{id} answers 500
+	failCancel    bool   // DELETE …/subscriptions/{id} answers 500
+	onCreateSub   func() // runs while a subscription is being created
 }
 
 func newFakeMollie(t *testing.T) (*fakeMollie, *mollie.Client) {
@@ -77,6 +78,9 @@ func (f *fakeMollie) serve(w http.ResponseWriter, r *http.Request) {
 		f.refunded = append(f.refunded, parts[1])
 		reply(map[string]any{"id": "re_1"})
 	case r.Method == http.MethodPost && len(parts) == 3 && parts[2] == "subscriptions":
+		if f.onCreateSub != nil {
+			f.onCreateSub()
+		}
 		f.createdSubs = append(f.createdSubs, body)
 		start, _ := body["startDate"].(string)
 		reply(map[string]any{"id": "sub_new", "status": "active", "startDate": start, "nextPaymentDate": start})
@@ -652,5 +656,125 @@ func TestHandover_PreviousOwnerPaymentRefusedWhenNewOwnerHasNoCustomer(t *testin
 	}
 	if len(fake.createdSubs) != 0 || len(fake.refunded) != 1 {
 		t.Errorf("created subs = %d, refunds = %v; want none created and the payment refunded", len(fake.createdSubs), fake.refunded)
+	}
+}
+
+// Review round 3 on #855.
+
+// The checkout is closed while the webhook creates the Mollie subscription:
+// the subscription is cancelled again, the payment refunded, and neither
+// the invoice nor the plan says otherwise.
+func TestActivation_CheckoutClosedMeanwhile(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	fake, client := newFakeMollie(t)
+	svc := NewService(pool, client, Config{}, true)
+	fx := seedHandover(t, pool, "expired") // nothing live: a normal checkout
+	if _, err := pool.Exec(ctx, `UPDATE public.projects SET plan = 'free' WHERE id = $1`, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	co, err := svc.CreateCheckout(ctx, fx.newOwner, fx.projectID, "pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if co.StartsAt != nil {
+		t.Fatal("normal checkout came back scheduled")
+	}
+	var payID string
+	_ = pool.QueryRow(ctx, `SELECT mollie_payment_id FROM public.invoices WHERE subscription_id = $1`, co.SubscriptionID).Scan(&payID)
+	fake.onCreateSub = func() {
+		_, _ = pool.Exec(ctx, `UPDATE public.subscriptions SET status = 'canceled' WHERE id = $1`, co.SubscriptionID)
+	}
+	fake.setPayment(payID, map[string]any{
+		"status": "paid", "sequenceType": "first", "customerId": "cst_new", "mandateId": "mdt_1",
+		"amount": map[string]any{"value": "25.00", "currency": "EUR"}, "createdAt": time.Now().UTC(),
+		"metadata": map[string]any{"subscription_id": co.SubscriptionID, "project_id": fx.projectID, "plan_code": "pro"},
+	})
+	if err := svc.ProcessMollieWebhook(ctx, payID); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.canceledSubs) != 1 || fake.canceledSubs[0] != "sub_new" {
+		t.Errorf("mollie cancels = %v, want the just-created subscription", fake.canceledSubs)
+	}
+	if len(fake.refunded) != 1 {
+		t.Errorf("refunds = %v, want the first payment refunded", fake.refunded)
+	}
+	if got := fx.plan(t); got != "free" {
+		t.Errorf("plan = %s, want free", got)
+	}
+	var invStatus string
+	_ = pool.QueryRow(ctx, `SELECT status FROM public.invoices WHERE mollie_payment_id = $1`, payID).Scan(&invStatus)
+	if invStatus != "refunded" {
+		t.Errorf("invoice status = %s, want refunded", invStatus)
+	}
+}
+
+// A €0 checkout confirmed after the owner already subscribed normally
+// starts nothing (it would charge twice).
+func TestActivation_ScheduledSupersededByNormalSubscription(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	fake, client := newFakeMollie(t)
+	svc := NewService(pool, client, Config{}, true)
+	fx := seedHandover(t, pool, "active")
+	if _, err := svc.HandOverOnTransfer(ctx, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	co, err := svc.CreateCheckout(ctx, fx.newOwner, fx.projectID, "pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Period ended, project dropped to Free, owner subscribed normally
+	// (a new live subscription, not cancelled).
+	if _, err := pool.Exec(ctx, `UPDATE public.subscriptions SET status = 'expired' WHERE id = $1`, fx.oldSubID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.subscriptions (project_id, mollie_customer_id, mollie_subscription_id, plan, price_cents, currency, billing_interval, status)
+		 VALUES ($1, 'cst_new', 'sub_normal', 'pro', 2500, 'EUR', '1 month', 'active')`, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	fake.setPayment("tr_m", map[string]any{
+		"status": "paid", "sequenceType": "first", "customerId": "cst_new", "mandateId": "mdt_1",
+		"amount": map[string]any{"value": "0.00", "currency": "EUR"}, "createdAt": time.Now().UTC(),
+		"metadata": map[string]any{"subscription_id": co.SubscriptionID, "project_id": fx.projectID, "plan_code": "pro"},
+	})
+	if err := svc.ProcessMollieWebhook(ctx, "tr_m"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.createdSubs) != 0 {
+		t.Errorf("a second Mollie subscription was started")
+	}
+	if got := fx.status(t, co.SubscriptionID); got != "canceled" {
+		t.Errorf("scheduled subscription = %s, want canceled", got)
+	}
+}
+
+// promoteScheduled never leaves a successor charging next to an
+// uncancelled live subscription: it cancels the successor.
+func TestPromote_SupersededSuccessorCancelled(t *testing.T) {
+	pool := handoverTestDB(t)
+	ctx := context.Background()
+	fake, client := newFakeMollie(t)
+	fx := seedHandover(t, pool, "active") // live and NOT cancelled
+	var succID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO public.subscriptions (project_id, mollie_customer_id, mollie_subscription_id, plan, price_cents, currency, billing_interval, status, starts_at)
+		 VALUES ($1, 'cst_new', 'sub_succ', 'pro', 2500, 'EUR', '1 month', 'scheduled', now() - interval '1 hour') RETURNING id`,
+		fx.projectID).Scan(&succID); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := promoteScheduled(ctx, pool, client, fx.projectID, true)
+	if err != nil || promoted {
+		t.Fatalf("promoted = %v, err = %v; want false, nil", promoted, err)
+	}
+	if got := fx.status(t, succID); got != "canceled" {
+		t.Errorf("successor = %s, want canceled", got)
+	}
+	if got := fx.status(t, fx.oldSubID); got != "active" {
+		t.Errorf("live subscription = %s, want untouched", got)
+	}
+	if len(fake.canceledSubs) != 1 || fake.canceledSubs[0] != "sub_succ" {
+		t.Errorf("mollie cancels = %v, want the successor", fake.canceledSubs)
 	}
 }

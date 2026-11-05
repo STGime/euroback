@@ -13,6 +13,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -202,11 +203,12 @@ func TestAcceptTransfer_BillingHandover(t *testing.T) {
 	_ = subID
 	paidUntil := time.Now().Add(10 * 24 * time.Hour).UTC().Truncate(time.Second)
 	var gotProject, ownerAtHandover string
-	handover := func(ctx context.Context, projectID string) (bool, *time.Time, error) {
+	finished := false
+	handover := func(ctx context.Context, tx pgx.Tx, projectID string) (bool, *time.Time, func(context.Context), error) {
 		gotProject = projectID
-		// Runs only after the ownership flip has committed.
-		_ = pool.QueryRow(ctx, `SELECT owner_id FROM public.projects WHERE id = $1`, projectID).Scan(&ownerAtHandover)
-		return true, &paidUntil, nil
+		// Runs in the ownership transaction, after the owner change.
+		_ = tx.QueryRow(ctx, `SELECT owner_id FROM public.projects WHERE id = $1`, projectID).Scan(&ownerAtHandover)
+		return true, &paidUntil, func(context.Context) { finished = true }, nil
 	}
 
 	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, handover, nil)
@@ -218,6 +220,9 @@ func TestAcceptTransfer_BillingHandover(t *testing.T) {
 	}
 	if ownerAtHandover != fx.newOwnerID {
 		t.Errorf("owner at handover = %s, want new owner %s (handover runs after the flip)", ownerAtHandover, fx.newOwnerID)
+	}
+	if !finished {
+		t.Error("the post-commit part of the handover didn't run")
 	}
 	var resp struct {
 		BillingHandover bool       `json:"billing_handover"`
@@ -432,9 +437,9 @@ func TestAcceptTransfer_PaymentOverdueRefused(t *testing.T) {
 	fx := seedTransfer(t, pool, "pro", time.Now().Add(time.Hour))
 	overdue := func(ctx context.Context, projectID string) error { return ErrTransferPaymentOverdue }
 	called := false
-	handover := func(ctx context.Context, projectID string) (bool, *time.Time, error) {
+	handover := func(ctx context.Context, tx pgx.Tx, projectID string) (bool, *time.Time, func(context.Context), error) {
 		called = true
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 	w := acceptRequestWith(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, handover, overdue, nil)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "payment_overdue") {
@@ -486,5 +491,75 @@ func assertOwner(t *testing.T, fx *transferFixture, want string) {
 	}
 	if owner != want {
 		t.Errorf("owner = %s, want %s", owner, want)
+	}
+}
+
+// A failing billing handover rolls the whole transfer back: ownership and
+// billing change together or not at all.
+func TestAcceptTransfer_HandoverFailureRollsBack(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "pro", time.Now().Add(time.Hour))
+	failing := func(ctx context.Context, tx pgx.Tx, projectID string) (bool, *time.Time, func(context.Context), error) {
+		return false, nil, nil, fmt.Errorf("boom")
+	}
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, failing, nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	assertOwner(t, fx, fx.oldOwnerID)
+	// The offer is still open: the recipient can retry.
+	if w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil); w.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// A pending invitation to the recipient is dropped on accept, and an
+// invitation can't lower an owner's membership.
+func TestAcceptTransfer_DropsRecipientInvitation(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.project_invitations (project_id, email, role, token_hash, invited_by, expires_at)
+		 VALUES ($1, upper($2), 'viewer', $3, $4, now() + interval '1 day')`,
+		fx.projectID, fx.newEmail, hashToken("invite-"+fx.rawToken), fx.oldOwnerID); err != nil {
+		t.Fatalf("seed invitation: %v", err)
+	}
+	if w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil); w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var n int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM public.project_invitations WHERE project_id = $1`, fx.projectID).Scan(&n)
+	if n != 0 {
+		t.Errorf("pending invitations for the new owner = %d, want 0", n)
+	}
+}
+
+// Cancelling doesn't reset the re-send throttle.
+func TestCancelTransfer_KeepsThrottle(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE public.project_ownership_transfers SET sent_at = now() WHERE project_id = $1`, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/platform/projects/"+fx.projectID+"/transfer", nil)
+	rc := chi.NewRouteContext()
+	rc.URLParams.Add("id", fx.projectID)
+	rctx := context.WithValue(req.Context(), chi.RouteCtxKey, rc)
+	rctx = auth.ContextWithClaims(rctx, &auth.Claims{Subject: fx.oldOwnerID, Email: fx.oldEmail})
+	rctx = WithRole(rctx, "owner")
+	w := httptest.NewRecorder()
+	HandleCancelTransfer(pool)(w, req.WithContext(rctx))
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d; body=%s", w.Code, w.Body.String())
+	}
+	// The link no longer works.
+	if w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil); w.Code == http.StatusOK {
+		t.Fatalf("accept after cancel succeeded")
+	}
+	ok := func(context.Context, *auth.Claims, string) error { return nil }
+	if w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "other-"+fx.newEmail, "", ok); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("re-send right after cancel: status = %d, want 429; body=%s", w.Code, w.Body.String())
 	}
 }

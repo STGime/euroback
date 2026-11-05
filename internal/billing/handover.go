@@ -86,16 +86,33 @@ func (s *Service) CheckTransferable(ctx context.Context, projectID string) error
 // refunded (recordRecurringPayment), and the period-end takeover repeats
 // the Mollie cancel. The Mollie calls come after, each best-effort.
 func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*HandoverResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return &HandoverResult{}, fmt.Errorf("billing: handover begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	res, finish, err := s.HandOverInTx(ctx, tx, projectID)
+	if err != nil {
+		return res, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return res, fmt.Errorf("billing: handover commit: %w", err)
+	}
+	res.MollieCancelFailed = !finish(ctx)
+	return res, nil
+}
+
+// HandOverInTx makes the handover's database changes in the caller's
+// transaction — the ownership transfer's own, so the two commit or fail
+// together. finish, called after the commit, stops the charges at Mollie;
+// it reports false when a Mollie cancel failed (later charges are then
+// refunded and the cancel retried at period end).
+func (s *Service) HandOverInTx(ctx context.Context, tx pgx.Tx, projectID string) (*HandoverResult, func(context.Context) bool, error) {
 	res := &HandoverResult{}
+	noop := func(context.Context) bool { return true }
 
 	type mollieSubRef struct{ subID, cus string }
 	var toCancel []mollieSubRef
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return res, fmt.Errorf("billing: handover begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	// 1. An open checkout of the previous owner, and a follow-on
 	// subscription they had scheduled. If an open checkout's payment still
@@ -108,13 +125,13 @@ func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*Ha
 		projectID,
 	)
 	if err != nil {
-		return res, fmt.Errorf("billing: close open subscriptions: %w", err)
+		return res, noop, fmt.Errorf("billing: close open subscriptions: %w", err)
 	}
 	for rows.Next() {
 		var sub, cus *string
 		if err := rows.Scan(&sub, &cus); err != nil {
 			rows.Close()
-			return res, fmt.Errorf("billing: scan closed subscription: %w", err)
+			return res, noop, fmt.Errorf("billing: scan closed subscription: %w", err)
 		}
 		if sub != nil && cus != nil && *sub != "" && *cus != "" {
 			toCancel = append(toCancel, mollieSubRef{*sub, *cus})
@@ -139,7 +156,7 @@ func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*Ha
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
-		return res, fmt.Errorf("billing: load live subscription: %w", err)
+		return res, noop, fmt.Errorf("billing: load live subscription: %w", err)
 	default:
 		// Without a known period end, nothing would ever end this
 		// subscription or let the new owner take over: derive it from the
@@ -151,7 +168,7 @@ func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*Ha
 				  WHERE subscription_id = $1 AND status = 'paid'`,
 				subID,
 			).Scan(&lastPaid); err != nil {
-				return res, fmt.Errorf("billing: last paid charge: %w", err)
+				return res, noop, fmt.Errorf("billing: last paid charge: %w", err)
 			}
 			end := time.Now().UTC()
 			if lastPaid != nil {
@@ -170,7 +187,7 @@ func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*Ha
 			  WHERE id = $1`,
 			subID, nextChargeAt,
 		); err != nil {
-			return res, fmt.Errorf("billing: stamp canceled_at: %w", err)
+			return res, noop, fmt.Errorf("billing: stamp canceled_at: %w", err)
 		}
 		if mollieSub != nil && cus != nil && *mollieSub != "" && *cus != "" {
 			toCancel = append(toCancel, mollieSubRef{*mollieSub, *cus})
@@ -178,19 +195,20 @@ func (s *Service) HandOverOnTransfer(ctx context.Context, projectID string) (*Ha
 		res.HandedOver = true
 		res.PaidUntil = nextChargeAt
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return res, fmt.Errorf("billing: handover commit: %w", err)
-	}
-
-	// 3. Stop the charges at Mollie. Keep going past failures.
-	for _, m := range toCancel {
-		if _, cerr := s.client.CancelSubscription(ctx, m.cus, m.subID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
-			res.MollieCancelFailed = true
-			slog.Error("billing: handover — mollie cancel failed; later charges are refunded and the cancel is retried at period end",
-				"project_id", projectID, "mollie_subscription_id", m.subID, "error", cerr)
+	// 3. Stop the charges at Mollie, after the caller commits. Keep going
+	// past failures.
+	finish := func(ctx context.Context) bool {
+		ok := true
+		for _, m := range toCancel {
+			if _, cerr := s.client.CancelSubscription(ctx, m.cus, m.subID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+				ok = false
+				slog.Error("billing: handover — mollie cancel failed; later charges are refunded and the cancel is retried at period end",
+					"project_id", projectID, "mollie_subscription_id", m.subID, "error", cerr)
+			}
 		}
+		return ok
 	}
-	return res, nil
+	return res, finish, nil
 }
 
 // scheduleTarget returns the live subscription a new one can follow without
@@ -398,9 +416,29 @@ func promoteScheduled(ctx context.Context, pool *pgxpool.Pool, client *mollie.Cl
 	rows.Close()
 	for _, p := range preds {
 		if !p.canceled {
-			// Never retire a subscription nobody cancelled.
-			slog.Error("billing: scheduled subscription not promoted — the live one isn't cancelled",
+			// Never retire a subscription nobody cancelled — and don't
+			// let the scheduled one charge alongside it: cancel it.
+			slog.Error("billing: scheduled subscription superseded by an uncancelled live one — cancelling it",
 				"project_id", projectID, "scheduled_id", succID, "live_id", p.id)
+			var mSub, cus *string
+			if err := tx.QueryRow(ctx,
+				`UPDATE public.subscriptions
+				    SET status = 'canceled', canceled_at = now()
+				  WHERE id = $1
+				  RETURNING mollie_subscription_id, mollie_customer_id`,
+				succID,
+			).Scan(&mSub, &cus); err != nil {
+				return false, fmt.Errorf("cancel superseded scheduled subscription: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return false, err
+			}
+			if client != nil && mSub != nil && cus != nil && *mSub != "" {
+				if _, cerr := client.CancelSubscription(ctx, *cus, *mSub); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+					slog.Error("billing: cancel of superseded scheduled subscription at mollie failed",
+						"project_id", projectID, "subscription_id", succID, "error", cerr)
+				}
+			}
 			return false, nil
 		}
 	}

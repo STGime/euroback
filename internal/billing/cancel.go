@@ -116,13 +116,27 @@ func (s *Service) CancelSubscription(ctx context.Context, userID, subscriptionID
 				return nil, fmt.Errorf("cancel scheduled mollie subscription: %w", cerr)
 			}
 		}
-		if _, err := s.pool.Exec(ctx,
+		tag, err := s.pool.Exec(ctx,
 			`UPDATE public.subscriptions
 			    SET status = 'canceled', canceled_at = now()
 			  WHERE id = $1 AND status = 'scheduled'`,
 			subscriptionID,
-		); err != nil {
+		)
+		if err != nil {
 			return nil, fmt.Errorf("cancel scheduled subscription: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// It took over in the meantime: it is now the live
+			// subscription, cancelled at Mollie above — end it with the
+			// current period like any end-of-period cancel.
+			if _, err := s.pool.Exec(ctx,
+				`UPDATE public.subscriptions
+				    SET canceled_at = COALESCE(canceled_at, now())
+				  WHERE id = $1`,
+				subscriptionID,
+			); err != nil {
+				return nil, fmt.Errorf("stamp canceled_at: %w", err)
+			}
 		}
 		slog.Info("billing: scheduled subscription canceled", "subscription_id", subscriptionID)
 		return &CancelResult{Mode: CancelModeEndOfPeriod, EffectiveAt: time.Now().UTC()}, nil

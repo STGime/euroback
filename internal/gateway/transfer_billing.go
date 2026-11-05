@@ -7,6 +7,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/billing"
 	"github.com/eurobase/euroback/internal/tenant"
+	"github.com/jackc/pgx/v5"
 )
 
 // transferBillingHooks adapts the billing service to the project ownership
@@ -16,12 +17,12 @@ func transferBillingHooks(svc *billing.Service) (tenant.BillingHandover, tenant.
 	if svc == nil {
 		return nil, nil
 	}
-	handover := func(ctx context.Context, projectID string) (bool, *time.Time, error) {
-		res, err := svc.HandOverOnTransfer(ctx, projectID)
-		if res == nil {
-			return false, nil, err
+	handover := func(ctx context.Context, tx pgx.Tx, projectID string) (bool, *time.Time, func(context.Context), error) {
+		res, finish, err := svc.HandOverInTx(ctx, tx, projectID)
+		if err != nil {
+			return false, nil, nil, err
 		}
-		return res.HandedOver, res.PaidUntil, err
+		return res.HandedOver, res.PaidUntil, func(ctx context.Context) { finish(ctx) }, nil
 	}
 	check := func(ctx context.Context, projectID string) error {
 		err := svc.CheckTransferable(ctx, projectID)

@@ -91,6 +91,15 @@ type Subscription struct {
 	CanceledAt      *time.Time        `json:"canceledAt,omitempty"`
 }
 
+// TodayInAmsterdam is today's date as Mollie counts days (YYYY-MM-DD).
+func TodayInAmsterdam(now time.Time) string {
+	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		amsterdam = time.FixedZone("CET", 3600)
+	}
+	return now.In(amsterdam).Format("2006-01-02")
+}
+
 // DefaultRecurringStartDate returns the yyyy-mm-dd string that
 // callers should pass as `SubscriptionCreateRequest.StartDate`
 // when creating a monthly recurring subscription right after a

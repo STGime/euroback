@@ -57,11 +57,14 @@ const transferTokenTTL = 7 * 24 * time.Hour
 // same token committed first).
 var errAlreadyAccepted = errors.New("transfer already accepted")
 
-// BillingHandover runs once ownership has moved: it closes what the previous
-// owner had open on the project and cancels their paid subscription at the
-// end of the period they paid for. handedOver reports whether there was one;
-// paidUntil is when it ends. Injected so this package doesn't import billing.
-type BillingHandover func(ctx context.Context, projectID string) (handedOver bool, paidUntil *time.Time, err error)
+// BillingHandover runs inside the ownership transaction: it closes what the
+// previous owner had open on the project and cancels their paid subscription
+// at the end of the period they paid for, so the transfer and the billing
+// change commit together. handedOver reports whether there was a paid
+// subscription; paidUntil is when it ends. finish runs after the commit (the
+// calls to the payment provider). Injected so this package doesn't import
+// billing.
+type BillingHandover func(ctx context.Context, tx pgx.Tx, projectID string) (handedOver bool, paidUntil *time.Time, finish func(context.Context), err error)
 
 // CheckTransferable returns ErrTransferPaymentOverdue when the project's
 // billing state doesn't allow a transfer (its last payment failed: there's
@@ -192,7 +195,6 @@ func HandleInitiateTransfer(pool *pgxpool.Pool, reauth ReauthFunc, checkTransfer
 			     sent_at         = now(),
 			     accepted_at     = NULL
 			 WHERE project_ownership_transfers.accepted_at IS NOT NULL
-			    OR project_ownership_transfers.expires_at < now()
 			    OR project_ownership_transfers.sent_at < now() - $6::interval`,
 			projectID, email, hash, claims.Subject, expiresAt,
 			fmt.Sprintf("%d seconds", int(transferResendInterval.Seconds())),
@@ -274,9 +276,13 @@ func HandleCancelTransfer(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Expire rather than delete: the row keeps sent_at, so cancelling
+		// and re-sending stays under the re-send throttle. The emailed
+		// link stops working either way.
 		tag, err := pool.Exec(r.Context(),
-			`DELETE FROM public.project_ownership_transfers
-			  WHERE project_id = $1 AND accepted_at IS NULL`,
+			`UPDATE public.project_ownership_transfers
+			    SET expires_at = now()
+			  WHERE project_id = $1 AND accepted_at IS NULL AND expires_at > now()`,
 			projectID,
 		)
 		if err != nil {
@@ -444,6 +450,9 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, handover BillingHandover, checkTra
 		// address, expiry): the owner may have withdrawn or redirected it
 		// since it was read above. The owner_id update is conditional on
 		// the owner read above, so a concurrent change aborts the transfer.
+		billingHandover := false
+		var paidUntil *time.Time
+		var finish func(context.Context)
 		txErr := func() error {
 			tx, err := pool.Begin(r.Context())
 			if err != nil {
@@ -486,9 +495,12 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, handover BillingHandover, checkTra
 			); err != nil {
 				return fmt.Errorf("promote new owner: %w", err)
 			}
+			// The scope guards again, on the row being changed: an org
+			// attach or a Team upgrade may have committed since the read.
 			tag, err = tx.Exec(r.Context(),
 				`UPDATE public.projects SET owner_id = $1
-				  WHERE id = $2 AND owner_id = $3 AND status = 'active'`,
+				  WHERE id = $2 AND owner_id = $3 AND status = 'active'
+				    AND org_id IS NULL AND plan NOT IN ('team', 'legal_team')`,
 				claims.Subject, projectID, oldOwnerID,
 			)
 			if err != nil {
@@ -496,6 +508,22 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, handover BillingHandover, checkTra
 			}
 			if tag.RowsAffected() == 0 {
 				return errAlreadyAccepted
+			}
+			// A pending invitation to the new owner would, if accepted
+			// later, overwrite their owner membership with a lower role.
+			if _, err := tx.Exec(r.Context(),
+				`DELETE FROM public.project_invitations
+				  WHERE project_id = $1 AND lower(email) = lower($2)`,
+				projectID, claims.Email,
+			); err != nil {
+				return fmt.Errorf("drop pending invitation: %w", err)
+			}
+			if handover != nil {
+				handed, until, fin, err := handover(r.Context(), tx, projectID)
+				if err != nil {
+					return fmt.Errorf("billing handover: %w", err)
+				}
+				billingHandover, paidUntil, finish = handed, until, fin
 			}
 			return tx.Commit(r.Context())
 		}()
@@ -509,19 +537,14 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, handover BillingHandover, checkTra
 			return
 		}
 
-		// Ownership has moved: hand the billing over. Only on a committed
-		// transfer, so a lost race can never cancel the previous owner's
-		// subscription. If it fails the transfer still stands; log loudly
-		// for ops (a charge Mollie still makes is refunded by the webhook).
-		billingHandover := false
-		var paidUntil *time.Time
-		if handover != nil {
-			handed, until, err := handover(r.Context(), projectID)
-			if err != nil {
-				slog.Error("transfer: NEEDS RECONCILE — ownership moved but the billing handover failed",
-					"project_id", projectID, "error", err)
-			}
-			billingHandover, paidUntil = handed, until
+		// Committed: stop the previous owner's charges at the payment
+		// provider. Detached from the request so a closed tab doesn't cut
+		// it short; a failure here is covered by the webhook (later
+		// charges are refunded) and the period-end retry.
+		if finish != nil {
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+			finish(fctx)
+			cancel()
 		}
 
 		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
@@ -576,7 +599,7 @@ func renderTransferEmail(projectName, fromEmail, token string) string {
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; color: #111;">
   <h2 style="color: #1e40af; margin-top: 0;">You've been offered ownership of a Eurobase project</h2>
   <p><strong>` + html.EscapeString(fromEmail) + `</strong> wants to transfer the project <strong>` + html.EscapeString(projectName) + `</strong> to you.</p>
-  <p>If you accept, you become the project's owner: you'll manage its settings, members and billing. The previous owner stays on as an admin unless they leave.</p>
+  <p>If you accept, you become the project's owner: you'll manage its settings, members and billing. The previous owner stays on as an admin unless you remove them.</p>
   <p style="margin: 24px 0;">
     <a href="` + acceptURL + `" style="display: inline-block; background: #2563eb; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">
       Review &amp; accept transfer

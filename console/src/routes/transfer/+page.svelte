@@ -102,9 +102,13 @@
 						</svg>
 					</div>
 					<h2 class="text-center text-lg font-semibold text-gray-900">Accept project ownership</h2>
+					<p class="text-center text-sm text-gray-500 break-all">
+						Signed in as <strong class="text-gray-700">{$user?.email}</strong>. The offer must have been sent to this address —
+						otherwise <button type="button" onclick={redirectToLogin} class="cursor-pointer font-medium text-eurobase-600 hover:text-eurobase-700">sign in with another account</button>.
+					</p>
 					<p class="text-sm text-gray-500">
 						Accepting makes you the <strong>owner</strong> of this project — you'll manage its settings, members and billing.
-						The previous owner stays on as an admin unless they leave.
+						The previous owner stays on as an admin unless you remove them.
 					</p>
 					<p class="text-sm text-gray-500">
 						If the project is on a paid plan, it stays on that plan until the end of the period the current owner has paid for.

@@ -304,10 +304,40 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	// end of the period the previous subscription paid for); the
 	// zero-amount first payment only set up the mandate.
 	startDate := mollie.DefaultRecurringStartDate(time.Now())
-	if scheduled && startsAt != nil {
-		startDate = startsAt.UTC().Format("2006-01-02")
-		if today := time.Now().UTC().Format("2006-01-02"); startDate < today {
-			startDate = today
+	if scheduled {
+		// A scheduled subscription only starts while the one it follows
+		// is the project's only live subscription and is cancelled (or
+		// already gone). If another live subscription started meanwhile
+		// (the owner subscribed normally after a Free gap), starting this
+		// one would charge twice: close it instead.
+		var conflicting int
+		if cerr := s.pool.QueryRow(ctx,
+			`SELECT count(*) FROM public.subscriptions
+			  WHERE project_id = $1
+			    AND status IN ('incomplete', 'active', 'past_due')
+			    AND canceled_at IS NULL`,
+			projectID,
+		).Scan(&conflicting); cerr != nil {
+			return fmt.Errorf("check live subscriptions: %w", cerr)
+		}
+		if conflicting > 0 {
+			slog.Warn("billing.webhook.scheduled_superseded",
+				"subscription_id", subscriptionID, "project_id", projectID)
+			if _, uerr := s.pool.Exec(ctx,
+				`UPDATE public.subscriptions
+				    SET status = 'canceled', canceled_at = now()
+				  WHERE id = $1 AND status = 'scheduled' AND mollie_subscription_id IS NULL`,
+				subscriptionID,
+			); uerr != nil {
+				return fmt.Errorf("close superseded scheduled subscription: %w", uerr)
+			}
+			return nil
+		}
+		if startsAt != nil {
+			startDate = startsAt.UTC().Format("2006-01-02")
+			if today := mollie.TodayInAmsterdam(time.Now()); startDate < today {
+				startDate = today
+			}
 		}
 	}
 	mollieSub, err := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
@@ -335,14 +365,21 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	if scheduled {
 		// Stays 'scheduled' until starts_at: the current subscription
 		// keeps the project on its plan until then.
-		if _, err := s.pool.Exec(ctx,
+		tag, err := s.pool.Exec(ctx,
 			`UPDATE public.subscriptions
 			    SET mollie_subscription_id = $1,
 			        next_charge_at = $2
-			  WHERE id = $3 AND status = 'scheduled'`,
+			  WHERE id = $3 AND status = 'scheduled' AND mollie_subscription_id IS NULL`,
 			mollieSub.ID, firstChargeDate(mollieSub), subscriptionID,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("confirm scheduled subscription: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// Closed while we were creating it (e.g. the project changed
+			// owner): don't leave a Mollie subscription nothing tracks.
+			s.abandonActivation(ctx, payment, mollieSub.ID, subscriptionID)
+			return nil
 		}
 		slog.Info("billing.webhook.scheduled",
 			"subscription_id", subscriptionID,
@@ -368,7 +405,7 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx,
+	flip, err := tx.Exec(ctx,
 		`UPDATE public.subscriptions
 		    SET mollie_subscription_id = $1,
 		        status = 'active',
@@ -376,8 +413,17 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 		        next_charge_at = $2
 		  WHERE id = $3 AND status = 'incomplete'`,
 		mollieSub.ID, nextChargeAt, subscriptionID,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("flip subscription to active: %w", err)
+	}
+	if flip.RowsAffected() == 0 {
+		// The checkout was closed while we were creating the Mollie
+		// subscription (e.g. the project changed owner): no invoice, no
+		// plan change, and nothing left charging.
+		_ = tx.Rollback(ctx)
+		s.abandonActivation(ctx, payment, mollieSub.ID, subscriptionID)
+		return nil
 	}
 
 	if _, err := tx.Exec(ctx,
@@ -716,11 +762,31 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 	return nil
 }
 
+// abandonActivation undoes a Mollie subscription created for a checkout
+// that was closed meanwhile: cancels it and refunds a non-zero first
+// payment. Best-effort; failures are logged loudly for ops.
+func (s *Service) abandonActivation(ctx context.Context, payment *mollie.Payment, mollieSubID, subscriptionID string) {
+	slog.Error("billing.webhook.activation_for_closed_checkout — cancelling",
+		"subscription_id", subscriptionID, "mollie_subscription_id", mollieSubID, "mollie_payment_id", payment.ID)
+	if _, err := s.client.CancelSubscription(ctx, payment.CustomerID, mollieSubID); err != nil && !errors.Is(err, mollie.ErrNotFound) {
+		slog.Error("billing.webhook.abandon_cancel_failed",
+			"subscription_id", subscriptionID, "mollie_subscription_id", mollieSubID, "error", err)
+	}
+	if payment.Amount.Value != "" && payment.Amount.Value != "0.00" {
+		_ = s.refundOrphanedPayment(ctx, payment, "checkout closed during activation")
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE public.invoices SET status = 'refunded' WHERE mollie_payment_id = $1`, payment.ID,
+		); err != nil {
+			slog.Warn("billing.webhook.abandon_invoice_update_failed", "mollie_payment_id", payment.ID, "error", err)
+		}
+	}
+}
+
 // refundOrphanedPayment issues a Mollie refund for a payment we
 // took but can't fulfill (pending row expired, project creation
 // failed, etc.). Best-effort — we log if the refund itself fails,
 // since manual intervention is required for such cases anyway.
-func (s *Service) refundOrphanedPayment(ctx context.Context, payment *mollie.Payment, reason string) {
+func (s *Service) refundOrphanedPayment(ctx context.Context, payment *mollie.Payment, reason string) error {
 	_, err := s.client.CreateRefund(ctx, payment.ID, mollie.RefundCreateRequest{
 		Amount:      payment.Amount,
 		Description: fmt.Sprintf("Auto-refund: %s (payment %s)", reason, payment.ID),
@@ -731,12 +797,13 @@ func (s *Service) refundOrphanedPayment(ctx context.Context, payment *mollie.Pay
 			"reason", reason,
 			"error", err,
 		)
-		return
+		return err
 	}
 	slog.Warn("billing.webhook.refunded_orphan",
 		"mollie_payment_id", payment.ID,
 		"reason", reason,
 	)
+	return nil
 }
 
 // nullIfEmpty returns a nullable pointer suitable for pgx to marshal
@@ -798,10 +865,15 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	if canceledAt != nil && payment.CreatedAt.After(*canceledAt) {
 		slog.Error("billing.webhook.charge_after_cancel — refunding",
 			"subscription_id", subscriptionID, "mollie_payment_id", payment.ID)
-		s.refundOrphanedPayment(ctx, payment, "charged after the subscription was cancelled")
+		refundErr := s.refundOrphanedPayment(ctx, payment, "charged after the subscription was cancelled")
 		if _, cerr := s.client.CancelSubscription(ctx, payment.CustomerID, payment.SubscriptionID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
 			slog.Error("billing.webhook.cancel_retry_failed",
 				"subscription_id", subscriptionID, "error", cerr)
+		}
+		if refundErr != nil {
+			// Fails the webhook so the failure metric fires and Mollie
+			// re-delivers; the refund's idempotency key makes a retry safe.
+			return fmt.Errorf("refund charge after cancel %s: %w", payment.ID, refundErr)
 		}
 		return nil
 	}

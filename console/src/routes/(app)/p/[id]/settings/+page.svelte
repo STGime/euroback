@@ -146,13 +146,17 @@
 		}
 	}
 
+	let cancelTransferError: string | null = $state(null);
 	async function handleCancelTransfer() {
 		if (!confirm('Cancel the pending ownership transfer?')) return;
 		cancellingTransfer = true;
+		cancelTransferError = null;
 		try {
 			await api.cancelTransfer(projectId);
 			await loadTransfer();
-		} catch { /* ignore */ }
+		} catch (err) {
+			cancelTransferError = err instanceof Error ? err.message : 'Failed to cancel the transfer';
+		}
 		cancellingTransfer = false;
 	}
 
@@ -386,10 +390,11 @@
 				<h2 class="text-lg font-semibold text-gray-900">Transfer ownership</h2>
 				<p class="mt-1 text-sm text-gray-500">
 					Hand this project to another person's account — for example, to the client it was built for.
-					They accept by email while signed in to their own account. You stay on as an admin unless you leave.
+					They accept by email while signed in to their own account. You stay on as an admin unless the new owner
+					removes you.
 					On a paid plan, your subscription ends with the period you've already paid for (no refund, no further
 					charges). The new owner can set up theirs right away and is first charged when your period ends, so the
-					project never drops to Free.
+					project stays on its plan if they subscribe before then.
 				</p>
 
 				{#if transferMessage}
@@ -397,8 +402,8 @@
 				{/if}
 
 				{#if pendingTransfer}
-					<div class="mt-4 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-						<div class="text-sm text-amber-800">
+					<div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+						<div class="min-w-0 break-all text-sm text-amber-800">
 							Pending transfer to <strong>{pendingTransfer.email}</strong>
 							<span class="text-amber-600">· expires {formatTransferDate(pendingTransfer.expires_at)}</span>
 						</div>
@@ -410,6 +415,9 @@
 						>
 							{cancellingTransfer ? 'Cancelling…' : 'Cancel transfer'}
 						</button>
+						{#if cancelTransferError}
+							<p class="w-full text-sm text-red-700">{cancelTransferError}</p>
+						{/if}
 					</div>
 				{:else}
 					<div class="mt-4">
