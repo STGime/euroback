@@ -85,6 +85,8 @@
 	let inviteError = $state('');
 	let resending: string | null = $state(null);
 	let isOwner = $derived(members.some(m => m.role === 'owner' && m.email === $user?.email));
+	// The server refuses Team / Legal Team transfers; don't offer the button.
+	let isTeamPlan = $derived(projectCtx.project?.plan === 'team' || projectCtx.project?.plan === 'legal_team');
 
 	// ── Ownership transfer (#846) ──
 	let pendingTransfer: PendingTransfer | null = $state(null);
@@ -419,6 +421,10 @@
 							<p class="w-full text-sm text-red-700">{cancelTransferError}</p>
 						{/if}
 					</div>
+				{:else if isTeamPlan}
+					<p class="mt-4 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-600">
+						Team projects can't be transferred yet. <a href="/support" class="underline hover:text-gray-800">Contact support</a> if you need to move one.
+					</p>
 				{:else}
 					<div class="mt-4">
 						<button

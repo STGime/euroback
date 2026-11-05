@@ -29,7 +29,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Transferring ownership</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					The owner sees a <strong>Transfer ownership</strong> card above the danger zone. <strong>Transfer this project&hellip;</strong> hands the project to another person's account; they accept by email while signed in, and you stay on as an admin. A pending transfer is shown in the same card with <strong>Cancel transfer</strong>. How it works, including what happens to a paid subscription, is described in chapter 19, <em>Team Collaboration</em> &rarr; Transferring ownership.
+					The owner sees a <strong>Transfer ownership</strong> card above the danger zone. <strong>Transfer this project&hellip;</strong> hands the project to another person's account (not available for Team / Legal Team projects yet); they accept by email while signed in, and you stay on as an admin. A pending transfer is shown in the same card with <strong>Cancel transfer</strong>. How it works, including what happens to a paid subscription, is described in chapter 19, <em>Team Collaboration</em> &rarr; Transferring ownership.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Danger zone &mdash; deleting a project</h3>
