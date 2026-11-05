@@ -19,6 +19,7 @@
 package mollie
 
 import (
+	"encoding/json"
 	"log/slog"
 	"time"
 )
@@ -214,12 +215,28 @@ type PaymentCreateRequest struct {
 	RedirectURL  string            `json:"redirectUrl,omitempty"`
 	CancelURL    string            `json:"cancelUrl,omitempty"`
 	WebhookURL   string            `json:"webhookUrl,omitempty"`
-	Method       string            `json:"method,omitempty"`
+	Method       PaymentMethods    `json:"method,omitempty"`
 	CustomerID   string            `json:"customerId,omitempty"`
 	SequenceType SequenceType      `json:"sequenceType,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Locale       string            `json:"locale,omitempty"`
 }
+
+// PaymentMethods restricts which methods Mollie's checkout offers. Mollie
+// takes a single method as a string and several as an array; empty lets
+// the customer choose any method enabled on the account.
+type PaymentMethods []string
+
+func (m PaymentMethods) MarshalJSON() ([]byte, error) {
+	if len(m) == 1 {
+		return json.Marshal(m[0])
+	}
+	return json.Marshal([]string(m))
+}
+
+// MandateMethods are the methods Mollie accepts for a zero-amount first
+// payment, which only sets up a mandate.
+var MandateMethods = PaymentMethods{"creditcard", "paypal"}
 
 // LinkObject is Mollie's canonical link envelope.
 type LinkObject struct {

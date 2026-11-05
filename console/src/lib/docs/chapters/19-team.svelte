@@ -43,8 +43,9 @@
 					When they accept: they become the <strong>owner</strong>, you're demoted to <strong>admin</strong> (so you can keep helping, or leave the project), and both sides are recorded in the audit log. The recipient needs room for the project under their own plan's project limit.
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
-					<li><strong>Paid projects:</strong> the project stays on its paid plan through the period you've already paid for — you're not charged again, and you aren't refunded for the remainder. Once that period ends, the new owner starts their own subscription from <strong>Settings &rarr; Billing</strong> (there may be a short gap on the Free plan until they do). There's no double-billing: only one subscription is ever active for a project at a time, so the new owner's first charge is the next cycle.</li>
-					<li><strong>Invoices already issued stay with you</strong> &mdash; keep the copies emailed to you at the time. New invoices go to the new owner.</li>
+					<li><strong>Paid projects:</strong> your subscription ends with the period you've already paid for &mdash; no further charges and no refund for the remainder. The new owner can set up their own subscription in <strong>Billing</strong> right away: they confirm a card or PayPal account (€0 today) and are first charged on the day your period ends. Example: you paid for October and transfer on 14 October; the new owner subscribes any day before 1 November and is first charged on 1 November. No gap, and nobody pays for October twice. If they haven't subscribed by then, the project moves to the Free plan until they do.</li>
+					<li><strong>Overdue payments:</strong> if the project's last payment failed, update the payment method in Billing first &mdash; a transfer is refused until it's settled.</li>
+					<li><strong>Invoices stay with whoever paid them</strong> &mdash; yours stay in your account, the new owner's go to theirs.</li>
 					<li><strong>Not yet transferable this way:</strong> projects attached to an organization, and Team / Legal Team projects &mdash; contact support for those.</li>
 				</ul>
 

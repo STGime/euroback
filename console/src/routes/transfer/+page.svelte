@@ -9,6 +9,7 @@
 	let errorMessage = $state('');
 	let projectId = $state('');
 	let billingHandover = $state(false);
+	let paidUntil = $state<string | null>(null);
 	let token = $state('');
 
 	onMount(() => {
@@ -30,8 +31,10 @@
 			const result = await api.acceptTransfer(token);
 			projectId = result.project_id;
 			billingHandover = result.billing_handover;
+			paidUntil = result.paid_until ?? null;
 			status = 'success';
-			setTimeout(() => goto(`/p/${projectId}`), 3000);
+			// With a paid period to take over, the next step is billing.
+			if (!billingHandover) setTimeout(() => goto(`/p/${projectId}`), 3000);
 		} catch (err) {
 			status = 'error';
 			errorMessage = err instanceof Error ? err.message : 'Failed to accept the transfer.';
@@ -104,9 +107,9 @@
 						The previous owner stays on as an admin unless they leave.
 					</p>
 					<p class="text-sm text-gray-500">
-						If the project is on a paid plan, it keeps running through the period the previous owner already paid for.
-						Once that period ends you set up your own subscription from <strong>Settings &rarr; Billing</strong> to continue on a paid plan
-						(there may be a short gap before you subscribe, during which the project is on the Free plan).
+						If the project is on a paid plan, it stays on that plan until the end of the period the current owner has paid for.
+						Set up your own subscription in <strong>Billing</strong> any time before then: you're first charged when that
+						period ends, so there's no gap and no double charge.
 					</p>
 					<button
 						onclick={acceptTransfer}
@@ -124,11 +127,17 @@
 					</div>
 					<h2 class="text-lg font-semibold text-gray-900">You're now the owner</h2>
 					{#if billingHandover}
-						<p class="text-sm text-gray-500">The project stays on its paid plan through the current billing period. Once that period ends, start your own subscription from <strong>Settings → Billing</strong> to keep it on a paid plan — there may be a brief gap on the Free plan until you do.</p>
+						<p class="text-sm text-gray-500">
+							The previous owner's subscription covers the project{paidUntil
+								? ` until ${new Date(paidUntil).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`
+								: ' until the end of the current period'}. Set up your own subscription before then to stay on the paid plan — you won't be charged until that date.
+						</p>
+						<a href="/p/{projectId}/billing" class="inline-block rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-semibold text-white hover:bg-eurobase-700">Set up billing</a>
+						<a href="/p/{projectId}" class="block text-sm text-eurobase-600 hover:text-eurobase-700 font-medium">Later — go to the project</a>
 					{:else}
 						<p class="text-sm text-gray-500">Redirecting to your project…</p>
+						<a href="/p/{projectId}" class="inline-block text-sm text-eurobase-600 hover:text-eurobase-700 font-medium">Go to project now</a>
 					{/if}
-					<a href="/p/{projectId}" class="inline-block text-sm text-eurobase-600 hover:text-eurobase-700 font-medium">Go to project now</a>
 				</div>
 			{:else if status === 'error'}
 				<div class="text-center space-y-4">

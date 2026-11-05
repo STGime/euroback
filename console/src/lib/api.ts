@@ -1035,7 +1035,7 @@ export class EurobaseAPI {
 	async startBillingCheckout(
 		projectId: string,
 		planCode: 'pro' | 'team' = 'pro'
-	): Promise<{ subscription_id: string; checkout_url: string }> {
+	): Promise<{ subscription_id: string; checkout_url: string; starts_at?: string }> {
 		return this.fetch('/platform/billing/checkout', {
 			method: 'POST',
 			body: JSON.stringify({ project_id: projectId, plan_code: planCode })
@@ -2223,7 +2223,12 @@ export class EurobaseAPI {
 	/** Accept an ownership transfer (recipient, signed in to their own account). */
 	async acceptTransfer(
 		token: string
-	): Promise<{ status: string; project_id: string; billing_handover: boolean }> {
+	): Promise<{
+		status: string;
+		project_id: string;
+		billing_handover: boolean;
+		paid_until?: string | null;
+	}> {
 		return this.fetch('/platform/transfers/accept', {
 			method: 'POST',
 			body: JSON.stringify({ token })
@@ -3508,6 +3513,18 @@ export interface ProjectSubscription {
 	currency: string;
 	next_charge_at?: string | null;
 	canceled_at?: string | null;
+	/** False while a previous owner's subscription runs out after an
+	 * ownership transfer. */
+	paid_by_you: boolean;
+	/** The caller's subscription waiting to take over when this one
+	 * ends; nothing is charged before starts_at. */
+	scheduled?: {
+		id: string;
+		plan_code: string;
+		price_cents: number;
+		currency: string;
+		starts_at: string;
+	} | null;
 }
 
 /** Buyer identity + address for Estonian VAT Act §37 invoice

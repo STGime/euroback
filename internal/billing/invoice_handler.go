@@ -49,7 +49,7 @@ func HandleListInvoices(svc *Service) http.HandlerFunc {
 			        i.invoice_number
 			   FROM public.invoices i
 			   JOIN public.projects p ON p.id = i.project_id
-			  WHERE COALESCE(i.billed_to_user_id, p.owner_id) = $1::uuid
+			  WHERE i.billed_to_user_id = $1::uuid
 			  ORDER BY i.created_at DESC
 			  LIMIT 500`,
 			claims.Subject,
@@ -104,6 +104,20 @@ type subscriptionSummary struct {
 	Currency     string     `json:"currency"`
 	NextChargeAt *time.Time `json:"next_charge_at,omitempty"`
 	CanceledAt   *time.Time `json:"canceled_at,omitempty"`
+	// PaidByYou is false while the previous owner's subscription runs
+	// out after an ownership transfer.
+	PaidByYou bool `json:"paid_by_you"`
+	// Scheduled is the caller's subscription waiting to take over when
+	// the current one ends (handover.go); nil when there's none.
+	Scheduled *scheduledSummary `json:"scheduled,omitempty"`
+}
+
+type scheduledSummary struct {
+	ID         string    `json:"id"`
+	PlanCode   string    `json:"plan_code"`
+	PriceCents int       `json:"price_cents"`
+	Currency   string    `json:"currency"`
+	StartsAt   time.Time `json:"starts_at"`
 }
 
 // HandleGetProjectSubscription is
@@ -132,7 +146,10 @@ func HandleGetProjectSubscription(svc *Service) http.HandlerFunc {
 		var sum subscriptionSummary
 		err := svc.pool.QueryRow(r.Context(),
 			`SELECT s.id, s.plan, s.status, s.price_cents, s.currency,
-			        s.next_charge_at, s.canceled_at
+			        s.next_charge_at, s.canceled_at,
+			        NOT EXISTS (SELECT 1 FROM public.platform_users other
+			                     WHERE other.mollie_customer_id = s.mollie_customer_id
+			                       AND other.id <> $2::uuid)
 			   FROM public.subscriptions s
 			   JOIN public.projects p ON p.id = s.project_id
 			  WHERE s.project_id = $1
@@ -142,7 +159,23 @@ func HandleGetProjectSubscription(svc *Service) http.HandlerFunc {
 			  LIMIT 1`,
 			projectID, claims.Subject,
 		).Scan(&sum.ID, &sum.PlanCode, &sum.Status, &sum.PriceCents, &sum.Currency,
-			&sum.NextChargeAt, &sum.CanceledAt)
+			&sum.NextChargeAt, &sum.CanceledAt, &sum.PaidByYou)
+		if err == nil {
+			var sc scheduledSummary
+			serr := svc.pool.QueryRow(r.Context(),
+				`SELECT s.id, s.plan, s.price_cents, s.currency, s.starts_at
+				   FROM public.subscriptions s
+				  WHERE s.project_id = $1 AND s.status = 'scheduled'
+				    AND s.mollie_subscription_id IS NOT NULL`,
+				projectID,
+			).Scan(&sc.ID, &sc.PlanCode, &sc.PriceCents, &sc.Currency, &sc.StartsAt)
+			switch {
+			case serr == nil:
+				sum.Scheduled = &sc
+			case !errors.Is(serr, pgx.ErrNoRows):
+				err = serr
+			}
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "subscription_not_found", "no live subscription for this project")
 			return
@@ -205,7 +238,7 @@ func HandleDownloadInvoicePDF(svc *Service) http.HandlerFunc {
 			createdAt     time.Time
 		)
 		err := svc.pool.QueryRow(r.Context(),
-			`SELECT i.pdf_object_key, (COALESCE(i.billed_to_user_id, p.owner_id) = $2::uuid) AS owner_match,
+			`SELECT i.pdf_object_key, COALESCE(i.billed_to_user_id = $2::uuid, false) AS owner_match,
 			        i.invoice_number, i.created_at
 			   FROM public.invoices i
 			   JOIN public.projects p ON p.id = i.project_id

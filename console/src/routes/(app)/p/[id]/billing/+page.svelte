@@ -155,6 +155,35 @@
 		}
 	}
 
+	function formatDay(iso?: string | null): string {
+		if (!iso) return '';
+		return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+	}
+
+	// The current subscription is ending (paid by a previous owner after an
+	// ownership transfer, or cancelled at period end): a new one can be set
+	// up now and is first charged when the current period ends.
+	let endingSub = $derived.by((): ProjectSubscription | null => {
+		const sub = subscription;
+		if (!sub || sub.status !== 'active') return null;
+		return !sub.paid_by_you || sub.canceled_at ? sub : null;
+	});
+
+	let cancelingScheduled = $state(false);
+	async function cancelScheduled(): Promise<void> {
+		if (!subscription?.scheduled) return;
+		if (!confirm(`Cancel the subscription that would start on ${formatDay(subscription.scheduled.starts_at)}? Nothing has been charged.`)) return;
+		cancelingScheduled = true;
+		try {
+			await api.cancelSubscription(subscription.scheduled.id, 'end_of_period');
+			await refresh();
+		} catch (err) {
+			checkoutError = err instanceof Error ? err.message : String(err);
+		} finally {
+			cancelingScheduled = false;
+		}
+	}
+
 	function formatEUR(cents: number, currency: string): string {
 		const prefix = currency === 'EUR' ? '€' : `${currency} `;
 		const abs = Math.abs(cents);
@@ -274,6 +303,22 @@
 						<p class="mt-2 text-sm text-gray-600">
 							100k MAU · 100 GB storage · 250 GB bandwidth · never pauses.
 						</p>
+						{#if endingSub}
+							{@const until = formatDay(endingSub.next_charge_at)}
+							{#if endingSub.scheduled}
+								<p class="mt-2 text-sm text-green-800">
+									{endingSub.paid_by_you ? 'Paid' : 'Paid by the previous owner'} until {until}. Your subscription takes over on {formatDay(endingSub.scheduled.starts_at)} — {formatEUR(endingSub.scheduled.price_cents, endingSub.scheduled.currency)}/month, first charged that day.
+								</p>
+							{:else if !endingSub.paid_by_you}
+								<p class="mt-2 text-sm font-medium text-amber-800">
+									Paid by the previous owner until {until}. Set up your subscription before then to stay on Pro — you won't be charged until {until}.
+								</p>
+							{:else}
+								<p class="mt-2 text-sm text-amber-800">
+									Cancelled — Pro until {until}. Subscribe again before then to keep Pro without a gap; you won't be charged until {until}.
+								</p>
+							{/if}
+						{/if}
 					{:else if project.plan === 'team' || project.plan === 'legal_team'}
 						<p class="mt-2 text-sm text-gray-600">
 							1M MAU · 100 GB dedicated database · 500 GB file storage · never pauses.
@@ -310,6 +355,28 @@
 						<span class="inline-flex rounded-full bg-eurobase-100 px-3 py-1 text-xs font-medium text-eurobase-800">
 							Beta grant · active
 						</span>
+					{:else if endingSub}
+						{#if endingSub.scheduled}
+							<button
+								type="button"
+								onclick={cancelScheduled}
+								disabled={cancelingScheduled}
+								class="text-sm text-gray-600 hover:text-red-700 disabled:opacity-50"
+							>
+								{cancelingScheduled ? 'Cancelling…' : 'Cancel new subscription'}
+							</button>
+						{:else}
+							<button
+								type="button"
+								onclick={startCheckout}
+								disabled={checkoutInFlight || !checkoutReady}
+								title={!checkoutReady ? 'Payments unavailable — please refresh' : undefined}
+								class="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+							>
+								{checkoutInFlight ? 'Redirecting…' : 'Set up subscription'}
+							</button>
+							<p class="mt-1 max-w-[16rem] text-xs text-gray-500">Card or PayPal. €0 today; first charge {formatDay(endingSub.next_charge_at)}.</p>
+						{/if}
 					{:else}
 						<div class="flex items-center gap-3">
 							<span class="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"

@@ -387,8 +387,9 @@
 				<p class="mt-1 text-sm text-gray-500">
 					Hand this project to another person's account — for example, to the client it was built for.
 					They accept by email while signed in to their own account. You stay on as an admin unless you leave.
-					On a paid plan, the project keeps running through the period you've already paid for, and the new
-					owner sets up their own billing from the next cycle.
+					On a paid plan, your subscription ends with the period you've already paid for (no refund, no further
+					charges). The new owner can set up theirs right away and is first charged when your period ends, so the
+					project never drops to Free.
 				</p>
 
 				{#if transferMessage}

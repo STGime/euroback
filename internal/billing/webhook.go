@@ -217,42 +217,87 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	}
 
 	// Check current state before doing external work.
-	var currentStatus string
-	var existingMollieSub *string
+	var (
+		currentStatus     string
+		existingMollieSub *string
+		startsAt          *time.Time
+		priceCents        int
+		subCustomerID     *string
+		ownerCustomerID   *string
+	)
 	err := s.pool.QueryRow(ctx,
-		`SELECT status, mollie_subscription_id
-		   FROM public.subscriptions
-		  WHERE id = $1`,
-		subscriptionID,
-	).Scan(&currentStatus, &existingMollieSub)
+		`SELECT s.status, s.mollie_subscription_id, s.starts_at, s.price_cents,
+		        s.mollie_customer_id, u.mollie_customer_id
+		   FROM public.subscriptions s
+		   JOIN public.projects p ON p.id = s.project_id
+		   JOIN public.platform_users u ON u.id = p.owner_id
+		  WHERE s.id = $1 AND s.project_id = $2`,
+		subscriptionID, projectID,
+	).Scan(&currentStatus, &existingMollieSub, &startsAt, &priceCents, &subCustomerID, &ownerCustomerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("subscription %s not found (payment %s)", subscriptionID, payment.ID)
 	}
 	if err != nil {
 		return fmt.Errorf("load subscription %s: %w", subscriptionID, err)
 	}
-	if currentStatus == "active" && existingMollieSub != nil && *existingMollieSub != "" {
+	confirmed := existingMollieSub != nil && *existingMollieSub != ""
+	if confirmed && (currentStatus == "active" || currentStatus == "scheduled") {
 		// Already activated — likely a webhook retry. Just make
 		// sure the invoice is marked paid (idempotent below).
 		return s.markInvoicePaid(ctx, payment)
+	}
+	// A checkout that was closed meanwhile (the project changed owner,
+	// the owner started another one) or a payer who no longer owns the
+	// project: never start a subscription on their mandate.
+	// The payer must be the customer the checkout was started for, and
+	// that customer must belong to the project's current owner (a NULL
+	// on platform_users means the ID was never persisted there; the
+	// checkout row still carries it).
+	scheduled := currentStatus == "scheduled"
+	payerIsOwner := subCustomerID != nil && *subCustomerID == payment.CustomerID &&
+		(ownerCustomerID == nil || *ownerCustomerID == payment.CustomerID)
+	if (currentStatus != "incomplete" && !scheduled) || !payerIsOwner {
+		slog.Warn("billing.webhook.first_payment_for_closed_checkout",
+			"subscription_id", subscriptionID, "project_id", projectID,
+			"status", currentStatus, "mollie_payment_id", payment.ID)
+		if _, uerr := s.pool.Exec(ctx,
+			`UPDATE public.subscriptions
+			    SET status = 'canceled', canceled_at = COALESCE(canceled_at, now())
+			  WHERE id = $1 AND status IN ('incomplete', 'scheduled')
+			    AND mollie_subscription_id IS NULL`,
+			subscriptionID,
+		); uerr != nil {
+			return fmt.Errorf("close checkout %s: %w", subscriptionID, uerr)
+		}
+		if payment.Amount.Value != "" && payment.Amount.Value != "0.00" {
+			s.refundOrphanedPayment(ctx, payment, "checkout no longer valid")
+			if _, uerr := s.pool.Exec(ctx,
+				`UPDATE public.invoices SET status = 'refunded' WHERE mollie_payment_id = $1`,
+				payment.ID,
+			); uerr != nil {
+				slog.Warn("billing.webhook.orphan_invoice_update_failed", "mollie_payment_id", payment.ID, "error", uerr)
+			}
+		}
+		return nil
 	}
 
 	// Create the Mollie recurring subscription. Amount + interval
 	// derive from our subscriptions row (source of truth is our
 	// DB — Mollie's payment amount is just the first charge).
-	var priceCents int
-	err = s.pool.QueryRow(ctx,
-		`SELECT price_cents FROM public.subscriptions WHERE id = $1`,
-		subscriptionID,
-	).Scan(&priceCents)
-	if err != nil {
-		return fmt.Errorf("read price_cents for %s: %w", subscriptionID, err)
+	// A scheduled subscription's first charge is on starts_at (the
+	// end of the period the previous subscription paid for); the
+	// zero-amount first payment only set up the mandate.
+	startDate := mollie.DefaultRecurringStartDate(time.Now())
+	if scheduled && startsAt != nil {
+		startDate = startsAt.UTC().Format("2006-01-02")
+		if today := time.Now().UTC().Format("2006-01-02"); startDate < today {
+			startDate = today
+		}
 	}
-
 	mollieSub, err := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
 		Amount:      mollie.AmountFromCents(priceCents, "EUR"),
 		Interval:    "1 month",
-		StartDate:   mollie.DefaultRecurringStartDate(time.Now()),
+		StartDate:   startDate,
 		Description: payment.Description,
 		// Pin the recurring subscription to the mandate captured
 		// by THIS first payment. Without this, Mollie picks the
@@ -269,6 +314,31 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	}, mollie.WithIdempotencyKey("activate:"+subscriptionID))
 	if err != nil {
 		return fmt.Errorf("create mollie subscription: %w", err)
+	}
+
+	if scheduled {
+		// Stays 'scheduled' until starts_at: the current subscription
+		// keeps the project on its plan until then.
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE public.subscriptions
+			    SET mollie_subscription_id = $1,
+			        next_charge_at = $2
+			  WHERE id = $3 AND status = 'scheduled'`,
+			mollieSub.ID, firstChargeDate(mollieSub), subscriptionID,
+		); err != nil {
+			return fmt.Errorf("confirm scheduled subscription: %w", err)
+		}
+		slog.Info("billing.webhook.scheduled",
+			"subscription_id", subscriptionID,
+			"project_id", projectID,
+			"mollie_subscription_id", mollieSub.ID,
+			"start_date", startDate,
+		)
+		// Late confirmation (the period already ended): take over now.
+		if _, perr := promoteScheduled(ctx, s.pool, s.client, projectID); perr != nil {
+			slog.Warn("billing.webhook.promote_failed", "project_id", projectID, "error", perr)
+		}
+		return nil
 	}
 
 	// Flip state atomically. next_charge_at from Mollie's
@@ -675,20 +745,49 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	}
 
 	// Look up our subscription row via Mollie's ID.
-	var subscriptionID, projectID string
+	var subscriptionID, projectID, status string
 	var priceCents int
-	var prevNextCharge *time.Time
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, project_id, price_cents, next_charge_at
-		   FROM public.subscriptions
-		  WHERE mollie_subscription_id = $1`,
-		payment.SubscriptionID,
-	).Scan(&subscriptionID, &projectID, &priceCents, &prevNextCharge)
+	var prevNextCharge, canceledAt *time.Time
+	load := func() error {
+		return s.pool.QueryRow(ctx,
+			`SELECT id, project_id, status, price_cents, next_charge_at, canceled_at
+			   FROM public.subscriptions
+			  WHERE mollie_subscription_id = $1`,
+			payment.SubscriptionID,
+		).Scan(&subscriptionID, &projectID, &status, &priceCents, &prevNextCharge, &canceledAt)
+	}
+	err := load()
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("no local subscription for mollie sub %s", payment.SubscriptionID)
 	}
 	if err != nil {
 		return fmt.Errorf("load subscription: %w", err)
+	}
+
+	// First charge of a scheduled subscription (handover.go) before the
+	// hourly sweep promoted it: promote now.
+	if status == "scheduled" {
+		if _, perr := promoteScheduled(ctx, s.pool, s.client, projectID); perr != nil {
+			return fmt.Errorf("promote scheduled subscription: %w", perr)
+		}
+		if err := load(); err != nil {
+			return fmt.Errorf("reload subscription: %w", err)
+		}
+	}
+
+	// A charge Mollie created after we cancelled the subscription means
+	// the cancel didn't reach Mollie (e.g. during an ownership transfer):
+	// refund it rather than bill a period nobody asked for, and cancel
+	// again.
+	if canceledAt != nil && payment.CreatedAt.After(*canceledAt) {
+		slog.Error("billing.webhook.charge_after_cancel — refunding",
+			"subscription_id", subscriptionID, "mollie_payment_id", payment.ID)
+		s.refundOrphanedPayment(ctx, payment, "charged after the subscription was cancelled")
+		if _, cerr := s.client.CancelSubscription(ctx, payment.CustomerID, payment.SubscriptionID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+			slog.Error("billing.webhook.cancel_retry_failed",
+				"subscription_id", subscriptionID, "error", cerr)
+		}
+		return nil
 	}
 
 	// Fetch canonical next_charge_at from Mollie (their
@@ -716,7 +815,15 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 		`INSERT INTO public.invoices
 		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at, billed_to_user_id)
 		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(),
-		         (SELECT owner_id FROM public.projects WHERE id = $1))
+		         -- The payer: whoever the subscription's Mollie customer
+		         -- belongs to, which after a transfer isn't necessarily
+		         -- the project's current owner.
+		         COALESCE(
+		           (SELECT u.id FROM public.platform_users u
+		              JOIN public.subscriptions s ON s.mollie_customer_id = u.mollie_customer_id
+		             WHERE s.id = $2
+		             ORDER BY u.created_at LIMIT 1),
+		           (SELECT owner_id FROM public.projects WHERE id = $1)))
 		 ON CONFLICT (mollie_payment_id) DO NOTHING`,
 		projectID, subscriptionID, payment.ID, priceCents,
 	)
@@ -804,7 +911,8 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 				    SET status = 'canceled',
 				        canceled_at = now()
 				  WHERE id = $1
-				    AND status = 'incomplete'`,
+				    AND (status = 'incomplete'
+				         OR (status = 'scheduled' AND mollie_subscription_id IS NULL))`,
 				subID,
 			); err != nil {
 				slog.Warn("billing.webhook.subscription_cancel_on_abandonment_failed",
@@ -844,6 +952,21 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 			}
 		}
 		return nil
+	}
+
+	// A failed first charge of a scheduled subscription: it takes over
+	// first, so the failure is tracked on the subscription now in force.
+	var schedProject string
+	if qerr := s.pool.QueryRow(ctx,
+		`SELECT project_id FROM public.subscriptions
+		  WHERE mollie_subscription_id = $1 AND status = 'scheduled'`,
+		payment.SubscriptionID,
+	).Scan(&schedProject); qerr == nil {
+		if _, perr := promoteScheduled(ctx, s.pool, s.client, schedProject); perr != nil {
+			return fmt.Errorf("promote scheduled subscription: %w", perr)
+		}
+	} else if !errors.Is(qerr, pgx.ErrNoRows) {
+		return fmt.Errorf("load scheduled subscription: %w", qerr)
 	}
 
 	res, err := s.pool.Exec(ctx,
@@ -915,7 +1038,7 @@ func (s *Service) processSubscriptionWebhook(ctx context.Context, subscriptionID
 			    SET status = 'canceled',
 			        canceled_at = COALESCE(canceled_at, now())
 			  WHERE mollie_subscription_id = $1
-			    AND status IN ('active', 'past_due')`,
+			    AND status IN ('active', 'past_due', 'scheduled')`,
 			subscriptionID,
 		); err != nil {
 			return fmt.Errorf("mark canceled: %w", err)

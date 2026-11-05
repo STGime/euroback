@@ -803,18 +803,12 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			} else {
 				r.Use(platformAuth.Handler)
 			}
-			var cancelSub tenant.CancelSubAtPeriodEnd
-			if billingSvc != nil {
-				cancelSub = func(ctx context.Context, ownerID, subID string) error {
-					_, err := billingSvc.CancelSubscription(ctx, ownerID, subID, billing.CancelModeEndOfPeriod)
-					return err
-				}
-			}
+			handover, checkTransferable := transferBillingHooks(billingSvc)
 			var checkLimit tenant.CheckOwnerProjectLimit
 			if limitsSvc != nil {
 				checkLimit = limitsSvc.CheckProjectLimit
 			}
-			r.With(auth.RequirePersonalSession).Post("/accept", tenant.HandleAcceptTransfer(pool, cancelSub, checkLimit))
+			r.With(auth.RequirePersonalSession).Post("/accept", tenant.HandleAcceptTransfer(pool, handover, checkTransferable, checkLimit))
 		})
 
 		// Team-tier organizations — CRUD + membership + SSO config.
@@ -1382,12 +1376,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 			// Ownership transfer (#846) — owner only, console session.
 			// Initiate requires a fresh re-auth (giving the project away).
+			_, transferCheck := transferBillingHooks(billingSvc)
 			var transferReauth tenant.ReauthFunc
 			if platformAuthSvc != nil {
 				transferReauth = platformAuthSvc.CheckPasskeyReauth
 			}
 			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Get("/transfer", tenant.HandleGetTransfer(pool))
-			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Post("/transfer", tenant.HandleInitiateTransfer(pool, transferReauth, sendEmailFn))
+			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Post("/transfer", tenant.HandleInitiateTransfer(pool, transferReauth, transferCheck, sendEmailFn))
 			r.With(auth.RequireConsoleSession, tenant.RequireMinRole("owner")).Delete("/transfer", tenant.HandleCancelTransfer(pool))
 
 			// Edge Functions (serverless compute management).

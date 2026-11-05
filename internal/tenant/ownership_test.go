@@ -81,8 +81,8 @@ func seedTransfer(t *testing.T, pool *pgxpool.Pool, plan string, expiresAt time.
 	raw := "tok-" + unique
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO public.project_ownership_transfers
-		     (project_id, new_owner_email, token_hash, initiated_by, expires_at)
-		 VALUES ($1,$2,$3,$4,$5)`,
+		     (project_id, new_owner_email, token_hash, initiated_by, expires_at, sent_at)
+		 VALUES ($1,$2,$3,$4,$5, now() - interval '2 minutes')`,
 		projectID, newEmail, hashToken(raw), oldID, expiresAt,
 	); err != nil {
 		t.Fatalf("seed transfer: %v", err)
@@ -112,16 +112,20 @@ func initiateRequest(fx *transferFixture, asUserID, asEmail, role, toEmail, pass
 	ctx = WithRole(ctx, role)
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
-	HandleInitiateTransfer(fx.pool, reauth, nil)(w, req)
+	HandleInitiateTransfer(fx.pool, reauth, nil, nil)(w, req)
 	return w
 }
 
-func acceptRequest(fx *transferFixture, asUserID, asEmail, token string, cancelSub CancelSubAtPeriodEnd, checkLimit CheckOwnerProjectLimit) *httptest.ResponseRecorder {
+func acceptRequest(fx *transferFixture, asUserID, asEmail, token string, handover BillingHandover, checkLimit CheckOwnerProjectLimit) *httptest.ResponseRecorder {
+	return acceptRequestWith(fx, asUserID, asEmail, token, handover, nil, checkLimit)
+}
+
+func acceptRequestWith(fx *transferFixture, asUserID, asEmail, token string, handover BillingHandover, check CheckTransferable, checkLimit CheckOwnerProjectLimit) *httptest.ResponseRecorder {
 	body, _ := json.Marshal(map[string]string{"token": token})
 	req := httptest.NewRequest(http.MethodPost, "/platform/transfers/accept", strings.NewReader(string(body)))
 	req = req.WithContext(auth.ContextWithClaims(req.Context(), &auth.Claims{Subject: asUserID, Email: asEmail}))
 	w := httptest.NewRecorder()
-	HandleAcceptTransfer(fx.pool, cancelSub, checkLimit)(w, req)
+	HandleAcceptTransfer(fx.pool, handover, check, checkLimit)(w, req)
 	return w
 }
 
@@ -195,28 +199,36 @@ func TestAcceptTransfer_BillingHandover(t *testing.T) {
 		t.Fatalf("seed subscription: %v", err)
 	}
 
-	var gotOwner, gotSub string
-	cancelSub := func(ctx context.Context, ownerID, subscriptionID string) error {
-		gotOwner, gotSub = ownerID, subscriptionID
-		return nil
+	_ = subID
+	paidUntil := time.Now().Add(10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	var gotProject, ownerAtHandover string
+	handover := func(ctx context.Context, projectID string) (bool, *time.Time, error) {
+		gotProject = projectID
+		// Runs only after the ownership flip has committed.
+		_ = pool.QueryRow(ctx, `SELECT owner_id FROM public.projects WHERE id = $1`, projectID).Scan(&ownerAtHandover)
+		return true, &paidUntil, nil
 	}
 
-	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, cancelSub, nil)
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, handover, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	if gotOwner != fx.newOwnerID {
-		t.Errorf("cancelSub owner = %s, want new owner %s (cancel runs after the flip, as the new owner)", gotOwner, fx.newOwnerID)
+	if gotProject != fx.projectID {
+		t.Errorf("handover project = %q, want %s", gotProject, fx.projectID)
 	}
-	if gotSub != subID {
-		t.Errorf("cancelSub subID = %s, want %s", gotSub, subID)
+	if ownerAtHandover != fx.newOwnerID {
+		t.Errorf("owner at handover = %s, want new owner %s (handover runs after the flip)", ownerAtHandover, fx.newOwnerID)
 	}
 	var resp struct {
-		BillingHandover bool `json:"billing_handover"`
+		BillingHandover bool       `json:"billing_handover"`
+		PaidUntil       *time.Time `json:"paid_until"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	if !resp.BillingHandover {
 		t.Errorf("billing_handover = false, want true")
+	}
+	if resp.PaidUntil == nil || !resp.PaidUntil.Equal(paidUntil) {
+		t.Errorf("paid_until = %v, want %v", resp.PaidUntil, paidUntil)
 	}
 }
 
@@ -321,7 +333,7 @@ func TestAcceptTransfer_LiveSubNoBillingHook(t *testing.T) {
 		t.Fatalf("seed subscription: %v", err)
 	}
 
-	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil /* no cancelSub */, nil)
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil /* no billing hook */, nil)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body=%s", w.Code, w.Body.String())
 	}
@@ -346,7 +358,7 @@ func TestInitiateTransfer_TeamPlanRefused(t *testing.T) {
 	pool := setupTestDB(t)
 	fx := seedTransfer(t, pool, "legal_team", time.Now().Add(time.Hour))
 
-	w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@example.com", "", nil)
+	w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@eurobase.app", "", nil)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (team plan); body=%s", w.Code, w.Body.String())
 	}
@@ -363,13 +375,116 @@ func TestInitiateTransfer_ReauthRequired(t *testing.T) {
 		return nil
 	}
 	// No password → reauth_required.
-	w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@example.com", "", reauth)
+	w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@eurobase.app", "", reauth)
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "reauth_required") {
 		t.Fatalf("status = %d body=%s, want 403 reauth_required", w.Code, w.Body.String())
 	}
 	// With password → succeeds (201).
-	w = initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@example.com", "hunter2", reauth)
+	w = initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "new-client@eurobase.app", "hunter2", reauth)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// The owner redirected (or withdrew) the offer after the recipient opened
+// it: the old token no longer matches the row and the accept is refused.
+func TestAcceptTransfer_OfferChangedMeanwhile(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE public.project_ownership_transfers SET token_hash = $2 WHERE project_id = $1`,
+		fx.projectID, hashToken("a-newer-offer"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil)
+	if w.Code == http.StatusOK {
+		t.Fatalf("accept with a replaced token succeeded; body=%s", w.Body.String())
+	}
+	assertOwner(t, fx, fx.oldOwnerID)
+}
+
+func TestAcceptTransfer_SuspendedProjectOrSender(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE public.projects SET status = 'suspended' WHERE id = $1`, fx.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if w := acceptRequest(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, nil, nil); w.Code != http.StatusConflict {
+		t.Fatalf("suspended project: status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+	assertOwner(t, fx, fx.oldOwnerID)
+
+	fx2 := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE public.platform_users SET suspended_at = now() WHERE id = $1`, fx2.oldOwnerID); err != nil {
+		t.Fatal(err)
+	}
+	if w := acceptRequest(fx2, fx2.newOwnerID, fx2.newEmail, fx2.rawToken, nil, nil); w.Code != http.StatusConflict {
+		t.Fatalf("suspended sender: status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+	assertOwner(t, fx2, fx2.oldOwnerID)
+}
+
+func TestAcceptTransfer_PaymentOverdueRefused(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "pro", time.Now().Add(time.Hour))
+	overdue := func(ctx context.Context, projectID string) error { return ErrTransferPaymentOverdue }
+	called := false
+	handover := func(ctx context.Context, projectID string) (bool, *time.Time, error) {
+		called = true
+		return false, nil, nil
+	}
+	w := acceptRequestWith(fx, fx.newOwnerID, fx.newEmail, fx.rawToken, handover, overdue, nil)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "payment_overdue") {
+		t.Fatalf("status = %d, want 409 payment_overdue; body=%s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Error("billing handover ran for a refused transfer")
+	}
+	assertOwner(t, fx, fx.oldOwnerID)
+}
+
+func TestInitiateTransfer_ReservedDomainAndThrottle(t *testing.T) {
+	pool := setupTestDB(t)
+	fx := seedTransfer(t, pool, "free", time.Now().Add(time.Hour))
+	ok := func(context.Context, *auth.Claims, string) error { return nil }
+
+	if w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "someone@example.com", "", ok); w.Code != http.StatusBadRequest {
+		t.Fatalf("reserved domain: status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+
+	// An offer sent just now can't be replaced within a minute.
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE public.project_ownership_transfers SET sent_at = now() WHERE project_id = $1`,
+		fx.projectID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "other-"+fx.newEmail, "", ok); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("immediate re-send: status = %d, want 429; body=%s", w.Code, w.Body.String())
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE public.project_ownership_transfers SET sent_at = now() - interval '2 minutes' WHERE project_id = $1`,
+		fx.projectID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if w := initiateRequest(fx, fx.oldOwnerID, fx.oldEmail, "owner", "other-"+fx.newEmail, "", ok); w.Code != http.StatusCreated {
+		t.Fatalf("re-send after a minute: status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func assertOwner(t *testing.T, fx *transferFixture, want string) {
+	t.Helper()
+	var owner string
+	if err := fx.pool.QueryRow(context.Background(),
+		`SELECT owner_id FROM public.projects WHERE id = $1`, fx.projectID,
+	).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != want {
+		t.Errorf("owner = %s, want %s", owner, want)
 	}
 }

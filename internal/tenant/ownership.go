@@ -13,6 +13,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/mailaddr"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,11 +57,23 @@ const transferTokenTTL = 7 * 24 * time.Hour
 // same token committed first).
 var errAlreadyAccepted = errors.New("transfer already accepted")
 
-// CancelSubAtPeriodEnd cancels a project's live subscription at period end,
-// run as the current owner. Injected from the billing service so this
-// package doesn't import billing (same pattern as SetSubscriptionCanceller).
-// nil when billing is disabled.
-type CancelSubAtPeriodEnd func(ctx context.Context, ownerID, subscriptionID string) error
+// BillingHandover runs once ownership has moved: it closes what the previous
+// owner had open on the project and cancels their paid subscription at the
+// end of the period they paid for. handedOver reports whether there was one;
+// paidUntil is when it ends. Injected so this package doesn't import billing.
+type BillingHandover func(ctx context.Context, projectID string) (handedOver bool, paidUntil *time.Time, err error)
+
+// CheckTransferable returns ErrTransferPaymentOverdue when the project's
+// billing state doesn't allow a transfer (its last payment failed: there's
+// no paid period to hand over).
+type CheckTransferable func(ctx context.Context, projectID string) error
+
+// ErrTransferPaymentOverdue: see CheckTransferable.
+var ErrTransferPaymentOverdue = errors.New("transfer: the project's last payment failed")
+
+// transferResendInterval throttles re-sending (or redirecting) an offer: each
+// send emails an address the owner picks.
+const transferResendInterval = time.Minute
 
 // CheckOwnerProjectLimit returns a non-nil error when ownerID is already at
 // their plan's project cap. Injected from plans.LimitsService.CheckProjectLimit.
@@ -81,7 +94,7 @@ type initiateTransferRequest struct {
 
 // HandleInitiateTransfer starts a transfer of a project to another user.
 // POST /platform/projects/{id}/transfer  (owner only, console session)
-func HandleInitiateTransfer(pool *pgxpool.Pool, reauth ReauthFunc, sendEmail func(ctx context.Context, to, subject, html string) error) http.HandlerFunc {
+func HandleInitiateTransfer(pool *pgxpool.Pool, reauth ReauthFunc, checkTransferable CheckTransferable, sendEmail func(ctx context.Context, to, subject, html string) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 		claims, _, ok := RequireRole(w, r, pool, projectID, "owner")
@@ -120,6 +133,10 @@ func HandleInitiateTransfer(pool *pgxpool.Pool, reauth ReauthFunc, sendEmail fun
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "you cannot transfer a project to yourself"})
 			return
 		}
+		if mailaddr.IsReserved(email) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this address can't receive email (reserved test domain) — use a real address"})
+			return
+		}
 
 		// Load the project and apply the v1 scope guards.
 		var (
@@ -148,6 +165,9 @@ func HandleInitiateTransfer(pool *pgxpool.Pool, reauth ReauthFunc, sendEmail fun
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "Team-tier projects can't be transferred yet — contact support"})
 			return
 		}
+		if !transferBillingOK(w, r, checkTransferable, projectID) {
+			return
+		}
 
 		raw, hash, err := generateInviteToken()
 		if err != nil {
@@ -157,7 +177,10 @@ func HandleInitiateTransfer(pool *pgxpool.Pool, reauth ReauthFunc, sendEmail fun
 		}
 		expiresAt := time.Now().Add(transferTokenTTL)
 
-		if _, err := pool.Exec(r.Context(),
+		// A pending offer sent less than transferResendInterval ago isn't
+		// replaced (the WHERE on the conflict update): each send emails an
+		// address the owner chooses.
+		tag, err := pool.Exec(r.Context(),
 			`INSERT INTO public.project_ownership_transfers
 			     (project_id, new_owner_email, token_hash, initiated_by, expires_at, sent_at)
 			 VALUES ($1, $2, $3, $4, $5, now())
@@ -167,11 +190,20 @@ func HandleInitiateTransfer(pool *pgxpool.Pool, reauth ReauthFunc, sendEmail fun
 			     initiated_by    = EXCLUDED.initiated_by,
 			     expires_at      = EXCLUDED.expires_at,
 			     sent_at         = now(),
-			     accepted_at     = NULL`,
+			     accepted_at     = NULL
+			 WHERE project_ownership_transfers.accepted_at IS NOT NULL
+			    OR project_ownership_transfers.expires_at < now()
+			    OR project_ownership_transfers.sent_at < now() - $6::interval`,
 			projectID, email, hash, claims.Subject, expiresAt,
-		); err != nil {
+			fmt.Sprintf("%d seconds", int(transferResendInterval.Seconds())),
+		)
+		if err != nil {
 			slog.Error("transfer: upsert", "project_id", projectID, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create transfer"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "an offer was just sent — wait a minute before sending another"})
 			return
 		}
 
@@ -276,7 +308,7 @@ type acceptTransferRequest struct {
 
 // HandleAcceptTransfer accepts a transfer: the signed-in recipient becomes
 // the project's owner. POST /platform/transfers/accept  (personal session)
-func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, checkLimit CheckOwnerProjectLimit) http.HandlerFunc {
+func HandleAcceptTransfer(pool *pgxpool.Pool, handover BillingHandover, checkTransferable CheckTransferable, checkLimit CheckOwnerProjectLimit) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, hasAuth := auth.ClaimsFromContext(r.Context())
 		if !hasAuth || claims == nil {
@@ -342,26 +374,36 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			return
 		}
 
-		// Current owner + plan, re-checked under the live row.
+		// Current owner + plan, re-checked under the live row. The project
+		// must still be active and its owner not suspended: an offer made
+		// before a project or account was suspended doesn't survive it.
 		var (
-			oldOwnerID string
-			plan       string
-			orgID      *string
+			oldOwnerID     string
+			plan           string
+			projectStatus  string
+			orgID          *string
+			ownerSuspended bool
 		)
 		if err := pool.QueryRow(r.Context(),
-			`SELECT owner_id, plan, org_id FROM public.projects WHERE id = $1`,
+			`SELECT p.owner_id, p.plan, p.status, p.org_id, u.suspended_at IS NOT NULL
+			   FROM public.projects p
+			   JOIN public.platform_users u ON u.id = p.owner_id
+			  WHERE p.id = $1`,
 			projectID,
-		).Scan(&oldOwnerID, &plan, &orgID); err != nil {
+		).Scan(&oldOwnerID, &plan, &projectStatus, &orgID, &ownerSuspended); err != nil {
 			slog.Error("transfer: accept load project", "project_id", projectID, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load project"})
 			return
 		}
-		if orgID != nil || plan == "team" || plan == "legal_team" {
+		if orgID != nil || plan == "team" || plan == "legal_team" || projectStatus != "active" || ownerSuspended {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "this project can no longer be transferred this way — contact support"})
 			return
 		}
 		if oldOwnerID == claims.Subject {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "you already own this project"})
+			return
+		}
+		if !transferBillingOK(w, r, checkTransferable, projectID) {
 			return
 		}
 
@@ -376,45 +418,54 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			}
 		}
 
-		// Does the project have a genuinely paying subscription to hand
-		// over? ('incomplete' is an abandoned checkout — bills nobody — so
-		// it's not a handover.) We look it up BEFORE the flip but only
-		// CANCEL it AFTER the ownership tx commits, so a lost race or a
-		// failed tx can never cancel the old owner's subscription without
-		// the transfer actually happening.
-		var liveSubID string
-		subErr := pool.QueryRow(r.Context(),
-			`SELECT id FROM public.subscriptions
-			  WHERE project_id = $1 AND status IN ('active','past_due')
-			  ORDER BY created_at DESC LIMIT 1`,
-			projectID,
-		).Scan(&liveSubID)
-		if subErr != nil && !errors.Is(subErr, pgx.ErrNoRows) {
-			slog.Error("transfer: find live subscription", "project_id", projectID, "error", subErr)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load billing"})
-			return
-		}
-		hasLiveSub := subErr == nil
-		// A live subscription needs the billing hook to hand it over;
-		// without it the old owner would keep being charged for a project
-		// they no longer own — refuse rather than transfer unsafely.
-		if hasLiveSub && cancelSub == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "billing handover is unavailable right now — please try again later or contact support"})
-			return
+		// A paid subscription needs the billing hook to hand it over;
+		// without it the previous owner would keep being charged for a
+		// project they no longer own — refuse rather than transfer unsafely.
+		if handover == nil {
+			var paid bool
+			if err := pool.QueryRow(r.Context(),
+				`SELECT EXISTS (SELECT 1 FROM public.subscriptions
+				                 WHERE project_id = $1
+				                   AND status IN ('incomplete', 'scheduled', 'active', 'past_due'))`,
+				projectID,
+			).Scan(&paid); err != nil {
+				slog.Error("transfer: find subscription", "project_id", projectID, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load billing"})
+				return
+			}
+			if paid {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "billing handover is unavailable right now — please try again later or contact support"})
+				return
+			}
 		}
 
 		// Reassign ownership atomically. The transfer row is claimed with a
-		// compare-and-swap (accepted_at IS NULL) so the token is single-use
-		// and concurrent accepts serialize on its row lock. Because nothing
-		// is committed until the CAS wins, a failure here leaves accepted_at
-		// NULL and the recipient can safely retry — the billing cancel above
-		// is idempotent (COALESCE on canceled_at).
+		// compare-and-swap that also re-checks the offer itself (token,
+		// address, expiry): the owner may have withdrawn or redirected it
+		// since it was read above. The owner_id update is conditional on
+		// the owner read above, so a concurrent change aborts the transfer.
 		txErr := func() error {
 			tx, err := pool.Begin(r.Context())
 			if err != nil {
 				return err
 			}
 			defer tx.Rollback(r.Context())
+
+			tag, err := tx.Exec(r.Context(),
+				`UPDATE public.project_ownership_transfers
+				    SET accepted_at = now()
+				  WHERE id = $1 AND accepted_at IS NULL
+				    AND token_hash = $2
+				    AND lower(new_owner_email) = lower($3)
+				    AND expires_at > now()`,
+				transferID, hashToken(req.Token), claims.Email,
+			)
+			if err != nil {
+				return fmt.Errorf("stamp accepted_at: %w", err)
+			}
+			if tag.RowsAffected() == 0 {
+				return errAlreadyAccepted
+			}
 
 			// Old owner becomes admin. Upsert (not a conditional UPDATE) so
 			// a project somehow missing its owner membership row still
@@ -435,20 +486,13 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			); err != nil {
 				return fmt.Errorf("promote new owner: %w", err)
 			}
-			if _, err := tx.Exec(r.Context(),
-				`UPDATE public.projects SET owner_id = $1 WHERE id = $2`,
-				claims.Subject, projectID,
-			); err != nil {
-				return fmt.Errorf("reassign owner_id: %w", err)
-			}
-			tag, err := tx.Exec(r.Context(),
-				`UPDATE public.project_ownership_transfers
-				    SET accepted_at = now()
-				  WHERE id = $1 AND accepted_at IS NULL`,
-				transferID,
+			tag, err = tx.Exec(r.Context(),
+				`UPDATE public.projects SET owner_id = $1
+				  WHERE id = $2 AND owner_id = $3 AND status = 'active'`,
+				claims.Subject, projectID, oldOwnerID,
 			)
 			if err != nil {
-				return fmt.Errorf("stamp accepted_at: %w", err)
+				return fmt.Errorf("reassign owner_id: %w", err)
 			}
 			if tag.RowsAffected() == 0 {
 				return errAlreadyAccepted
@@ -456,7 +500,7 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			return tx.Commit(r.Context())
 		}()
 		if errors.Is(txErr, errAlreadyAccepted) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "this transfer has already been accepted"})
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "this offer is no longer valid — it was accepted, withdrawn or changed. Ask the owner to send a new one"})
 			return
 		}
 		if txErr != nil {
@@ -465,19 +509,19 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			return
 		}
 
-		// Ownership has moved. Now cancel the old owner's subscription at
-		// period end, run as the NEW owner (who now owns the project, so the
-		// billing ownership check passes). Best-effort and only on a
-		// committed transfer: if it fails the transfer still stands and we
-		// log loudly for ops (the new owner can also cancel it themselves).
+		// Ownership has moved: hand the billing over. Only on a committed
+		// transfer, so a lost race can never cancel the previous owner's
+		// subscription. If it fails the transfer still stands; log loudly
+		// for ops (a charge Mollie still makes is refunded by the webhook).
 		billingHandover := false
-		if hasLiveSub && cancelSub != nil {
-			if err := cancelSub(r.Context(), claims.Subject, liveSubID); err != nil {
-				slog.Error("transfer: NEEDS RECONCILE — ownership moved but the old subscription cancel failed; the new owner holds the previous owner's live subscription",
-					"project_id", projectID, "subscription_id", liveSubID, "error", err)
-			} else {
-				billingHandover = true
+		var paidUntil *time.Time
+		if handover != nil {
+			handed, until, err := handover(r.Context(), projectID)
+			if err != nil {
+				slog.Error("transfer: NEEDS RECONCILE — ownership moved but the billing handover failed",
+					"project_id", projectID, "error", err)
 			}
+			billingHandover, paidUntil = handed, until
 		}
 
 		if auditSvc := audit.FromContext(r.Context()); auditSvc != nil {
@@ -487,6 +531,7 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 				audit.WithMetadata(map[string]interface{}{
 					"from_owner_id":    oldOwnerID,
 					"billing_handover": billingHandover,
+					"paid_until":       paidUntil,
 				}),
 				audit.WithIP(r.RemoteAddr))
 		}
@@ -495,8 +540,32 @@ func HandleAcceptTransfer(pool *pgxpool.Pool, cancelSub CancelSubAtPeriodEnd, ch
 			"status":           "accepted",
 			"project_id":       projectID,
 			"billing_handover": billingHandover,
+			"paid_until":       paidUntil,
 		})
 	}
+}
+
+// transferBillingOK refuses (and writes the response) when the project's
+// billing state doesn't allow a transfer. A nil check (billing disabled)
+// allows it.
+func transferBillingOK(w http.ResponseWriter, r *http.Request, check CheckTransferable, projectID string) bool {
+	if check == nil {
+		return true
+	}
+	err := check(r.Context(), projectID)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, ErrTransferPaymentOverdue) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "this project's last payment failed — the owner needs to update the payment method in Billing before it can be transferred",
+			"code":  "payment_overdue",
+		})
+		return false
+	}
+	slog.Error("transfer: billing check", "project_id", projectID, "error", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load billing"})
+	return false
 }
 
 // renderTransferEmail builds the recipient email with a /transfer?token= link.
@@ -513,7 +582,7 @@ func renderTransferEmail(projectName, fromEmail, token string) string {
       Review &amp; accept transfer
     </a>
   </p>
-  <p style="color: #6b7280; font-size: 13px;">You'll accept while signed in to your own Eurobase account. If this project is on a paid plan, it stays active through the period the previous owner already paid for, and you'll set up your own billing from the next cycle. This offer expires in 7 days.</p>
+  <p style="color: #6b7280; font-size: 13px;">You'll accept while signed in to your own Eurobase account. If this project is on a paid plan, it stays on that plan until the end of the period the current owner has paid for. You can set up your own subscription in Billing any time before then: your card isn't charged until that period ends, so there's no gap and no double charge. This offer expires in 7 days.</p>
   <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0 16px;">
   <p style="color: #9ca3af; font-size: 12px; margin: 16px 0 0;">If you didn't expect this, you can safely ignore this email — nothing changes unless you accept.</p>
 </body>

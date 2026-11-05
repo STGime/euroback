@@ -314,6 +314,9 @@ func (s *Service) Mode() string { return s.config.Mode }
 type CheckoutResult struct {
 	SubscriptionID string
 	CheckoutURL    string
+	// StartsAt is set for a scheduled subscription (see handover.go):
+	// nothing is charged until then.
+	StartsAt *time.Time
 }
 
 // CreateCheckout starts the payment flow for a project. Steps:
@@ -369,62 +372,21 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	// 2. Pre-check for an existing live subscription. The unique
 	// partial index enforces this at insert time; the pre-check
 	// just gives a cleaner error path for the common (non-race)
-	// case.
-	var existing string
-	err = s.pool.QueryRow(ctx,
-		`SELECT id FROM public.subscriptions
-		  WHERE project_id = $1 AND status IN ('incomplete', 'active', 'past_due')
-		  LIMIT 1`,
-		projectID,
-	).Scan(&existing)
-	if err == nil {
-		return nil, ErrAlreadySubscribed
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("billing: existing-sub check: %w", err)
-	}
-
-	// 3. Get or create the Mollie customer. Stored on
-	// platform_users.mollie_customer_id so a user with many
-	// projects reuses the same Mollie customer.
-	var userEmail string
-	var mollieCustomerID *string
-	err = s.pool.QueryRow(ctx,
-		`SELECT email, mollie_customer_id FROM public.platform_users WHERE id = $1::uuid`,
-		userID,
-	).Scan(&userEmail, &mollieCustomerID)
+	// case. A live subscription that is cancelled at period end and
+	// still running isn't a conflict: the new subscription is
+	// scheduled to start when it ends (handover.go).
+	predID, startsAt, schedule, err := s.scheduleTarget(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("billing: load platform_user: %w", err)
+		return nil, err
+	}
+	if schedule {
+		return s.createScheduledCheckout(ctx, userID, projectID, projectName, planCode, price, predID, startsAt)
 	}
 
-	customerID := ""
-	if mollieCustomerID != nil {
-		customerID = *mollieCustomerID
-	}
-	if customerID == "" {
-		cust, cerr := s.client.CreateCustomer(ctx, mollie.CustomerCreateRequest{
-			Email: userEmail,
-			Metadata: map[string]string{
-				"platform_user_id": userID,
-			},
-		}, mollie.WithIdempotencyKey("customer:"+userID))
-		if cerr != nil {
-			return nil, fmt.Errorf("billing: create mollie customer: %w", cerr)
-		}
-		customerID = cust.ID
-		if _, uerr := s.pool.Exec(ctx,
-			`UPDATE public.platform_users SET mollie_customer_id = $1 WHERE id = $2::uuid`,
-			customerID, userID,
-		); uerr != nil {
-			// Non-fatal: the WithIdempotencyKey("customer:"+userID)
-			// above means Mollie returns the SAME customer on retry
-			// (no leak). We just fail to remember the ID locally, so
-			// the next checkout re-derives via the same idempotency
-			// key and gets the same cst_ back. Log loudly so ops
-			// sees the drift and can investigate the DB-write path.
-			slog.Warn("billing: created Mollie customer but failed to persist ID",
-				"user_id", userID, "mollie_customer_id", customerID, "error", uerr)
-		}
+	// 3. Get or create the Mollie customer.
+	customerID, err := s.ensureMollieCustomer(ctx, userID)
+	if err != nil {
+		return nil, err
 	}
 
 	// 4. Insert the incomplete subscription row. Kept OUT of a
@@ -505,9 +467,8 @@ func (s *Service) CreateCheckout(ctx context.Context, userID, projectID, planCod
 	_, err = tx.Exec(ctx,
 		`INSERT INTO public.invoices
 		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, billed_to_user_id)
-		 VALUES ($1, $2, $3, $4, 'EUR', 'pending',
-		         (SELECT owner_id FROM public.projects WHERE id = $1))`,
-		projectID, subscriptionID, payment.ID, price,
+		 VALUES ($1, $2, $3, $4, 'EUR', 'pending', $5::uuid)`,
+		projectID, subscriptionID, payment.ID, price, userID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("billing: insert invoice: %w", err)
@@ -1040,4 +1001,50 @@ func (s *Service) RecordBetaGrant(ctx context.Context, projectID, planCode strin
 		"plan_code", planCode,
 	)
 	return subscriptionID, nil
+}
+
+// ensureMollieCustomer returns the user's Mollie customer ID, creating
+// the customer on first use. Stored on platform_users.mollie_customer_id
+// so a user with many projects reuses the same Mollie customer.
+func (s *Service) ensureMollieCustomer(ctx context.Context, userID string) (string, error) {
+	var userEmail string
+	var mollieCustomerID *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT email, mollie_customer_id FROM public.platform_users WHERE id = $1::uuid`,
+		userID,
+	).Scan(&userEmail, &mollieCustomerID)
+	if err != nil {
+		return "", fmt.Errorf("billing: load platform_user: %w", err)
+	}
+
+	customerID := ""
+	if mollieCustomerID != nil {
+		customerID = *mollieCustomerID
+	}
+	if customerID == "" {
+		cust, cerr := s.client.CreateCustomer(ctx, mollie.CustomerCreateRequest{
+			Email: userEmail,
+			Metadata: map[string]string{
+				"platform_user_id": userID,
+			},
+		}, mollie.WithIdempotencyKey("customer:"+userID))
+		if cerr != nil {
+			return "", fmt.Errorf("billing: create mollie customer: %w", cerr)
+		}
+		customerID = cust.ID
+		if _, uerr := s.pool.Exec(ctx,
+			`UPDATE public.platform_users SET mollie_customer_id = $1 WHERE id = $2::uuid`,
+			customerID, userID,
+		); uerr != nil {
+			// Non-fatal: the WithIdempotencyKey("customer:"+userID)
+			// above means Mollie returns the SAME customer on retry
+			// (no leak). We just fail to remember the ID locally, so
+			// the next checkout re-derives via the same idempotency
+			// key and gets the same cst_ back. Log loudly so ops
+			// sees the drift and can investigate the DB-write path.
+			slog.Warn("billing: created Mollie customer but failed to persist ID",
+				"user_id", userID, "mollie_customer_id", customerID, "error", uerr)
+		}
+	}
+	return customerID, nil
 }
