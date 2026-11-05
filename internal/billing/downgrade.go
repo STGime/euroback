@@ -111,6 +111,11 @@ func (s *DowngradeService) StartLoop(ctx context.Context) {
 //      Pro indefinitely — the PR 8 review caught this before
 //      merge.
 func (s *DowngradeService) RunSweep(ctx context.Context) {
+	// Scheduled subscriptions whose start date has passed take over
+	// first (handover.go), so the end-of-period branch below never drops
+	// a project that has a successor to Free.
+	s.promoteDueScheduled(ctx)
+
 	pastDue, err := s.findPastDueGraceElapsed(ctx)
 	if err != nil {
 		slog.Error("billing: past-due sweep query failed", "error", err)
@@ -135,6 +140,38 @@ func (s *DowngradeService) RunSweep(ctx context.Context) {
 	} else {
 		for _, c := range endOfPeriod {
 			s.downgradeOne(ctx, c, "end_of_period_cancel")
+		}
+	}
+}
+
+// promoteDueScheduled hands each project whose scheduled subscription has
+// reached its start date over to that subscription.
+func (s *DowngradeService) promoteDueScheduled(ctx context.Context) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT project_id FROM public.subscriptions
+		  WHERE status = 'scheduled'
+		    AND mollie_subscription_id IS NOT NULL
+		    AND starts_at <= now()
+		  LIMIT 500`,
+	)
+	if err != nil {
+		slog.Error("billing: scheduled-subscription sweep query failed", "error", err)
+		return
+	}
+	var projects []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			slog.Error("billing: scheduled-subscription sweep scan failed", "error", err)
+			return
+		}
+		projects = append(projects, id)
+	}
+	rows.Close()
+	for _, id := range projects {
+		if _, err := promoteScheduled(ctx, s.pool, s.client, id, false); err != nil {
+			slog.Error("billing: scheduled subscription takeover failed", "project_id", id, "error", err)
 		}
 	}
 }
@@ -208,6 +245,12 @@ func (s *DowngradeService) findEndOfPeriodElapsed(ctx context.Context) ([]downgr
 		    AND s.canceled_at IS NOT NULL
 		    AND s.next_charge_at IS NOT NULL
 		    AND s.next_charge_at < now()
+		    AND NOT EXISTS (
+		         SELECT 1 FROM public.subscriptions n
+		          WHERE n.project_id = s.project_id
+		            AND n.status = 'scheduled'
+		            AND n.mollie_subscription_id IS NOT NULL
+		    )
 		  ORDER BY s.canceled_at ASC
 		  LIMIT 500`,
 	)
@@ -330,16 +373,25 @@ func (s *DowngradeService) downgradeOne(ctx context.Context, c downgradeCandidat
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if c.SubscriptionID != nil {
-		if _, err := tx.Exec(ctx,
+		subRes, err := tx.Exec(ctx,
 			`UPDATE public.subscriptions
 			    SET status = 'expired',
 			        canceled_at = COALESCE(canceled_at, now())
 			  WHERE id = $1
 			    AND status IN ('active', 'past_due', 'incomplete')`,
 			*c.SubscriptionID,
-		); err != nil {
+		)
+		if err != nil {
 			slog.Error("billing: downgrade subscription update failed",
 				"project_id", c.ProjectID, "error", err)
+			return
+		}
+		// Someone else closed this subscription since the candidate was
+		// selected — e.g. a scheduled successor took over (handover.go),
+		// which also expired it. Leave the project's plan alone.
+		if subRes.RowsAffected() == 0 {
+			slog.Debug("billing: downgrade skipped — subscription already closed",
+				"project_id", c.ProjectID, "subscription_id", *c.SubscriptionID)
 			return
 		}
 	}
@@ -412,8 +464,11 @@ func (s *DowngradeService) sendDowngradeMail(ctx context.Context, c downgradeCan
 	subject := fmt.Sprintf("Eurobase — %s is on the Free plan", c.ProjectName)
 
 	reasonBlurb := "your Pro subscription payment failed and the retry window has ended"
-	if reason == "legacy_pro_grace_elapsed" {
+	switch reason {
+	case "legacy_pro_grace_elapsed":
 		reasonBlurb = "the 14-day window to add a payment method to your closed-beta Pro project has ended"
+	case "end_of_period_cancel":
+		reasonBlurb = "its Pro subscription was cancelled and the period it paid for has ended"
 	}
 
 	body := fmt.Sprintf(`<!DOCTYPE html>

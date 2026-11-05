@@ -80,12 +80,20 @@ func (s *Service) CancelSubscription(ctx context.Context, userID, subscriptionID
 		mollieCustID           *string
 		nextChargeAt           *time.Time
 	)
+	// The caller must own the project AND be the one paying: after an
+	// ownership transfer the previous owner's subscription runs until the
+	// end of its paid period, and the new owner doesn't get to end it
+	// early (the transfer has already cancelled it at period end).
 	err := s.pool.QueryRow(ctx,
 		`SELECT s.project_id, s.status, s.mollie_subscription_id,
 		        s.mollie_customer_id, s.next_charge_at
 		   FROM public.subscriptions s
 		   JOIN public.projects p ON p.id = s.project_id
-		  WHERE s.id = $1 AND p.owner_id = $2::uuid`,
+		  WHERE s.id = $1 AND p.owner_id = $2::uuid
+		    AND NOT EXISTS (
+		         SELECT 1 FROM public.platform_users other
+		          WHERE other.mollie_customer_id = s.mollie_customer_id
+		            AND other.id <> $2::uuid)`,
 		subscriptionID, userID,
 	).Scan(&projectID, &status, &mollieSubID, &mollieCustID, &nextChargeAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -99,6 +107,39 @@ func (s *Service) CancelSubscription(ctx context.Context, userID, subscriptionID
 	switch status {
 	case "canceled", "expired":
 		return nil, ErrSubscriptionAlreadyClosed
+	case "scheduled":
+		// Hasn't started and nothing was charged: stop it at Mollie and
+		// close it. The subscription it was going to follow is
+		// unaffected.
+		if mollieSubID != nil && mollieCustID != nil && *mollieSubID != "" && *mollieCustID != "" {
+			if _, cerr := s.client.CancelSubscription(ctx, *mollieCustID, *mollieSubID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+				return nil, fmt.Errorf("cancel scheduled mollie subscription: %w", cerr)
+			}
+		}
+		tag, err := s.pool.Exec(ctx,
+			`UPDATE public.subscriptions
+			    SET status = 'canceled', canceled_at = now()
+			  WHERE id = $1 AND status = 'scheduled'`,
+			subscriptionID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("cancel scheduled subscription: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// It took over in the meantime: it is now the live
+			// subscription, cancelled at Mollie above — end it with the
+			// current period like any end-of-period cancel.
+			if _, err := s.pool.Exec(ctx,
+				`UPDATE public.subscriptions
+				    SET canceled_at = COALESCE(canceled_at, now())
+				  WHERE id = $1`,
+				subscriptionID,
+			); err != nil {
+				return nil, fmt.Errorf("stamp canceled_at: %w", err)
+			}
+		}
+		slog.Info("billing: scheduled subscription canceled", "subscription_id", subscriptionID)
+		return &CancelResult{Mode: CancelModeEndOfPeriod, EffectiveAt: time.Now().UTC()}, nil
 	}
 
 	// End-of-period: minimal work, keep the user in Pro until the
@@ -259,52 +300,55 @@ func (s *Service) CancelSubscriptionForProject(ctx context.Context, projectID st
 	if !s.enabled {
 		return nil
 	}
-	var (
-		subID        string
-		status       string
-		mollieSubID  *string
-		mollieCustID *string
-	)
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, status, mollie_subscription_id, mollie_customer_id
+	// Every open subscription: after an ownership transfer a project can
+	// have the previous owner's running out and a scheduled one waiting.
+	type openSub struct {
+		id                        string
+		mollieSubID, mollieCustID *string
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, mollie_subscription_id, mollie_customer_id
 		   FROM public.subscriptions
 		  WHERE project_id = $1
-		  ORDER BY created_at DESC
-		  LIMIT 1`,
+		    AND status NOT IN ('canceled', 'expired')`,
 		projectID,
-	).Scan(&subID, &status, &mollieSubID, &mollieCustID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // nothing to cancel
-	}
+	)
 	if err != nil {
-		return fmt.Errorf("load subscription for project %s: %w", projectID, err)
+		return fmt.Errorf("load subscriptions for project %s: %w", projectID, err)
 	}
-	switch status {
-	case "canceled", "expired":
-		return nil // already closed
-	}
-
-	// Cancel in Mollie so no further charges hit the mandate. ErrNotFound
-	// = already gone on Mollie's side, which is fine.
-	if mollieSubID != nil && mollieCustID != nil && *mollieSubID != "" && *mollieCustID != "" {
-		if _, cerr := s.client.CancelSubscription(ctx, *mollieCustID, *mollieSubID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
-			return fmt.Errorf("cancel mollie subscription %s: %w", *mollieSubID, cerr)
+	var open []openSub
+	for rows.Next() {
+		var o openSub
+		if err := rows.Scan(&o.id, &o.mollieSubID, &o.mollieCustID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan subscription for project %s: %w", projectID, err)
 		}
+		open = append(open, o)
 	}
+	rows.Close()
 
-	// Mark the local row canceled. It is about to be FK-cascade-deleted
-	// with the project, but flipping it first keeps state consistent if the
-	// delete is retried or aborts after this point.
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE public.subscriptions
-		    SET status = 'canceled', canceled_at = COALESCE(canceled_at, now())
-		  WHERE id = $1`,
-		subID,
-	); err != nil {
-		return fmt.Errorf("mark subscription canceled: %w", err)
+	for _, o := range open {
+		// Cancel in Mollie so no further charges hit the mandate.
+		// ErrNotFound = already gone on Mollie's side, which is fine.
+		if o.mollieSubID != nil && o.mollieCustID != nil && *o.mollieSubID != "" && *o.mollieCustID != "" {
+			if _, cerr := s.client.CancelSubscription(ctx, *o.mollieCustID, *o.mollieSubID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+				return fmt.Errorf("cancel mollie subscription %s: %w", *o.mollieSubID, cerr)
+			}
+		}
+		// Mark the local row canceled. It is about to be FK-cascade-deleted
+		// with the project, but flipping it first keeps state consistent if
+		// the delete is retried or aborts after this point.
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE public.subscriptions
+			    SET status = 'canceled', canceled_at = COALESCE(canceled_at, now())
+			  WHERE id = $1`,
+			o.id,
+		); err != nil {
+			return fmt.Errorf("mark subscription canceled: %w", err)
+		}
+		slog.Info("billing: subscription canceled for project deletion",
+			"project_id", projectID, "subscription_id", o.id)
 	}
-	slog.Info("billing: subscription canceled for project deletion",
-		"project_id", projectID, "subscription_id", subID)
 	return nil
 }
 

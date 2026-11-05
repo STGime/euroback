@@ -27,6 +27,11 @@
 					A project's plan and subscription are managed on the <strong>Billing</strong> page (Project &rarr; Billing). To stop paying for a Pro project without deleting it, use <strong>Cancel subscription</strong> there &mdash; by default it cancels at the end of the current billing period, so you keep Pro until the period you've already paid for runs out, then the project drops to Free. No new charges are made after you cancel.
 				</p>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Transferring ownership</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The owner sees a <strong>Transfer ownership</strong> card above the danger zone. <strong>Transfer this project&hellip;</strong> hands the project to another person's account (not available for Team / Legal Team projects yet); they accept by email while signed in, and you stay on as an admin. A pending transfer is shown in the same card with <strong>Cancel transfer</strong>. How it works, including what happens to a paid subscription, is described in chapter 19, <em>Team Collaboration</em> &rarr; Transferring ownership.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Danger zone &mdash; deleting a project</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					At the bottom of the Settings page is the <strong>danger zone</strong>, where the project owner (or an org admin) can <strong>permanently delete</strong> the project. You confirm by typing the project's slug. This action cannot be undone.

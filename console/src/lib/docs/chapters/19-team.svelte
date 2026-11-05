@@ -35,6 +35,20 @@
 					Once invited, a member sees the project in their project list alongside any projects they own. All member actions are recorded in the <strong>Compliance &rarr; Audit Log</strong>: invitations sent, accepted, roles changed, and members removed.
 				</p>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-4">Transferring ownership</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Built a project for a client, a club or an association, and want it to live in <em>their</em> account rather than yours? The owner can hand the whole project over. Go to <strong>Settings &rarr; Transfer this project</strong>, enter the recipient's email, check the address on the confirmation screen, and send (you'll be asked for your password if you haven't signed in recently). The recipient gets an email and accepts while signed in to their own account — nothing changes until they do. The offer is valid for 7 days. Until it's accepted, you can withdraw it with <strong>Cancel transfer</strong> in the same place — for example if you used the wrong address — and the emailed link stops working.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					When they accept: they become the <strong>owner</strong>, you're demoted to <strong>admin</strong> (so you can keep helping; the new owner can remove you from Members), and both sides are recorded in the audit log. The recipient needs room for the project under their own plan's project limit.
+				</p>
+				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
+					<li><strong>Paid projects:</strong> your subscription ends with the period you've already paid for &mdash; no further charges and no refund for the remainder. The new owner can set up their own subscription in <strong>Billing</strong> right away: they confirm a card or PayPal account (€0 today) and are first charged on the day your period ends. Example: you paid for October and transfer on 14 October; the new owner subscribes any day before 1 November and is first charged on 1 November. No gap, and nobody pays for October twice. If they haven't subscribed by then, the project moves to the Free plan until they do. The early €0 sign-up needs a card or PayPal; a new owner who wants to pay by bank account subscribes on or after the day your period ends instead, and the project is on Free from that day until they do.</li>
+					<li><strong>Overdue payments:</strong> if the project's last payment failed, update the payment method in Billing first &mdash; a transfer is refused until it's settled.</li>
+					<li><strong>Invoices stay with whoever paid them</strong> &mdash; yours stay in your account, the new owner's go to theirs.</li>
+					<li><strong>Not yet transferable this way:</strong> projects attached to an organization, and Team / Legal Team projects &mdash; contact support for those.</li>
+				</ul>
+
 				<div class="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 flex gap-3">
 					<svg class="h-5 w-5 text-blue-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />

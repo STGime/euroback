@@ -522,7 +522,8 @@ func HandleAcceptInvitation(pool *pgxpool.Pool) http.HandlerFunc {
 		_, err = pool.Exec(r.Context(),
 			`INSERT INTO public.project_members (project_id, user_id, role, invited_by)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+			 ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role
+			 WHERE project_members.role <> 'owner'`,
 			inv.ProjectID, claims.Subject, inv.Role, inv.InvitedBy)
 		if err != nil {
 			slog.Error("insert member failed", "error", err)

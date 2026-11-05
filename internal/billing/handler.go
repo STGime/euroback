@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/go-chi/chi/v5/middleware"
@@ -25,8 +26,9 @@ type checkoutRequest struct {
 // names. Kept separate from the service type so an internal rename
 // doesn't leak into the console contract.
 type checkoutResponse struct {
-	SubscriptionID string `json:"subscription_id"`
-	CheckoutURL    string `json:"checkout_url"`
+	SubscriptionID string     `json:"subscription_id"`
+	CheckoutURL    string     `json:"checkout_url"`
+	StartsAt       *time.Time `json:"starts_at,omitempty"`
 }
 
 // HandleCreateCheckout is POST /platform/billing/checkout. Auth-only
@@ -80,6 +82,8 @@ func HandleCreateCheckout(svc *Service) http.HandlerFunc {
 				writeJSONError(w, http.StatusNotFound, "project_not_found", "project not found")
 			case errors.Is(err, ErrAlreadySubscribed):
 				writeJSONError(w, http.StatusConflict, "already_subscribed", "project already has an active or pending subscription")
+			case errors.Is(err, ErrAlreadyScheduled):
+				writeJSONError(w, http.StatusConflict, "already_scheduled", "a subscription is already set up to start when the current period ends")
 			case errors.Is(err, ErrBillingProfileRequired):
 				writeJSONError(w, http.StatusConflict, "billing_profile_required", "please add your billing details before continuing")
 			case errors.Is(err, ErrInvalidPlan):
@@ -106,6 +110,7 @@ func HandleCreateCheckout(svc *Service) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(checkoutResponse{
 			SubscriptionID: res.SubscriptionID,
 			CheckoutURL:    res.CheckoutURL,
+			StartsAt:       res.StartsAt,
 		})
 	}
 }

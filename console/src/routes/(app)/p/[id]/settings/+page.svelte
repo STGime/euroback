@@ -2,7 +2,7 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { getContext, onMount } from 'svelte';
-	import { api, type Project, type APIKey, type ProjectMember, type ProjectInvitation } from '$lib/api.js';
+	import { api, APIError, type Project, type APIKey, type ProjectMember, type ProjectInvitation, type PendingTransfer } from '$lib/api.js';
 	import { user } from '$lib/stores.js';
 
 	const projectCtx = getContext<{ id: string; project: Project | null }>('projectId');
@@ -48,6 +48,10 @@
 			keys = await api.listAPIKeys(projectId);
 		} catch { /* ignore */ }
 		keysLoading = false;
+		// Load members so the owner-gated Ownership card resolves on the
+		// Settings tab, and fetch any pending transfer.
+		loadMembers();
+		loadTransfer();
 	});
 
 	async function handleRegenerate() {
@@ -81,6 +85,86 @@
 	let inviteError = $state('');
 	let resending: string | null = $state(null);
 	let isOwner = $derived(members.some(m => m.role === 'owner' && m.email === $user?.email));
+	// The server refuses Team / Legal Team transfers; don't offer the button.
+	let isTeamPlan = $derived(projectCtx.project?.plan === 'team' || projectCtx.project?.plan === 'legal_team');
+
+	// ── Ownership transfer (#846) ──
+	let pendingTransfer: PendingTransfer | null = $state(null);
+	let showTransferModal = $state(false);
+	let transferEmail = $state('');
+	let transferPassword = $state('');
+	// Two steps: enter the address, then confirm it (catches typos).
+	let transferStep: 'enter' | 'confirm' = $state('enter');
+	let transferEmailValid = $derived(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(transferEmail.trim()));
+	let reauthNeeded = $state(false);
+	let transferring = $state(false);
+	let transferError: string | null = $state(null);
+	let transferMessage = $state('');
+	let cancellingTransfer = $state(false);
+
+	async function loadTransfer() {
+		try {
+			const resp = await api.getTransfer(projectId);
+			pendingTransfer = resp.transfer;
+		} catch { /* owner-only; ignore for non-owners */ }
+	}
+
+	function openTransferModal() {
+		transferEmail = '';
+		transferPassword = '';
+		reauthNeeded = false;
+		transferError = null;
+		transferStep = 'enter';
+		showTransferModal = true;
+	}
+
+	function reviewTransfer() {
+		if (!transferEmailValid) return;
+		transferError = null;
+		transferStep = 'confirm';
+	}
+
+	async function handleConfirmTransfer() {
+		const email = transferEmail.trim();
+		if (!email) return;
+		transferring = true;
+		transferError = null;
+		try {
+			await api.initiateTransfer(projectId, email, transferPassword || undefined);
+			showTransferModal = false;
+			transferMessage = `Transfer offer sent to ${email}`;
+			transferPassword = '';
+			await loadTransfer();
+			setTimeout(() => { transferMessage = ''; }, 5000);
+		} catch (err) {
+			if (err instanceof APIError && err.code === 'reauth_required') {
+				reauthNeeded = true;
+				transferError = 'Please confirm your current password to transfer ownership.';
+			} else {
+				transferError = err instanceof Error ? err.message : 'Failed to start transfer';
+			}
+		} finally {
+			transferring = false;
+		}
+	}
+
+	let cancelTransferError: string | null = $state(null);
+	async function handleCancelTransfer() {
+		if (!confirm('Cancel the pending ownership transfer?')) return;
+		cancellingTransfer = true;
+		cancelTransferError = null;
+		try {
+			await api.cancelTransfer(projectId);
+			await loadTransfer();
+		} catch (err) {
+			cancelTransferError = err instanceof Error ? err.message : 'Failed to cancel the transfer';
+		}
+		cancellingTransfer = false;
+	}
+
+	function formatTransferDate(iso: string): string {
+		try { return new Date(iso).toLocaleDateString(); } catch { return iso; }
+	}
 
 	async function loadMembers() {
 		membersLoading = true;
@@ -302,6 +386,59 @@
 			{/if}
 		</div>
 
+		<!-- Ownership transfer (owner only) -->
+		{#if isOwner}
+			<div class="rounded-xl border border-gray-200 bg-white p-6">
+				<h2 class="text-lg font-semibold text-gray-900">Transfer ownership</h2>
+				<p class="mt-1 text-sm text-gray-500">
+					Hand this project to another person's account — for example, to the client it was built for.
+					They accept by email while signed in to their own account. You stay on as an admin unless the new owner
+					removes you.
+					On a paid plan, your subscription ends with the period you've already paid for (no refund, no further
+					charges). The new owner can set up theirs right away and is first charged when your period ends, so the
+					project stays on its plan if they subscribe before then.
+				</p>
+
+				{#if transferMessage}
+					<p class="mt-3 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">{transferMessage}</p>
+				{/if}
+
+				{#if pendingTransfer}
+					<div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+						<div class="min-w-0 break-all text-sm text-amber-800">
+							Pending transfer to <strong>{pendingTransfer.email}</strong>
+							<span class="text-amber-600">· expires {formatTransferDate(pendingTransfer.expires_at)}</span>
+						</div>
+						<button
+							type="button"
+							disabled={cancellingTransfer}
+							class="cursor-pointer rounded-lg border border-amber-300 px-3 py-1.5 text-sm font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50 transition-colors"
+							onclick={handleCancelTransfer}
+						>
+							{cancellingTransfer ? 'Cancelling…' : 'Cancel transfer'}
+						</button>
+						{#if cancelTransferError}
+							<p class="w-full text-sm text-red-700">{cancelTransferError}</p>
+						{/if}
+					</div>
+				{:else if isTeamPlan}
+					<p class="mt-4 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-600">
+						Team projects can't be transferred yet. <a href="/support" class="underline hover:text-gray-800">Contact support</a> if you need to move one.
+					</p>
+				{:else}
+					<div class="mt-4">
+						<button
+							type="button"
+							class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors"
+							onclick={openTransferModal}
+						>
+							Transfer this project…
+						</button>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
 		<!-- Danger Zone -->
 		<div class="rounded-xl border border-red-200 bg-white p-6">
 			<h2 class="text-lg font-semibold text-red-600">Danger Zone</h2>
@@ -395,6 +532,81 @@
 					{deleting ? 'Deleting...' : 'Delete Project'}
 				</button>
 			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Transfer ownership confirm -->
+{#if showTransferModal}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+		<button type="button" class="fixed inset-0 bg-black/50 cursor-default" onclick={() => (showTransferModal = false)} tabindex="-1" aria-label="Close"></button>
+		<div class="relative z-10 w-full max-w-md rounded-xl bg-white shadow-2xl p-6">
+			<h3 class="text-sm font-semibold text-gray-900 mb-1">Transfer this project</h3>
+			<p class="text-xs text-gray-500 mb-4">
+				The recipient becomes the owner once they accept. You'll be demoted to admin. This can't be undone from here — only the new owner can transfer it back.
+			</p>
+			{#if transferError}
+				<div class="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+					<p class="text-sm text-red-700">{transferError}</p>
+				</div>
+			{/if}
+			{#if transferStep === 'enter'}
+				<div class="mb-4">
+					<label for="transfer-email" class="block text-sm font-medium text-gray-700 mb-1">Recipient email</label>
+					<input
+						id="transfer-email"
+						type="email"
+						bind:value={transferEmail}
+						onkeydown={(e) => { if (e.key === 'Enter') reviewTransfer(); }}
+						placeholder="owner@example.com"
+						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none"
+					/>
+				</div>
+				<div class="flex justify-end gap-3">
+					<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showTransferModal = false)}>Cancel</button>
+					<button
+						type="button"
+						class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						disabled={!transferEmailValid}
+						onclick={reviewTransfer}
+					>
+						Continue
+					</button>
+				</div>
+			{:else}
+				<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+					<p class="text-sm text-amber-900">
+						Transfer <strong>{projectCtx.project?.name}</strong> to
+					</p>
+					<p class="mt-1 break-all text-base font-semibold text-gray-900">{transferEmail.trim()}</p>
+					<p class="mt-2 text-xs text-amber-800">
+						Check the address: whoever signs in with it can accept for 7 days, until you cancel the offer.
+					</p>
+				</div>
+				{#if reauthNeeded}
+					<div class="mb-4">
+						<label for="transfer-password" class="block text-sm font-medium text-gray-700 mb-1">Confirm your password</label>
+						<input
+							id="transfer-password"
+							type="password"
+							bind:value={transferPassword}
+							autocomplete="current-password"
+							class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:outline-none"
+						/>
+					</div>
+				{/if}
+				<div class="flex justify-end gap-3">
+					<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50" disabled={transferring} onclick={() => { transferStep = 'enter'; transferError = null; }}>Back</button>
+					<button
+						type="button"
+						class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						disabled={transferring || (reauthNeeded && !transferPassword)}
+						onclick={handleConfirmTransfer}
+					>
+						{transferring ? 'Sending…' : 'Send transfer offer'}
+					</button>
+				</div>
+			{/if}
 		</div>
 	</div>
 {/if}

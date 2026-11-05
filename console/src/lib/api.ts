@@ -1035,7 +1035,7 @@ export class EurobaseAPI {
 	async startBillingCheckout(
 		projectId: string,
 		planCode: 'pro' | 'team' = 'pro'
-	): Promise<{ subscription_id: string; checkout_url: string }> {
+	): Promise<{ subscription_id: string; checkout_url: string; starts_at?: string }> {
 		return this.fetch('/platform/billing/checkout', {
 			method: 'POST',
 			body: JSON.stringify({ project_id: projectId, plan_code: planCode })
@@ -2191,6 +2191,50 @@ export class EurobaseAPI {
 		});
 	}
 
+	// ---- Ownership transfer (#846) ----
+
+	/** Get the pending ownership transfer for a project, if any. */
+	async getTransfer(projectId: string): Promise<{ transfer: PendingTransfer | null }> {
+		return this.fetch(`/platform/projects/${projectId}/transfer`);
+	}
+
+	/**
+	 * Start transferring a project to another user. `currentPassword` is
+	 * sent when the server asks for re-auth (APIError code "reauth_required").
+	 */
+	async initiateTransfer(
+		projectId: string,
+		email: string,
+		currentPassword?: string
+	): Promise<{ status: string; email: string }> {
+		return this.fetch(`/platform/projects/${projectId}/transfer`, {
+			method: 'POST',
+			body: JSON.stringify({ email, current_password: currentPassword })
+		});
+	}
+
+	/** Cancel a pending ownership transfer. */
+	async cancelTransfer(projectId: string): Promise<{ status: string }> {
+		return this.fetch(`/platform/projects/${projectId}/transfer`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** Accept an ownership transfer (recipient, signed in to their own account). */
+	async acceptTransfer(
+		token: string
+	): Promise<{
+		status: string;
+		project_id: string;
+		billing_handover: boolean;
+		paid_until?: string | null;
+	}> {
+		return this.fetch('/platform/transfers/accept', {
+			method: 'POST',
+			body: JSON.stringify({ token })
+		});
+	}
+
 	// ---- Edge Functions ----
 
 	/** List all edge functions for a project. */
@@ -3247,6 +3291,12 @@ export interface MembersResponse {
 	invitations: ProjectInvitation[];
 }
 
+export interface PendingTransfer {
+	email: string;
+	sent_at: string;
+	expires_at: string;
+}
+
 export interface AuditLogEntry {
 	id: string;
 	project_id: string | null;
@@ -3458,11 +3508,25 @@ export interface BillingConfig {
 export interface ProjectSubscription {
 	id: string;
 	plan_code: string;
-	status: 'incomplete' | 'active' | 'past_due';
+	/** 'scheduled' only when nothing is live and a subscription is
+	 * waiting to start (see `scheduled`). */
+	status: 'incomplete' | 'active' | 'past_due' | 'scheduled';
 	price_cents: number;
 	currency: string;
 	next_charge_at?: string | null;
 	canceled_at?: string | null;
+	/** False while a previous owner's subscription runs out after an
+	 * ownership transfer. */
+	paid_by_you: boolean;
+	/** The caller's subscription waiting to take over when this one
+	 * ends; nothing is charged before starts_at. */
+	scheduled?: {
+		id: string;
+		plan_code: string;
+		price_cents: number;
+		currency: string;
+		starts_at: string;
+	} | null;
 }
 
 /** Buyer identity + address for Estonian VAT Act §37 invoice
