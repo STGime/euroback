@@ -91,6 +91,9 @@
 	let showTransferModal = $state(false);
 	let transferEmail = $state('');
 	let transferPassword = $state('');
+	// Two steps: enter the address, then confirm it (catches typos).
+	let transferStep: 'enter' | 'confirm' = $state('enter');
+	let transferEmailValid = $derived(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(transferEmail.trim()));
 	let reauthNeeded = $state(false);
 	let transferring = $state(false);
 	let transferError: string | null = $state(null);
@@ -109,7 +112,14 @@
 		transferPassword = '';
 		reauthNeeded = false;
 		transferError = null;
+		transferStep = 'enter';
 		showTransferModal = true;
+	}
+
+	function reviewTransfer() {
+		if (!transferEmailValid) return;
+		transferError = null;
+		transferStep = 'confirm';
 	}
 
 	async function handleConfirmTransfer() {
@@ -525,39 +535,63 @@
 					<p class="text-sm text-red-700">{transferError}</p>
 				</div>
 			{/if}
-			<div class="mb-4">
-				<label for="transfer-email" class="block text-sm font-medium text-gray-700 mb-1">Recipient email</label>
-				<input
-					id="transfer-email"
-					type="email"
-					bind:value={transferEmail}
-					placeholder="owner@example.com"
-					class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none"
-				/>
-			</div>
-			{#if reauthNeeded}
+			{#if transferStep === 'enter'}
 				<div class="mb-4">
-					<label for="transfer-password" class="block text-sm font-medium text-gray-700 mb-1">Confirm your password</label>
+					<label for="transfer-email" class="block text-sm font-medium text-gray-700 mb-1">Recipient email</label>
 					<input
-						id="transfer-password"
-						type="password"
-						bind:value={transferPassword}
-						autocomplete="current-password"
-						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:outline-none"
+						id="transfer-email"
+						type="email"
+						bind:value={transferEmail}
+						onkeydown={(e) => { if (e.key === 'Enter') reviewTransfer(); }}
+						placeholder="owner@example.com"
+						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none"
 					/>
 				</div>
+				<div class="flex justify-end gap-3">
+					<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showTransferModal = false)}>Cancel</button>
+					<button
+						type="button"
+						class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						disabled={!transferEmailValid}
+						onclick={reviewTransfer}
+					>
+						Continue
+					</button>
+				</div>
+			{:else}
+				<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+					<p class="text-sm text-amber-900">
+						Transfer <strong>{projectCtx.project?.name}</strong> to
+					</p>
+					<p class="mt-1 break-all text-base font-semibold text-gray-900">{transferEmail.trim()}</p>
+					<p class="mt-2 text-xs text-amber-800">
+						Check the address: whoever signs in with it can accept for 7 days, until you cancel the offer.
+					</p>
+				</div>
+				{#if reauthNeeded}
+					<div class="mb-4">
+						<label for="transfer-password" class="block text-sm font-medium text-gray-700 mb-1">Confirm your password</label>
+						<input
+							id="transfer-password"
+							type="password"
+							bind:value={transferPassword}
+							autocomplete="current-password"
+							class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:outline-none"
+						/>
+					</div>
+				{/if}
+				<div class="flex justify-end gap-3">
+					<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50" disabled={transferring} onclick={() => { transferStep = 'enter'; transferError = null; }}>Back</button>
+					<button
+						type="button"
+						class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						disabled={transferring || (reauthNeeded && !transferPassword)}
+						onclick={handleConfirmTransfer}
+					>
+						{transferring ? 'Sending…' : 'Send transfer offer'}
+					</button>
+				</div>
 			{/if}
-			<div class="flex justify-end gap-3">
-				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showTransferModal = false)}>Cancel</button>
-				<button
-					type="button"
-					class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					disabled={!transferEmail.trim() || transferring || (reauthNeeded && !transferPassword)}
-					onclick={handleConfirmTransfer}
-				>
-					{transferring ? 'Sending…' : 'Send transfer offer'}
-				</button>
-			</div>
 		</div>
 	</div>
 {/if}

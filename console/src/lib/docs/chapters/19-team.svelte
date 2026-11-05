@@ -37,7 +37,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-4">Transferring ownership</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Built a project for a client, a club or an association, and want it to live in <em>their</em> account rather than yours? The owner can hand the whole project over. Go to <strong>Settings &rarr; Transfer this project</strong>, enter the recipient's email, and confirm (you'll be asked for your password if you haven't signed in recently). The recipient gets an email and accepts while signed in to their own account — nothing changes until they do.
+					Built a project for a client, a club or an association, and want it to live in <em>their</em> account rather than yours? The owner can hand the whole project over. Go to <strong>Settings &rarr; Transfer this project</strong>, enter the recipient's email, check the address on the confirmation screen, and send (you'll be asked for your password if you haven't signed in recently). The recipient gets an email and accepts while signed in to their own account — nothing changes until they do. The offer is valid for 7 days. Until it's accepted, you can withdraw it with <strong>Cancel transfer</strong> in the same place — for example if you used the wrong address — and the emailed link stops working.
 				</p>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					When they accept: they become the <strong>owner</strong>, you're demoted to <strong>admin</strong> (so you can keep helping, or leave the project), and both sides are recorded in the audit log. The recipient needs room for the project under their own plan's project limit.
