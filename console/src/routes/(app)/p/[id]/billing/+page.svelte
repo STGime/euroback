@@ -390,6 +390,7 @@
 								{checkoutInFlight ? 'Redirecting…' : 'Set up subscription'}
 							</button>
 							<p class="mt-1 max-w-[16rem] text-xs text-gray-500">Card or PayPal. €0 today; first charge {formatDay(endingSub.next_charge_at)}.</p>
+							<p class="mt-1 max-w-[16rem] text-xs text-gray-500">Want to pay by bank account? Subscribe on or after {formatDay(endingSub.next_charge_at)} instead — the project is on the Free plan until you do.</p>
 						{/if}
 					{:else}
 						<div class="flex items-center gap-3">
