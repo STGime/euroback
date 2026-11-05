@@ -101,6 +101,8 @@ type ProjectListItem struct {
 	// project card.
 	OrgID   *string `json:"org_id,omitempty"`
 	OrgName *string `json:"org_name,omitempty"`
+	// OwnerEmail: set only for projects the caller doesn't own (#887).
+	OwnerEmail *string `json:"owner_email,omitempty"`
 }
 
 var (
@@ -402,7 +404,8 @@ func HandleListProjects(pool *pgxpool.Pool, svc *TenantService) http.HandlerFunc
 				// Forwarding the field lets the console render
 				// "Org: <name>" instead of a bare "Org" badge; nil
 				// when enrichment failed → client falls back gracefully.
-				OrgName: p.OrgName,
+				OrgName:    p.OrgName,
+				OwnerEmail: p.OwnerEmail,
 			}
 		}
 

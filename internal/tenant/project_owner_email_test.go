@@ -2,6 +2,9 @@ package tenant
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/eurobase/euroback/internal/auth"
@@ -29,11 +32,21 @@ func TestListProjects_OwnerEmail(t *testing.T) {
 		t.Fatalf("add member: %v", err)
 	}
 
-	find := func(uid, email string) *Project {
+	// Through the HTTP handler: it maps projects into its own response
+	// type, which once dropped the field.
+	handler := HandleListProjects(pool, svc)
+	find := func(uid, email string) *ProjectListItem {
 		t.Helper()
-		list, err := svc.ListProjects(ctx, &auth.Claims{Subject: uid, Email: email, LoginVia: auth.LoginViaPassword})
-		if err != nil {
-			t.Fatalf("list projects: %v", err)
+		req := httptest.NewRequest(http.MethodGet, "/v1/tenants", nil)
+		req = req.WithContext(auth.ContextWithClaims(ctx, &auth.Claims{Subject: uid, Email: email, LoginVia: auth.LoginViaPassword}))
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list projects: status %d: %s", rec.Code, rec.Body.String())
+		}
+		var list []ProjectListItem
+		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+			t.Fatalf("decode list: %v", err)
 		}
 		for i := range list {
 			if list[i].ID == p.ID {
