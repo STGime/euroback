@@ -522,7 +522,7 @@
 				{:else if isForgotPassword && forgotPasswordSent}
 					<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-700">
 						<p class="font-medium">Check your inbox</p>
-						<p class="mt-1">If an account exists for <strong>{email}</strong>, we've sent a password reset link.</p>
+						<p class="mt-1">If an account exists for <strong>{email}</strong>, we've sent a password reset link. If you haven't confirmed your email yet, we've sent the confirmation link instead.</p>
 					</div>
 					<div class="mt-4 text-center">
 						<button onclick={() => { isForgotPassword = false; forgotPasswordSent = false; error = ''; }} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to sign in</button>
