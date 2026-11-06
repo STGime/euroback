@@ -87,6 +87,11 @@ claims := token.Claims.(jwt.MapClaims) // claims["sub"] = user id`;
 					Each URL <strong>must appear</strong> in the <strong>Allowed redirect URLs</strong> list above (same allowlist). The console blocks Save inline if a URL isn't allowed; the backend rejects the update for the same reason. This is the standard <em>open-redirect defence</em> &mdash; without it, an attacker could put your project's URL in a phishing email and land users on their own page. Add both your dev and prod URLs to the redirect list before configuring the three fields.
 				</p>
 
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Your app's name in emails</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Sign-in, confirmation and password emails name your app in the subject and the text (&ldquo;Sign in to &hellip;&rdquo;). By default that's the project name. To show a nicer name, set <strong>Auth &rarr; Settings &rarr; App name in emails</strong> (up to 60 characters). Custom email templates get the same value as <code class="bg-gray-100 border border-gray-200 rounded px-1">{'{{.ProjectName}}'}</code>.
+				</p>
+
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">The verify-email page (copy-paste starter)</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					This is the minimum &mdash; a static HTML file works. Adapt to your framework (Next.js page, SvelteKit route, Vue component &mdash; same three lines of logic).

@@ -65,6 +65,7 @@
 	// #260 email-flow redirect URLs (part of #257). Each must be a member
 	// of the redirect_urls list above or the backend rejects PATCH.
 	let emailVerificationUrl = $state('');
+	let appName = $state('');
 	let passwordResetUrl = $state('');
 	let magicLinkUrl = $state('');
 	// #630: end-user passkeys (per-project WebAuthn relying party).
@@ -454,6 +455,7 @@
 			redirectUrls = cfg.redirect_urls.join('\n');
 			corsOrigins = (cfg.cors_origins ?? []).join('\n');
 			emailVerificationUrl = projectCtx.project?.auth_config?.email_verification_url ?? '';
+			appName = projectCtx.project?.auth_config?.app_name ?? '';
 			passwordResetUrl = projectCtx.project?.auth_config?.password_reset_url ?? '';
 			magicLinkUrl = projectCtx.project?.auth_config?.magic_link_url ?? '';
 
@@ -690,7 +692,9 @@
 				require_email_confirmation: requireEmailConfirmation,
 				session_duration: sessionDuration,
 				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean),
-				cors_origins: corsOrigins.split('\n').map(u => u.trim()).filter(Boolean)
+				cors_origins: corsOrigins.split('\n').map(u => u.trim()).filter(Boolean),
+				// undefined drops the key, so clearing the field falls back to the project name.
+				app_name: appName.trim() || undefined
 			};
 			// #630: passkeys. Send the block when the toggle is on or there's
 			// leftover config; the backend validates (origin host must be
@@ -1518,6 +1522,20 @@
 						></textarea>
 					</div>
 
+					<!-- Name shown in auth emails -->
+					<div class="mt-4">
+						<label for="app-name" class="block text-sm font-medium text-gray-700">App name in emails</label>
+						<p class="text-xs text-gray-400 mt-0.5">Shown to your users in sign-in, confirmation and password emails. Leave empty to use the project name ({projectCtx.project?.name}).</p>
+						<input
+							id="app-name"
+							type="text"
+							maxlength="60"
+							bind:value={appName}
+							placeholder={projectCtx.project?.name ?? 'My App'}
+							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						/>
+					</div>
+
 					<!-- Email-flow redirect URLs (#260, part of #257) -->
 					<div class="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
 						<h3 class="text-sm font-semibold text-gray-900">Email-flow redirect URLs</h3>
@@ -1629,7 +1647,7 @@
 						</div>
 						<div class="text-[11px] text-gray-400 space-y-0.5">
 							<p><strong class="text-gray-500">UserEmail</strong> — the end-user's email address</p>
-							<p><strong class="text-gray-500">ProjectName</strong> — your project name</p>
+							<p><strong class="text-gray-500">ProjectName</strong> — the app name in emails (Settings tab), or your project name</p>
 							<p><strong class="text-gray-500">ActionURL</strong> — the verification or reset link (auto-generated with token)</p>
 							<p><strong class="text-gray-500">ExpiresIn</strong> — how long the link is valid (e.g. "24 hours")</p>
 						</div>

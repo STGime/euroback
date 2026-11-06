@@ -63,6 +63,9 @@ export interface AuthConfig {
 	 * PATCH. The tenant's page reads the `?token=...` query param and
 	 * calls `eb.auth.verifyEmail(token)` to confirm. */
 	email_verification_url?: string;
+	/** Product name shown to end users in auth emails (subject and body).
+	 * Empty / absent = the project name. Max 60 characters. */
+	app_name?: string;
 	/** URL the password-reset email links to. Same allowlist rule. */
 	password_reset_url?: string;
 	/** URL the magic-link email links to. Same allowlist rule. */

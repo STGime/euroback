@@ -285,7 +285,7 @@ func (s *EmailService) sendVerificationEmail(ctx context.Context, projectID, pro
 	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("verification", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: projectName,
+		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
 		ExpiresIn:   "24 hours",
 	})
@@ -330,7 +330,7 @@ func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, pr
 	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("password_reset", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: projectName,
+		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
 		ExpiresIn:   "1 hour",
 	})
@@ -359,7 +359,7 @@ func (s *EmailService) sendPasswordChangedEmail(ctx context.Context, projectID, 
 	}
 	subject, body, err := RenderTemplate("password_changed", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: projectName,
+		ProjectName: s.displayName(ctx, projectID, projectName),
 	})
 	if err != nil {
 		return Delivery{}, fmt.Errorf("render password changed email: %w", err)
@@ -401,7 +401,7 @@ func (s *EmailService) sendMagicLinkEmail(ctx context.Context, projectID, projec
 	actionURL := appendTokenQuery(redirectURL, rawToken)
 	subject, body, err := RenderTemplate("magic_link", customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: projectName,
+		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
 		ExpiresIn:   "15 minutes",
 	})
@@ -574,6 +574,31 @@ func (s *EmailService) VerifyPlatformToken(ctx context.Context, rawToken, tokenT
 	}
 
 	return userID, nil
+}
+
+// displayName is the product name auth emails show: the project's
+// auth_config.app_name, else its name. fallback (what the caller passed)
+// is used only when the lookup fails.
+func (s *EmailService) displayName(ctx context.Context, projectID, fallback string) string {
+	name, err := ProjectDisplayName(ctx, s.pool, projectID)
+	if err != nil || name == "" {
+		if err != nil {
+			slog.Warn("email: project display name lookup failed", "error", err, "project_id", projectID)
+		}
+		return fallback
+	}
+	return name
+}
+
+// ProjectDisplayName returns auth_config.app_name when set, else the
+// project name.
+func ProjectDisplayName(ctx context.Context, pool *pgxpool.Pool, projectID string) (string, error) {
+	var name string
+	err := pool.QueryRow(ctx,
+		`SELECT COALESCE(NULLIF(btrim(auth_config->>'app_name'), ''), name)
+		   FROM public.projects WHERE id = $1`, projectID,
+	).Scan(&name)
+	return name, err
 }
 
 func (s *EmailService) loadCustomTemplate(ctx context.Context, projectID, templateType string) (string, string, error) {

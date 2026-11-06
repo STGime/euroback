@@ -1,6 +1,9 @@
 package tenant
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Closes #48: OAuth redirect-URL allowlist must require segment
 // boundary, not substring HasPrefix.
@@ -103,6 +106,33 @@ func TestPasskeyConfigValidation(t *testing.T) {
 		err := c.Validate()
 		if (err != nil) != tc.wantErr {
 			t.Errorf("%s: Validate err = %v, wantErr %v", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestAppNameValidation(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+		ok             bool
+	}{
+		{"empty", "", "", true},
+		{"trimmed", "  Stupid Correlations  ", "Stupid Correlations", true},
+		{"unicode", "Café Zürich ☕", "Café Zürich ☕", true},
+		{"max length", strings.Repeat("é", MaxAppNameLength), strings.Repeat("é", MaxAppNameLength), true},
+		{"too long", strings.Repeat("a", MaxAppNameLength+1), "", false},
+		{"newline", "Acme\nBcc: x@example.com", "", false},
+		{"tab", "Acme\tApp", "", false},
+	}
+	for _, tc := range cases {
+		c := DefaultAuthConfig()
+		c.AppName = tc.in
+		err := c.Validate()
+		if tc.ok != (err == nil) {
+			t.Errorf("%s: Validate() err = %v, want ok=%v", tc.name, err, tc.ok)
+			continue
+		}
+		if tc.ok && c.AppName != tc.want {
+			t.Errorf("%s: AppName = %q, want %q", tc.name, c.AppName, tc.want)
 		}
 	}
 }
