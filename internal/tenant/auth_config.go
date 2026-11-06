@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ProviderConfig defines settings for a single auth provider.
@@ -83,6 +85,11 @@ type AuthConfig struct {
 	EmailVerificationURL string `json:"email_verification_url,omitempty"`
 	PasswordResetURL     string `json:"password_reset_url,omitempty"`
 	MagicLinkURL         string `json:"magic_link_url,omitempty"`
+
+	// AppName is the product name shown to end users in auth emails
+	// (subject and body). Empty = the project name. Plain text, at most
+	// MaxAppNameLength characters, no control characters.
+	AppName string `json:"app_name,omitempty"`
 
 	// Passkeys is the per-project WebAuthn (passkey) config (#630). nil or
 	// disabled = off. When enabled, RPID is the relying-party id — the
@@ -442,7 +449,20 @@ func DefaultAuthConfig() AuthConfig {
 }
 
 // Validate checks that the AuthConfig values are within allowed bounds.
+// MaxAppNameLength caps AuthConfig.AppName (characters).
+const MaxAppNameLength = 60
+
 func (c *AuthConfig) Validate() error {
+	c.AppName = strings.TrimSpace(c.AppName)
+	if utf8.RuneCountInString(c.AppName) > MaxAppNameLength {
+		return fmt.Errorf("app_name must be at most %d characters", MaxAppNameLength)
+	}
+	for _, r := range c.AppName {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("app_name must not contain control characters or line breaks")
+		}
+	}
+
 	if c.PasswordMinLength < 8 || c.PasswordMinLength > 128 {
 		return fmt.Errorf("password_min_length must be between 8 and 128")
 	}

@@ -175,10 +175,7 @@ func (h *TemplateHandler) HandlePreview() http.HandlerFunc {
 		}
 
 		// Load project name for preview
-		var projectName string
-		err := h.pool.QueryRow(r.Context(),
-			`SELECT name FROM public.projects WHERE id = $1`, projectID,
-		).Scan(&projectName)
+		projectName, err := ProjectDisplayName(r.Context(), h.pool, projectID)
 		if err != nil {
 			projectName = "My Project"
 		}
@@ -231,10 +228,7 @@ func (h *TemplateHandler) HandleTest() http.HandlerFunc {
 			return
 		}
 
-		var projectName string
-		_ = h.pool.QueryRow(r.Context(),
-			`SELECT name FROM public.projects WHERE id = $1`, projectID,
-		).Scan(&projectName)
+		projectName, _ := ProjectDisplayName(r.Context(), h.pool, projectID)
 		if projectName == "" {
 			projectName = "My Project"
 		}
