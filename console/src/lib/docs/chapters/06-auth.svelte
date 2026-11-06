@@ -50,7 +50,7 @@ claims := token.Claims.(jwt.MapClaims) // claims["sub"] = user id`;
 					<li><strong>Email + Password</strong> &mdash; traditional sign-up and sign-in with email and password</li>
 					<li><strong>Magic Links</strong> &mdash; passwordless sign-in via a one-time email link (no password needed)</li>
 					<li><strong>Phone (SMS OTP)</strong> &mdash; sign in with phone number via a 6-digit SMS code (EU-sovereign SMS via GatewayAPI). <span class="text-amber-700 font-medium">Paid plans only</span> &mdash; every send has a per-message cost.</li>
-					<li><strong>Passkeys</strong> &mdash; coming soon (WebAuthn / FaceID / fingerprint)</li>
+					<li><strong>Passkeys</strong> &mdash; passwordless sign-in with Face ID, Touch ID or a security key (WebAuthn). Turn on in <strong>Auth &rarr; Settings</strong> and enter your app's domain and origins; in the SDK, <code class="bg-gray-100 border border-gray-200 rounded px-1">registerPasskey()</code> for a signed-in user and <code class="bg-gray-100 border border-gray-200 rounded px-1">signInWithPasskey()</code> (SDK 0.9.0 or later)</li>
 					<li><strong>Social Login</strong> &mdash; Google, GitHub, LinkedIn, Apple (configure in Auth settings)</li>
 				</ul>
 
