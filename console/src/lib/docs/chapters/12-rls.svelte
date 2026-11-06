@@ -25,7 +25,7 @@
 							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_uid() / auth.uid()</td><td class="px-3 py-1.5 text-gray-500">uuid</td><td class="px-3 py-1.5 text-gray-500">Current user's ID, NULL when no end-user context</td></tr>
 							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_email() / auth.email()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">Current user's email</td></tr>
 							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth_role() / auth.role()</td><td class="px-3 py-1.5 text-gray-500">text</td><td class="px-3 py-1.5 text-gray-500">'service_role', 'authenticated', or 'anon'</td></tr>
-							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">is_service_role()</td><td class="px-3 py-1.5 text-gray-500">boolean</td><td class="px-3 py-1.5 text-gray-500">True for calls made with the service key (bypasses end-user RLS)</td></tr>
+							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">is_service_role()</td><td class="px-3 py-1.5 text-gray-500">boolean</td><td class="px-3 py-1.5 text-gray-500">True for calls made with the secret key. Policies must include it for the secret key to pass (the console presets do)</td></tr>
 							<tr><td class="px-3 py-1.5 text-gray-700 font-mono">auth.jwt()</td><td class="px-3 py-1.5 text-gray-500">jsonb</td><td class="px-3 py-1.5 text-gray-500">{'{'} sub, email, role {'}'} &mdash; for policies that read JWT claims</td></tr>
 						</tbody>
 					</table>
@@ -221,7 +221,7 @@ create policy "read profiles" on app_profiles
 					</svg>
 					<div class="text-sm text-eurobase-800">
 						<p><strong>Supabase compatibility:</strong> Eurobase's <code class="bg-white/50 rounded px-1">auth_uid()</code>, <code class="bg-white/50 rounded px-1">auth_role()</code>, and <code class="bg-white/50 rounded px-1">auth_email()</code> follow the same pattern as Supabase's GoTrue. RLS policies written for Supabase work in Eurobase with minimal changes.</p>
-						<p class="mt-1"><strong>Secret API key</strong> (<code class="bg-white/50 rounded px-1">eb_sk_</code>) bypasses RLS entirely &mdash; use it for server-side admin access, never in client code.</p>
+						<p class="mt-1"><strong>Secret API key</strong> (<code class="bg-white/50 rounded px-1">eb_sk_</code>) passes every policy that includes <code class="bg-white/50 rounded px-1">is_service_role()</code>. The console presets add it; a policy you write yourself needs it too, or the secret key is refused like any other caller. Use it for server-side access only, never in client code.</p>
 					</div>
 				</div>
 

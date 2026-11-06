@@ -172,6 +172,16 @@ const {'{'} data: stats {'}'} = await eb.db.rpc('generate_daily_stats')
 console.log(stats) // {'{'} total_users: 150, active_today: 23 {'}'}</pre>
 				</div>
 
+				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 mt-3">
+					<p class="text-sm text-amber-900"><span class="font-semibold">Anyone with your public key can call any function.</span> <code class="bg-white/50 rounded px-1">POST /v1/db/rpc/&lt;name&gt;</code> doesn't check which key was used, and who may execute a function can't be restricted with <code class="bg-white/50 rounded px-1">GRANT</code> / <code class="bg-white/50 rounded px-1">REVOKE</code>. Policies still apply to the tables a function reads and writes, but a function meant only for your server (credits, payouts, admin fixes) must check the caller itself:</p>
+					<div class="relative rounded-lg bg-gray-900 p-3 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+						<pre>IF NOT public.is_service_role() THEN
+  RAISE EXCEPTION 'server only';
+END IF;</pre>
+					</div>
+					<p class="text-sm text-amber-900 mt-2">For a function signed-in users may call, check <code class="bg-white/50 rounded px-1">auth_uid()</code> instead; it only has a value when the call carries a user token.</p>
+				</div>
+
 				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3 mt-3">
 					<svg class="h-5 w-5 text-eurobase-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
