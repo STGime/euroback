@@ -237,6 +237,7 @@
 	let passwordMinLength = $state(8);
 	let sessionDuration = $state('168h');
 	let redirectUrls = $state('http://localhost:3000');
+	let emailVerificationUrl = $state('');
 	let savingAuth = $state(false);
 	let authError = $state('');
 
@@ -471,12 +472,17 @@
 		savingAuth = true;
 		authError = '';
 		try {
+			const redirects = redirectUrls.split('\n').map(u => u.trim()).filter(Boolean);
+			const verifyUrl = requireEmailConfirmation ? emailVerificationUrl.trim() : '';
+			// The verification URL must be an allowed redirect URL; add it for them.
+			if (verifyUrl && !redirects.includes(verifyUrl)) redirects.push(verifyUrl);
 			const config: AuthConfig = {
 				providers: { email_password: { enabled: emailPasswordEnabled }, magic_link: { enabled: magicLinkEnabled }, phone: { enabled: phoneEnabled } },
 				password_min_length: passwordMinLength,
 				require_email_confirmation: requireEmailConfirmation,
 				session_duration: sessionDuration,
-				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean)
+				redirect_urls: redirects,
+				...(verifyUrl ? { email_verification_url: verifyUrl } : {})
 			};
 			await api.updateProject(createdProject.id, { auth_config: config });
 			step = 'success';
@@ -924,8 +930,8 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 						<!-- Passkeys (coming soon) -->
 						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
 							<div>
-								<p class="text-sm font-medium text-gray-900">Passkeys</p>
-								<p class="text-xs text-gray-500">Passwordless auth with WebAuthn</p>
+								<p class="text-sm font-medium text-gray-900">Passkeys for your app's users</p>
+								<p class="text-xs text-gray-500">Your users sign in with Face ID, Touch ID or a security key</p>
 							</div>
 							<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
 						</div>
@@ -948,7 +954,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 						<div class="flex items-start justify-between">
 							<div>
 								<p class="text-sm font-medium text-gray-700">Require email confirmation</p>
-								<p class="text-xs text-gray-400 mt-0.5">New users confirm their email before signing in. Set the verification URL in Auth settings after creating the project.</p>
+								<p class="text-xs text-gray-400 mt-0.5">New users click a link in an email before they can sign in.</p>
 							</div>
 							<button
 								type="button"
@@ -960,6 +966,20 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 								<span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {requireEmailConfirmation ? 'translate-x-5' : 'translate-x-0'}"></span>
 							</button>
 						</div>
+
+						{#if requireEmailConfirmation}
+							<div>
+								<label for="verify-url" class="block text-sm font-medium text-gray-700">Email verification URL</label>
+								<p class="text-xs text-gray-400 mt-0.5">The page in your app the confirmation link opens. Sign-ups are refused until it's set; you can also add it later in Auth settings.</p>
+								<input
+									id="verify-url"
+									type="url"
+									bind:value={emailVerificationUrl}
+									placeholder="https://yourapp.example/verify"
+									class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm font-mono focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+								/>
+							</div>
+						{/if}
 
 						<!-- Minimum password length -->
 						<div>
