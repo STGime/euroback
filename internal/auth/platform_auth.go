@@ -976,12 +976,25 @@ func (s *PlatformAuthService) ForgotPassword(ctx context.Context, emailAddr stri
 	emailAddr = strings.ToLower(strings.TrimSpace(emailAddr))
 
 	var userID string
+	var unconfirmedPasswordUser bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT id FROM platform_users WHERE email = $1`,
+		`SELECT id, (password_hash IS NOT NULL AND email_confirmed_at IS NULL)
+		   FROM platform_users WHERE email = $1`,
 		emailAddr,
-	).Scan(&userID)
+	).Scan(&userID, &unconfirmedPasswordUser)
 	if err != nil {
 		return nil // prevent enumeration
+	}
+
+	// An unconfirmed account can't sign in whatever its password, so a
+	// reset link would be a dead end. Send the confirmation email instead:
+	// it goes to the same inbox and signs them in. Same accounts as
+	// ResendVerification (password accounts only). The response is the same.
+	if unconfirmedPasswordUser {
+		if err := s.emailService.SendPlatformVerificationEmail(ctx, userID, emailAddr); err != nil {
+			slog.Error("failed to send platform verification email (forgot password)", "error", err, "user_id", userID)
+		}
+		return nil
 	}
 
 	if err := s.emailService.SendPlatformPasswordResetEmail(ctx, userID, emailAddr); err != nil {

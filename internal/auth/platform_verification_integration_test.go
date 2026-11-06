@@ -22,6 +22,7 @@ type fakeEmailer struct {
 	pool    *pgxpool.Pool
 	lastRaw string
 	sends   int
+	resets  int
 }
 
 func hashHex(s string) string {
@@ -40,6 +41,7 @@ func (f *fakeEmailer) SendPlatformVerificationEmail(ctx context.Context, userID,
 }
 
 func (f *fakeEmailer) SendPlatformPasswordResetEmail(ctx context.Context, userID, email string) error {
+	f.resets++
 	return nil
 }
 
@@ -120,6 +122,31 @@ func TestPlatformSignupVerificationFlow(t *testing.T) {
 		t.Fatalf("expected ErrEmailNotVerified, got %v", serr)
 	}
 
+	// 3b. Forgot password on an unconfirmed account sends the confirmation
+	// email (a reset can't get them in), not a reset link.
+	if err := svc.ForgotPassword(ctx, email); err != nil {
+		t.Fatalf("ForgotPassword (unconfirmed): %v", err)
+	}
+	if fake.sends != 2 || fake.resets != 0 {
+		t.Errorf("unconfirmed forgot-password: verification sends = %d (want 2), resets = %d (want 0)", fake.sends, fake.resets)
+	}
+
+	// 3c. An unconfirmed account without a password (pre-password legacy
+	// rows) isn't one ResendVerification serves either: it keeps getting
+	// the reset link, never a sign-in link.
+	legacy := "legacy-" + email
+	t.Cleanup(func() { cleanupPlatformUser(context.Background(), pool, legacy) })
+	cleanupPlatformUser(ctx, pool, legacy)
+	if _, err := pool.Exec(ctx, `INSERT INTO platform_users (email) VALUES ($1)`, legacy); err != nil {
+		t.Fatalf("insert legacy user: %v", err)
+	}
+	if err := svc.ForgotPassword(ctx, legacy); err != nil {
+		t.Fatalf("ForgotPassword (legacy): %v", err)
+	}
+	if fake.sends != 2 || fake.resets != 1 {
+		t.Errorf("legacy forgot-password: verification sends = %d (want 2), resets = %d (want 1)", fake.sends, fake.resets)
+	}
+
 	// 4. Verify with the emailed token → confirms + issues a session.
 	vresp, err := svc.VerifyEmail(ctx, fake.lastRaw)
 	if err != nil {
@@ -153,6 +180,14 @@ func TestPlatformSignupVerificationFlow(t *testing.T) {
 	}
 	if fake.sends != before {
 		t.Error("resend should not send for an already-verified account")
+	}
+
+	// 7b. Forgot password on a confirmed account sends a reset link.
+	if err := svc.ForgotPassword(ctx, email); err != nil {
+		t.Fatalf("ForgotPassword (confirmed): %v", err)
+	}
+	if fake.resets != 2 || fake.sends != before {
+		t.Errorf("confirmed forgot-password: resets = %d (want 2), verification sends = %d (want %d)", fake.resets, fake.sends, before)
 	}
 
 	// 8. ChangePassword enforces the same strength policy.
