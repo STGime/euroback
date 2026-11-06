@@ -948,7 +948,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 						<div class="flex items-start justify-between">
 							<div>
 								<p class="text-sm font-medium text-gray-700">Require email confirmation</p>
-								<p class="text-xs text-gray-400 mt-0.5">Email sending not yet configured</p>
+								<p class="text-xs text-gray-400 mt-0.5">New users confirm their email before signing in. Set the verification URL in Auth settings after creating the project.</p>
 							</div>
 							<button
 								type="button"
