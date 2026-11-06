@@ -927,13 +927,12 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 							</button>
 						</div>
 
-						<!-- Passkeys (coming soon) -->
-						<div class="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3 opacity-50 cursor-not-allowed">
+						<!-- Passkeys: need the app's domain, so set up after creation -->
+						<div class="rounded-lg border border-gray-200 px-4 py-3">
 							<div>
 								<p class="text-sm font-medium text-gray-900">Passkeys for your app's users</p>
-								<p class="text-xs text-gray-500">Your users sign in with Face ID, Touch ID or a security key</p>
+								<p class="text-xs text-gray-500">Your users sign in with Face ID, Touch ID or a security key. Turn on after project creation in Auth settings (needs your app's domain).</p>
 							</div>
-							<span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Coming soon</span>
 						</div>
 
 						<!-- Social Login -->
