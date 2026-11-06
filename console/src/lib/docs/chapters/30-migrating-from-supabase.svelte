@@ -28,7 +28,7 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Is Row-Level Security supported?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes — RLS is the core authorization model, with the same helpers you know (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth.uid()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth.role()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth.email()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">is_service_role()</code>). The importer auto-translates Supabase policies, and the service (secret) key bypasses RLS like Supabase's service role.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes — RLS is the core authorization model, with the same helpers you know (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth.uid()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth.role()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth.email()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">is_service_role()</code>). The importer auto-translates Supabase policies and adds an <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">is_service_role()</code> branch to each, so the secret key passes them like Supabase's service role. Policies you write later need that branch too &mdash; no API key skips RLS on its own.</p>
 				</div>
 
 				<div class="rounded-xl border border-amber-200 bg-amber-50 p-5">
