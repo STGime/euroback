@@ -83,6 +83,11 @@ func rpcErrorForUnscrubbed(err error, funcName string) rpcError {
 		e.Status = http.StatusBadRequest
 	case "40":
 		e.Status = http.StatusConflict
+	case "25":
+		e.Status = http.StatusBadRequest
+		if pgErr.Code == "25006" { // read-only: a write refused (e.g. a freeze trigger)
+			e.Status = http.StatusConflict
+		}
 	case "53", "57":
 		e.Status = http.StatusServiceUnavailable
 	case "08", "58", "F0", "XX": // connection, system, config, internal

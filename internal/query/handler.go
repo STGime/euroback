@@ -590,6 +590,27 @@ func handleQueryError(w http.ResponseWriter, err error) bool {
 		jsonError(w, "permission denied", http.StatusForbidden)
 		return true
 	}
+	// Errors the developer's own triggers or functions raise: a write
+	// refused as read-only (25006, e.g. a trigger freezing a table during a
+	// migration) or a RAISE EXCEPTION (P0xxx). The message is the
+	// developer's own text — pass it on with the code, like RPC does,
+	// instead of a 500.
+	if pgErr != nil && (pgErr.Code == "25006" || strings.HasPrefix(pgErr.Code, "P0")) {
+		status, msg := http.StatusBadRequest, pgErr.Message
+		if pgErr.Code == "25006" {
+			status = http.StatusConflict
+			if msg == "" {
+				msg = "table is read-only"
+			}
+		}
+		if msg == "" {
+			msg = "the operation was refused by a database function"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": pgErr.Code})
+		return true
+	}
 	if isUniqueViolation(err) {
 		field := extractConflictField(err)
 		msg := "a record with this value already exists"
