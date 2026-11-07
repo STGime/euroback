@@ -70,6 +70,13 @@ func TestRPCErrorFor(t *testing.T) {
 			wantCode:   "57014",
 		},
 		{
+			name:       "read-only (freeze trigger) is 409 with the message",
+			err:        wrap(&pgconn.PgError{Code: "25006", Message: "table legacy is read-only during migration"}),
+			wantStatus: http.StatusConflict,
+			wantMsg:    "table legacy is read-only during migration",
+			wantCode:   "25006",
+		},
+		{
 			name:       "function ended without RETURN is 400",
 			err:        wrap(&pgconn.PgError{Code: "2F005", Message: "control reached end of function without RETURN"}),
 			wantStatus: http.StatusBadRequest,

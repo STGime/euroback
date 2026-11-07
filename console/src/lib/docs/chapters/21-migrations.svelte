@@ -126,5 +126,30 @@ eurobase migrations up</pre>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Plain <code class="bg-gray-100 rounded px-1">LANGUAGE plpgsql</code> functions and triggers are fine. Bulk data loads belong in the SDK/REST data path, not migrations.
 				</p>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Making tables read-only during a data migration</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					To stop every write to a table while you export or move its data (your app&rsquo;s users, secret-key clients, edge functions, cron jobs, and also your own SQL), add a trigger that refuses writes. Triggers fire for everyone, and only you can remove them. Reads keep working.
+				</p>
+				<pre class="bg-gray-900 text-gray-100 rounded-lg p-4 text-xs overflow-x-auto"><code>CREATE FUNCTION migration_freeze() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'table % is read-only during migration', TG_TABLE_NAME
+    USING ERRCODE = '25006';
+END $$;
+
+-- once per table:
+CREATE TRIGGER migration_freeze
+  BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON legacy_table
+  FOR EACH STATEMENT EXECUTE FUNCTION migration_freeze();
+
+-- to lift it:
+DROP TRIGGER migration_freeze ON legacy_table;
+DROP FUNCTION migration_freeze();</code></pre>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					While it&rsquo;s on, REST and RPC writes get <code class="bg-gray-100 rounded px-1">409</code> with <code class="bg-gray-100 rounded px-1">{'{'}"error": "table legacy_table is read-only during migration", "code": "25006"{'}'}</code>; edge functions and cron jobs get the database error. Pause cron jobs that write to the table first. For a consistent copy of all tables, use the full project export (<a href="/docs/compliance" class="text-eurobase-600 hover:underline">Compliance</a>): it reads every table from one snapshot.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The same goes for any error your own triggers or functions raise with <code class="bg-gray-100 rounded px-1">RAISE EXCEPTION</code>: REST returns <code class="bg-gray-100 rounded px-1">400</code> with your message and its code (e.g. <code class="bg-gray-100 rounded px-1">P0001</code>), as RPC does.
+				</p>
 			</div>
 		</section>
