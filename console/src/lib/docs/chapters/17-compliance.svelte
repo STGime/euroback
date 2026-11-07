@@ -89,6 +89,93 @@ curl https://api.eurobase.app/platform/projects/$PROJECT_ID/compliance/exports/$
 					<li>Every request, completion and failure lands in the Audit Log with the token owner's email and IP.</li>
 				</ul>
 
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Downloading the archive safely</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">download_url</code> is a pre-signed Scaleway Object Storage link. Its host is always <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">s3.fr-par.scw.cloud</code> over HTTPS, on every plan: the bucket is in the path, never in the hostname. If your client allowlists download hosts, that one entry is all you need.
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>https://s3.fr-par.scw.cloud/&lt;project-bucket&gt;/exports/&lt;project-id&gt;/&lt;export-id&gt;.zip?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=…&X-Amz-Date=…&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&response-content-disposition=…&X-Amz-Signature=…</pre>
+				</div>
+				<ul class="text-sm text-gray-700 leading-relaxed list-disc pl-5 mt-2 space-y-1">
+					<li>The link carries its own signature in the query string. Fetch it <strong>without</strong> an <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">Authorization</code> header: your token only ever goes to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">api.eurobase.app</code>, and S3 refuses a request that has both.</li>
+					<li>A successful download is a direct <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">200</code> with the zip, no redirect.</li>
+					<li><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">download_url</code> appears once <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">status</code> is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">completed</code>. Each status request signs a new link (valid 1 hour). After <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">expires_at</code> (7 days) the archive and its record are deleted and the status request returns <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">404</code>: request a new export.</li>
+				</ul>
+
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Archive format</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					A full project export with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">"format": "json"</code> (with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">"csv"</code>, the table files are <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">.csv</code> with a header row):
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>eurobase-&lt;slug&gt;-project-&lt;YYYY-MM-DD&gt;.zip
+├── _metadata.json             what was exported, with row counts and statuses
+├── _audit_log.json            project audit log (latest 10,000 entries)
+├── _retention_holds.json      legal retention holds (usually [])
+├── tables/
+│   ├── &lt;table&gt;.json           one file per table, empty tables too
+│   └── …                      (platform tables such as users included)
+└── schema/
+    ├── schema.sql             pg_dump --schema-only, same snapshot as the rows
+    ├── sequences.json         current sequence values
+    ├── auth_manifest.json     auth settings and email templates, no secrets
+    └── storage_manifest.json  stored objects: key, size, ETag, content type</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">_metadata.json</code> describes the run (shortened example):
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>{'{'}
+  "format_version": 2,
+  "export_id": "2f0c…",
+  "project_id": "8a1b…",
+  "format": "json",
+  "exported_at": "2026-11-08T10:15:02.123Z",
+  "table_count": 11,
+  "total_rows": 48210,
+  "complete": true,
+  "tables": [
+    {'{'} "table": "orders", "file": "tables/orders.json", "rows": 1200, "status": "exported" },
+    {'{'} "table": "order_items", "file": "tables/order_items.json", "rows": 0, "status": "exported" },
+    {'{'} "table": "users", "file": "tables/users.json", "rows": 340, "status": "exported",
+      "redacted_columns": ["password_hash"] },
+    {'{'} "table": "order_summary", "rows": 0, "status": "skipped",
+      "reason": "view: derived data, definition in schema/schema.sql" }
+  ],
+  "row_limit_per_table": 100000,
+  "sections": [
+    {'{'} "section": "schema", "file": "schema/schema.sql", "status": "exported" },
+    {'{'} "section": "sequences", "file": "schema/sequences.json", "status": "exported", "count": 2 },
+    {'{'} "section": "auth_manifest", "file": "schema/auth_manifest.json", "status": "exported" },
+    {'{'} "section": "storage_manifest", "file": "schema/storage_manifest.json", "status": "exported", "count": 0 }
+  ],
+  "retention_hold_count": 0
+}</pre>
+				</div>
+				<ul class="text-sm text-gray-700 leading-relaxed list-disc pl-5 mt-2 space-y-1">
+					<li>Each table's <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">status</code> is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">exported</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">truncated</code> (more than 100,000 rows) or <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">failed</code> (with an <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">error</code>). Views, materialized views and foreign tables are listed as <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">skipped</code> with a <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">reason</code>; their definitions are in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">schema/schema.sql</code>.</li>
+					<li>Credential columns of platform tables (password hashes, token hashes, vault secrets) are left out and listed in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">redacted_columns</code>.</li>
+					<li>Use an archive for a restore or migration only when <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">complete</code> is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">true</code>; otherwise <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">warnings</code> says what is missing.</li>
+				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					A table file is one JSON array with an object per row, keyed by column name. An empty table is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">[]</code>.
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>[
+  {'{'}
+    "id": "6f1d0c2e-…",
+    "customer_id": "a91b…",
+    "total": 42.5,
+    "payload": "q83v…==",
+    "created_at": "2026-11-07T18:02:11.482913Z",
+    "meta": {'{'} "source": "web" }
+  }
+]</pre>
+				</div>
+				<ul class="text-sm text-gray-700 leading-relaxed list-disc pl-5 mt-2 space-y-1">
+					<li><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">uuid</code> values are strings; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">jsonb</code> is nested JSON; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">timestamptz</code> is RFC 3339.</li>
+					<li><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">bytea</code> values (e.g. encrypted payloads) are <strong>base64</strong> strings: decode them before writing them back.</li>
+				</ul>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Your Data Processing Agreement (Art. 28 GDPR)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					The DPA report above is a description of processing (Article 30). The <em>contract</em> that makes Eurobase your processor is the <strong>Data Processing Agreement v2</strong>, which you accepted click-through when you created your account &mdash; that is a valid written form under Art. 28(9), and it applies on every tier, including Free. The full text is at <a href="/legal/dpa" class="text-eurobase-600 hover:underline cursor-pointer">/legal/dpa</a>: it names the contracting entity (Eurobase OÜ, Ahtri 12, Tallinn 15551, Estonia, registry code 17557586), sets out the technical and organisational measures, and carries the sub-processor annex. Print it or save it as PDF for your records; the sub-processors actually engaged by <em>your</em> project's enabled features are listed live in the DPA Report tab.
