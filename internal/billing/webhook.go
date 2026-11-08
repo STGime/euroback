@@ -154,6 +154,16 @@ func (s *Service) processPaymentWebhook(ctx context.Context, paymentID string) e
 		"has_pending_project_id", payment.Metadata["pending_project_id"] != "",
 	)
 
+	// A zero-amount payment that only adds a new card / PayPal account
+	// for an existing subscription (payment_method.go). Never a checkout:
+	// a failed or abandoned one changes nothing.
+	if payment.Metadata["purpose"] == purposePaymentMethodUpdate {
+		if payment.Status == "paid" {
+			return s.applyPaymentMethodUpdate(ctx, payment)
+		}
+		return nil
+	}
+
 	switch payment.Status {
 	case "paid":
 		if payment.SequenceType == mollie.SequenceTypeFirst {
@@ -782,6 +792,16 @@ func (s *Service) abandonActivation(ctx context.Context, payment *mollie.Payment
 	}
 }
 
+// alreadyRefunded reports whether Mollie says the payment has been
+// refunded in full.
+func alreadyRefunded(p *mollie.Payment) bool {
+	if p.AmountRefunded == nil {
+		return false
+	}
+	total := p.Amount.Cents()
+	return total > 0 && p.AmountRefunded.Cents() >= total
+}
+
 // refundOrphanedPayment issues a Mollie refund for a payment we
 // took but can't fulfill (pending row expired, project creation
 // failed, etc.). Best-effort — we log if the refund itself fails,
@@ -855,6 +875,38 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 		}
 		if err := load(); err != nil {
 			return fmt.Errorf("reload subscription: %w", err)
+		}
+	}
+
+	// Already refunded (Mollie calls the webhook again for a refund or
+	// chargeback on a payment): nothing more to do here.
+	if alreadyRefunded(payment) {
+		return nil
+	}
+
+	// A charge that lands on a subscription that has ended: a late
+	// retry of a failed charge (SEPA can settle days later) after the
+	// project was downgraded, or any charge from a subscription the
+	// project no longer uses. Refund it, unless we recorded it as paid
+	// before (then this is a redelivery for a charge that was fine when
+	// it came in). A 'failed' invoice doesn't count: a retry that
+	// succeeds late may carry the failed payment's id.
+	if status == "expired" || status == "canceled" {
+		var recorded bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM public.invoices
+			                 WHERE mollie_payment_id = $1 AND status IN ('paid', 'refunded'))`,
+			payment.ID,
+		).Scan(&recorded); err != nil {
+			return fmt.Errorf("check invoice for %s: %w", payment.ID, err)
+		}
+		if !recorded {
+			slog.Error("billing.webhook.charge_on_closed_subscription — refunding",
+				"subscription_id", subscriptionID, "status", status, "mollie_payment_id", payment.ID)
+			if err := s.refundOrphanedPayment(ctx, payment, "charged after the subscription had ended"); err != nil {
+				return fmt.Errorf("refund charge on closed subscription %s: %w", payment.ID, err)
+			}
+			return nil
 		}
 	}
 

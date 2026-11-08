@@ -1221,6 +1221,27 @@ export class EurobaseAPI {
 		}
 	}
 
+	/** The card / PayPal account / bank account the project's
+	 * subscription is charged to. Null when there's nothing to show
+	 * (no live subscription, paid by a previous owner, billing off). */
+	async getPaymentMethod(projectId: string): Promise<PaymentMethod | null> {
+		try {
+			return await this.fetch<PaymentMethod>(`/platform/billing/projects/${projectId}/payment-method`);
+		} catch (err) {
+			if (err instanceof APIError && (err.status === 404 || err.status === 409 || err.status === 503)) {
+				return null;
+			}
+			throw err;
+		}
+	}
+
+	/** Starts a €0 Mollie checkout to add a new card or PayPal account;
+	 * the subscription moves to it once completed. Returns the URL to
+	 * redirect to. */
+	async startPaymentMethodUpdate(projectId: string): Promise<{ checkout_url: string }> {
+		return this.fetch(`/platform/billing/projects/${projectId}/payment-method`, { method: 'POST' });
+	}
+
 	/** List all projects (tenants) for the authenticated user. */
 	async listProjects(): Promise<Project[]> {
 		return this.fetch<Project[]>('/v1/tenants');
@@ -3536,6 +3557,21 @@ export interface ProjectSubscription {
 		currency: string;
 		starts_at: string;
 	} | null;
+}
+
+/** Payment method a subscription is charged to, from
+ * GET /platform/billing/projects/{id}/payment-method. */
+export interface PaymentMethod {
+	method: 'creditcard' | 'paypal' | 'directdebit' | string;
+	status: 'valid' | 'pending' | 'invalid' | string;
+	card_label?: string;
+	card_last4?: string;
+	/** YYYY-MM */
+	card_expiry?: string;
+	account_name?: string;
+	account?: string;
+	expires_before_next_charge: boolean;
+	can_change: boolean;
 }
 
 /** Buyer identity + address for Estonian VAT Act §37 invoice
