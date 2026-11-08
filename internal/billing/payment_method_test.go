@@ -264,11 +264,12 @@ func TestApplyPaymentMethodUpdate(t *testing.T) {
 func TestRecordRecurringPayment_ClosedSubscriptionRefunds(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
-		recorded   bool
+		invoice    string // status of an existing invoice row, "" for none
 		wantRefund bool
 	}{
-		{"new charge on an expired subscription", false, true},
-		{"redelivery of a charge recorded earlier", true, false},
+		{"new charge on an expired subscription", "", true},
+		{"late success of a charge recorded as failed", "failed", true},
+		{"redelivery of a charge recorded as paid", "paid", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := setupPaymentFailureFixture(t)
@@ -276,8 +277,9 @@ func TestRecordRecurringPayment_ClosedSubscriptionRefunds(t *testing.T) {
 			fx.seedSubscription(t, "expired", subID)
 			ctx := context.Background()
 			_, _ = fx.pool.Exec(ctx, `UPDATE public.subscriptions SET canceled_at = now(), price_cents = 2500 WHERE id = $1`, fx.subscriptionID)
-			if tc.recorded {
+			if tc.invoice != "" {
 				fx.seedInvoice(t)
+				_, _ = fx.pool.Exec(ctx, `UPDATE public.invoices SET status = $2 WHERE mollie_payment_id = $1`, fx.molliePaymentID, tc.invoice)
 			}
 			f, client := newPMMollie(t)
 			svc := NewService(fx.pool, client, Config{WebhookBaseURL: "https://api.test"}, true)
@@ -295,7 +297,7 @@ func TestRecordRecurringPayment_ClosedSubscriptionRefunds(t *testing.T) {
 			}
 			var invoices int
 			_ = fx.pool.QueryRow(ctx, `SELECT count(*) FROM public.invoices WHERE mollie_payment_id = $1 AND status = 'paid'`, payment.ID).Scan(&invoices)
-			if tc.wantRefund && invoices != 0 {
+			if tc.wantRefund && invoices != 0 && tc.invoice != "paid" {
 				t.Errorf("refunded charge was also recorded as a paid invoice")
 			}
 		})

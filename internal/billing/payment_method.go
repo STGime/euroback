@@ -355,8 +355,11 @@ func writePaymentMethodError(w http.ResponseWriter, err error, userID, projectID
 		writeJSONError(w, http.StatusConflict, "payment_overdue", "the last payment failed; contact hello@eurobase.app to settle it with a new payment method")
 	case errors.Is(err, ErrPaymentMethodNotChangeable):
 		writeJSONError(w, http.StatusConflict, "not_changeable", "the payment method can't be changed for a subscription that is cancelled or not set up yet")
+	case errors.Is(err, mollie.ErrServer) || errors.Is(err, mollie.ErrRateLimited) || errors.Is(err, mollie.ErrNotFound):
+		slog.Error("billing: payment method request failed at Mollie", "user_id", userID, "project_id", projectID, "error", err)
+		writeJSONError(w, http.StatusBadGateway, "payment_provider_error", "couldn't reach the payment provider, try again")
 	default:
 		slog.Error("billing: payment method request failed", "user_id", userID, "project_id", projectID, "error", err)
-		writeJSONError(w, http.StatusBadGateway, "payment_provider_error", "couldn't reach the payment provider, try again")
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", "payment method request failed")
 	}
 }

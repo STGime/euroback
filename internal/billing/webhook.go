@@ -887,13 +887,15 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	// A charge that lands on a subscription that has ended: a late
 	// retry of a failed charge (SEPA can settle days later) after the
 	// project was downgraded, or any charge from a subscription the
-	// project no longer uses. Refund it, unless we recorded it before
-	// (then this is a redelivery for a charge that was fine when it
-	// came in).
+	// project no longer uses. Refund it, unless we recorded it as paid
+	// before (then this is a redelivery for a charge that was fine when
+	// it came in). A 'failed' invoice doesn't count: a retry that
+	// succeeds late may carry the failed payment's id.
 	if status == "expired" || status == "canceled" {
 		var recorded bool
 		if err := s.pool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM public.invoices WHERE mollie_payment_id = $1)`,
+			`SELECT EXISTS (SELECT 1 FROM public.invoices
+			                 WHERE mollie_payment_id = $1 AND status IN ('paid', 'refunded'))`,
 			payment.ID,
 		).Scan(&recorded); err != nil {
 			return fmt.Errorf("check invoice for %s: %w", payment.ID, err)
