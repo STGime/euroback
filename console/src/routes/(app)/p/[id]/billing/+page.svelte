@@ -308,6 +308,23 @@
 						<p class="mt-2 text-sm text-gray-600">
 							100k MAU · 100 GB storage · 250 GB bandwidth · never pauses.
 						</p>
+						{#if subscription?.status === 'past_due'}
+							<div class="mt-3 max-w-xl rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+								<p class="font-medium">The last payment for this project failed.</p>
+								<p class="mt-1">
+									Depending on the reason, Mollie retries the charge automatically for a few days.
+									{#if subscription.downgrade_at}
+										If it still hasn't come through by {formatDay(subscription.downgrade_at)}, the project moves to the Free plan.
+									{:else}
+										If it still doesn't come through, the project moves to the Free plan.
+									{/if}
+									Nothing is deleted.
+								</p>
+								<p class="mt-1">
+									To keep Pro with a different card or payment method, contact <a href="mailto:hello@eurobase.app" class="underline">hello@eurobase.app</a>.
+								</p>
+							</div>
+						{/if}
 						{#if endingSub}
 							{@const until = formatDay(endingSub.next_charge_at)}
 							{#if endingSub.scheduled}
@@ -394,9 +411,15 @@
 						{/if}
 					{:else}
 						<div class="flex items-center gap-3">
-							<span class="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"
-								>Active</span
-							>
+							{#if subscription?.status === 'past_due'}
+								<span class="inline-flex rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-800"
+									>Payment failed</span
+								>
+							{:else}
+								<span class="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"
+									>Active</span
+								>
+							{/if}
 							{#if subscription && subscription.status !== 'past_due'}
 								<button
 									type="button"

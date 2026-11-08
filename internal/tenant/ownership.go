@@ -581,7 +581,7 @@ func transferBillingOK(w http.ResponseWriter, r *http.Request, check CheckTransf
 	}
 	if errors.Is(err, ErrTransferPaymentOverdue) {
 		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "this project's last payment failed — the owner needs to update the payment method in Billing before it can be transferred",
+			"error": "this project's last payment failed — it can be transferred once the payment has come through or the project has moved to the Free plan",
 			"code":  "payment_overdue",
 		})
 		return false

@@ -26,6 +26,9 @@
 				<p class="text-sm text-gray-700 leading-relaxed">
 					A project's plan and subscription are managed on the <strong>Billing</strong> page (Project &rarr; Billing). To stop paying for a Pro project without deleting it, use <strong>Cancel subscription</strong> there &mdash; by default it cancels at the end of the current billing period, so you keep Pro until the period you've already paid for runs out, then the project drops to Free. No new charges are made after you cancel.
 				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<strong>If a payment fails</strong>, the project's owner gets an email and the Billing page shows <em>Payment failed</em> with the date the project would drop to Free. Depending on the reason, Mollie, our payment provider, retries the charge automatically, up to five times, once a day; a retry that goes through clears the warning. If the payment still hasn't come through 7 days after the first failure, the project moves to the Free plan. Nothing is deleted, and you can subscribe to Pro again at any time. The same applies if Mollie stops the subscription on its own, for example because the card or payment authorisation is no longer valid. To switch to a different card or payment method before then, email <a href="mailto:hello@eurobase.app" class="text-eurobase-600 hover:underline">hello@eurobase.app</a>.
+				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Transferring ownership</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">

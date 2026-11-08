@@ -969,11 +969,13 @@ func (s *Service) invoiceIDForPayment(ctx context.Context, molliePaymentID strin
 }
 
 // markPaymentFailure flags the subscription past_due on the first
-// failed charge. Mollie will retry twice more on its own schedule;
-// each retry fires another webhook. Only the first transition
-// sets past_due_since — the query below is a no-op on retries
-// because it targets status='active'. PR 5's cron uses the aged
-// past_due_since to time the 7-day grace before downgrade.
+// failed charge. Mollie retries a failed recurring charge up to 5
+// times, once a day, and cancels the subscription after the last one
+// (or at once for some failure reasons); each retry fires another
+// webhook. Only the first transition sets past_due_since and mails
+// the owner — the query below is a no-op on retries because it
+// targets status='active'. The downgrade sweep uses past_due_since
+// to time the 7-day grace before the project drops to Free.
 func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Payment) error {
 	if payment.SubscriptionID == "" {
 		// A failed first payment (before mandate capture) doesn't
@@ -1083,15 +1085,19 @@ func (s *Service) markPaymentFailure(ctx context.Context, payment *mollie.Paymen
 			"mollie_subscription_id", payment.SubscriptionID,
 			"payment_id", payment.ID,
 		)
+		sendPaymentProblemMail(ctx, s.pool, s.invoiceMailer, payment.SubscriptionID, paymentProblemChargeFailed)
 	}
 	return nil
 }
 
-// processSubscriptionWebhook handles /v2/subscriptions state
-// changes. Mollie fires this when the subscription is canceled or
-// completes its fixed term. Eurobase subscriptions have no fixed
-// term (Times is unset), so "completed" is rare — but handle it
-// for defensive completeness.
+// processSubscriptionWebhook handles a sub_ id posted to the webhook.
+// Mollie doesn't send webhooks for subscription status changes (only
+// for their payments), so in practice this runs only if someone posts
+// a subscription id by hand; the downgrade sweep's reconcile step
+// (reconcileStoppedSubscriptions) is what notices a subscription Mollie
+// stopped. Both apply the same rule: a live subscription we didn't
+// cancel goes past_due, so the project gets the usual grace and then
+// drops to Free, instead of staying on Pro unpaid.
 func (s *Service) processSubscriptionWebhook(ctx context.Context, subscriptionID string) error {
 	// Look up the customer first so we can hit the correct API
 	// path (Mollie's subscription GET is namespaced under a
@@ -1119,41 +1125,28 @@ func (s *Service) processSubscriptionWebhook(ctx context.Context, subscriptionID
 		return fmt.Errorf("fetch subscription %s: %w", subscriptionID, err)
 	}
 
-	switch mollieSub.Status {
-	case "canceled":
-		if _, err := s.pool.Exec(ctx,
-			`UPDATE public.subscriptions
-			    SET status = 'canceled',
-			        canceled_at = COALESCE(canceled_at, now())
-			  WHERE mollie_subscription_id = $1
-			    AND status IN ('active', 'past_due', 'scheduled')`,
-			subscriptionID,
-		); err != nil {
-			return fmt.Errorf("mark canceled: %w", err)
-		}
-		slog.Info("billing.webhook.subscription_canceled", "id", subscriptionID)
-	case "completed":
-		if _, err := s.pool.Exec(ctx,
-			`UPDATE public.subscriptions
-			    SET status = 'expired',
-			        canceled_at = COALESCE(canceled_at, now())
-			  WHERE mollie_subscription_id = $1
-			    AND status IN ('active', 'past_due')`,
-			subscriptionID,
-		); err != nil {
-			return fmt.Errorf("mark expired: %w", err)
-		}
-		slog.Info("billing.webhook.subscription_completed", "id", subscriptionID)
-	case "active", "pending", "suspended":
-		// No-op — active/pending are steady states; suspended
-		// is Mollie's warning that recurring is temporarily
-		// blocked (usually mandate issue). The payment webhook
-		// already covers past_due tracking; we don't need to
-		// mirror suspended into our schema.
+	if !mollieSubscriptionStopped(mollieSub.Status) {
+		// active / pending: steady states, nothing to mirror.
 		return nil
-	default:
-		slog.Warn("billing.webhook.unknown_subscription_status",
+	}
+	// A scheduled subscription stopped before it started can't take
+	// over: close it.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE public.subscriptions
+		    SET status = 'canceled', canceled_at = COALESCE(canceled_at, now())
+		  WHERE mollie_subscription_id = $1 AND status = 'scheduled'`,
+		subscriptionID,
+	); err != nil {
+		return fmt.Errorf("close scheduled subscription: %w", err)
+	}
+	changed, err := markStoppedAtMollie(ctx, s.pool, subscriptionID)
+	if err != nil {
+		return fmt.Errorf("mark stopped subscription past_due: %w", err)
+	}
+	if changed {
+		slog.Warn("billing.webhook.subscription_stopped_at_mollie",
 			"id", subscriptionID, "status", mollieSub.Status)
+		sendPaymentProblemMail(ctx, s.pool, s.invoiceMailer, subscriptionID, paymentProblemStoppedAtMollie)
 	}
 	return nil
 }

@@ -18,9 +18,10 @@ import (
 const downgradeInterval = 1 * time.Hour
 
 // pastDueGracePeriod is how long a subscription stays in past_due
-// before we downgrade the project. 7 days after Mollie's own 3-
-// strike retry schedule (~21 days) means ~28 days from first
-// failed charge to auto-downgrade. Documented in the plan.
+// before we downgrade the project, counted from the first failed
+// charge. Mollie retries a failed charge up to 5 times, once a day,
+// so its retries are over before the grace ends; a retry that
+// succeeds clears past_due (recordRecurringPayment).
 const pastDueGracePeriod = 7 * 24 * time.Hour
 
 // downgradeMailer is the surface DowngradeService uses to send
@@ -116,6 +117,11 @@ func (s *DowngradeService) RunSweep(ctx context.Context) {
 	// a project that has a successor to Free.
 	s.promoteDueScheduled(ctx)
 
+	// Subscriptions Mollie stopped without telling us (it sends no
+	// webhook for subscription status changes) go past_due first, so
+	// the branch below gives them the same grace.
+	s.reconcileStoppedSubscriptions(ctx)
+
 	pastDue, err := s.findPastDueGraceElapsed(ctx)
 	if err != nil {
 		slog.Error("billing: past-due sweep query failed", "error", err)
@@ -172,6 +178,98 @@ func (s *DowngradeService) promoteDueScheduled(ctx context.Context) {
 	for _, id := range projects {
 		if _, err := promoteScheduled(ctx, s.pool, s.client, id, false); err != nil {
 			slog.Error("billing: scheduled subscription takeover failed", "project_id", id, "error", err)
+		}
+	}
+}
+
+// overdueReconcileAfter is how long after next_charge_at a live
+// subscription may go without a recorded charge before the sweep asks
+// Mollie whether it is still running. Card and PayPal charges settle
+// within a day; SEPA Direct Debit can stay pending for several days
+// (Mollie still reports the subscription active then, so that is only
+// logged).
+const overdueReconcileAfter = 2 * 24 * time.Hour
+
+// reconcileStoppedSubscriptions asks Mollie about live subscriptions
+// whose next charge is overdue, and moves the ones Mollie has stopped
+// to past_due (markStoppedAtMollie). Without it, a subscription
+// cancelled at Mollie with no failed payment — a revoked mandate, an
+// account closed at the bank — would leave the project on Pro unpaid
+// for good: no payment is created, so no webhook ever arrives.
+func (s *DowngradeService) reconcileStoppedSubscriptions(ctx context.Context) {
+	if s.client == nil {
+		return
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT s.mollie_subscription_id, s.mollie_customer_id, s.next_charge_at
+		   FROM public.subscriptions s
+		  WHERE s.status = 'active'
+		    AND s.canceled_at IS NULL
+		    AND s.mollie_subscription_id IS NOT NULL
+		    AND s.mollie_customer_id IS NOT NULL
+		    AND s.next_charge_at IS NOT NULL
+		    AND s.next_charge_at < now() - $1::interval
+		  ORDER BY s.next_charge_at ASC
+		  LIMIT 200`,
+		fmt.Sprintf("%d hours", int(overdueReconcileAfter.Hours())),
+	)
+	if err != nil {
+		slog.Error("billing: overdue-subscription query failed", "error", err)
+		return
+	}
+	type overdue struct {
+		subID, custID string
+		due           time.Time
+	}
+	var list []overdue
+	for rows.Next() {
+		var o overdue
+		if err := rows.Scan(&o.subID, &o.custID, &o.due); err != nil {
+			rows.Close()
+			slog.Error("billing: overdue-subscription scan failed", "error", err)
+			return
+		}
+		list = append(list, o)
+	}
+	rows.Close()
+
+	for _, o := range list {
+		sub, err := s.client.GetSubscription(ctx, o.custID, o.subID)
+		if errors.Is(err, mollie.ErrNotFound) {
+			// Not acted on: a 404 also comes back for a subscription made
+			// with the other API key (test vs live) or under another
+			// customer, and acting on it would mail a paying owner that
+			// their subscription stopped. Ops looks at it instead.
+			slog.Error("billing: overdue subscription not found at Mollie",
+				"mollie_subscription_id", o.subID, "next_charge_at", o.due)
+			continue
+		}
+		if err != nil {
+			slog.Warn("billing: overdue-subscription fetch failed",
+				"mollie_subscription_id", o.subID, "error", err)
+			continue
+		}
+		status := sub.Status
+		if !mollieSubscriptionStopped(status) {
+			// Still running at Mollie: a charge is pending (SEPA) or a
+			// webhook was lost. Nothing to change here; flag it if it
+			// has been overdue for long.
+			if time.Since(o.due) > 10*24*time.Hour {
+				slog.Warn("billing: subscription charge overdue but still active at Mollie",
+					"mollie_subscription_id", o.subID, "next_charge_at", o.due, "mollie_status", status)
+			}
+			continue
+		}
+		changed, err := markStoppedAtMollie(ctx, s.pool, o.subID)
+		if err != nil {
+			slog.Error("billing: mark stopped subscription past_due failed",
+				"mollie_subscription_id", o.subID, "error", err)
+			continue
+		}
+		if changed {
+			slog.Warn("billing: subscription stopped at Mollie, now past_due",
+				"mollie_subscription_id", o.subID, "mollie_status", status)
+			sendPaymentProblemMail(ctx, s.pool, s.mailer, o.subID, paymentProblemStoppedAtMollie)
 		}
 	}
 }

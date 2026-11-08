@@ -3521,6 +3521,9 @@ export interface ProjectSubscription {
 	currency: string;
 	next_charge_at?: string | null;
 	canceled_at?: string | null;
+	/** Set while status is 'past_due': when the project drops to Free
+	 * unless the payment comes through. */
+	downgrade_at?: string | null;
 	/** False while a previous owner's subscription runs out after an
 	 * ownership transfer. */
 	paid_by_you: boolean;
