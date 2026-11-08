@@ -3,6 +3,7 @@ package billing
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -104,6 +105,9 @@ type subscriptionSummary struct {
 	Currency     string     `json:"currency"`
 	NextChargeAt *time.Time `json:"next_charge_at,omitempty"`
 	CanceledAt   *time.Time `json:"canceled_at,omitempty"`
+	// DowngradeAt is set while the subscription is past_due: when the
+	// project drops to Free unless the payment comes through.
+	DowngradeAt *time.Time `json:"downgrade_at,omitempty"`
 	// PaidByYou is false while the previous owner's subscription runs
 	// out after an ownership transfer.
 	PaidByYou bool `json:"paid_by_you"`
@@ -147,6 +151,7 @@ func HandleGetProjectSubscription(svc *Service) http.HandlerFunc {
 		err := svc.pool.QueryRow(r.Context(),
 			`SELECT s.id, s.plan, s.status, s.price_cents, s.currency,
 			        s.next_charge_at, s.canceled_at,
+			        CASE WHEN s.status = 'past_due' THEN s.past_due_since + $3::interval END,
 			        NOT EXISTS (SELECT 1 FROM public.platform_users other
 			                     WHERE other.mollie_customer_id = s.mollie_customer_id
 			                       AND other.id <> $2::uuid)
@@ -157,9 +162,9 @@ func HandleGetProjectSubscription(svc *Service) http.HandlerFunc {
 			    AND s.status IN ('incomplete', 'active', 'past_due')
 			  ORDER BY s.started_at DESC NULLS LAST
 			  LIMIT 1`,
-			projectID, claims.Subject,
+			projectID, claims.Subject, fmt.Sprintf("%d hours", int(pastDueGracePeriod.Hours())),
 		).Scan(&sum.ID, &sum.PlanCode, &sum.Status, &sum.PriceCents, &sum.Currency,
-			&sum.NextChargeAt, &sum.CanceledAt, &sum.PaidByYou)
+			&sum.NextChargeAt, &sum.CanceledAt, &sum.DowngradeAt, &sum.PaidByYou)
 		if err == nil {
 			var sc scheduledSummary
 			serr := svc.pool.QueryRow(r.Context(),

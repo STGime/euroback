@@ -44,7 +44,7 @@
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Paid projects:</strong> your subscription ends with the period you've already paid for &mdash; no further charges and no refund for the remainder. The new owner can set up their own subscription in <strong>Billing</strong> right away: they confirm a card or PayPal account (€0 today) and are first charged on the day your period ends. Example: you paid for October and transfer on 14 October; the new owner subscribes any day before 1 November and is first charged on 1 November. No gap, and nobody pays for October twice. If they haven't subscribed by then, the project moves to the Free plan until they do. The early €0 sign-up needs a card or PayPal; a new owner who wants to pay by bank account subscribes on or after the day your period ends instead, and the project is on Free from that day until they do.</li>
-					<li><strong>Overdue payments:</strong> if the project's last payment failed, update the payment method in Billing first &mdash; a transfer is refused until it's settled.</li>
+					<li><strong>Overdue payments:</strong> a transfer is refused while the project's last payment has failed (Billing shows <em>Payment failed</em>). It can go ahead once a retried charge has come through, or once the project has moved to the Free plan.</li>
 					<li><strong>Invoices stay with whoever paid them</strong> &mdash; yours stay in your account, the new owner's go to theirs.</li>
 					<li><strong>Not yet transferable this way:</strong> projects attached to an organization, and Team / Legal Team projects &mdash; contact support for those.</li>
 				</ul>
