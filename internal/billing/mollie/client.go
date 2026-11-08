@@ -192,6 +192,24 @@ func (c *Client) GetSubscription(ctx context.Context, customerID, subscriptionID
 	return &out, nil
 }
 
+// UpdateSubscription PATCHes a subscription (here: its mandate).
+func (c *Client) UpdateSubscription(ctx context.Context, customerID, subscriptionID string, req SubscriptionUpdateRequest) (*Subscription, error) {
+	var out Subscription
+	if err := c.do(ctx, http.MethodPatch, "/customers/"+customerID+"/subscriptions/"+subscriptionID, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetMandate fetches one of a customer's mandates.
+func (c *Client) GetMandate(ctx context.Context, customerID, mandateID string) (*Mandate, error) {
+	var out Mandate
+	if err := c.do(ctx, http.MethodGet, "/customers/"+customerID+"/mandates/"+mandateID, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CancelSubscription flips a subscription to canceled. Mollie
 // enforces end-of-period semantics by default (no partial refund
 // unless a refund is separately created). Returns the canceled

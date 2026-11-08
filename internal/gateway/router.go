@@ -902,6 +902,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				r.With(auth.RequirePersonalSession).Get("/invoices/{id}/pdf", billing.HandleDownloadInvoicePDF(billingSvc))
 				r.With(auth.RequirePersonalSession).Post("/subscriptions/{id}/cancel", billing.HandleCancelSubscription(billingSvc))
 				r.With(auth.RequirePersonalSession).Get("/projects/{project_id}/subscription", billing.HandleGetProjectSubscription(billingSvc))
+				r.With(auth.RequirePersonalSession).Get("/projects/{project_id}/payment-method", billing.HandleGetPaymentMethod(billingSvc))
+				r.With(auth.RequirePersonalSession).Post("/projects/{project_id}/payment-method", billing.HandleStartPaymentMethodUpdate(billingSvc))
 			})
 
 			// UNAUTHENTICATED: Mollie's webhook endpoint. Mollie

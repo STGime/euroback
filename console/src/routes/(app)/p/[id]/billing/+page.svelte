@@ -5,7 +5,7 @@
 	// producer today).
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { api, APIError, type BillingConfig, type Invoice, type Project, type ProjectSubscription } from '$lib/api.js';
+	import { api, APIError, type BillingConfig, type Invoice, type PaymentMethod, type Project, type ProjectSubscription } from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import CancelSubscriptionModal from '$lib/CancelSubscriptionModal.svelte';
 	import BillingTestModeBanner from '$lib/BillingTestModeBanner.svelte';
@@ -14,6 +14,9 @@
 
 	let project: Project | null = $state(null);
 	let subscription: ProjectSubscription | null = $state(null);
+	let paymentMethod = $state<PaymentMethod | null>(null);
+	let pmInFlight = $state(false);
+	let pmError: string | null = $state(null);
 	let invoices: Invoice[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);
@@ -48,6 +51,7 @@
 	// link from the legacy-Pro modal).
 	let autoStart = $derived($page.url.searchParams.get('plan') === 'pro');
 	let successBanner = $derived($page.url.searchParams.get('status') === 'success');
+	let paymentMethodBanner = $derived($page.url.searchParams.get('status') === 'payment_method');
 
 	// Gate the Upgrade CTA on a resolved probe. Failed probe →
 	// button disabled; the user can retry by refreshing.
@@ -69,6 +73,9 @@
 			invoices = list.invoices.filter((i) => i.project_id === projectId);
 			subscription = sub;
 			billingConfig = cfg;
+			// Separate request: it calls Mollie, so it can be slow, and
+			// the page shouldn't wait for it.
+			if (sub && sub.status !== 'scheduled' && sub.paid_by_you) void loadPaymentMethod();
 			// Auto-start only in live mode. In test mode (or when
 			// the probe failed) the user must click through the
 			// banner deliberately.
@@ -114,6 +121,38 @@
 			// Non-fatal; the cancelSuccess banner is the primary
 			// user signal.
 		}
+	}
+
+	async function loadPaymentMethod(): Promise<void> {
+		try {
+			paymentMethod = await api.getPaymentMethod(projectId);
+		} catch {
+			paymentMethod = null; // the rest of the page works without it
+		}
+	}
+
+	async function changePaymentMethod(): Promise<void> {
+		if (pmInFlight) return;
+		pmInFlight = true;
+		pmError = null;
+		try {
+			const { checkout_url } = await api.startPaymentMethodUpdate(projectId);
+			window.location.href = checkout_url;
+		} catch (err) {
+			pmError = err instanceof Error ? err.message : String(err);
+			pmInFlight = false;
+		}
+	}
+
+	function describeMethod(pm: PaymentMethod): string {
+		if (pm.method === 'creditcard') {
+			const label = pm.card_label || 'Card';
+			const exp = pm.card_expiry ? `, expires ${pm.card_expiry.slice(5)}/${pm.card_expiry.slice(0, 4)}` : '';
+			return `${label} •••• ${pm.card_last4 ?? ''}${exp}`;
+		}
+		if (pm.method === 'paypal') return `PayPal${pm.account ? ` (${pm.account})` : ''}`;
+		if (pm.method === 'directdebit') return `SEPA Direct Debit${pm.account ? ` ${pm.account}` : ''}`;
+		return pm.method;
 	}
 
 	function needsPayment(p: Project): boolean {
@@ -250,6 +289,14 @@
 		</div>
 	{/if}
 
+	{#if paymentMethodBanner}
+		<div class="mb-6 rounded-md border border-green-200 bg-green-50 p-4">
+			<p class="text-sm font-medium text-green-800">
+				Nothing was charged. If you completed the checkout, your next payments go to the new payment method once Mollie has confirmed it, usually within a minute; refresh this page if it still shows the old one. If you cancelled, the current payment method stays.
+			</p>
+		</div>
+	{/if}
+
 	{#if cancelSuccess}
 		<div class="mb-6 rounded-md border border-blue-200 bg-blue-50 p-4">
 			<p class="text-sm font-medium text-blue-800">{cancelSuccess}</p>
@@ -308,6 +355,32 @@
 						<p class="mt-2 text-sm text-gray-600">
 							100k MAU · 100 GB storage · 250 GB bandwidth · never pauses.
 						</p>
+						{#if paymentMethod}
+							<div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+								<span class="text-gray-500">Payment method:</span>
+								<span class="text-gray-900">{describeMethod(paymentMethod)}</span>
+								{#if paymentMethod.can_change}
+									<button
+										type="button"
+										onclick={changePaymentMethod}
+										disabled={pmInFlight}
+										class="text-sm font-medium text-blue-700 hover:text-blue-800 disabled:opacity-50"
+									>
+										{pmInFlight ? 'Redirecting…' : 'Change'}
+									</button>
+								{/if}
+							</div>
+							{#if paymentMethod.status === 'invalid'}
+								<p class="mt-1 text-sm font-medium text-red-700">This payment method is no longer valid. Change it to keep Pro.</p>
+							{:else if paymentMethod.expires_before_next_charge && subscription?.next_charge_at}
+								<p class="mt-1 text-sm font-medium text-amber-800">
+									This card expires before the next charge on {formatDay(subscription.next_charge_at)}. Change it to avoid a failed payment.
+								</p>
+							{/if}
+							{#if pmError}
+								<p class="mt-1 text-sm text-red-700">Couldn't start the change: {pmError}</p>
+							{/if}
+						{/if}
 						{#if subscription?.status === 'past_due'}
 							<div class="mt-3 max-w-xl rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
 								<p class="font-medium">The last payment for this project failed.</p>

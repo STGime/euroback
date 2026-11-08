@@ -1,7 +1,8 @@
 // Package mollie is a thin REST client for the Mollie Payments API.
 //
 // It exposes only the endpoints Eurobase billing needs: Customers
-// (create + get), Subscriptions (create + get + cancel), Payments
+// (create + get), Subscriptions (create + get + update + cancel),
+// Mandates (get), Payments
 // (get) and Refunds (create). Everything else Mollie offers is out of
 // scope for now — the design goal is a small, auditable surface so the
 // billing state machine (PR 4) has a predictable dependency.
@@ -87,8 +88,42 @@ type Subscription struct {
 	Method          string            `json:"method,omitempty"`
 	WebhookURL      string            `json:"webhookUrl,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
+	MandateID       string            `json:"mandateId,omitempty"`
 	CreatedAt       time.Time         `json:"createdAt"`
 	CanceledAt      *time.Time        `json:"canceledAt,omitempty"`
+}
+
+// SubscriptionUpdateRequest is the PATCH body for a subscription.
+// Eurobase only moves a subscription to another mandate (a new card or
+// PayPal account); Mollie refuses updates to a canceled subscription.
+type SubscriptionUpdateRequest struct {
+	MandateID string `json:"mandateId,omitempty"`
+}
+
+// Mandate is /v2/customers/:id/mandates/:id: the customer's permission
+// to charge a card, PayPal account or bank account. Status is valid,
+// pending or invalid.
+type Mandate struct {
+	ID        string         `json:"id"`
+	Mode      string         `json:"mode"`
+	Status    string         `json:"status"`
+	Method    string         `json:"method"`
+	Details   MandateDetails `json:"details"`
+	CreatedAt time.Time      `json:"createdAt"`
+}
+
+// MandateDetails depends on Method: creditcard fills the card fields
+// (CardNumber is the last four digits, CardExpiryDate YYYY-MM-DD);
+// directdebit fills Consumer* with the account holder, IBAN and BIC;
+// paypal fills ConsumerName and ConsumerAccount (the PayPal email).
+type MandateDetails struct {
+	CardHolder      string `json:"cardHolder,omitempty"`
+	CardNumber      string `json:"cardNumber,omitempty"`
+	CardLabel       string `json:"cardLabel,omitempty"`
+	CardExpiryDate  string `json:"cardExpiryDate,omitempty"`
+	ConsumerName    string `json:"consumerName,omitempty"`
+	ConsumerAccount string `json:"consumerAccount,omitempty"`
+	ConsumerBic     string `json:"consumerBic,omitempty"`
 }
 
 // TodayInAmsterdam is today's date as Mollie counts days (YYYY-MM-DD).
