@@ -312,7 +312,7 @@
 							<div class="mt-3 max-w-xl rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
 								<p class="font-medium">The last payment for this project failed.</p>
 								<p class="mt-1">
-									Mollie retries the charge automatically for a few days.
+									Depending on the reason, Mollie retries the charge automatically for a few days.
 									{#if subscription.downgrade_at}
 										If it still hasn't come through by {formatDay(subscription.downgrade_at)}, the project moves to the Free plan.
 									{:else}

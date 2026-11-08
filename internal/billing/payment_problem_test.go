@@ -118,7 +118,7 @@ func TestReconcileStoppedSubscriptions(t *testing.T) {
 	}{
 		{"canceled at Mollie", "canceled", false, 3 * 24 * time.Hour, "past_due", true},
 		{"suspended at Mollie", "suspended", false, 3 * 24 * time.Hour, "past_due", true},
-		{"gone at Mollie", "gone", false, 3 * 24 * time.Hour, "past_due", true},
+		{"not found at Mollie (left for ops)", "gone", false, 3 * 24 * time.Hour, "active", false},
 		{"still active (SEPA pending)", "active", false, 3 * 24 * time.Hour, "active", false},
 		{"not overdue long enough", "canceled", false, 12 * time.Hour, "active", false},
 		{"owner cancelled at period end", "canceled", true, 3 * 24 * time.Hour, "active", false},

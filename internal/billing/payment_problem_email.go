@@ -73,7 +73,7 @@ func renderPaymentProblemMail(projectID, projectName string, downgradeAt time.Ti
 
 	subject = fmt.Sprintf("Eurobase — payment for %s failed", projectName)
 	what := "We couldn't collect this month's payment for your Pro project <strong>" + name + "</strong>. " +
-		"Our payment provider, Mollie, retries the charge automatically once a day for a few days. " +
+		"Depending on the reason, our payment provider, Mollie, retries the charge automatically once a day for a few days. " +
 		"The most common causes are an expired card, insufficient funds, or a bank that declined the charge."
 	if kind == paymentProblemStoppedAtMollie {
 		subject = fmt.Sprintf("Eurobase — the subscription for %s has stopped", projectName)
@@ -117,7 +117,7 @@ func renderPaymentProblemMail(projectID, projectName string, downgradeAt time.Ti
 
 // markStoppedAtMollie moves a live subscription to past_due when
 // Mollie reports it as no longer running (canceled / suspended /
-// completed / gone) although we never cancelled it. The past-due
+// completed) although we never cancelled it. The past-due
 // sweep then gives the usual grace before the project drops to Free.
 //
 // Subscriptions the owner cancelled (canceled_at set) are left alone:

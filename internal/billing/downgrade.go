@@ -234,19 +234,23 @@ func (s *DowngradeService) reconcileStoppedSubscriptions(ctx context.Context) {
 	rows.Close()
 
 	for _, o := range list {
-		status := "missing"
 		sub, err := s.client.GetSubscription(ctx, o.custID, o.subID)
-		switch {
-		case errors.Is(err, mollie.ErrNotFound):
-			// Gone at Mollie: no further charges either.
-		case err != nil:
+		if errors.Is(err, mollie.ErrNotFound) {
+			// Not acted on: a 404 also comes back for a subscription made
+			// with the other API key (test vs live) or under another
+			// customer, and acting on it would mail a paying owner that
+			// their subscription stopped. Ops looks at it instead.
+			slog.Error("billing: overdue subscription not found at Mollie",
+				"mollie_subscription_id", o.subID, "next_charge_at", o.due)
+			continue
+		}
+		if err != nil {
 			slog.Warn("billing: overdue-subscription fetch failed",
 				"mollie_subscription_id", o.subID, "error", err)
 			continue
-		default:
-			status = sub.Status
 		}
-		if status != "missing" && !mollieSubscriptionStopped(status) {
+		status := sub.Status
+		if !mollieSubscriptionStopped(status) {
 			// Still running at Mollie: a charge is pending (SEPA) or a
 			// webhook was lost. Nothing to change here; flag it if it
 			// has been overdue for long.
