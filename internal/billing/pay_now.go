@@ -134,7 +134,14 @@ func (s *Service) processPayNowWebhook(ctx context.Context, payment *mollie.Paym
 //
 // Refunded instead when the payment can't be used: the old charge was
 // collected meanwhile, the owner cancelled, the payer is no longer the
-// owner, or another subscription started.
+// owner, another subscription started, or Mollie refuses the new
+// subscription.
+//
+// Accepted residual: if a retry of the old charge is recorded in the
+// moment between cancelling the old Mollie subscription and the local
+// switch, the payment is refunded and the old row stays active on a
+// Mollie subscription that has stopped; the hourly reconcile then marks
+// it past due again and the owner can pay once more.
 func (s *Service) applyPayNow(ctx context.Context, payment *mollie.Payment) error {
 	oldID := payment.Metadata["subscription_id"]
 	projectID := payment.Metadata["project_id"]
@@ -165,18 +172,19 @@ func (s *Service) applyPayNow(ctx context.Context, payment *mollie.Payment) erro
 		status, plan       string
 		price              *int
 		canceledAt         *time.Time
+		pastDueSince       *time.Time
 		oldMollieSub       *string
 		subCust, ownerCust *string
 	)
 	err = s.pool.QueryRow(ctx,
-		`SELECT s.status, s.plan, s.price_cents, s.canceled_at, s.mollie_subscription_id,
+		`SELECT s.status, s.plan, s.price_cents, s.canceled_at, s.past_due_since, s.mollie_subscription_id,
 		        s.mollie_customer_id, u.mollie_customer_id
 		   FROM public.subscriptions s
 		   JOIN public.projects p ON p.id = s.project_id
 		   JOIN public.platform_users u ON u.id = p.owner_id
 		  WHERE s.id = $1 AND s.project_id = $2 AND p.status = 'active'`,
 		oldID, projectID,
-	).Scan(&status, &plan, &price, &canceledAt, &oldMollieSub, &subCust, &ownerCust)
+	).Scan(&status, &plan, &price, &canceledAt, &pastDueSince, &oldMollieSub, &subCust, &ownerCust)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s.refundPayNow(ctx, payment, "subscription or project not found")
 	}
@@ -185,9 +193,11 @@ func (s *Service) applyPayNow(ctx context.Context, payment *mollie.Payment) erro
 	}
 	payerIsOwner := subCust != nil && ownerCust != nil &&
 		*subCust == payment.CustomerID && *ownerCust == payment.CustomerID
-	// expired: the grace period ran out and the project was moved to Free
-	// while the owner was paying. The payment still brings Pro back.
-	usable := (status == "past_due" && canceledAt == nil) || status == "expired"
+	// expired by the sweep (the grace period ran out while the owner was
+	// paying): the payment still brings Pro back. Not when the owner
+	// cancelled before it expired.
+	usable := (status == "past_due" && canceledAt == nil) ||
+		(status == "expired" && expiredByGrace(canceledAt, pastDueSince))
 	if !payerIsOwner || !usable || price == nil {
 		slog.Warn("billing.webhook.pay_now_refused",
 			"subscription_id", oldID, "status", status, "canceled", canceledAt != nil,
@@ -207,9 +217,95 @@ func (s *Service) applyPayNow(ctx context.Context, payment *mollie.Payment) erro
 		}
 	}
 
-	newID := uuid.NewString()
-	mollieSub, err := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
-		Amount:      mollie.AmountFromCents(*price, "EUR"),
+	// The replacement's id is derived from the payment, so a redelivered
+	// webhook finds the Mollie subscription an earlier attempt created
+	// (Mollie keeps idempotency keys for an hour only, and webhook retries
+	// run longer) instead of creating a second one.
+	newID := payNowSubscriptionID(payment.ID)
+	mollieSub, err := s.findPayNowSubscription(ctx, payment.CustomerID, newID)
+	if err != nil {
+		return err
+	}
+	if mollieSub != nil && mollieSubscriptionStopped(mollieSub.Status) {
+		// An earlier attempt created and then undid it.
+		return s.refundPayNow(ctx, payment, "the overdue subscription can no longer be settled with this payment")
+	}
+	if mollieSub == nil {
+		mollieSub, err = s.createPayNowSubscription(ctx, payment, newID, projectID, plan, *price)
+		if errors.Is(err, mollie.ErrInvalidRequest) {
+			// e.g. the mandate isn't usable: retrying won't help.
+			slog.Error("billing.webhook.pay_now_subscription_rejected",
+				"subscription_id", oldID, "mollie_payment_id", payment.ID, "error", err)
+			return s.refundPayNow(ctx, payment, "the payment method can't be used for the subscription")
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	committed, err := s.replaceOverdueSubscription(ctx, payment, oldID, newID, projectID, plan, *price, mollieSub)
+	if err != nil {
+		return err
+	}
+	if !committed {
+		// Closed or replaced while we were working: undo at Mollie and
+		// refund. Both errors fail the webhook so Mollie calls again.
+		slog.Warn("billing.webhook.pay_now_superseded",
+			"subscription_id", oldID, "mollie_subscription_id", mollieSub.ID, "mollie_payment_id", payment.ID)
+		if _, cerr := s.client.CancelSubscription(ctx, payment.CustomerID, mollieSub.ID); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
+			cur, gerr := s.client.GetSubscription(ctx, payment.CustomerID, mollieSub.ID)
+			if gerr != nil || !mollieSubscriptionStopped(cur.Status) {
+				return fmt.Errorf("cancel unused replacement %s: %w", mollieSub.ID, cerr)
+			}
+		}
+		return s.refundPayNow(ctx, payment, "the overdue subscription can no longer be settled with this payment")
+	}
+	slog.Info("billing.webhook.pay_now_settled",
+		"old_subscription_id", oldID, "subscription_id", newID, "project_id", projectID,
+		"mollie_subscription_id", mollieSub.ID, "mollie_payment_id", payment.ID)
+	if invoiceID := s.invoiceIDForPayment(ctx, payment.ID); invoiceID != "" {
+		s.enqueueInvoiceRender(invoiceID)
+	}
+	return nil
+}
+
+// payNowNamespace seeds payNowSubscriptionID (UUID v5).
+var payNowNamespace = uuid.MustParse("6f1d2c4e-8a51-4c0e-9b7a-2f4c1e9d3a10")
+
+// payNowSubscriptionID is the replacement subscription's id for a Pay
+// now payment: the same on every webhook delivery.
+func payNowSubscriptionID(paymentID string) string {
+	return uuid.NewSHA1(payNowNamespace, []byte(paymentID)).String()
+}
+
+// expiredByGrace reports a subscription the downgrade sweep expired at
+// the end of its past-due grace (canceled_at stamped then), as opposed to
+// one the owner cancelled earlier.
+func expiredByGrace(canceledAt, pastDueSince *time.Time) bool {
+	if canceledAt == nil || pastDueSince == nil {
+		return false
+	}
+	return !canceledAt.Before(pastDueSince.Add(pastDueGracePeriod - time.Hour))
+}
+
+// findPayNowSubscription returns the customer's Mollie subscription an
+// earlier delivery of this webhook created, if any.
+func (s *Service) findPayNowSubscription(ctx context.Context, customerID, newID string) (*mollie.Subscription, error) {
+	subs, err := s.client.ListSubscriptions(ctx, customerID)
+	if err != nil {
+		return nil, fmt.Errorf("list subscriptions of %s: %w", customerID, err)
+	}
+	for i := range subs {
+		if subs[i].Metadata["subscription_id"] == newID {
+			return &subs[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *Service) createPayNowSubscription(ctx context.Context, payment *mollie.Payment, newID, projectID, plan string, price int) (*mollie.Subscription, error) {
+	sub, err := s.client.CreateSubscription(ctx, payment.CustomerID, mollie.SubscriptionCreateRequest{
+		Amount:      mollie.AmountFromCents(price, "EUR"),
 		Interval:    "1 month",
 		StartDate:   mollie.DefaultRecurringStartDate(time.Now()),
 		Description: payment.Description,
@@ -222,25 +318,9 @@ func (s *Service) applyPayNow(ctx context.Context, payment *mollie.Payment) erro
 		},
 	}, mollie.WithIdempotencyKey("pay-now-activate:"+payment.ID))
 	if err != nil {
-		return fmt.Errorf("create replacement mollie subscription: %w", err)
+		return nil, fmt.Errorf("create replacement mollie subscription: %w", err)
 	}
-
-	committed, err := s.replaceOverdueSubscription(ctx, payment, oldID, newID, projectID, plan, *price, mollieSub)
-	if err != nil {
-		return err
-	}
-	if !committed {
-		// Closed or replaced while we were working: undo at Mollie.
-		s.abandonActivation(ctx, payment, mollieSub.ID, newID)
-		return nil
-	}
-	slog.Info("billing.webhook.pay_now_settled",
-		"old_subscription_id", oldID, "subscription_id", newID, "project_id", projectID,
-		"mollie_subscription_id", mollieSub.ID, "mollie_payment_id", payment.ID)
-	if invoiceID := s.invoiceIDForPayment(ctx, payment.ID); invoiceID != "" {
-		s.enqueueInvoiceRender(invoiceID)
-	}
-	return nil
+	return sub, nil
 }
 
 // replaceOverdueSubscription is applyPayNow's local switch: expire the
@@ -258,8 +338,11 @@ func (s *Service) replaceOverdueSubscription(ctx context.Context, payment *molli
 	closed, err := tx.Exec(ctx,
 		`UPDATE public.subscriptions
 		    SET status = 'expired', canceled_at = COALESCE(canceled_at, now())
-		  WHERE id = $1 AND (status = 'expired' OR (status = 'past_due' AND canceled_at IS NULL))`,
-		oldID,
+		  WHERE id = $1
+		    AND ((status = 'past_due' AND canceled_at IS NULL)
+		         OR (status = 'expired' AND past_due_since IS NOT NULL
+		             AND canceled_at >= past_due_since + $2::interval))`,
+		oldID, fmt.Sprintf("%d hours", int((pastDueGracePeriod-time.Hour).Hours())),
 	)
 	if err != nil {
 		return false, fmt.Errorf("expire overdue subscription: %w", err)

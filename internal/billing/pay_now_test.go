@@ -94,9 +94,13 @@ func TestApplyPayNow(t *testing.T) {
 	}{
 		{"settles a past-due subscription", nil, true, true, false},
 		{"downgraded meanwhile: brings Pro back", func(t *testing.T, fx *paymentFailureFixture) {
-			_, _ = fx.pool.Exec(context.Background(), `UPDATE public.subscriptions SET status = 'expired', canceled_at = now() WHERE id = $1`, fx.subscriptionID)
+			_, _ = fx.pool.Exec(context.Background(), `UPDATE public.subscriptions SET status = 'expired', past_due_since = now() - interval '7 days', canceled_at = now() WHERE id = $1`, fx.subscriptionID)
 			_, _ = fx.pool.Exec(context.Background(), `UPDATE public.projects SET plan = 'free' WHERE id = $1`, fx.projectID)
 		}, true, false, false},
+		{"cancelled by the owner, then expired: refunded", func(t *testing.T, fx *paymentFailureFixture) {
+			_, _ = fx.pool.Exec(context.Background(), `UPDATE public.subscriptions SET status = 'expired', past_due_since = now() - interval '7 days', canceled_at = now() - interval '3 days' WHERE id = $1`, fx.subscriptionID)
+			_, _ = fx.pool.Exec(context.Background(), `UPDATE public.projects SET plan = 'free' WHERE id = $1`, fx.projectID)
+		}, false, false, true},
 		{"retry went through meanwhile: refunded", func(t *testing.T, fx *paymentFailureFixture) {
 			_, _ = fx.pool.Exec(context.Background(), `UPDATE public.subscriptions SET status = 'active', past_due_since = NULL WHERE id = $1`, fx.subscriptionID)
 		}, false, false, true},
@@ -199,7 +203,7 @@ func TestApplyPayNow_AnotherSubscriptionStarted(t *testing.T) {
 	fx := setupPaymentFailureFixture(t)
 	cust, _ := seedPayNow(t, fx)
 	ctx := context.Background()
-	_, _ = fx.pool.Exec(ctx, `UPDATE public.subscriptions SET status = 'expired', canceled_at = now() WHERE id = $1`, fx.subscriptionID)
+	_, _ = fx.pool.Exec(ctx, `UPDATE public.subscriptions SET status = 'expired', past_due_since = now() - interval '7 days', canceled_at = now() WHERE id = $1`, fx.subscriptionID)
 	if _, err := fx.pool.Exec(ctx,
 		`INSERT INTO public.subscriptions (project_id, plan, status, price_cents) VALUES ($1, 'pro', 'incomplete', 2500)`,
 		fx.projectID); err != nil {
@@ -247,5 +251,75 @@ func TestPayNow_FailedPaymentChangesNothing(t *testing.T) {
 	_ = fx.pool.QueryRow(ctx, `SELECT status FROM public.invoices WHERE mollie_payment_id = $1`, payID).Scan(&inv)
 	if status != "past_due" || inv != "failed" {
 		t.Errorf("subscription %q invoice %q", status, inv)
+	}
+}
+
+func payNowPayment(fx *paymentFailureFixture, cust, id string) *mollie.Payment {
+	return &mollie.Payment{
+		ID: id, Status: "paid", SequenceType: mollie.SequenceTypeFirst,
+		CustomerID: cust, MandateID: "mdt_new", Amount: mollie.Amount{Currency: "EUR", Value: "25.00"},
+		Metadata: map[string]string{"purpose": purposePayNow, "subscription_id": fx.subscriptionID, "project_id": fx.projectID, "plan_code": "pro"},
+	}
+}
+
+// An earlier delivery created the Mollie subscription but failed before
+// the local switch: a later delivery (past Mollie's one-hour idempotency
+// window) uses that subscription instead of creating a second one.
+func TestApplyPayNow_RedeliveryReusesCreatedSubscription(t *testing.T) {
+	fx := setupPaymentFailureFixture(t)
+	cust, _ := seedPayNow(t, fx)
+	f, client := newPMMollie(t)
+	svc := NewService(fx.pool, client, Config{WebhookBaseURL: "https://api.test"}, true)
+	ctx := context.Background()
+	payment := payNowPayment(fx, cust, "tr_pn4_"+fx.molliePaymentID)
+	// What the earlier delivery left at Mollie.
+	f.newSubs = append(f.newSubs, map[string]any{"mandateId": "mdt_new", "startDate": "2026-12-08",
+		"metadata": map[string]any{"subscription_id": payNowSubscriptionID(payment.ID)}})
+	f.subs["sub_new_1"] = "mdt_new"
+
+	if err := svc.processPayNowWebhook(ctx, payment); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(f.newSubs) != 1 {
+		t.Errorf("created a second Mollie subscription: %v", f.newSubs)
+	}
+	var mollieSub string
+	if err := fx.pool.QueryRow(ctx,
+		`SELECT mollie_subscription_id FROM public.subscriptions WHERE mollie_payment_id = $1 AND status = 'active'`,
+		payment.ID).Scan(&mollieSub); err != nil || mollieSub != "sub_new_1" {
+		t.Errorf("replacement on %q (err %v), want sub_new_1", mollieSub, err)
+	}
+}
+
+// Mollie refuses the new subscription (e.g. the mandate isn't usable):
+// refunded, the project stays past due.
+func TestApplyPayNow_SubscriptionRejectedRefunds(t *testing.T) {
+	fx := setupPaymentFailureFixture(t)
+	cust, _ := seedPayNow(t, fx)
+	f, client := newPMMollie(t)
+	f.rejectCreate = true
+	svc := NewService(fx.pool, client, Config{WebhookBaseURL: "https://api.test"}, true)
+	if err := svc.processPayNowWebhook(context.Background(), payNowPayment(fx, cust, "tr_pn5_"+fx.molliePaymentID)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(f.refunded) != 1 {
+		t.Errorf("refunded = %v", f.refunded)
+	}
+	fx.assertSubscription(t, "past_due", false, true)
+}
+
+// The old subscription can't be cancelled and is still running at
+// Mollie: the webhook fails (Mollie calls again) and nothing is created.
+func TestApplyPayNow_OldSubscriptionStillRunning(t *testing.T) {
+	fx := setupPaymentFailureFixture(t)
+	cust, _ := seedPayNow(t, fx)
+	f, client := newPMMollie(t)
+	svc := NewService(fx.pool, client, Config{WebhookBaseURL: "https://api.test"}, true)
+	f.rejectCancel = true // DELETE answers 422, GET still says active
+	if err := svc.processPayNowWebhook(context.Background(), payNowPayment(fx, cust, "tr_pn6_"+fx.molliePaymentID)); err == nil {
+		t.Fatal("expected an error so Mollie redelivers")
+	}
+	if len(f.newSubs) != 0 || len(f.refunded) != 0 {
+		t.Errorf("created %v, refunded %v", f.newSubs, f.refunded)
 	}
 }

@@ -75,6 +75,9 @@ type pmMollie struct {
 	subStatus map[string]string
 	canceled  []string         // DELETE /customers/…/subscriptions/{id}
 	newSubs   []map[string]any // POST /customers/…/subscriptions bodies
+	// rejectCreate answers subscription creation with 422, rejectCancel
+	// cancellation; failList fails the subscription listing.
+	rejectCreate, rejectCancel, failList bool
 }
 
 func newPMMollie(t *testing.T) (*pmMollie, *mollie.Client) {
@@ -127,7 +130,7 @@ func (f *pmMollie) serve(w http.ResponseWriter, r *http.Request) {
 		f.patches = append(f.patches, parts[3]+":"+m)
 		reply(map[string]any{"id": parts[3], "status": "active", "mandateId": m})
 	case len(parts) == 4 && parts[2] == "subscriptions" && r.Method == http.MethodDelete:
-		if f.subStatus[parts[3]] == "canceled" {
+		if f.subStatus[parts[3]] == "canceled" || f.rejectCancel {
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			reply(map[string]any{"status": 422, "detail": "already canceled"})
 			return
@@ -135,7 +138,28 @@ func (f *pmMollie) serve(w http.ResponseWriter, r *http.Request) {
 		f.subStatus[parts[3]] = "canceled"
 		f.canceled = append(f.canceled, parts[3])
 		reply(map[string]any{"id": parts[3], "status": "canceled"})
+	case len(parts) == 3 && parts[2] == "subscriptions" && r.Method == http.MethodGet:
+		if f.failList {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		list := []any{}
+		for i := len(f.newSubs) - 1; i >= 0; i-- { // newest first
+			id := fmt.Sprintf("sub_new_%d", i+1)
+			status := f.subStatus[id]
+			if status == "" {
+				status = "active"
+			}
+			list = append(list, map[string]any{"id": id, "status": status, "mandateId": f.subs[id],
+				"nextPaymentDate": f.newSubs[i]["startDate"], "metadata": f.newSubs[i]["metadata"]})
+		}
+		reply(map[string]any{"count": len(list), "_embedded": map[string]any{"subscriptions": list}})
 	case len(parts) == 3 && parts[2] == "subscriptions" && r.Method == http.MethodPost:
+		if f.rejectCreate {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			reply(map[string]any{"status": 422, "detail": "mandate not usable"})
+			return
+		}
 		f.newSubs = append(f.newSubs, body)
 		id := fmt.Sprintf("sub_new_%d", len(f.newSubs))
 		m, _ := body["mandateId"].(string)

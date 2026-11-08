@@ -417,6 +417,7 @@
 									{/if}
 									Nothing is deleted.
 								</p>
+								{#if subscription.paid_by_you && !subscription.canceled_at}
 								<p class="mt-1">
 									To settle it now, pay one month with a card or payment method of your choice. Future charges use it too, and the new month starts today.
 								</p>
@@ -430,6 +431,7 @@
 								</button>
 								{#if payNowError}
 									<p class="mt-1 text-red-700">Couldn't start the payment: {payNowError}</p>
+								{/if}
 								{/if}
 							</div>
 						{/if}
