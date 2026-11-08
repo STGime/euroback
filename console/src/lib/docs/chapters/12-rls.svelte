@@ -344,6 +344,9 @@ create trigger assessments_history
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
 					Use a trigger for what must happen on every change, such as the history above: it fires however the row is changed. Use an RPC function when one operation needs inputs or checks beyond a single row update; its writes still fire your triggers in the same transaction.
 				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Every request runs at PostgreSQL&rsquo;s default isolation level, <strong>READ COMMITTED</strong>: API and RPC requests as well as SQL from the console, the CLI and MCP. Locks are released when the request&rsquo;s transaction ends, and a transaction can&rsquo;t stay open across two requests. To test how concurrent transactions behave (lock waits, what a trigger sees after one), use two sessions on a local PostgreSQL 16, the same major version we run. See the PostgreSQL docs on <a href="https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">Read Committed</a> and <a href="https://www.postgresql.org/docs/16/explicit-locking.html#LOCKING-ROWS" target="_blank" rel="noopener" class="text-eurobase-600 hover:underline">row-level locks</a>.
+				</p>
 
 			</div>
 

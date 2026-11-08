@@ -68,7 +68,7 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">How do I make several writes atomic without client transactions?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Every API request runs in its own transaction. Put the related writes in a trigger (it commits or rolls back with the write that fired it) or in an RPC function (the whole function is one transaction; an exception undoes everything). Both run with the caller&rsquo;s rights, so RLS applies; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">SECURITY DEFINER</code> isn&rsquo;t accepted. See <a href="/docs/rls" class="cursor-pointer text-eurobase-700 hover:underline">Row-Level Security</a> for a change-history example.</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Every API request runs in its own transaction. Put the related writes in a trigger (it commits or rolls back with the write that fired it) or in an RPC function (the whole function is one transaction; an exception undoes everything). Both run with the caller&rsquo;s rights, so RLS applies; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">SECURITY DEFINER</code> isn&rsquo;t accepted. See <a href="/docs/rls" class="cursor-pointer text-eurobase-700 hover:underline">Row-Level Security</a> for a change-history example and the isolation level requests run at (READ COMMITTED).</p>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
