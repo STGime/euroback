@@ -1242,6 +1242,11 @@ export class EurobaseAPI {
 		return this.fetch(`/platform/billing/projects/${projectId}/payment-method`, { method: 'POST' });
 	}
 
+	/** Pay a past-due subscription now with a new payment method; returns the Mollie checkout URL. */
+	async startPayNow(projectId: string): Promise<{ checkout_url: string }> {
+		return this.fetch(`/platform/billing/projects/${projectId}/pay-now`, { method: 'POST' });
+	}
+
 	/** List all projects (tenants) for the authenticated user. */
 	async listProjects(): Promise<Project[]> {
 		return this.fetch<Project[]>('/v1/tenants');

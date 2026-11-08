@@ -98,7 +98,7 @@ func renderPaymentProblemMail(projectID, projectName string, downgradeAt time.Ti
             The project stays on Pro until <strong>%s</strong>. If the payment hasn't come through by then, it moves to the Free plan. Nothing is deleted: your database, storage, functions and users stay as they are.
           </p>
           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#374151;">
-            To keep Pro, reply to this mail and we'll help you set up a new payment method. You can see the status on <a href="%s" style="color:#1d4ed8;">the project's billing page</a>.
+            To settle it now, open <a href="%s" style="color:#1d4ed8;">the project's billing page</a> and choose <strong>Pay now</strong>. You pay one month with the card or payment method you choose there, and future charges use it too. If you have questions, reply to this mail.
           </p>
           <p style="margin:20px 0 6px;font-size:14px;color:#374151;">Thanks,<br><strong>Stefan</strong></p>
         </td></tr>

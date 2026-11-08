@@ -17,6 +17,8 @@
 	let paymentMethod = $state<PaymentMethod | null>(null);
 	let pmInFlight = $state(false);
 	let pmError: string | null = $state(null);
+	let payNowInFlight = $state(false);
+	let payNowError: string | null = $state(null);
 	let invoices: Invoice[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);
@@ -52,6 +54,7 @@
 	let autoStart = $derived($page.url.searchParams.get('plan') === 'pro');
 	let successBanner = $derived($page.url.searchParams.get('status') === 'success');
 	let paymentMethodBanner = $derived($page.url.searchParams.get('status') === 'payment_method');
+	let payNowBanner = $derived($page.url.searchParams.get('status') === 'pay_now');
 
 	// Gate the Upgrade CTA on a resolved probe. Failed probe →
 	// button disabled; the user can retry by refreshing.
@@ -141,6 +144,19 @@
 		} catch (err) {
 			pmError = err instanceof Error ? err.message : String(err);
 			pmInFlight = false;
+		}
+	}
+
+	async function payNow(): Promise<void> {
+		if (payNowInFlight) return;
+		payNowInFlight = true;
+		payNowError = null;
+		try {
+			const { checkout_url } = await api.startPayNow(projectId);
+			window.location.href = checkout_url;
+		} catch (err) {
+			payNowError = err instanceof Error ? err.message : String(err);
+			payNowInFlight = false;
 		}
 	}
 
@@ -297,6 +313,14 @@
 		</div>
 	{/if}
 
+	{#if payNowBanner}
+		<div class="mb-6 rounded-md border border-green-200 bg-green-50 p-4">
+			<p class="text-sm font-medium text-green-800">
+				If you completed the payment, the project is back in good standing once Mollie has confirmed it, usually within a minute; refresh this page if it still shows the failed payment. If you cancelled, nothing was charged.
+			</p>
+		</div>
+	{/if}
+
 	{#if cancelSuccess}
 		<div class="mb-6 rounded-md border border-blue-200 bg-blue-50 p-4">
 			<p class="text-sm font-medium text-blue-800">{cancelSuccess}</p>
@@ -394,8 +418,19 @@
 									Nothing is deleted.
 								</p>
 								<p class="mt-1">
-									To keep Pro with a different card or payment method, contact <a href="mailto:hello@eurobase.app" class="underline">hello@eurobase.app</a>.
+									To settle it now, pay one month with a card or payment method of your choice. Future charges use it too, and the new month starts today.
 								</p>
+								<button
+									type="button"
+									onclick={payNow}
+									disabled={payNowInFlight}
+									class="mt-2 rounded-md bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-800 disabled:opacity-50"
+								>
+									{payNowInFlight ? 'Redirecting…' : `Pay now${subscription.price_cents ? ` — ${formatEUR(subscription.price_cents, subscription.currency)}` : ''}`}
+								</button>
+								{#if payNowError}
+									<p class="mt-1 text-red-700">Couldn't start the payment: {payNowError}</p>
+								{/if}
 							</div>
 						{/if}
 						{#if endingSub}

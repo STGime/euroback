@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,6 +73,8 @@ type pmMollie struct {
 	created   []map[string]any          // POST /payments bodies
 	refunded  []string
 	subStatus map[string]string
+	canceled  []string         // DELETE /customers/…/subscriptions/{id}
+	newSubs   []map[string]any // POST /customers/…/subscriptions bodies
 }
 
 func newPMMollie(t *testing.T) (*pmMollie, *mollie.Client) {
@@ -123,6 +126,21 @@ func (f *pmMollie) serve(w http.ResponseWriter, r *http.Request) {
 		f.subs[parts[3]] = m
 		f.patches = append(f.patches, parts[3]+":"+m)
 		reply(map[string]any{"id": parts[3], "status": "active", "mandateId": m})
+	case len(parts) == 4 && parts[2] == "subscriptions" && r.Method == http.MethodDelete:
+		if f.subStatus[parts[3]] == "canceled" {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			reply(map[string]any{"status": 422, "detail": "already canceled"})
+			return
+		}
+		f.subStatus[parts[3]] = "canceled"
+		f.canceled = append(f.canceled, parts[3])
+		reply(map[string]any{"id": parts[3], "status": "canceled"})
+	case len(parts) == 3 && parts[2] == "subscriptions" && r.Method == http.MethodPost:
+		f.newSubs = append(f.newSubs, body)
+		id := fmt.Sprintf("sub_new_%d", len(f.newSubs))
+		m, _ := body["mandateId"].(string)
+		f.subs[id] = m
+		reply(map[string]any{"id": id, "status": "active", "mandateId": m, "nextPaymentDate": body["startDate"]})
 	case len(parts) == 3 && parts[0] == "payments" && parts[2] == "refunds" && r.Method == http.MethodPost:
 		f.refunded = append(f.refunded, parts[1])
 		reply(map[string]any{"id": "re_1"})
