@@ -11,9 +11,38 @@ import (
 )
 
 // PlanLimits maps billing plan names to their per-second request limits.
+// The live values are plan_limits.rate_limit_rps (see PlanRPS); this map
+// is the fallback when that lookup isn't wired or fails, and mirrors it.
 var PlanLimits = map[string]int{
-	"free": 100,
-	"pro":  1000,
+	"free":       100,
+	"pro":        1000,
+	"team":       5000,
+	"legal_team": 5000,
+}
+
+// PlanRPS returns a plan's per-second request limit from plan_limits.
+type PlanRPS func(ctx context.Context, plan string) (int, error)
+
+// limitFor picks the per-second limit for a plan: plan_limits via lookup
+// when it answers with a positive value, else the PlanLimits fallback,
+// else the Free limit (an unknown plan never gets more than Free).
+func limitFor(ctx context.Context, plan string, lookup PlanRPS) int {
+	if plan == "" {
+		plan = "free"
+	}
+	if lookup != nil {
+		rps, err := lookup(ctx, plan)
+		if err == nil && rps > 0 {
+			return rps
+		}
+		if err != nil {
+			slog.Warn("rate limit: plan lookup failed, using built-in limit", "plan", plan, "error", err)
+		}
+	}
+	if l, ok := PlanLimits[plan]; ok {
+		return l
+	}
+	return PlanLimits["free"]
 }
 
 // RateLimitInfo contains rate limit state returned alongside allow/deny decisions.
