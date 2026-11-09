@@ -31,12 +31,9 @@ func limitFor(ctx context.Context, plan string, lookup PlanRPS) int {
 		plan = "free"
 	}
 	if lookup != nil {
-		rps, err := lookup(ctx, plan)
-		if err == nil && rps > 0 {
+		// A failed lookup is already logged by the lookup itself.
+		if rps, err := lookup(ctx, plan); err == nil && rps > 0 {
 			return rps
-		}
-		if err != nil {
-			slog.Warn("rate limit: plan lookup failed, using built-in limit", "plan", plan, "error", err)
 		}
 	}
 	if l, ok := PlanLimits[plan]; ok {
