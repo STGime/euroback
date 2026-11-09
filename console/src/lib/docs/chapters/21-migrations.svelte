@@ -127,6 +127,16 @@ eurobase migrations up</pre>
 					Plain <code class="bg-gray-100 rounded px-1">LANGUAGE plpgsql</code> functions and triggers are fine. Bulk data loads belong in the SDK/REST data path, not migrations.
 				</p>
 
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Who can use the tables a migration creates</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					You don&rsquo;t grant anything. A table created by a migration (or in the SQL editor) can be read and written by your app right away: the roles behind the SDK, REST API, RPC, edge functions and cron get <code class="bg-gray-100 rounded px-1">SELECT</code>, <code class="bg-gray-100 rounded px-1">INSERT</code>, <code class="bg-gray-100 rounded px-1">UPDATE</code> and <code class="bg-gray-100 rounded px-1">DELETE</code> on new tables and can use new sequences and call new functions. Which rows a caller may read or change is decided only by your RLS policies, so enable RLS and add policies in the same migration.
+				</p>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
+					<li>Functions you call via RPC run as the caller (<code class="bg-gray-100 rounded px-1">SECURITY INVOKER</code>, the default), and so do trigger functions. Statements inside them have the same privileges and the same policies as the caller, including <code class="bg-gray-100 rounded px-1">UPDATE</code> and <code class="bg-gray-100 rounded px-1">INSERT</code> from a trigger.</li>
+					<li><code class="bg-gray-100 rounded px-1">SELECT &hellip; FOR UPDATE</code> locks only rows the caller can both read and update: a row has to pass your <code class="bg-gray-100 rounded px-1">SELECT</code> and your <code class="bg-gray-100 rounded px-1">UPDATE</code> policies, otherwise it is skipped, not locked.</li>
+					<li>To check the result, call your tables and RPCs as real callers on a test project: a signed-in test user, the public key alone, and the secret key (see <a href="/docs/cli" class="text-eurobase-600 hover:underline">CLI &rarr; testing as an authenticated client</a>). <code class="bg-gray-100 rounded px-1">GET .../schema/rls-audit</code> lists tables without RLS or without policies.</li>
+				</ul>
+
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Making tables read-only during a data migration</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					To stop every write to a table while you export or move its data (your app&rsquo;s users, secret-key clients, edge functions, cron jobs, and also your own SQL), add a trigger that refuses writes. Triggers fire for everyone, and only you can remove them. Reads keep working.
