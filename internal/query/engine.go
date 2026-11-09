@@ -745,6 +745,12 @@ func (e *QueryEngine) InsertRows(ctx context.Context, schemaName, tableName stri
 
 	var results []map[string]interface{}
 	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		// Up to 1000 rows plus the table's triggers: end the batch before
+		// the gateway's 30 s write timeout rather than commit after the
+		// client gave up.
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '25s'"); err != nil {
+			return fmt.Errorf("set statement_timeout: %w", err)
+		}
 		for _, sql := range stmts {
 			stmtArgs := args
 			if len(stmts) > 1 {

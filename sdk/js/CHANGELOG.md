@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added — bulk insert
 
-`db.from(table).insert([...])` takes an array of up to 1000 rows and inserts them in one request and one transaction (all or none). `data` is the inserted rows in input order and `count` their number (typed as the new `InsertManyResult<T>`); a column a row leaves out gets its default. A single object works as before. Needs the gateway change that accepts an array on `POST /v1/db/{table}` (deployed with the same PR).
+`db.from(table).insert([...])` takes an array of up to 1000 rows and inserts them in one request and one transaction (all or none). `data` is the inserted rows in input order and `count` their number (typed as the new `InsertManyResult<T>`); a column a row leaves out gets its default. A single object works as before. Request bodies are limited to 4 MB. Needs the gateway change that accepts an array on `POST /v1/db/{table}` (deployed with the same PR).
 
 ## 0.12.0 — 2026-10-20
 

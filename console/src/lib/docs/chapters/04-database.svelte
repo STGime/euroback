@@ -131,7 +131,7 @@ await eb.db
 
 				<h4 class="text-base font-semibold text-gray-900 mt-5">Inserting many rows at once</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Pass an array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">insert()</code> (SDK 0.13.0 or later), or send a JSON array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /v1/db/&lbrace;table&rbrace;</code>. Up to 1,000 rows per request are inserted in one transaction: all of them or none. The response is the inserted rows, in the order you sent them. A column a row leaves out gets its default value. RLS policies, triggers, realtime events and webhooks apply to each row as for single inserts. If a trigger skips a row (returns <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">NULL</code>), the request fails with 409 and nothing is inserted. The request body can be up to 16 MB.
+					Pass an array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">insert()</code> (SDK 0.13.0 or later), or send a JSON array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /v1/db/&lbrace;table&rbrace;</code>. Up to 1,000 rows per request are inserted in one transaction: all of them or none. The response is the inserted rows, in the order you sent them. A column a row leaves out gets its default value. RLS policies and triggers apply to each row as for single inserts. If a trigger skips a row (returns <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">NULL</code>), the request fails with 409 and nothing is inserted. The request body can be up to 4 MB, and the batch has 25 seconds to complete.
 				</p>
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 					<pre>const {'{'} data: rows, error {'}'} = await eb.db
@@ -141,6 +141,9 @@ await eb.db
     {'{'} kind: 'resize', payload: {'{'} id: 2 {'}'} {'}'},
   ])</pre>
 				</div>
+				<p class="mt-3 text-sm text-gray-700 leading-relaxed">
+					Each inserted row is one realtime event and one webhook event. With large batches: a realtime subscriber that can't keep up is disconnected and should reconnect and reload; webhooks are delivered for up to 1,000 events per project at once and 100 per second after that, and events beyond that aren't delivered. To process every row reliably, read new rows from the table (for example by a <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">created_at</code> or status column) rather than relying on each event.
+				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Schema management</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">

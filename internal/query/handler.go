@@ -1,11 +1,11 @@
 package query
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -413,23 +413,21 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		r.Body = http.MaxBytesReader(w, r.Body, maxInsertBodyBytes)
-		var raw json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		data, rows, isArray, err := decodeInsertBody(r.Body)
+		if err != nil {
 			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
+			switch {
+			case errors.As(err, &tooLarge):
 				jsonError(w, fmt.Sprintf("request body too large (max %d MB)", maxInsertBodyBytes>>20), http.StatusRequestEntityTooLarge)
-				return
+			case errors.Is(err, ErrBulkInsertSize):
+				jsonError(w, strings.TrimPrefix(err.Error(), ErrBulkInsertSize.Error()+": "), http.StatusBadRequest)
+			default:
+				jsonError(w, "invalid request body: expected an object or an array of objects", http.StatusBadRequest)
 			}
-			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if trimmed := bytes.TrimLeft(raw, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
-			insertRows(w, r, engine, pub, schema, tableName, raw)
-			return
-		}
-		var data map[string]interface{}
-		if err := json.Unmarshal(raw, &data); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if isArray {
+			insertRows(w, r, engine, pub, schema, tableName, rows)
 			return
 		}
 
@@ -454,23 +452,87 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 
 // maxInsertBodyBytes caps the body of POST /v1/db/{table} (one row or a
 // bulk insert of up to MaxBulkInsertRows), read before any other check.
-const maxInsertBodyBytes = 16 << 20
+const maxInsertBodyBytes = 4 << 20
+
+var errInsertBody = errors.New("invalid insert body")
+
+// decodeInsertBody reads one JSON object, or an array of objects decoded
+// element by element so that reading stops at the row cap instead of
+// holding an arbitrarily long array. A top-level null is an empty object,
+// as before (all columns take their defaults).
+func decodeInsertBody(body io.Reader) (map[string]interface{}, []map[string]interface{}, bool, error) {
+	dec := json.NewDecoder(body)
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	switch tok {
+	case json.Delim('['):
+		var rows []map[string]interface{}
+		for dec.More() {
+			if len(rows) == MaxBulkInsertRows {
+				return nil, nil, true, fmt.Errorf("%w: insert between 1 and %d rows per request", ErrBulkInsertSize, MaxBulkInsertRows)
+			}
+			var row map[string]interface{}
+			if err := dec.Decode(&row); err != nil {
+				return nil, nil, true, err
+			}
+			if row == nil {
+				return nil, nil, true, errInsertBody
+			}
+			rows = append(rows, row)
+		}
+		if _, err := dec.Token(); err != nil { // closing ]
+			return nil, nil, true, err
+		}
+		if err := expectEOF(dec); err != nil {
+			return nil, nil, true, err
+		}
+		return nil, rows, true, nil
+	case json.Delim('{'):
+		data := map[string]interface{}{}
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return nil, nil, false, err
+			}
+			key, ok := kt.(string)
+			if !ok {
+				return nil, nil, false, errInsertBody
+			}
+			var v interface{}
+			if err := dec.Decode(&v); err != nil {
+				return nil, nil, false, err
+			}
+			data[key] = v
+		}
+		// Like the decoder before bulk insert, anything after the object
+		// is ignored.
+		if _, err := dec.Token(); err != nil { // closing }
+			return nil, nil, false, err
+		}
+		return data, nil, false, nil
+	case nil:
+		return map[string]interface{}{}, nil, false, nil
+	default:
+		return nil, nil, false, errInsertBody
+	}
+}
+
+// expectEOF refuses anything after the JSON value except whitespace.
+func expectEOF(dec *json.Decoder) error {
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return errInsertBody
+		}
+		return err
+	}
+	return nil
+}
 
 // insertRows handles POST /v1/db/{table} with an array body: all rows in
 // one transaction, 201 with the inserted rows in input order.
-func insertRows(w http.ResponseWriter, r *http.Request, engine *QueryEngine, pub *realtime.EventPublisher, schema, tableName string, raw json.RawMessage) {
-	var rows []map[string]interface{}
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		jsonError(w, "invalid request body: expected an object or an array of objects", http.StatusBadRequest)
-		return
-	}
-	for _, row := range rows {
-		if row == nil {
-			jsonError(w, "invalid request body: expected an object or an array of objects", http.StatusBadRequest)
-			return
-		}
-	}
-
+func insertRows(w http.ResponseWriter, r *http.Request, engine *QueryEngine, pub *realtime.EventPublisher, schema, tableName string, rows []map[string]interface{}) {
 	inserted, err := engine.InsertRows(r.Context(), schema, tableName, rows)
 	if err != nil {
 		slog.Error("bulk insert failed", "error", err, "schema", schema, "table", tableName, "rows", len(rows))
