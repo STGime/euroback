@@ -164,6 +164,11 @@ func (s *Service) processPaymentWebhook(ctx context.Context, paymentID string) e
 		return nil
 	}
 
+	// An owner settling an overdue subscription (pay_now.go).
+	if payment.Metadata["purpose"] == purposePayNow {
+		return s.processPayNowWebhook(ctx, payment)
+	}
+
 	switch payment.Status {
 	case "paid":
 		if payment.SequenceType == mollie.SequenceTypeFirst {

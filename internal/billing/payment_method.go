@@ -168,7 +168,7 @@ func mandateView(m *mollie.Mandate, nextCharge *time.Time) *PaymentMethodView {
 // (applyPaymentMethodUpdate). Returns the Mollie checkout URL.
 //
 // Past-due subscriptions are refused here: the owed charge has to be
-// collected as well, which this flow doesn't do.
+// collected as well, which Pay now does (pay_now.go).
 func (s *Service) StartPaymentMethodUpdate(ctx context.Context, userID, projectID string) (string, error) {
 	if !s.enabled {
 		return "", ErrBillingDisabled
@@ -352,7 +352,7 @@ func writePaymentMethodError(w http.ResponseWriter, err error, userID, projectID
 	case errors.Is(err, ErrNotPayer):
 		writeJSONError(w, http.StatusConflict, "not_payer", "this project's subscription is paid by its previous owner")
 	case errors.Is(err, ErrPaymentOverdue):
-		writeJSONError(w, http.StatusConflict, "payment_overdue", "the last payment failed; contact hello@eurobase.app to settle it with a new payment method")
+		writeJSONError(w, http.StatusConflict, "payment_overdue", "the last payment failed; use Pay now to settle it with a new payment method")
 	case errors.Is(err, ErrPaymentMethodNotChangeable):
 		writeJSONError(w, http.StatusConflict, "not_changeable", "the payment method can't be changed for a subscription that is cancelled or not set up yet")
 	case errors.Is(err, mollie.ErrServer) || errors.Is(err, mollie.ErrRateLimited) || errors.Is(err, mollie.ErrNotFound):

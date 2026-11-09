@@ -192,6 +192,20 @@ func (c *Client) GetSubscription(ctx context.Context, customerID, subscriptionID
 	return &out, nil
 }
 
+// ListSubscriptions returns a customer's subscriptions, newest first
+// (Mollie's default order), up to 250 — the first page only.
+func (c *Client) ListSubscriptions(ctx context.Context, customerID string) ([]Subscription, error) {
+	var out struct {
+		Embedded struct {
+			Subscriptions []Subscription `json:"subscriptions"`
+		} `json:"_embedded"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/customers/"+customerID+"/subscriptions?limit=250", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Embedded.Subscriptions, nil
+}
+
 // UpdateSubscription PATCHes a subscription (here: its mandate).
 func (c *Client) UpdateSubscription(ctx context.Context, customerID, subscriptionID string, req SubscriptionUpdateRequest) (*Subscription, error) {
 	var out Subscription
