@@ -88,6 +88,10 @@ func HandleConnect(pool, catalog *pgxpool.Pool) http.HandlerFunc {
 
 		// Introspect tables in the tenant schema.
 		tables := introspectSchema(r.Context(), catalog, schemaName)
+		if tables == nil {
+			// A new project has no app tables yet: send [] rather than null.
+			tables = []ConnectTable{}
+		}
 
 		// Build CLAUDE.md content.
 		claudeMD := generateClaudeMD(name, slug, apiURL, plan, tables)

@@ -42,7 +42,7 @@
 		try {
 			const hiddenTables = INTERNAL_TABLES;
 			info = await api.getConnectInfo(projectId);
-			info.tables = info.tables.filter(t => !hiddenTables.has(t.name));
+			info.tables = (info.tables ?? []).filter(t => !hiddenTables.has(t.name));
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load connect info';
 		} finally {
