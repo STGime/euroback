@@ -114,3 +114,29 @@ func TestInsertRows_AllDefaults(t *testing.T) {
 		t.Fatalf("got %d rows, want 2", len(rows))
 	}
 }
+
+func TestInsertRows_TriggerSkipsRow(t *testing.T) {
+	pool, schema, _ := setupTestDB(t)
+	ctx := context.Background()
+	engine := NewQueryEngine(pool)
+	createBulkItems(t, ctx, engine, schema)
+	qs := quoteIdent(schema)
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION %[1]s.skip_dupes() RETURNS trigger LANGUAGE plpgsql AS $f$
+		BEGIN IF NEW.name = 'skip' THEN RETURN NULL; END IF; RETURN NEW; END $f$;
+		CREATE TRIGGER skip_dupes BEFORE INSERT ON %[1]s.bulk_items
+		FOR EACH ROW EXECUTE FUNCTION %[1]s.skip_dupes();`, qs)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := engine.InsertRows(ctx, schema, "bulk_items", []map[string]interface{}{{"name": "a"}, {"name": "skip"}})
+	if !errors.Is(err, ErrBulkInsertSkipped) {
+		t.Fatalf("err = %v, want ErrBulkInsertSkipped", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s.bulk_items`, qs)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("%d rows inserted, want 0 (rolled back)", n)
+	}
+}

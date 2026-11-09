@@ -131,7 +131,7 @@ await eb.db
 
 				<h4 class="text-base font-semibold text-gray-900 mt-5">Inserting many rows at once</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Pass an array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">insert()</code> (SDK 0.13.0 or later), or send a JSON array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /v1/db/&lbrace;table&rbrace;</code>. Up to 1,000 rows per request are inserted in one transaction: all of them or none. The response is the inserted rows, in the order you sent them. A column a row leaves out gets its default value. RLS policies, triggers, realtime events and webhooks apply to each row as for single inserts.
+					Pass an array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">insert()</code> (SDK 0.13.0 or later), or send a JSON array to <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">POST /v1/db/&lbrace;table&rbrace;</code>. Up to 1,000 rows per request are inserted in one transaction: all of them or none. The response is the inserted rows, in the order you sent them. A column a row leaves out gets its default value. RLS policies, triggers, realtime events and webhooks apply to each row as for single inserts. If a trigger skips a row (returns <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">NULL</code>), the request fails with 409 and nothing is inserted. The request body can be up to 16 MB.
 				</p>
 				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 					<pre>const {'{'} data: rows, error {'}'} = await eb.db

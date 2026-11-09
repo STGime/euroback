@@ -678,6 +678,11 @@ const maxBindParams = 65535
 // many values for one statement (400).
 var ErrBulkInsertSize = errors.New("bulk insert size")
 
+// ErrBulkInsertSkipped means the table's triggers skipped some rows of a
+// bulk insert (a BEFORE INSERT trigger returned NULL); the whole batch is
+// rolled back (409).
+var ErrBulkInsertSkipped = errors.New("bulk insert skipped rows")
+
 // InsertRows inserts several rows in one statement and one transaction:
 // all of them or none. It returns the inserted rows in input order. Rows
 // may name different columns; a column a row doesn't name gets its
@@ -757,7 +762,7 @@ func (e *QueryEngine) InsertRows(ctx context.Context, schemaName, tableName stri
 			results = append(results, got...)
 		}
 		if len(results) != len(rows) {
-			return fmt.Errorf("bulk insert returned %d rows, want %d", len(results), len(rows))
+			return fmt.Errorf("%w: a trigger on the table skipped %d of %d rows, so nothing was inserted", ErrBulkInsertSkipped, len(rows)-len(results), len(rows))
 		}
 		return nil
 	})

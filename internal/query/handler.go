@@ -412,8 +412,14 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxInsertBodyBytes)
 		var raw json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				jsonError(w, fmt.Sprintf("request body too large (max %d MB)", maxInsertBodyBytes>>20), http.StatusRequestEntityTooLarge)
+				return
+			}
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
@@ -445,6 +451,10 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		jsonResponse(w, row, http.StatusCreated)
 	}
 }
+
+// maxInsertBodyBytes caps the body of POST /v1/db/{table} (one row or a
+// bulk insert of up to MaxBulkInsertRows), read before any other check.
+const maxInsertBodyBytes = 16 << 20
 
 // insertRows handles POST /v1/db/{table} with an array body: all rows in
 // one transaction, 201 with the inserted rows in input order.
@@ -619,6 +629,10 @@ func handleQueryError(w http.ResponseWriter, err error) bool {
 	}
 	if errors.Is(err, ErrBulkInsertSize) {
 		jsonError(w, strings.TrimPrefix(err.Error(), ErrBulkInsertSize.Error()+": "), http.StatusBadRequest)
+		return true
+	}
+	if errors.Is(err, ErrBulkInsertSkipped) {
+		jsonError(w, strings.TrimPrefix(err.Error(), ErrBulkInsertSkipped.Error()+": "), http.StatusConflict)
 		return true
 	}
 	if errors.Is(err, ErrPlatformManagedTable) || errors.Is(err, ErrInternalTable) {

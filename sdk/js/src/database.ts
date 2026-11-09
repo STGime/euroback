@@ -18,6 +18,13 @@ export interface QueryResult<T = Record<string, any>> {
   error: string | null
 }
 
+/** Result of `insert()` with an array: the inserted rows, in input order. */
+export interface InsertManyResult<T = Record<string, any>> {
+  data: T[] | null
+  count: number | null
+  error: string | null
+}
+
 /** Result of `db.rpc()`. */
 export interface RpcResult<T = any> {
   /** What the function returned, or `null` on an error. */
@@ -210,9 +217,10 @@ export class QueryBuilder<T = Record<string, any>> implements PromiseLike<QueryR
    * transaction — all or none — and `data` is the inserted rows in the
    * same order. A column a row leaves out gets its default.
    */
-  async insert(data: Record<string, any>[]): Promise<QueryResult<T[]>>
+  async insert(data: Record<string, any>[]): Promise<InsertManyResult<T>>
   async insert(data: Record<string, any>): Promise<QueryResult<T>>
-  async insert(data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T | T[]>> {
+  async insert(data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T>>
+  async insert(data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T>> {
     const res = await this.http.post(`/v1/db/${encodeURIComponent(this.table)}`, data)
 
     if (res.error) {
