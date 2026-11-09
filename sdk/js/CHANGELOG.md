@@ -2,6 +2,12 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added — bulk insert
+
+`db.from(table).insert([...])` takes an array of up to 1000 rows and inserts them in one request and one transaction (all or none). `data` is the inserted rows in input order and `count` their number; a column a row leaves out gets its default. A single object works as before. Needs the gateway change that accepts an array on `POST /v1/db/{table}` (deployed with the same PR).
+
 ## 0.12.0 — 2026-10-20
 
 ### Added — `db.rpc()`

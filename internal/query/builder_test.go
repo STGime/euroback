@@ -283,3 +283,32 @@ func TestNoUserInputInSQL(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildBulkInsertQuery(t *testing.T) {
+	rows := []map[string]interface{}{
+		{"name": "a", "qty": 1},
+		{"name": "b"},
+		{"qty": 3, "note": "x"},
+	}
+	sql, args := buildBulkInsertQuery("tenant_x", "items", []string{"name", "qty", "note"}, rows)
+	want := `INSERT INTO "tenant_x"."items" ("name", "qty", "note") VALUES ($1, $2, DEFAULT), ($3, DEFAULT, DEFAULT), (DEFAULT, $4, $5) RETURNING *`
+	if sql != want {
+		t.Fatalf("sql:\n got %s\nwant %s", sql, want)
+	}
+	wantArgs := []interface{}{"a", 1, "b", 3, "x"}
+	if len(args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", args, wantArgs)
+	}
+	for i := range args {
+		if args[i] != wantArgs[i] {
+			t.Fatalf("args[%d] = %v, want %v", i, args[i], wantArgs[i])
+		}
+	}
+}
+
+func TestBuildBulkInsertQuery_QuotesIdentifiers(t *testing.T) {
+	sql, _ := buildBulkInsertQuery("s", "t", []string{`a"b`}, []map[string]interface{}{{`a"b`: 1}})
+	if !strings.Contains(sql, `("a""b")`) {
+		t.Fatalf("column not quoted: %s", sql)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -664,6 +665,108 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 	// RETURNING * would otherwise echo sensitive system-table columns.
 	stripDeniedColumns(ctx, tableName, []map[string]interface{}{result})
 	return result, nil
+}
+
+// MaxBulkInsertRows caps the rows of one bulk insert (POST /v1/db/{table}
+// with an array body), like bulk delete's 1000 ids.
+const MaxBulkInsertRows = 1000
+
+// maxBindParams is PostgreSQL's limit on parameters in one statement.
+const maxBindParams = 65535
+
+// ErrBulkInsertSize means a bulk insert has no rows, too many rows or too
+// many values for one statement (400).
+var ErrBulkInsertSize = errors.New("bulk insert size")
+
+// InsertRows inserts several rows in one statement and one transaction:
+// all of them or none. It returns the inserted rows in input order. Rows
+// may name different columns; a column a row doesn't name gets its
+// default. Same checks as InsertRow.
+func (e *QueryEngine) InsertRows(ctx context.Context, schemaName, tableName string, rows []map[string]interface{}) ([]map[string]interface{}, error) {
+	if len(rows) == 0 || len(rows) > MaxBulkInsertRows {
+		return nil, fmt.Errorf("%w: insert between 1 and %d rows per request", ErrBulkInsertSize, MaxBulkInsertRows)
+	}
+	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
+		return nil, err
+	}
+	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
+		return nil, err
+	}
+
+	// Union of the columns, in first-seen order (sorted within a row so
+	// the statement doesn't depend on map order).
+	var columns []string
+	seen := map[string]bool{}
+	params := 0
+	for _, row := range rows {
+		keys := make([]string, 0, len(row))
+		for k := range row {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if !seen[k] {
+				seen[k] = true
+				columns = append(columns, k)
+			}
+		}
+		params += len(row)
+	}
+	if params > maxBindParams {
+		return nil, fmt.Errorf("%w: too many values in one request (%d, max %d): send fewer rows per request", ErrBulkInsertSize, params, maxBindParams)
+	}
+
+	var stmts []string
+	var args []interface{}
+	if len(columns) == 0 {
+		// Every row is {}: all columns take their defaults.
+		qt := qualifiedTable(schemaName, tableName)
+		for range rows {
+			stmts = append(stmts, fmt.Sprintf("INSERT INTO %s DEFAULT VALUES RETURNING *", qt))
+		}
+	} else {
+		if err := ValidateColumns(ctx, e.catalogPool(ctx), schemaName, tableName, columns); err != nil {
+			return nil, err
+		}
+		if err := checkDeniedColumns(ctx, tableName, columns); err != nil {
+			return nil, err
+		}
+		var sql string
+		sql, args = buildBulkInsertQuery(schemaName, tableName, columns, rows)
+		stmts = []string{sql}
+	}
+
+	slog.Debug("executing bulk insert", "rows", len(rows), "columns", len(columns), "args_count", len(args))
+
+	var results []map[string]interface{}
+	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		for _, sql := range stmts {
+			stmtArgs := args
+			if len(stmts) > 1 {
+				stmtArgs = nil
+			}
+			out, err := tx.Query(ctx, sql, stmtArgs...)
+			if err != nil {
+				return fmt.Errorf("execute bulk insert: %w", err)
+			}
+			got, err := scanRows(out)
+			out.Close()
+			if err != nil {
+				return err
+			}
+			results = append(results, got...)
+		}
+		if len(results) != len(rows) {
+			return fmt.Errorf("bulk insert returned %d rows, want %d", len(results), len(rows))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// RETURNING * would otherwise echo sensitive system-table columns.
+	stripDeniedColumns(ctx, tableName, results)
+	return results, nil
 }
 
 // UpdateRow builds and executes a parameterized UPDATE ... WHERE id = $1 RETURNING *.

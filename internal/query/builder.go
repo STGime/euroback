@@ -330,6 +330,40 @@ func buildInsertQuery(schemaName, tableName string, data map[string]interface{})
 	return sql, args
 }
 
+// buildBulkInsertQuery builds one parameterized multi-row
+// INSERT ... RETURNING * for rows that may name different columns: the
+// statement lists the union of their columns (in the order given), and a
+// row that doesn't name a column gets DEFAULT for it, exactly as if it had
+// been inserted on its own.
+func buildBulkInsertQuery(schemaName, tableName string, columns []string, rows []map[string]interface{}) (string, []interface{}) {
+	qt := qualifiedTable(schemaName, tableName)
+
+	quoted := make([]string, len(columns))
+	for i, c := range columns {
+		quoted[i] = quoteIdent(c)
+	}
+
+	args := make([]interface{}, 0, len(rows)*len(columns))
+	tuples := make([]string, 0, len(rows))
+	for _, row := range rows {
+		vals := make([]string, len(columns))
+		for i, c := range columns {
+			v, ok := row[c]
+			if !ok {
+				vals[i] = "DEFAULT"
+				continue
+			}
+			args = append(args, v)
+			vals[i] = fmt.Sprintf("$%d", len(args))
+		}
+		tuples = append(tuples, "("+strings.Join(vals, ", ")+")")
+	}
+
+	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s RETURNING *",
+		qt, strings.Join(quoted, ", "), strings.Join(tuples, ", "))
+	return sql, args
+}
+
 // buildUpdateQuery builds a parameterized UPDATE ... WHERE id = $1 RETURNING * query.
 func buildUpdateQuery(schemaName, tableName, rowID string, data map[string]interface{}) (string, []interface{}) {
 	qt := qualifiedTable(schemaName, tableName)

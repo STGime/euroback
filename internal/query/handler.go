@@ -1,6 +1,7 @@
 package query
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -411,8 +412,17 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 			return
 		}
 
+		var raw json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if trimmed := bytes.TrimLeft(raw, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+			insertRows(w, r, engine, pub, schema, tableName, raw)
+			return
+		}
 		var data map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		if err := json.Unmarshal(raw, &data); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
@@ -434,6 +444,45 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		slog.Debug("row inserted", "schema", schema, "table", tableName)
 		jsonResponse(w, row, http.StatusCreated)
 	}
+}
+
+// insertRows handles POST /v1/db/{table} with an array body: all rows in
+// one transaction, 201 with the inserted rows in input order.
+func insertRows(w http.ResponseWriter, r *http.Request, engine *QueryEngine, pub *realtime.EventPublisher, schema, tableName string, raw json.RawMessage) {
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		jsonError(w, "invalid request body: expected an object or an array of objects", http.StatusBadRequest)
+		return
+	}
+	for _, row := range rows {
+		if row == nil {
+			jsonError(w, "invalid request body: expected an object or an array of objects", http.StatusBadRequest)
+			return
+		}
+	}
+
+	inserted, err := engine.InsertRows(r.Context(), schema, tableName, rows)
+	if err != nil {
+		slog.Error("bulk insert failed", "error", err, "schema", schema, "table", tableName, "rows", len(rows))
+		if !handleQueryError(w, err) {
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	projectID := ProjectIDFromContext(r.Context())
+	evs := make([]events.Event, 0, len(inserted))
+	for _, row := range inserted {
+		pr := PublishableRow(tableName, row)
+		if pub != nil {
+			_ = pub.PublishInsert(r.Context(), projectID, tableName, pr)
+		}
+		evs = append(evs, events.Event{ProjectID: projectID, Type: events.DBInsert, Table: tableName, Data: pr})
+	}
+	events.FromContext(r.Context()).EmitMany(r.Context(), evs)
+
+	slog.Debug("bulk insert complete", "schema", schema, "table", tableName, "rows", len(inserted))
+	jsonResponse(w, inserted, http.StatusCreated)
 }
 
 // handleUpdateRow handles PATCH /v1/db/{table}/{id}.
@@ -566,6 +615,10 @@ func handleQueryError(w http.ResponseWriter, err error) bool {
 		// configured, or a Team project's dedicated DB not serving): 503,
 		// never a fall-through to a shared login. Matches /v1/db/sql + RPC.
 		jsonError(w, "the project's database is not available right now", http.StatusServiceUnavailable)
+		return true
+	}
+	if errors.Is(err, ErrBulkInsertSize) {
+		jsonError(w, strings.TrimPrefix(err.Error(), ErrBulkInsertSize.Error()+": "), http.StatusBadRequest)
 		return true
 	}
 	if errors.Is(err, ErrPlatformManagedTable) || errors.Is(err, ErrInternalTable) {

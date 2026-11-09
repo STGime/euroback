@@ -203,14 +203,26 @@ export class QueryBuilder<T = Record<string, any>> implements PromiseLike<QueryR
     return { data, count, error: null }
   }
 
-  /** Insert a new row. POST /v1/db/{table} */
-  async insert(data: Record<string, any>): Promise<QueryResult<T>> {
+  /**
+   * Insert a row, or several rows at once. POST /v1/db/{table}
+   *
+   * With an array (up to 1000 rows), all rows are inserted in one
+   * transaction — all or none — and `data` is the inserted rows in the
+   * same order. A column a row leaves out gets its default.
+   */
+  async insert(data: Record<string, any>[]): Promise<QueryResult<T[]>>
+  async insert(data: Record<string, any>): Promise<QueryResult<T>>
+  async insert(data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T | T[]>> {
     const res = await this.http.post(`/v1/db/${encodeURIComponent(this.table)}`, data)
 
     if (res.error) {
       return { data: null, count: null, error: res.error }
     }
 
+    if (Array.isArray(data)) {
+      const rows = res as unknown as T[]
+      return { data: rows, count: rows.length, error: null }
+    }
     return { data: res as T, count: null, error: null }
   }
 
