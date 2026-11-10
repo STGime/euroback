@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -41,22 +42,14 @@ func cronListCmd() *cobra.Command {
 				return err
 			}
 
-			var jobs []struct {
-				ID       string `json:"id"`
-				Name     string `json:"name"`
-				Schedule string `json:"schedule"`
-				Type     string `json:"type"`
-				Enabled  bool   `json:"enabled"`
-				LastRun  string `json:"last_run"`
-				Runs     int    `json:"total_runs"`
-			}
+			var jobs []cliCronJob
 			if err := json.Unmarshal(data, &jobs); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
 			}
 
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			if jsonOut {
-				PrintJSON(jobs)
+				PrintJSON(json.RawMessage(data)) // the full API response
 				return nil
 			}
 
@@ -67,13 +60,13 @@ func cronListCmd() *cobra.Command {
 				if j.Enabled {
 					enabled = colorGreen + "yes" + colorReset
 				}
-				lastRun := j.LastRun
-				if lastRun == "" {
-					lastRun = "never"
+				lastRun := "never"
+				if j.LastRunAt != nil {
+					lastRun = j.LastRunAt.Local().Format("2006-01-02 15:04:05")
 				}
 				rows = append(rows, []string{
-					j.ID, j.Name, j.Schedule, j.Type, enabled, lastRun,
-					fmt.Sprintf("%d", j.Runs),
+					j.ID, j.Name, j.Schedule, j.ActionType, enabled, lastRun,
+					fmt.Sprintf("%d", j.RunCount),
 				})
 			}
 			PrintTable(headers, rows)
@@ -106,23 +99,18 @@ func cronLogsCmd() *cobra.Command {
 				return err
 			}
 
-			var runs []struct {
-				Time     string `json:"timestamp"`
-				Duration string `json:"duration"`
-				Status   string `json:"status"`
-				Result   string `json:"result"`
-			}
+			var runs []cliCronRun
 			if err := json.Unmarshal(data, &runs); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
 			}
 
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			if jsonOut {
-				PrintJSON(runs)
+				PrintJSON(json.RawMessage(data)) // the full API response
 				return nil
 			}
 
-			headers := []string{"Time", "Duration", "Status", "Result"}
+			headers := []string{"Started", "Duration", "Status", "Result"}
 			var rows [][]string
 			for _, r := range runs {
 				status := r.Status
@@ -131,10 +119,42 @@ func cronLogsCmd() *cobra.Command {
 				} else if status == "error" || status == "failed" {
 					status = colorRed + status + colorReset
 				}
-				rows = append(rows, []string{r.Time, r.Duration, status, r.Result})
+				duration := "-"
+				if r.DurationMs != nil {
+					duration = fmt.Sprintf("%d ms", *r.DurationMs)
+				}
+				result := ""
+				if r.Error != nil && *r.Error != "" {
+					result = *r.Error
+				} else if r.Result != nil {
+					result = *r.Result
+				}
+				rows = append(rows, []string{r.StartedAt.Local().Format("2006-01-02 15:04:05"), duration, status, result})
 			}
 			PrintTable(headers, rows)
 			return nil
 		},
 	}
+}
+
+// cliCronJob is the part of the API's cron job (internal/cron.CronJob) the
+// CLI shows. Field names must match the API's JSON.
+type cliCronJob struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Schedule   string     `json:"schedule"`
+	ActionType string     `json:"action_type"`
+	Enabled    bool       `json:"enabled"`
+	LastRunAt  *time.Time `json:"last_run_at"`
+	RunCount   int        `json:"run_count"`
+}
+
+// cliCronRun is the part of the API's run record (internal/cron.CronJobRun)
+// the CLI shows.
+type cliCronRun struct {
+	StartedAt  time.Time `json:"started_at"`
+	DurationMs *int      `json:"duration_ms"`
+	Status     string    `json:"status"`
+	Result     *string   `json:"result"`
+	Error      *string   `json:"error"`
 }

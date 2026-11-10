@@ -422,15 +422,16 @@ type CronJobRun struct {
 	Error      *string    `json:"error"`
 }
 
-// ListRuns returns the most recent execution records for a cron job.
-func (s *CronService) ListRuns(ctx context.Context, jobID string, limit int) ([]CronJobRun, error) {
+// ListRuns returns the most recent execution records for a cron job of
+// projectID.
+func (s *CronService) ListRuns(ctx context.Context, projectID, jobID string, limit int) ([]CronJobRun, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, job_id, project_id, started_at, finished_at, duration_ms, status, result, error
-		 FROM cron_job_runs WHERE job_id = $1 ORDER BY started_at DESC LIMIT $2`, jobID, limit)
+		 FROM cron_job_runs WHERE job_id = $1 AND project_id = $2 ORDER BY started_at DESC LIMIT $3`, jobID, projectID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query cron job runs: %w", err)
 	}
