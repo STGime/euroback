@@ -9,11 +9,16 @@
 --
 --   NOLOGIN            reached only via SET ROLE from eurobase_developer
 --   BYPASSRLS          the one thing the developer role lacks for FORCE tables
---   pg_read_all_data   SELECT on every table, no write privilege anywhere
---   INHERIT FALSE      eurobase_developer does not gain BYPASSRLS or the
---                      read grant by itself; it has to SET ROLE explicitly
+--   eurobase_migrator  inherited: owner-equivalent access to tenant tables
+--                      (via its <schema>_ddl memberships), nothing more. Not
+--                      pg_read_all_data: that also reads pg_authid and
+--                      ignores catalog privileges.
+--   INHERIT FALSE      eurobase_developer does not gain BYPASSRLS by itself;
+--                      it has to SET ROLE explicitly
+-- The export's transaction is READ ONLY, so the migrator's write privileges
+-- are not usable there.
 --
--- Creating a BYPASSRLS role and granting pg_read_all_data need a superuser
+-- Creating a BYPASSRLS role and granting it eurobase_migrator need a superuser
 -- (on Scaleway: _rdb_superadmin), so this can't be a migration. Without the
 -- role, exports report FORCE RLS tables as not exported, with the reason.
 -- Idempotent.
@@ -26,7 +31,7 @@ BEGIN
     END IF;
 END$$;
 -- Options spelled out: managed PostgreSQL defaults unspecified ones to FALSE.
-GRANT pg_read_all_data TO eurobase_export_reader WITH INHERIT TRUE, SET FALSE;
+GRANT eurobase_migrator TO eurobase_export_reader WITH INHERIT TRUE, SET FALSE;
 GRANT eurobase_export_reader TO eurobase_developer WITH INHERIT FALSE, SET TRUE;
 
 -- Check: prints one row, t|t|t.

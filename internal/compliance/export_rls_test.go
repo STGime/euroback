@@ -111,6 +111,22 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		})
 	}
 
+	// The reader inherits eurobase_migrator, not pg_read_all_data, so it
+	// can't read pg_authid (password verifiers).
+	t.Run("the reader role can't read pg_authid", func(t *testing.T) {
+		tx, err := dev.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+ExportReaderRole); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, "SELECT 1 FROM pg_authid LIMIT 1"); err == nil {
+			t.Error("reader role read pg_authid")
+		}
+	})
+
 	// The reader role is held only for the forced table's read.
 	t.Run("the reader role ends with the forced table's read", func(t *testing.T) {
 		err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
@@ -187,6 +203,9 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		}
 		if b := findTable(meta.Tables, "bookings"); b == nil || b.Status != TableTruncated {
 			t.Errorf("bookings = %+v, want truncated", b)
+		}
+		if f := findTable(meta.Tables, "forced"); f == nil || f.Status != TableTruncated || f.Rows != 2 {
+			t.Errorf("forced (read as the reader) = %+v, want truncated at 2", f)
 		}
 		if s := findTable(meta.Tables, "series_log"); s == nil || s.Status != TableExported {
 			t.Errorf("series_log (exactly the cap) = %+v, want exported", s)
