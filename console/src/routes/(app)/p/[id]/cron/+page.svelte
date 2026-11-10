@@ -2,9 +2,9 @@
 	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { api, type CronJob, type CronJobRun, type DBFunction, type TableSchema } from '$lib/api.js';
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { saveDraft, loadDraft, clearDraft } from '$lib/draft';
+	import { saveDraft, loadDraft, clearDraft, DRAFT_PREFIX } from '$lib/draft';
 
 	let projectId = $derived($page.params.id!);
 
@@ -35,7 +35,11 @@
 		action: string;
 		useCustomSchedule: boolean;
 	}
-	let draftKey = $derived(`eurobase_cron_draft:${projectId}`);
+	let draftKey = $derived(`${DRAFT_PREFIX}cron:${projectId}`);
+
+	// Leaving the page in the app drops the draft; only a full page
+	// change (the sign-in redirect, a reload) keeps it.
+	onDestroy(() => clearDraft(draftKey));
 
 	$effect(() => {
 		if (!showForm) return;
@@ -57,6 +61,7 @@
 	}
 
 	function restoreDraft() {
+		if (showForm) return; // the user already opened a form
 		const d = loadDraft<JobDraft>(draftKey);
 		if (!d) return;
 		const job = d.editingJobId ? jobs.find((j) => j.id === d.editingJobId) : null;

@@ -2,6 +2,7 @@
  * Svelte stores for Eurobase console state.
  */
 
+import { clearAllDrafts } from './draft';
 import { writable, derived } from 'svelte/store';
 import { api, type Project } from './api.js';
 
@@ -95,6 +96,7 @@ export const signOut = { explicit: false };
 
 export function logout(): void {
 	signOut.explicit = true;
+	clearAllDrafts();
 	api.clearToken();
 	if (typeof localStorage !== 'undefined') {
 		localStorage.removeItem('eurobase_token');
