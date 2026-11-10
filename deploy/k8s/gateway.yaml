@@ -66,6 +66,11 @@ spec:
             - secretRef:
                 name: eurobase-secrets
           env:
+            # Soft heap limit below the container's 256Mi: the Go GC works
+            # harder as the heap approaches it instead of growing into the
+            # OOM kill. Change it together with resources.limits.memory.
+            - name: GOMEMLIMIT
+              value: "200MiB"
             - name: PORT
               value: "8080"
             - name: METRICS_PORT
