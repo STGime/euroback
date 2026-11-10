@@ -341,8 +341,7 @@ func handleCreateTable(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req CreateTableRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 
@@ -503,8 +502,7 @@ func handleAddColumn(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req AddColumnRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 
@@ -590,8 +588,7 @@ func handleRenameTable(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req RenameTableRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 		if req.NewName == "" {
@@ -638,8 +635,7 @@ func handleAddForeignKey(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req ForeignKeyDefinition
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 
@@ -720,8 +716,7 @@ func handleAddUniqueConstraint(pool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			Column string `json:"column"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 
@@ -797,8 +792,7 @@ func handleCreateIndex(pool *pgxpool.Pool) http.HandlerFunc {
 			Column string `json:"column"`
 			Unique bool   `json:"unique"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 
@@ -901,8 +895,7 @@ func handleCreateTrigger(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req CreateTriggerRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 		// The URL param is authoritative — ignore Table from body if it differs.
@@ -1047,8 +1040,7 @@ func handleCreateFunction(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req CreateFunctionRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 
@@ -1198,8 +1190,7 @@ func handleAlterColumn(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req AlterColumnRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &req) {
 			return
 		}
 
@@ -1282,8 +1273,7 @@ func handleToggleRLS(pool *pgxpool.Pool) http.HandlerFunc {
 		var body struct {
 			Enabled bool `json:"enabled"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &body) {
 			return
 		}
 
@@ -1351,8 +1341,7 @@ func handleApplyPreset(pool *pgxpool.Pool) http.HandlerFunc {
 			Preset       string `json:"preset"`
 			UserIDColumn string `json:"user_id_column"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &body) {
 			return
 		}
 
@@ -1387,8 +1376,7 @@ func handleCreatePolicy(pool *pgxpool.Pool) http.HandlerFunc {
 			Using     string `json:"using"`
 			WithCheck string `json:"with_check"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &body) {
 			return
 		}
 		if body.Name == "" || body.Command == "" {

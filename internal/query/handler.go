@@ -134,8 +134,7 @@ func HandleTableBulkDelete(engine *QueryEngine, pub *realtime.EventPublisher) ht
 		var body struct {
 			IDs []string `json:"ids"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &body) {
 			return
 		}
 
@@ -412,8 +411,7 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		var data map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &data) {
 			return
 		}
 
@@ -453,8 +451,7 @@ func handleUpdateRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		var data map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeWriteBody(w, r, &data) {
 			return
 		}
 
@@ -529,8 +526,7 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 
 		var args map[string]interface{}
 		if r.Body != nil && r.ContentLength > 0 {
-			if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-				jsonError(w, "invalid request body", http.StatusBadRequest)
+			if !decodeWriteBody(w, r, &args) {
 				return
 			}
 		}
@@ -556,6 +552,40 @@ func handleCallFunction(engine *QueryEngine) http.HandlerFunc {
 
 		jsonResponse(w, map[string]interface{}{"result": result}, http.StatusOK)
 	}
+}
+
+// maxWriteBodyBytes caps the JSON body of data API writes (insert,
+// update, bulk delete, RPC). JSON of many small values takes far more
+// memory once decoded than on the wire, so the body is capped before it
+// is read.
+const maxWriteBodyBytes = 1 << 20
+
+// maxPlatformSQLBodyBytes caps console / MCP / CLI SQL requests, which may
+// carry pasted scripts.
+const maxPlatformSQLBodyBytes = 8 << 20
+
+// decodeWriteBody decodes a data API write body into v, capped at
+// maxWriteBodyBytes. On failure it writes the response (413 or 400) and
+// returns false.
+func decodeWriteBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeCappedBody(w, r, v, maxWriteBodyBytes)
+}
+
+// decodeCappedBody decodes a JSON request body into v, reading at most
+// limit bytes. On failure it writes the response (413 or 400) and returns
+// false.
+func decodeCappedBody(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonError(w, fmt.Sprintf("request body too large (max %d MiB)", limit>>20), http.StatusRequestEntityTooLarge)
+			return false
+		}
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 // handleQueryError writes the appropriate HTTP error response for a query engine error.
