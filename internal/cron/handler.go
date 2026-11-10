@@ -167,13 +167,14 @@ func handleDelete(svc *CronService) http.HandlerFunc {
 
 func handleListRuns(svc *CronService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "id")
 		jobID := chi.URLParam(r, "jobId")
 		if jobID == "" {
 			jsonError(w, "job ID is required", http.StatusBadRequest)
 			return
 		}
 
-		runs, err := svc.ListRuns(r.Context(), jobID, 20)
+		runs, err := svc.ListRuns(r.Context(), projectID, jobID, 20)
 		if err != nil {
 			slog.Error("list cron job runs failed", "error", err, "job_id", jobID)
 			jsonError(w, "internal server error", http.StatusInternalServerError)
