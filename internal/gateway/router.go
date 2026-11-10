@@ -1693,7 +1693,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 
 			// Rate limiting.
 			if limiter != nil {
-				r.Use(ratelimit.RateLimitMiddleware(limiter))
+				var planRPS ratelimit.PlanRPS
+				if limitsSvc != nil {
+					planRPS = func(ctx context.Context, plan string) (int, error) {
+						l, err := limitsSvc.GetLimits(ctx, plan)
+						if err != nil {
+							return 0, err
+						}
+						return l.RateLimitRPS, nil
+					}
+				}
+				r.Use(ratelimit.RateLimitMiddleware(limiter, planRPS))
 			}
 
 			// SDK runtime engine — routes tenant queries to the

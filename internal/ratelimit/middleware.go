@@ -13,7 +13,9 @@ import (
 // RateLimitMiddleware returns chi-compatible middleware that enforces per-tenant
 // rate limits. If the limiter is nil, all requests are allowed through (graceful
 // degradation when Redis is unavailable).
-func RateLimitMiddleware(limiter *RateLimiter) func(http.Handler) http.Handler {
+//
+// lookup reads the plan's limit from plan_limits; nil uses PlanLimits.
+func RateLimitMiddleware(limiter *RateLimiter, lookup PlanRPS) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Graceful degradation: if limiter is nil, skip rate limiting.
@@ -30,12 +32,11 @@ func RateLimitMiddleware(limiter *RateLimiter) func(http.Handler) http.Handler {
 			}
 
 			// Determine rate limit from project plan.
-			limit := PlanLimits["free"]
-			if pc, ok := auth.ProjectFromContext(r.Context()); ok && pc.Plan != "" {
-				if planLimit, exists := PlanLimits[pc.Plan]; exists {
-					limit = planLimit
-				}
+			plan := ""
+			if pc, ok := auth.ProjectFromContext(r.Context()); ok {
+				plan = pc.Plan
 			}
+			limit := limitFor(r.Context(), plan, lookup)
 			window := time.Second
 
 			allowed, info, err := limiter.Allow(r.Context(), key, limit, window)
