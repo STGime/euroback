@@ -130,6 +130,11 @@ GRANT eurobase_migrator TO eurobase_developer WITH INHERIT TRUE, SET TRUE;
 GRANT eurobase_gateway  TO eurobase_migrator  WITH INHERIT TRUE;
 SQL
 
+# BYPASSRLS read role for exports of FORCE RLS tables (#906): superuser-only,
+# so like the grants above it's a console/support step on Scaleway.
+[ "$(sql -f "$REPO_ROOT/scripts/db/export-reader.sql" | tail -1)" = "t|t|t" ] || {
+    echo "FAILED: scripts/db/export-reader.sql check" >&2; exit 1; }
+
 CURRENT=0
 if [ "$(sql -c "SELECT to_regclass('public.schema_migrations') IS NOT NULL")" = "t" ]; then
     CURRENT="$(sql -c "SELECT COALESCE(max(version), 0) FROM schema_migrations")"

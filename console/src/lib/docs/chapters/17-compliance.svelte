@@ -179,10 +179,13 @@ curl https://api.eurobase.app/platform/projects/$PROJECT_ID/compliance/exports/$
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Tables with FORCE ROW LEVEL SECURITY</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Both export types read each table as its owner, with row-level security bypassed, so it gets every row. A table with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">FORCE ROW LEVEL SECURITY</code> applies its policies to the owner too. The export then leaves that table out rather than export only part of it: it is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">failed</code> in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">_metadata.json</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">complete</code> is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">false</code>, and a full project export's warning reads:
+					Both export types read each table as its owner, with row-level security bypassed, so they get every row. A table with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">FORCE ROW LEVEL SECURITY</code> applies its policies to the owner too; the export reads those tables with a role that bypasses row-level security, so they are exported in full as well. You don't need to change anything.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<strong>Team</strong> projects (dedicated database): the export can't bypass FORCE there yet. It leaves such a table out rather than export only part of it: the table is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">failed</code> in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">_metadata.json</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">complete</code> is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">false</code>, and the warning reads:
 				</p>
 				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
-					<pre>table "orders" was not exported: query would be affected by row-level security policy for table "orders"</pre>
+					<pre>table "orders" was not exported: table has FORCE ROW LEVEL SECURITY, which makes its policies apply to the export too; ...</pre>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
 					To export such tables, switch FORCE off for the export and back on afterwards, in the SQL editor:
@@ -197,7 +200,7 @@ ALTER TABLE orders NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE orders FORCE ROW LEVEL SECURITY;</pre>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					Row-level security stays enabled the whole time, so requests from your app are still checked against your policies. FORCE only decides whether the policies also apply to the table owner, which is the role behind the SQL editor, migrations and the export. On Team, that includes connections using your database's owner URL while FORCE is off. An archive with failed tables can't be completed afterwards; request a new export.
+					Row-level security stays enabled the whole time, so requests from your app are still checked against your policies. FORCE only decides whether the policies also apply to the table owner, which includes connections using your database's owner URL while FORCE is off. An archive with failed tables can't be completed afterwards; request a new export.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Your Data Processing Agreement (Art. 28 GDPR)</h3>

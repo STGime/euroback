@@ -246,10 +246,11 @@ func main() {
 	// eurobase_gateway — every tenant table's owner — so RLS written for
 	// end users can't hide rows from the export (#654). Without a
 	// developer pool (dev), exports read on `pool` and report RLS-limited
-	// tables as not exported.
+	// tables as not exported. Tables with FORCE ROW LEVEL SECURITY are
+	// read as ExportReaderRole (BYPASSRLS) when the database has it (#906).
 	var exportData compliance.ExportSource
 	if developerPool != pool {
-		exportData = compliance.ExportSource{Pool: developerPool}
+		exportData = compliance.ExportSource{Pool: developerPool, BypassRole: compliance.ExportReaderRole}
 	}
 	// A Team-tier project's tenant data lives on its dedicated database,
 	// not the shared cluster (#663): exports read it there as the owner.
