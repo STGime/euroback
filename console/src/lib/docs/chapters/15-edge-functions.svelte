@@ -180,12 +180,31 @@ export default handler</pre>
 					</table>
 				</div>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Calling your database functions (RPC)</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					From an edge function, call your database functions directly with <code class="bg-gray-100 border border-gray-200 rounded px-1">ctx.db.sql</code>, not through your project's API URL (<code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/db/rpc/…</code>). Functions can't reach Eurobase API URLs: such a request gets no answer and runs into your timeout. <code class="bg-gray-100 border border-gray-200 rounded px-1">ctx.db.sql</code> needs no API key and no Vault secret.
+				</p>
+				<pre class="rounded-lg bg-gray-900 px-4 py-3 text-sm text-green-400 font-mono overflow-x-auto whitespace-pre mt-2">// a function that returns rows (RETURNS TABLE / SETOF)
+const players = await ctx.db.sql(
+  "SELECT * FROM team_roster($1)",
+  [teamId]
+);
+
+// a function that returns one value
+const [{ result }] = await ctx.db.sql(
+  "SELECT accept_invitation($1, $2) AS result",
+  [invitationId, answer]
+);</pre>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1 mt-2">
+					<li><strong>Arguments</strong> go in the array as <code class="bg-gray-100 border border-gray-200 rounded px-1">$1</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">$2</code>, … Never build the SQL string from request input.</li>
+					<li><strong>Who it runs as:</strong> when the function is called with a signed-in user's token, the SQL runs as that user: <code class="bg-gray-100 border border-gray-200 rounded px-1">auth_uid()</code> is that user and your RLS policies for signed-in users apply, exactly as for <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.db.rpc()</code> from your app. With JWT verification on, calls without a signed-in user are refused. With it off, anyone with your public key can call the function, and calls without a user run as the service role, so check the caller before doing privileged work.</li>
+					<li><strong>Transactions:</strong> each <code class="bg-gray-100 border border-gray-200 rounded px-1">ctx.db.sql</code> call is one statement in its own transaction. To change several rows together, put the steps in one database function and call that.</li>
+					<li><strong>Errors</strong> are thrown: wrap the call in <code class="bg-gray-100 border border-gray-200 rounded px-1">try/catch</code>. Your own <code class="bg-gray-100 border border-gray-200 rounded px-1">RAISE EXCEPTION</code> message is in the error.</li>
+				</ul>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Network access</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Functions can call any public internet address (<code class="bg-gray-100 border border-gray-200 rounded px-1">fetch</code>, or raw TCP). Private and internal addresses aren't reachable. To send email, use your email provider: its HTTPS API, or its SMTP server on a submission port with your account's login — port 2525 for now (587 and 465 are currently blocked by our hosting provider; we're working on opening them). Port 25 (direct delivery to recipients' mail servers) is blocked.
-				</p>
-				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					<strong>Calling your own project:</strong> for database work, including your RPC functions, use <code class="bg-gray-100 border border-gray-200 rounded px-1">ctx.db.sql</code>, e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">ctx.db.sql('SELECT * FROM my_function($1)', [id])</code>. It runs in your database without an HTTP round trip and needs no API key. When the function is called with a signed-in user's token, the SQL runs as that user (RLS applies their policies). With JWT verification on, calls without a signed-in user are refused. With it off, anyone with your public key can call the function, and calls without a user run as the service role, so check the caller before doing privileged work. Your project's public API URL (<code class="bg-gray-100 border border-gray-200 rounded px-1">https://&lt;slug&gt;.eurobase.app/v1/…</code>) is reachable from functions too, with the same keys and checks as any other client. Per-address rate limits (sign-in, magic links, password reset) count all functions calls from our runners as one client, so don't run end-user auth flows through a function.
+					Functions can call any public internet address (<code class="bg-gray-100 border border-gray-200 rounded px-1">fetch</code>, or raw TCP). Private and internal addresses aren't reachable, and neither are Eurobase API URLs (use <code class="bg-gray-100 border border-gray-200 rounded px-1">ctx.db.sql</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">ctx.storage</code> instead). To send email, use your email provider: its HTTPS API, or its SMTP server on a submission port with your account's login — port 2525 for now (587 and 465 are currently blocked by our hosting provider; we're working on opening them). Port 25 (direct delivery to recipients' mail servers) is blocked.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Use Cases</h3>
