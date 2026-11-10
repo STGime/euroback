@@ -275,10 +275,13 @@ func TestRealtime_TokenFromHeaders(t *testing.T) {
 		query string
 		want  string
 	}{
-		"bearer":            {http.Header{"Authorization": {"Bearer eb_sk_one"}}, "", "eb_sk_one"},
-		"apikey":            {http.Header{"Apikey": {"eb_sk_two"}}, "", "eb_sk_two"},
-		"query":             {nil, "token=eb_pk_three", "eb_pk_three"},
-		"header over query": {http.Header{"Authorization": {"bearer eb_sk_four"}}, "token=eb_pk_x", "eb_sk_four"},
+		"bearer":                     {http.Header{"Authorization": {"Bearer eb_sk_one"}}, "", "eb_sk_one"},
+		"apikey":                     {http.Header{"Apikey": {"eb_sk_two"}}, "", "eb_sk_two"},
+		"query":                      {nil, "token=eb_pk_three", "eb_pk_three"},
+		"header over query":          {http.Header{"Authorization": {"bearer eb_sk_four"}}, "token=eb_pk_x", "eb_sk_four"},
+		"bearer over apikey":         {http.Header{"Authorization": {"Bearer eb_sk_five"}, "Apikey": {"eb_pk_y"}}, "", "eb_sk_five"},
+		"basic falls through":        {http.Header{"Authorization": {"Basic dXNlcjpwdw=="}, "Apikey": {"eb_sk_six"}}, "", "eb_sk_six"},
+		"empty bearer falls through": {http.Header{"Authorization": {"Bearer "}}, "token=eb_pk_seven", "eb_pk_seven"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c, resp, err := websocket.DefaultDialer.Dial(wsURL+"?project_id=p-1&"+tc.query, tc.hdr)
@@ -291,4 +294,28 @@ func TestRealtime_TokenFromHeaders(t *testing.T) {
 			}
 		})
 	}
+}
+
+// No Origin doesn't skip authentication: without a token the upgrade is
+// refused with 401, through the production origin checker.
+func TestRealtime_NoOriginStillNeedsToken(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	authorize := func(context.Context, string, string) (AuthorizedClient, error) {
+		return AuthorizedClient{ProjectID: "p-1", Plan: "pro"}, nil
+	}
+	denyAll := func(*http.Request) bool { return false }
+	srv := httptest.NewServer(HandleWebSocket(hub, authorize, denyAll, false))
+	defer srv.Close()
+	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
+
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL+"?project_id=p-1", nil)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no Origin, no token: err=%v resp=%v, want 401", err, resp)
+	}
+	c, _, err := websocket.DefaultDialer.Dial(wsURL+"?project_id=p-1", http.Header{"Authorization": {"Bearer eb_sk_x"}})
+	if err != nil {
+		t.Fatalf("no Origin, with token: %v", err)
+	}
+	_ = c.Close()
 }
