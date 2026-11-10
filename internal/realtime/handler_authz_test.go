@@ -254,3 +254,41 @@ func TestRealtime_PublishWithDifferentProjectID_DoesNotDeliver(t *testing.T) {
 		t.Fatal("subscriber received an event from a different project — cross-project leak")
 	}
 }
+
+// Server-side clients can send the credential in a header, so a secret key
+// stays out of URLs (and access logs). Header wins over ?token=.
+func TestRealtime_TokenFromHeaders(t *testing.T) {
+	var got atomic.Value
+	authorize := func(_ context.Context, token, _ string) (AuthorizedClient, error) {
+		got.Store(token)
+		return AuthorizedClient{ProjectID: "p-1", Plan: "pro"}, nil
+	}
+	hub := NewHub()
+	go hub.Run()
+	allowAll := func(*http.Request) bool { return true }
+	srv := httptest.NewServer(HandleWebSocket(hub, authorize, allowAll, false))
+	defer srv.Close()
+	wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
+
+	for name, tc := range map[string]struct {
+		hdr   http.Header
+		query string
+		want  string
+	}{
+		"bearer":            {http.Header{"Authorization": {"Bearer eb_sk_one"}}, "", "eb_sk_one"},
+		"apikey":            {http.Header{"Apikey": {"eb_sk_two"}}, "", "eb_sk_two"},
+		"query":             {nil, "token=eb_pk_three", "eb_pk_three"},
+		"header over query": {http.Header{"Authorization": {"bearer eb_sk_four"}}, "token=eb_pk_x", "eb_sk_four"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, resp, err := websocket.DefaultDialer.Dial(wsURL+"?project_id=p-1&"+tc.query, tc.hdr)
+			if err != nil {
+				t.Fatalf("dial: %v (%v)", err, resp)
+			}
+			_ = c.Close()
+			if got.Load() != tc.want {
+				t.Errorf("token = %v, want %s", got.Load(), tc.want)
+			}
+		})
+	}
+}

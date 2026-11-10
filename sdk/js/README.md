@@ -392,6 +392,10 @@ eb.realtime.disconnect()
 
 Reconnects automatically with exponential backoff (1s, 2s, 4s, ... up to 30s).
 
+### Server-side clients
+
+The SDK in the browser passes its key or user token as `?token=` (browsers can't set headers on a WebSocket), so use only the public key or a user's token there. A server or worker connecting to `wss://<slug>.eurobase.app/v1/realtime` directly can send its secret key in a header instead, which keeps it out of URLs and logs: `Authorization: Bearer eb_sk_…` (or `apikey: eb_sk_…`). Clients that don't send an `Origin` header, such as servers, are accepted; when an `Origin` is sent, it must be allowed in the project's CORS settings.
+
 ### Server-side row filtering
 
 Realtime events are filtered on the server before they reach a subscriber, based on the row's owner column (`user_id`, `owner_id`, `created_by`, or `uploaded_by`):
