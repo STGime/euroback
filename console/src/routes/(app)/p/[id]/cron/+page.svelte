@@ -1158,7 +1158,7 @@
 							rows="3"
 							class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none resize-y bg-gray-900 text-green-400"
 						></textarea>
-						<p class="mt-1 text-xs text-gray-400">Runs in your project's database. One statement against your project's own tables (UPDATE, INSERT, DELETE, or calling your functions) — the same rules as the SQL editor apply: no other schemas, system catalogs, or role/permission statements. The number of affected rows is recorded. Use the Test Run button below to verify your SQL before scheduling.</p>
+						<p class="mt-1 text-xs text-gray-400">Runs in your project's database. One statement against your project's own tables (UPDATE, INSERT, DELETE, or calling your functions) — no other schemas, system catalogs, or role/permission statements, and stricter than the SQL editor: no DO blocks, CREATE FUNCTION or temporary objects (put multi-step logic in a function and call it here). The number of affected rows is recorded. Use the Test Run button below to verify your SQL before scheduling.</p>
 					{/if}
 				</div>
 
