@@ -64,6 +64,25 @@ spec:
       ports:
         - protocol: TCP
           port: 6432
+    # Allow the ingress controller, so a function can call public
+    # Eurobase URLs (its own project's REST / RPC / storage API). Inside the
+    # cluster, traffic to the load balancer's public IP is routed straight
+    # to these pods (Cilium kube-proxy replacement), so the ipBlock rule
+    # below never matches it and the request was silently dropped. Same
+    # endpoints, keys and checks as a request from the internet.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
     # Allow everything to the public internet, except RFC1918 and
     # link-local. This covers Scaleway's managed Postgres/Redis (they
     # sit on public IPs) plus any third-party API the function calls.
