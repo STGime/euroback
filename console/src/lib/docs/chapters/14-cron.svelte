@@ -85,8 +85,8 @@
 					<div class="text-sm text-eurobase-800">
 						<p><strong>Plan limits:</strong> Free plan includes 2 scheduled jobs. Pro plan has unlimited jobs.</p>
 						<p class="mt-1">Jobs run in your project's own schema, as your project's database role &mdash; they can't reach other schemas. One statement per job, run in its own transaction: everything it does, including what the functions it calls change, commits together or not at all. Each run may take up to 30 seconds.</p>
-						<p class="mt-1"><strong>Not allowed in a job</strong> (stricter than the SQL editor): <code class="bg-white/50 rounded px-1">DO</code> blocks, <code class="bg-white/50 rounded px-1">CREATE FUNCTION</code> / <code class="bg-white/50 rounded px-1">CREATE PROCEDURE</code>, temporary tables, <code class="bg-white/50 rounded px-1">set_config()</code>, role and privilege statements, and references to other schemas or the system catalogs. The job is refused when you save it. For multi-step logic, create a function in the SQL editor and call it from the job, e.g. <code class="bg-white/50 rounded px-1">SELECT my_function();</code></p>
-						<p class="mt-1"><strong>Test Run</strong> runs the statement exactly like a scheduled run (same role, same <em>Run as service role</em> setting, same checks), then <strong>always rolls back</strong> &mdash; including changes made by the functions it calls. Nothing is committed. A Test Run may take up to 25 seconds.</p>
+						<p class="mt-1"><strong>Not allowed in a SQL job:</strong> <code class="bg-white/50 rounded px-1">DO</code> blocks, <code class="bg-white/50 rounded px-1">CREATE FUNCTION</code> / <code class="bg-white/50 rounded px-1">CREATE PROCEDURE</code> and temporary objects (all allowed in the SQL editor), plus what the SQL editor refuses too: <code class="bg-white/50 rounded px-1">set_config()</code>, role and privilege statements, and references to other schemas or the system catalogs. The job is refused when you save it. For multi-step logic, create a function in the SQL editor and call it from the job, e.g. <code class="bg-white/50 rounded px-1">SELECT my_function();</code></p>
+						<p class="mt-1"><strong>Test Run</strong> runs the statement exactly like a scheduled run (same role, same <em>Run as service role</em> setting, same checks), then <strong>always rolls back</strong> &mdash; including changes made by the functions it calls. Nothing is committed (sequence values still advance). A Test Run may take up to 25 seconds. The console shows the Test Run button for SQL jobs; to test a function, use a SQL job with <code class="bg-white/50 rounded px-1">SELECT my_function();</code></p>
 						<p class="mt-1"><strong>Run as service role</strong> (default for new jobs): row-level security policies see the job as the service role, like an edge function called without a user, so policies that allow the service role apply and housekeeping jobs (purging expired rows, rollups) can reach rows across users. Custom policies that don't check for the service role still apply as written. With it off, the job has no user context and only sees rows your policies allow to everyone. Jobs created before this option existed have it off; switch it on in the job's settings.</p>
 					</div>
 				</div>
@@ -97,8 +97,8 @@
 				</p>
 				<ol class="list-decimal pl-5 text-sm text-gray-700 leading-relaxed mt-1 space-y-0.5">
 					<li>Put the work in a function and make it safe to run twice &mdash; e.g. return early if the data already exists.</li>
-					<li>Check it with <strong>Test Run</strong> (rolled back).</li>
-					<li>Create the job with a schedule a few minutes ahead.</li>
+					<li>Create a SQL job with <code class="bg-gray-100 rounded px-1">SELECT my_function();</code> and check it with <strong>Test Run</strong> (rolled back).</li>
+					<li>Save the job with a schedule a few minutes ahead.</li>
 					<li>Check the job's run history, then delete or disable the job.</li>
 				</ol>
 			<h3 class="text-lg font-semibold text-gray-900 mt-6">RPC Functions</h3>
