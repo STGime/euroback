@@ -23,7 +23,7 @@
 				</p>
 				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 					<pre>CREATE TABLE listings (
-    id          uuid PRIMARY KEY DEFAULT public.uuid_generate_v4(),
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id     uuid NOT NULL,
     source      text NOT NULL,
     source_id   text NOT NULL,

@@ -157,7 +157,7 @@ create policy "read profiles" on app_profiles
 						<p class="text-xs font-semibold text-gray-700">Step 1: Create the table with a user_id column</p>
 						<div class="mt-1.5 rounded bg-gray-900 px-2.5 py-1.5 font-mono text-[11px] text-green-400 space-y-0.5">
 							<div>CREATE TABLE tasks (</div>
-							<div>&nbsp;&nbsp;id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),</div>
+							<div>&nbsp;&nbsp;id UUID PRIMARY KEY DEFAULT gen_random_uuid(),</div>
 							<div>&nbsp;&nbsp;user_id UUID NOT NULL REFERENCES users(id),</div>
 							<div>&nbsp;&nbsp;title TEXT NOT NULL,</div>
 							<div>&nbsp;&nbsp;completed BOOLEAN DEFAULT false,</div>

@@ -81,7 +81,8 @@ EUROBASE_PROJECT_ID=%s
 - Check state with: eurobase migrations status
 - Each migration runs in ONE transaction inside this project's schema. Use unqualified
   table names. RLS helpers public.is_service_role() and public.current_end_user_id()
-  are available for policies; public.uuid_generate_v4() for defaults.
+  are available for policies; gen_random_uuid() for uuid defaults
+  (uuid_generate_v4() is refused in migrations).
 - Not allowed in migration SQL: referencing other schemas, GRANT/REVOKE, SET ROLE /
   search_path, transaction control (COMMIT/BEGIN), SECURITY DEFINER, COPY,
   CREATE EXTENSION. Never edit an already-applied migration — add a new version.
