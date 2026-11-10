@@ -191,7 +191,7 @@ const players = await ctx.db.sql(
 );
 
 // a function that returns one value
-const [{ result }] = await ctx.db.sql(
+const [&#123; result &#125;] = await ctx.db.sql(
   "SELECT accept_invitation($1, $2) AS result",
   [invitationId, answer]
 );</pre>
