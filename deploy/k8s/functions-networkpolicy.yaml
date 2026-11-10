@@ -66,10 +66,11 @@ spec:
           port: 6432
     # Allow the ingress controller, so a function can call public
     # Eurobase URLs (its own project's REST / RPC / storage API). Inside the
-    # cluster, traffic to the load balancer's public IP is routed straight
-    # to these pods (Cilium kube-proxy replacement), so the ipBlock rule
+    # cluster, traffic to the load balancer's public IP is translated to
+    # these pods by Cilium's service load-balancing, so the ipBlock rule
     # below never matches it and the request was silently dropped. Same
-    # endpoints, keys and checks as a request from the internet.
+    # endpoints, keys and checks as a request from the internet; per-IP
+    # rate limits see one runner pod as one client.
     - to:
         - namespaceSelector:
             matchLabels:
