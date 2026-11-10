@@ -230,8 +230,14 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 		if n := countAndReplace(&text, reAuthEmail, "auth_email()"); n > 0 {
 			fired["rewrite:auth.email() → auth_email()"] += n
 		}
-		if n := countAndReplace(&text, reExtensionsUUID, "public.uuid_generate_v4()"); n > 0 {
-			fired["rewrite:extensions.uuid_generate_v4() → public.uuid_generate_v4()"] += n
+		// Tenant migrations refuse uuid_generate_v4() (uuid-ossp isn't
+		// available to them); the built-in gen_random_uuid() works on every
+		// path, so every spelling is rewritten to it.
+		if n := countAndReplace(&text, reExtensionsUUID, "gen_random_uuid()"); n > 0 {
+			fired["rewrite:extensions.uuid_generate_v4() → gen_random_uuid()"] += n
+		}
+		if n := countAndReplace(&text, reUUIDGenerateV4, "gen_random_uuid()"); n > 0 {
+			fired["rewrite:uuid_generate_v4() → gen_random_uuid()"] += n
 		}
 		if n := countAndReplace(&text, reExtensionsGenRandomUUID, "gen_random_uuid()"); n > 0 {
 			fired["rewrite:extensions.gen_random_uuid() → gen_random_uuid()"] += n
@@ -750,6 +756,7 @@ var (
 	// as the built-in `gen_random_uuid()`. (#274 review H4.)
 	reExtensionsUUID          = regexp.MustCompile(`\bextensions\.uuid_generate_v4\s*\(\s*\)`)
 	reExtensionsGenRandomUUID = regexp.MustCompile(`\bextensions\.gen_random_uuid\s*\(\s*\)`)
+	reUUIDGenerateV4          = regexp.MustCompile(`(?i)\b(public\s*\.\s*)?uuid_generate_v4\s*\(\s*\)`)
 
 	// `CREATE POLICY` at statement head — used by Pass 2 to decide
 	// which statements to run through wrapPolicyBody.

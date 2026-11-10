@@ -2059,8 +2059,8 @@ func sdkDDLAdapter(ownerPoolFor func(context.Context, string) *pgxpool.Pool, rou
 //  1. **API key** (`eb_pk_…` / `eb_sk_…`) — resolved server-side to a
 //     project. `?project_id=` may be omitted; if provided it must
 //     match the apikey's project. `eb_sk_*` is treated as service-role
-//     (sees every row); `eb_pk_*` is anonymous (sees only rows
-//     without an owner column).
+//     (sees every row); `eb_pk_*` is anonymous and receives no
+//     rows (#860).
 //  2. **Platform JWT** — validated against the platform secret,
 //     subject is a platform user. Requires `?project_id=` and a
 //     project_members row. Treated as service-role.

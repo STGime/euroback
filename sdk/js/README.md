@@ -398,16 +398,17 @@ Realtime events are filtered on the server before they reach a subscriber, based
 
 | Subscriber identity | Table has an owner column | Table has no owner column |
 |---|---|---|
-| End-user JWT (`accessToken` set after sign-in) | Receives only rows where the owner column equals their `user_id` | Receives every event |
-| Server / admin (`eb_sk_*` secret API key, or signed-in console user) | Receives every event | Receives every event |
-| Anonymous (`eb_pk_*` public API key, no end-user JWT) | **Receives nothing** | Receives every event |
+| End-user JWT (`accessToken` set after sign-in) | Receives only rows where the owner column equals their `user_id` | **Receives nothing** |
+| Server / admin (`eb_sk_*` secret API key, or a console user; system tables need developer or above) | Receives every event | Receives every event |
+| Anonymous (`eb_pk_*` public API key, no end-user JWT) | **Receives nothing** | **Receives nothing** |
 
-This matches the `owner_access` RLS preset applied by `eb.db.schema.createTable()` when an owner column is detected, so realtime and REST agree on which rows a subscriber can see.
+This matches the `owner_access` RLS preset applied by `eb.db.schema.createTable()` when an owner column is detected, so for tables using that preset, realtime and the API agree on whose rows a user gets. Realtime doesn't check your own policies: a custom policy that hides some of a user's own rows doesn't stop realtime from sending them.
 
-**Limitations.** The server-side filter is column-based, not a full RLS evaluator:
+**Limitations.** The filter is column-based; realtime doesn't evaluate your RLS policies:
 
-- Custom or composite RLS policies (e.g. `USING (org_id = current_org() OR is_admin)`) are not enforced over realtime. Subscribers on those tables will see every row.
-- If you need stricter realtime authorisation than the owner column provides, gate sensitive tables off realtime entirely until [#108 follow-up](https://github.com/STGime/euroback/issues/108) ships full policy evaluation in v1.1.
+- A row is delivered to an end user only if its owner column is their id. Rows your policies share with other users (team members, an `org_id` or `workspace_id` column, public tables) are not delivered to those users, and tables without an owner column send end users nothing.
+- For shared data, re-read through the API when you need it (or poll), until realtime evaluates policies ([#108](https://github.com/STGime/euroback/issues/108)).
+- Your server can subscribe with the secret key to receive every event.
 
 ## Edge Functions
 

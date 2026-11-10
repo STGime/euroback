@@ -112,9 +112,9 @@ func ValidateNoCrossSchemaRefsOpts(sql, allowedSchema string, opts CrossSchemaOp
 //     policy helpers the console's docs page (rls-authoring) tells users
 //     to reference qualified as `public.is_service_role() OR
 //     public.current_end_user_id() = user_id`.
-//   - uuid_generate_v4, gen_random_uuid — id-default helpers the console
-//     Table Editor generates as `public.uuid_generate_v4()` for new
-//     table primary keys.
+//   - uuid_generate_v4, gen_random_uuid — id-default helpers; the console
+//     Table Editor now generates gen_random_uuid(), older tables and
+//     SQL may still use `public.uuid_generate_v4()`.
 //
 // Deliberately NOT included: names that could also be Eurobase-owned
 // tables (subscriptions, invoices, projects, platform_users, webhooks).
