@@ -18,7 +18,7 @@
 					Without Homebrew (CI, agents, Linux servers), download the binary for your platform (macOS or Linux, amd64 or arm64):
 				</p>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400 space-y-0.5">
-					<div>VER=0.6.0  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
+					<div>VER=0.6.1  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
 					<div>OS=$(uname -s | tr '[:upper:]' '[:lower:]')</div>
 					<div>ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')</div>
 					<div>BASE=https://github.com/STGime/homebrew-tap/releases/download/cli-v$&#123;VER&#125;</div>
