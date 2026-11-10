@@ -392,6 +392,24 @@ eb.realtime.disconnect()
 
 Reconnects automatically with exponential backoff (1s, 2s, 4s, ... up to 30s).
 
+### Server-side clients
+
+The SDK always passes its key or user token as `?token=`, in the browser and in Node (browsers can't set headers on a WebSocket). Use it with the public key or a user's token. To connect with the secret key from a server, use a WebSocket client that can set headers (e.g. [`ws`](https://www.npmjs.com/package/ws)) and send the key in a header, which keeps it out of URLs and logs:
+
+```ts
+import WebSocket from 'ws';
+
+const socket = new WebSocket('wss://<slug>.eurobase.app/v1/realtime', {
+  headers: { Authorization: `Bearer ${process.env.EUROBASE_SECRET_KEY}` }, // or apikey: …
+});
+socket.on('open', () => socket.send(JSON.stringify({ action: 'subscribe', channel: 'db:jobs' })));
+socket.on('message', (data) => {
+  const event = JSON.parse(data.toString()); // { channel, type: 'INSERT' | 'UPDATE' | 'DELETE', record, old_record, timestamp }
+});
+```
+
+With an API key the project comes from the key; with a user's access token, add `?project_id=<project id>`. Clients that don't send an `Origin` header, such as servers, are accepted. When an `Origin` is sent, it must be allowed in the project's CORS settings (checked on the project's own `<slug>.eurobase.app` address).
+
 ### Server-side row filtering
 
 Realtime events are filtered on the server before they reach a subscriber, based on the row's owner column (`user_id`, `owner_id`, `created_by`, or `uploaded_by`):

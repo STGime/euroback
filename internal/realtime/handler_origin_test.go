@@ -94,22 +94,21 @@ func TestCheckOrigin_ProductionAcceptsAllowedOrigin(t *testing.T) {
 	}
 }
 
-func TestCheckOrigin_ProductionRejectsMissingOrigin(t *testing.T) {
-	// Browsers always send Origin on cross-origin requests. A missing
-	// header in production is suspicious; we fail closed (the checker
-	// returns false on empty Origin).
-	checker := func(r *http.Request) bool {
-		return r.Header.Get("Origin") != ""
-	}
+func TestCheckOrigin_ProductionAcceptsMissingOrigin(t *testing.T) {
+	// Browsers always send Origin on a WebSocket handshake. A client
+	// without one is a server-side client authenticating with its own
+	// token, so the cross-site check has nothing to protect.
+	checker := func(r *http.Request) bool { return false } // no origin allowed
 	wsURL, stop := startServer(t, checker, false)
 	defer stop()
 
 	resp, err := dialWith(t, wsURL, "")
-	if err == nil {
-		t.Fatal("expected handshake to fail when Origin missing in production")
+	if err != nil {
+		t.Fatalf("handshake without Origin failed: %v (resp %v)", err, resp)
 	}
-	if resp == nil || resp.StatusCode != http.StatusForbidden {
-		t.Errorf("expected 403, got %v", resp)
+	// A present Origin is still checked.
+	if _, err := dialWith(t, wsURL, "https://attacker.example"); err == nil {
+		t.Fatal("disallowed Origin accepted")
 	}
 }
 

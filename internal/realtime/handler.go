@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
@@ -65,10 +66,20 @@ type Authorize func(ctx context.Context, token, requestedProjectID string) (Auth
 // matching what the SDK publisher emits, so events actually reach
 // subscribers.
 //
+// Credentials (required outside dev mode), first match wins:
+//
+//	Authorization: Bearer <token>  — server-side clients
+//	apikey: <key>                  — server-side clients
+//	?token=<token>                 — browsers (they can't set headers on a
+//	                                 WebSocket); use the public key or a
+//	                                 user token there, never the secret key
+//
+// A key or JWT in a header stays out of URLs, and so out of access logs.
+//
 // Query parameters:
 //
-//	token       — JWT (platform or end-user). Required outside dev mode.
-//	project_id  — project UUID the client wants to subscribe to. Required.
+//	project_id  — project UUID the client wants to subscribe to. Required
+//	              for JWTs; resolved from an API key.
 //
 // devMode skips auth and accepts any project_id (or none — falls back
 // to a fixed dev project). Production fences in cmd/gateway/main.go
@@ -86,6 +97,14 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 			}
 			if originChecker == nil {
 				return false
+			}
+			// Browsers always send Origin on a WebSocket handshake; the
+			// check stops another site from using a visitor's browser.
+			// A client without Origin isn't a browser (a server, a
+			// worker), and authenticates with its own token, so there
+			// is nothing for the check to protect.
+			if r.Header.Get("Origin") == "" {
+				return true
 			}
 			return originChecker(r)
 		},
@@ -106,9 +125,9 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 				"project_id", ac.ProjectID,
 			)
 		} else {
-			token := r.URL.Query().Get("token")
+			token := requestToken(r)
 			if token == "" {
-				http.Error(w, `{"error":"missing token query parameter"}`, http.StatusUnauthorized)
+				http.Error(w, `{"error":"missing token: send it as Authorization: Bearer, apikey, or ?token="}`, http.StatusUnauthorized)
 				return
 			}
 			if authorize == nil {
@@ -143,7 +162,8 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 
 		// Enforce per-project connection limit.
 		limit := freeConnectionLimit
-		if plan == "pro" || plan == "enterprise" {
+		switch plan {
+		case "pro", "team", "legal_team", "enterprise":
 			limit = proConnectionLimit
 		}
 		if hub.ConnectionCount(projectID) >= limit {
@@ -188,4 +208,16 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 		go writePump(client)
 		go readPump(client)
 	}
+}
+
+// requestToken returns the client's credential: the Authorization bearer
+// token, else the apikey header, else the token query parameter.
+func requestToken(r *http.Request) string {
+	if h := strings.TrimSpace(r.Header.Get("Authorization")); len(h) > 7 && strings.EqualFold(h[:7], "bearer ") {
+		return strings.TrimSpace(h[7:])
+	}
+	if k := strings.TrimSpace(r.Header.Get("apikey")); k != "" {
+		return k
+	}
+	return r.URL.Query().Get("token")
 }
