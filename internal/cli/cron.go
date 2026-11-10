@@ -49,7 +49,7 @@ func cronListCmd() *cobra.Command {
 
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			if jsonOut {
-				PrintJSON(jobs)
+				PrintJSON(json.RawMessage(data)) // the full API response
 				return nil
 			}
 
@@ -106,7 +106,7 @@ func cronLogsCmd() *cobra.Command {
 
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			if jsonOut {
-				PrintJSON(runs)
+				PrintJSON(json.RawMessage(data)) // the full API response
 				return nil
 			}
 
