@@ -137,7 +137,7 @@ stub rejects them with a clear error. JSX/TSX is not supported either
 
 -- Function code storage (platform-level, not per-tenant schema)
 CREATE TABLE public.edge_functions (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
     code            TEXT NOT NULL,           -- TypeScript/JavaScript source
@@ -169,7 +169,7 @@ CREATE INDEX idx_edge_functions_project ON public.edge_functions(project_id);
 
 -- Execution logs
 CREATE TABLE public.edge_function_logs (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     function_id     UUID NOT NULL REFERENCES edge_functions(id) ON DELETE CASCADE,
     project_id      UUID NOT NULL,
     status          INTEGER NOT NULL,       -- HTTP status code returned

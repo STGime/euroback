@@ -213,19 +213,20 @@ func TestTranslate_WarnsOnCustomSchemas(t *testing.T) {
 	}
 }
 
-// #274 review H4: `extensions.uuid_generate_v4()` gets rewritten to
-// Eurobase's `public.uuid_generate_v4()` outright (not warned about).
-// `extensions.gen_random_uuid()` → bare `gen_random_uuid()`.
+// #274 review H4: `extensions.uuid_generate_v4()` gets rewritten outright
+// (not warned about), to the built-in `gen_random_uuid()`: tenant
+// migrations refuse uuid_generate_v4(). `extensions.gen_random_uuid()` →
+// bare `gen_random_uuid()`.
 func TestTranslate_ExtensionsUUIDRewrite(t *testing.T) {
 	in := `CREATE TABLE orders (
     id uuid DEFAULT extensions.uuid_generate_v4() NOT NULL,
     ref uuid DEFAULT extensions.gen_random_uuid() NOT NULL
 );`
 	got := Translate(in).sql
-	if !strings.Contains(got, "public.uuid_generate_v4()") {
-		t.Errorf("extensions.uuid_generate_v4() not rewritten to public.uuid_generate_v4():\n%s", got)
+	if !strings.Contains(got, "id uuid DEFAULT gen_random_uuid()") {
+		t.Errorf("extensions.uuid_generate_v4() not rewritten to gen_random_uuid():\n%s", got)
 	}
-	if strings.Contains(got, "extensions.uuid_generate_v4") {
+	if strings.Contains(got, "uuid_generate_v4") {
 		t.Errorf("original extensions.uuid_generate_v4() survived:\n%s", got)
 	}
 	if !strings.Contains(got, "DEFAULT gen_random_uuid()") {
@@ -238,8 +239,7 @@ func TestTranslate_ExtensionsUUIDRewrite(t *testing.T) {
 
 // #274 review B1: `public.<table>` must be stripped so the object lands
 // in the tenant schema (the executor pins `search_path`). Function
-// calls stay qualified — `public.uuid_generate_v4()` and
-// `public.is_service_role()` are Eurobase helpers.
+// calls stay qualified — `public.is_service_role()` is a Eurobase helper.
 func TestTranslate_StripsPublicQualifier(t *testing.T) {
 	in := `CREATE TABLE public.orders (id uuid PRIMARY KEY);
 ALTER TABLE ONLY public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
@@ -273,12 +273,13 @@ ALTER TABLE ONLY public.line_items ADD CONSTRAINT fk FOREIGN KEY (order_id) REFE
 // they refer to Eurobase's helper functions.
 func TestTranslate_KeepsPublicOnFunctionCalls(t *testing.T) {
 	in := `CREATE TABLE orders (
-    id uuid DEFAULT public.uuid_generate_v4() NOT NULL
+    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
+    ref uuid DEFAULT uuid_generate_v4()
 );
 CREATE POLICY p ON orders FOR SELECT USING (public.is_service_role() OR (user_id = auth_uid()));`
 	got := Translate(in).sql
-	if !strings.Contains(got, "public.uuid_generate_v4()") {
-		t.Errorf("public.uuid_generate_v4() (function call) got stripped:\n%s", got)
+	if strings.Contains(got, "uuid_generate_v4") || strings.Count(got, "DEFAULT gen_random_uuid()") != 2 {
+		t.Errorf("uuid_generate_v4() not rewritten to gen_random_uuid():\n%s", got)
 	}
 	if !strings.Contains(got, "public.is_service_role()") {
 		t.Errorf("public.is_service_role() (function call) got stripped:\n%s", got)

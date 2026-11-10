@@ -399,10 +399,10 @@ Realtime events are filtered on the server before they reach a subscriber, based
 | Subscriber identity | Table has an owner column | Table has no owner column |
 |---|---|---|
 | End-user JWT (`accessToken` set after sign-in) | Receives only rows where the owner column equals their `user_id` | **Receives nothing** |
-| Server / admin (`eb_sk_*` secret API key, or signed-in console user) | Receives every event | Receives every event |
+| Server / admin (`eb_sk_*` secret API key, or a console user; system tables need developer or above) | Receives every event | Receives every event |
 | Anonymous (`eb_pk_*` public API key, no end-user JWT) | **Receives nothing** | **Receives nothing** |
 
-This matches the `owner_access` RLS preset applied by `eb.db.schema.createTable()` when an owner column is detected, so realtime never delivers a row the subscriber couldn't read through the API.
+This matches the `owner_access` RLS preset applied by `eb.db.schema.createTable()` when an owner column is detected, so for tables using that preset, realtime and the API agree on whose rows a user gets. Realtime doesn't check your own policies: a custom policy that hides some of a user's own rows doesn't stop realtime from sending them.
 
 **Limitations.** The filter is column-based; realtime doesn't evaluate your RLS policies:
 
