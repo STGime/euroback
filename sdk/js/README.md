@@ -394,7 +394,21 @@ Reconnects automatically with exponential backoff (1s, 2s, 4s, ... up to 30s).
 
 ### Server-side clients
 
-The SDK in the browser passes its key or user token as `?token=` (browsers can't set headers on a WebSocket), so use only the public key or a user's token there. A server or worker connecting to `wss://<slug>.eurobase.app/v1/realtime` directly can send its secret key in a header instead, which keeps it out of URLs and logs: `Authorization: Bearer eb_sk_…` (or `apikey: eb_sk_…`). Clients that don't send an `Origin` header, such as servers, are accepted; when an `Origin` is sent, it must be allowed in the project's CORS settings.
+The SDK always passes its key or user token as `?token=`, in the browser and in Node (browsers can't set headers on a WebSocket). Use it with the public key or a user's token. To connect with the secret key from a server, use a WebSocket client that can set headers (e.g. [`ws`](https://www.npmjs.com/package/ws)) and send the key in a header, which keeps it out of URLs and logs:
+
+```ts
+import WebSocket from 'ws';
+
+const socket = new WebSocket('wss://<slug>.eurobase.app/v1/realtime', {
+  headers: { Authorization: `Bearer ${process.env.EUROBASE_SECRET_KEY}` }, // or apikey: …
+});
+socket.on('open', () => socket.send(JSON.stringify({ action: 'subscribe', channel: 'db:jobs' })));
+socket.on('message', (data) => {
+  const event = JSON.parse(data.toString()); // { channel, type: 'INSERT' | 'UPDATE' | 'DELETE', record, old_record, timestamp }
+});
+```
+
+With an API key the project comes from the key; with a user's access token, add `?project_id=<project id>`. Clients that don't send an `Origin` header, such as servers, are accepted. When an `Origin` is sent, it must be allowed in the project's CORS settings (checked on the project's own `<slug>.eurobase.app` address).
 
 ### Server-side row filtering
 

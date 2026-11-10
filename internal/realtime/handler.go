@@ -162,7 +162,8 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 
 		// Enforce per-project connection limit.
 		limit := freeConnectionLimit
-		if plan == "pro" || plan == "enterprise" {
+		switch plan {
+		case "pro", "team", "legal_team", "enterprise":
 			limit = proConnectionLimit
 		}
 		if hub.ConnectionCount(projectID) >= limit {
