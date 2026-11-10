@@ -129,7 +129,7 @@ await eb.db
   .delete('some-uuid')</pre>
 				</div>
 				<p class="mt-3 text-sm text-gray-700 leading-relaxed">
-					The request body of an insert, update, bulk delete or RPC call can be up to 1 MB; larger requests get <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">413</code>. Store files in <a href="/docs/storage" class="text-eurobase-600 hover:text-eurobase-700">Storage</a> and keep a reference in the row.
+					The request body of an insert, update, bulk delete, RPC call or SDK SQL query can be up to 1 MB (SQL from the console, MCP or CLI: 8 MB); larger requests get <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">413</code>. Store files in <a href="/docs/storage" class="text-eurobase-600 hover:text-eurobase-700">Storage</a> and keep a reference in the row.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Schema management</h3>

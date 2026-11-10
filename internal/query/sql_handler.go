@@ -1,7 +1,6 @@
 package query
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,8 +105,7 @@ func HandlePlatformSQLTransaction(engine *QueryEngine) http.HandlerFunc {
 		}
 
 		var req SQLTransactionRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeCappedBody(w, r, &req, maxPlatformSQLBodyBytes) {
 			return
 		}
 		if len(req.Statements) == 0 {
@@ -210,9 +208,14 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 			return
 		}
 
+		// SDK SQL (read-only) gets the data API's write cap; platform SQL
+		// may carry pasted scripts.
+		limit := int64(maxPlatformSQLBodyBytes)
+		if forceReadOnly {
+			limit = maxWriteBodyBytes
+		}
 		var req SQLRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeCappedBody(w, r, &req, limit) {
 			return
 		}
 

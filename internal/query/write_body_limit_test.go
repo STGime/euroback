@@ -42,3 +42,27 @@ func TestWriteBodyLimit(t *testing.T) {
 		})
 	}
 }
+
+// SQL bodies: the SDK's read-only SQL gets the write cap, platform SQL
+// (console / MCP / CLI) a larger one for pasted scripts.
+func TestSQLBodyLimits(t *testing.T) {
+	post := func(h http.HandlerFunc, body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req = req.WithContext(ContextWithSchema(req.Context(), "tenant_x"))
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		return rec.Code
+	}
+	sdkBig := `{"query":"` + strings.Repeat("x", maxWriteBodyBytes) + `"}`
+	if code := post(HandleSQL(&QueryEngine{}), sdkBig); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("SDK sql over 1 MiB: status %d, want 413", code)
+	}
+	platformBig := `{"query":"` + strings.Repeat("x", maxPlatformSQLBodyBytes) + `"}`
+	if code := post(HandlePlatformSQL(&QueryEngine{}), platformBig); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("platform sql over 8 MiB: status %d, want 413", code)
+	}
+	txBig := `{"statements":["` + strings.Repeat("x", maxPlatformSQLBodyBytes) + `"]}`
+	if code := post(HandlePlatformSQLTransaction(&QueryEngine{}), txBig); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("platform sql transaction over 8 MiB: status %d, want 413", code)
+	}
+}
