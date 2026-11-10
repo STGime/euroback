@@ -28,3 +28,16 @@ export function defaultProjectOwner(
 	const ok = adminOrgs.find((o) => !o.sso_required || o.id === ssoOrg);
 	return ok ? ok.id : 'personal';
 }
+
+/** When this session's token expires (ms since epoch), or null if unknown. */
+export function sessionExpiresAt(token: string | null | undefined): number | null {
+	if (!token) return null;
+	try {
+		const part = token.split('.')[1] ?? '';
+		const json = atob(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='));
+		const claims = JSON.parse(json) as { exp?: number };
+		return typeof claims.exp === 'number' ? claims.exp * 1000 : null;
+	} catch {
+		return null;
+	}
+}
