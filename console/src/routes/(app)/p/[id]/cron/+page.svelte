@@ -2,8 +2,9 @@
 	import { INTERNAL_TABLES } from '$lib/utils';
 	import { page } from '$app/stores';
 	import { api, type CronJob, type CronJobRun, type DBFunction, type TableSchema } from '$lib/api.js';
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { saveDraft, loadDraft, clearDraft, DRAFT_PREFIX } from '$lib/draft';
 
 	let projectId = $derived($page.params.id!);
 
@@ -21,6 +22,69 @@
 	let formAction = $state('');
 	let formError: string | null = $state(null);
 	let saving = $state(false);
+	let draftRestored = $state(false);
+
+	// Unsent form, kept for this tab so it survives a sign-in redirect
+	// when the session expires.
+	interface JobDraft {
+		editingJobId: string | null;
+		name: string;
+		schedule: string;
+		actionType: 'sql' | 'rpc';
+		runAs: 'service' | 'none';
+		action: string;
+		useCustomSchedule: boolean;
+	}
+	let draftKey = $derived(`${DRAFT_PREFIX}cron:${projectId}`);
+
+	// Leaving the page in the app drops the draft; only a full page
+	// change (the sign-in redirect, a reload) keeps it.
+	onDestroy(() => clearDraft(draftKey));
+
+	$effect(() => {
+		if (!showForm) return;
+		saveDraft(draftKey, {
+			editingJobId: editingJob?.id ?? null,
+			name: formName,
+			schedule: formSchedule,
+			actionType: formActionType,
+			runAs: formRunAs,
+			action: formAction,
+			useCustomSchedule
+		} satisfies JobDraft);
+	});
+
+	function closeForm() {
+		showForm = false;
+		draftRestored = false;
+		clearDraft(draftKey);
+	}
+
+	function restoreDraft() {
+		if (showForm) return; // the user already opened a form
+		const d = loadDraft<JobDraft>(draftKey);
+		if (!d) return;
+		const job = d.editingJobId ? jobs.find((j) => j.id === d.editingJobId) : null;
+		if (d.editingJobId && !job) {
+			clearDraft(draftKey);
+			return;
+		}
+		if (job) openEdit(job);
+		else openCreate();
+		formName = d.name;
+		formSchedule = d.schedule;
+		formActionType = d.actionType;
+		formRunAs = d.runAs;
+		formAction = d.action;
+		useCustomSchedule = d.useCustomSchedule;
+		if (d.useCustomSchedule) {
+			const parts = d.schedule.split(' ');
+			if (parts.length === 5) {
+				cronMinute = parts[0]; cronHour = parts[1]; cronDay = parts[2]; cronMonth = parts[3]; cronWeekday = parts[4];
+			}
+		}
+		draftRestored = true;
+	}
 
 	// Custom schedule fields
 	let cronMinute = $state('*');
@@ -175,7 +239,7 @@
 		{ label: 'Every Monday 9am', value: '0 9 * * 1' }
 	];
 
-	onMount(() => { loadJobs(); loadFunctionsForTab(); });
+	onMount(() => { loadJobs().then(() => { if (!error) restoreDraft(); }); loadFunctionsForTab(); });
 
 	async function loadJobs() {
 		loading = true;
@@ -351,7 +415,7 @@
 					run_as: formRunAs
 				});
 			}
-			showForm = false;
+			closeForm();
 			await loadJobs();
 		} catch (err) {
 			let msg = err instanceof Error ? err.message : 'Failed to save job';
@@ -815,14 +879,19 @@
 <!-- Create / Edit Modal -->
 {#if showForm}
 	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-		<button type="button" class="fixed inset-0 bg-black/50 cursor-default" onclick={() => (showForm = false)} tabindex="-1" aria-label="Close"></button>
+		<button type="button" class="fixed inset-0 bg-black/50 cursor-default" onclick={closeForm} tabindex="-1" aria-label="Close"></button>
 		<div class="relative z-10 w-full max-w-4xl rounded-xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
 			<div class="flex items-center justify-between border-b border-gray-200 px-6 py-4 shrink-0">
 				<h2 class="text-lg font-semibold text-gray-900">{editingJob ? 'Edit Job' : 'New Scheduled Job'}</h2>
-				<button type="button" class="cursor-pointer rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600" onclick={() => (showForm = false)} aria-label="Close">
+				<button type="button" class="cursor-pointer rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600" onclick={closeForm} aria-label="Close">
 					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
 				</button>
 			</div>
+			{#if draftRestored}
+				<div class="border-b border-eurobase-200 bg-eurobase-50 px-6 py-2 text-sm text-eurobase-800 shrink-0">
+					Restored the job you were editing. Nothing was saved yet.
+				</div>
+			{/if}
 			<div class="flex flex-1 min-h-0">
 				<!-- Schema browser (left side) -->
 				{#if formActionType === 'sql' || showCreateFunction}
@@ -1201,7 +1270,7 @@
 			</div>
 			</div> <!-- close flex row -->
 			<div class="flex items-center justify-end gap-3 border-t border-gray-200 px-6 py-4 shrink-0">
-				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showForm = false)}>Cancel</button>
+				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={closeForm}>Cancel</button>
 				<button
 					type="button"
 					class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50"

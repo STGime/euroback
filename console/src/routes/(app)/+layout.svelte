@@ -12,6 +12,7 @@
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
 	import LegacyProModal from '$lib/LegacyProModal.svelte';
 	import PasskeyNudge from '$lib/PasskeyNudge.svelte';
+	import SessionExpiryWarning from '$lib/SessionExpiryWarning.svelte';
 
 	const BLUESKY_URL = 'https://bsky.app/profile/eurobasebaas.bsky.social';
 
@@ -374,6 +375,7 @@
 
 		<!-- Page content -->
 		<main class="flex-1 p-4 sm:p-6 lg:p-8 min-w-0 overflow-x-auto md:overflow-hidden">
+			<SessionExpiryWarning />
 			<PasskeyNudge />
 			{@render children()}
 		</main>
