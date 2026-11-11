@@ -455,7 +455,7 @@ Declare a function's schedule from the same repo that ships the function. Requir
 ```ts
 await eb.functions.schedules.create('purge-expired-images', {
   functionName: 'purge-expired-images',  // must already be deployed
-  cron: '0 4 * * *',                     // POSIX 5-field
+  cron: '0 4 * * *',                     // 5 fields: *, */N, numbers, comma lists
   timezone: 'UTC',                        // optional IANA tz
   description: 'Daily purge of session_images past 24h TTL',
 })

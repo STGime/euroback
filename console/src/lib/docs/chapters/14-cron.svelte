@@ -65,6 +65,15 @@
 						</tbody>
 					</table>
 				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Each field is <code class="bg-gray-100 rounded px-1">*</code>, <code class="bg-gray-100 rounded px-1">*/N</code>, a number, or a comma list of these. Ranges (<code class="bg-gray-100 rounded px-1">1-5</code>) and names (<code class="bg-gray-100 rounded px-1">MON</code>) aren't supported &mdash; list the values instead: <code class="bg-gray-100 rounded px-1">0 9 * * 1,2,3,4,5</code> is weekdays at 9:00.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<strong>Timezone:</strong> a job's schedule is read in its timezone, <strong>UTC</strong> unless you pick another one in the form (e.g. <code class="bg-gray-100 rounded px-1">Europe/Stockholm</code>, which follows daylight saving time). The form shows the next run times before you save, and the job list shows each job's next run. In zones with daylight saving time, a time in the hour that repeats in autumn runs twice, and a time in the hour skipped in spring doesn't run that day. Through the API, set <code class="bg-gray-100 rounded px-1">timezone</code> on the job.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					When both day of month and day of week are set, a job runs only on days that match <strong>both</strong> (standard cron runs on either): <code class="bg-gray-100 rounded px-1">0 9 13 * 5</code> runs on Friday the 13th only.
+				</p>
 
 				<div class="rounded-lg border border-gray-200 bg-gray-50 p-3 mt-3">
 					<p class="text-xs font-semibold text-gray-700 mb-1">Quick reference</p>
@@ -98,7 +107,7 @@
 				<ol class="list-decimal pl-5 text-sm text-gray-700 leading-relaxed mt-1 space-y-0.5">
 					<li>Put the work in a function and make it safe to run twice &mdash; e.g. return early if the data already exists.</li>
 					<li>Create a SQL job with <code class="bg-gray-100 rounded px-1">SELECT my_function();</code> and check it with <strong>Test Run</strong> (rolled back).</li>
-					<li>Save the job with a schedule a few minutes ahead.</li>
+					<li>Save the job with a schedule a few minutes ahead &mdash; the form shows when it will next run.</li>
 					<li>Check the job's run history, then delete or disable the job.</li>
 				</ol>
 			<h3 class="text-lg font-semibold text-gray-900 mt-6">RPC Functions</h3>

@@ -1852,7 +1852,7 @@ export class EurobaseAPI {
 		return this.fetch<CronJob[]>(`/platform/projects/${projectId}/cron`);
 	}
 
-	async createCronJob(projectId: string, data: { name: string; schedule: string; action_type: string; action: string; run_as?: 'service' | 'none' }): Promise<CronJob> {
+	async createCronJob(projectId: string, data: { name: string; schedule: string; timezone?: string; action_type: string; action: string; run_as?: 'service' | 'none' }): Promise<CronJob> {
 		return this.fetch<CronJob>(`/platform/projects/${projectId}/cron`, {
 			method: 'POST',
 			body: JSON.stringify(data)
@@ -3125,6 +3125,8 @@ export interface CronJob {
 	project_id: string;
 	name: string;
 	schedule: string;
+	/** IANA timezone the schedule is read in; 'UTC' unless set. */
+	timezone: string;
 	action_type: string;
 	action: string;
 	enabled: boolean;

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -183,5 +184,46 @@ func TestCronService_RunAs(t *testing.T) {
 	}
 	if _, err := svc.Update(ctx, projectID, def.ID, UpdateCronJobRequest{RunAs: &bad}); err == nil {
 		t.Error("Update accepted run_as=admin")
+	}
+}
+
+// A schedule the scheduler can't match must be refused on save, not stored
+// as a job that never runs.
+func TestValidateCronSchedule(t *testing.T) {
+	ok := []string{
+		"* * * * *", "*/5 * * * *", "0 * * * *", "30 14 * * *",
+		"0 9 * * 1,2,3,4,5", "0 0 1 1 *", "59 23 31 12 6", "0,30 */2 * * 0",
+	}
+	for _, s := range ok {
+		if err := validateCronSchedule(s); err != nil {
+			t.Errorf("%q refused: %v", s, err)
+		}
+	}
+	bad := []string{
+		"* * * *", "0 9 * * 1-5", "0 9 * * MON", "60 * * * *", "0 24 * * *",
+		"0 0 0 * *", "0 0 * 13 *", "0 0 * * 7", "*/0 * * * *", "0 9-17 * * *",
+		"5/15 * * * *", "1,,2 * * * *", "+5 * * * *", "-0 * * * *",
+		"*/1001 * * * *", "99999999999999999999 * * * *", "*/99999999999999999999 * * * *",
+	}
+	for _, s := range bad {
+		if err := validateCronSchedule(s); err == nil {
+			t.Errorf("%q accepted", s)
+		}
+	}
+	if !shouldRun("30 14 * * *", time.Date(2026, 11, 11, 14, 30, 0, 0, time.UTC)) {
+		t.Error("30 14 * * * should run at 14:30")
+	}
+}
+
+func TestValidateTimezone(t *testing.T) {
+	for _, tz := range []string{"UTC", "Europe/Stockholm", "Asia/Kolkata", "Etc/UTC"} {
+		if err := validateTimezone(tz); err != nil {
+			t.Errorf("%q refused: %v", tz, err)
+		}
+	}
+	for _, tz := range []string{"Local", "Mars/Olympus", "CEST+1"} {
+		if err := validateTimezone(tz); err == nil {
+			t.Errorf("%q accepted", tz)
+		}
 	}
 }

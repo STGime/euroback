@@ -5,6 +5,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { saveDraft, loadDraft, clearDraft, DRAFT_PREFIX } from '$lib/draft';
+	import { nextRuns, scheduleError, formatInZone, browserTimezone, timezoneOptions } from '$lib/cron';
 
 	let projectId = $derived($page.params.id!);
 
@@ -17,6 +18,7 @@
 	let editingJob: CronJob | null = $state(null);
 	let formName = $state('');
 	let formSchedule = $state('');
+	let formTimezone = $state('UTC');
 	let formActionType: 'sql' | 'rpc' = $state('sql');
 	let formRunAs: 'service' | 'none' = $state('service');
 	let formAction = $state('');
@@ -30,6 +32,7 @@
 		editingJobId: string | null;
 		name: string;
 		schedule: string;
+		timezone?: string;
 		actionType: 'sql' | 'rpc';
 		runAs: 'service' | 'none';
 		action: string;
@@ -47,6 +50,7 @@
 			editingJobId: editingJob?.id ?? null,
 			name: formName,
 			schedule: formSchedule,
+			timezone: formTimezone,
 			actionType: formActionType,
 			runAs: formRunAs,
 			action: formAction,
@@ -73,6 +77,7 @@
 		else openCreate();
 		formName = d.name;
 		formSchedule = d.schedule;
+		formTimezone = d.timezone ?? formTimezone;
 		formActionType = d.actionType;
 		formRunAs = d.runAs;
 		formAction = d.action;
@@ -231,6 +236,36 @@
 	// Delete confirm
 	let deleteConfirmId: string | null = $state(null);
 
+	// Schedule checks and the next run times, worked out in the browser the
+	// way the scheduler does (see $lib/cron).
+	const viewerTimezone = browserTimezone();
+	let timezones = $derived.by(() => {
+		const opts = timezoneOptions();
+		return opts.includes(formTimezone) ? opts : [formTimezone, ...opts];
+	});
+	let formScheduleError = $derived(formSchedule.trim() ? scheduleError(formSchedule) : null);
+	let formNextRuns = $derived(formSchedule.trim() && !formScheduleError ? nextRuns(formSchedule, formTimezone) : []);
+
+	// Next run per job, recomputed each minute so it doesn't fall behind.
+	let now = $state(new Date());
+	onMount(() => {
+		const id = setInterval(() => (now = new Date()), 60_000);
+		return () => clearInterval(id);
+	});
+	let jobNextRuns = $derived.by(() => {
+		const out: Record<string, string> = {};
+		for (const job of jobs) {
+			const tz = job.timezone || 'UTC';
+			if (!job.enabled) out[job.id] = 'Disabled';
+			else if (scheduleError(job.schedule)) out[job.id] = 'Invalid schedule (edit to fix)';
+			else {
+				const [next] = nextRuns(job.schedule, tz, 1, now);
+				out[job.id] = next ? formatInZone(next, tz) : 'Never';
+			}
+		}
+		return out;
+	});
+
 	const schedulePresets = [
 		{ label: 'Every minute', value: '* * * * *' },
 		{ label: 'Every 5 minutes', value: '*/5 * * * *' },
@@ -338,6 +373,7 @@
 		editingJob = null;
 		formName = '';
 		formSchedule = '';
+		formTimezone = 'UTC';
 		formActionType = 'sql';
 		formRunAs = 'service';
 		formAction = '';
@@ -358,6 +394,7 @@
 		editingJob = job;
 		formName = job.name;
 		formSchedule = job.schedule;
+		formTimezone = job.timezone || 'UTC';
 		formActionType = job.action_type as 'sql' | 'rpc';
 		formRunAs = job.run_as ?? 'none';
 		formAction = job.action;
@@ -402,6 +439,7 @@
 				await api.updateCronJob(projectId, editingJob.id, {
 					name: formName.trim(),
 					schedule: formSchedule.trim(),
+					timezone: formTimezone,
 					action_type: formActionType,
 					action: formAction.trim(),
 					run_as: formRunAs
@@ -410,6 +448,7 @@
 				await api.createCronJob(projectId, {
 					name: formName.trim(),
 					schedule: formSchedule.trim(),
+					timezone: formTimezone,
 					action_type: formActionType,
 					action: formAction.trim(),
 					run_as: formRunAs
@@ -575,8 +614,11 @@
 								<span class="font-mono">{job.schedule}</span>
 								<span class="text-gray-300">|</span>
 								<span>{formatSchedule(job.schedule)}</span>
+								<span class="text-gray-300">|</span>
+								<span>{job.timezone || 'UTC'}</span>
 							</div>
 							<div class="mt-1.5 flex items-center gap-4 text-xs text-gray-400">
+								<span>Next run: {jobNextRuns[job.id]}</span>
 								<span>Last run: {formatLastRun(job.last_run_at)}</span>
 								<span>Runs: {job.run_count}</span>
 								{#if job.last_error}
@@ -1052,6 +1094,36 @@
 							Pick a schedule above (a preset or Custom) — required to create the job.
 						</div>
 					{/if}
+
+					<div class="mt-3 flex flex-wrap items-center gap-2">
+						<label for="cron-tz" class="text-xs font-medium text-gray-600">Timezone</label>
+						<select id="cron-tz" bind:value={formTimezone}
+							class="rounded-lg border border-gray-300 px-2 py-1 text-xs text-gray-900 focus:border-eurobase-500 focus:outline-none">
+							{#each timezones as tz}
+								<option value={tz}>{tz}{tz === viewerTimezone && tz !== 'UTC' ? ' (yours)' : ''}</option>
+							{/each}
+						</select>
+						{#if formTimezone !== viewerTimezone && viewerTimezone !== 'UTC'}
+							<button type="button" class="cursor-pointer text-xs text-eurobase-600 hover:underline" onclick={() => (formTimezone = viewerTimezone)}>Use {viewerTimezone}</button>
+						{/if}
+					</div>
+					<p class="mt-1 text-[11px] text-gray-400">The schedule's hours and days are read in this timezone, including daylight saving changes.</p>
+
+					{#if formScheduleError}
+						<div class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{formScheduleError}</div>
+					{:else if formSchedule.trim()}
+						<div class="mt-2 text-xs text-gray-600">
+							{#if formNextRuns.length}
+								<span class="font-medium">Next runs:</span>
+								{#each formNextRuns as run, i}
+									<span>{formatInZone(run, formTimezone)}{i < formNextRuns.length - 1 ? ' · ' : ''}</span>
+								{/each}
+								<span class="text-gray-400">({formTimezone}{formTimezone !== viewerTimezone ? `; first run ${formatInZone(formNextRuns[0], viewerTimezone)} your time` : ''})</span>
+							{:else}
+								<span class="text-amber-700">This schedule doesn't run in the next year (for example, a day that month doesn't have).</span>
+							{/if}
+						</div>
+					{/if}
 				</div>
 
 				<!-- Action Type -->
@@ -1274,7 +1346,7 @@
 				<button
 					type="button"
 					class="cursor-pointer rounded-lg bg-eurobase-600 px-4 py-2 text-sm font-medium text-white hover:bg-eurobase-700 transition-colors disabled:opacity-50"
-					disabled={!formName.trim() || !formSchedule.trim() || !formAction.trim() || saving}
+					disabled={!formName.trim() || !formSchedule.trim() || !!formScheduleError || !formAction.trim() || saving}
 					onclick={handleSave}
 				>
 					{saving ? 'Saving...' : editingJob ? 'Save Changes' : 'Create Job'}
