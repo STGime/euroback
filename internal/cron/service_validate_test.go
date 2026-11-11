@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -183,5 +184,34 @@ func TestCronService_RunAs(t *testing.T) {
 	}
 	if _, err := svc.Update(ctx, projectID, def.ID, UpdateCronJobRequest{RunAs: &bad}); err == nil {
 		t.Error("Update accepted run_as=admin")
+	}
+}
+
+// A schedule the scheduler can't match must be refused on save, not stored
+// as a job that never runs.
+func TestValidateCronSchedule(t *testing.T) {
+	ok := []string{
+		"* * * * *", "*/5 * * * *", "0 * * * *", "30 14 * * *",
+		"0 9 * * 1,2,3,4,5", "0 0 1 1 *", "59 23 31 12 6", "0,30 */2 * * 0",
+	}
+	for _, s := range ok {
+		if err := validateCronSchedule(s); err != nil {
+			t.Errorf("%q refused: %v", s, err)
+		}
+	}
+	bad := []string{
+		"* * * *", "0 9 * * 1-5", "0 9 * * MON", "60 * * * *", "0 24 * * *",
+		"0 0 0 * *", "0 0 * 13 *", "0 0 * * 7", "*/0 * * * *", "0 9-17 * * *",
+		"5/15 * * * *", "1,,2 * * * *",
+	}
+	for _, s := range bad {
+		if err := validateCronSchedule(s); err == nil {
+			t.Errorf("%q accepted", s)
+		}
+	}
+	// Whatever is accepted, the scheduler can match: every accepted field
+	// value is reachable by partMatches.
+	if !shouldRun("30 14 * * *", time.Date(2026, 11, 11, 14, 30, 0, 0, time.UTC)) {
+		t.Error("30 14 * * * should run at 14:30")
 	}
 }
