@@ -97,8 +97,8 @@ func (r *CreateCronJobRequest) Validate() error {
 		return fmt.Errorf("action_type must be 'sql', 'rpc', or 'function'")
 	}
 	if r.Timezone != "" {
-		if _, err := time.LoadLocation(r.Timezone); err != nil {
-			return fmt.Errorf("invalid timezone %q: %w", r.Timezone, err)
+		if err := validateTimezone(r.Timezone); err != nil {
+			return err
 		}
 	}
 	if err := validateRunAs(r.RunAs); err != nil {
@@ -254,9 +254,12 @@ func (s *CronService) updateBy(ctx context.Context, whereClause string, whereArg
 			return nil, err
 		}
 	}
-	if req.Timezone != nil && *req.Timezone != "" {
-		if _, err := time.LoadLocation(*req.Timezone); err != nil {
-			return nil, fmt.Errorf("invalid timezone %q: %w", *req.Timezone, err)
+	if req.Timezone != nil {
+		if *req.Timezone == "" {
+			utc := "UTC" // as on create
+			req.Timezone = &utc
+		} else if err := validateTimezone(*req.Timezone); err != nil {
+			return nil, err
 		}
 	}
 	if req.ActionType != nil && *req.ActionType != "sql" && *req.ActionType != "rpc" && *req.ActionType != "function" {
@@ -490,13 +493,13 @@ func validateCronSchedule(schedule string) error {
 				continue
 			}
 			if strings.HasPrefix(part, "*/") {
-				if n, err := strconv.Atoi(part[2:]); err == nil && n >= 1 {
+				if n, ok := cronNumber(part[2:]); ok && n >= 1 && n <= 1000 {
 					continue
 				}
-				return fmt.Errorf("invalid cron schedule: %s %q: use */N with N of 1 or more", f.name, part)
+				return fmt.Errorf("invalid cron schedule: %s %q: use */N with N from 1 to 1000", f.name, part)
 			}
-			n, err := strconv.Atoi(part)
-			if err != nil {
+			n, ok := cronNumber(part)
+			if !ok {
 				return fmt.Errorf("invalid cron schedule: %s %q: use *, */N, a number or a comma list (ranges like 1-5 and names aren't supported; list the values instead, e.g. 1,2,3,4,5)", f.name, part)
 			}
 			if n < f.min || n > f.max {
@@ -507,6 +510,37 @@ func validateCronSchedule(schedule string) error {
 				return fmt.Errorf("invalid cron schedule: %s %d is outside %d-%d%s", f.name, n, f.min, f.max, hint)
 			}
 		}
+	}
+	return nil
+}
+
+// cronNumber parses a plain decimal number (digits only: no sign, no
+// spaces), as the console's check does. Long numbers come back as out of
+// range rather than failing to parse.
+func cronNumber(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	if len(s) > 6 {
+		return 1 << 30, true
+	}
+	n, _ := strconv.Atoi(s)
+	return n, true
+}
+
+// validateTimezone accepts IANA names the scheduler can load. "Local" is
+// refused: it means the server's own zone.
+func validateTimezone(tz string) error {
+	if tz == "Local" {
+		return fmt.Errorf("invalid timezone %q: use an IANA name such as UTC or Europe/Stockholm", tz)
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return fmt.Errorf("invalid timezone %q: %w", tz, err)
 	}
 	return nil
 }

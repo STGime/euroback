@@ -23,9 +23,13 @@
  *     for provisioning scripts that don't want to branch on the error.
  *   - Missed ticks during platform downtime are dropped (no backfill).
  *   - Each tick is independent — no overlap protection in v1.
- *   - Cron grammar is POSIX 5-field (minute hour day-of-month month
+ *   - Cron grammar is 5 fields (minute hour day-of-month month
  *     day-of-week), evaluated in the schedule's `timezone` (defaults to
- *     UTC). `@daily` / `@hourly` aliases are not supported.
+ *     UTC). Each field is `*`, a step (star-slash-N, e.g. every 5),
+ *     a number or a comma list of these; ranges
+ *     (`1-5`), names (`MON`) and `@daily` / `@hourly` aliases are not
+ *     supported, and the API refuses them. Day of month and day of week
+ *     must both match when both are set.
  */
 
 import type { HttpClient } from './http'
@@ -33,7 +37,7 @@ import type { HttpClient } from './http'
 export interface ScheduleSpec {
   /** Function to invoke. Must already be deployed. */
   functionName: string
-  /** Standard 5-field cron expression, evaluated in `timezone`. */
+  /** 5-field cron expression (`*`, steps, numbers, comma lists), evaluated in `timezone`. */
   cron: string
   /** Optional IANA timezone. Defaults to UTC. */
   timezone?: string

@@ -202,16 +202,28 @@ func TestValidateCronSchedule(t *testing.T) {
 	bad := []string{
 		"* * * *", "0 9 * * 1-5", "0 9 * * MON", "60 * * * *", "0 24 * * *",
 		"0 0 0 * *", "0 0 * 13 *", "0 0 * * 7", "*/0 * * * *", "0 9-17 * * *",
-		"5/15 * * * *", "1,,2 * * * *",
+		"5/15 * * * *", "1,,2 * * * *", "+5 * * * *", "-0 * * * *",
+		"*/1001 * * * *", "99999999999999999999 * * * *", "*/99999999999999999999 * * * *",
 	}
 	for _, s := range bad {
 		if err := validateCronSchedule(s); err == nil {
 			t.Errorf("%q accepted", s)
 		}
 	}
-	// Whatever is accepted, the scheduler can match: every accepted field
-	// value is reachable by partMatches.
 	if !shouldRun("30 14 * * *", time.Date(2026, 11, 11, 14, 30, 0, 0, time.UTC)) {
 		t.Error("30 14 * * * should run at 14:30")
+	}
+}
+
+func TestValidateTimezone(t *testing.T) {
+	for _, tz := range []string{"UTC", "Europe/Stockholm", "Asia/Kolkata", "Etc/UTC"} {
+		if err := validateTimezone(tz); err != nil {
+			t.Errorf("%q refused: %v", tz, err)
+		}
+	}
+	for _, tz := range []string{"Local", "Mars/Olympus", "CEST+1"} {
+		if err := validateTimezone(tz); err == nil {
+			t.Errorf("%q accepted", tz)
+		}
 	}
 }

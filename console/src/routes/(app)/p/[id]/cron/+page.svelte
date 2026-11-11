@@ -246,11 +246,25 @@
 	let formScheduleError = $derived(formSchedule.trim() ? scheduleError(formSchedule) : null);
 	let formNextRuns = $derived(formSchedule.trim() && !formScheduleError ? nextRuns(formSchedule, formTimezone) : []);
 
-	function jobNextRun(job: CronJob): string {
-		if (!job.enabled) return 'Disabled';
-		const [next] = nextRuns(job.schedule, job.timezone || 'UTC', 1);
-		return next ? `${formatInZone(next, job.timezone || 'UTC')} ${job.timezone || 'UTC'}` : 'Never';
-	}
+	// Next run per job, recomputed each minute so it doesn't fall behind.
+	let now = $state(new Date());
+	onMount(() => {
+		const id = setInterval(() => (now = new Date()), 60_000);
+		return () => clearInterval(id);
+	});
+	let jobNextRuns = $derived.by(() => {
+		const out: Record<string, string> = {};
+		for (const job of jobs) {
+			const tz = job.timezone || 'UTC';
+			if (!job.enabled) out[job.id] = 'Disabled';
+			else if (scheduleError(job.schedule)) out[job.id] = 'Invalid schedule (edit to fix)';
+			else {
+				const [next] = nextRuns(job.schedule, tz, 1, now);
+				out[job.id] = next ? formatInZone(next, tz) : 'Never';
+			}
+		}
+		return out;
+	});
 
 	const schedulePresets = [
 		{ label: 'Every minute', value: '* * * * *' },
@@ -604,7 +618,7 @@
 								<span>{job.timezone || 'UTC'}</span>
 							</div>
 							<div class="mt-1.5 flex items-center gap-4 text-xs text-gray-400">
-								<span>Next run: {jobNextRun(job)}</span>
+								<span>Next run: {jobNextRuns[job.id]}</span>
 								<span>Last run: {formatLastRun(job.last_run_at)}</span>
 								<span>Runs: {job.run_count}</span>
 								{#if job.last_error}
