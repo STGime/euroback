@@ -959,6 +959,7 @@
 					columns={selectedSchema.columns}
 					{rows}
 					loading={dataLoading}
+					rowOffset={currentOffset}
 					bind:selectedIds
 					onUpdateCell={async (rowId, column, value) => {
 						if (!selectedTable) return;
