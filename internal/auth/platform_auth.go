@@ -575,6 +575,9 @@ func (s *PlatformAuthService) VerifyEmail(ctx context.Context, rawToken string) 
 	if _, err := s.pool.Exec(ctx, `DELETE FROM email_suppressions WHERE email = lower($1)`, user.Email); err != nil {
 		slog.Warn("clearing email suppression after verification failed", "user_id", user.ID, "error", err)
 	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM email_bounce_blocks WHERE address_hash = $1`, mailaddr.Hash(user.Email)); err != nil {
+		slog.Warn("clearing email bounce block after verification failed", "user_id", user.ID, "error", err)
+	}
 
 	// MFA (#621): a verification link must not become a passkey bypass.
 	// A leftover link (e.g. an earlier "resend" still inside its 24h

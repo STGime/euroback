@@ -27,6 +27,8 @@ on:
       - internal/workers/invoke_function_trigger*.go
       - internal/workers/project_events*.go
       - internal/workers/email_bounces*.go
+      - internal/email/bounce_blocks*.go
+      - internal/email/service.go
       - internal/tenant/broadcast_admin_handlers*.go
       - internal/tenant/admin_handlers.go
       - internal/tenant/signup_users_admin_handlers.go
@@ -156,7 +158,7 @@ jobs:
           EMAIL_LOG_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           EMAIL_LOG_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           EMAIL_LOG_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
-        run: go test -count=1 -v ./internal/email/ -run 'TestEmailLog_ProductionRoles'
+        run: go test -count=1 -v ./internal/email/ -run 'TestEmailLog_ProductionRoles|TestBounceBlocks_ProductionRoles'
 
       # The SQL log (000139): the gateway may only insert, the developer
       # pool lists and cleans up.

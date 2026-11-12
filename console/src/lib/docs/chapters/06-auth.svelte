@@ -159,6 +159,9 @@ claims := token.Claims.(jwt.MapClaims) // claims["sub"] = user id`;
 				<p class="text-sm text-gray-700 leading-relaxed">
 					These requests answer “OK” whether or not an email was sent, so they never reveal which addresses have accounts. <strong>Auth &rarr; Email log</strong> shows what really happened to each one: sent (with the email service's id), not sent (no user with that address, redirect URL not allowed, already confirmed) or failed (with the reason, e.g. your SMTP server rejected the login). Addresses are shortened (p****@example.com) and entries are kept 14 days. Needs the Developer role.
 				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<strong>Test with real mailboxes.</strong> Emails sent through Eurobase's email service share one sending reputation, so it doesn't send to addresses that can't receive mail: reserved test domains (<code class="bg-gray-100 border border-gray-200 rounded px-1">example.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">.test</code>, …) are skipped, and so is an address whose mail failed permanently (no such mailbox, unknown domain) for 30 days, or 7 days for a full mailbox. The email log shows these as not sent, with the reason. Your own SMTP sender (Pro) isn't affected.
+				</p>
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Per-request override (multi-tenant apps)</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
