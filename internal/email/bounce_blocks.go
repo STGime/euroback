@@ -9,7 +9,6 @@ package email
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -38,21 +37,31 @@ const (
 // AddressHash is the key of an address in email_bounce_blocks: SHA-256 of
 // the trimmed, lower-cased address, hex.
 func AddressHash(addr string) string {
-	return hashSHA256(strings.ToLower(strings.TrimSpace(addr)))
+	return mailaddr.Hash(addr)
 }
 
-// BounceKind sorts a FailedEmail's reason into a kind. The reason holds
-// the provider's flags in brackets (see parseFailedEmailsPage).
+// BounceKind sorts a FailedEmail's reason into a kind. The reason is
+// "<status> [<provider flags>]: <last server message>" (see
+// parseFailedEmailsPage); flags are matched only inside the brackets, so
+// a server's own wording can't pick the kind.
 func BounceKind(reason string) string {
 	r := strings.ToLower(reason)
+	flags := map[string]bool{}
+	if i := strings.IndexByte(r, '['); i >= 0 {
+		if j := strings.IndexByte(r[i:], ']'); j > 0 {
+			for _, f := range strings.Split(r[i+1:i+j], ",") {
+				flags[strings.TrimSpace(f)] = true
+			}
+		}
+	}
 	switch {
-	case strings.Contains(r, "mailbox_full"):
+	case flags["mailbox_full"]:
 		return BounceMailboxFull
-	case strings.Contains(r, "mailbox_not_found"):
+	case flags["mailbox_not_found"]:
 		return BounceMailboxNotFound
 	case strings.Contains(r, "non-existing domain"):
 		return BounceDomainNotFound
-	case strings.Contains(r, "blocklisted"):
+	case flags["blocklisted"]:
 		return BounceBlocklisted
 	default:
 		return BounceHard
@@ -103,10 +112,24 @@ const (
 	ReasonAddressBounced = "address_bounced"
 )
 
+// consoleRetryAfter: console account mail (verification, password reset)
+// to a blocked address still goes out once a day, so an account whose
+// mailbox was full or not yet set up can recover; a new bounce renews
+// the block. Project auth mail stays skipped for the whole block.
+const consoleRetryAfter = 24 * time.Hour
+
 // platformSendSkip says whether the platform sender should skip `to`:
 // the email log reason and detail, or "" to send. A failed lookup sends
-// (the block protects reputation; it must not stop auth mail).
+// (the block protects reputation; it must not stop auth mail). The
+// detail names the kind of failure but not when it happened: the same
+// address may be another project's user.
 func (s *EmailService) platformSendSkip(ctx context.Context, to string) (reason, detail string) {
+	return s.platformSendSkipAfter(ctx, to, 0)
+}
+
+// platformSendSkipAfter: with retryAfter > 0, a block whose last failure
+// is older than that doesn't skip.
+func (s *EmailService) platformSendSkipAfter(ctx context.Context, to string, retryAfter time.Duration) (reason, detail string) {
 	if mailaddr.IsReserved(to) {
 		return ReasonReservedAddress, ""
 	}
@@ -114,15 +137,17 @@ func (s *EmailService) platformSendSkip(ctx context.Context, to string) (reason,
 		return "", ""
 	}
 	var kind string
-	var until time.Time
+	var lastSeen time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT kind, blocked_until FROM public.email_bounce_blocks
+		`SELECT kind, last_seen_at FROM public.email_bounce_blocks
 		  WHERE address_hash = $1 AND blocked_until > now()`,
-		AddressHash(to)).Scan(&kind, &until)
+		AddressHash(to)).Scan(&kind, &lastSeen)
 	switch {
 	case err == nil:
-		return ReasonAddressBounced, fmt.Sprintf("(%s) Sending resumes after %s.",
-			bounceKindText(kind), until.UTC().Format("2 Jan 2006 15:04 UTC"))
+		if retryAfter > 0 && time.Since(lastSeen) > retryAfter {
+			return "", ""
+		}
+		return ReasonAddressBounced, "Reason: " + bounceKindText(kind) + "."
 	case errors.Is(err, pgx.ErrNoRows):
 		return "", ""
 	default:

@@ -228,7 +228,7 @@
 	};
 
 	// Why an email wasn't sent, in words. Keep in sync with the reasons in
-	// internal/email/delivery_log.go.
+	// internal/email/delivery_log.go and internal/email/bounce_blocks.go.
 	const REASON_TEXT: Record<string, string> = {
 		no_user: 'No user with this email in the project. Magic links, password resets and confirmation resends only go to existing users — sign the user up first.',
 		already_confirmed: 'This email address is already confirmed.',
@@ -239,7 +239,7 @@
 		platform_failed: "Eurobase's email service didn't take the message.",
 		internal_error: "The email couldn't be prepared.",
 		reserved_address: "Not sent: a reserved test domain (example.com, .test, …) can't receive mail. Use a real mailbox you control for testing.",
-		address_bounced: "Not sent: mail to this address failed recently, so Eurobase's email service skips it for a while to keep delivery working for everyone. Use a real mailbox, or your own SMTP sender (Pro)."
+		address_bounced: "Not sent: mail to this address failed recently, so Eurobase's email service skips it for up to 30 days to keep delivery working for everyone. Use a real mailbox, or your own SMTP sender (Pro)."
 	};
 
 	function emailLogExplanation(e: EmailLogEntry): string {

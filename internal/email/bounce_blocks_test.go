@@ -20,6 +20,8 @@ func TestBounceKind(t *testing.T) {
 		"dropped [blocklisted]":                   BounceBlocklisted,
 		"dropped [hard_bounce]: 550 user unknown": BounceHard,
 		"failed": BounceHard,
+		"dropped [hard_bounce]: 554 IP blocklisted": BounceHard,
+		"dropped: mailbox_full":                     BounceHard,
 	}
 	for in, want := range cases {
 		if got := BounceKind(in); got != want {
@@ -139,12 +141,27 @@ func TestBounceBlocks_ProductionRoles(t *testing.T) {
 		t.Fatal("expired block not removed")
 	}
 
-	// The console verification path clears by a hash computed in SQL.
-	var sqlHash string
-	if err := gw.QueryRow(ctx, `SELECT encode(sha256(convert_to(lower(btrim($1)), 'UTF8')), 'hex')`, addr).Scan(&sqlHash); err != nil {
+	// The detail never says when the failure happened.
+	if _, d := s.platformSendSkip(ctx, addr); strings.Contains(d, "20") {
+		t.Fatalf("detail carries a date: %q", d)
+	}
+
+	// Console mail retries once a day: a block whose last failure is
+	// older than a day sends; project mail stays skipped.
+	old := "old-" + hex.EncodeToString(b) + "@bounce-check.eu"
+	t.Cleanup(func() {
+		_, _ = admin.Exec(ctx, `DELETE FROM public.email_bounce_blocks WHERE address_hash = $1`, AddressHash(old))
+	})
+	if err := RecordBounceBlock(ctx, gw, FailedEmail{Recipient: old, Reason: "[mailbox_not_found]", At: now.Add(-2 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if sqlHash != AddressHash(addr) {
-		t.Fatalf("SQL hash %s != Go hash %s", sqlHash, AddressHash(addr))
+	if r, _ := s.platformSendSkip(ctx, old); r != ReasonAddressBounced {
+		t.Fatalf("project mail to a blocked address sent: %q", r)
+	}
+	if r, _ := s.platformSendSkipAfter(ctx, old, consoleRetryAfter); r != "" {
+		t.Fatalf("console mail not retried after a day: %q", r)
+	}
+	if r, _ := s.platformSendSkipAfter(ctx, addr, consoleRetryAfter); r != ReasonAddressBounced {
+		t.Fatalf("console mail sent right after a bounce: %q", r)
 	}
 }

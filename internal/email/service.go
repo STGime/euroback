@@ -521,7 +521,7 @@ func (s *EmailService) skipPlatformMail(ctx context.Context, kind, userID, to st
 	if !s.client.Configured() {
 		return false
 	}
-	reason, _ := s.platformSendSkip(ctx, to)
+	reason, _ := s.platformSendSkipAfter(ctx, to, consoleRetryAfter)
 	if reason == "" {
 		return false
 	}
