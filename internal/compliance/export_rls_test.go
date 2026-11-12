@@ -33,11 +33,10 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 	dev := mustPool(t, devURL)
 	gw := mustPool(t, gwURL)
 	projectID, schema, userID := provisionRLSFixture(t, dev)
-	// Production source: the developer pool as eurobase_developer itself,
-	// with the BYPASSRLS reader for FORCE RLS tables (#906).
-	src := ExportSource{Pool: dev, BypassRole: ExportReaderRole}
+	// Production source: the developer pool as eurobase_developer itself.
+	src := ExportSource{Pool: dev}
 
-	t.Run("reads every row as the owner; FORCE RLS table in full as the reader", func(t *testing.T) {
+	t.Run("reads every row as the owner, FORCE RLS tables included", func(t *testing.T) {
 		res, entries, meta := runTenantExport(t, gw, src, schema, projectID)
 		for file, want := range map[string]int{
 			"tables/bookings.json":        3, // <schema>_ddl-owned, owner-only policy
@@ -48,7 +47,7 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 			"tables/legacy_dev.json":      3, // eurobase_developer-owned (legacy MCP DDL)
 			"tables/legacy_gw.json":       2, // eurobase_gateway-owned (legacy SDK DDL)
 			"tables/forced.json":          4, // FORCE RLS, deny-all policy (#906)
-			"tables/z_after.json":         2, // read after forced: not as the reader
+			"tables/z_after.json":         2, // read after forced
 		} {
 			if got := jsonRows(t, entries, file); got != want {
 				t.Errorf("%s: %d rows, want %d", file, got, want)
@@ -86,66 +85,75 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		}
 	})
 
-	// Without a usable reader role (Team, or a database without
-	// scripts/db/export-reader.sql), a FORCE RLS table is refused, never
-	// exported in part, and the warning names the cause.
-	for name, s := range map[string]ExportSource{
-		"no reader role configured": {Pool: dev},
-		"reader role missing":       {Pool: dev, BypassRole: "eurobase_no_such_reader"},
-		"role without BYPASSRLS":    {Pool: dev, BypassRole: "eurobase_gateway"},
-	} {
-		t.Run(name+": FORCE RLS table is reported with the reason", func(t *testing.T) {
-			res, entries, meta := runTenantExport(t, gw, s, schema, projectID)
-			if _, ok := entries["tables/forced.json"]; ok {
-				t.Error("FORCE RLS table produced a file; the read should have been refused")
-			}
-			if f := findTable(meta.Tables, "forced"); f == nil || f.Status != TableFailed || f.Error != forcedRLSNotice {
-				t.Errorf("forced table = %+v, want failed with forcedRLSNotice", f)
-			}
-			if res.Complete || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "FORCE ROW LEVEL SECURITY") {
-				t.Errorf("complete=%v warnings=%q", res.Complete, res.Warnings)
-			}
-			if got := jsonRows(t, entries, "tables/z_after.json"); got != 2 {
-				t.Errorf("z_after: %d rows, want 2", got)
-			}
-		})
+	forceOn := func(t *testing.T) bool {
+		t.Helper()
+		var on bool
+		if err := dev.QueryRow(ctx, `SELECT relforcerowsecurity FROM pg_class
+			WHERE oid = to_regclass($1)`, quoteIdent(schema)+".forced").Scan(&on); err != nil {
+			t.Fatal(err)
+		}
+		return on
 	}
 
-	// The reader inherits eurobase_migrator, not pg_read_all_data, so it
-	// can't read pg_authid (password verifiers).
-	t.Run("the reader role can't read pg_authid", func(t *testing.T) {
-		tx, err := dev.Begin(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-		if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+ExportReaderRole); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tx.Exec(ctx, "SELECT 1 FROM pg_authid LIMIT 1"); err == nil {
-			t.Error("reader role read pg_authid")
+	// The export switches FORCE off only inside its own transaction.
+	t.Run("FORCE is still on after the export", func(t *testing.T) {
+		runTenantExport(t, gw, src, schema, projectID)
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off")
 		}
 	})
 
-	// The reader role is held only for the forced table's read.
-	t.Run("the reader role ends with the forced table's read", func(t *testing.T) {
+	// A table someone else holds a lock on fails after the lock timeout
+	// with the reason; the export doesn't wait behind it, and the other
+	// tables are still exported.
+	t.Run("a busy FORCE RLS table fails with the reason", func(t *testing.T) {
+		lockTx, err := dev.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lockTx.Rollback(ctx) //nolint:errcheck
+		if _, err := lockTx.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS SHARE MODE`, quoteIdent(schema))); err != nil {
+			t.Fatal(err)
+		}
+		res, entries, meta := runTenantExport(t, gw, src, schema, projectID)
+		if f := findTable(meta.Tables, "forced"); f == nil || f.Status != TableFailed || f.Error != forcedBusyNotice {
+			t.Errorf("forced table = %+v, want failed with forcedBusyNotice", f)
+		}
+		if _, ok := entries["tables/forced.json"]; ok {
+			t.Error("busy FORCE table produced a file")
+		}
+		if got := jsonRows(t, entries, "tables/z_after.json"); got != 2 {
+			t.Errorf("z_after: %d rows, want 2", got)
+		}
+		if res.Complete {
+			t.Error("export with a failed table reported complete")
+		}
+		_ = lockTx.Rollback(ctx)
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off")
+		}
+	})
+
+	// Only the FORCE tables' savepoints may write; everything after them
+	// runs READ ONLY.
+	t.Run("the export is read only after the FORCE tables", func(t *testing.T) {
 		err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
-			var buf bytes.Buffer
-			zw := zip.NewWriter(&buf)
-			q := fmt.Sprintf(`SELECT * FROM %s.forced`, quoteIdent(schema))
-			if te := exportTable(ctx, tx, zw, "forced", "tables/forced", q, nil, "json", forcedRead{forced: true, role: ExportReaderRole}); te.Status != TableExported || te.Rows != 4 {
-				t.Errorf("forced = %+v", te)
-			}
-			var who string
-			if err := tx.QueryRow(ctx, `SELECT current_user`).Scan(&who); err != nil {
+			forced, err := forcedTables(ctx, tx, schema)
+			if err != nil {
 				return err
 			}
-			if who != "eurobase_developer" {
-				t.Errorf("current_user after the forced read = %q, want eurobase_developer", who)
+			var buf bytes.Buffer
+			zw := zip.NewWriter(&buf)
+			res, err := readTables(ctx, tx, zw, forced, []tableRead{{schema: schema, table: "forced", file: "tables/forced",
+				sql: fmt.Sprintf(`SELECT * FROM %s.forced`, quoteIdent(schema))}}, "json")
+			if err != nil {
+				return err
 			}
-			// And the next forced read without the role is refused again.
-			if te := exportTable(ctx, tx, zw, "forced", "tables/forced2", q, nil, "json", forcedRead{forced: true}); te.Status != TableFailed || te.Error != forcedRLSNotice {
-				t.Errorf("forced read without the role = %+v, want failed", te)
+			if res[0].Status != TableExported || res[0].Rows != 4 {
+				t.Errorf("forced = %+v", res[0])
+			}
+			if _, err := tx.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.forced NO FORCE ROW LEVEL SECURITY`, quoteIdent(schema))); err == nil {
+				t.Error("write after the FORCE tables succeeded; want read only")
 			}
 			return nil
 		})
@@ -185,8 +193,8 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		if _, ok := entries["tables/bookings.json"]; ok {
 			t.Error("bookings exported via the gateway role — expected a refused read")
 		}
-		if b := findTable(meta.Tables, "bookings"); b == nil || b.Status != TableFailed || b.Error == forcedRLSNotice {
-			t.Errorf("bookings via gateway = %+v, want failed with Postgres' error (no FORCE on it)", b)
+		if b := findTable(meta.Tables, "bookings"); b == nil || b.Status != TableFailed {
+			t.Errorf("bookings via gateway = %+v, want failed", b)
 		}
 		if res.Complete {
 			t.Error("gateway-sourced export reported complete")
@@ -205,7 +213,7 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 			t.Errorf("bookings = %+v, want truncated", b)
 		}
 		if f := findTable(meta.Tables, "forced"); f == nil || f.Status != TableTruncated || f.Rows != 2 {
-			t.Errorf("forced (read as the reader) = %+v, want truncated at 2", f)
+			t.Errorf("forced = %+v, want truncated at 2", f)
 		}
 		if s := findTable(meta.Tables, "series_log"); s == nil || s.Status != TableExported {
 			t.Errorf("series_log (exactly the cap) = %+v, want exported", s)
@@ -311,8 +319,7 @@ func provisionRLSFixture(t *testing.T, dev *pgxpool.Pool) (projectID, schema, us
 		`ALTER TABLE `+s+`.forced ENABLE ROW LEVEL SECURITY`,
 		`ALTER TABLE `+s+`.forced FORCE ROW LEVEL SECURITY`,
 		`CREATE POLICY none ON `+s+`.forced USING (false)`,
-		// Sorts after "forced"; owner-only RLS, so a leaked reader role
-		// would still read it — the role check is the subtest above.
+		// Sorts after "forced": read after the FORCE tables, read only.
 		`CREATE TABLE `+s+`.z_after (id int)`,
 		`ALTER TABLE `+s+`.z_after ENABLE ROW LEVEL SECURITY`,
 		`INSERT INTO `+s+`.z_after VALUES (1), (2)`,
