@@ -15,6 +15,7 @@ func KeysCmd() *cobra.Command {
 	}
 	cmd.AddCommand(keysShowCmd())
 	cmd.AddCommand(keysRegenerateCmd())
+	cmd.AddCommand(keysRotateSecretCmd())
 	return cmd
 }
 
@@ -128,5 +129,56 @@ func keysRegenerateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool("confirm", false, "Confirm key regeneration")
+	return cmd
+}
+
+func keysRotateSecretCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rotate-secret",
+		Short: "Replace only the secret key (the public key stays)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			confirm, _ := cmd.Flags().GetBool("confirm")
+			if !confirm {
+				PrintError("This replaces the secret key; the current one stops working immediately. The public key stays the same.")
+				fmt.Println("  Re-run with --confirm to proceed.")
+				return nil
+			}
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+
+			data, err := client.Post("/platform/projects/"+cfg.ActiveProject+"/api-keys/rotate-secret", nil)
+			if err != nil {
+				return err
+			}
+
+			var keys struct {
+				SecretKey string `json:"secret_key"`
+			}
+			if err := json.Unmarshal(data, &keys); err != nil {
+				return fmt.Errorf("parsing response: %w", err)
+			}
+			if keys.SecretKey == "" {
+				// The old secret key is already gone; say so rather than print a blank.
+				return fmt.Errorf("the secret key was rotated but the response had no key — rotate again from the console")
+			}
+
+			PrintSuccess("Secret key rotated (the public key is unchanged)")
+			fmt.Printf("\n  %sSecret key:%s %s\n", colorBold, colorReset, keys.SecretKey)
+			PrintWarning("Save the secret key now — it will not be shown again.")
+			return nil
+		},
+	}
+	cmd.Flags().Bool("confirm", false, "Confirm secret key rotation")
 	return cmd
 }

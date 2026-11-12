@@ -1943,6 +1943,11 @@ export class EurobaseAPI {
 		return this.fetch(`/platform/projects/${projectId}/api-keys/regenerate`, { method: 'POST' });
 	}
 
+	/** Replace only the secret key; the public key stays. The new key is returned once. */
+	async rotateSecretKey(projectId: string): Promise<{ secret_key: string }> {
+		return this.fetch(`/platform/projects/${projectId}/api-keys/rotate-secret`, { method: 'POST' });
+	}
+
 	/** Get connection info for IDE integration (CLAUDE.md, .cursorrules, .env). */
 	async getConnectInfo(projectId: string): Promise<ConnectInfo> {
 		return this.fetch<ConnectInfo>(`/platform/projects/${projectId}/connect`);

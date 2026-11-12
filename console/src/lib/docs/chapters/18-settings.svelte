@@ -10,15 +10,19 @@
 				<h3 class="text-lg font-semibold text-gray-900">API key management</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>View keys</strong> &mdash; the public key is shown in full (it ships in your app anyway; any project member, viewers included, can copy it). The secret key is shown only once, when it is created &mdash; afterwards just its prefix. A public key created before this was available appears in full after its first use.</li>
+					<li><strong>Rotate the secret key</strong> (<strong>Rotate</strong> on the secret key) &mdash; replaces only the secret key, e.g. after it was exposed. The old secret key stops working with the next request; the public key stays the same, so apps that use only the public key keep working. The new secret key is shown once. Admins only; recorded in the audit log as <em>Secret Key Rotated</em>. CLI: <code class="rounded bg-gray-100 px-1 py-0.5 text-xs">eurobase keys rotate-secret --confirm</code>.</li>
 					<li><strong>Regenerate keys</strong> &mdash; generate a new public and secret key pair instantly. The old keys stop working immediately &mdash; also the way to cut off a former member who copied the public key.</li>
 				</ul>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Edge functions don't need the secret key: <code class="rounded bg-gray-100 px-1 py-0.5 text-xs">ctx.db.sql</code>, <code class="rounded bg-gray-100 px-1 py-0.5 text-xs">ctx.storage</code> and <code class="rounded bg-gray-100 px-1 py-0.5 text-xs">ctx.vault</code> already have full access to your project. Keep the secret key only in your own servers, and other credentials in the Vault.
+				</p>
 
 				<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">
 					<svg class="h-5 w-5 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
 					</svg>
 					<p class="text-sm text-amber-800">
-						<strong>Regenerating a key is irreversible.</strong> All applications using the old key will lose access. Update your environment variables and redeploy before regenerating.
+						<strong>Rotating or regenerating a key is irreversible.</strong> All applications using the old key will lose access. Have the new key ready to deploy (environment variables, servers) before you rotate.
 					</p>
 				</div>
 

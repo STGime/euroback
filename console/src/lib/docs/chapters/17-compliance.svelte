@@ -25,7 +25,7 @@
 				</p>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Auth config changes</strong> &mdash; updating login providers, OAuth settings, session duration</li>
-					<li><strong>API key regeneration</strong> &mdash; who rotated keys and when</li>
+					<li><strong>API key regeneration and secret key rotation</strong> &mdash; who rotated keys and when</li>
 					<li><strong>Project deletion</strong> &mdash; logged before the data is removed</li>
 					<li><strong>Schema DDL</strong> &mdash; creating, dropping, or renaming tables and columns</li>
 					<li><strong>RLS policy changes</strong> &mdash; toggling row-level security, applying presets, creating or dropping policies</li>

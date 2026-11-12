@@ -837,6 +837,7 @@
 			<option value="">All actions</option>
 			<option value="auth_config.updated">Auth Config Updated</option>
 			<option value="api_keys.regenerated">API Keys Regenerated</option>
+			<option value="api_keys.secret_rotated">Secret Key Rotated</option>
 			<option value="project.created">Project Created</option>
 			<option value="project.deleted">Project Deleted</option>
 			<option value="vault.secret_set">Vault Secret Set</option>

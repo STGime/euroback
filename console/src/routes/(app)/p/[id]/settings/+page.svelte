@@ -16,7 +16,11 @@
 	let keysLoading = $state(true);
 	let showRegenConfirm = $state(false);
 	let regenerating = $state(false);
-	let newKeys: { public_key: string; secret_key: string } | null = $state(null);
+	// public_key is absent when only the secret key was rotated.
+	let newKeys: { public_key?: string; secret_key: string } | null = $state(null);
+	let showRotateConfirm = $state(false);
+	let rotating = $state(false);
+	let rotateError: string | null = $state(null);
 	let copiedKey: string | null = $state(null);
 
 	// Delete project
@@ -62,6 +66,19 @@
 			keys = await api.listAPIKeys(projectId);
 		} catch { /* ignore */ }
 		regenerating = false;
+	}
+
+	async function handleRotateSecret() {
+		rotating = true;
+		rotateError = null;
+		try {
+			newKeys = await api.rotateSecretKey(projectId);
+			showRotateConfirm = false;
+			keys = await api.listAPIKeys(projectId);
+		} catch (err) {
+			rotateError = err instanceof Error ? err.message : 'Failed to rotate the secret key';
+		}
+		rotating = false;
 	}
 
 	function copyKey(key: string) {
@@ -309,16 +326,17 @@
 			{#if newKeys}
 				<div class="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
 					<div class="flex items-center justify-between mb-2">
-						<p class="text-sm font-medium text-amber-800">New keys generated — copy the secret key now, it won't be shown again</p>
+						<p class="text-sm font-medium text-amber-800">{newKeys.public_key ? 'New keys generated' : 'New secret key generated (the public key is unchanged)'} — copy the secret key now, it won't be shown again</p>
 						<button type="button" class="cursor-pointer text-amber-400 hover:text-amber-600" onclick={() => (newKeys = null)}>
 							<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
 						</button>
 					</div>
 					<div class="space-y-2">
+						{#if newKeys.public_key}
 						<div class="flex items-center gap-2">
 							<span class="text-xs font-medium text-amber-700 w-16">Public</span>
 							<code class="flex-1 rounded bg-white border border-amber-200 px-2 py-1 text-xs font-mono text-gray-900">{newKeys.public_key}</code>
-							<button type="button" class="cursor-pointer text-amber-500 hover:text-amber-700" onclick={() => copyKey(newKeys!.public_key)} title="Copy">
+							<button type="button" class="cursor-pointer text-amber-500 hover:text-amber-700" onclick={() => copyKey(newKeys!.public_key!)} title="Copy">
 								{#if copiedKey === newKeys.public_key}
 									<svg class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
 								{:else}
@@ -326,6 +344,7 @@
 								{/if}
 							</button>
 						</div>
+						{/if}
 						<div class="flex items-center gap-2">
 							<span class="text-xs font-medium text-amber-700 w-16">Secret</span>
 							<code class="flex-1 rounded bg-white border border-amber-200 px-2 py-1 text-xs font-mono text-gray-900">{newKeys.secret_key}</code>
@@ -377,6 +396,14 @@
 							<span class="text-xs text-gray-400">
 								Created {new Date(secretKey.created_at).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', year: 'numeric' })}
 							</span>
+							<button
+								type="button"
+								class="cursor-pointer rounded-lg border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+								title="Replace only the secret key; the public key stays"
+								onclick={() => { showRotateConfirm = true; rotateError = null; }}
+							>
+								Rotate
+							</button>
 						</div>
 					{/if}
 				</div>
@@ -476,6 +503,36 @@
 				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showRegenConfirm = false)}>Cancel</button>
 				<button type="button" class="cursor-pointer rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 transition-colors disabled:opacity-50" disabled={regenerating} onclick={handleRegenerate}>
 					{regenerating ? 'Regenerating...' : 'Regenerate'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Rotate Secret Key Confirm -->
+{#if showRotateConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+		<button type="button" class="fixed inset-0 bg-black/50 cursor-default" onclick={() => (showRotateConfirm = false)} tabindex="-1" aria-label="Close"></button>
+		<div class="relative z-10 w-full max-w-sm rounded-xl bg-white shadow-2xl p-6">
+			<div class="flex items-center gap-3 mb-4">
+				<div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-100">
+					<svg class="h-5 w-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+					</svg>
+				</div>
+				<div>
+					<h3 class="text-sm font-semibold text-gray-900">Rotate Secret Key</h3>
+					<p class="text-xs text-gray-500">The public key stays the same.</p>
+				</div>
+			</div>
+			<p class="text-sm text-gray-600 mb-5">The current secret key stops working immediately. Apps that use only the public key aren't affected. Have the new key ready to deploy wherever the secret key is used.</p>
+			{#if rotateError}
+				<p class="mb-4 text-sm text-red-600">{rotateError}</p>
+			{/if}
+			<div class="flex justify-end gap-3">
+				<button type="button" class="cursor-pointer rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors" onclick={() => (showRotateConfirm = false)}>Cancel</button>
+				<button type="button" class="cursor-pointer rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 transition-colors disabled:opacity-50" disabled={rotating} onclick={handleRotateSecret}>
+					{rotating ? 'Rotating...' : 'Rotate secret key'}
 				</button>
 			</div>
 		</div>

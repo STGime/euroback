@@ -1122,6 +1122,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.With(tenant.RequireMinRole("developer")).Mount("/cron", cron.Routes(cronSvc, cronDry))
 			r.With(tenant.RequireMinRole("viewer")).Get("/api-keys", tenant.HandleListAPIKeys(pool))
 			r.With(tenant.RequireMinRole("admin")).Post("/api-keys/regenerate", tenant.HandleRegenerateAPIKeys(pool))
+			r.With(tenant.RequireMinRole("admin")).Post("/api-keys/rotate-secret", tenant.HandleRotateSecretKey(pool))
 			r.With(tenant.RequireMinRole("viewer")).Get("/connect", tenant.HandleConnect(pool, catalogPool))
 
 			// Plan usage.
