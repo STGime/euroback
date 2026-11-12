@@ -63,9 +63,17 @@ func syncEmailBounces(ctx context.Context, pool *pgxpool.Pool, lister failedEmai
 		return 0
 	}
 	recorded := 0
+	blocks := 0
 	for _, f := range failed {
 		if mailaddr.IsReserved(f.Recipient) {
 			continue // never platform recipients worth tracking
+		}
+		// Every recipient (projects' end users too, by hash only): the
+		// transactional send path skips them for a while.
+		if err := email.RecordBounceBlock(ctx, pool, f); err != nil {
+			slog.Warn("email bounce sync: recording bounce block", "error", err)
+		} else {
+			blocks++
 		}
 		at := f.At
 		if at.IsZero() {
@@ -89,6 +97,9 @@ func syncEmailBounces(ctx context.Context, pool *pgxpool.Pool, lister failedEmai
 	if recorded > 0 {
 		slog.Info("email bounce sync: suppressions recorded", "count", recorded)
 	}
+	if blocks > 0 {
+		slog.Info("email bounce sync: bounce blocks recorded", "count", blocks)
+	}
 	return recorded
 }
 
@@ -100,6 +111,9 @@ const emailSuppressionTTL = 90 * 24 * time.Hour
 // platform account or allowlist entry, and rows not seen for
 // emailSuppressionTTL.
 func removeStaleSuppressions(ctx context.Context, pool *pgxpool.Pool) {
+	if err := email.RemoveExpiredBounceBlocks(ctx, pool); err != nil {
+		slog.Warn("email bounce sync: removing expired bounce blocks", "error", err)
+	}
 	if _, err := pool.Exec(ctx, `
 		DELETE FROM public.email_suppressions s
 		 WHERE s.last_seen_at < now() - make_interval(secs => $1)

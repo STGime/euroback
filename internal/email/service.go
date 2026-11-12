@@ -135,6 +135,9 @@ func (s *EmailService) recordSend(ctx context.Context, projectID, flow, to strin
 func classifySend(flow, to string, d Delivery, err error) DeliveryLogEntry {
 	e := DeliveryLogEntry{Flow: flow, Recipient: to, Via: d.Via, MessageID: d.MessageID}
 	switch {
+	case err == nil && d.SkipReason != "":
+		e.Via = ""
+		e.Outcome, e.Reason, e.Detail = OutcomeSkipped, d.SkipReason, d.SkipDetail
 	case err == nil && d.Via == "":
 		e.Outcome, e.Reason = OutcomeSkipped, ReasonEmailNotConfigured
 	case err == nil:
@@ -159,6 +162,10 @@ func classifySend(flow, to string, d Delivery, err error) DeliveryLogEntry {
 type Delivery struct {
 	Via       string
 	MessageID string // TEM email id, platform sends only
+	// SkipReason: the platform sender deliberately didn't send (a reserved
+	// test address, or one that bounced recently); logged as "skipped".
+	SkipReason string
+	SkipDetail string
 }
 
 // sendProjectScoped is the central dispatcher for "send email for
@@ -215,6 +222,12 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 	if !s.client.Configured() {
 		_ = s.client.Send(ctx, to, subject, htmlBody) // logs instead of sending
 		return Delivery{}, nil
+	}
+	// The platform sender's reputation is shared by every project: no
+	// mail to addresses that can't receive it. (A project's own SMTP
+	// server, above, is the project's call.)
+	if reason, detail := s.platformSendSkip(ctx, to); reason != "" {
+		return Delivery{SkipReason: reason, SkipDetail: detail}, nil
 	}
 	id, err := s.client.SendWithID(ctx, to, subject, htmlBody)
 	return Delivery{Via: ViaPlatform, MessageID: id}, err
@@ -414,6 +427,9 @@ func (s *EmailService) sendMagicLinkEmail(ctx context.Context, projectID, projec
 
 // SendPlatformPasswordResetEmail sends a password reset email for console users.
 func (s *EmailService) SendPlatformPasswordResetEmail(ctx context.Context, userID, userEmail string) error {
+	if s.skipPlatformMail(ctx, "password_reset", userID, userEmail) {
+		return nil
+	}
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -467,6 +483,9 @@ func (s *EmailService) SendPlatformPasskeysClearedEmail(ctx context.Context, use
 // the tenant verification TTL) + a link to the console's /verify-email
 // page. Platform mail always sends from us, never a tenant's BYO-SMTP.
 func (s *EmailService) SendPlatformVerificationEmail(ctx context.Context, userID, userEmail string) error {
+	if s.skipPlatformMail(ctx, "verification", userID, userEmail) {
+		return nil
+	}
 	rawToken, tokenHash, err := generateToken()
 	if err != nil {
 		return err
@@ -493,6 +512,21 @@ func (s *EmailService) SendPlatformVerificationEmail(ctx context.Context, userID
 	}
 
 	return s.client.Send(ctx, userEmail, subject, body)
+}
+
+// skipPlatformMail: a console account email to an address that recently
+// bounced (or a reserved one) is not sent. The caller answers as if it
+// were (these endpoints don't reveal whether an account exists).
+func (s *EmailService) skipPlatformMail(ctx context.Context, kind, userID, to string) bool {
+	if !s.client.Configured() {
+		return false
+	}
+	reason, _ := s.platformSendSkip(ctx, to)
+	if reason == "" {
+		return false
+	}
+	slog.Info("platform email skipped", "type", kind, "user_id", userID, "reason", reason)
+	return true
 }
 
 // OrgInvitationURL opens an org invitation in the console (after sign-in

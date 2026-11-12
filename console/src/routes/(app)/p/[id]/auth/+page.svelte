@@ -237,7 +237,9 @@
 		email_not_configured: 'Email sending is not configured on this Eurobase environment.',
 		custom_smtp_failed: "Your SMTP server didn't take the message.",
 		platform_failed: "Eurobase's email service didn't take the message.",
-		internal_error: "The email couldn't be prepared."
+		internal_error: "The email couldn't be prepared.",
+		reserved_address: "Not sent: a reserved test domain (example.com, .test, …) can't receive mail. Use a real mailbox you control for testing.",
+		address_bounced: "Not sent: mail to this address failed recently, so Eurobase's email service skips it for a while to keep delivery working for everyone. Use a real mailbox, or your own SMTP sender (Pro)."
 	};
 
 	function emailLogExplanation(e: EmailLogEntry): string {
