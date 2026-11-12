@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/jackc/pgx/v5"
@@ -180,6 +181,83 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	// FORCE must never stay off, however the export ends after switching
+	// it off: the change is only ever in an uncommitted transaction.
+	lockFree := func(t *testing.T) {
+		t.Helper()
+		other, err := dev.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Rollback(ctx) //nolint:errcheck
+		if _, err := other.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS EXCLUSIVE MODE NOWAIT`, quoteIdent(schema))); err != nil {
+			t.Errorf("table still locked: %v", err)
+		}
+	}
+	t.Run("FORCE stays on when the read fails after NO FORCE", func(t *testing.T) {
+		err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
+			var buf bytes.Buffer
+			res, err := readTables(ctx, tx, zip.NewWriter(&buf), map[string]bool{"forced": true},
+				[]tableRead{{schema: schema, table: "forced", file: "tables/forced",
+					sql: fmt.Sprintf(`SELECT id / 0 FROM %s.forced`, quoteIdent(schema))}}, "json")
+			if err != nil {
+				return err
+			}
+			if res[0].Status != TableFailed {
+				t.Errorf("forced = %+v, want failed", res[0])
+			}
+			lockFree(t) // released while the export is still open
+			return errors.New("export fails after the FORCE table")
+		})
+		if err == nil {
+			t.Fatal("want the export to fail")
+		}
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off after a failed read")
+		}
+	})
+	t.Run("FORCE stays on when the connection dies after NO FORCE", func(t *testing.T) {
+		conn, err := pgx.Connect(ctx, devURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := noForce(ctx, sp, schema, "forced"); err != nil {
+			t.Fatal(err)
+		}
+		// The worker crashes or the network drops: no ROLLBACK, no COMMIT,
+		// the socket just closes.
+		_ = conn.PgConn().Conn().Close()
+		// The server notices the closed socket and aborts the transaction,
+		// which releases the lock; then FORCE must read as on.
+		freed := false
+		for i := 0; i < 50 && !freed; i++ {
+			other, err := dev.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, lerr := other.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS EXCLUSIVE MODE NOWAIT`, quoteIdent(schema)))
+			_ = other.Rollback(ctx)
+			freed = lerr == nil
+			if !freed {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		if !freed {
+			t.Fatal("table still locked after the connection died")
+		}
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off after the connection died")
 		}
 	})
 
