@@ -489,9 +489,10 @@ type ExportSource struct {
 }
 
 // forcedLockTimeout bounds how long the export waits for the lock that
-// switching FORCE off needs; a busy table fails instead of blocking writes
-// behind the export.
-const forcedLockTimeout = "5s"
+// switching FORCE off needs (ACCESS EXCLUSIVE: while it waits, other
+// reads and writes of the table queue behind it); a busy table fails
+// instead.
+const forcedLockTimeout = "2s"
 
 // forcedBusyNotice replaces the lock timeout error for a FORCE table.
 const forcedBusyNotice = "table has FORCE ROW LEVEL SECURITY and was busy (the export waits at most " +
@@ -686,7 +687,7 @@ func exportTable(ctx context.Context, tx pgx.Tx, zw *zip.Writer, r tableRead, fo
 		te.Status, te.Error = TableFailed, errorText(err)
 	default:
 		if err := end(ctx); err != nil {
-			te.Status, te.Error = TableFailed, errorText(err)
+			te.Status, te.Error, te.File = TableFailed, errorText(err), ""
 		} else if res.Truncated {
 			te.Status = TableTruncated
 		} else {

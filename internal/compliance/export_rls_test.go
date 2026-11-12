@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -104,8 +106,8 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 	})
 
 	// A table someone else holds a lock on fails after the lock timeout
-	// with the reason; the export doesn't wait behind it, and the other
-	// tables are still exported.
+	// (forcedLockTimeout) with the reason, and the other tables are still
+	// exported.
 	t.Run("a busy FORCE RLS table fails with the reason", func(t *testing.T) {
 		lockTx, err := dev.Begin(ctx)
 		if err != nil {
@@ -134,9 +136,10 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		}
 	})
 
-	// Only the FORCE tables' savepoints may write; everything after them
-	// runs READ ONLY.
-	t.Run("the export is read only after the FORCE tables", func(t *testing.T) {
+	// The FORCE table's lock is released right after its read, while the
+	// export is still running; only the FORCE tables' savepoints may write,
+	// everything after them runs READ ONLY.
+	t.Run("lock released after the read; read only after the FORCE tables", func(t *testing.T) {
 		err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
 			forced, err := forcedTables(ctx, tx, schema)
 			if err != nil {
@@ -152,8 +155,26 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 			if res[0].Status != TableExported || res[0].Rows != 4 {
 				t.Errorf("forced = %+v", res[0])
 			}
-			if _, err := tx.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.forced NO FORCE ROW LEVEL SECURITY`, quoteIdent(schema))); err == nil {
-				t.Error("write after the FORCE tables succeeded; want read only")
+			// Another session can take the strongest lock at once (NOWAIT),
+			// and sees FORCE still on, while the export's transaction is open.
+			other, err := dev.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer other.Rollback(ctx) //nolint:errcheck
+			if _, err := other.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS EXCLUSIVE MODE NOWAIT`, quoteIdent(schema))); err != nil {
+				t.Errorf("lock still held after the read: %v", err)
+			}
+			var on bool
+			if err := other.QueryRow(ctx, `SELECT relforcerowsecurity FROM pg_class WHERE oid = to_regclass($1)`,
+				quoteIdent(schema)+".forced").Scan(&on); err != nil || !on {
+				t.Errorf("FORCE seen by another session during the export: %v (err %v), want on", on, err)
+			}
+			_ = other.Rollback(ctx)
+			_, err = tx.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.forced NO FORCE ROW LEVEL SECURITY`, quoteIdent(schema)))
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "25006" {
+				t.Errorf("write after the FORCE tables: %v, want read_only_sql_transaction (25006)", err)
 			}
 			return nil
 		})
