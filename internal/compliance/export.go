@@ -699,10 +699,19 @@ func exportTable(ctx context.Context, tx pgx.Tx, zw *zip.Writer, r tableRead, fo
 
 // noForce switches FORCE ROW LEVEL SECURITY off for schema.table within
 // sp, waiting at most forcedLockTimeout for the table's lock. The caller
-// rolls sp back.
+// rolls sp back. The change is never committed; if the worker vanishes
+// without closing the connection, the two timeouts make the server end
+// the transaction (and release the table's lock) within about a minute
+// instead of at TCP keepalive. The rollback undoes all three settings.
 func noForce(ctx context.Context, sp pgx.Tx, schema, table string) error {
-	if _, err := sp.Exec(ctx, "SET LOCAL lock_timeout = '"+forcedLockTimeout+"'"); err != nil {
-		return err
+	for _, set := range []string{
+		"SET LOCAL lock_timeout = '" + forcedLockTimeout + "'",
+		"SET LOCAL idle_in_transaction_session_timeout = '60s'",
+		"SET LOCAL tcp_user_timeout = '30s'",
+	} {
+		if _, err := sp.Exec(ctx, set); err != nil {
+			return err
+		}
 	}
 	_, err := sp.Exec(ctx, fmt.Sprintf("ALTER TABLE %s.%s NO FORCE ROW LEVEL SECURITY", quoteIdent(schema), quoteIdent(table)))
 	return err

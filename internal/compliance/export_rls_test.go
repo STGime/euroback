@@ -206,8 +206,9 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if res[0].Status != TableFailed {
-				t.Errorf("forced = %+v, want failed", res[0])
+			// Failed in the read, after NO FORCE (not in noForce itself).
+			if res[0].Status != TableFailed || !strings.Contains(res[0].Error, "division by zero") {
+				t.Errorf("forced = %+v, want failed with division by zero", res[0])
 			}
 			lockFree(t) // released while the export is still open
 			return errors.New("export fails after the FORCE table")
@@ -224,6 +225,7 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer conn.Close(ctx) //nolint:errcheck
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
