@@ -34,6 +34,7 @@ type Client struct {
 	endUserID     string
 	service       bool
 	denied        map[string]bool // tables whose db: channels are refused
+	apiKeyHash    string          // SHA-256 of the API key it connected with ("" for JWTs)
 	subscriptions []string        // channels like "db:users", "db:users:uuid", "storage:bucket"
 	send          chan []byte
 	mu            sync.Mutex // protects subscriptions
@@ -82,6 +83,10 @@ type Hub struct {
 	// tenantConns tracks per-tenant connection counts for limit enforcement.
 	tenantConns map[string]int
 
+	// keyed holds the clients that connected with an API key, so a key
+	// that was rotated or regenerated away can be found (SweepRevokedKeys).
+	keyed map[*Client]struct{}
+
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan *broadcastMsg
@@ -102,6 +107,7 @@ func NewHub() *Hub {
 	return &Hub{
 		clients:     make(map[string]map[*Client]bool),
 		tenantConns: make(map[string]int),
+		keyed:       make(map[*Client]struct{}),
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		broadcast:   make(chan *broadcastMsg, 256),
@@ -116,6 +122,9 @@ func (h *Hub) Run() {
 		case client := <-h.register:
 			h.mu.Lock()
 			h.tenantConns[client.tenantID]++
+			if client.apiKeyHash != "" {
+				h.keyed[client] = struct{}{}
+			}
 			h.mu.Unlock()
 			slog.Debug("client registered",
 				"tenant_id", client.tenantID,
@@ -241,6 +250,7 @@ func (h *Hub) removeClient(client *Client) {
 		}
 	}
 
+	delete(h.keyed, client)
 	h.tenantConns[client.tenantID]--
 	if h.tenantConns[client.tenantID] <= 0 {
 		delete(h.tenantConns, client.tenantID)

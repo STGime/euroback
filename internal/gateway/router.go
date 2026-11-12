@@ -2085,9 +2085,10 @@ func buildRealtimeAuthorize(pool, developerPool *pgxpool.Pool, platformAuth *aut
 				return realtime.AuthorizedClient{}, realtime.ErrForbidden
 			}
 			return realtime.AuthorizedClient{
-				ProjectID: pc.ProjectID,
-				Plan:      pc.Plan,
-				Service:   pc.KeyType == "secret",
+				ProjectID:  pc.ProjectID,
+				Plan:       pc.Plan,
+				Service:    pc.KeyType == "secret",
+				APIKeyHash: auth.HashAPIKey(token),
 			}, nil
 		}
 

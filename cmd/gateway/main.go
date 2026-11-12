@@ -425,6 +425,9 @@ func main() {
 	// ── Set up realtime WebSocket hub ──
 	hub := realtime.NewHub()
 	go hub.Run()
+	// Close realtime connections whose API key was rotated or regenerated
+	// away: the key is only checked when a connection opens.
+	go hub.RunKeySweep(ctx, 30*time.Second, realtime.PoolKeyCheck(pool))
 	slog.Info("realtime hub started")
 
 	// Set up Redis bridge for cross-instance realtime fan-out (optional).

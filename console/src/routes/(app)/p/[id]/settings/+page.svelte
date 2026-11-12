@@ -74,11 +74,13 @@
 		try {
 			newKeys = await api.rotateSecretKey(projectId);
 			showRotateConfirm = false;
-			keys = await api.listAPIKeys(projectId);
 		} catch (err) {
 			rotateError = err instanceof Error ? err.message : 'Failed to rotate the secret key';
 		}
 		rotating = false;
+		if (newKeys) {
+			try { keys = await api.listAPIKeys(projectId); } catch { /* the list refreshes on the next visit */ }
+		}
 	}
 
 	function copyKey(key: string) {
