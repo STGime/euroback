@@ -21,18 +21,32 @@ func GenerateAPIKeyPair() (publicKey, secretKey, publicKeyHash, secretKeyHash st
 		return "", "", "", "", fmt.Errorf("generate public key: %w", err)
 	}
 
-	secRandom, err := randomHex(16)
+	secretKey, secretKeyHash, err = GenerateSecretKey()
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("generate secret key: %w", err)
+		return "", "", "", "", err
 	}
 
 	publicKey = "eb_pk_" + pubRandom
-	secretKey = "eb_sk_" + secRandom
-
 	publicKeyHash = hashSHA256(publicKey)
-	secretKeyHash = hashSHA256(secretKey)
 
 	return publicKey, secretKey, publicKeyHash, secretKeyHash, nil
+}
+
+// GenerateSecretKey generates a secret key (eb_sk_…) and its SHA-256 hash.
+func GenerateSecretKey() (secretKey, secretKeyHash string, err error) {
+	secRandom, err := randomHex(16)
+	if err != nil {
+		return "", "", fmt.Errorf("generate secret key: %w", err)
+	}
+	secretKey = "eb_sk_" + secRandom
+	return secretKey, hashSHA256(secretKey), nil
+}
+
+// lockProjectKeys serialises key changes for one project within tx, so two
+// concurrent rotations can't both delete the old row and leave two keys.
+func lockProjectKeys(ctx context.Context, tx pgx.Tx, projectID string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('api_keys:' || $1::text))`, projectID)
+	return err
 }
 
 // StoreAPIKeys inserts two rows into the api_keys table within the given

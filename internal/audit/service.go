@@ -15,10 +15,11 @@ import (
 
 // Action constants used across the codebase.
 const (
-	ActionAuthConfigUpdated  = "auth_config.updated"
-	ActionAPIKeysRegenerated = "api_keys.regenerated"
-	ActionProjectCreated     = "project.created"
-	ActionProjectDeleted     = "project.deleted"
+	ActionAuthConfigUpdated   = "auth_config.updated"
+	ActionAPIKeysRegenerated  = "api_keys.regenerated"
+	ActionAPISecretKeyRotated = "api_keys.secret_rotated"
+	ActionProjectCreated      = "project.created"
+	ActionProjectDeleted      = "project.deleted"
 	// Ownership transfer (#846): initiated by the current owner, accepted
 	// by the recipient, or cancelled before acceptance.
 	ActionTransferInitiated    = "project.transfer_initiated"

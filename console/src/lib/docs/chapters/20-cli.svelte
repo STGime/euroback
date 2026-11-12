@@ -105,7 +105,8 @@
 
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Keys & Config</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">keys show</td><td class="px-3 py-1 text-gray-500">Display API keys</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">keys regenerate</td><td class="px-3 py-1 text-gray-500">Rotate API keys</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">keys regenerate</td><td class="px-3 py-1 text-gray-500">Replace both API keys</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">keys rotate-secret</td><td class="px-3 py-1 text-gray-500">Replace only the secret key (the public key stays)</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">init</td><td class="px-3 py-1 text-gray-500">Generate .env, CLAUDE.md, .cursorrules</td></tr>
 
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Logs</td></tr>

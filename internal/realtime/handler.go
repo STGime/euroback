@@ -44,6 +44,10 @@ type AuthorizedClient struct {
 	// DeniedTables are tables whose db:<table> channels this client may
 	// not subscribe to (a console Viewer: the internal tables).
 	DeniedTables map[string]bool
+	// APIKeyHash is the SHA-256 (hex) of the API key the client connected
+	// with, "" for JWTs. The hub closes the connection once that key no
+	// longer exists (SweepRevokedKeys).
+	APIKeyHash string
 }
 
 // Authorize validates the caller's token for the requested project and
@@ -184,13 +188,14 @@ func HandleWebSocket(hub *Hub, authorize Authorize, originChecker func(*http.Req
 		}
 
 		client := &Client{
-			hub:       hub,
-			conn:      conn,
-			tenantID:  projectID, // hub still uses "tenantID" internally; semantically it's projectID now
-			endUserID: ac.EndUserID,
-			service:   ac.Service,
-			denied:    ac.DeniedTables,
-			send:      make(chan []byte, 256),
+			hub:        hub,
+			conn:       conn,
+			tenantID:   projectID, // hub still uses "tenantID" internally; semantically it's projectID now
+			endUserID:  ac.EndUserID,
+			service:    ac.Service,
+			denied:     ac.DeniedTables,
+			apiKeyHash: ac.APIKeyHash,
+			send:       make(chan []byte, 256),
 		}
 
 		hub.register <- client

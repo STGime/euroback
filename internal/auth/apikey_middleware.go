@@ -35,6 +35,12 @@ func NewAPIKeyMiddleware(pool *pgxpool.Pool) *APIKeyMiddleware {
 // pd_id column is nullable in the SELECT — populated only for
 // projects with a live row (state in provisioning/active/restoring,
 // deleted_at IS NULL).
+// HashAPIKey is the api_keys.key_hash of a key: SHA-256, hex.
+func HashAPIKey(apiKey string) string {
+	h := sha256.Sum256([]byte(apiKey))
+	return hex.EncodeToString(h[:])
+}
+
 func ResolveAPIKey(ctx context.Context, pool *pgxpool.Pool, apiKey string) (*ProjectContext, error) {
 	if apiKey == "" {
 		return nil, errInvalidAPIKey
