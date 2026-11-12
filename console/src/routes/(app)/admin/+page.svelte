@@ -108,18 +108,33 @@
 		};
 	});
 
-	const INVITATION_TEMPLATE = {
-		subject: "You're invited to Eurobase (closed beta)",
+	// Team-tier closed-beta invitation. Pro has been live since public
+	// beta (see PUBLIC_BETA_OPEN_TEMPLATE), so the generic "closed beta"
+	// invite is retired — the thing we now hand-invite people into is
+	// Team. Content tracks docs chapter 26 (Team tier) + 27 (Orgs & SSO):
+	// grant-first flow (ops flips team_beta_access, then this mail tells
+	// them), free during the beta window, 30 days' notice before billing.
+	const TEAM_INVITATION_TEMPLATE = {
+		subject: "You're in the Eurobase Team beta",
 		body: `<p>Hi,</p>
-<p>You're on the early-access list for <strong>Eurobase</strong> — the EU-sovereign backend-as-a-service, made in Berlin. We're opening the beta to a small cohort this week and you're in it.</p>
-<p style="background:#fef3c7;border-left:3px solid #f59e0b;padding:10px 12px;margin:14px 0;color:#92400e;font-size:14px;"><strong>Heads-up — this is a beta test system.</strong> Features may change or break without notice. There are no uptime, data-retention, or backup guarantees during the beta. Please don't run production workloads on it yet.</p>
-<p>To get started:</p>
+<p>We've enabled <strong>Team-tier beta access</strong> on your Eurobase account. Team is for workloads that have outgrown the shared cluster and want production isolation — your own database, backups you control, and company-wide login.</p>
+<p style="background:#ecfdf5;border-left:3px solid #10b981;padding:10px 12px;margin:14px 0;color:#065f46;font-size:14px;"><strong>Free during the closed beta.</strong> Team isn't self-serve on the pricing page yet — grants are manual, and we'll give you <strong>30 days' notice before any billing starts</strong>. Post-beta pricing is €149/mo per organisation (SSO, RBAC, priority support, and one bundled Team project), with extra projects at their per-project rate.</p>
+<p><strong>What Team gives you, on top of Pro:</strong></p>
+<ul>
+  <li><strong>A dedicated Postgres instance</strong> (Scaleway fr-par) per Team project — no shared cluster, no noisy neighbours.</li>
+  <li><strong>Automatic daily backups</strong> with 7-day retention, plus <strong>on-demand snapshots</strong> you can tag before a risky migration.</li>
+  <li><strong>Self-serve restore</strong> from any snapshot — no support ticket. One restore per calendar month is included.</li>
+  <li><strong>A direct <code>DATABASE_URL</code></strong> so Prisma, Drizzle, <code>psql</code>, or any migration runner can connect straight to the instance.</li>
+  <li><strong>Organizations with OIDC SSO</strong> — sign your team in through your own identity provider (Google Workspace, Microsoft Entra ID, Okta, Authentik, …) and invite teammates by email.</li>
+  <li><strong>Priority support</strong> on Team-tier tickets.</li>
+</ul>
+<p><strong>To get started:</strong></p>
 <ol>
-  <li>Go to <a href="https://console.eurobase.app">console.eurobase.app</a> and sign up with this email.</li>
-  <li>Create your first project — the SDK (<code>npm install @eurobase/sdk</code>) gets you hacking in a minute.</li>
-  <li>Read the <a href="https://console.eurobase.app/docs">docs</a> for auth, database, storage, and realtime examples.</li>
+  <li>Sign in at <a href="https://console.eurobase.app">console.eurobase.app</a> with this email — you'll now see <strong>Team</strong> in the new-project modal and <strong>Organizations</strong> in the sidebar.</li>
+  <li><strong>Projects → New project → Team</strong>. We provision a dedicated instance in the background (usually 90 seconds to a few minutes).</li>
+  <li>Walk the full flow in the docs: <a href="https://console.eurobase.app/docs/team-tier">Team tier</a> and <a href="https://console.eurobase.app/docs/orgs-sso">Organizations &amp; SSO</a>.</li>
 </ol>
-<p>You stay in control of your data: you can delete a project (schema + storage objects) directly from the console at any time.</p>
+<p style="background:#fef3c7;border-left:3px solid #f59e0b;padding:10px 12px;margin:14px 0;color:#92400e;font-size:14px;"><strong>A few beta rough edges to set expectations:</strong> SSO is OIDC-only for now (no SAML) and teammates are added by email (no domain auto-provisioning yet); one organisation per account for now; snapshots are point-in-time restore points, not continuous PITR, and don't include your S3 storage objects; there's no self-serve billing or Team→Free/Pro downgrade during the beta — once a project is on a dedicated instance it stays there. Features may still change.</p>
 <p>Found a bug or have an idea? File it on GitHub at <a href="https://github.com/STGime/euroback/issues">github.com/STGime/euroback/issues</a> — or just reply to this mail, I read every word.</p>
 <p>— Stefan</p>
 <hr/>
@@ -1205,9 +1220,9 @@
 					<button
 						type="button"
 						class="text-eurobase-600 hover:underline cursor-pointer"
-						onclick={() => applyTemplate(INVITATION_TEMPLATE)}
+						onclick={() => applyTemplate(TEAM_INVITATION_TEMPLATE)}
 					>
-						Beta invitation
+						Team beta invitation
 					</button>
 					<span class="text-gray-300">·</span>
 					<button
