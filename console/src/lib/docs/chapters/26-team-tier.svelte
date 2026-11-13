@@ -46,7 +46,7 @@
 
 				<div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-900">
 					<strong>What's NOT in the beta yet.</strong> Say this up front to your own team so nobody plans around it:
-					SAML SSO (OIDC only for now), project-level RBAC (Owner/Admin/Developer/Read-only),
+					SAML SSO (OIDC only for now),
 					domain-based SSO auto-provisioning (invitees must be added by email today),
 					dev/staging/prod branches, preview function envs. PITR was removed in favour of snapshots.
 				</div>
