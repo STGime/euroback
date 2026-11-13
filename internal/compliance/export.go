@@ -472,6 +472,11 @@ func resolveBucket(ctx context.Context, pool *pgxpool.Pool, projectID string) st
 // would still apply (FORCE ROW LEVEL SECURITY, an owner outside that set)
 // makes Postgres raise an error instead of returning fewer rows. Such a
 // table is reported as failed — never exported as empty.
+//
+// FORCE ROW LEVEL SECURITY makes policies apply to the owner too. The
+// export, as an owner, switches FORCE off for such a table inside its own
+// transaction and rolls that back right after the read (#906): nothing is
+// committed, so no one else ever sees the change.
 type ExportSource struct {
 	Pool *pgxpool.Pool
 	// Role, if set, is assumed with SET LOCAL ROLE for the read
@@ -483,15 +488,78 @@ type ExportSource struct {
 	PgDump string
 }
 
+// forcedLockTimeout bounds how long the export waits for the lock that
+// switching FORCE off needs (ACCESS EXCLUSIVE: while it waits, other
+// reads and writes of the table queue behind it); a busy table fails
+// instead.
+const forcedLockTimeout = "2s"
+
+// forcedBusyNotice replaces the lock timeout error for a FORCE table.
+const forcedBusyNotice = "table has FORCE ROW LEVEL SECURITY and was busy (the export waits at most " +
+	forcedLockTimeout + " for it); request a new export"
+
+// forcedTables returns the tables of schemaName with FORCE ROW LEVEL
+// SECURITY.
+func forcedTables(ctx context.Context, tx pgx.Tx, schemaName string) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relforcerowsecurity`, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("list tables with FORCE ROW LEVEL SECURITY: %w", err)
+	}
+	defer rows.Close()
+	forced := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		forced[name] = true
+	}
+	return forced, rows.Err()
+}
+
+// tableRead is one table an export reads: sql selects its rows (from
+// schema.table), into the zip entry file.
+type tableRead struct {
+	schema, table, file, sql string
+	args                     []any
+}
+
+// readTables reads each table with exportTable and returns the results in
+// the order given. Tables with FORCE ROW LEVEL SECURITY are read first,
+// each with FORCE switched off in a savepoint that is rolled back; then
+// the transaction becomes READ ONLY for the rest.
+func readTables(ctx context.Context, tx pgx.Tx, zw *zip.Writer, forced map[string]bool, reads []tableRead, format string) ([]TableExport, error) {
+	out := make([]TableExport, len(reads))
+	for i, r := range reads {
+		if forced[r.table] {
+			out[i] = exportTable(ctx, tx, zw, r, format, true)
+		}
+	}
+	if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+		return nil, fmt.Errorf("export: read only: %w", err)
+	}
+	for i, r := range reads {
+		if !forced[r.table] {
+			out[i] = exportTable(ctx, tx, zw, r, format, false)
+		}
+	}
+	return out, nil
+}
+
 // querier is satisfied by *pgxpool.Pool and pgx.Tx.
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// withExportSnapshot runs fn in a read-only REPEATABLE READ transaction
-// on src, so every table in one export comes from the same snapshot.
+// withExportSnapshot runs fn in a REPEATABLE READ transaction on src, so
+// every table in one export comes from the same snapshot. The transaction
+// is always rolled back. It starts read-write only so that tables with
+// FORCE ROW LEVEL SECURITY can have FORCE switched off (in savepoints that
+// are rolled back, see readTables), and is READ ONLY after them.
 func withExportSnapshot(ctx context.Context, src ExportSource, fn func(pgx.Tx) error) error {
-	tx, err := src.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := src.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return fmt.Errorf("begin export snapshot: %w", err)
 	}
@@ -517,7 +585,8 @@ func withExportSnapshot(ctx context.Context, src ExportSource, fn func(pgx.Tx) e
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	// Nothing to keep: the export only reads.
+	return tx.Rollback(ctx)
 }
 
 // requireSchema fails when schemaName doesn't exist on the export source.
@@ -575,38 +644,83 @@ type ExportResult struct {
 // exportTable streams one table (or a filtered query over it) into the
 // zip inside its own savepoint, so a failing table doesn't abort the
 // snapshot for the tables after it.
-func exportTable(ctx context.Context, tx pgx.Tx, zw *zip.Writer, table, file, sql string, args []any, format string) TableExport {
-	te := TableExport{Table: table}
+//
+// For a table with FORCE ROW LEVEL SECURITY (forced), the savepoint
+// switches FORCE off first, so the export's owner rights skip the policies
+// as for any other table (#906), and is always rolled back after the read:
+// that undoes the change and releases the table's lock. Taking the lock
+// waits at most forcedLockTimeout.
+func exportTable(ctx context.Context, tx pgx.Tx, zw *zip.Writer, r tableRead, format string, forced bool) TableExport {
+	te := TableExport{Table: r.table}
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		te.Status, te.Error = TableFailed, err.Error()
 		return te
 	}
+	if forced {
+		if err := noForce(ctx, sp, r.schema, r.table); err != nil {
+			_ = sp.Rollback(ctx)
+			te.Status, te.Error = TableFailed, errorText(err)
+			if isLockTimeout(err) {
+				te.Error = forcedBusyNotice
+			}
+			return te
+		}
+	}
 	// One row past the cap tells a truncated table from one of exactly
 	// maxRowsPerTable rows, without reading the rest of a large table.
-	sql = fmt.Sprintf("%s LIMIT %d", sql, maxRowsPerTable+1)
-	res, err := streamQueryToZip(ctx, sp, zw, sql, args, file, format,
-		streamOpts{writeEmpty: true, limit: maxRowsPerTable, omit: query.SensitiveSystemColumns(table)})
+	sql := fmt.Sprintf("%s LIMIT %d", r.sql, maxRowsPerTable+1)
+	res, err := streamQueryToZip(ctx, sp, zw, sql, r.args, r.file, format,
+		streamOpts{writeEmpty: true, limit: maxRowsPerTable, omit: query.SensitiveSystemColumns(r.table)})
 	te.Rows = res.Rows
 	te.RedactedColumns = res.Omitted
 	if res.Written {
 		te.File = res.File
 	}
+	end := sp.Commit
+	if forced {
+		end = sp.Rollback // undo NO FORCE, release the lock
+	}
 	switch {
 	case err != nil:
 		_ = sp.Rollback(ctx)
 		te.Status, te.Error = TableFailed, errorText(err)
-	case res.Truncated:
-		_ = sp.Commit(ctx)
-		te.Status = TableTruncated
 	default:
-		if err := sp.Commit(ctx); err != nil {
-			te.Status, te.Error = TableFailed, errorText(err)
+		if err := end(ctx); err != nil {
+			te.Status, te.Error, te.File = TableFailed, errorText(err), ""
+		} else if res.Truncated {
+			te.Status = TableTruncated
 		} else {
 			te.Status = TableExported
 		}
 	}
 	return te
+}
+
+// noForce switches FORCE ROW LEVEL SECURITY off for schema.table within
+// sp, waiting at most forcedLockTimeout for the table's lock. The caller
+// rolls sp back. The change is never committed; if the worker vanishes
+// without closing the connection, the two timeouts make the server end
+// the transaction (and release the table's lock) within about a minute
+// instead of at TCP keepalive. The rollback undoes all three settings.
+func noForce(ctx context.Context, sp pgx.Tx, schema, table string) error {
+	for _, set := range []string{
+		"SET LOCAL lock_timeout = '" + forcedLockTimeout + "'",
+		"SET LOCAL idle_in_transaction_session_timeout = '60s'",
+		"SET LOCAL tcp_user_timeout = '30s'",
+	} {
+		if _, err := sp.Exec(ctx, set); err != nil {
+			return err
+		}
+	}
+	_, err := sp.Exec(ctx, fmt.Sprintf("ALTER TABLE %s.%s NO FORCE ROW LEVEL SECURITY", quoteIdent(schema), quoteIdent(table)))
+	return err
+}
+
+// isLockTimeout reports Postgres' lock_timeout error.
+func isLockTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
 }
 
 // errorText is the message recorded for a failed table: the server's
@@ -1013,12 +1127,23 @@ func WriteTenantExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource
 		if tables, err = ListTenantTables(ctx, tx, schemaName); err != nil {
 			return err
 		}
+		forced, err := forcedTables(ctx, tx, schemaName)
+		if err != nil {
+			return err
+		}
 		files := zipFileNames("tables", tables)
-		for _, table := range tables {
-			q := fmt.Sprintf(`SELECT * FROM %s.%s`, quoteIdent(schemaName), quoteIdent(table))
-			te := exportTable(ctx, tx, zw, table, files[table], q, nil, format)
+		reads := make([]tableRead, len(tables))
+		for i, table := range tables {
+			reads[i] = tableRead{schema: schemaName, table: table, file: files[table],
+				sql: fmt.Sprintf(`SELECT * FROM %s.%s`, quoteIdent(schemaName), quoteIdent(table))}
+		}
+		results, err := readTables(ctx, tx, zw, forced, reads, format)
+		if err != nil {
+			return err
+		}
+		for _, te := range results {
 			if te.Status == TableFailed {
-				slog.Warn("export: table not exported", "table", table, "error", te.Error, "project_id", projectID)
+				slog.Warn("export: table not exported", "table", te.Table, "error", te.Error, "project_id", projectID)
 			}
 			res.TotalRows += te.Rows
 			exported = append(exported, te)
@@ -1135,14 +1260,10 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, 
 		if err := requireSchema(ctx, tx, schemaName); err != nil {
 			return err
 		}
-		// User profile.
-		te := exportTable(ctx, tx, zw, "users", "_user_profile",
-			fmt.Sprintf(`SELECT * FROM %s.users WHERE id = $1`, quoteIdent(schemaName)),
-			[]any{userID}, format)
-		res.TotalRows += te.Rows
-		exported = append(exported, te)
-
-		var err error
+		forced, err := forcedTables(ctx, tx, schemaName)
+		if err != nil {
+			return err
+		}
 		if refs, err = DiscoverUserTables(ctx, tx, schemaName); err != nil {
 			return err
 		}
@@ -1151,12 +1272,22 @@ func WriteUserExport(ctx context.Context, pool *pgxpool.Pool, src ExportSource, 
 			names[i] = r.TableName
 		}
 		files := zipFileNames("tables", names)
+		// User profile first, then the tables that reference the user.
+		reads := []tableRead{{schema: schemaName, table: "users", file: "_user_profile",
+			sql: fmt.Sprintf(`SELECT * FROM %s.users WHERE id = $1`, quoteIdent(schemaName)), args: []any{userID}}}
 		for _, ref := range refs {
-			q := fmt.Sprintf(`SELECT * FROM %s.%s WHERE %s = $1`,
-				quoteIdent(schemaName), quoteIdent(ref.TableName), quoteIdent(ref.UserColumn))
-			te := exportTable(ctx, tx, zw, ref.TableName, files[ref.TableName], q, []any{userID}, format)
-			if te.Status == TableFailed {
-				slog.Warn("export: user table not exported", "table", ref.TableName, "error", te.Error, "project_id", projectID)
+			reads = append(reads, tableRead{schema: schemaName, table: ref.TableName, file: files[ref.TableName],
+				sql: fmt.Sprintf(`SELECT * FROM %s.%s WHERE %s = $1`,
+					quoteIdent(schemaName), quoteIdent(ref.TableName), quoteIdent(ref.UserColumn)),
+				args: []any{userID}})
+		}
+		results, err := readTables(ctx, tx, zw, forced, reads, format)
+		if err != nil {
+			return err
+		}
+		for i, te := range results {
+			if i > 0 && te.Status == TableFailed {
+				slog.Warn("export: user table not exported", "table", te.Table, "error", te.Error, "project_id", projectID)
 			}
 			res.TotalRows += te.Rows
 			exported = append(exported, te)

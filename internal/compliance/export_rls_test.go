@@ -5,13 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eurobase/euroback/internal/audit"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,7 +39,7 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 	// Production source: the developer pool as eurobase_developer itself.
 	src := ExportSource{Pool: dev}
 
-	t.Run("reads every row as the owner; FORCE RLS table is reported, not dropped", func(t *testing.T) {
+	t.Run("reads every row as the owner, FORCE RLS tables included", func(t *testing.T) {
 		res, entries, meta := runTenantExport(t, gw, src, schema, projectID)
 		for file, want := range map[string]int{
 			"tables/bookings.json":        3, // <schema>_ddl-owned, owner-only policy
@@ -45,26 +49,21 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 			"tables/empty_table.json":     0, // empty tables get a file
 			"tables/legacy_dev.json":      3, // eurobase_developer-owned (legacy MCP DDL)
 			"tables/legacy_gw.json":       2, // eurobase_gateway-owned (legacy SDK DDL)
+			"tables/forced.json":          4, // FORCE RLS, deny-all policy (#906)
+			"tables/z_after.json":         2, // read after forced
 		} {
 			if got := jsonRows(t, entries, file); got != want {
 				t.Errorf("%s: %d rows, want %d", file, got, want)
 			}
 		}
-		if _, ok := entries["tables/forced.json"]; ok {
-			t.Error("FORCE RLS table produced a file; the read should have been refused")
-		}
 		if _, ok := entries["tables/a_.._b.json"]; !ok {
 			t.Errorf("table named %q not exported under a safe name; have %v", "a/../b", keys(entries))
 		}
-		forced := findTable(meta.Tables, "forced")
-		if forced == nil || forced.Status != TableFailed || !strings.Contains(forced.Error, "row-level security") {
-			t.Errorf("forced table status = %+v, want failed with the RLS error", forced)
+		if f := findTable(meta.Tables, "forced"); f == nil || f.Status != TableExported || f.Rows != 4 {
+			t.Errorf("forced table = %+v, want exported with 4 rows", f)
 		}
-		if res.Complete || meta.Complete {
-			t.Error("export with a failed table reported complete")
-		}
-		if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], `"forced"`) {
-			t.Errorf("warnings = %q", res.Warnings)
+		if !res.Complete || !meta.Complete || len(res.Warnings) != 0 {
+			t.Errorf("complete=%v meta.complete=%v warnings=%q, want complete", res.Complete, meta.Complete, res.Warnings)
 		}
 		if b := findTable(meta.Tables, "bookings"); b == nil || b.Status != TableExported || b.Rows != 3 || b.File != "tables/bookings.json" {
 			t.Errorf("bookings = %+v", b)
@@ -86,6 +85,195 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		}
 		if u := jsonObjects(t, entries, "tables/users.json"); len(u) == 1 && u[0]["email"] != "member@export.test" {
 			t.Errorf("users row lost its other columns: %v", u[0])
+		}
+	})
+
+	forceOn := func(t *testing.T) bool {
+		t.Helper()
+		var on bool
+		if err := dev.QueryRow(ctx, `SELECT relforcerowsecurity FROM pg_class
+			WHERE oid = to_regclass($1)`, quoteIdent(schema)+".forced").Scan(&on); err != nil {
+			t.Fatal(err)
+		}
+		return on
+	}
+
+	// The export switches FORCE off only inside its own transaction.
+	t.Run("FORCE is still on after the export", func(t *testing.T) {
+		runTenantExport(t, gw, src, schema, projectID)
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off")
+		}
+	})
+
+	// A table someone else holds a lock on fails after the lock timeout
+	// (forcedLockTimeout) with the reason, and the other tables are still
+	// exported.
+	t.Run("a busy FORCE RLS table fails with the reason", func(t *testing.T) {
+		lockTx, err := dev.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lockTx.Rollback(ctx) //nolint:errcheck
+		if _, err := lockTx.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS SHARE MODE`, quoteIdent(schema))); err != nil {
+			t.Fatal(err)
+		}
+		res, entries, meta := runTenantExport(t, gw, src, schema, projectID)
+		if f := findTable(meta.Tables, "forced"); f == nil || f.Status != TableFailed || f.Error != forcedBusyNotice {
+			t.Errorf("forced table = %+v, want failed with forcedBusyNotice", f)
+		}
+		if _, ok := entries["tables/forced.json"]; ok {
+			t.Error("busy FORCE table produced a file")
+		}
+		if got := jsonRows(t, entries, "tables/z_after.json"); got != 2 {
+			t.Errorf("z_after: %d rows, want 2", got)
+		}
+		if res.Complete {
+			t.Error("export with a failed table reported complete")
+		}
+		_ = lockTx.Rollback(ctx)
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off")
+		}
+	})
+
+	// The FORCE table's lock is released right after its read, while the
+	// export is still running; only the FORCE tables' savepoints may write,
+	// everything after them runs READ ONLY.
+	t.Run("lock released after the read; read only after the FORCE tables", func(t *testing.T) {
+		err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
+			forced, err := forcedTables(ctx, tx, schema)
+			if err != nil {
+				return err
+			}
+			var buf bytes.Buffer
+			zw := zip.NewWriter(&buf)
+			res, err := readTables(ctx, tx, zw, forced, []tableRead{{schema: schema, table: "forced", file: "tables/forced",
+				sql: fmt.Sprintf(`SELECT * FROM %s.forced`, quoteIdent(schema))}}, "json")
+			if err != nil {
+				return err
+			}
+			if res[0].Status != TableExported || res[0].Rows != 4 {
+				t.Errorf("forced = %+v", res[0])
+			}
+			// Another session can take the strongest lock at once (NOWAIT),
+			// and sees FORCE still on, while the export's transaction is open.
+			other, err := dev.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer other.Rollback(ctx) //nolint:errcheck
+			if _, err := other.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS EXCLUSIVE MODE NOWAIT`, quoteIdent(schema))); err != nil {
+				t.Errorf("lock still held after the read: %v", err)
+			}
+			var on bool
+			if err := other.QueryRow(ctx, `SELECT relforcerowsecurity FROM pg_class WHERE oid = to_regclass($1)`,
+				quoteIdent(schema)+".forced").Scan(&on); err != nil || !on {
+				t.Errorf("FORCE seen by another session during the export: %v (err %v), want on", on, err)
+			}
+			_ = other.Rollback(ctx)
+			_, err = tx.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.forced NO FORCE ROW LEVEL SECURITY`, quoteIdent(schema)))
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "25006" {
+				t.Errorf("write after the FORCE tables: %v, want read_only_sql_transaction (25006)", err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// FORCE must never stay off, however the export ends after switching
+	// it off: the change is only ever in an uncommitted transaction.
+	lockFree := func(t *testing.T) {
+		t.Helper()
+		other, err := dev.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Rollback(ctx) //nolint:errcheck
+		if _, err := other.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS EXCLUSIVE MODE NOWAIT`, quoteIdent(schema))); err != nil {
+			t.Errorf("table still locked: %v", err)
+		}
+	}
+	t.Run("FORCE stays on when the read fails after NO FORCE", func(t *testing.T) {
+		err := withExportSnapshot(ctx, src, func(tx pgx.Tx) error {
+			var buf bytes.Buffer
+			res, err := readTables(ctx, tx, zip.NewWriter(&buf), map[string]bool{"forced": true},
+				[]tableRead{{schema: schema, table: "forced", file: "tables/forced",
+					sql: fmt.Sprintf(`SELECT id / 0 FROM %s.forced`, quoteIdent(schema))}}, "json")
+			if err != nil {
+				return err
+			}
+			// Failed in the read, after NO FORCE (not in noForce itself).
+			if res[0].Status != TableFailed || !strings.Contains(res[0].Error, "division by zero") {
+				t.Errorf("forced = %+v, want failed with division by zero", res[0])
+			}
+			lockFree(t) // released while the export is still open
+			return errors.New("export fails after the FORCE table")
+		})
+		if err == nil {
+			t.Fatal("want the export to fail")
+		}
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off after a failed read")
+		}
+	})
+	t.Run("FORCE stays on when the connection dies after NO FORCE", func(t *testing.T) {
+		conn, err := pgx.Connect(ctx, devURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close(ctx) //nolint:errcheck
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := noForce(ctx, sp, schema, "forced"); err != nil {
+			t.Fatal(err)
+		}
+		// The worker crashes or the network drops: no ROLLBACK, no COMMIT,
+		// the socket just closes.
+		_ = conn.PgConn().Conn().Close()
+		// The server notices the closed socket and aborts the transaction,
+		// which releases the lock; then FORCE must read as on.
+		freed := false
+		for i := 0; i < 50 && !freed; i++ {
+			other, err := dev.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, lerr := other.Exec(ctx, fmt.Sprintf(`LOCK TABLE %s.forced IN ACCESS EXCLUSIVE MODE NOWAIT`, quoteIdent(schema)))
+			_ = other.Rollback(ctx)
+			freed = lerr == nil
+			if !freed {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		if !freed {
+			t.Fatal("table still locked after the connection died")
+		}
+		if !forceOn(t) {
+			t.Fatal("FORCE ROW LEVEL SECURITY was left off after the connection died")
+		}
+	})
+
+	t.Run("user export reads the subject's rows of a FORCE RLS table", func(t *testing.T) {
+		var buf bytes.Buffer
+		res, err := WriteUserExport(ctx, gw, src, &buf, schema, projectID, userID, "exp-user-forced", "json")
+		if err != nil {
+			t.Fatalf("WriteUserExport: %v", err)
+		}
+		if got := jsonRows(t, unzip(t, buf.Bytes()), "tables/forced.json"); got != 2 {
+			t.Errorf("forced: %d rows for this user, want 2", got)
+		}
+		if !res.Complete {
+			t.Errorf("user export incomplete: %q", res.Warnings)
 		}
 	})
 
@@ -124,6 +312,9 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		}
 		if b := findTable(meta.Tables, "bookings"); b == nil || b.Status != TableTruncated {
 			t.Errorf("bookings = %+v, want truncated", b)
+		}
+		if f := findTable(meta.Tables, "forced"); f == nil || f.Status != TableTruncated || f.Rows != 2 {
+			t.Errorf("forced = %+v, want truncated at 2", f)
 		}
 		if s := findTable(meta.Tables, "series_log"); s == nil || s.Status != TableExported {
 			t.Errorf("series_log (exactly the cap) = %+v, want exported", s)
@@ -164,6 +355,7 @@ func TestTenantExport_RLSTablesAreComplete(t *testing.T) {
 		if got := jsonRows(t, entries, "tables/bookings.json"); got != 1 {
 			t.Errorf("bookings: %d rows for this user, want 1", got)
 		}
+
 		if got := jsonRows(t, entries, "_audit_log.json"); got != 1 {
 			t.Errorf("_audit_log.json: %d entries for this user, want 1", got)
 		}
@@ -223,9 +415,15 @@ func provisionRLSFixture(t *testing.T, dev *pgxpool.Pool) (projectID, schema, us
 		`ALTER TABLE `+s+`.bookings ENABLE ROW LEVEL SECURITY`,
 		`CREATE POLICY own ON `+s+`.bookings USING (user_id = public.current_end_user_id())`,
 		`INSERT INTO `+s+`.bookings (user_id, name) VALUES ('`+userID+`', 'a'), (gen_random_uuid(), 'b'), (gen_random_uuid(), 'c')`,
-		`CREATE TABLE `+s+`.forced (id int)`,
+		`CREATE TABLE `+s+`.forced (id int, user_id uuid)`,
+		`INSERT INTO `+s+`.forced VALUES (1, '`+userID+`'), (2, '`+userID+`'), (3, gen_random_uuid()), (4, NULL)`,
 		`ALTER TABLE `+s+`.forced ENABLE ROW LEVEL SECURITY`,
 		`ALTER TABLE `+s+`.forced FORCE ROW LEVEL SECURITY`,
+		`CREATE POLICY none ON `+s+`.forced USING (false)`,
+		// Sorts after "forced": read after the FORCE tables, read only.
+		`CREATE TABLE `+s+`.z_after (id int)`,
+		`ALTER TABLE `+s+`.z_after ENABLE ROW LEVEL SECURITY`,
+		`INSERT INTO `+s+`.z_after VALUES (1), (2)`,
 		`CREATE TABLE `+s+`.empty_table (id int)`,
 		`CREATE TABLE `+s+`."a/../b" (id int)`,
 		// SQL-editor tables are owned by eurobase_migrator.

@@ -179,25 +179,10 @@ curl https://api.eurobase.app/platform/projects/$PROJECT_ID/compliance/exports/$
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Tables with FORCE ROW LEVEL SECURITY</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Both export types read each table as its owner, with row-level security bypassed, so it gets every row. A table with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">FORCE ROW LEVEL SECURITY</code> applies its policies to the owner too. The export then leaves that table out rather than export only part of it: it is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">failed</code> in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">_metadata.json</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">complete</code> is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">false</code>, and a full project export's warning reads:
+					Both export types read each table as its owner, with row-level security bypassed, so they get every row. A table with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">FORCE ROW LEVEL SECURITY</code> applies its policies to the owner too. For those tables the export switches FORCE off inside its own transaction, reads the table and undoes the change right away. Nothing is saved, so your app and everyone else keep seeing FORCE on, and the tables are exported in full. If an export fails or is interrupted at any point, the database discards the change on its own. You don't need to change anything.
 				</p>
-				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
-					<pre>table "orders" was not exported: query would be affected by row-level security policy for table "orders"</pre>
-				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					To export such tables, switch FORCE off for the export and back on afterwards, in the SQL editor:
-				</p>
-				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
-					<pre>-- 1. before the export, for each table named in the warnings
-ALTER TABLE orders NO FORCE ROW LEVEL SECURITY;
-
--- 2. run the export and check that "complete" is true
-
--- 3. afterwards
-ALTER TABLE orders FORCE ROW LEVEL SECURITY;</pre>
-				</div>
-				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					Row-level security stays enabled the whole time, so requests from your app are still checked against your policies. FORCE only decides whether the policies also apply to the table owner, which is the role behind the SQL editor, migrations and the export. On Team, that includes connections using your database's owner URL while FORCE is off. An archive with failed tables can't be completed afterwards; request a new export.
+					While the export reads such a table, it holds a lock on it: reads and writes of that table wait until the read is done (usually well under a second per thousand rows). This applies to project exports and to per-user exports, including the ones your end users request themselves. If another transaction is using the table, the export waits at most 2 seconds, and requests to that table queue behind it during that time; then it leaves the table out. It is then <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">failed</code> in <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">_metadata.json</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">complete</code> is <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">false</code>, and the warning says the table was busy. An archive with failed tables can't be completed afterwards; request a new export.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Your Data Processing Agreement (Art. 28 GDPR)</h3>
