@@ -135,7 +135,7 @@
   <li>Walk the full flow in the docs: <a href="https://console.eurobase.app/docs/team-tier">Team tier</a> and <a href="https://console.eurobase.app/docs/orgs-sso">Organizations &amp; SSO</a>.</li>
 </ol>
 <p style="background:#fef3c7;border-left:3px solid #f59e0b;padding:10px 12px;margin:14px 0;color:#92400e;font-size:14px;"><strong>A few beta rough edges to set expectations:</strong> SSO is OIDC-only for now (no SAML) and teammates are added by email (no domain auto-provisioning yet); one organisation per account for now; snapshots are point-in-time restore points, not continuous PITR, and don't include your S3 storage objects; there's no self-serve billing or Team→Free/Pro downgrade during the beta — once a project is on a dedicated instance it stays there. Features may still change.</p>
-<p>Found a bug or have an idea? File it on GitHub at <a href="https://github.com/STGime/euroback/issues">github.com/STGime/euroback/issues</a> — or just reply to this mail, I read every word.</p>
+<p>Found a bug or have an idea? File it on GitHub at <a href="https://github.com/STGime/euroback/issues">github.com/STGime/euroback/issues</a> — or write to <a href="mailto:contact@eurobase.app">contact@eurobase.app</a>, I read every word.</p>
 <p>— Stefan</p>
 <hr/>
 <p style="color:#6b7280;font-size:12px;">All your data stays in EU jurisdiction (Scaleway, France). GDPR by design.</p>`
@@ -149,7 +149,7 @@
   <li><strong>Feature 1</strong> — ...</li>
   <li><strong>Feature 2</strong> — ...</li>
 </ul>
-<p>Try it out at <a href="https://console.eurobase.app">console.eurobase.app</a>. As always, reply with feedback.</p>
+<p>Try it out at <a href="https://console.eurobase.app">console.eurobase.app</a>. As always, send feedback to <a href="mailto:contact@eurobase.app">contact@eurobase.app</a>.</p>
 <p>— Stefan</p>`
 	};
 
@@ -169,7 +169,7 @@
   <li>Full write-up: <a href="https://eurobase.app/blog/public-beta-open">eurobase.app/blog/public-beta-open</a></li>
 </ul>
 <p>The closed-beta framing is over, but the practical reality is the same as yesterday: your data stays in EU jurisdiction (Scaleway, France), the SDK / CLI / MCP haven't changed, and <code>eurobase db dump</code> still gives you a standard <code>pg_dump</code> you can migrate anywhere.</p>
-<p>Bug reports or feedback: reply to this mail, or open an issue at <a href="https://github.com/STGime/euroback/issues">github.com/STGime/euroback/issues</a>. I read every word.</p>
+<p>Bug reports or feedback: write to <a href="mailto:contact@eurobase.app">contact@eurobase.app</a>, or open an issue at <a href="https://github.com/STGime/euroback/issues">github.com/STGime/euroback/issues</a>. I read every word.</p>
 <p>— Stefan</p>
 <hr/>
 <p style="color:#6b7280;font-size:12px;">Sent to Eurobase account holders. This is not a marketing email — one-off announcement.</p>`
