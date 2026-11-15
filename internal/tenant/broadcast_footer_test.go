@@ -16,7 +16,7 @@ func TestWithBroadcastFooter(t *testing.T) {
 		t.Fatalf("link to the console's mail settings missing: %s", full)
 	}
 	frag := withBroadcastFooter("<p>Hi</p>", url)
-	if !strings.HasPrefix(frag, "<p>Hi</p>") || !strings.Contains(frag, "reply to this email") {
+	if !strings.HasPrefix(frag, "<p>Hi</p>") || !strings.Contains(frag, "contact@eurobase.app") {
 		t.Fatalf("fragment: %s", frag)
 	}
 }

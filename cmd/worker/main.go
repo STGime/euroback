@@ -142,11 +142,9 @@ func main() {
 	docsURL := consoleURL + "/docs"
 
 	// Drip sender falls back to `hello@eurobase.app` if no explicit
-	// env override — the persona split (`hello@` drip vs `noreply@`
-	// transactional) is a locked-in decision in the public-beta
-	// launch plan; hardcoding the fallback keeps a Secret typo from
-	// silently pointing "reply to this email — we read replies" at a
-	// dead noreply@ inbox.
+	// env override (the persona split `hello@` drip vs `noreply@`
+	// transactional). Replies to either aren't read: mail templates
+	// point people at contact@eurobase.app instead of "reply".
 	emailClient := email.NewEmailClient(
 		os.Getenv("SCW_TEM_SECRET_KEY"),
 		os.Getenv("SCW_TEM_REGION"),
