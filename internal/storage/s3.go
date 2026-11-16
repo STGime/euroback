@@ -81,6 +81,30 @@ func (s *S3Client) CreateBucket(ctx context.Context, bucketName string) error {
 	return s.CreateBucketWithObjectLock(ctx, bucketName, false)
 }
 
+// EnsureUploadCORS lets browsers use signed URLs on bucketName: PUT
+// (large uploads straight to storage), GET and HEAD from any origin. CORS
+// only lets a browser read the response; every request still needs a
+// valid signature, and the bucket stays private. Idempotent (replaces the
+// bucket's CORS rules).
+func (s *S3Client) EnsureUploadCORS(ctx context.Context, bucketName string) error {
+	_, err := s.client.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+		Bucket: aws.String(bucketName),
+		CORSConfiguration: &types.CORSConfiguration{
+			CORSRules: []types.CORSRule{{
+				AllowedOrigins: []string{"*"},
+				AllowedMethods: []string{"PUT", "GET", "HEAD"},
+				AllowedHeaders: []string{"*"},
+				ExposeHeaders:  []string{"ETag"},
+				MaxAgeSeconds:  aws.Int32(3600),
+			}},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("put bucket cors %s: %w", bucketName, err)
+	}
+	return nil
+}
+
 // CreateBucketWithObjectLock creates a private S3 bucket, optionally
 // enabling S3 Object Lock at bucket creation time (a one-time flag —
 // Object Lock cannot be turned on after the fact). Returns nil if the
@@ -132,6 +156,12 @@ func (s *S3Client) CreateBucketWithObjectLock(ctx context.Context, bucketName st
 		} else {
 			return fmt.Errorf("set bucket acl to private %s: %w", bucketName, err)
 		}
+	}
+
+	// Best effort: the worker's CORS pass (workers.StartBucketCORS)
+	// repairs a bucket this misses.
+	if err := s.EnsureUploadCORS(ctx, bucketName); err != nil {
+		slog.Warn("bucket cors not set", "bucket", bucketName, "error", err)
 	}
 
 	slog.Info("s3 bucket created", "bucket", bucketName, "object_lock", enableObjectLock)
@@ -650,6 +680,15 @@ func (s *S3Client) GeneratePresignedUploadURL(ctx context.Context, bucketName, k
 // upstream comparators (audit logs, policy resolution) see a stable
 // value regardless of when the presigner ran.
 func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention) (*PresignedUpload, error) {
+	return s.GeneratePresignedUploadURLSized(ctx, bucketName, key, contentType, expiry, retention, 0)
+}
+
+// GeneratePresignedUploadURLSized is GeneratePresignedUploadURLWithRetention
+// with the upload's size in the signature (size > 0): Content-Length is a
+// signed header, so the storage refuses a PUT of any other size. That's how
+// a plan's upload limit holds for uploads that never pass the gateway.
+// size 0 signs no length.
+func (s *S3Client) GeneratePresignedUploadURLSized(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention, size int64) (*PresignedUpload, error) {
 	if expiry <= 0 {
 		expiry = 15 * time.Minute
 	}
@@ -667,6 +706,9 @@ func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, 
 	if retention.Mode != "" {
 		input.ObjectLockMode = types.ObjectLockMode(retention.Mode)
 		input.ObjectLockRetainUntilDate = aws.Time(retention.RetainUntil)
+	}
+	if size > 0 {
+		input.ContentLength = aws.Int64(size)
 	}
 
 	presigned, err := s.presignClient.PresignPutObject(ctx, input, s3.WithPresignExpires(expiry))

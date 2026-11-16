@@ -147,6 +147,20 @@ type StorageHandler struct {
 	retention RetentionResolver
 	holds     HoldChecker
 	resolver  PoolResolver
+	// uploadLimit returns a project's per-file upload limit in bytes
+	// (its plan's upload_size_mb). Used for sized signed upload URLs.
+	uploadLimit UploadLimitFunc
+}
+
+// UploadLimitFunc returns the per-file upload limit in bytes for a project.
+type UploadLimitFunc func(ctx context.Context, projectID string) (int64, error)
+
+// WithUploadLimit sets the per-plan upload limit applied to sized signed
+// upload URLs. Chainable; without it a sized request is refused (503)
+// rather than signed without a check.
+func (h *StorageHandler) WithUploadLimit(f UploadLimitFunc) *StorageHandler {
+	h.uploadLimit = f
+	return h
 }
 
 // NewStorageHandler creates a new StorageHandler backed by the given S3Client
@@ -1320,6 +1334,10 @@ type signedURLRequest struct {
 	Operation   string `json:"operation"`    // "upload" or "download"
 	ContentType string `json:"content_type"` // required for upload
 	ExpiresIn   int    `json:"expires_in"`   // seconds; 0 means default
+	// Size (upload only) is the file's exact size in bytes. When set, it
+	// is checked against the plan's upload limit and signed into the URL
+	// (the upload must send exactly that many bytes).
+	Size int64 `json:"size"`
 }
 
 // signedURLResponse is the JSON response with the generated URL.
@@ -1376,6 +1394,16 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
+	if req.Size < 0 || (req.Size > 0 && req.Operation != "upload") {
+		http.Error(w, `{"error":"size must be a positive byte count, for uploads only"}`, http.StatusBadRequest)
+		return
+	}
+	if req.Size > 0 {
+		if status, msg := h.checkUploadSize(r, req.Size); status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+	}
 	if req.Operation == "upload" && isExportKey(r, req.Key) {
 		http.Error(w, ErrExportsReadOnlyJSON, http.StatusForbidden)
 		return
@@ -1407,6 +1435,16 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			slog.Error("storage signed-url: tracking failed", "error", err, "key", req.Key)
 			writeClaimError(w, err)
 			return
+		}
+		// A sized URL accepts exactly that many bytes: record the size
+		// now (the PUT never passes through the gateway), so the file
+		// counts toward the project's storage usage.
+		if req.Size > 0 {
+			if err := h.recordSignedUploadSize(r, req.Key, req.Size); err != nil {
+				slog.Error("storage signed-url: recording size failed", "error", err, "key", req.Key)
+				writeClaimError(w, err)
+				return
+			}
 		}
 	}
 	if req.Operation == "download" {
@@ -1446,10 +1484,18 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			expiry = maxUploadURLExpiry
 		}
 		retention := h.retentionFor(r, req.Key)
-		p, perr := h.s3.GeneratePresignedUploadURLWithRetention(r.Context(), bucket, req.Key, req.ContentType, expiry, retention)
+		p, perr := h.s3.GeneratePresignedUploadURLSized(r.Context(), bucket, req.Key, req.ContentType, expiry, retention, req.Size)
 		if p != nil {
 			url = p.URL
 			signedHeaders = p.SignedHeaders
+			// A sized URL also signs Content-Type: the upload must send
+			// exactly this value, so say so.
+			if req.Size > 0 {
+				if signedHeaders == nil {
+					signedHeaders = map[string]string{}
+				}
+				signedHeaders["content-type"] = req.ContentType
+			}
 		}
 		err = perr
 
@@ -1633,4 +1679,44 @@ func writeTenantPoolError(w http.ResponseWriter, err error) {
 		return
 	}
 	http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+}
+
+// checkUploadSize checks a declared upload size against the project's
+// plan limit: 0 and "" when it fits, else the HTTP status and JSON body.
+// A failed lookup refuses (503) rather than signing an unchecked size.
+func (h *StorageHandler) checkUploadSize(r *http.Request, size int64) (int, string) {
+	projectID := query.ProjectIDFromContext(r.Context())
+	if pc, _ := auth.ProjectFromContext(r.Context()); pc != nil && pc.ProjectID != "" {
+		projectID = pc.ProjectID
+	}
+	if h.uploadLimit == nil || projectID == "" {
+		return http.StatusServiceUnavailable, `{"error":"upload limit unavailable, try again"}`
+	}
+	limit, err := h.uploadLimit(r.Context(), projectID)
+	if err != nil || limit <= 0 {
+		slog.Error("storage signed-url: upload limit lookup failed", "error", err, "project_id", projectID)
+		return http.StatusServiceUnavailable, `{"error":"upload limit unavailable, try again"}`
+	}
+	if size > limit {
+		return http.StatusRequestEntityTooLarge, fmt.Sprintf(`{"error":"file is larger than this plan's upload limit of %d MB","max_bytes":%d}`, limit>>20, limit)
+	}
+	return 0, ""
+}
+
+// recordSignedUploadSize sets the tracked size of key to the size a sized
+// signed upload URL was issued for.
+func (h *StorageHandler) recordSignedUploadSize(r *http.Request, key string, size int64) error {
+	if h.engine == nil || h.pool == nil {
+		return nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" {
+		return nil
+	}
+	return h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE "%s".storage_objects SET size_bytes = $2 WHERE key = $1`, strings.ReplaceAll(schema, `"`, `""`)),
+			key, size)
+		return err
+	})
 }

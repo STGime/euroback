@@ -317,6 +317,8 @@ await eb.db.schema.createTable('internal_admin_lookups', {
 
 ## Storage
 
+Per-file upload limit by plan: Free 10 MB, Pro 50 MB, Team and Legal Team 500 MB. `upload()` sends files over 45 MB straight to storage through a signed upload URL sized to the file (checked against that limit), so large files work up to your plan's limit.
+
 ```ts
 // Upload a file
 const { key, size, error } = await eb.storage.upload(
@@ -341,11 +343,13 @@ const { url, expires_at } = await eb.storage.createSignedUrl(
   { expiresIn: 3600 },
 )
 
-// Generate a signed upload URL
-const { url } = await eb.storage.createSignedUrl(
+// Generate a signed upload URL (size: the file's exact byte count,
+// checked against your plan's upload limit; send exactly that many bytes
+// and any returned `headers`)
+const { url, headers } = await eb.storage.createSignedUrl(
   'uploads/doc.pdf',
   'upload',
-  { expiresIn: 600 },
+  { expiresIn: 600, size: file.size, contentType: 'application/pdf' },
 )
 
 // Delete a file
