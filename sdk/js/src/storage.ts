@@ -26,7 +26,7 @@ export interface SignedUrlResult {
    * Headers the upload must send exactly as given (e.g. a retention policy
    * on Legal Team projects). Empty for most uploads and all downloads.
    */
-  headers: Record<string, string>
+  headers?: Record<string, string>
   error: string | null
 }
 
@@ -183,13 +183,13 @@ export class StorageClient {
     if (signed.error) {
       return { key: '', content_type: '', size: 0, error: signed.error }
     }
+    // The signed headers (Content-Type included) must be sent exactly as
+    // given; Headers merges names case-insensitively.
+    const headers = new Headers(signed.headers ?? {})
+    if (!headers.has('content-type')) headers.set('content-type', contentType)
     let res: Response
     try {
-      res = await fetch(signed.url, {
-        method: 'PUT',
-        headers: { 'Content-Type': contentType, ...signed.headers },
-        body: blob,
-      })
+      res = await fetch(signed.url, { method: 'PUT', headers, body: blob })
     } catch (err) {
       return { key: '', content_type: '', size: 0, error: `upload failed: ${(err as Error).message}` }
     }

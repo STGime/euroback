@@ -1436,6 +1436,16 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 			writeClaimError(w, err)
 			return
 		}
+		// A sized URL accepts exactly that many bytes: record the size
+		// now (the PUT never passes through the gateway), so the file
+		// counts toward the project's storage usage.
+		if req.Size > 0 {
+			if err := h.recordSignedUploadSize(r, req.Key, req.Size); err != nil {
+				slog.Error("storage signed-url: recording size failed", "error", err, "key", req.Key)
+				writeClaimError(w, err)
+				return
+			}
+		}
 	}
 	if req.Operation == "download" {
 		visible, err := h.objectReadable(r, req.Key)
@@ -1478,6 +1488,14 @@ func (h *StorageHandler) GenerateSignedURL(w http.ResponseWriter, r *http.Reques
 		if p != nil {
 			url = p.URL
 			signedHeaders = p.SignedHeaders
+			// A sized URL also signs Content-Type: the upload must send
+			// exactly this value, so say so.
+			if req.Size > 0 {
+				if signedHeaders == nil {
+					signedHeaders = map[string]string{}
+				}
+				signedHeaders["content-type"] = req.ContentType
+			}
 		}
 		err = perr
 
@@ -1683,4 +1701,22 @@ func (h *StorageHandler) checkUploadSize(r *http.Request, size int64) (int, stri
 		return http.StatusRequestEntityTooLarge, fmt.Sprintf(`{"error":"file is larger than this plan's upload limit of %d MB","max_bytes":%d}`, limit>>20, limit)
 	}
 	return 0, ""
+}
+
+// recordSignedUploadSize sets the tracked size of key to the size a sized
+// signed upload URL was issued for.
+func (h *StorageHandler) recordSignedUploadSize(r *http.Request, key string, size int64) error {
+	if h.engine == nil || h.pool == nil {
+		return nil
+	}
+	schema := h.schemaForRequest(r)
+	if schema == "" {
+		return nil
+	}
+	return h.runAsService(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE "%s".storage_objects SET size_bytes = $2 WHERE key = $1`, strings.ReplaceAll(schema, `"`, `""`)),
+			key, size)
+		return err
+	})
 }

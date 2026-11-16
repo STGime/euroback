@@ -317,7 +317,7 @@ await eb.db.schema.createTable('internal_admin_lookups', {
 
 ## Storage
 
-Per-file upload limit by plan: Free 10 MB, Pro 50 MB, Team and Legal Team 500 MB. `upload()` sends files over 45 MB straight to storage through a signed upload URL, so large files work up to your plan's limit.
+Per-file upload limit by plan: Free 10 MB, Pro 50 MB, Team and Legal Team 500 MB. `upload()` sends files over 45 MB straight to storage through a signed upload URL sized to the file (checked against that limit), so large files work up to your plan's limit.
 
 ```ts
 // Upload a file

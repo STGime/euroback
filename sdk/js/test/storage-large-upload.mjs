@@ -17,7 +17,7 @@ globalThis.fetch = async (url, init = {}) => {
     if (req.size > 500 * 1024 * 1024) {
       return json({ error: 'file is larger than this plan\'s upload limit of 500 MB' }, 413)
     }
-    return json({ url: 'https://s3.example/b/big.bin?sig', expires_at: '2030-01-01T00:00:00Z', headers: { 'x-amz-object-lock-mode': 'COMPLIANCE' } }, 200)
+    return json({ url: 'https://s3.example/b/big.bin?sig', expires_at: '2030-01-01T00:00:00Z', headers: { 'x-amz-object-lock-mode': 'COMPLIANCE', 'content-type': JSON.parse(init.body).content_type } }, 200)
   }
   if (u.startsWith('https://s3.example/')) return new Response('', { status: 200 })
   if (u.endsWith('/v1/storage/upload')) return json({ key: 'small.txt', content_type: 'text/plain', size: 5 }, 201)
@@ -40,7 +40,8 @@ assert.equal(res.size, big.size)
 assert.equal(calls.length, 2)
 assert.deepEqual(JSON.parse(calls[0].body), { key: 'big.bin', operation: 'upload', content_type: 'application/octet-stream', size: big.size })
 assert.equal(calls[1].method, 'PUT')
-assert.equal(calls[1].headers['x-amz-object-lock-mode'], 'COMPLIANCE', 'signed headers are sent')
+assert.equal(calls[1].headers.get('x-amz-object-lock-mode'), 'COMPLIANCE', 'signed headers are sent')
+assert.equal(calls[1].headers.get('content-type'), 'application/octet-stream', 'one content-type, as signed')
 assert.equal(calls[1].body, big)
 
 // Over the plan limit: the API's refusal comes back as the error, no PUT.

@@ -719,6 +719,11 @@ func main() {
 	// (from the email provider), so bulk announcements and the onboarding
 	// series skip them.
 	workers.StartEmailBounceSync(ctx, pool, emailClient)
+	// Browser CORS on every project bucket: signed upload URLs PUT
+	// straight to storage (large uploads).
+	if s3Client != nil {
+		workers.StartBucketCORS(ctx, pool, s3Client)
+	}
 
 	// ── Backup sweeper (M3) ──
 	// 6-hour ticker: refreshes backup_snapshots cache from

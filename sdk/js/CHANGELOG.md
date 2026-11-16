@@ -8,7 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 `storage.upload()` sends files over 45 MB straight to storage through a signed upload URL (sized to the file and checked against the plan's upload limit), so uploads work up to the plan's limit: 500 MB on Team and Legal Team. Smaller files keep going through the API. Needs the gateway change from the same PR (`size` on `POST /v1/storage/signed-url`).
 
-`createSignedUrl(key, 'upload', { size })` passes the file's size; `SignedUrlResult` now carries `headers`, which an upload must send as given (retention policies on Legal Team).
+`createSignedUrl(key, 'upload', { size })` passes the file's size; `SignedUrlResult` now carries optional `headers`, which an upload must send exactly as given (Content-Type on sized URLs, retention policies on Legal Team).
+
+**Behaviour change:** files over 45 MB are now checked against the plan's upload limit, so on Free (10 MB) an `upload()` of 45–50 MB that used to succeed now returns an error; Pro's 50 MB limit is unchanged.
 
 ## 0.12.0 — 2026-10-20
 
