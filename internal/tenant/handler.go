@@ -279,6 +279,14 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 		if req.Plan == "" {
 			req.Plan = "free"
 		}
+		// Paid plans start with a payment: a Pro project is created by the
+		// billing webhook after checkout (CreateProjectForBilling), never
+		// here. Team / Legal Team are checked against the beta grant in
+		// CreateProject. Anything else is refused.
+		if status, msg := createPlanAllowed(req.Plan); status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
 
 		// #70 diagnostic: log right before the INSERT so we can see if
 		// anything between decode and CreateProject mutated req.Plan.
@@ -751,5 +759,18 @@ func HandleDeleteProject(pool *pgxpool.Pool, svc *TenantService) http.HandlerFun
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// createPlanAllowed says whether POST /v1/tenants may create a project on
+// plan: 0 and "" if so, else the HTTP status and JSON body.
+func createPlanAllowed(plan string) (int, string) {
+	switch plan {
+	case "free", "team", "legal_team":
+		return 0, ""
+	case "pro":
+		return http.StatusPaymentRequired, `{"error":"Pro projects are created through checkout","code":"checkout_required"}`
+	default:
+		return http.StatusBadRequest, `{"error":"unknown plan"}`
 	}
 }
