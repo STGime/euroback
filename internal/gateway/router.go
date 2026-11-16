@@ -951,6 +951,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))
 			r.Delete("/allowlist/{email}", tenant.AdminRemoveAllowlist(pool))
 			r.Post("/allowlist/email", tenant.AdminSendAllowlistEmail(pool, emailService))
+			// Signup domain blocklist (public.platform_blocked_signup_domains),
+			// enforced in PlatformAuthService.SignUp.
+			r.Get("/blocked-domains", tenant.AdminListBlockedDomains(pool))
+			r.Post("/blocked-domains", tenant.AdminAddBlockedDomain(pool))
+			r.Delete("/blocked-domains/{domain}", tenant.AdminRemoveBlockedDomain(pool))
 			// Broadcast audience — the deduped union of
 			// platform_allowlist ∪ platform_users. Used by the
 			// Compose Broadcast modal in /admin so a superadmin can

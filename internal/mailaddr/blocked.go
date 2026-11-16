@@ -2,31 +2,37 @@ package mailaddr
 
 import "strings"
 
-// blockedSignupDomains lists deliverable domains that are refused at
-// platform signup because the addresses on them only ever produce abuse
-// or throwaway accounts, never a genuine user. Unlike IsReserved (which
-// covers undeliverable reserved/test TLDs), these are real domains we
-// deliberately decline. Keep entries lowercase, registrable domains
-// (no leading dot); matching also covers their subdomains. Sorted for
-// readability.
-var blockedSignupDomains = []string{
-	"fldubai.com",
-}
-
-// IsBlockedSignupDomain reports whether addr's domain is on the signup
-// blocklist — the domain itself, or any subdomain of it. The caller
-// (PlatformAuthService.SignUp) refuses the signup when this is true.
-func IsBlockedSignupDomain(addr string) bool {
+// SignupDomainCandidates returns an address's email domain together with
+// each of its parent domains, lowercased, for matching against the signup
+// blocklist (public.platform_blocked_signup_domains). The blocklist stores
+// registrable domains, so a row for "fldubai.com" must also refuse
+// "x@mail.fldubai.com": the caller queries `domain = ANY(candidates)`, and
+// a subdomain's candidate list includes its parents.
+//
+// Example: "a@x.y.fldubai.com" -> ["x.y.fldubai.com", "y.fldubai.com",
+// "fldubai.com", "com"]. Returns nil when addr has no domain part.
+//
+// The actual lookup lives in the auth package (PlatformAuthService.SignUp)
+// because mailaddr is a leaf package that must not import a DB driver; this
+// helper is the pure string half of the check.
+func SignupDomainCandidates(addr string) []string {
 	addr = strings.ToLower(strings.TrimSpace(addr))
 	at := strings.LastIndexByte(addr, '@')
 	if at < 0 {
-		return false
+		return nil
 	}
 	domain := strings.TrimSuffix(addr[at+1:], ".")
-	for _, d := range blockedSignupDomains {
-		if domain == d || strings.HasSuffix(domain, "."+d) {
-			return true
-		}
+	if domain == "" {
+		return nil
 	}
-	return false
+	var out []string
+	for {
+		out = append(out, domain)
+		i := strings.IndexByte(domain, '.')
+		if i < 0 {
+			break
+		}
+		domain = domain[i+1:]
+	}
+	return out
 }

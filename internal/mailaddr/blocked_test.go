@@ -1,32 +1,52 @@
 package mailaddr
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
-func TestIsBlockedSignupDomain(t *testing.T) {
-	blocked := []string{
-		"n16630aldiypmyl@fldubai.com",   // the reported abuse address
-		"someone@fldubai.com",           // same domain, different local part
-		"abuse@mail.fldubai.com",        // subdomain
-		"Mixed@FLDubai.Com",             // case-insensitive
-		" spaced@fldubai.com ",          // surrounding whitespace
-		"trailingdot@fldubai.com.",      // trailing root dot
+func TestSignupDomainCandidates(t *testing.T) {
+	cases := []struct {
+		addr string
+		want []string
+	}{
+		{"n16630aldiypmyl@fldubai.com", []string{"fldubai.com", "com"}},
+		{"Mixed@FLDubai.Com", []string{"fldubai.com", "com"}},
+		{" spaced@fldubai.com ", []string{"fldubai.com", "com"}},
+		{"trailingdot@fldubai.com.", []string{"fldubai.com", "com"}},
+		{"abuse@x.y.fldubai.com", []string{"x.y.fldubai.com", "y.fldubai.com", "fldubai.com", "com"}},
+		{"user@notfldubai.com", []string{"notfldubai.com", "com"}},
+		{"noatsign", nil},
+		{"trailing@", nil},
+		{"", nil},
 	}
-	for _, addr := range blocked {
-		if !IsBlockedSignupDomain(addr) {
-			t.Errorf("IsBlockedSignupDomain(%q) = false, want true", addr)
+	for _, c := range cases {
+		got := SignupDomainCandidates(c.addr)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("SignupDomainCandidates(%q) = %v, want %v", c.addr, got, c.want)
 		}
 	}
 
-	allowed := []string{
-		"user@example.org",            // ordinary domain (reserved, but not blocked here)
-		"user@notfldubai.com",         // substring, not a subdomain — must not match
-		"user@fldubai.com.evil.com",   // blocked domain only appears mid-host
-		"fldubai.com",                 // no @ at all
-		"",                            // empty
+	// The matching contract: an address is blocked iff one of its
+	// candidates equals a blocklisted registrable domain. Spot-check that
+	// "fldubai.com" is a candidate for the domain and its subdomains, but
+	// not for a look-alike or a domain that merely contains it mid-host.
+	has := func(addr, domain string) bool {
+		for _, c := range SignupDomainCandidates(addr) {
+			if c == domain {
+				return true
+			}
+		}
+		return false
 	}
-	for _, addr := range allowed {
-		if IsBlockedSignupDomain(addr) {
-			t.Errorf("IsBlockedSignupDomain(%q) = true, want false", addr)
+	for _, addr := range []string{"a@fldubai.com", "a@mail.fldubai.com"} {
+		if !has(addr, "fldubai.com") {
+			t.Errorf("%q should match blocklist domain fldubai.com", addr)
+		}
+	}
+	for _, addr := range []string{"a@notfldubai.com", "a@fldubai.com.evil.com"} {
+		if has(addr, "fldubai.com") {
+			t.Errorf("%q must NOT match blocklist domain fldubai.com", addr)
 		}
 	}
 }

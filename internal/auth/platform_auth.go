@@ -203,10 +203,11 @@ var requiredAcceptances = []string{"terms", "dpa"}
 // can never receive mail (reserved test domains, mailaddr.IsReserved).
 var ErrUndeliverableEmail = errors.New("this address can't receive email (reserved test domain) — use a real address")
 
-// ErrBlockedSignupDomain refuses a signup from a domain on the signup
-// blocklist (mailaddr.IsBlockedSignupDomain) — deliverable domains that
-// only ever produce abuse or throwaway accounts. The message is kept
-// generic so it doesn't advertise the blocklist.
+// ErrBlockedSignupDomain refuses a signup from a domain on the
+// admin-managed signup blocklist (public.platform_blocked_signup_domains;
+// candidates built by mailaddr.SignupDomainCandidates) — deliverable
+// domains that only ever produce abuse or throwaway accounts. The message
+// is kept generic so it doesn't advertise the blocklist.
 var ErrBlockedSignupDomain = errors.New("this email address can't be used to sign up")
 
 // SignUp creates a new platform user with email + bcrypt-hashed password.
@@ -228,9 +229,22 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	if mailaddr.IsReserved(email) {
 		return nil, ErrUndeliverableEmail
 	}
-	if mailaddr.IsBlockedSignupDomain(email) {
-		slog.Info("signup blocked by domain blocklist", "email", email)
-		return nil, ErrBlockedSignupDomain
+	if candidates := mailaddr.SignupDomainCandidates(email); len(candidates) > 0 {
+		// Admin-managed blocklist (public.platform_blocked_signup_domains):
+		// a signup is refused when the address's domain, or any parent
+		// domain, is listed. Fail OPEN on a query error — a transient read
+		// failure must not block every legitimate signup (this is abuse
+		// mitigation, not a security boundary).
+		var blocked bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM public.platform_blocked_signup_domains WHERE domain = ANY($1))`,
+			candidates,
+		).Scan(&blocked); err != nil {
+			slog.Warn("signup blocklist check failed; allowing signup", "error", err)
+		} else if blocked {
+			slog.Info("signup blocked by domain blocklist", "email", email)
+			return nil, ErrBlockedSignupDomain
+		}
 	}
 	if err := ValidatePasswordStrength(password, email); err != nil {
 		return nil, err
