@@ -22,6 +22,11 @@ export interface UploadResult {
 export interface SignedUrlResult {
   url: string
   expires_at: string
+  /**
+   * Headers the upload must send exactly as given (e.g. a retention policy
+   * on Legal Team projects). Empty for most uploads and all downloads.
+   */
+  headers: Record<string, string>
   error: string | null
 }
 
@@ -71,7 +76,19 @@ function isBuffer(value: unknown): value is { buffer: ArrayBuffer; byteOffset: n
 export interface SignedUrlOptions {
   expiresIn?: number
   contentType?: string
+  /**
+   * Upload only: the file's exact size in bytes. It is checked against your
+   * plan's upload limit, and the URL then accepts exactly that many bytes.
+   */
+  size?: number
 }
+
+/**
+ * Files larger than this go straight to storage through a signed upload
+ * URL instead of through the API (which takes request bodies up to 50 MB),
+ * so they can reach the plan's upload limit (500 MB on Team).
+ */
+export const DIRECT_UPLOAD_THRESHOLD = 45 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
 // StorageClient
@@ -111,7 +128,9 @@ export class StorageClient {
 
   /**
    * Upload a file.
-   * Uses multipart/form-data via POST /v1/storage/upload.
+   * Uses multipart/form-data via POST /v1/storage/upload; files over
+   * 45 MB go straight to storage through a signed upload URL, up to the
+   * plan's upload limit.
    */
   async upload(
     key: string,
@@ -134,6 +153,10 @@ export class StorageClient {
       blob = file as Blob
     }
 
+    if (blob.size > DIRECT_UPLOAD_THRESHOLD) {
+      return this.uploadDirect(key, blob, options?.contentType || blob.type || 'application/octet-stream')
+    }
+
     formData.append('file', blob, key)
     formData.append('key', key)
 
@@ -149,6 +172,31 @@ export class StorageClient {
       size: res.size ?? 0,
       error: null,
     }
+  }
+
+  /**
+   * Upload a large file straight to storage: a signed upload URL for its
+   * exact size (checked against the plan's upload limit), then a PUT.
+   */
+  private async uploadDirect(key: string, blob: Blob, contentType: string): Promise<UploadResult> {
+    const signed = await this.createSignedUrl(key, 'upload', { contentType, size: blob.size })
+    if (signed.error) {
+      return { key: '', content_type: '', size: 0, error: signed.error }
+    }
+    let res: Response
+    try {
+      res = await fetch(signed.url, {
+        method: 'PUT',
+        headers: { 'Content-Type': contentType, ...signed.headers },
+        body: blob,
+      })
+    } catch (err) {
+      return { key: '', content_type: '', size: 0, error: `upload failed: ${(err as Error).message}` }
+    }
+    if (!res.ok) {
+      return { key: '', content_type: '', size: 0, error: `upload failed: storage answered ${res.status}` }
+    }
+    return { key, content_type: contentType, size: blob.size, error: null }
   }
 
   /**
@@ -216,16 +264,20 @@ export class StorageClient {
     if (options?.contentType) {
       body['content_type'] = options.contentType
     }
+    if (options?.size !== undefined) {
+      body['size'] = options.size
+    }
 
     const res = await this.http.post('/v1/storage/signed-url', body)
 
     if (res.error) {
-      return { url: '', expires_at: '', error: res.error }
+      return { url: '', expires_at: '', headers: {}, error: res.error }
     }
 
     return {
       url: res.url ?? '',
       expires_at: res.expires_at ?? '',
+      headers: res.headers ?? {},
       error: null,
     }
   }

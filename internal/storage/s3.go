@@ -650,6 +650,15 @@ func (s *S3Client) GeneratePresignedUploadURL(ctx context.Context, bucketName, k
 // upstream comparators (audit logs, policy resolution) see a stable
 // value regardless of when the presigner ran.
 func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention) (*PresignedUpload, error) {
+	return s.GeneratePresignedUploadURLSized(ctx, bucketName, key, contentType, expiry, retention, 0)
+}
+
+// GeneratePresignedUploadURLSized is GeneratePresignedUploadURLWithRetention
+// with the upload's size in the signature (size > 0): Content-Length is a
+// signed header, so the storage refuses a PUT of any other size. That's how
+// a plan's upload limit holds for uploads that never pass the gateway.
+// size 0 signs no length.
+func (s *S3Client) GeneratePresignedUploadURLSized(ctx context.Context, bucketName, key, contentType string, expiry time.Duration, retention Retention, size int64) (*PresignedUpload, error) {
 	if expiry <= 0 {
 		expiry = 15 * time.Minute
 	}
@@ -667,6 +676,9 @@ func (s *S3Client) GeneratePresignedUploadURLWithRetention(ctx context.Context, 
 	if retention.Mode != "" {
 		input.ObjectLockMode = types.ObjectLockMode(retention.Mode)
 		input.ObjectLockRetainUntilDate = aws.Time(retention.RetainUntil)
+	}
+	if size > 0 {
+		input.ContentLength = aws.Int64(size)
 	}
 
 	presigned, err := s.presignClient.PresignPutObject(ctx, input, s3.WithPresignExpires(expiry))

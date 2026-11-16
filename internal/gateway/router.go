@@ -1449,7 +1449,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					storageHandler := storage.NewStorageHandler(s3Client, developerPool, query.NewQueryEngine(developerPool).WithPoolResolver(query.TenantPoolFromContext)).
 						WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
 						WithHoldChecker(compliance.NewHoldService(pool)).
-						WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) })
+						WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) }).
+						WithUploadLimit(uploadLimitFunc(limitsSvc))
 					r.With(tenant.RequireMinRole("developer")).Post("/upload", storageHandler.UploadFile)
 					r.With(tenant.RequireMinRole("developer")).Post("/signed-url", storageHandler.GenerateSignedURL)
 					r.With(tenant.RequireMinRole("viewer")).Get("/", storageHandler.ListFiles)
@@ -1781,7 +1782,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				storageHandler := storage.NewStorageHandler(s3Client, pool, query.NewQueryEngine(pool).WithPoolResolver(query.TenantPoolFromContext).WithCatalogPool(sdkCatalogPool)).
 					WithRetentionResolver(compliance.NewStorageRetentionService(pool)).
 					WithHoldChecker(compliance.NewHoldService(pool)).
-					WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) })
+					WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) }).
+					WithUploadLimit(uploadLimitFunc(limitsSvc))
 				r.Mount("/", storageHandler.Routes())
 			})
 		} else {
@@ -2324,4 +2326,16 @@ func newSDKCatalogPool(pool, developerPool *pgxpool.Pool) *pgxpool.Pool {
 		return developerPool
 	}
 	return p
+}
+
+// uploadLimitFunc adapts the plan limits to storage's per-file upload
+// limit (upload_size_mb). Nil limits: no limit known, sized signed upload
+// URLs are refused.
+func uploadLimitFunc(limits *plans.LimitsService) storage.UploadLimitFunc {
+	if limits == nil {
+		return nil
+	}
+	return func(ctx context.Context, projectID string) (int64, error) {
+		return limits.GetUploadSizeLimit(ctx, projectID)
+	}
 }

@@ -59,6 +59,27 @@ const blob = await eb.storage.download('contracts/nda-acme.pdf')
 await eb.storage.remove('contracts/nda-acme.pdf')</pre>
 				</div>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Large files</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					The largest file you can upload depends on your plan: <strong>Free 10 MB, Pro 50 MB, Team and Legal Team 500 MB</strong>.
+					<code class="rounded bg-gray-100 px-1 text-xs">upload()</code> sends files up to 45 MB through the API. Larger files go straight to storage: the SDK asks for a signed upload URL for the file's exact size, checked against your plan's limit, and uploads to it. You don't need to change anything; it needs SDK 0.13.0 or newer.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					Without the SDK, request the URL with the file's size and send exactly that many bytes:
+				</p>
+				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>POST /v1/storage/signed-url
+{'{'} "key": "videos/demo.mp4", "operation": "upload",
+  "content_type": "video/mp4", "size": 314572800 {'}'}
+
+→ {'{'} "url": "https://…", "expires_at": "…", "headers": {'{'}…{'}'} {'}'}
+
+PUT &lt;url&gt;   (Content-Type and any returned headers; body = the file)</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					A size above your plan's limit is refused with <code class="rounded bg-gray-100 px-1 text-xs">413</code>. A PUT with a different number of bytes than declared is refused by the storage.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Who sees which files</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li>Each signed-in user <strong>owns</strong> the files they upload: only they can list, download, replace or delete them. Use keys that include the user's id (e.g. <code class="rounded bg-gray-100 px-1 text-xs">avatars/&lt;user-id&gt;.png</code>) &mdash; the first user to upload a key owns it (until you upload to the same key from the console, which makes it yours).</li>

@@ -2,6 +2,14 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added — large uploads
+
+`storage.upload()` sends files over 45 MB straight to storage through a signed upload URL (sized to the file and checked against the plan's upload limit), so uploads work up to the plan's limit: 500 MB on Team and Legal Team. Smaller files keep going through the API. Needs the gateway change from the same PR (`size` on `POST /v1/storage/signed-url`).
+
+`createSignedUrl(key, 'upload', { size })` passes the file's size; `SignedUrlResult` now carries `headers`, which an upload must send as given (retention policies on Legal Team).
+
 ## 0.12.0 — 2026-10-20
 
 ### Added — `db.rpc()`
