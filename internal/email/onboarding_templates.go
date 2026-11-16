@@ -113,11 +113,11 @@ var onboardingTemplates = []onboardingTemplate{
 			  <ul style="margin:0; padding-left:20px; font-size:14px; line-height:1.6; color:#1e40af;">
 			    <li>Open <a href="{{.DocsURL}}" style="color:#1d4ed8;">/docs</a> — the in-console docs walk you through the SDK.</li>
 			    <li>Copy your project's <code style="background:#e0e7ff; padding:1px 4px; border-radius:3px; font-size:12px;">public_key</code> from the console → <strong>Project Settings → API Keys</strong> (generate a pair if you haven't yet).</li>
-			    <li>Reply to this email if anything doesn't work. We read replies.</li>
+			    <li>If anything doesn't work, write to <a href="mailto:contact@eurobase.app" style="color:#1d4ed8;">contact@eurobase.app</a>. We read every mail.</li>
 			  </ul>
 			</div>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  If you catch something rough, tell us — reply lands in my inbox.
+			  If you catch something rough, tell us at <a href="mailto:contact@eurobase.app" style="color:#1d4ed8;">contact@eurobase.app</a>.
 			</p>
 		`),
 	},
@@ -269,7 +269,7 @@ const key = ctx.env.STRIPE_KEY</pre>
 			  That's the last of the drip. If Eurobase is starting to feel small — you're hitting the Free-tier caps, or your project's real users need production guarantees, or you're using it commercially — Pro is €25/mo per project, everything unlocks. If not, keep prototyping; Free stays.
 			</p>
 			<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#374151;">
-			  Reply to this mail with anything you'd want us to build. We read replies.
+			  Tell us at <a href="mailto:contact@eurobase.app" style="color:#1d4ed8;">contact@eurobase.app</a> what you'd want us to build. We read every mail.
 			</p>
 		`),
 	},

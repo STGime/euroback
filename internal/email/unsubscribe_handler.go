@@ -61,11 +61,11 @@ func UnsubscribeHandler(signer *UnsubscribeSigner, pool *pgxpool.Pool) http.Hand
 			switch {
 			case errors.Is(err, ErrExpiredUnsubscribeToken):
 				renderUnsubResult(w, "Link expired",
-					"This unsubscribe link expired. Open the console and unsubscribe from your account settings instead, or reply to any Eurobase mail asking to be removed.",
+					"This unsubscribe link expired. Open the console and unsubscribe from your account settings instead, or write to contact@eurobase.app asking to be removed.",
 					http.StatusGone)
 			default:
 				renderUnsubResult(w, "Invalid link",
-					"The unsubscribe link is invalid. Copy the link from the mail again, or reply to any Eurobase mail asking to be removed.",
+					"The unsubscribe link is invalid. Copy the link from the mail again, or write to contact@eurobase.app asking to be removed.",
 					http.StatusBadRequest)
 			}
 			return
@@ -85,7 +85,7 @@ func UnsubscribeHandler(signer *UnsubscribeSigner, pool *pgxpool.Pool) http.Hand
 		); err != nil {
 			slog.Error("unsubscribe write failed", "user_id", userID, "category", category, "error", err)
 			renderUnsubResult(w, "Something went wrong",
-				"We couldn't update your preference just now. Try again in a minute, or reply to any Eurobase mail asking to be removed.",
+				"We couldn't update your preference just now. Try again in a minute, or write to contact@eurobase.app asking to be removed.",
 				http.StatusInternalServerError)
 			return
 		}

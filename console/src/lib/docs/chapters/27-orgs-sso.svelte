@@ -138,7 +138,7 @@
 				<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
 					<strong>Existing projects (created before the org): no self-serve move today.</strong>
 					The API endpoint (<code class="rounded bg-amber-100 px-1">PATCH /platform/projects/{'{id}'}/org</code>) exists, but no console UI is wired to it yet.
-					If you have a personal project that predates your org and want to move it in (or vice versa), reply to any support email or ping us on Discord — we'll flip <code class="rounded bg-amber-100 px-1">org_id</code> for you.
+					If you have a personal project that predates your org and want to move it in (or vice versa), email <a href="mailto:contact@eurobase.app" class="underline">contact@eurobase.app</a> or ping us on Discord — we'll flip <code class="rounded bg-amber-100 px-1">org_id</code> for you.
 					A self-serve <em>Owner</em> control on the project settings page is tracked as a follow-up.
 				</div>
 				<div class="rounded-md bg-blue-50 border border-blue-200 p-3 text-xs text-blue-900">
