@@ -451,6 +451,9 @@ func isUserError(err error) bool {
 	if errors.Is(err, ErrUndeliverableEmail) {
 		return true
 	}
+	if errors.Is(err, ErrBlockedSignupDomain) {
+		return true
+	}
 	msg := err.Error()
 	return msg == "email is required" ||
 		msg == "email already registered" ||

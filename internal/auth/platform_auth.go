@@ -203,6 +203,12 @@ var requiredAcceptances = []string{"terms", "dpa"}
 // can never receive mail (reserved test domains, mailaddr.IsReserved).
 var ErrUndeliverableEmail = errors.New("this address can't receive email (reserved test domain) — use a real address")
 
+// ErrBlockedSignupDomain refuses a signup from a domain on the signup
+// blocklist (mailaddr.IsBlockedSignupDomain) — deliverable domains that
+// only ever produce abuse or throwaway accounts. The message is kept
+// generic so it doesn't advertise the blocklist.
+var ErrBlockedSignupDomain = errors.New("this email address can't be used to sign up")
+
 // SignUp creates a new platform user with email + bcrypt-hashed password.
 // When AllowPublicSignup is false (default), only emails present in the
 // platform_allowlist table can register. Others receive a waitlist error.
@@ -221,6 +227,10 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	}
 	if mailaddr.IsReserved(email) {
 		return nil, ErrUndeliverableEmail
+	}
+	if mailaddr.IsBlockedSignupDomain(email) {
+		slog.Info("signup blocked by domain blocklist", "email", email)
+		return nil, ErrBlockedSignupDomain
 	}
 	if err := ValidatePasswordStrength(password, email); err != nil {
 		return nil, err
