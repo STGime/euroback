@@ -70,7 +70,9 @@ func (w *DeliverProjectWebhookWorker) Work(ctx context.Context, job *river.Job[j
 		enabled          *bool
 	)
 	err := w.Pool.QueryRow(ctx,
-		`SELECT url, secret, enabled FROM public.webhooks WHERE id = $1::uuid`, a.WebhookID,
+		`SELECT w.url, w.secret, w.enabled FROM public.webhooks w
+		   JOIN public.projects p ON p.id = w.project_id AND p.status = 'active'
+		  WHERE w.id = $1::uuid`, a.WebhookID,
 	).Scan(&endpoint, &secret, &enabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // webhook deleted since the event: nothing to deliver

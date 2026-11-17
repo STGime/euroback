@@ -2594,6 +2594,18 @@ export class EurobaseAPI {
 		return this.fetch<{ projects: AdminProject[]; total: number }>('/platform/admin/projects');
 	}
 
+	/** Suspend a project (superadmin): it stops serving until unsuspended. */
+	async adminSuspendProject(projectId: string, reason?: string): Promise<{ id: string; status: string }> {
+		return this.fetch(`/platform/admin/projects/${encodeURIComponent(projectId)}/suspend`, {
+			method: 'POST',
+			body: JSON.stringify({ reason: reason ?? '' }),
+		});
+	}
+
+	async adminUnsuspendProject(projectId: string): Promise<{ id: string; status: string }> {
+		return this.fetch(`/platform/admin/projects/${encodeURIComponent(projectId)}/suspend`, { method: 'DELETE' });
+	}
+
 	/** List all platform_allowlist entries. Superadmin only. */
 	async adminListAllowlist(): Promise<{ entries: AllowlistEntry[]; total: number }> {
 		return this.fetch<{ entries: AllowlistEntry[]; total: number }>('/platform/admin/allowlist');

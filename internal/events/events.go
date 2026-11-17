@@ -505,8 +505,9 @@ func (e *Emitter) loadFromDB(ctx context.Context, projectID string) ([]webhookSu
 	}
 	var hooks []webhookSub
 	rows, err := e.pool.Query(ctx,
-		`SELECT id::text, events FROM public.webhooks
-		  WHERE project_id = $1 AND enabled IS NOT FALSE AND cardinality(events) > 0`, projectID)
+		`SELECT w.id::text, w.events FROM public.webhooks w
+		   JOIN public.projects p ON p.id = w.project_id AND p.status = 'active'
+		  WHERE w.project_id = $1 AND w.enabled IS NOT FALSE AND cardinality(w.events) > 0`, projectID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load webhooks: %w", err)
 	}
@@ -528,6 +529,7 @@ func (e *Emitter) loadFromDB(ctx context.Context, projectID string) ([]webhookSu
 		`SELECT t.id::text, t.table_name, t.events
 		   FROM public.function_triggers t
 		   JOIN public.edge_functions f ON f.id = t.function_id
+		   JOIN public.projects p ON p.id = t.project_id AND p.status = 'active'
 		  WHERE t.project_id = $1 AND t.enabled IS NOT FALSE AND f.status = 'active'`, projectID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load function triggers: %w", err)
