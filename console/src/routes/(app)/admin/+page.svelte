@@ -1,9 +1,32 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type AdminProject, type AllowlistEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient, type ContactRequestEntry } from '$lib/api.js';
+	import { api, type AdminProject, type AllowlistEntry, type BlockedDomainEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient, type ContactRequestEntry } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
 	let allowlist = $state<AllowlistEntry[]>([]);
+	let blockedDomains = $state<BlockedDomainEntry[]>([]);
+	let newBlockedDomain = $state('');
+	let newBlockedReason = $state('');
+	let blockedBusy = $state(false);
+
+	// Top-of-page section navigation. The admin view is long (projects,
+	// users, allowlist, blocked domains, team beta, contact triage), so
+	// instead of one endless scroll we show one section at a time behind a
+	// tab strip. The active tab is mirrored to the URL hash so a view is
+	// shareable / survives a reload. All data still loads once in refresh().
+	const adminTabs = [
+		{ id: 'projects', label: 'Projects' },
+		{ id: 'users', label: 'Signup users' },
+		{ id: 'allowlist', label: 'Allowlist' },
+		{ id: 'blocked', label: 'Blocked domains' },
+		{ id: 'teambeta', label: 'Team beta' },
+		{ id: 'contact', label: 'Contact' }
+	] as const;
+	let activeTab = $state<string>('projects');
+	function setTab(id: string) {
+		activeTab = id;
+		if (typeof history !== 'undefined') history.replaceState(null, '', `#${id}`);
+	}
 	let teamBeta = $state<TeamBetaEntry[]>([]);
 	let teamBetaSearch = $state('');
 	let teamBetaBusy = $state(false);
@@ -185,9 +208,10 @@
 		loading = true;
 		error = null;
 		try {
-			const [p, a, tb, su, cr, profile] = await Promise.all([
+			const [p, a, bd, tb, su, cr, profile] = await Promise.all([
 				api.adminListAllProjects(),
 				api.adminListAllowlist(),
+				api.adminListBlockedDomains(),
 				api.adminListTeamBetaUsers(),
 				api.adminListSignupUsers(),
 				api.adminListContactRequests(contactRequestFilter),
@@ -195,6 +219,7 @@
 			]);
 			projects = p.projects;
 			allowlist = a.entries;
+			blockedDomains = bd.entries;
 			teamBeta = tb.entries;
 			signupUsers = su.users;
 			// Drop selections that no longer get product updates (their
@@ -378,6 +403,11 @@
 	}
 
 	onMount(refresh);
+	onMount(() => {
+		// Deep-link / reload support: open the tab named in the URL hash.
+		const h = typeof location !== 'undefined' ? location.hash.replace(/^#/, '') : '';
+		if (adminTabs.some((t) => t.id === h)) activeTab = h;
+	});
 
 	async function addEntry() {
 		if (!newEmail.trim()) return;
@@ -407,6 +437,36 @@
 		if (selected.has(email)) selected.delete(email);
 		else selected.add(email);
 		selected = new Set(selected);
+	}
+
+	async function addBlockedDomain() {
+		if (!newBlockedDomain.trim() || blockedBusy) return;
+		blockedBusy = true;
+		error = null;
+		try {
+			await api.adminAddBlockedDomain(newBlockedDomain.trim(), newBlockedReason.trim() || undefined);
+			newBlockedDomain = '';
+			newBlockedReason = '';
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Failed to block domain';
+		} finally {
+			blockedBusy = false;
+		}
+	}
+
+	async function removeBlockedDomain(domain: string) {
+		if (blockedBusy || !confirm(`Unblock ${domain}? New signups from this domain will be allowed again.`)) return;
+		blockedBusy = true;
+		error = null;
+		try {
+			await api.adminRemoveBlockedDomain(domain);
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Failed to unblock domain';
+		} finally {
+			blockedBusy = false;
+		}
 	}
 
 	function toggleOneSignup(email: string) {
@@ -623,6 +683,24 @@
 		<div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-800">{error}</div>
 	{/if}
 
+	<!-- Section navigation: one section at a time behind a tab strip. -->
+	<nav class="flex gap-1 overflow-x-auto md:flex-wrap md:overflow-visible border-b border-gray-200">
+		{#each adminTabs as t}
+			<button
+				type="button"
+				onclick={() => setTab(t.id)}
+				aria-current={activeTab === t.id ? 'page' : undefined}
+				class="relative shrink-0 whitespace-nowrap px-3 sm:px-4 py-2.5 text-sm font-medium transition-colors cursor-pointer {activeTab === t.id ? 'text-eurobase-700' : 'text-gray-500 hover:text-gray-700'}"
+			>
+				{t.label}
+				{#if activeTab === t.id}
+					<span class="absolute bottom-0 left-0 right-0 h-0.5 bg-eurobase-600 rounded-full"></span>
+				{/if}
+			</button>
+		{/each}
+	</nav>
+
+	{#if activeTab === 'allowlist'}
 	<section class="space-y-3">
 		<h2 class="text-lg font-semibold text-gray-900">Signup Allowlist</h2>
 		<div class="flex gap-2 items-end">
@@ -733,7 +811,89 @@
 			</table>
 		</div>
 	</section>
+	{/if}
 
+	{#if activeTab === 'blocked'}
+	<section class="space-y-3">
+		<h2 class="text-lg font-semibold text-gray-900">Blocked signup domains</h2>
+		<p class="text-xs text-gray-500">
+			New platform signups from these domains (and their subdomains) are refused. Use this for
+			abuse / throwaway domains. It does not affect existing accounts — suspend or delete those from
+			Signup Users below.
+		</p>
+		<div class="flex gap-2 items-end">
+			<div class="flex-1">
+				<label for="blocked-new-domain" class="text-xs text-gray-500 block mb-1">Domain</label>
+				<input
+					id="blocked-new-domain"
+					type="text"
+					bind:value={newBlockedDomain}
+					placeholder="example.com"
+					onkeydown={(e) => e.key === 'Enter' && addBlockedDomain()}
+					class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+				/>
+			</div>
+			<div class="flex-1">
+				<label for="blocked-new-reason" class="text-xs text-gray-500 block mb-1">Reason (optional)</label>
+				<input
+					id="blocked-new-reason"
+					type="text"
+					bind:value={newBlockedReason}
+					placeholder="abuse, throwaway signups, …"
+					onkeydown={(e) => e.key === 'Enter' && addBlockedDomain()}
+					class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+				/>
+			</div>
+			<button
+				onclick={addBlockedDomain}
+				disabled={blockedBusy || !newBlockedDomain.trim()}
+				class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+			>
+				Block
+			</button>
+		</div>
+
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
+			<table class="w-full text-sm">
+				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
+					<tr>
+						<th class="px-4 py-2">Domain</th>
+						<th class="px-4 py-2">Reason</th>
+						<th class="px-4 py-2">Added</th>
+						<th class="px-4 py-2"></th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-gray-100">
+					{#if loading}
+						<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+					{:else if blockedDomains.length === 0}
+						<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">No blocked domains.</td></tr>
+					{:else}
+						{#each blockedDomains as d}
+							<tr>
+								<td class="px-4 py-2 font-mono text-gray-900">{d.domain}</td>
+								<td class="px-4 py-2 text-gray-600">{d.reason ?? ''}</td>
+								<td class="px-4 py-2 text-gray-500">{new Date(d.created_at).toLocaleDateString()}</td>
+								<td class="px-4 py-2 text-right">
+									<button
+										type="button"
+										onclick={() => removeBlockedDomain(d.domain)}
+										disabled={blockedBusy}
+										class="text-xs font-medium text-red-600 hover:text-red-700 disabled:opacity-40 cursor-pointer"
+									>
+										Unblock
+									</button>
+								</td>
+							</tr>
+						{/each}
+					{/if}
+				</tbody>
+			</table>
+		</div>
+	</section>
+	{/if}
+
+	{#if activeTab === 'teambeta'}
 	<section class="space-y-3">
 		<div class="flex items-baseline justify-between">
 			<h2 class="text-lg font-semibold text-gray-900">Team-tier closed beta</h2>
@@ -816,7 +976,9 @@
 			</table>
 		</div>
 	</section>
+	{/if}
 
+	{#if activeTab === 'users'}
 	<section class="space-y-3">
 		<div class="flex items-center justify-between">
 			<div>
@@ -973,11 +1135,13 @@
 			</table>
 		</div>
 	</section>
+	{/if}
 
 	<!-- ── Contact-form triage ───────────────────────────────────
 	     Rows written by the marketing-site widget on eurobase.app
 	     (POST /platform/public/contact). Superadmin triage marks
 	     them resolved with an optional short note. -->
+	{#if activeTab === 'contact'}
 	<section class="space-y-3">
 		<div class="flex items-center justify-between gap-3 flex-wrap">
 			<div>
@@ -1103,7 +1267,9 @@
 			</table>
 		</div>
 	</section>
+	{/if}
 
+	{#if activeTab === 'projects'}
 	<section class="space-y-3">
 		<h2 class="text-lg font-semibold text-gray-900">All Projects</h2>
 		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
@@ -1139,6 +1305,7 @@
 			</table>
 		</div>
 	</section>
+	{/if}
 </div>
 
 <!-- Compose modal -->

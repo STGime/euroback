@@ -359,6 +359,12 @@ export interface AllowlistEntry {
 	created_at: string;
 }
 
+export interface BlockedDomainEntry {
+	domain: string;
+	reason: string | null;
+	created_at: string;
+}
+
 // One row on GET /platform/admin/broadcast/audience — the deduped
 // union of platform_allowlist ∪ platform_users. Fields annotate the
 // source(s) so the Compose modal can render "N invited, M signed up,
@@ -2604,6 +2610,26 @@ export class EurobaseAPI {
 	/** Remove an email from the platform allowlist. Superadmin only. */
 	async adminRemoveAllowlist(email: string): Promise<void> {
 		return this.fetch(`/platform/admin/allowlist/${encodeURIComponent(email)}`, {
+			method: 'DELETE'
+		});
+	}
+
+	/** List all blocked signup domains. Superadmin only. */
+	async adminListBlockedDomains(): Promise<{ entries: BlockedDomainEntry[]; total: number }> {
+		return this.fetch<{ entries: BlockedDomainEntry[]; total: number }>('/platform/admin/blocked-domains');
+	}
+
+	/** Add a domain to the signup blocklist. Superadmin only. */
+	async adminAddBlockedDomain(domain: string, reason?: string): Promise<{ status: string; domain: string }> {
+		return this.fetch('/platform/admin/blocked-domains', {
+			method: 'POST',
+			body: JSON.stringify({ domain, reason: reason ?? '' })
+		});
+	}
+
+	/** Remove a domain from the signup blocklist. Superadmin only. */
+	async adminRemoveBlockedDomain(domain: string): Promise<void> {
+		return this.fetch(`/platform/admin/blocked-domains/${encodeURIComponent(domain)}`, {
 			method: 'DELETE'
 		});
 	}

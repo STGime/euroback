@@ -39,6 +39,8 @@ const (
 	ActionFunctionDeleted      = "function.deleted"
 	ActionAllowlistAdded       = "allowlist.added"
 	ActionAllowlistRemoved     = "allowlist.removed"
+	ActionBlockedDomainAdded   = "blocked_domain.added"
+	ActionBlockedDomainRemoved = "blocked_domain.removed"
 	// ActionAllowlistEmailed is the legacy action for the pre-widening
 	// send flow that only reached rows on public.platform_allowlist.
 	// Retained so historical audit rows keep parsing; new sends log
