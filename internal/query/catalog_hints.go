@@ -18,10 +18,10 @@ import "strings"
 const schemaAPI = "GET /platform/projects/<project-id>/schema"
 
 const (
-	hintFunctions = "your functions and their definitions are available with the MCP tools listDbFunctions / getDbFunction, or " + schemaAPI + "/functions"
-	hintPolicies  = "a table's RLS policies are listed in the console (Database, the table's policies) and by " + schemaAPI + "/tables/<table>/policies"
-	hintTriggers  = "a table's triggers are listed by the MCP tool describeTable (or " + schemaAPI + "); read the trigger function with getDbFunction"
-	hintTables    = "your tables, columns, keys, indexes, triggers and RLS status are available with the MCP tools listTables / describeTable, or " + schemaAPI
+	hintFunctions = "your functions and their definitions are available with the MCP tools listDbFunctions / getDbFunction, or " + schemaAPI + "/functions (developer role)"
+	hintPolicies  = "a table's RLS policies are listed in the console (Database, the table's policies) and by " + schemaAPI + "/tables/<table>/policies (developer role)"
+	hintTriggers  = "a table's triggers are listed by the MCP tool describeTable and " + schemaAPI + "/tables/<table>/triggers (developer role); read the trigger function with getDbFunction"
+	hintTables    = "your tables, columns, primary / unique / foreign keys, indexes, triggers and RLS status are available with the MCP tools listTables / describeTable, or " + schemaAPI
 	hintObjects   = "your views, materialized views, sequences and types are available with the MCP tool listSchemaObjects, or " + schemaAPI + "/objects"
 	hintAccess    = "roles and grants are managed by the platform; each table's RLS status is in the console (Database) and " + schemaAPI + "/rls-audit"
 )
@@ -41,19 +41,20 @@ var catalogHints = map[string]string{
 	// triggers
 	"pg_trigger":        hintTriggers,
 	"pg_get_triggerdef": hintTriggers,
-	// tables, columns, constraints, indexes
-	"pg_class":             hintTables,
-	"pg_tables":            hintTables,
-	"pg_namespace":         hintTables,
-	"pg_attribute":         hintTables,
-	"pg_attrdef":           hintTables,
-	"pg_constraint":        hintTables,
-	"pg_get_constraintdef": hintTables,
-	"pg_index":             hintTables,
-	"pg_indexes":           hintTables,
-	"pg_get_indexdef":      hintTables,
-	"pg_get_expr":          hintTables,
-	"pg_description":       hintTables,
+	// tables, columns, keys, indexes. CHECK constraint expressions
+	// (pg_get_constraintdef, information_schema.check_constraints) and
+	// comments (pg_description) aren't returned by the schema API, so
+	// those get no hint rather than a wrong one.
+	"pg_class":        hintTables,
+	"pg_tables":       hintTables,
+	"pg_namespace":    hintTables,
+	"pg_attribute":    hintTables,
+	"pg_attrdef":      hintTables,
+	"pg_constraint":   hintTables,
+	"pg_index":        hintTables,
+	"pg_indexes":      hintTables,
+	"pg_get_indexdef": hintTables,
+	"pg_get_expr":     hintTables,
 	// views, sequences, types
 	"pg_views":       hintObjects,
 	"pg_matviews":    hintObjects,
@@ -80,7 +81,6 @@ var informationSchemaHints = map[string]string{
 	"key_column_usage":        hintTables,
 	"constraint_column_usage": hintTables,
 	"referential_constraints": hintTables,
-	"check_constraints":       hintTables,
 	"routines":                hintFunctions,
 	"parameters":              hintFunctions,
 	"triggers":                hintTriggers,
@@ -119,4 +119,12 @@ func catalogRefHint(schema, name string) string {
 		return catalogHints[name]
 	}
 	return ""
+}
+
+// withoutHint returns a refusal message without its hint.
+func withoutHint(msg string) string {
+	if i := strings.Index(msg, ". Hint: "); i >= 0 {
+		return msg[:i]
+	}
+	return msg
 }

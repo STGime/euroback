@@ -259,13 +259,35 @@ func TestRefusalAlert_TrackedReasonsBounded(t *testing.T) {
 }
 
 func TestRefusalAlertDescription(t *testing.T) {
-	d := refusalAlertDescription("p1", 10, []string{"references to schema \"x\" are not allowed `y` *z* @everyone (×3)"})
-	for _, want := range []string{"**10**", "Top reasons:", "\\`y\\`", "\\*z\\*", "@\u200beveryone", "SQL log in /admin"} {
+	d := refusalAlertDescription("p1", 10, []string{`references to schema "x" are not allowed (×3)`})
+	for _, want := range []string{"**10**", "Top reasons:", "• `references to schema \"x\" are not allowed (×3)`", "SQL log in /admin"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("description missing %q:\n%s", want, d)
 		}
 	}
 	if strings.Contains(refusalAlertDescription("p1", 10, nil), "Top reasons") {
 		t.Error("no reasons must not print the heading")
+	}
+}
+
+// The alert leaves the SQL log's admin-only boundary: developer-typed text
+// must not reach it, and nothing in it may render as markdown, a link or
+// a mention.
+func TestAlertReason_NoDeveloperText(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`statement 3: references to PostgreSQL system catalog objects ("pg_proc") are not allowed. Hint: use getDbFunction`,
+			`references to PostgreSQL system catalog objects ("pg_proc") are not allowed`},
+		{`test run: references to PostgreSQL system catalog objects ("pg_roles") are not allowed`,
+			`references to PostgreSQL system catalog objects ("pg_roles") are not allowed`},
+		{`references to PostgreSQL system catalog objects ("pg_[ok](https://evil.example)") are not allowed`,
+			`references to PostgreSQL system catalog objects ("…") are not allowed`},
+		{`references to schema "a\"b @everyone" are not allowed`, `references to schema "…" are not allowed`},
+		{"line\nbreak `tick`", "linebreak tick"},
+		{"", "(no reason recorded)"},
+	}
+	for _, tc := range cases {
+		if got := alertReason(tc.in); got != tc.want {
+			t.Errorf("alertReason(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

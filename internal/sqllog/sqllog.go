@@ -142,7 +142,11 @@ type refusalWindow struct {
 	start   time.Time
 	count   int
 	alerted bool
-	reasons map[string]int // normalised refusal reason → count (≤ maxTrackedReasons keys)
+	// normalised refusal reason → count. At most maxTrackedReasons keys:
+	// reasons first seen after that aren't tracked, so many distinct
+	// reasons early in a window can keep a later frequent one out of the
+	// alert (the count is still exact).
+	reasons map[string]int
 }
 
 const (
@@ -151,18 +155,41 @@ const (
 	maxReasonLen      = 160 // characters of one reason in the alert
 )
 
-// stmtPrefixRe matches the "statement N: " prefix the transaction
-// endpoint puts on a refusal, so the same reason groups together.
-var stmtPrefixRe = regexp.MustCompile(`^statement \d+: `)
+// reasonPrefixRe matches the prefixes callers put on a refusal ("statement
+// N: " from the transaction endpoint, "test run: " from cron's dry run), so
+// the same reason groups together.
+var reasonPrefixRe = regexp.MustCompile(`^(statement \d+: |test run: )+`)
 
-// alertReason normalises a refusal detail for the alert: no statement
-// index, no hint (the platform's pointer to the right tool is noise for
-// ops), bounded length.
+// quotedRe matches a double-quoted segment of a refusal message: the
+// guards quote what the developer typed (%q).
+var quotedRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// plainNameRe is a quoted segment kept in the alert: a plain SQL name.
+var plainNameRe = regexp.MustCompile(`^"[A-Za-z0-9_.]{1,63}"$`)
+
+// alertReason normalises a refusal detail for the alert. The alert goes to
+// an ops channel outside the SQL log's admin-only boundary, so it must not
+// carry developer-typed text: quoted segments are kept only when they are a
+// plain SQL name (the refused object, useful to ops) and replaced by "…"
+// otherwise, and anything that isn't a plain printable character is
+// dropped. No statement index, no hint, bounded length.
 func alertReason(detail string) string {
-	r := stmtPrefixRe.ReplaceAllString(strings.TrimSpace(detail), "")
+	r := reasonPrefixRe.ReplaceAllString(strings.TrimSpace(detail), "")
 	if i := strings.Index(r, ". Hint: "); i >= 0 {
 		r = r[:i]
 	}
+	r = quotedRe.ReplaceAllStringFunc(r, func(q string) string {
+		if plainNameRe.MatchString(q) {
+			return q
+		}
+		return `"…"`
+	})
+	r = strings.Map(func(c rune) rune {
+		if c < 0x20 || c == 0x7f || c == '`' {
+			return -1
+		}
+		return c
+	}, r)
 	if r == "" {
 		r = "(no reason recorded)"
 	}

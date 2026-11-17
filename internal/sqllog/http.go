@@ -97,6 +97,8 @@ func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID string, c
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		body, _ := json.Marshal(map[string]any{
+			// Never ping anyone from text in the alert.
+			"allowed_mentions": map[string]any{"parse": []string{}},
 			"embeds": []map[string]any{{
 				"title":       "⚠️ Refused SQL statements",
 				"description": refusalAlertDescription(projectID, count, reasons),
@@ -131,14 +133,14 @@ func refusalAlertDescription(projectID string, count int, reasons []string) stri
 	if len(reasons) > 0 {
 		sb.WriteString("\n\nTop reasons:")
 		for _, r := range reasons {
-			// Reasons echo identifiers the developer typed: keep them out
-			// of Discord markdown.
-			sb.WriteString("\n• ")
-			sb.WriteString(discordEscaper.Replace(r))
+			// alertReason has already dropped developer-typed text and
+			// backticks; a code span renders the rest literally (no
+			// markdown, links or mentions).
+			sb.WriteString("\n• `")
+			sb.WriteString(strings.ReplaceAll(r, "`", ""))
+			sb.WriteString("`")
 		}
 	}
 	sb.WriteString("\n\nDetails: SQL log in /admin.")
 	return sb.String()
 }
-
-var discordEscaper = strings.NewReplacer("`", "\\`", "*", "\\*", "_", "\\_", "~", "\\~", "|", "\\|", ">", "\\>", "@", "@\u200b")
