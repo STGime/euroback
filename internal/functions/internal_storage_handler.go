@@ -108,7 +108,7 @@ func refuseExportArchive(w http.ResponseWriter, projectID, key string) bool {
 // derived server-side and never trusted from a header.
 func (h *InternalStorageHandler) projectMeta(ctx context.Context, projectID string) (slug, schema string, err error) {
 	err = h.pool.QueryRow(ctx,
-		`SELECT slug, schema_name FROM public.projects WHERE id = $1`,
+		`SELECT slug, schema_name FROM public.projects WHERE id = $1 AND status = 'active'`,
 		projectID,
 	).Scan(&slug, &schema)
 	if err != nil {

@@ -406,20 +406,22 @@
 	// project offline); unsuspending is immediate.
 	let suspendTarget = $state<AdminProject | null>(null);
 	let suspendReason = $state('');
+	let suspendError = $state<string | null>(null);
 	let projectBusy = $state<string | null>(null);
 
 	async function confirmSuspendProject() {
 		if (!suspendTarget || projectBusy) return;
 		const target = suspendTarget;
 		projectBusy = target.id;
-		error = null;
+		suspendError = null;
 		try {
 			await api.adminSuspendProject(target.id, suspendReason.trim());
 			suspendTarget = null;
 			suspendReason = '';
 			await refresh();
 		} catch (e: any) {
-			error = e?.message ?? 'Suspend failed';
+			// Shown in the dialog: the page banner sits behind its overlay.
+			suspendError = e?.message ?? 'Suspend failed';
 		} finally {
 			projectBusy = null;
 		}
@@ -1346,7 +1348,7 @@
 									{#if p.status === 'active'}
 										<button
 											type="button"
-											onclick={() => { suspendTarget = p; suspendReason = ''; }}
+											onclick={() => { suspendTarget = p; suspendReason = ''; suspendError = null; }}
 											disabled={projectBusy !== null}
 											class="rounded-md border border-red-300 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50 cursor-pointer disabled:opacity-50"
 										>
@@ -1549,7 +1551,7 @@
 	</div>
 {/if}
 
-<!-- Delete user confirm modal -->
+<!-- Suspend project confirm modal -->
 {#if suspendTarget}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
 		<div class="w-full max-w-md rounded-xl bg-white shadow-xl">
@@ -1577,6 +1579,9 @@
 					class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
 					autocomplete="off"
 				/>
+				{#if suspendError}
+					<p class="text-sm text-red-700">{suspendError}</p>
+				{/if}
 			</div>
 			<div class="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">
 				<button
@@ -1600,6 +1605,7 @@
 	</div>
 {/if}
 
+<!-- Delete user confirm modal -->
 {#if deleteUserTarget}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
 		<div class="w-full max-w-md rounded-xl bg-white shadow-xl">

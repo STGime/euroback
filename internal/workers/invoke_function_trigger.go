@@ -44,11 +44,11 @@ func (w *InvokeFunctionTriggerWorker) Work(ctx context.Context, job *river.Job[j
 		`SELECT p.id::text, p.schema_name, COALESCE(p.plan, ''), f.id::text, f.name, f.status, f.version, t.enabled
 		   FROM public.function_triggers t
 		   JOIN public.edge_functions f ON f.id = t.function_id AND f.project_id = t.project_id
-		   JOIN public.projects p ON p.id = t.project_id
+		   JOIN public.projects p ON p.id = t.project_id AND p.status = 'active'
 		  WHERE t.id = $1::uuid`, a.TriggerID,
 	).Scan(&projectID, &schema, &plan, &fnID, &fnName, &fnStatus, &fnVersion, &enabled)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // trigger or function deleted since the event
+		return nil // trigger or function deleted, or project not active, since the event
 	}
 	if err != nil {
 		return fmt.Errorf("load function trigger %s: %w", a.TriggerID, err)

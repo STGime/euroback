@@ -1557,11 +1557,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// Kept as a separate route from PATCH /{id} because the shape
 		// + auth check (owner + org membership) is entirely different
 		// from the auth_config flow.
-		r.With(auth.RequireConsoleSession, tenant.StashCallerRole(developerPool, pool)).Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
+		r.With(auth.RequireConsoleSession, tenant.StashCallerRole(developerPool, pool), tenant.RefuseSuspendedProject(pool)).Patch("/{id}/org", tenant.HandleSetProjectOrg(pool, tenantSvc))
 		// Deleting a project is owner / org-admin only; a project-scoped
 		// token never may (defence in depth: ScopedTokenAllowed already
 		// refuses it). Legacy tokens still can (the CLI deletes projects).
-		r.With(auth.RefuseScopedTokens, tenant.StashCallerRole(developerPool, pool)).Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
+		r.With(auth.RefuseScopedTokens, tenant.StashCallerRole(developerPool, pool), tenant.RefuseSuspendedProject(pool)).Delete("/{id}", tenant.HandleDeleteProject(pool, tenantSvc))
 	})
 
 	// ── WebSocket realtime route ──
@@ -1907,6 +1907,15 @@ func projectMembershipMiddleware(pool, developerPool *pgxpool.Pool, isDev bool) 
 				}
 				slog.Error("project membership: sso enforcement", "error", err, "project_id", projectID, "user_id", claims.Subject)
 				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+
+			// A suspended project (Admin → Projects) answers nothing
+			// on its console / MCP / CLI routes. After the membership
+			// 404, so a non-member can't tell a suspended project from
+			// a missing one.
+			if tenant.ProjectSuspended(r.Context(), pool, projectID) {
+				http.Error(w, tenant.ErrProjectSuspendedJSON, http.StatusForbidden)
 				return
 			}
 

@@ -54,6 +54,9 @@ func TestAdminSuspendProject_DB(t *testing.T) {
 	if c := keyStatus(); c != http.StatusNoContent {
 		t.Fatalf("key on an active project: %d", c)
 	}
+	if ProjectSuspended(ctx, pool, project.ID) {
+		t.Fatal("active project reported suspended")
+	}
 	if c := call(AdminSuspendProject(pool)); c != http.StatusOK {
 		t.Fatalf("suspend: %d", c)
 	}
@@ -62,6 +65,36 @@ func TestAdminSuspendProject_DB(t *testing.T) {
 	}
 	if c := call(AdminSuspendProject(pool)); c != http.StatusConflict {
 		t.Fatalf("second suspend: %d, want 409", c)
+	}
+	if !ProjectSuspended(ctx, pool, project.ID) {
+		t.Fatal("suspended project not reported suspended")
+	}
+	// The console / MCP / CLI routes refuse it.
+	guarded := RefuseSuspendedProject(pool)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	{
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", project.ID)
+		req := httptest.NewRequest(http.MethodGet, "/v1/tenants/"+project.ID, nil)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		rec := httptest.NewRecorder()
+		guarded.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("route on a suspended project: %d, want 403", rec.Code)
+		}
+	}
+	// A malformed id is a 404, not a 500.
+	{
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", "not-a-uuid")
+		req := httptest.NewRequest(http.MethodPost, "/platform/admin/projects/not-a-uuid/suspend", nil)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		rec := httptest.NewRecorder()
+		AdminSuspendProject(pool)(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("malformed id: %d, want 404", rec.Code)
+		}
 	}
 	if c := call(AdminUnsuspendProject(pool)); c != http.StatusOK {
 		t.Fatalf("unsuspend: %d", c)

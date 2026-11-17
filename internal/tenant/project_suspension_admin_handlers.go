@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -23,7 +25,8 @@ func AdminSuspendProject(pool *pgxpool.Pool) http.HandlerFunc {
 			Reason string `json:"reason"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if rr := []rune(strings.TrimSpace(body.Reason)); len(rr) > 500 {
+		body.Reason = strings.TrimSpace(body.Reason)
+		if rr := []rune(body.Reason); len(rr) > 500 {
 			body.Reason = string(rr[:500])
 		}
 		setProjectStatus(w, r, pool, "active", "suspended", audit.ActionProjectSuspended, body.Reason)
@@ -37,12 +40,41 @@ func AdminUnsuspendProject(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// ErrProjectSuspendedJSON is the body for any request to a suspended
+// project's console / API routes.
+const ErrProjectSuspendedJSON = `{"error":"this project is suspended; contact support","code":"project_suspended"}`
+
+// ProjectSuspended reports whether the project is suspended. A failed
+// lookup reports false: the route's own checks still apply.
+func ProjectSuspended(ctx context.Context, pool *pgxpool.Pool, projectID string) bool {
+	var suspended bool
+	if err := pool.QueryRow(ctx,
+		`SELECT status = 'suspended' FROM public.projects WHERE id::text = $1`, projectID).Scan(&suspended); err != nil {
+		return false
+	}
+	return suspended
+}
+
+// RefuseSuspendedProject answers 403 project_suspended for a route whose
+// {id} is a suspended project.
+func RefuseSuspendedProject(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ProjectSuspended(r.Context(), pool, chi.URLParam(r, "id")) {
+				http.Error(w, ErrProjectSuspendedJSON, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // setProjectStatus moves a project from one status to the other; any
 // other current status (provisioning, deleting, …) is refused with 409.
 func setProjectStatus(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, from, to, action, reason string) {
 	projectID := strings.TrimSpace(chi.URLParam(r, "id"))
-	if projectID == "" {
-		http.Error(w, `{"error":"project id required"}`, http.StatusBadRequest)
+	if _, err := uuid.Parse(projectID); err != nil {
+		http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 		return
 	}
 	var slug string
