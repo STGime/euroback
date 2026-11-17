@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +113,9 @@ type Logger struct {
 
 	// OnRefusals is called (in its own goroutine) when a project reaches
 	// RefusalAlertThreshold refused statements inside RefusalAlertWindow.
-	OnRefusals func(projectID string, count int)
+	// reasons are the most frequent refusal reasons of the window so far
+	// (at most maxAlertReasons, most frequent first, "reason (×n)").
+	OnRefusals func(projectID string, count int, reasons []string)
 
 	mu       sync.Mutex
 	limiters map[string]*rate.Limiter
@@ -138,6 +142,54 @@ type refusalWindow struct {
 	start   time.Time
 	count   int
 	alerted bool
+	reasons map[string]int // normalised refusal reason → count (≤ maxTrackedReasons keys)
+}
+
+const (
+	maxAlertReasons   = 3   // reasons shown in the alert
+	maxTrackedReasons = 20  // distinct reasons kept per window (bounds memory)
+	maxReasonLen      = 160 // characters of one reason in the alert
+)
+
+// stmtPrefixRe matches the "statement N: " prefix the transaction
+// endpoint puts on a refusal, so the same reason groups together.
+var stmtPrefixRe = regexp.MustCompile(`^statement \d+: `)
+
+// alertReason normalises a refusal detail for the alert: no statement
+// index, no hint (the platform's pointer to the right tool is noise for
+// ops), bounded length.
+func alertReason(detail string) string {
+	r := stmtPrefixRe.ReplaceAllString(strings.TrimSpace(detail), "")
+	if i := strings.Index(r, ". Hint: "); i >= 0 {
+		r = r[:i]
+	}
+	if r == "" {
+		r = "(no reason recorded)"
+	}
+	return truncate(r, maxReasonLen)
+}
+
+// topReasons returns up to maxAlertReasons reasons, most frequent first
+// (ties by text, so the order is stable).
+func topReasons(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]] != m[keys[j]] {
+			return m[keys[i]] > m[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	if len(keys) > maxAlertReasons {
+		keys = keys[:maxAlertReasons]
+	}
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = fmt.Sprintf("%s (×%d)", k, m[k])
+	}
+	return out
 }
 
 // New returns a logger; a nil pool gives a no-op logger.
@@ -201,7 +253,7 @@ func (l *Logger) RecordBatch(ctx context.Context, projectID string, items []Item
 	}
 	for _, it := range items {
 		if it.Entry.Outcome == OutcomeRefused {
-			l.countRefusal(projectID)
+			l.countRefusal(projectID, it.Entry.Detail)
 		}
 	}
 	items = items[:l.allowN(projectID, len(items))]
@@ -261,26 +313,34 @@ func (l *Logger) allowN(projectID string, n int) int {
 // countRefusal tracks refused statements per project and calls OnRefusals
 // once per window when the threshold is reached. Counted before the write
 // budget, so dropped entries still count.
-func (l *Logger) countRefusal(projectID string) {
+func (l *Logger) countRefusal(projectID, detail string) {
 	l.mu.Lock()
 	w := l.refusals[projectID]
 	now := time.Now()
 	if w == nil || now.Sub(w.start) > RefusalAlertWindow {
-		w = &refusalWindow{start: now}
+		w = &refusalWindow{start: now, reasons: map[string]int{}}
 		l.refusals[projectID] = w
 	}
 	w.count++
+	reason := alertReason(detail)
+	if _, seen := w.reasons[reason]; seen || len(w.reasons) < maxTrackedReasons {
+		w.reasons[reason]++
+	}
 	fire := !w.alerted && w.count >= RefusalAlertThreshold
 	if fire {
 		w.alerted = true
 	}
 	count := w.count
+	var reasons []string
+	if fire {
+		reasons = topReasons(w.reasons)
+	}
 	hook := l.OnRefusals
 	l.mu.Unlock()
 	if fire {
 		slog.Warn("sql log: many refused statements", "project_id", projectID, "count", count, "window", RefusalAlertWindow.String())
 		if hook != nil {
-			go hook(projectID, count)
+			go hook(projectID, count, reasons)
 		}
 	}
 }

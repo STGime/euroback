@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -88,19 +89,17 @@ func HandleAdminLog(pool *pgxpool.Pool) http.HandlerFunc {
 
 // DiscordRefusalAlert returns an OnRefusals hook that posts to a Discord
 // webhook. An empty URL returns nil (no alert; the warning is still logged).
-func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID string, count int) {
+func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID string, count int, reasons []string) {
 	if webhookURL == "" {
 		return nil
 	}
-	return func(projectID string, count int) {
+	return func(projectID string, count int, reasons []string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		desc := fmt.Sprintf("Project `%s` had **%d** SQL statements refused by the platform's checks within %s. Details: SQL log in /admin.",
-			projectID, count, RefusalAlertWindow)
 		body, _ := json.Marshal(map[string]any{
 			"embeds": []map[string]any{{
 				"title":       "⚠️ Refused SQL statements",
-				"description": desc,
+				"description": refusalAlertDescription(projectID, count, reasons),
 				"url":         consoleURL + "/admin/sql",
 				"color":       0xf59e0b, // amber-500
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
@@ -122,3 +121,24 @@ func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID string, c
 		}
 	}
 }
+
+// refusalAlertDescription is the alert text: the count, then the most
+// frequent refusal reasons, so ops can tell a developer's agent
+// inspecting its own schema from probing without opening the log.
+func refusalAlertDescription(projectID string, count int, reasons []string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Project `%s` had **%d** SQL statements refused by the platform's checks within %s.", projectID, count, RefusalAlertWindow)
+	if len(reasons) > 0 {
+		sb.WriteString("\n\nTop reasons:")
+		for _, r := range reasons {
+			// Reasons echo identifiers the developer typed: keep them out
+			// of Discord markdown.
+			sb.WriteString("\n• ")
+			sb.WriteString(discordEscaper.Replace(r))
+		}
+	}
+	sb.WriteString("\n\nDetails: SQL log in /admin.")
+	return sb.String()
+}
+
+var discordEscaper = strings.NewReplacer("`", "\\`", "*", "\\*", "_", "\\_", "~", "\\~", "|", "\\|", ">", "\\>", "@", "@\u200b")
