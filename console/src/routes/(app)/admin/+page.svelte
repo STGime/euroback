@@ -402,6 +402,43 @@
 		}
 	}
 
+	// Project suspension: a confirm dialog for suspending (it takes the
+	// project offline); unsuspending is immediate.
+	let suspendTarget = $state<AdminProject | null>(null);
+	let suspendReason = $state('');
+	let projectBusy = $state<string | null>(null);
+
+	async function confirmSuspendProject() {
+		if (!suspendTarget || projectBusy) return;
+		const target = suspendTarget;
+		projectBusy = target.id;
+		error = null;
+		try {
+			await api.adminSuspendProject(target.id, suspendReason.trim());
+			suspendTarget = null;
+			suspendReason = '';
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Suspend failed';
+		} finally {
+			projectBusy = null;
+		}
+	}
+
+	async function unsuspendProject(p: AdminProject) {
+		if (projectBusy) return;
+		projectBusy = p.id;
+		error = null;
+		try {
+			await api.adminUnsuspendProject(p.id);
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Unsuspend failed';
+		} finally {
+			projectBusy = null;
+		}
+	}
+
 	onMount(refresh);
 	onMount(() => {
 		// Deep-link / reload support: open the tab named in the URL hash.
@@ -1282,13 +1319,14 @@
 						<th class="px-4 py-2">Plan</th>
 						<th class="px-4 py-2">Status</th>
 						<th class="px-4 py-2">Created</th>
+						<th class="px-4 py-2 text-right">Actions</th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-100">
 					{#if loading}
-						<tr><td colspan="6" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+						<tr><td colspan="7" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
 					{:else if projects.length === 0}
-						<tr><td colspan="6" class="px-4 py-6 text-center text-gray-400">No projects.</td></tr>
+						<tr><td colspan="7" class="px-4 py-6 text-center text-gray-400">No projects.</td></tr>
 					{:else}
 						{#each projects as p}
 							<tr>
@@ -1296,8 +1334,35 @@
 								<td class="px-4 py-2 font-mono text-gray-600">{p.slug}</td>
 								<td class="px-4 py-2 text-gray-600">{p.owner_email}</td>
 								<td class="px-4 py-2 text-gray-600">{p.plan}</td>
-								<td class="px-4 py-2 text-gray-600">{p.status}</td>
+								<td class="px-4 py-2">
+									{#if p.status === 'suspended'}
+										<span class="inline-flex rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700">suspended</span>
+									{:else}
+										<span class="text-gray-600">{p.status}</span>
+									{/if}
+								</td>
 								<td class="px-4 py-2 text-gray-500">{new Date(p.created_at).toLocaleDateString()}</td>
+								<td class="px-4 py-2 text-right whitespace-nowrap">
+									{#if p.status === 'active'}
+										<button
+											type="button"
+											onclick={() => { suspendTarget = p; suspendReason = ''; }}
+											disabled={projectBusy !== null}
+											class="rounded-md border border-red-300 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50 cursor-pointer disabled:opacity-50"
+										>
+											Suspend
+										</button>
+									{:else if p.status === 'suspended'}
+										<button
+											type="button"
+											onclick={() => unsuspendProject(p)}
+											disabled={projectBusy !== null}
+											class="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 cursor-pointer disabled:opacity-50"
+										>
+											{projectBusy === p.id ? 'Unsuspending…' : 'Unsuspend'}
+										</button>
+									{/if}
+								</td>
 							</tr>
 						{/each}
 					{/if}
@@ -1485,6 +1550,56 @@
 {/if}
 
 <!-- Delete user confirm modal -->
+{#if suspendTarget}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+		<div class="w-full max-w-md rounded-xl bg-white shadow-xl">
+			<div class="border-b border-gray-200 px-5 py-3">
+				<h3 class="text-base font-semibold text-red-700">Suspend project</h3>
+				<p class="mt-1 text-xs text-gray-500">The project stops serving until you unsuspend it. Nothing is deleted.</p>
+			</div>
+			<div class="px-5 py-4 space-y-3">
+				<div class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+					<div><strong>Project:</strong> {suspendTarget.name} <span class="font-mono text-xs">({suspendTarget.slug})</span></div>
+					<div class="mt-1"><strong>Owner:</strong> {suspendTarget.owner_email}</div>
+					<div class="mt-1"><strong>Plan:</strong> {suspendTarget.plan}</div>
+				</div>
+				<p class="text-sm text-gray-700">
+					Its API, sign-in, storage, functions and scheduled jobs stop, and members can't open it in the console.
+					The owner's account and other projects aren't affected.
+				</p>
+				<label class="block text-xs font-medium text-gray-700" for="suspend-reason">Reason (audit log, optional)</label>
+				<input
+					id="suspend-reason"
+					type="text"
+					bind:value={suspendReason}
+					maxlength="500"
+					placeholder="e.g. abuse report"
+					class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+					autocomplete="off"
+				/>
+			</div>
+			<div class="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">
+				<button
+					type="button"
+					onclick={() => { suspendTarget = null; }}
+					disabled={projectBusy !== null}
+					class="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer disabled:opacity-50"
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					onclick={confirmSuspendProject}
+					disabled={projectBusy !== null}
+					class="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+				>
+					{projectBusy ? 'Suspending…' : 'Suspend project'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 {#if deleteUserTarget}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
 		<div class="w-full max-w-md rounded-xl bg-white shadow-xl">

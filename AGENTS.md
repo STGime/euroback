@@ -98,6 +98,7 @@ Shared login roles are created via the Scaleway console before their migrations 
 
 ## Account suspension
 - `platform_users.suspended_at` (000142) suspends a platform account: **every login path refuses to mint a session** (the check is in `generatePlatformJWT`, the single chokepoint for password / passkey / SSO / magic-link) and **`CreateProject` refuses** (defence-in-depth — an existing JWT stays valid < 24 h). It does NOT touch the user's projects, tokens or data. Superadmin only: `POST`/`DELETE /platform/admin/users/{id}/suspend`; can't suspend yourself or another superadmin. Audited (`user.suspended` / `user.unsuspended`).
+- **Project suspension** is separate: `POST`/`DELETE /platform/admin/projects/{id}/suspend` (superadmin; **Suspend** in Admin → Projects) moves `projects.status` between `active` and `suspended`. Everything that serves a project requires `active` (API keys, the project subdomain, console project routes, cron, function triggers), so it stops answering; data is kept. Audited on the project (`project.suspended` / `project.unsuspended`, optional reason). Any new path that serves a project must check `status = 'active'` too.
 
 ## Build & Deploy
 - **New code never starts before migrations.** CI applies Deployment manifests pinned to the currently-running image (`apply_pinned`); new images arrive only via `kubectl set image` after migrations run. Any new Deployment manifest must be applied through `apply_pinned`, and each Deployment must be defined in exactly one manifest.
