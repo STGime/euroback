@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -47,9 +48,16 @@ const ErrProjectSuspendedJSON = `{"error":"this project is suspended; contact su
 // ProjectSuspended reports whether the project is suspended. A failed
 // lookup reports false: the route's own checks still apply.
 func ProjectSuspended(ctx context.Context, pool *pgxpool.Pool, projectID string) bool {
+	id, err := uuid.Parse(projectID)
+	if err != nil {
+		return false // not a project id; the route 404s on its own
+	}
 	var suspended bool
 	if err := pool.QueryRow(ctx,
-		`SELECT status = 'suspended' FROM public.projects WHERE id::text = $1`, projectID).Scan(&suspended); err != nil {
+		`SELECT status = 'suspended' FROM public.projects WHERE id = $1`, id).Scan(&suspended); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("project suspension check failed", "error", err, "project_id", projectID)
+		}
 		return false
 	}
 	return suspended
