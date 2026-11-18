@@ -50,12 +50,19 @@ import (
 type translationWarning struct {
 	line int    // 1-indexed line in the input
 	note string // human-readable
+	// access marks a change that can let callers do something they
+	// couldn't on Supabase. `schema` won't write the file until these
+	// are acknowledged with --accept-access-changes.
+	access bool
 }
 
 // translationResult is what Translate returns.
 type translationResult struct {
 	sql      string
 	warnings []translationWarning
+	// definers are the functions that were SECURITY DEFINER (normalized
+	// names), so policies and triggers using them can be flagged.
+	definers map[string]bool
 	// rewriteCount tracks how many of each rewrite fired. Useful for
 	// tests and for a "changed N policies" summary line at CLI exit.
 	rewrites map[string]int
@@ -64,7 +71,7 @@ type translationResult struct {
 // Translate rewrites a Supabase pg_dump schema-only body for Eurobase.
 // See the file-level doc for the two-pass architecture.
 func Translate(input string) translationResult {
-	res := translationResult{rewrites: map[string]int{}}
+	res := translationResult{rewrites: map[string]int{}, definers: map[string]bool{}}
 
 	// Tokenizer view: byte i is code iff mask[i]. Used by Pass 1 to
 	// avoid rewriting inside literals; Pass 2 re-tokenizes since it
@@ -116,6 +123,9 @@ const rewriteModdatetime = "rewrite:extensions.moddatetime() → moddatetime()"
 const moddatetimeShim = `-- eurobase: replaces the moddatetime extension used by the triggers below.
 CREATE FUNCTION moddatetime() RETURNS trigger LANGUAGE plpgsql AS $eb$
 BEGIN
+  IF TG_NARGS <> 1 OR NOT (to_jsonb(NEW) ? TG_ARGV[0]) THEN
+    RAISE EXCEPTION 'moddatetime: % has no column %', TG_TABLE_NAME, TG_ARGV[0];
+  END IF;
   NEW := jsonb_populate_record(NEW, jsonb_build_object(TG_ARGV[0], now()));
   RETURN NEW;
 END
@@ -341,12 +351,14 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 			note: "uses `auth.jwt()` — Eurobase does not expose the raw JWT to SQL; verify the intent (may need a policy rewrite that reads Eurobase's session GUC instead)",
 		})
 	}
-	// request.jwt.* is read through current_setting('request.jwt…'), so
-	// that check looks at the whole line, literals included.
+	// request.jwt.* and the role setting are read through
+	// current_setting('…'), so that check looks at the whole line,
+	// literals included.
 	if reSupabaseRoleCheck.MatchString(code) || reJWTSetting.MatchString(line) {
 		warns = append(warns, translationWarning{
-			line: lineNum,
-			note: "checks the database role or JWT settings (current_user / session_user / current_role / request.jwt.*) — on Eurobase every API request runs as the same role and those settings are empty, so a check like `current_user <> 'anon'` lets anonymous callers through. Rewrite it with auth_uid() (NULL when no one is signed in) or public.is_service_role()",
+			line:   lineNum,
+			access: true,
+			note:   "checks the database role or JWT settings (current_user / session_user / current_role / pg_has_role / current_setting('role') / request.jwt.*) — on Eurobase every API request runs as the same role and those settings are empty, so a check like `current_user <> 'anon'` lets anonymous callers through and one like `current_setting('role') = 'authenticated'` never fires. Rewrite it with auth_uid() (NULL when no one is signed in) or public.is_service_role()",
 		})
 	}
 	if rePublicBareWord.MatchString(reStripQualifiedPublic.ReplaceAllString(code, "")) {
@@ -746,8 +758,8 @@ var (
 	reExtensionsUUID          = regexp.MustCompile(`\bextensions\.uuid_generate_v4\s*\(\s*\)`)
 	reExtensionsGenRandomUUID = regexp.MustCompile(`\bextensions\.gen_random_uuid\s*\(\s*\)`)
 	reExtensionsModdatetime   = regexp.MustCompile(`(?i)\bextensions\s*\.\s*moddatetime\s*\(`)
-	reSupabaseRoleCheck       = regexp.MustCompile(`(?i)\b(current_user|session_user|current_role)\b`)
-	reJWTSetting              = regexp.MustCompile(`(?i)current_setting\s*\(\s*'request\.jwt`)
+	reSupabaseRoleCheck       = regexp.MustCompile(`(?i)\b(current_user|session_user|current_role|pg_has_role)\b`)
+	reJWTSetting              = regexp.MustCompile(`(?i)current_setting\s*\(\s*'(request\.jwt|role')`)
 	rePublicBareWord          = regexp.MustCompile(`(?i)\bpublic\b`)
 	reStripQualifiedPublic    = regexp.MustCompile(`(?i)\bpublic\s*\.`)
 	reExtensionsRef           = regexp.MustCompile(`(?i)\bextensions\s*\.\s*[A-Za-z_]`)
@@ -785,5 +797,5 @@ var (
 	// not in this list because we rewrite the common helpers on that
 	// schema; anything else on `extensions` gets flagged separately
 	// if it's a schema Supabase-only tenants would rely on.
-	reCustomSchemaRef = regexp.MustCompile(`\b(?:graphql|graphql_public|realtime|vault|net|cron|supabase_functions|_supabase|pgmq_public)\.\w+`)
+	reCustomSchemaRef = regexp.MustCompile(`\b(?:graphql|graphql_public|realtime|vault|net|cron|supabase_functions|_supabase|pgmq_public|private)\.\w+`)
 )

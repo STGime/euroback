@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -524,6 +525,49 @@ func TestSchemaImport_Fixture(t *testing.T) {
 		t.Errorf("definer not reported: %+v", res.warnings)
 	}
 
+	// GRANT / REVOKE restrictions are read from the source.
+	grants, err := readNarrowedGrants(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grantLines []string
+	for _, g := range grants {
+		grantLines = append(grantLines, g.String())
+	}
+	wantGrant := "table profiles: anon has no SELECT; column grants: SELECT (id, role)"
+	if strings.Join(grantLines, "\n") != wantGrant {
+		t.Errorf("narrowed grants:\n%s\nwant:\n%s", strings.Join(grantLines, "\n"), wantGrant)
+	}
+
+	// The command refuses to write while access changes are unaccepted,
+	// and writes them into the file's header once accepted.
+	t.Setenv("SUPABASE_DB_URL", dsn)
+	out := t.TempDir() + "/m.sql"
+	cmd := importSupabaseSchemaCmd()
+	cmd.SetArgs([]string{"--output", out})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.ExecuteContext(ctx); err == nil || !strings.Contains(err.Error(), "--accept-access-changes") {
+		t.Errorf("expected a refusal, got %v", err)
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("file written despite the refusal")
+	}
+	cmd = importSupabaseSchemaCmd()
+	cmd.SetArgs([]string{"--output", out, "--accept-access-changes"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("with --accept-access-changes: %v", err)
+	}
+	written, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), "-- ACCESS CHANGES") || !strings.Contains(string(written), "GRANT/REVOKE not carried over: table profiles") {
+		t.Errorf("header doesn't list the access changes:\n%.1500s", written)
+	}
+
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -669,9 +713,6 @@ DROP TABLE IF EXISTS public.notes, public.members_only CASCADE;
 // for anon / authenticated, a helper used by policies, an updated_at trigger, a
 // materialized view. Idempotent.
 const schemaImportFixtureSQL = `
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
-END $$;
 CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE
   AS $f$ SELECT nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
 CREATE OR REPLACE FUNCTION extensions.moddatetime() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$;
@@ -700,6 +741,9 @@ CREATE TABLE public.members_only (id integer PRIMARY KEY);
 ALTER TABLE public.members_only ENABLE ROW LEVEL SECURITY;
 CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $f$ SELECT 'anon' $f$;
 CREATE POLICY "Members" ON public.members_only FOR SELECT USING (auth.role() = 'authenticated');
+-- Column-level security: anon may read only id and role.
+REVOKE SELECT ON public.profiles FROM anon;
+GRANT SELECT (id, role) ON public.profiles TO anon;
 CREATE MATERIALIZED VIEW public.post_counts AS SELECT user_id, count(*) AS n FROM public.posts GROUP BY user_id;
 CREATE INDEX post_counts_user_idx ON public.post_counts (user_id);
 `
@@ -875,5 +919,111 @@ func TestTranslate_FunctionSettings(t *testing.T) {
 	}
 	if strings.Contains(got, "search_path") {
 		t.Errorf("search_path setting kept:\n%s", got)
+	}
+}
+
+// ── second review ────────────────────────────────────────────────────
+
+func accessNotes(res translationResult) []string {
+	var out []string
+	for _, w := range res.warnings {
+		if w.access {
+			out = append(out, w.note)
+		}
+	}
+	return out
+}
+
+func TestTranslate_RoleSettingChecksAreAccessChanges(t *testing.T) {
+	for _, in := range []string{
+		"CREATE FUNCTION public.guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF current_setting('role') = 'authenticated' THEN RAISE EXCEPTION 'no'; END IF; RETURN NEW; END $$;",
+		`CREATE POLICY p ON t USING ((current_setting('role'::text) <> 'anon'::text));`,
+		`CREATE POLICY p ON t USING (pg_has_role('authenticated', 'member'));`,
+		`CREATE POLICY p ON t USING ((CURRENT_USER <> 'anon'::name));`,
+	} {
+		if len(accessNotes(Translate(in))) == 0 {
+			t.Errorf("not an access change: %s", in)
+		}
+	}
+}
+
+// A former definer function used in a policy or trigger is an access
+// change: as invoker it can't see what it checked for.
+func TestTranslate_DefinerUsedInPolicyIsAccessChange(t *testing.T) {
+	in := `CREATE FUNCTION public.is_banned() RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT EXISTS (SELECT 1 FROM public.banned_users WHERE id = auth.uid()) $$;
+CREATE POLICY "Insert unless banned" ON public.posts FOR INSERT TO authenticated WITH CHECK (((auth.uid() = user_id) AND (NOT public.is_banned())));
+CREATE TRIGGER t BEFORE INSERT ON public.posts FOR EACH ROW EXECUTE FUNCTION public.is_banned();
+CREATE POLICY "Other" ON public.posts FOR SELECT USING (true);`
+	notes := accessNotes(Translate(in))
+	if len(notes) != 2 || !strings.Contains(notes[0], `policy "Insert unless banned" calls is_banned`) || !strings.Contains(notes[1], "trigger t calls is_banned") {
+		t.Errorf("access notes = %q", notes)
+	}
+}
+
+// Leaving out a policy, an RLS switch or a trigger is an access change;
+// leaving out an index isn't.
+func TestTranslate_SkippedPolicyIsAccessChange(t *testing.T) {
+	in := `--
+-- Name: active_subs; Type: MATERIALIZED VIEW; Schema: public; Owner: -
+--
+
+CREATE MATERIALIZED VIEW public.active_subs AS SELECT 1 AS user_id WITH NO DATA;
+
+
+--
+-- Name: active_subs_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX active_subs_idx ON public.active_subs USING btree (user_id);
+
+
+--
+-- Name: posts Paid only; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY "Paid only" ON public.posts AS RESTRICTIVE FOR SELECT USING ((EXISTS ( SELECT 1 FROM public.active_subs WHERE (active_subs.user_id = auth.uid()))));
+`
+	notes := accessNotes(Translate(in))
+	if len(notes) != 1 || !strings.Contains(notes[0], "posts Paid only is not imported") {
+		t.Errorf("access notes = %q", notes)
+	}
+}
+
+// A quoted mixed-case materialized view doesn't drag a lowercase table
+// of the same spelling along.
+func TestTranslate_SkippedMatviewNameIsCaseSensitive(t *testing.T) {
+	in := `--
+-- Name: Orders; Type: MATERIALIZED VIEW; Schema: public; Owner: -
+--
+
+CREATE MATERIALIZED VIEW public."Orders" AS SELECT 1 AS n WITH NO DATA;
+
+
+--
+-- Name: orders; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
+`
+	if got := Translate(in).sql; !strings.Contains(got, "\nALTER TABLE orders ENABLE ROW LEVEL SECURITY;") {
+		t.Errorf("RLS switch of orders was skipped:\n%s", got)
+	}
+}
+
+func TestTranslate_ModdatetimeChecksColumn(t *testing.T) {
+	got := Translate(`CREATE TRIGGER t BEFORE UPDATE ON public.p FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime('updated_at');`).sql
+	if !strings.Contains(got, "to_jsonb(NEW) ? TG_ARGV[0]") || !strings.Contains(got, "RAISE EXCEPTION") {
+		t.Errorf("moddatetime() doesn't check its column:\n%s", got)
+	}
+}
+
+func TestTranslate_WarnsOnPlatformTableNameAndPrivateSchema(t *testing.T) {
+	res := Translate(`CREATE TABLE public.users (id uuid);
+CREATE POLICY p ON public.posts USING (private.is_org_member(org_id));`)
+	if !hasWarning(res, "table users has the name of a table every Eurobase project already has") {
+		t.Errorf("no platform-table warning: %+v", res.warnings)
+	}
+	if !hasWarning(res, "schema other than") {
+		t.Errorf("no private-schema warning: %+v", res.warnings)
 	}
 }

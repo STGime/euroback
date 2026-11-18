@@ -68,6 +68,8 @@ func translateStatements(sql string, res *translationResult) string {
 var (
 	reHeadPolicy   = regexp.MustCompile(`(?i)^CREATE\s+POLICY\b`)
 	reHeadFunction = regexp.MustCompile(`(?i)^CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+([^\s(]+)`)
+	reHeadTrigger  = regexp.MustCompile(`(?i)^CREATE\s+(OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+("(?:[^"]|"")*"|\S+)`)
+	reHeadTable    = regexp.MustCompile(`(?i)^CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")*"|[^\s(]+)`)
 	reHeadView     = regexp.MustCompile(`(?i)^CREATE\s+(OR\s+REPLACE\s+)?(TEMP\s+|TEMPORARY\s+|RECURSIVE\s+)*VIEW\s+([^\s(]+)`)
 )
 
@@ -75,7 +77,20 @@ func translateStatement(s string, res *translationResult) string {
 	head := statementCodeHead(s)
 	switch {
 	case reHeadPolicy.MatchString(head):
-		return translatePolicy(s, res)
+		out := translatePolicy(s, res)
+		flagDefinerUse(out, "policy "+policyName(out), res)
+		return out
+	case reHeadTrigger.MatchString(head):
+		flagDefinerUse(s, "trigger "+reHeadTrigger.FindStringSubmatch(head)[2], res)
+		return s
+	case reHeadTable.MatchString(head):
+		name := normalizeName(reHeadTable.FindStringSubmatch(head)[1])
+		if platformTableNames[name] {
+			res.warnings = append(res.warnings, translationWarning{
+				note: fmt.Sprintf("table %s has the name of a table every Eurobase project already has — rename it in Supabase (and in your app) before importing, or the migration fails", name),
+			})
+		}
+		return s
 	case reHeadFunction.MatchString(head):
 		name := reHeadFunction.FindStringSubmatch(head)[3]
 		return translateFunction(s, name, res)
@@ -279,6 +294,7 @@ func translateFunction(s, name string, res *translationResult) string {
 			s = s[:ms[i][0]] + " " + s[ms[i][1]:]
 		}
 		res.rewrites["rewrite:SECURITY DEFINER removed"]++
+		res.definers[normalizeName(name)] = true
 		res.warnings = append(res.warnings, translationWarning{
 			note: fmt.Sprintf("function %s was SECURITY DEFINER; it now runs with the caller's rights, so it only sees rows the caller's RLS allows. Eurobase doesn't run functions with their owner's rights — if it did work the caller can't (e.g. a trigger writing to another table), move that work to an edge function or a webhook (see the assess report)", name),
 		})
@@ -321,6 +337,69 @@ func translateFunction(s, name string, res *translationResult) string {
 			res.warnings = append(res.warnings, w)
 		}
 		b.WriteString(tag + rewritten + tag)
+	}
+	return b.String()
+}
+
+// platformTableNames are the tables every project schema has.
+var platformTableNames = map[string]bool{
+	"users": true, "user_identities": true, "refresh_tokens": true, "email_tokens": true,
+	"storage_objects": true, "storage_shared_prefixes": true, "vault_secrets": true,
+}
+
+// normalizeName drops a schema qualifier and folds an unquoted name to
+// lower case, as Postgres does.
+func normalizeName(n string) string {
+	// Last dot outside double quotes separates the schema.
+	last, inQuote := 0, false
+	for i := 0; i < len(n); i++ {
+		switch n[i] {
+		case '"':
+			inQuote = !inQuote
+		case '.':
+			if !inQuote {
+				last = i + 1
+			}
+		}
+	}
+	n = n[last:]
+	if len(n) >= 2 && n[0] == '"' && n[len(n)-1] == '"' {
+		return strings.ReplaceAll(n[1:len(n)-1], `""`, `"`)
+	}
+	return strings.ToLower(n)
+}
+
+// flagDefinerUse reports a policy or trigger that calls a function
+// which was SECURITY DEFINER. Running with the caller's rights, such a
+// function sees only the rows the caller may see — a check for the
+// absence of rows (`NOT is_banned()`, `NOT EXISTS (…)`) then passes
+// for callers it used to stop.
+func flagDefinerUse(stmt, what string, res *translationResult) {
+	if len(res.definers) == 0 {
+		return
+	}
+	code := strings.ToLower(statementCode(stmt))
+	for fn := range res.definers {
+		if regexp.MustCompile(`(^|[^a-z0-9_$."])("?` + regexp.QuoteMeta(strings.ToLower(fn)) + `"?)\s*\(`).MatchString(code) {
+			res.warnings = append(res.warnings, translationWarning{
+				access: true,
+				note:   fmt.Sprintf("%s calls %s, which was SECURITY DEFINER and now runs with the caller's rights: it only sees rows the caller may see, so a check for the absence of rows (e.g. NOT is_banned(), NOT EXISTS …) can now let callers through. Rewrite the check so the caller's own policies allow what it reads, or move it out of the database", what, fn),
+			})
+		}
+	}
+}
+
+// statementCode is the statement's code with literals and comments
+// blanked (quoted identifiers kept).
+func statementCode(s string) string {
+	segs, _ := splitCodeAndLiterals(s)
+	var b strings.Builder
+	for _, seg := range segs {
+		if seg.code || strings.HasPrefix(seg.text, `"`) {
+			b.WriteString(seg.text)
+		} else {
+			b.WriteByte(' ')
+		}
 	}
 	return b.String()
 }

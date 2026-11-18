@@ -324,7 +324,10 @@ func TestReadSupabaseCode_Fixture(t *testing.T) {
 const supabaseFixtureSQL = `
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
 END $$;
+-- Like Supabase: new public tables are open to anon / authenticated.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;
 DROP EXTENSION IF EXISTS pg_stat_statements;
 DROP SCHEMA IF EXISTS auth, storage, vault, supabase_functions, private, extensions CASCADE;
 DROP VIEW IF EXISTS public.latest_posts, public.safe_posts;

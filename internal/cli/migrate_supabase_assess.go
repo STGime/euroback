@@ -127,6 +127,11 @@ rerun doesn't overwrite the previous report. Pass --output to override
 			if err := assessPolicies(ctx, conn, r); err != nil {
 				return fmt.Errorf("enumerate RLS policies: %w", err)
 			}
+			grants, err := readNarrowedGrants(ctx, conn)
+			if err != nil {
+				return fmt.Errorf("enumerate privileges: %w", err)
+			}
+			r.policies = append(r.policies, gradeGrants(grants)...)
 			if err := assessAuthUsers(ctx, conn, r); err != nil {
 				return fmt.Errorf("enumerate auth users: %w", err)
 			}
@@ -948,4 +953,19 @@ func isMissingObjectError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// gradeGrants turns GRANT / REVOKE restrictions into blockers: Eurobase
+// has no per-role grants, so each must be replaced (RLS, a view, an edge
+// function) before the app goes live there.
+func gradeGrants(gs []narrowedGrant) []item {
+	out := make([]item, 0, len(gs))
+	for _, g := range gs {
+		out = append(out, item{
+			name:  "grant: " + g.object + " (" + g.role + ")",
+			grade: gradeBlocker,
+			note:  g.role + " has " + g.detail + " on Supabase. " + grantsNote,
+		})
+	}
+	return out
 }

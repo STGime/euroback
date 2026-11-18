@@ -20,6 +20,8 @@ import (
 	"strings"
 )
 
+var reLowerIdent = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
+
 var reDumpHeader = regexp.MustCompile(`(?m)^-- Name: (.*?); Type: (.*?); Schema: (.*?);`)
 
 type dumpBlock struct {
@@ -129,8 +131,13 @@ func refersToSkipped(b dumpBlock, skipped map[string]bool) bool {
 	}
 	text := code.String()
 	for name := range skipped {
-		re := regexp.MustCompile(`(?i)\b(ON|FROM|JOIN|COLUMN|VIEW|TABLE|ONLY)\s+(public\.)?("` +
-			regexp.QuoteMeta(name) + `"|` + regexp.QuoteMeta(name) + `\b)`)
+		// pg_dump writes a name unquoted only when it is a plain
+		// lowercase identifier; anything else appears quoted, exactly.
+		ref := `"` + regexp.QuoteMeta(name) + `"`
+		if reLowerIdent.MatchString(name) {
+			ref = `(?:` + ref + `|` + regexp.QuoteMeta(name) + `\b)`
+		}
+		re := regexp.MustCompile(`(?i:\b(?:ON|FROM|JOIN|COLUMN|VIEW|TABLE|ONLY)\s+(?:public\.)?)` + ref)
 		if re.MatchString(text) {
 			return true
 		}
@@ -172,6 +179,15 @@ func commentOutUnsupportedObjects(sql string, res *translationResult) string {
 		}
 		byReason[reason] = append(byReason[reason], b.name)
 		res.rewrites["skip:unsupported object (commented out)"]++
+		switch b.typ {
+		case "POLICY", "ROW SECURITY", "TRIGGER", "RULE":
+			// Leaving out a restrictive policy, an ENABLE ROW LEVEL
+			// SECURITY or a guard trigger opens access up.
+			res.warnings = append(res.warnings, translationWarning{
+				access: true,
+				note:   fmt.Sprintf("%s %s is not imported (%s) — whatever it restricted is no longer restricted; recreate the check another way", strings.ToLower(b.typ), b.name, reason),
+			})
+		}
 		out.WriteString("-- eurobase: not imported — " + reason + "\n")
 		lines := strings.SplitAfter(b.text, "\n")
 		for _, ln := range lines {
