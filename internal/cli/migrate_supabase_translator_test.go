@@ -422,10 +422,12 @@ INSERT INTO events (msg) VALUES ('table public.orders was updated by auth.uid()'
 	}
 }
 
-// TestTranslate_LeavesDollarQuotedBodiesAlone pins re-review S1/S2:
-// content inside a `$$…$$` or `$tag$…$tag$` block MUST pass through
-// unchanged. Statement splitting must not stop at a `;` inside the body.
-func TestTranslate_LeavesDollarQuotedBodiesAlone(t *testing.T) {
+// TestTranslate_FunctionBodiesKeepLiterals pins re-review S1/S2 as
+// updated for function bodies: the body's code is translated (a project
+// has no auth schema, so a bare auth.uid() would fail at runtime), but
+// string literals inside it pass through unchanged, and a `;` inside
+// the body doesn't split the statement.
+func TestTranslate_FunctionBodiesKeepLiterals(t *testing.T) {
 	in := `CREATE FUNCTION notify_change() RETURNS trigger AS $$
 BEGIN
     PERFORM 1;
@@ -437,39 +439,26 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE orders (id uuid PRIMARY KEY);`
 	got := Translate(in).sql
 
-	// Body content must be untouched — including the `auth.uid()` inside
-	// the RAISE NOTICE string literal.
-	if !strings.Contains(got, "'auth.uid() = %'") {
-		t.Errorf("string literal inside dollar-quote body was rewritten:\n%s", got)
+	if !strings.Contains(got, "RAISE NOTICE 'auth.uid() = %', auth_uid();") {
+		t.Errorf("body code not translated, or its string literal was:\n%s", got)
 	}
-	// The dollar-quote body's `;` must NOT split the statement — the
-	// CREATE TABLE that follows must land intact.
 	if !strings.Contains(got, "CREATE TABLE orders (id uuid PRIMARY KEY);") {
 		t.Errorf("dollar-quote body's `;` split the statement:\n%s", got)
 	}
-	// The full function-body sequence should still be present in one
-	// piece (all four PERFORM/RAISE lines).
-	for _, want := range []string{
-		"PERFORM 1;",
-		"PERFORM 2;",
-		"RETURN NEW;",
-		"$$ LANGUAGE plpgsql;",
-	} {
+	for _, want := range []string{"PERFORM 1;", "PERFORM 2;", "RETURN NEW;", "$$ LANGUAGE plpgsql;"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("dollar-quote body content lost (%q):\n%s", want, got)
 		}
 	}
-	// #274 re-review M-c: the input's dollar-quote body contains
-	// `auth.uid()` in TWO positions — inside the RAISE NOTICE string
-	// literal AND bare after the comma. Both live inside the
-	// dollar-quote and must survive verbatim. A `strings.Contains`
-	// check would tautologically match the substring inside the string
-	// literal even if the bare one got rewritten — count instead.
-	if got, want := strings.Count(got, "auth.uid()"), 2; got != want {
-		t.Errorf("expected auth.uid() to survive in %d places inside dollar-quote body, got %d occurrences", want, got)
-	}
-	if strings.Contains(got, "auth_uid()") {
-		t.Errorf("auth.uid() inside dollar-quote body was rewritten to auth_uid():\n%s", got)
+}
+
+// A dollar-quoted string outside a function (here a COMMENT) is data,
+// not code — it stays untouched.
+func TestTranslate_LeavesOtherDollarQuotesAlone(t *testing.T) {
+	in := `COMMENT ON TABLE orders IS $$uses auth.uid() and public.orders$$;`
+	got := Translate(in).sql
+	if !strings.Contains(got, "$$uses auth.uid() and public.orders$$") {
+		t.Errorf("dollar-quoted comment text was rewritten:\n%s", got)
 	}
 }
 

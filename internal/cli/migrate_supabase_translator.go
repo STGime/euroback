@@ -82,17 +82,46 @@ func Translate(input string) translationResult {
 		})
 	}
 
+	// ── Pass 0: pg_dump objects Eurobase can't hold are commented out ──
+	input = commentOutUnsupportedObjects(input, &res)
+	mask, _ = buildCodeMask(input)
+
 	// ── Pass 1: source-line by source-line ──
 	pass1 := translatePass1(input, mask, &res)
 
-	// ── Pass 2: statement-level policy wrap ──
-	final, wraps := wrapPoliciesInStatements(pass1)
-	if wraps > 0 {
-		res.rewrites["rewrite:policy body OR'd with is_service_role()"] += wraps
+	// ── Pass 2: statement-level (policies, functions, views) ──
+	final := translateStatements(pass1, &res)
+
+	// Sequence defaults: pg_dump writes nextval('public.t_id_seq'::regclass);
+	// the name is in a string literal, which Pass 1 deliberately leaves
+	// alone, so this one shape is rewritten here.
+	if n := len(reRegclassPublic.FindAllStringIndex(final, -1)); n > 0 {
+		final = reRegclassPublic.ReplaceAllString(final, "'$1'::regclass")
+		res.rewrites["rewrite:'public.<seq>'::regclass → '<seq>'::regclass"] += n
+	}
+	if res.rewrites[rewriteModdatetime] > 0 || res.rewrites[rewriteModdatetime+" (function bodies)"] > 0 {
+		if !reDefinesModdatetime.MatchString(final) {
+			final = moddatetimeShim + final
+			res.rewrites["add:moddatetime() trigger function"]++
+		}
 	}
 	res.sql = final
 	return res
 }
+
+const rewriteModdatetime = "rewrite:extensions.moddatetime() → moddatetime()"
+
+// moddatetimeShim does what the moddatetime extension's trigger does:
+// sets the column named by the trigger argument to the current time.
+const moddatetimeShim = `-- eurobase: replaces the moddatetime extension used by the triggers below.
+CREATE FUNCTION moddatetime() RETURNS trigger LANGUAGE plpgsql AS $eb$
+BEGIN
+  NEW := jsonb_populate_record(NEW, jsonb_build_object(TG_ARGV[0], now()));
+  RETURN NEW;
+END
+$eb$;
+
+`
 
 // translatePass1 walks the input line by line. A line ends at a `\n`
 // that appears in the source. For each line:
@@ -137,7 +166,26 @@ func translatePass1(input string, mask []bool, res *translationResult) string {
 		if headIsCode {
 			trimmed := strings.TrimLeft(line, " \t")
 			switch {
+			case reSetCheckFunctionBodies.MatchString(trimmed):
+				// pg_dump writes functions before the tables they read
+				// and turns body checks off so SQL-language functions
+				// can be created; keep that, for this migration only.
+				out.WriteString("SET LOCAL check_function_bodies = false;")
+				if i < n {
+					out.WriteByte('\n')
+				}
+				res.rewrites["keep:SET LOCAL check_function_bodies = false"]++
+				dropped = true
 			case reSetAny.MatchString(trimmed):
+				res.rewrites["strip:SET <preamble>"]++
+				dropped = true
+			case reMetaCommand.MatchString(trimmed):
+				// pg_dump ≥ 17.6 / 18 brackets the dump in psql
+				// meta-commands (\restrict KEY … \unrestrict KEY);
+				// they aren't SQL.
+				res.rewrites["strip:psql meta-command"]++
+				dropped = true
+			case reSetConfigSearchPath.MatchString(trimmed):
 				res.rewrites["strip:SET <preamble>"]++
 				dropped = true
 			case reCreateSchemaPublic.MatchString(trimmed):
@@ -223,8 +271,11 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 		if n := countAndReplace(&text, reAuthUID, "auth_uid()"); n > 0 {
 			fired["rewrite:auth.uid() → auth_uid()"] += n
 		}
+		// auth.role() is 'anon' without a signed-in user — mapping
+		// everything but the service key to 'authenticated' would let
+		// anonymous callers through `auth.role() = 'authenticated'`.
 		if n := countAndReplace(&text, reAuthRole,
-			"(CASE WHEN public.is_service_role() THEN 'service_role' ELSE 'authenticated' END)"); n > 0 {
+			"(CASE WHEN public.is_service_role() THEN 'service_role' WHEN auth_uid() IS NULL THEN 'anon' ELSE 'authenticated' END)"); n > 0 {
 			fired["rewrite:auth.role() → CASE"] += n
 		}
 		if n := countAndReplace(&text, reAuthEmail, "auth_email()"); n > 0 {
@@ -242,8 +293,17 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 		if n := countAndReplace(&text, reExtensionsGenRandomUUID, "gen_random_uuid()"); n > 0 {
 			fired["rewrite:extensions.gen_random_uuid() → gen_random_uuid()"] += n
 		}
+		// moddatetime (Supabase's "updated_at" trigger helper) isn't
+		// available in a project; Translate adds an equivalent
+		// moddatetime() to the migration when this fires.
+		if n := countAndReplace(&text, reExtensionsModdatetime, "moddatetime("); n > 0 {
+			fired[rewriteModdatetime] += n
+		}
 		if n := countAndReplacePublicQualifier(&text); n > 0 {
-			fired["rewrite:public.<table> → <table>"] += n
+			fired["rewrite:public.<name> → <name>"] += n
+		}
+		if n := countAndReplace(&text, rePgCatalogQualifier, ""); n > 0 {
+			fired["rewrite:pg_catalog.<name> → <name>"] += n
 		}
 		runs[idx].text = text
 	}
@@ -272,6 +332,12 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 			note: "uses `auth.jwt()` — Eurobase does not expose the raw JWT to SQL; verify the intent (may need a policy rewrite that reads Eurobase's session GUC instead)",
 		})
 	}
+	if reExtensionsRef.MatchString(code) {
+		warns = append(warns, translationWarning{
+			line: lineNum,
+			note: "references the `extensions` schema, which a Eurobase project doesn't have — replace the call (the assess report lists which extensions are available)",
+		})
+	}
 	if reCustomSchemaRef.MatchString(code) {
 		warns = append(warns, translationWarning{
 			line: lineNum,
@@ -280,107 +346,6 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 	}
 
 	return out, fired, warns
-}
-
-// wrapPoliciesInStatements walks the input by SQL statements — a
-// statement ends at the next `;` that lives in a code segment. For
-// each statement whose head reads CREATE POLICY, wraps every USING
-// and WITH CHECK body in `public.is_service_role() OR (...)`.
-//
-// Tokenizer-driven: a `;` inside a dollar-quoted function body or a
-// single-quoted string doesn't split the statement. This is the fix
-// for S1 from the #274 re-review — the old byte-loop split
-// `CREATE FUNCTION foo() AS $$ … PERFORM 1; PERFORM 2; … $$` at the
-// first inner `;`.
-func wrapPoliciesInStatements(sql string) (string, int) {
-	segments, _ := splitCodeAndLiterals(sql)
-	var out strings.Builder
-	out.Grow(len(sql))
-	var stmt strings.Builder
-	total := 0
-	flush := func() {
-		if stmt.Len() == 0 {
-			return
-		}
-		s := stmt.String()
-		trimmed := strings.TrimLeft(s, " \t\n\r")
-		if reCreatePolicyMulti.MatchString(trimmed) {
-			wrapped, n := wrapPolicyBody(s)
-			out.WriteString(wrapped)
-			total += n
-		} else {
-			out.WriteString(s)
-		}
-		stmt.Reset()
-	}
-	for _, seg := range segments {
-		if !seg.code {
-			stmt.WriteString(seg.text)
-			continue
-		}
-		text := seg.text
-		for {
-			idx := strings.IndexByte(text, ';')
-			if idx == -1 {
-				stmt.WriteString(text)
-				break
-			}
-			stmt.WriteString(text[:idx+1])
-			flush()
-			text = text[idx+1:]
-		}
-	}
-	flush()
-	return out.String(), total
-}
-
-// wrapPolicyBody rewrites `USING (X)` → `USING (public.is_service_role() OR (X))`
-// and the same for `WITH CHECK (X)`. Requires balanced parens (regex
-// finds the opening paren; we walk to the matching close). Returns
-// the rewritten statement and the count of clauses wrapped.
-//
-// Idempotent: a body that already contains `public.is_service_role() OR (`
-// is left alone (avoids double-wrapping when the CLI is rerun on
-// already-translated input).
-func wrapPolicyBody(stmt string) (string, int) {
-	if strings.Contains(stmt, "public.is_service_role() OR (") {
-		return stmt, 0
-	}
-	changed := 0
-	for _, clauseKW := range []string{"USING", "WITH CHECK"} {
-		// Case-insensitive keyword search, byte-aligned to the original
-		// so paren offsets stay valid.
-		lower := strings.ToLower(stmt)
-		kw := strings.ToLower(clauseKW)
-		idx := 0
-		for {
-			hit := strings.Index(lower[idx:], kw)
-			if hit == -1 {
-				break
-			}
-			hit += idx
-			openParen := strings.IndexByte(stmt[hit:], '(')
-			if openParen == -1 {
-				break
-			}
-			openParen += hit
-			closeParen := findMatchingParen(stmt, openParen)
-			if closeParen == -1 {
-				break
-			}
-			body := stmt[openParen+1 : closeParen]
-			if strings.Contains(body, "public.is_service_role() OR (") {
-				idx = closeParen + 1
-				continue
-			}
-			wrapped := "public.is_service_role() OR (" + body + ")"
-			stmt = stmt[:openParen+1] + wrapped + stmt[closeParen:]
-			changed++
-			lower = strings.ToLower(stmt)
-			idx = openParen + 1 + len(wrapped) + 1
-		}
-	}
-	return stmt, changed
 }
 
 // findMatchingParen given the index of a `(` returns the index of its
@@ -427,7 +392,7 @@ type segment struct {
 // that's true if the tokenizer hit EOF while still inside a literal
 // (an unterminated string / dollar-quote / block-comment). Handles:
 //
-//   - Single-quoted strings: `'foo''bar'` (doubled `''` is an escape).
+//   - Single-quoted strings: `'foo”bar'` (doubled `”` is an escape).
 //   - Escape-string literals: `E'foo\'bar\n'` — the `E`/`e` prefix
 //     honors backslash escapes (`\'`, `\\`, `\n`, `\t`, etc.). Without
 //     this, `E'a\'b public.orders'` would false-close at the `\'` and
@@ -689,27 +654,26 @@ func countAndReplace(s *string, re *regexp.Regexp, repl string) int {
 	return len(matches)
 }
 
-// countAndReplacePublicQualifier strips `public.` from table/sequence
-// references while leaving `public.<func>()` calls, string literals,
-// and USING-clause operator classes intact. pg_dump emits `CREATE
-// TABLE public.orders`, `REFERENCES public.users(id)`, `ALTER TABLE
-// ONLY public.orders`, `JOIN public.orders`, `DROP TABLE IF EXISTS
-// public.orders`, etc.; Eurobase's tenant migrator pins `search_path`
-// to the tenant schema, so an explicit `public.` qualifier lands the
-// object in `public` (which the per-tenant `_ddl` role can't create
-// in). We keep `public.uuid_generate_v4()` and
-// `public.is_service_role()` intact — those are function calls in
-// Eurobase's public schema and must stay qualified. Gated on the
-// preceding DDL keyword (see rePublicQualifierContext). Since the
-// caller already limited the input to code-only spans, string-literal
-// false positives (`'public.foo'::regclass`) are impossible.
+// countAndReplacePublicQualifier strips `public.` from every qualified
+// name in a code span — tables, sequences, types, functions, triggers'
+// EXECUTE FUNCTION targets — except Eurobase's own helpers, which live
+// in public and must stay qualified (public.is_service_role() etc.).
+// A tenant migration runs with search_path pinned to the project schema
+// and refuses any other `public.` reference, so the project's own
+// objects must be unqualified. The caller limits the input to code
+// spans, so string literals and comments are never touched; a quoted
+// name (`public."Orders"`) arrives as `public.` at the end of the code
+// span, which the regex also matches.
 func countAndReplacePublicQualifier(s *string) int {
-	matches := rePublicQualifierContext.FindAllStringIndex(*s, -1)
-	if len(matches) == 0 {
-		return 0
-	}
-	*s = rePublicQualifierContext.ReplaceAllString(*s, "$1")
-	return len(matches)
+	n := 0
+	*s = rePublicQualifier.ReplaceAllStringFunc(*s, func(m string) string {
+		if rePublicHelper.MatchString(m) {
+			return m
+		}
+		n++
+		return rePublicDot.ReplaceAllString(m, "")
+	})
+	return n
 }
 
 // ── regex table ──────────────────────────────────────────────────────
@@ -728,10 +692,11 @@ var (
 	// which are safe to strip in tenant-migration context (Eurobase
 	// controls the session role and locale). The wider net is
 	// intentional. (#274 review M2, M6.)
-	reSetAny             = regexp.MustCompile(`(?i)^\s*SET\s+\w+`)
-	reCreateSchemaPublic = regexp.MustCompile(`(?i)^\s*CREATE\s+SCHEMA\s+(IF\s+NOT\s+EXISTS\s+)?public\b`)
-	reAlterSchemaOwner   = regexp.MustCompile(`(?i)^\s*ALTER\s+SCHEMA\s+\w+\s+OWNER\s+TO`)
-	reCommentOnSchema    = regexp.MustCompile(`(?i)^\s*COMMENT\s+ON\s+SCHEMA\b`)
+	reSetCheckFunctionBodies = regexp.MustCompile(`(?i)^\s*SET\s+check_function_bodies\s*=\s*false\s*;\s*$`)
+	reSetAny                 = regexp.MustCompile(`(?i)^\s*SET\s+\w+`)
+	reCreateSchemaPublic     = regexp.MustCompile(`(?i)^\s*CREATE\s+SCHEMA\s+(IF\s+NOT\s+EXISTS\s+)?public\b`)
+	reAlterSchemaOwner       = regexp.MustCompile(`(?i)^\s*ALTER\s+SCHEMA\s+\w+\s+OWNER\s+TO`)
+	reCommentOnSchema        = regexp.MustCompile(`(?i)^\s*COMMENT\s+ON\s+SCHEMA\b`)
 
 	// `auth.users` as a table reference. Word-boundaries at each end
 	// so `auth.users_view` doesn't get mangled.
@@ -756,28 +721,33 @@ var (
 	// as the built-in `gen_random_uuid()`. (#274 review H4.)
 	reExtensionsUUID          = regexp.MustCompile(`\bextensions\.uuid_generate_v4\s*\(\s*\)`)
 	reExtensionsGenRandomUUID = regexp.MustCompile(`\bextensions\.gen_random_uuid\s*\(\s*\)`)
+	reExtensionsModdatetime   = regexp.MustCompile(`(?i)\bextensions\s*\.\s*moddatetime\s*\(`)
+	reExtensionsRef           = regexp.MustCompile(`(?i)\bextensions\s*\.\s*[A-Za-z_]`)
+	reDefinesModdatetime      = regexp.MustCompile(`(?i)\bCREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+moddatetime\s*\(`)
 	reUUIDGenerateV4          = regexp.MustCompile(`(?i)\b(public\s*\.\s*)?uuid_generate_v4\s*\(\s*\)`)
 
-	// `CREATE POLICY` at statement head — used by Pass 2 to decide
-	// which statements to run through wrapPolicyBody.
-	reCreatePolicyMulti = regexp.MustCompile(`(?i)^\s*CREATE\s+POLICY\b`)
+	// `public.` followed by a name (or by the end of the code span — a
+	// quoted name starts the next span). rePublicHelper picks out the
+	// Eurobase helpers that stay qualified (the migration validator's
+	// allowlist).
+	rePublicQualifier = regexp.MustCompile(`(?i)\bpublic\s*\.\s*([A-Za-z_][A-Za-z0-9_$]*|$)`)
+	rePublicHelper    = regexp.MustCompile(`(?i)^public\s*\.\s*(is_service_role|current_end_user_id|is_internal_auth_path)$`)
+	rePublicDot       = regexp.MustCompile(`(?i)^public\s*\.\s*`)
 
-	// `<DDL keyword> public.` — used by countAndReplacePublicQualifier.
-	// We strip `public.` only after keywords that unambiguously precede
-	// a table/sequence/view/trigger name in pg_dump's output:
-	//
-	//   TABLE / INTO / FROM / JOIN / UPDATE / REFERENCES / ON
-	//   / SEQUENCE / VIEW / TRIGGER / OWNED BY
-	//
-	// Plus optional `ONLY`, `IF NOT EXISTS`, or `IF EXISTS` modifiers
-	// between the keyword and the qualifier. This gate is deliberately
-	// narrower than "any `public.<ident>`" — a blanket strip would
-	// corrupt function calls (`public.uuid_generate_v4()`) and USING-
-	// clause operator classes. String-literal safety is handled by
-	// the tokenizer at the layer above. (#274 review B1 + H2 + H3.)
-	rePublicQualifierContext = regexp.MustCompile(
-		`(?i)(\b(?:TABLE|INTO|FROM|JOIN|UPDATE|REFERENCES|ON|SEQUENCE|VIEW|TRIGGER|OWNED\s+BY)\s+(?:ONLY\s+|IF\s+NOT\s+EXISTS\s+|IF\s+EXISTS\s+)?)public\.`,
-	)
+	// `pg_catalog.` qualifier — pg_dump writes COLLATE pg_catalog."C",
+	// pg_catalog.set_config(…). Unqualified names resolve to pg_catalog
+	// first anyway, and tenant migrations refuse the qualifier.
+	rePgCatalogQualifier = regexp.MustCompile(`(?i)\bpg_catalog\s*\.\s*`)
+
+	// nextval('public.t_id_seq'::regclass) — the one place pg_dump puts a
+	// public-qualified name inside a string literal.
+	reRegclassPublic = regexp.MustCompile(`'public\.([^'.]+)'::regclass`)
+
+	// psql meta-command lines (\restrict / \unrestrict from pg_dump 18).
+	reMetaCommand = regexp.MustCompile(`^\\[A-Za-z]+`)
+
+	// pg_dump's `SELECT pg_catalog.set_config('search_path', '', false);`
+	reSetConfigSearchPath = regexp.MustCompile(`(?i)^\s*SELECT\s+(pg_catalog\.)?set_config\s*\(\s*'search_path'`)
 
 	// Any qualified reference to a schema that ISN'T public / auth /
 	// storage / pg_catalog / information_schema / tenant (the ones
